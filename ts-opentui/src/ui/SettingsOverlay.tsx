@@ -7,7 +7,7 @@
  * Navigation:
  * - j/k: Move up/down through settings
  * - Space/Enter: Toggle boolean settings or cycle enum values
- * - e: Open .azedarach.json in external editor for advanced changes
+ * - e: Open project config in external editor for advanced changes
  * - Escape: Close overlay and return to normal mode
  *
  * Architecture:

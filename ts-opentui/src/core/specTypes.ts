@@ -2,6 +2,7 @@ import type { DateTime } from "effect"
 
 export type SpecRequirementKind = "functional" | "acceptance" | "other"
 export type SpecLinkType = "implements" | "tests" | "blocks" | "relates"
+export type SpecLinkFulfillmentStatus = "planned" | "partial" | "complete" | "verified"
 export type SpecRequirementLookupSelector = "auto" | "id" | "local_id" | "external_code"
 
 export interface SpecRequirement {
@@ -23,6 +24,10 @@ export interface SpecIssueLink {
 	readonly requirement_local_id: string
 	readonly requirement_external_code: string | null
 	readonly link_type: SpecLinkType
+	readonly implementations: readonly string[]
+	readonly fulfillment_status: SpecLinkFulfillmentStatus
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 	readonly created_at: string
 	readonly updated_at: string
 }
@@ -33,6 +38,10 @@ export interface SpecIssueRef {
 	readonly status?: string
 	readonly issue_type?: string
 	readonly link_type: SpecLinkType
+	readonly implementations: readonly string[]
+	readonly fulfillment_status: SpecLinkFulfillmentStatus
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 }
 
 export interface SpecRequirementRef {
@@ -42,10 +51,22 @@ export interface SpecRequirementRef {
 	readonly title: string
 	readonly kind: SpecRequirementKind
 	readonly link_type: SpecLinkType
+	readonly implementations: readonly string[]
+	readonly fulfillment_status: SpecLinkFulfillmentStatus
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 }
 
 export interface SpecRequirementWithStats extends SpecRequirement {
 	readonly linked_issue_count: number
+	readonly implemented_issue_count: number
+}
+
+export interface SpecRequirementListFilters {
+	readonly query?: string
+	readonly kind?: SpecRequirementKind
+	readonly status?: string
+	readonly priority?: number
 }
 
 export interface SpecCoverageGap {
@@ -58,7 +79,63 @@ export interface SpecCoverageGap {
 export interface SpecCoverageReport {
 	readonly requirements: readonly SpecRequirementWithStats[]
 	readonly unlinked_requirement_ids: readonly string[]
+	readonly fully_implemented_requirement_ids: readonly string[]
+	readonly partially_implemented_requirement_ids: readonly string[]
 	readonly integrity_gaps: readonly SpecCoverageGap[]
+}
+
+export interface SpecParityRequirement {
+	readonly id: string
+	readonly local_id: string
+	readonly external_code: string | null
+	readonly title: string
+	readonly implements_issue_ids: readonly string[]
+	readonly partial_issue_ids: readonly string[]
+	readonly tests_issue_ids: readonly string[]
+	readonly other_issue_ids: readonly string[]
+}
+
+export interface SpecParityReport {
+	readonly implementation: string
+	readonly total_requirements: number
+	readonly implemented_requirement_ids: readonly string[]
+	readonly partially_implemented_requirement_ids: readonly string[]
+	readonly tested_requirement_ids: readonly string[]
+	readonly uncovered_requirement_ids: readonly string[]
+	readonly related_only_requirement_ids: readonly string[]
+	readonly requirements: readonly SpecParityRequirement[]
+}
+
+export interface SpecLintResult {
+	readonly ok: boolean
+	readonly requirement_count: number
+	readonly linked_requirement_count: number
+	readonly unlinked_requirement_count: number
+	readonly integrity_gap_count: number
+	readonly gap_counts: {
+		readonly unlinked_requirement: number
+		readonly missing_issue: number
+		readonly missing_requirement: number
+	}
+	readonly report: SpecCoverageReport
+}
+
+export type SpecSnapshotDocumentKey = "overview" | "requirements" | "acceptance" | "change_log"
+
+export interface SpecMarkdownSyncDocumentResult {
+	readonly key: SpecSnapshotDocumentKey
+	readonly path: string
+	readonly status: "unchanged" | "updated"
+	readonly changed: boolean
+}
+
+export interface SpecMarkdownSyncResult {
+	readonly out_dir: string
+	readonly check: boolean
+	readonly ok: boolean
+	readonly total_documents: number
+	readonly changed_documents: number
+	readonly documents: readonly SpecMarkdownSyncDocumentResult[]
 }
 
 export interface SpecPublishConfig {
@@ -74,7 +151,7 @@ export interface SpecPublishConfig {
 }
 
 export interface SpecPublishDocumentOutcome {
-	readonly document_key: "overview" | "requirements" | "acceptance" | "change_log"
+	readonly document_key: SpecSnapshotDocumentKey
 	readonly title: string
 	readonly status: "success" | "failed" | "skipped"
 	readonly message: string

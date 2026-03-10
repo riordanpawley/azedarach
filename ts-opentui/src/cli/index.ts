@@ -35,12 +35,21 @@ import {
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
 import packageJson from "../../package.json" with { type: "json" }
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
-import { AzedarachConfigSchema } from "../config/schema.js"
+import {
+	type AzedarachConfig,
+	AzedarachConfigJsonSchema,
+	AzedarachConfigSchema,
+} from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
-import { IssueTrackerClient, type Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+import {
+	type ImplementationRecord,
+	type ImplementationRegistry,
+	IssueTrackerClient,
+	type Issue as TrackedIssue,
+} from "../core/IssueTrackerClient.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
@@ -51,7 +60,8 @@ import {
 } from "../core/paths.js"
 import { SessionManager } from "../core/SessionManager.js"
 import { SpecService } from "../core/SpecService.js"
-import type { SpecRequirementLookupSelector } from "../core/specTypes.js"
+import type { SpecLinkFulfillmentStatus, SpecRequirementLookupSelector } from "../core/specTypes.js"
+import { getProjectStoragePaths } from "../core/storagePaths.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -71,7 +81,7 @@ import { NavigationService } from "../services/NavigationService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { OverlayService } from "../services/OverlayService.js"
-import { ProjectService } from "../services/ProjectService.js"
+import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ProjectStateService } from "../services/ProjectStateService.js"
 import { SessionService } from "../services/SessionService.js"
 import { SettingsService } from "../services/SettingsService.js"
@@ -121,67 +131,90 @@ const telemetryLayer =
 
 const CLI_VERSION = packageJson.version
 
+const buildAppConfigLayer = (configPath: string | null) => {
+	if (configPath === null) {
+		return AppConfig.Default
+	}
+
+	return AppConfig.Default.pipe(
+		Layer.provide(
+			Layer.succeed(
+				AppConfigConfig,
+				AppConfigConfig.make({
+					configPath,
+					projectPath: process.cwd(),
+				}),
+			),
+		),
+	)
+}
+
 /**
  * Full CLI layer used for TUI launch and commands that still depend on
  * TUI-coupled services (for now, `az dev`).
  */
-const fullCliLayer = Layer.mergeAll(
-	MutationQueue.Default,
-	SessionService.Default,
-	AttachmentService.Default,
-	OverlayService.Default,
-	ImageAttachmentService.Default,
-	BoardService.Default,
-	ClockService.Default,
-	TmuxService.Default,
-	IssueEditorService.Default,
-	PRWorkflow.Default,
-	TerminalService.Default,
-	EditorService.Default,
-	KeyboardService.Default,
-	ToastService.Default,
-	NavigationService.Default,
-	SessionManager.Default,
-	IssueTrackerClient.Default,
-	AppConfig.Default,
-	VCService.Default,
-	ViewService.Default,
-	TmuxSessionMonitor.Default,
-	CommandQueueService.Default,
-	PTYMonitor.Default,
-	DiagnosticsService.Default,
-	ProjectService.Default,
-	ProjectStateService.Default,
-	SettingsService.Default,
-	TemplateService.Default,
-	NetworkService.Default,
-	OfflineService.Default,
-	DevServerService.Default,
-	DiffService.Default,
-	PlanningService.Default,
-	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-	Layer.provideMerge(telemetryLayer),
-	Layer.provideMerge(BunContext.layer),
-)
+const createFullCliLayer = (configPath: string | null) =>
+	Layer.mergeAll(
+		MutationQueue.Default,
+		SessionService.Default,
+		AttachmentService.Default,
+		OverlayService.Default,
+		ImageAttachmentService.Default,
+		BoardService.Default,
+		ClockService.Default,
+		TmuxService.Default,
+		IssueEditorService.Default,
+		PRWorkflow.Default,
+		TerminalService.Default,
+		EditorService.Default,
+		KeyboardService.Default,
+		ToastService.Default,
+		NavigationService.Default,
+		SessionManager.Default,
+		IssueTrackerClient.Default,
+		buildAppConfigLayer(configPath),
+		VCService.Default,
+		ViewService.Default,
+		TmuxSessionMonitor.Default,
+		CommandQueueService.Default,
+		PTYMonitor.Default,
+		DiagnosticsService.Default,
+		ProjectService.Default,
+		ProjectStateService.Default,
+		SettingsService.Default,
+		TemplateService.Default,
+		NetworkService.Default,
+		OfflineService.Default,
+		DevServerService.Default,
+		DiffService.Default,
+		PlanningService.Default,
+		SpecService.Default,
+	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
 
 /**
  * Lean command layer for non-TUI CLI commands.
  * Intentionally excludes board/navigation/overlay/view services so command
  * invocations don't start board refresh polling or webhook listeners.
  */
-const commandCliLayer = Layer.mergeAll(
-	AppConfig.Default,
-	ProjectService.Default,
-	IssueTrackerClient.Default,
-	SessionManager.Default,
-	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-	Layer.provideMerge(telemetryLayer),
-	Layer.provideMerge(BunContext.layer),
-)
+const createCommandCliLayer = (configPath: string | null) =>
+	Layer.mergeAll(
+		buildAppConfigLayer(configPath),
+		ProjectService.Default,
+		IssueTrackerClient.Default,
+		SessionManager.Default,
+		SpecService.Default,
+	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
+
+const fullCliLayer = createFullCliLayer(null)
+const commandCliLayer = createCommandCliLayer(null)
 
 // ============================================================================
 // Shared Options
@@ -201,7 +234,7 @@ const verboseOption = Options.boolean("verbose").pipe(
 const configOption = Options.file("config").pipe(
 	Options.withAlias("c"),
 	Options.optional,
-	Options.withDescription("Path to config file (default: .azedarach.json)"),
+	Options.withDescription("Path to config file (default: .azedarach/config.json)"),
 )
 
 /**
@@ -249,6 +282,170 @@ const validateIssueTrackerStore = (projectDir: string) =>
 			)
 		}
 	})
+
+/**
+ * Validate that spec workflows are enabled for the project before using az spec surfaces.
+ */
+const ensureSpecEnabled = (projectDir: string) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const specConfig = yield* appConfig.getSpecConfigForProjectPath(projectDir)
+		if (specConfig.enabled) {
+			return
+		}
+
+		return yield* Effect.fail(
+			new Error(
+				"Spec workflows are disabled for this project. Run `az config set spec.enabled true` or set `spec.enabled` to true in `.azedarach.json` to use `az spec` and spec-aware guidance.",
+			),
+		)
+	})
+
+const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+
+const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const loadedConfigPath = yield* SubscriptionRef.get(appConfig.loadedConfigPath)
+		if (loadedConfigPath !== null && !loadedConfigPath.endsWith("package.json")) {
+			return loadedConfigPath
+		}
+
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const projectService = yield* ProjectService
+		const projectPath =
+			explicitProjectDir ?? (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const cwdPath = explicitProjectDir ?? process.cwd()
+		const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
+		const cwdHasConfig = yield* fs
+			.exists(cwdConfigPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		const configBasePath = resolveConfigBasePath({
+			cwdPath,
+			projectPath,
+			pathOps: pathService,
+			cwdHasConfig,
+		})
+		return pathService.join(configBasePath, ".azedarach.json")
+	})
+
+const loadWritableConfig = (configPath: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const exists = yield* fs
+			.exists(configPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		if (!exists) {
+			return yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to create default config snapshot: ${String(error)}`),
+				),
+			)
+		}
+
+		const content = yield* fs
+			.readFileString(configPath)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to read config file ${configPath}: ${String(error)}`),
+				),
+			)
+
+		return yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
+			Effect.mapError(
+				(error) => new Error(`Config parse/validation failed for ${configPath}: ${String(error)}`),
+			),
+		)
+	})
+
+const saveWritableConfig = (configPath: string, config: AzedarachConfig) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config).pipe(
+			Effect.mapError((error) => new Error(`Failed to encode config: ${String(error)}`)),
+		)
+		yield* fs
+			.writeFileString(configPath, json)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to write config file ${configPath}: ${String(error)}`),
+				),
+			)
+		const schemaPath = pathService.join(pathService.dirname(configPath), ".azedarach.schema.json")
+		yield* fs
+			.writeFileString(schemaPath, configJsonSchemaString)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`Failed to write config JSON schema at ${schemaPath}: ${String(error)}`,
+					),
+				),
+			)
+	})
+
+const parseBooleanConfigValue = (value: string): boolean | undefined => {
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "true":
+		case "1":
+		case "yes":
+		case "on":
+			return true
+		case "false":
+		case "0":
+		case "no":
+		case "off":
+			return false
+		default:
+			return undefined
+	}
+}
+
+const setConfigValue = (
+	config: AzedarachConfig,
+	key: string,
+	value: string,
+): Effect.Effect<
+	{ readonly nextConfig: AzedarachConfig; readonly renderedValue: string },
+	Error
+> => {
+	if (key === "spec.enabled") {
+		const parsed = parseBooleanConfigValue(value)
+		if (parsed === undefined) {
+			return Effect.fail(
+				new Error(
+					`Invalid boolean value '${value}' for spec.enabled. Use true/false, on/off, yes/no, or 1/0.`,
+				),
+			)
+		}
+		return Effect.succeed({
+			nextConfig: {
+				...config,
+				spec: {
+					...config.spec,
+					enabled: parsed,
+				},
+			},
+			renderedValue: String(parsed),
+		})
+	}
+
+	return Effect.fail(new Error(`Unsupported config key '${key}'. Supported keys: spec.enabled`))
+}
 
 // ============================================================================
 // Command Handlers
@@ -569,9 +766,98 @@ type SpecRequirementLookupInput = {
 }
 
 const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
+const SPEC_IMPLEMENTATION_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
+const DEFAULT_SPEC_IMPLEMENTATION = "default"
 
 const normalizeSpecExternalCodeForCli = (value: string): string =>
 	value.trim().toUpperCase().replace(/\s+/g, "")
+
+const normalizeSpecImplementationForCli = (value: string): string => value.trim().toLowerCase()
+
+const parseSpecImplementationForCli = (value: string): Effect.Effect<string, Error> => {
+	const normalized = normalizeSpecImplementationForCli(value)
+	if (!SPEC_IMPLEMENTATION_PATTERN.test(normalized)) {
+		return Effect.fail(
+			new Error(
+				`Invalid implementation '${value}'. Expected lowercase letters, digits, and hyphens, starting with a letter.`,
+			),
+		)
+	}
+	return Effect.succeed(normalized)
+}
+
+const parseSpecImplementationsForCli = (
+	values: readonly string[],
+): Effect.Effect<readonly string[], Error> =>
+	Effect.gen(function* () {
+		if (values.length === 0) {
+			return [DEFAULT_SPEC_IMPLEMENTATION] as const
+		}
+
+		const parsed = yield* Effect.all(values.map((value) => parseSpecImplementationForCli(value)))
+		return [...new Set(parsed)].sort((left, right) => left.localeCompare(right))
+	})
+
+const parseOptionalImplementationListForCli = (
+	values: readonly string[],
+): Effect.Effect<readonly string[] | undefined, Error> =>
+	values.length === 0 ? Effect.succeed(undefined) : parseSpecImplementationsForCli(values)
+
+const resolveParityImplementationForCli = (
+	value: Option.Option<string>,
+	registry: ImplementationRegistry,
+): Effect.Effect<string, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(registry.default_implementation),
+		onSome: (implementation) => parseSpecImplementationForCli(implementation),
+	})
+
+const formatImplementationSummaryLine = (implementation: ImplementationRecord): string => {
+	const flags = [
+		implementation.is_default ? "default" : undefined,
+		implementation.is_builtin ? "builtin" : undefined,
+	].filter((flag): flag is string => flag !== undefined)
+	const description =
+		implementation.description === undefined
+			? ""
+			: ` - ${compactSingleLineText(implementation.description)}`
+	return `${implementation.name}${flags.length === 0 ? "" : ` [${flags.join(",")}]`}${description}`
+}
+
+const logImplementationDetails = (
+	implementation: ImplementationRecord,
+	registry: ImplementationRegistry,
+): Effect.Effect<void> =>
+	Effect.gen(function* () {
+		yield* Console.log(`Implementation: ${implementation.name}`)
+		yield* Console.log(`Default: ${implementation.is_default ? "yes" : "no"}`)
+		yield* Console.log(`Built-in: ${implementation.is_builtin ? "yes" : "no"}`)
+		yield* Console.log(
+			`Implicit default allowed: ${registry.implicit_default_allowed ? "yes" : "no"}`,
+		)
+		if (implementation.description !== undefined) {
+			yield* Console.log(`Description: ${implementation.description}`)
+		}
+		yield* Console.log(`Created: ${implementation.created_at}`)
+		yield* Console.log(`Updated: ${implementation.updated_at}`)
+	})
+
+const withIssueEditorDefaultImplementation = (
+	config: AzedarachConfig,
+	defaultImplementation: string | undefined,
+): AzedarachConfig =>
+	defaultImplementation === undefined
+		? {
+				...config,
+				issueEditor: undefined,
+			}
+		: {
+				...config,
+				issueEditor: {
+					...(config.issueEditor ?? {}),
+					defaultImplementation,
+				},
+			}
 
 const inferSpecRequirementKindFromExternalCodeForCli = (
 	externalCode: string,
@@ -647,6 +933,68 @@ const resolveSpecRequirementLookupInput = (args: {
 		}
 	})
 
+const resolveOptionalAliasedTextInput = (args: {
+	readonly positional: Option.Option<string>
+	readonly optionValue: Option.Option<string>
+	readonly positionalName: string
+	readonly optionName: string
+}): Effect.Effect<Option.Option<string>, Error> =>
+	Effect.gen(function* () {
+		const positional = Option.getOrUndefined(args.positional)?.trim()
+		const optionValue = Option.getOrUndefined(args.optionValue)?.trim()
+
+		const hasPositional = positional !== undefined && positional.length > 0
+		const hasOptionValue = optionValue !== undefined && optionValue.length > 0
+
+		if (!hasPositional && !hasOptionValue) {
+			return Option.none<string>()
+		}
+		if (!hasPositional && hasOptionValue) {
+			if (optionValue === undefined) {
+				return Option.none<string>()
+			}
+			return Option.some(optionValue)
+		}
+		if (hasPositional && !hasOptionValue) {
+			if (positional === undefined) {
+				return Option.none<string>()
+			}
+			return Option.some(positional)
+		}
+
+		if (positional?.toLowerCase() !== optionValue?.toLowerCase()) {
+			return yield* Effect.fail(
+				new Error(
+					`Conflicting values for ${args.positionalName} and ${args.optionName}. Provide one source or matching values.`,
+				),
+			)
+		}
+
+		if (positional === undefined) {
+			return Option.none<string>()
+		}
+		return Option.some(positional)
+	})
+
+const resolveRequiredAliasedTextInput = (args: {
+	readonly positional: Option.Option<string>
+	readonly optionValue: Option.Option<string>
+	readonly positionalName: string
+	readonly optionName: string
+}): Effect.Effect<string, Error> =>
+	Effect.gen(function* () {
+		const merged = yield* resolveOptionalAliasedTextInput(args)
+		const value = Option.getOrUndefined(merged)
+		if (value === undefined || value.length === 0) {
+			return yield* Effect.fail(
+				new Error(
+					`Missing ${args.positionalName}. Provide ${args.optionName} or positional input.`,
+				),
+			)
+		}
+		return value
+	})
+
 const parseRelationshipDependencyType = (
 	value: string | undefined,
 ): RelationshipDependencyType | undefined => {
@@ -683,6 +1031,48 @@ const parseRelationshipSpecLinkType = (
 		default:
 			return undefined
 	}
+}
+
+const parseSpecLinkFulfillmentStatus = (
+	value: string | undefined,
+): SpecLinkFulfillmentStatus | undefined => {
+	if (value === undefined) {
+		return undefined
+	}
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "planned":
+		case "partial":
+		case "complete":
+		case "verified":
+			return normalized
+		default:
+			return undefined
+	}
+}
+
+const parseSpecLinkFulfillmentPercent = (
+	value: Option.Option<number>,
+): Effect.Effect<number | null | undefined, Error> =>
+	Effect.gen(function* () {
+		if (Option.isNone(value)) {
+			return undefined
+		}
+		const rounded = Math.round(value.value)
+		if (!Number.isFinite(rounded) || rounded < 0 || rounded > 100) {
+			return yield* Effect.fail(
+				new Error("Invalid --fulfillment-percent. Expected an integer 0-100."),
+			)
+		}
+		return rounded
+	})
+
+const parseSpecLinkEvidenceNote = (value: Option.Option<string>): string | null | undefined => {
+	if (Option.isNone(value)) {
+		return undefined
+	}
+	const trimmed = value.value.trim()
+	return trimmed.length > 0 ? trimmed : null
 }
 
 const DEFAULT_ISSUE_GET_SYNC_MAX_WAIT_MS = 250
@@ -750,6 +1140,8 @@ const issueGetHandler = (args: {
 					).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
 				),
 			)
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const showImplementations = registry.implementations.length > 1
 
 		if (args.json) {
 			yield* Console.log(
@@ -765,8 +1157,11 @@ const issueGetHandler = (args: {
 			return
 		}
 
-		yield* Console.log(formatIssueSummaryLine(issue))
-		const detailSections = formatIssueDetailSections(issue, { linkedSpecRequirements })
+		yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
+		const detailSections = formatIssueDetailSections(issue, {
+			linkedSpecRequirements,
+			showImplementations,
+		})
 		if (detailSections.length > 0) {
 			yield* Console.log("")
 			yield* Console.log(detailSections.join("\n\n"))
@@ -789,6 +1184,8 @@ const issueListHandler = (args: {
 	readonly status: Option.Option<string>
 	readonly priority: Option.Option<number>
 	readonly issueType: Option.Option<string>
+	readonly parent: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly limit: Option.Option<number>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -808,6 +1205,8 @@ const issueListHandler = (args: {
 			status: Option.getOrUndefined(args.status),
 			priority: Option.getOrUndefined(args.priority),
 			type: Option.getOrUndefined(args.issueType),
+			parent: Option.getOrUndefined(args.parent),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 		}
 		const hasFilters = Object.values(filters).some((value) => value !== undefined)
 
@@ -826,6 +1225,8 @@ const issueListHandler = (args: {
 			yield* Console.log(JSON.stringify(issues, null, 2))
 			return
 		}
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const showImplementations = registry.implementations.length > 1
 
 		if (issues.length === 0) {
 			yield* Console.log("No issues found.")
@@ -833,7 +1234,7 @@ const issueListHandler = (args: {
 		}
 
 		for (const issue of issues) {
-			yield* Console.log(formatIssueSummaryLine(issue))
+			yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
 		}
 
 		if (args.verbose) {
@@ -854,6 +1255,7 @@ const issueCreateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly deferred: boolean
 	readonly noDefaultParent: boolean
@@ -896,6 +1298,7 @@ const issueCreateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels: parseLabelsOption(args.labels),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -908,6 +1311,12 @@ const issueCreateHandler = (args: {
 		yield* Console.log(`Created issue ${issue.id}`)
 		if (resolvedParent !== undefined) {
 			yield* Console.log(`Parent: ${resolvedParent}`)
+		}
+		if (
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default")
+		) {
+			yield* Console.log(`Implementations: ${issue.implementations.join(", ")}`)
 		}
 		if (args.verbose) {
 			yield* Console.error(
@@ -931,6 +1340,7 @@ const issueChildHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -973,6 +1383,7 @@ const issueChildHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels: parseLabelsOption(args.labels),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -983,6 +1394,12 @@ const issueChildHandler = (args: {
 		}
 
 		yield* Console.log(`Created child issue ${issue.id} under ${resolvedParent}`)
+		if (
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default")
+		) {
+			yield* Console.log(`Implementations: ${issue.implementations.join(", ")}`)
+		}
 		if (args.verbose) {
 			yield* Console.error(
 				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
@@ -1006,6 +1423,7 @@ const issueUpdateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -1043,6 +1461,7 @@ const issueUpdateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels,
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 		}
 
@@ -1065,6 +1484,369 @@ const issueUpdateHandler = (args: {
 		if (args.verbose) {
 			yield* Console.error("Use `az issue get <issue-id>` to inspect the updated issue.")
 		}
+	})
+
+const issueBulkUpdateHandler = (args: {
+	readonly input: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const inputContent = yield* readIssueBulkUpdateInput(args.input)
+		const updates = yield* decodeIssueBulkUpdatePayload(inputContent).pipe(
+			Effect.mapError(
+				(error) =>
+					new Error(
+						`Bulk update JSON parse/validation failed: ${formatIssueBulkUpdateError(error)}`,
+					),
+			),
+		)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const results = yield* Effect.forEach(updates, (entry, index) =>
+			Effect.gen(function* () {
+				const fields = mapIssueBulkUpdateFields(entry)
+				if (!hasIssueBulkUpdateChanges(fields)) {
+					return {
+						index,
+						requestedId: entry.id,
+						issueId: entry.id,
+						updated: false,
+						error: "No fields provided for bulk update item.",
+					} satisfies IssueBulkUpdateResult
+				}
+
+				return yield* resolveCliIssueId(entry.id, resolverCwd).pipe(
+					Effect.flatMap((issueId) =>
+						issueTrackerClient.update(issueId, fields, explicitProjectDir).pipe(
+							Effect.as<IssueBulkUpdateResult>({
+								index,
+								requestedId: entry.id,
+								issueId,
+								updated: true,
+							}),
+						),
+					),
+					Effect.catchAll((error) =>
+						Effect.succeed<IssueBulkUpdateResult>({
+							index,
+							requestedId: entry.id,
+							issueId: entry.id,
+							updated: false,
+							error: formatIssueBulkUpdateError(error),
+						}),
+					),
+				)
+			}),
+		)
+
+		const summary = summarizeIssueBulkUpdateResults(results)
+		if (args.json) {
+			yield* Console.log(JSON.stringify(summary, null, 2))
+			return
+		}
+
+		yield* Console.log(
+			`Bulk update finished: ${summary.updatedCount} succeeded, ${summary.failedCount} failed.`,
+		)
+		if (summary.failedCount > 0 || args.verbose) {
+			for (const result of summary.results) {
+				const issueLabel =
+					result.issueId === result.requestedId
+						? result.issueId
+						: `${result.requestedId} -> ${result.issueId}`
+				if (result.updated) {
+					yield* Console.log(`- ${issueLabel}: updated`)
+					continue
+				}
+				yield* Console.log(`- ${issueLabel}: failed (${result.error ?? "unknown error"})`)
+			}
+		}
+	})
+
+const implListHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const appConfig = yield* AppConfig
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const issueEditorConfig = yield* appConfig.getIssueEditorConfig()
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						...registry,
+						tui_issue_editor_default_implementation:
+							issueEditorConfig.defaultImplementation ?? null,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		for (const implementation of registry.implementations) {
+			yield* Console.log(formatImplementationSummaryLine(implementation))
+		}
+		if (args.verbose) {
+			yield* Console.error(`default=${registry.default_implementation}`)
+			yield* Console.error(`implicit_default_allowed=${registry.implicit_default_allowed}`)
+			yield* Console.error(
+				`tui_issue_editor_default=${issueEditorConfig.defaultImplementation ?? "<unset>"}`,
+			)
+		}
+	})
+
+const implGetHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementation = registry.implementations.find(
+			(entry) => entry.name === implementationName,
+		)
+		if (implementation === undefined) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* logImplementationDetails(implementation, registry)
+	})
+
+const implAddHandler = (args: {
+	readonly implementation: string
+	readonly description: Option.Option<string>
+	readonly setDefault: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const implementation = yield* issueTrackerClient.createImplementation({
+			name: implementationName,
+			description: Option.getOrUndefined(args.description),
+			setDefault: args.setDefault,
+			cwd: explicitProjectDir,
+		})
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* Console.log(`Added implementation ${implementation.name}`)
+		if (implementation.is_default) {
+			yield* Console.log(`Default: ${implementation.name}`)
+		}
+	})
+
+const implUpdateHandler = (args: {
+	readonly implementation: string
+	readonly rename: Option.Option<string>
+	readonly description: Option.Option<string>
+	readonly setDefault: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const nextName = yield* Option.match(args.rename, {
+			onNone: () => Effect.succeed<string | undefined>(undefined),
+			onSome: (value) => parseSpecImplementationForCli(value).pipe(Effect.map((parsed) => parsed)),
+		})
+		const description = Option.match(args.description, {
+			onNone: () => undefined,
+			onSome: (value) => value,
+		})
+		if (nextName === undefined && description === undefined && !args.setDefault) {
+			return yield* Effect.fail(
+				new Error("No changes provided. Use --rename, --description, or --default."),
+			)
+		}
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const implementation = yield* issueTrackerClient.updateImplementation(
+			implementationName,
+			{
+				name: nextName,
+				description,
+				setDefault: args.setDefault ? true : undefined,
+			},
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* Console.log(`Updated implementation ${implementation.name}`)
+		if (implementation.is_default) {
+			yield* Console.log(`Default: ${implementation.name}`)
+		}
+	})
+
+const implDeleteHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const deleted = yield* issueTrackerClient.deleteImplementation(
+			implementationName,
+			explicitProjectDir,
+		)
+		if (!deleted) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify({ name: implementationName, deleted: true }, null, 2))
+			return
+		}
+
+		yield* Console.log(`Deleted implementation ${implementationName}`)
+	})
+
+const implSetDefaultHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.setDefaultImplementation(
+			implementationName,
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(registry, null, 2))
+			return
+		}
+
+		yield* Console.log(`Default implementation: ${registry.default_implementation}`)
+	})
+
+const implSetEditorDefaultHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementationExists = registry.implementations.some(
+			(entry) => entry.name === implementationName,
+		)
+		if (!implementationExists) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const nextConfig = withIssueEditorDefaultImplementation(currentConfig, implementationName)
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						configPath,
+						defaultImplementation: implementationName,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log(`TUI issue editor default implementation: ${implementationName}`)
+		yield* Console.log(`Config: ${configPath}`)
+	})
+
+const implClearEditorDefaultHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const nextConfig = withIssueEditorDefaultImplementation(currentConfig, undefined)
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						configPath,
+						defaultImplementation: null,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log("Cleared TUI issue editor default implementation")
+		yield* Console.log(`Config: ${configPath}`)
 	})
 
 /**
@@ -1197,6 +1979,195 @@ const issueCloseHandler = (args: {
 		}
 	})
 
+interface ParentChildTrackingMiss {
+	readonly issue: TrackedIssue
+	readonly reason: string
+	readonly inspectCommand: string
+	readonly remediateCommand: string
+}
+
+const hasParentChildDependency = (issue: TrackedIssue): boolean =>
+	(issue.dependencies ?? []).some((dependency) => dependency.dependency_type === "parent-child")
+
+const findDependencyToIssue = (issue: TrackedIssue, targetIssueId: string) =>
+	(issue.dependencies ?? []).find((dependency) =>
+		issueIdsEqualForLookup(dependency.id, targetIssueId),
+	)
+
+const issueMentionsParentId = (issue: TrackedIssue, parentIssueId: string): boolean => {
+	const needle = parentIssueId.trim().toLowerCase()
+	if (needle.length === 0) {
+		return false
+	}
+
+	const haystack = [
+		issue.title,
+		issue.description ?? "",
+		issue.design ?? "",
+		issue.acceptance ?? "",
+		issue.notes ?? "",
+	]
+		.join(" ")
+		.toLowerCase()
+	return haystack.includes(needle)
+}
+
+const buildParentChildTrackingMiss = (
+	issue: TrackedIssue,
+	parentIssueId: string,
+	reason: string,
+): ParentChildTrackingMiss => ({
+	issue,
+	reason,
+	inspectCommand: `az issue get ${issue.id}`,
+	remediateCommand: `az issue update ${issue.id} --parent ${parentIssueId}`,
+})
+
+const findLikelyParentChildTrackingMisses = (
+	parentIssueId: string,
+	issues: ReadonlyArray<TrackedIssue>,
+): ReadonlyArray<ParentChildTrackingMiss> => {
+	const misses: ParentChildTrackingMiss[] = []
+	for (const issue of issues) {
+		if (issueIdsEqualForLookup(issue.id, parentIssueId)) {
+			continue
+		}
+		if (!isOpenChildForCloseGuard(issue)) {
+			continue
+		}
+
+		const dependencyToParent = findDependencyToIssue(issue, parentIssueId)
+		if (dependencyToParent !== undefined) {
+			if (dependencyToParent.dependency_type !== "parent-child") {
+				misses.push(
+					buildParentChildTrackingMiss(
+						issue,
+						parentIssueId,
+						`Dependency to ${parentIssueId} is typed '${dependencyToParent.dependency_type}' instead of 'parent-child'.`,
+					),
+				)
+			}
+			continue
+		}
+
+		if (hasParentChildDependency(issue)) {
+			continue
+		}
+
+		if (issueMentionsParentId(issue, parentIssueId)) {
+			misses.push(
+				buildParentChildTrackingMiss(
+					issue,
+					parentIssueId,
+					`Issue text references ${parentIssueId} but no parent-child link exists.`,
+				),
+			)
+		}
+	}
+	return misses
+}
+
+const formatParentChildCheckOutput = (
+	parentIssueId: string,
+	misses: ReadonlyArray<ParentChildTrackingMiss>,
+): string => {
+	if (misses.length === 0) {
+		return `No likely parent-child tracking misses found for ${parentIssueId}.`
+	}
+
+	const lines: string[] = [
+		`Parent-child tracking check for ${parentIssueId}: ${misses.length} likely miss(es) found.`,
+		"Suggested remediation commands:",
+	]
+	for (const miss of misses) {
+		lines.push(
+			`- ${miss.issue.id}: ${compactSingleLineText(miss.issue.title)} [status=${miss.issue.status}]`,
+		)
+		lines.push(`  reason: ${miss.reason}`)
+		lines.push(`  inspect: ${miss.inspectCommand}`)
+		lines.push(`  remediate: ${miss.remediateCommand}`)
+	}
+	return lines.join("\n")
+}
+
+const issueCheckHandler = (args: {
+	readonly issueId: Option.Option<string>
+	readonly limit: Option.Option<number>
+	readonly includeClosed: boolean
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const parentContext = yield* Option.match(args.issueId, {
+			onSome: (parentIssueId) =>
+				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+					Effect.map((issueId) =>
+						Option.some<ActiveParentContext>({
+							issueId,
+							source: "explicit-arg",
+						}),
+					),
+				),
+			onNone: () => resolveActiveParentContext(resolverCwd),
+		})
+
+		if (Option.isNone(parentContext)) {
+			return yield* Effect.fail(
+				new Error(
+					"No active parent context found. Provide [issue-id] or set AZEDARACH_PARENT_ISSUE_ID/AZEDARACH_ISSUE_ID.",
+				),
+			)
+		}
+
+		const parentIssueId = parentContext.value.issueId
+		const issueTrackerClient = yield* IssueTrackerClient
+		const parentIssue = yield* issueTrackerClient.show(parentIssueId, explicitProjectDir)
+
+		const issues = yield* issueTrackerClient.list(undefined, explicitProjectDir, {
+			limit: Option.getOrElse(args.limit, () => 200),
+			includeClosed: args.includeClosed,
+			sortBy: "updated_at",
+			sortDirection: "desc",
+		})
+		const misses = findLikelyParentChildTrackingMisses(parentIssueId, issues)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						parent_issue_id: parentIssueId,
+						parent_issue_title: parentIssue.title,
+						checked_count: issues.length,
+						miss_count: misses.length,
+						misses: misses.map((miss) => ({
+							issue_id: miss.issue.id,
+							title: miss.issue.title,
+							status: miss.issue.status,
+							reason: miss.reason,
+							inspect_command: miss.inspectCommand,
+							remediate_command: miss.remediateCommand,
+						})),
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log(formatParentChildCheckOutput(parentIssueId, misses))
+		if (args.verbose) {
+			yield* Console.error(
+				`checked=${issues.length} misses=${misses.length} parent=${parentIssueId}`,
+			)
+		}
+	})
+
 /**
  * Delete an issue
  */
@@ -1239,21 +2210,67 @@ const formatSpecRequirementSummaryLine = (requirement: {
 }): string =>
 	`${formatSpecRequirementReference(requirement)}: ${compactSingleLineText(requirement.title)} [id=${requirement.id} kind=${requirement.kind} status=${requirement.status} priority=${requirement.priority} updated_at=${requirement.updated_at}]`
 
+type SpecRequirementViewMode = "compact" | "verbose"
+
+const parseSpecRequirementKindOption = (
+	value: Option.Option<string>,
+): Effect.Effect<"functional" | "acceptance" | "other" | undefined, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(undefined),
+		onSome: (raw) => {
+			const normalized = raw.trim().toLowerCase()
+			if (normalized === "functional") return Effect.succeed("functional")
+			if (normalized === "acceptance") return Effect.succeed("acceptance")
+			if (normalized === "other") return Effect.succeed("other")
+			return Effect.fail(
+				new Error(`Invalid kind '${raw}'. Expected: functional, acceptance, other.`),
+			)
+		},
+	})
+
+const parseSpecRequirementViewMode = (
+	value: Option.Option<string>,
+): Effect.Effect<SpecRequirementViewMode, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed("compact"),
+		onSome: (raw) => {
+			const normalized = raw.trim().toLowerCase()
+			if (normalized === "compact") return Effect.succeed("compact")
+			if (normalized === "verbose") return Effect.succeed("verbose")
+			return Effect.fail(new Error(`Invalid view '${raw}'. Expected: compact, verbose.`))
+		},
+	})
+
 /**
  * List spec requirements
  */
 const specReqListHandler = (args: {
 	readonly projectDir: Option.Option<string>
+	readonly query: Option.Option<string>
+	readonly kind: Option.Option<string>
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly view: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
+		const parsedKind = yield* parseSpecRequirementKindOption(args.kind)
+		const viewMode = yield* parseSpecRequirementViewMode(args.view)
+		const query = Option.getOrUndefined(args.query)?.trim()
+		const status = Option.getOrUndefined(args.status)?.trim()
 
 		const specService = yield* SpecService
-		const requirements = yield* specService.listRequirements(explicitProjectDir)
+		const requirements = yield* specService.listRequirements(explicitProjectDir, {
+			query,
+			kind: parsedKind,
+			status,
+			priority: Option.getOrUndefined(args.priority),
+		})
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(requirements, null, 2))
@@ -1267,10 +2284,258 @@ const specReqListHandler = (args: {
 
 		for (const requirement of requirements) {
 			yield* Console.log(formatSpecRequirementSummaryLine(requirement))
+			if (viewMode === "verbose") {
+				yield* Console.log(`Body:\n${requirement.body}`)
+				yield* Console.log("")
+			}
 		}
 
 		if (args.verbose) {
 			yield* Console.error(`Listed ${requirements.length} requirement(s).`)
+		}
+	})
+
+const specReqSearchHandler = (args: {
+	readonly query: string
+	readonly kind: Option.Option<string>
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly view: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	specReqListHandler({
+		projectDir: args.projectDir,
+		query: Option.some(args.query),
+		kind: args.kind,
+		status: args.status,
+		priority: args.priority,
+		view: args.view,
+		verbose: args.verbose,
+		json: args.json,
+	})
+
+const specReadHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly view: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+		const viewMode = yield* parseSpecRequirementViewMode(args.view)
+
+		const specService = yield* SpecService
+		const [requirements, links, coverage, publishConfig, lastOutcome] = yield* Effect.all([
+			specService.listRequirements(explicitProjectDir),
+			specService.listLinks(undefined, explicitProjectDir),
+			specService.getCoverageReport(explicitProjectDir),
+			specService.getPublishConfig(explicitProjectDir),
+			specService.getLastPublishOutcome(explicitProjectDir),
+		])
+
+		const payload = {
+			summary: {
+				requirement_count: requirements.length,
+				link_count: links.length,
+				unlinked_requirement_count: coverage.unlinked_requirement_ids.length,
+				fully_implemented_requirement_count: coverage.fully_implemented_requirement_ids.length,
+				partially_implemented_requirement_count:
+					coverage.partially_implemented_requirement_ids.length,
+				integrity_gap_count: coverage.integrity_gaps.length,
+			},
+			requirements,
+			links,
+			coverage,
+			publish_config: publishConfig,
+			last_publish_outcome: lastOutcome,
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(payload, null, 2))
+			return
+		}
+
+		yield* Console.log(
+			`Spec summary: requirements=${requirements.length} links=${links.length} fully_implemented=${coverage.fully_implemented_requirement_ids.length} partial=${coverage.partially_implemented_requirement_ids.length} unlinked=${coverage.unlinked_requirement_ids.length} gaps=${coverage.integrity_gaps.length}`,
+		)
+		yield* Console.log("")
+
+		for (const kind of ["functional", "acceptance", "other"] as const) {
+			const subset = requirements.filter((requirement) => requirement.kind === kind)
+			if (subset.length === 0) continue
+			yield* Console.log(`${kind.toUpperCase()} (${subset.length})`)
+			for (const requirement of subset) {
+				yield* Console.log(`- ${formatSpecRequirementSummaryLine(requirement)}`)
+				if (viewMode === "verbose") {
+					yield* Console.log(`  ${compactSingleLineText(requirement.body)}`)
+				}
+			}
+			yield* Console.log("")
+		}
+
+		if (links.length > 0) {
+			yield* Console.log(`LINKS (${links.length})`)
+			for (const link of links) {
+				const requirementRef =
+					link.requirement_external_code === null
+						? link.requirement_local_id
+						: `${link.requirement_local_id} (${link.requirement_external_code})`
+				yield* Console.log(
+					`- ${link.issue_id} -> ${requirementRef} [${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}]`,
+				)
+				if (viewMode === "verbose" && link.evidence_note !== null) {
+					yield* Console.log(`  note: ${compactSingleLineText(link.evidence_note)}`)
+				}
+			}
+			yield* Console.log("")
+		}
+
+		yield* Console.log(
+			`Publish config: enabled=${publishConfig.enabled} debounce_ms=${publishConfig.debounce_ms} target_project=${publishConfig.target_project ?? "<unset>"}`,
+		)
+		if (lastOutcome !== undefined) {
+			yield* Console.log(
+				`Last publish: status=${lastOutcome.status} finished_at=${DateTime.formatIso(lastOutcome.finished_at)}`,
+			)
+		}
+	})
+
+const specLintHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly strict: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const specService = yield* SpecService
+		const lintResult = yield* specService.lint(explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(lintResult, null, 2))
+		} else {
+			yield* Console.log(
+				`Lint ${lintResult.ok ? "ok" : "issues"}: requirements=${lintResult.requirement_count} linked=${lintResult.linked_requirement_count} unlinked=${lintResult.unlinked_requirement_count} gaps=${lintResult.integrity_gap_count}`,
+			)
+			for (const gap of lintResult.report.integrity_gaps) {
+				yield* Console.log(`- [${gap.kind}] ${gap.message}`)
+			}
+		}
+
+		if (args.strict && !lintResult.ok) {
+			return yield* Effect.fail(new Error("Spec lint failed in strict mode."))
+		}
+	})
+
+const parseSpecSyncTarget = (target: Option.Option<string>) =>
+	Effect.gen(function* () {
+		const normalized = Option.match(target, {
+			onNone: () => "md",
+			onSome: (value) => value.trim().toLowerCase(),
+		})
+		if (normalized === "md" || normalized === "markdown") return "md" as const
+		if (normalized === "linear") return "linear" as const
+		if (normalized === "all") return "all" as const
+		return yield* Effect.fail(
+			new Error(`Invalid sync target '${normalized}'. Expected one of: md, linear, all.`),
+		)
+	})
+
+const specSyncHandler = (args: {
+	readonly target: Option.Option<string>
+	readonly outDir: Option.Option<string>
+	readonly check: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+		const target = yield* parseSpecSyncTarget(args.target)
+
+		const specService = yield* SpecService
+		if (args.check && target !== "md") {
+			return yield* Effect.fail(
+				new Error("--check is supported only for --target md (or default target)."),
+			)
+		}
+
+		if (target === "linear") {
+			const outcome = yield* specService.publish(explicitProjectDir)
+			if (args.json) {
+				yield* Console.log(JSON.stringify(outcome, null, 2))
+				return
+			}
+			yield* Console.log(
+				`Spec sync linear ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
+			)
+			for (const documentOutcome of outcome.outcomes) {
+				yield* Console.log(
+					`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
+				)
+			}
+			return
+		}
+
+		const syncResult = yield* specService.syncMarkdown(
+			{
+				outDir: Option.getOrUndefined(args.outDir),
+				check: args.check,
+			},
+			explicitProjectDir,
+		)
+		if (target === "md") {
+			if (args.json) {
+				yield* Console.log(JSON.stringify(syncResult, null, 2))
+			} else {
+				yield* Console.log(
+					`Spec sync md ${syncResult.check ? "check" : "write"}: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+				)
+				for (const document of syncResult.documents) {
+					yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
+				}
+			}
+
+			if (syncResult.check && !syncResult.ok) {
+				return yield* Effect.fail(new Error("Spec markdown snapshots are out of sync."))
+			}
+			return
+		}
+
+		const outcome = yield* specService.publish(explicitProjectDir)
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						target: "all",
+						markdown: syncResult,
+						linear: outcome,
+					},
+					null,
+					2,
+				),
+			)
+		} else {
+			yield* Console.log(
+				`Spec sync md write: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+			)
+			for (const document of syncResult.documents) {
+				yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
+			}
+			yield* Console.log(
+				`Spec sync linear ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
+			)
+			for (const documentOutcome of outcome.outcomes) {
+				yield* Console.log(
+					`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
+				)
+			}
 		}
 	})
 
@@ -1279,6 +2544,7 @@ const specReqListHandler = (args: {
  */
 const specReqGetHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -1289,9 +2555,16 @@ const specReqGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1334,7 +2607,7 @@ const specReqGetHandler = (args: {
 			yield* Console.log("Linked Issues:")
 			for (const issue of linkedIssues) {
 				yield* Console.log(
-					`${issue.id} [${issue.status ?? "unknown"} ${issue.issue_type ?? "task"}] (${issue.link_type}) ${issue.title ?? ""}`.trimEnd(),
+					`${issue.id} [${issue.status ?? "unknown"} ${issue.issue_type ?? "task"}] (${issue.link_type} fulfillment=${issue.fulfillment_status}${issue.fulfillment_percent === null ? "" : `:${issue.fulfillment_percent}%`}) ${issue.title ?? ""}`.trimEnd(),
 				)
 			}
 		}
@@ -1349,6 +2622,7 @@ const specReqGetHandler = (args: {
  */
 const specReqCreateHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly localId: Option.Option<string>
 	readonly externalCode: Option.Option<string>
 	readonly title: string
@@ -1362,8 +2636,15 @@ const specReqCreateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
-		const positionalRef = Option.getOrUndefined(args.requirementRef)?.trim()
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const positionalRef = Option.getOrUndefined(mergedRequirementRef)?.trim()
 		const optionLocalId = Option.getOrUndefined(args.localId)?.trim()
 		const optionExternalCodeRaw = Option.getOrUndefined(args.externalCode)?.trim()
 		const optionExternalCode =
@@ -1452,6 +2733,7 @@ const specReqCreateHandler = (args: {
  */
 const specReqUpdateHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -1466,9 +2748,16 @@ const specReqUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1539,6 +2828,7 @@ const specReqUpdateHandler = (args: {
  */
 const specReqDeleteHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -1548,9 +2838,16 @@ const specReqDeleteHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1592,12 +2889,14 @@ const specLinkListHandler = (args: {
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueId = yield* Option.match(args.issueId, {
@@ -1626,6 +2925,10 @@ const specLinkListHandler = (args: {
 				}).pipe(Effect.map((lookup) => lookup)),
 		})
 		const specService = yield* SpecService
+		const hasImplementationFilter = args.implementations.length > 0
+		const implementationFilter = hasImplementationFilter
+			? yield* parseSpecImplementationsForCli(args.implementations)
+			: undefined
 		const links = yield* specService.listLinks(
 			{
 				issueId,
@@ -1634,22 +2937,30 @@ const specLinkListHandler = (args: {
 			},
 			explicitProjectDir,
 		)
+		const filteredLinks =
+			implementationFilter === undefined
+				? links
+				: links.filter((link) =>
+						implementationFilter.some((implementation) =>
+							link.implementations.includes(implementation),
+						),
+					)
 
 		if (args.json) {
-			yield* Console.log(JSON.stringify(links, null, 2))
+			yield* Console.log(JSON.stringify(filteredLinks, null, 2))
 			return
 		}
-		if (links.length === 0) {
+		if (filteredLinks.length === 0) {
 			yield* Console.log("No spec links found.")
 			return
 		}
-		for (const link of links) {
+		for (const link of filteredLinks) {
 			const requirementRef =
 				link.requirement_external_code === null
 					? link.requirement_local_id
 					: `${link.requirement_local_id} (${link.requirement_external_code})`
 			yield* Console.log(
-				`${link.issue_id} -> ${requirementRef} [type=${link.link_type}] id=${link.requirement_id} updated_at=${link.updated_at}`,
+				`${link.issue_id} -> ${requirementRef} [type=${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}] impl=${link.implementations.join(",")} id=${link.requirement_id} updated_at=${link.updated_at}${link.evidence_note === null ? "" : ` note=${link.evidence_note}`}`,
 			)
 		}
 	})
@@ -1658,23 +2969,42 @@ const specLinkListHandler = (args: {
  * Add spec link
  */
 const specLinkAddHandler = (args: {
-	readonly issueId: string
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly implementations: readonly string[]
+	readonly fulfillmentStatus: Option.Option<string>
+	readonly fulfillmentPercent: Option.Option<number>
+	readonly evidenceNote: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1693,7 +3023,23 @@ const specLinkAddHandler = (args: {
 				return Effect.succeed(parsed)
 			},
 		})
-
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
+		const fulfillmentStatus = yield* Option.match(args.fulfillmentStatus, {
+			onNone: () => Effect.succeed<SpecLinkFulfillmentStatus>("planned"),
+			onSome: (value) => {
+				const parsed = parseSpecLinkFulfillmentStatus(value)
+				if (parsed === undefined) {
+					return Effect.fail(
+						new Error(
+							`Invalid fulfillment status '${value}'. Expected one of: planned, partial, complete, verified.`,
+						),
+					)
+				}
+				return Effect.succeed(parsed)
+			},
+		})
+		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
+		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
 		const specService = yield* SpecService
 		yield* specService.addIssueLink(
 			issueId,
@@ -1701,7 +3047,23 @@ const specLinkAddHandler = (args: {
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
+			implementations,
+			{
+				status: fulfillmentStatus,
+				percent: fulfillmentPercent,
+				evidenceNote,
+			},
 		)
+		const matchingLinks = yield* specService.listLinks(
+			{
+				issueId,
+				requirementId: lookup.reference,
+				requirementSelector: lookup.selector,
+			},
+			explicitProjectDir,
+		)
+		const matchingLink = matchingLinks.find((link) => link.link_type === linkType)
+		const effectiveImplementations = matchingLink?.implementations ?? implementations ?? []
 
 		if (args.json) {
 			yield* Console.log(
@@ -1710,6 +3072,10 @@ const specLinkAddHandler = (args: {
 						issueId,
 						requirement: lookup,
 						type: linkType,
+						fulfillment_status: fulfillmentStatus,
+						fulfillment_percent: fulfillmentPercent ?? null,
+						evidence_note: evidenceNote ?? null,
+						implementations: effectiveImplementations,
 						updated: true,
 					},
 					null,
@@ -1718,30 +3084,154 @@ const specLinkAddHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(`Added spec link: ${issueId} -> ${lookup.reference} (${linkType})`)
+		yield* Console.log(
+			`Added spec link: ${issueId} -> ${lookup.reference} (${linkType}, fulfillment=${fulfillmentStatus}${fulfillmentPercent === undefined || fulfillmentPercent === null ? "" : `:${fulfillmentPercent}%`})`,
+		)
+		if (effectiveImplementations.length > 0) {
+			yield* Console.log(`Implementations: ${effectiveImplementations.join(",")}`)
+		}
 	})
 
 /**
  * Remove spec link
  */
 const specLinkRemoveHandler = (args: {
-	readonly issueId: string
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
+		const linkType = Option.match(args.linkType, {
+			onNone: () => undefined,
+			onSome: (value) => parseRelationshipSpecLinkType(value),
+		})
+		if (Option.isSome(args.linkType) && linkType === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid link type '${args.linkType.value}'. Expected one of: implements, tests, blocks, relates.`,
+				),
+			)
+		}
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
+		const specService = yield* SpecService
+		const removed = yield* specService.removeIssueLink(
+			issueId,
+			lookup.reference,
+			linkType,
+			explicitProjectDir,
+			lookup.selector,
+			implementations,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify({ removed }, null, 2))
+			return
+		}
+		yield* Console.log(`Removed ${removed} spec link(s).`)
+	})
+
+const specParityHandler = (args: {
+	readonly implementation: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementation = yield* resolveParityImplementationForCli(args.implementation, registry)
+		const specService = yield* SpecService
+		const report = yield* specService.getParityReport(implementation, explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(report, null, 2))
+			return
+		}
+
+		yield* Console.log(`implementation=${report.implementation}`)
+		yield* Console.log(`total=${report.total_requirements}`)
+		yield* Console.log(`implemented=${report.implemented_requirement_ids.length}`)
+		yield* Console.log(`partial=${report.partially_implemented_requirement_ids.length}`)
+		yield* Console.log(`tested=${report.tested_requirement_ids.length}`)
+		yield* Console.log(`uncovered=${report.uncovered_requirement_ids.length}`)
+		yield* Console.log(`related_only=${report.related_only_requirement_ids.length}`)
+	})
+
+/**
+ * Update spec link fulfillment metadata
+ */
+const specLinkUpdateHandler = (args: {
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
+	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
+	readonly linkType: Option.Option<string>
+	readonly fulfillmentStatus: Option.Option<string>
+	readonly fulfillmentPercent: Option.Option<number>
+	readonly evidenceNote: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1758,20 +3248,64 @@ const specLinkRemoveHandler = (args: {
 			)
 		}
 
+		const fulfillmentStatus = Option.match(args.fulfillmentStatus, {
+			onNone: () => undefined,
+			onSome: (value) => parseSpecLinkFulfillmentStatus(value),
+		})
+		if (Option.isSome(args.fulfillmentStatus) && fulfillmentStatus === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid fulfillment status '${args.fulfillmentStatus.value}'. Expected one of: planned, partial, complete, verified.`,
+				),
+			)
+		}
+		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
+		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
+		if (
+			fulfillmentStatus === undefined &&
+			fulfillmentPercent === undefined &&
+			evidenceNote === undefined
+		) {
+			return yield* Effect.fail(
+				new Error(
+					"No fields provided. Use at least one --fulfillment-status/--fulfillment-percent/--evidence-note.",
+				),
+			)
+		}
+
 		const specService = yield* SpecService
-		const removed = yield* specService.removeIssueLink(
+		const updated = yield* specService.updateIssueLink(
 			issueId,
 			lookup.reference,
+			{
+				status: fulfillmentStatus,
+				percent: fulfillmentPercent,
+				evidenceNote,
+			},
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
 		)
 
 		if (args.json) {
-			yield* Console.log(JSON.stringify({ removed }, null, 2))
+			yield* Console.log(
+				JSON.stringify(
+					{
+						issueId,
+						requirement: lookup,
+						type: linkType ?? null,
+						fulfillment_status: fulfillmentStatus ?? null,
+						fulfillment_percent: fulfillmentPercent ?? null,
+						evidence_note: evidenceNote ?? null,
+						updated,
+					},
+					null,
+					2,
+				),
+			)
 			return
 		}
-		yield* Console.log(`Removed ${removed} spec link(s).`)
+		yield* Console.log(`Updated ${updated} spec link(s).`)
 	})
 
 /**
@@ -1782,25 +3316,16 @@ const specPublishRunHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(resolverCwd)
-
-		const specService = yield* SpecService
-		const outcome = yield* specService.publish(explicitProjectDir)
-		if (args.json) {
-			yield* Console.log(JSON.stringify(outcome, null, 2))
-			return
+		if (!args.json) {
+			yield* Console.log("Deprecated: use `az spec sync --target linear`.")
 		}
-
-		yield* Console.log(
-			`Publish ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
-		)
-		for (const documentOutcome of outcome.outcomes) {
-			yield* Console.log(
-				`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
-			)
-		}
+		return yield* specSyncHandler({
+			target: Option.some("linear"),
+			outDir: Option.none(),
+			check: false,
+			projectDir: args.projectDir,
+			json: args.json,
+		})
 	})
 
 /**
@@ -1813,6 +3338,7 @@ const specPublishConfigGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -1858,6 +3384,7 @@ const specPublishConfigSetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -1886,6 +3413,93 @@ const specPublishConfigSetHandler = (args: {
 		}
 		yield* Console.log("Updated spec publish config.")
 	})
+
+const specPublishConfigHandler = (args: {
+	readonly action: Option.Option<string>
+	readonly enabled: Option.Option<boolean>
+	readonly debounceMs: Option.Option<number>
+	readonly project: Option.Option<string>
+	readonly overview: Option.Option<string>
+	readonly requirements: Option.Option<string>
+	readonly acceptance: Option.Option<string>
+	readonly changeLog: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const hasSetOptions =
+			Option.getOrElse(args.enabled, () => false) ||
+			Option.isSome(args.debounceMs) ||
+			Option.isSome(args.project) ||
+			Option.isSome(args.overview) ||
+			Option.isSome(args.requirements) ||
+			Option.isSome(args.acceptance) ||
+			Option.isSome(args.changeLog)
+
+		const requestedAction = Option.match(args.action, {
+			onNone: () => (hasSetOptions ? "set" : "get"),
+			onSome: (value) => value.toLowerCase(),
+		})
+
+		if (requestedAction !== "get" && requestedAction !== "set") {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid config action '${requestedAction}'. Use 'get' or 'set' (for example: az spec publish config get).`,
+				),
+			)
+		}
+
+		if (requestedAction === "get") {
+			if (hasSetOptions) {
+				return yield* Effect.fail(
+					new Error(
+						"Config update flags cannot be used with 'get'. Use `az spec publish config` or `az spec publish config set ...`.",
+					),
+				)
+			}
+			return yield* specPublishConfigGetHandler({
+				projectDir: args.projectDir,
+				json: args.json,
+			})
+		}
+
+		return yield* specPublishConfigSetHandler({
+			enabled: args.enabled,
+			debounceMs: args.debounceMs,
+			project: args.project,
+			overview: args.overview,
+			requirements: args.requirements,
+			acceptance: args.acceptance,
+			changeLog: args.changeLog,
+			projectDir: args.projectDir,
+			json: args.json,
+		})
+	})
+
+const configSetHandler = (args: {
+	readonly key: string
+	readonly value: string
+	readonly projectDir: Option.Option<string>
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const { nextConfig, renderedValue } = yield* setConfigValue(currentConfig, args.key, args.value)
+
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		yield* Console.log(`Updated ${configPath}: ${args.key}=${renderedValue}`)
+		if (args.key === "spec.enabled") {
+			yield* Console.log(
+				renderedValue === "true"
+					? "Spec workflows are enabled."
+					: "Spec workflows are disabled. `az prime` will stop mentioning spec and `az spec` commands will fail until re-enabled.",
+			)
+		}
+	})
+
+const configUsageHandler = (usage: string) => Console.log(usage)
 
 /**
  * Run quality gates for a task's worktree
@@ -2148,6 +3762,159 @@ const parseLabelsOption = (labels: Option.Option<string>): string[] | undefined 
 				.filter((label) => label.length > 0),
 	})
 
+interface IssueBulkUpdateFields {
+	readonly status?: string
+	readonly notes?: string
+	readonly priority?: number
+	readonly title?: string
+	readonly type?: string
+	readonly description?: string
+	readonly design?: string
+	readonly acceptance?: string
+	readonly assignee?: string
+	readonly estimate?: number
+	readonly labels?: string[]
+	readonly implementations?: readonly string[]
+	readonly parent?: string
+}
+
+const IssueBulkUpdateEntrySchema = Schema.Struct({
+	id: Schema.String,
+	status: Schema.String.pipe(Schema.optional),
+	notes: Schema.String.pipe(Schema.optional),
+	priority: Schema.Number.pipe(Schema.optional),
+	title: Schema.String.pipe(Schema.optional),
+	type: Schema.String.pipe(Schema.optional),
+	description: Schema.String.pipe(Schema.optional),
+	design: Schema.String.pipe(Schema.optional),
+	acceptance: Schema.String.pipe(Schema.optional),
+	assignee: Schema.String.pipe(Schema.optional),
+	estimate: Schema.Number.pipe(Schema.optional),
+	labels: Schema.Array(Schema.String).pipe(Schema.optional),
+	implementations: Schema.Array(Schema.String).pipe(Schema.optional),
+	parent: Schema.String.pipe(Schema.optional),
+})
+
+const IssueBulkUpdatePayloadSchema = Schema.Union(
+	Schema.Array(IssueBulkUpdateEntrySchema),
+	Schema.Struct({
+		updates: Schema.Array(IssueBulkUpdateEntrySchema),
+	}),
+)
+
+type IssueBulkUpdateEntry = Schema.Schema.Type<typeof IssueBulkUpdateEntrySchema>
+type IssueBulkUpdatePayload = Schema.Schema.Type<typeof IssueBulkUpdatePayloadSchema>
+
+interface IssueBulkUpdateResult {
+	readonly index: number
+	readonly requestedId: string
+	readonly issueId: string
+	readonly updated: boolean
+	readonly error?: string
+}
+
+interface IssueBulkUpdateSummary {
+	readonly requestCount: number
+	readonly updatedCount: number
+	readonly failedCount: number
+	readonly results: readonly IssueBulkUpdateResult[]
+}
+
+const decodeIssueBulkUpdatePayload = (content: string) =>
+	Schema.decode(Schema.parseJson(IssueBulkUpdatePayloadSchema))(content).pipe(
+		Effect.flatMap((payload: IssueBulkUpdatePayload) => {
+			if (isIssueBulkUpdateEntryArray(payload)) {
+				return payload.length > 0
+					? Effect.succeed(payload)
+					: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+			}
+
+			return payload.updates.length > 0
+				? Effect.succeed(payload.updates)
+				: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+		}),
+	)
+
+const isIssueBulkUpdateEntryArray = (
+	payload: IssueBulkUpdatePayload,
+): payload is readonly IssueBulkUpdateEntry[] => Array.isArray(payload)
+
+const mapIssueBulkUpdateFields = (entry: IssueBulkUpdateEntry): IssueBulkUpdateFields => ({
+	status: entry.status,
+	notes: entry.notes,
+	priority: entry.priority,
+	title: entry.title,
+	type: entry.type,
+	description: entry.description,
+	design: entry.design,
+	acceptance: entry.acceptance,
+	assignee: entry.assignee,
+	estimate: entry.estimate,
+	labels: entry.labels === undefined ? undefined : [...entry.labels],
+	implementations:
+		entry.implementations !== undefined && entry.implementations.length > 0
+			? [...entry.implementations]
+			: undefined,
+	parent: entry.parent,
+})
+
+const hasIssueBulkUpdateChanges = (fields: IssueBulkUpdateFields): boolean =>
+	fields.status !== undefined ||
+	fields.notes !== undefined ||
+	fields.priority !== undefined ||
+	fields.title !== undefined ||
+	fields.type !== undefined ||
+	fields.description !== undefined ||
+	fields.design !== undefined ||
+	fields.acceptance !== undefined ||
+	fields.assignee !== undefined ||
+	fields.estimate !== undefined ||
+	fields.labels !== undefined ||
+	fields.implementations !== undefined ||
+	fields.parent !== undefined
+
+const summarizeIssueBulkUpdateResults = (
+	results: readonly IssueBulkUpdateResult[],
+): IssueBulkUpdateSummary => {
+	const updatedCount = results.filter((result) => result.updated).length
+	return {
+		requestCount: results.length,
+		updatedCount,
+		failedCount: results.length - updatedCount,
+		results,
+	}
+}
+
+const formatIssueBulkUpdateError = (error: unknown): string =>
+	error instanceof Error ? error.message : String(error)
+
+const readIssueBulkUpdateInput = (inputPath: string) =>
+	Effect.gen(function* () {
+		if (inputPath === "-") {
+			return yield* Effect.tryPromise({
+				try: () => Bun.file("/dev/stdin").text(),
+				catch: (error) =>
+					new Error(
+						`Failed to read bulk update JSON from stdin: ${formatIssueBulkUpdateError(error)}`,
+					),
+			})
+		}
+
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const resolvedInputPath = pathService.resolve(inputPath)
+		return yield* fs
+			.readFileString(resolvedInputPath)
+			.pipe(
+				Effect.mapError(
+					(error) =>
+						new Error(
+							`Failed to read bulk update JSON from ${resolvedInputPath}: ${String(error)}`,
+						),
+				),
+			)
+	})
+
 const isOpenChildForCloseGuard = (issue: TrackedIssue): boolean =>
 	issue.status !== "closed" && issue.status !== "tombstone"
 
@@ -2176,15 +3943,45 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const appConfig = yield* AppConfig
+		const specConfig = yield* appConfig.getSpecConfig()
+		const implementationContext = yield* IssueTrackerClient.pipe(
+			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
+			Effect.map((registry) => ({
+				implementations: registry.implementations.map((implementation) => implementation.name),
+			})),
+			Effect.catchAll(() => Effect.succeed(undefined)),
+		)
+		const showImplementations =
+			implementationContext !== undefined && implementationContext.implementations.length > 1
 		const issueContext =
 			issueId === undefined
-				? ""
-				: yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
-						Effect.map((output) => output.trim()),
-						Effect.catchAll(() => Effect.succeed("")),
+				? undefined
+				: yield* IssueTrackerClient.pipe(
+						Effect.flatMap((issueTrackerClient) => issueTrackerClient.show(issueId)),
+						Effect.flatMap((issue) =>
+							(specConfig.enabled
+								? SpecService.pipe(
+										Effect.flatMap((specService) =>
+											specService.listIssueRequirements(issue.id, process.cwd()),
+										),
+										Effect.catchAll(() => Effect.succeed([])),
+									)
+								: Effect.succeed([])
+							).pipe(
+								Effect.map((linkedSpecRequirements) => ({
+									issue,
+									linkedSpecRequirements,
+									showImplementations,
+								})),
+							),
+						),
+						Effect.catchAll(() => Effect.succeed(undefined)),
 					)
 
-		yield* Console.log(buildPrimeOutput(issueId, issueContext))
+		yield* Console.log(
+			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled),
+		)
 	})
 
 /**
@@ -2298,6 +4095,9 @@ const applyTmuxAttentionStyles = (sessionName: string, verbose: boolean) =>
 		// Keep bell monitoring + alert styles session-local so Az sessions stay readable
 		// in native tmux pickers without changing the user's global theme.
 		yield* setTmuxSessionOption(sessionName, "monitor-bell", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "monitor-activity", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "bell-action", "any", verbose)
+		yield* setTmuxSessionOption(sessionName, "activity-action", "any", verbose)
 		yield* setTmuxSessionOption(
 			sessionName,
 			"window-status-bell-style",
@@ -2490,10 +4290,9 @@ const hooksInstallHandler = (args: {
 						),
 					),
 				)
-			existingSettings = yield* Effect.try({
-				try: () => JSON.parse(content),
-				catch: () => ({}),
-			}).pipe(
+			existingSettings = yield* Schema.decode(
+				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+			)(content).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 						Effect.zipRight(Effect.succeed({})),
@@ -2545,17 +4344,28 @@ const projectAddHandler = (args: {
 		}
 
 		let tracker: "tracker" | "legacy" | "linear" | "local" = "local"
-		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
-		const hasLocalConfig = yield* fs
-			.exists(localConfigPath)
-			.pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-						Effect.zipRight(Effect.succeed(false)),
+		const storagePaths = getProjectStoragePaths(absolutePath, pathService)
+		const configPathCandidates = [
+			storagePaths.canonicalConfigPath,
+			storagePaths.legacyConfigPath,
+		] as const
+		let localConfigPath: string | null = null
+		for (const candidatePath of configPathCandidates) {
+			const existsForCandidate = yield* fs
+				.exists(candidatePath)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(false)),
+						),
 					),
-				),
-			)
-		if (hasLocalConfig) {
+				)
+			if (existsForCandidate) {
+				localConfigPath = candidatePath
+				break
+			}
+		}
+		if (localConfigPath !== null) {
 			const localConfigRaw = yield* fs
 				.readFileString(localConfigPath)
 				.pipe(
@@ -2813,6 +4623,12 @@ const primeCommand = Command.make(
 
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 
+const issueImplementationOption = Options.text("impl").pipe(
+	Options.repeated,
+	Options.withAlias("I"),
+	Options.withDescription("Implementation assignment (repeatable)"),
+)
+
 /**
  * az issue list - List issues
  */
@@ -2834,6 +4650,12 @@ const issueListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by issue type"),
 		),
+		parent: Options.text("parent").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Filter by parent issue ID"),
+		),
+		implementations: issueImplementationOption,
 		limit: Options.integer("limit").pipe(
 			Options.withAlias("l"),
 			Options.optional,
@@ -2922,6 +4744,7 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		implementations: issueImplementationOption,
 		deferred: Options.boolean("deferred").pipe(
 			Options.withDescription("Create issue without inheriting active parent context"),
 		),
@@ -2987,6 +4810,7 @@ const issueChildCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		implementations: issueImplementationOption,
 		parent: Options.text("parent").pipe(
 			Options.withAlias("r"),
 			Options.optional,
@@ -3064,6 +4888,7 @@ const issueUpdateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels (replaces labels)"),
 		),
+		implementations: issueImplementationOption,
 		parent: Options.text("parent").pipe(
 			Options.withAlias("P"),
 			Options.optional,
@@ -3078,6 +4903,23 @@ const issueUpdateCommand = Command.make(
 	},
 	issueUpdateHandler,
 ).pipe(Command.withDescription("Update issue fields"))
+
+const issueBulkUpdateCommand = Command.make(
+	"bulk-update",
+	{
+		input: Options.text("input").pipe(
+			Options.withAlias("i"),
+			Options.withDescription("Path to bulk-update JSON payload, or - to read from stdin"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON summary"),
+		),
+	},
+	issueBulkUpdateHandler,
+).pipe(Command.withDescription("Update multiple issues from a JSON payload"))
 
 /**
  * az issue dep add <issue-id> <depends-on-id> - Add dependency edge
@@ -3156,6 +4998,53 @@ const issueDeleteCommand = Command.make(
 	issueDeleteHandler,
 ).pipe(Command.withDescription("Delete an issue (requires --force)"))
 
+const issueCheckIssueIdArg = Args.text({ name: "issue-id" }).pipe(
+	Args.optional,
+	Args.withDescription("Parent issue ID (defaults to active parent context)"),
+)
+
+const issueCheckCommand = Command.make(
+	"check",
+	{
+		issueId: issueCheckIssueIdArg,
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum issues to scan (default: 200)"),
+		),
+		includeClosed: Options.boolean("include-closed").pipe(
+			Options.withDescription("Include closed/tombstone issues in scan"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON diagnostics"),
+		),
+	},
+	issueCheckHandler,
+).pipe(Command.withDescription("Check for likely parent-child tracking misses"))
+
+const issueDoctorCommand = Command.make(
+	"doctor",
+	{
+		issueId: issueCheckIssueIdArg,
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum issues to scan (default: 200)"),
+		),
+		includeClosed: Options.boolean("include-closed").pipe(
+			Options.withDescription("Include closed/tombstone issues in scan"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON diagnostics"),
+		),
+	},
+	issueCheckHandler,
+).pipe(Command.withDescription("Alias of `az issue check`"))
+
 /**
  * az issue - Parent command for issue operations
  */
@@ -3169,9 +5058,158 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueCreateCommand,
 		issueChildCommand,
 		issueUpdateCommand,
+		issueBulkUpdateCommand,
 		issueDepCommand,
+		issueCheckCommand,
+		issueDoctorCommand,
 		issueCloseCommand,
 		issueDeleteCommand,
+	]),
+)
+
+const implementationArg = Args.text({ name: "implementation" }).pipe(
+	Args.withDescription("Implementation name (for example default or ts-opentui)"),
+)
+
+const implListCommand = Command.make(
+	"list",
+	{
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implListHandler,
+).pipe(Command.withDescription("List registered implementations"))
+
+const implGetCommand = Command.make(
+	"get",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implGetHandler,
+).pipe(Command.withDescription("Show implementation details"))
+
+const implAddCommand = Command.make(
+	"add",
+	{
+		implementation: implementationArg,
+		description: Options.text("description").pipe(
+			Options.withAlias("d"),
+			Options.optional,
+			Options.withDescription("Optional implementation description"),
+		),
+		setDefault: Options.boolean("default").pipe(
+			Options.withDescription("Set the new implementation as the registry default"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implAddHandler,
+).pipe(Command.withDescription("Add a named implementation"))
+
+const implUpdateCommand = Command.make(
+	"update",
+	{
+		implementation: implementationArg,
+		rename: Options.text("rename").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Rename the implementation"),
+		),
+		description: Options.text("description").pipe(
+			Options.withAlias("d"),
+			Options.optional,
+			Options.withDescription("Update the implementation description (pass empty string to clear)"),
+		),
+		setDefault: Options.boolean("default").pipe(
+			Options.withDescription("Set this implementation as the registry default"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implUpdateHandler,
+).pipe(Command.withDescription("Update implementation metadata"))
+
+const implDeleteCommand = Command.make(
+	"delete",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implDeleteHandler,
+).pipe(Command.withDescription("Delete a named implementation"))
+
+const implSetDefaultCommand = Command.make(
+	"set-default",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implSetDefaultHandler,
+).pipe(Command.withDescription("Set the registry default implementation"))
+
+const implSetEditorDefaultCommand = Command.make(
+	"set-editor-default",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implSetEditorDefaultHandler,
+).pipe(Command.withDescription("Set the TUI issue editor default implementation"))
+
+const implClearEditorDefaultCommand = Command.make(
+	"clear-editor-default",
+	{
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implClearEditorDefaultHandler,
+).pipe(Command.withDescription("Clear the TUI issue editor default implementation"))
+
+const implCommand = Command.make("impl", {}, () =>
+	Console.log(
+		"Usage: az impl [list|get|add|update|delete|set-default|set-editor-default|clear-editor-default] ...",
+	),
+).pipe(
+	Command.withDescription("Manage implementation registry metadata"),
+	Command.withSubcommands([
+		implListCommand,
+		implGetCommand,
+		implAddCommand,
+		implUpdateCommand,
+		implDeleteCommand,
+		implSetDefaultCommand,
+		implSetEditorDefaultCommand,
+		implClearEditorDefaultCommand,
 	]),
 )
 
@@ -3180,6 +5218,25 @@ const requirementRefArg = Args.text({ name: "requirement-ref" }).pipe(
 	Args.withDescription(
 		"Spec requirement reference (auto-resolved by local_id, id, then external_code)",
 	),
+)
+
+const requirementRefOption = Options.text("req").pipe(
+	Options.withAlias("r"),
+	Options.optional,
+	Options.withDescription(
+		"Spec requirement reference (alias for positional requirement-ref; auto selector)",
+	),
+)
+
+const specLinkIssueIdArg = Args.text({ name: "issue-id" }).pipe(
+	Args.optional,
+	Args.withDescription("Issue ID (optional when --issue is provided)"),
+)
+
+const specLinkIssueIdOption = Options.text("issue").pipe(
+	Options.withAlias("i"),
+	Options.optional,
+	Options.withDescription("Issue ID (alias for positional issue-id)"),
 )
 
 const requirementByIdOption = Options.text("id").pipe(
@@ -3202,9 +5259,51 @@ const requirementByExternalCodeOption = Options.text("external-code").pipe(
 	Options.withDescription("Lookup by requirement external code (for example AZ-FR-4201)"),
 )
 
+const specImplementationOption = Options.text("impl").pipe(
+	Options.repeated,
+	Options.withDescription("Implementation scope (repeatable). Default: default"),
+)
+
+const optionalSpecImplementationOption = Options.text("impl").pipe(
+	Options.optional,
+	Options.withDescription("Implementation scope. Default: default"),
+)
+
+const specUsageHandler = (usage: string) =>
+	Effect.gen(function* () {
+		yield* ensureSpecEnabled(process.cwd())
+		yield* Console.log(usage)
+	})
+
+const specRequirementViewOption = Options.text("view").pipe(
+	Options.optional,
+	Options.withDescription("Display mode: compact|verbose"),
+)
+
 const specReqListCommand = Command.make(
 	"list",
 	{
+		query: Options.text("query").pipe(
+			Options.withAlias("q"),
+			Options.optional,
+			Options.withDescription("Filter by query against local_id/external_code/title/body"),
+		),
+		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
+			Options.optional,
+			Options.withDescription("Filter by kind (functional|acceptance|other)"),
+		),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Filter by requirement status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Filter by requirement priority"),
+		),
+		view: specRequirementViewOption,
 		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(
@@ -3215,10 +5314,41 @@ const specReqListCommand = Command.make(
 	specReqListHandler,
 ).pipe(Command.withDescription("List spec requirements"))
 
+const specReqSearchCommand = Command.make(
+	"search",
+	{
+		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
+			Options.optional,
+			Options.withDescription("Filter by kind (functional|acceptance|other)"),
+		),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Filter by requirement status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Filter by requirement priority"),
+		),
+		view: specRequirementViewOption,
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+		query: Args.text({ name: "query" }).pipe(Args.withDescription("Search query text")),
+	},
+	specReqSearchHandler,
+).pipe(Command.withDescription("Search spec requirements"))
+
 const specReqGetCommand = Command.make(
 	"get",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3236,6 +5366,7 @@ const specReqCreateCommand = Command.make(
 	"create",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		localId: requirementByLocalIdOption,
 		externalCode: requirementByExternalCodeOption,
 		title: Options.text("title").pipe(
@@ -3274,6 +5405,7 @@ const specReqUpdateCommand = Command.make(
 	"update",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3315,6 +5447,7 @@ const specReqDeleteCommand = Command.make(
 	"delete",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3328,13 +5461,14 @@ const specReqDeleteCommand = Command.make(
 ).pipe(Command.withDescription("Delete a spec requirement"))
 
 const specReqCommand = Command.make("req", {}, () =>
-	Console.log(
-		"Usage: az spec req [list|get|create|update|delete] [<requirement-ref>] [--id|--local-id|--external-code] ...",
+	specUsageHandler(
+		"Usage: az spec req [list|search|get|create|update|delete] [--req <requirement-ref>|<requirement-ref>] [--id|--local-id|--external-code] ...",
 	),
 ).pipe(
 	Command.withDescription("Manage spec requirement records"),
 	Command.withSubcommands([
 		specReqListCommand,
+		specReqSearchCommand,
 		specReqGetCommand,
 		specReqCreateCommand,
 		specReqUpdateCommand,
@@ -3370,6 +5504,7 @@ const specLinkListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by requirement external code"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -3382,8 +5517,10 @@ const specLinkListCommand = Command.make(
 const specLinkAddCommand = Command.make(
 	"add",
 	{
-		issueId: issueIdArg,
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3391,6 +5528,22 @@ const specLinkAddCommand = Command.make(
 			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
+		),
+		implementations: specImplementationOption,
+		fulfillmentStatus: Options.text("fulfillment-status").pipe(
+			Options.withAlias("f"),
+			Options.optional,
+			Options.withDescription("Fulfillment status (planned|partial|complete|verified)"),
+		),
+		fulfillmentPercent: Options.integer("fulfillment-percent").pipe(
+			Options.withAlias("F"),
+			Options.optional,
+			Options.withDescription("Optional fulfillment percentage (0-100)"),
+		),
+		evidenceNote: Options.text("evidence-note").pipe(
+			Options.withAlias("N"),
+			Options.optional,
+			Options.withDescription("Optional fulfillment evidence note"),
 		),
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
@@ -3404,8 +5557,10 @@ const specLinkAddCommand = Command.make(
 const specLinkRemoveCommand = Command.make(
 	"remove",
 	{
-		issueId: issueIdArg,
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3414,6 +5569,7 @@ const specLinkRemoveCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Optional link type filter"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -3423,12 +5579,71 @@ const specLinkRemoveCommand = Command.make(
 	specLinkRemoveHandler,
 ).pipe(Command.withDescription("Remove typed issue<->requirement link"))
 
+const specLinkUpdateCommand = Command.make(
+	"update",
+	{
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
+		requirementRef: requirementRefArg,
+		requirementRefOption,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
+		linkType: Options.text("type").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Optional link type filter"),
+		),
+		fulfillmentStatus: Options.text("fulfillment-status").pipe(
+			Options.withAlias("f"),
+			Options.optional,
+			Options.withDescription("Set fulfillment status (planned|partial|complete|verified)"),
+		),
+		fulfillmentPercent: Options.integer("fulfillment-percent").pipe(
+			Options.withAlias("F"),
+			Options.optional,
+			Options.withDescription("Set fulfillment percentage (0-100)"),
+		),
+		evidenceNote: Options.text("evidence-note").pipe(
+			Options.withAlias("N"),
+			Options.optional,
+			Options.withDescription("Set fulfillment evidence note"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specLinkUpdateHandler,
+).pipe(Command.withDescription("Update typed issue<->requirement link fulfillment metadata"))
+
 const specLinkCommand = Command.make("link", {}, () =>
-	Console.log("Usage: az spec link [list|add|remove] ..."),
+	specUsageHandler(
+		"Usage: az spec link [list|add|update|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
+	),
 ).pipe(
 	Command.withDescription("Manage typed issue/spec links"),
-	Command.withSubcommands([specLinkListCommand, specLinkAddCommand, specLinkRemoveCommand]),
+	Command.withSubcommands([
+		specLinkListCommand,
+		specLinkAddCommand,
+		specLinkUpdateCommand,
+		specLinkRemoveCommand,
+	]),
 )
+
+const specParityCommand = Command.make(
+	"parity",
+	{
+		implementation: optionalSpecImplementationOption,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specParityHandler,
+).pipe(Command.withDescription("Report spec parity for a selected implementation"))
 
 const specPublishRunCommand = Command.make(
 	"run",
@@ -3440,22 +5655,10 @@ const specPublishRunCommand = Command.make(
 		),
 	},
 	specPublishRunHandler,
-).pipe(Command.withDescription("Run one-way spec publish to Linear project documents"))
+).pipe(Command.withDescription("Deprecated alias for `az spec sync --target linear`"))
 
-const specPublishConfigGetCommand = Command.make(
-	"get",
-	{
-		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(
-			Options.withAlias("j"),
-			Options.withDescription("Output JSON"),
-		),
-	},
-	specPublishConfigGetHandler,
-).pipe(Command.withDescription("Inspect spec publish config and last outcome"))
-
-const specPublishConfigSetCommand = Command.make(
-	"set",
+const specPublishConfigCommand = Command.make(
+	"config",
 	{
 		enabled: Options.boolean("enabled").pipe(
 			Options.withAlias("e"),
@@ -3497,29 +5700,92 @@ const specPublishConfigSetCommand = Command.make(
 			Options.withAlias("j"),
 			Options.withDescription("Output JSON"),
 		),
+		action: Args.text({ name: "action" }).pipe(
+			Args.optional,
+			Args.withDescription("Optional action: get | set"),
+		),
 	},
-	specPublishConfigSetHandler,
-).pipe(Command.withDescription("Update spec publish config"))
-
-const specPublishConfigCommand = Command.make("config", {}, () =>
-	Console.log("Usage: az spec publish config [get|set] ..."),
-).pipe(
-	Command.withDescription("Manage spec publish configuration"),
-	Command.withSubcommands([specPublishConfigGetCommand, specPublishConfigSetCommand]),
-)
+	specPublishConfigHandler,
+).pipe(Command.withDescription("Inspect or update spec publish configuration"))
 
 const specPublishCommand = Command.make("publish", {}, () =>
-	Console.log("Usage: az spec publish [run|config] ..."),
+	specUsageHandler("Usage: az spec publish [run|config] ..."),
 ).pipe(
-	Command.withDescription("Spec publish operations"),
+	Command.withDescription("Spec publish operations (deprecated export alias; use `az spec sync`)"),
 	Command.withSubcommands([specPublishRunCommand, specPublishConfigCommand]),
 )
 
+const specReadCommand = Command.make(
+	"read",
+	{
+		view: specRequirementViewOption,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specReadHandler,
+).pipe(Command.withDescription("Show full spec in terminal-friendly form"))
+
+const specLintCommand = Command.make(
+	"lint",
+	{
+		strict: Options.boolean("strict").pipe(
+			Options.withAlias("s"),
+			Options.withDescription("Fail with non-zero exit when issues are found"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specLintHandler,
+).pipe(Command.withDescription("Validate spec coverage and integrity"))
+
+const specSyncCommand = Command.make(
+	"sync",
+	{
+		target: Options.text("target").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Sync target: md|linear|all (default: md)"),
+		),
+		outDir: Options.text("out-dir").pipe(
+			Options.withAlias("o"),
+			Options.optional,
+			Options.withDescription("Output directory for markdown snapshots (default: docs/spec)"),
+		),
+		check: Options.boolean("check").pipe(
+			Options.withAlias("c"),
+			Options.withDescription("Check for drift without writing files"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specSyncHandler,
+).pipe(Command.withDescription("Sync spec exports to markdown and/or Linear"))
+
 const specCommand = Command.make("spec", {}, () =>
-	Console.log("Usage: az spec [req|link|publish] ..."),
+	specUsageHandler("Usage: az spec [req|link|parity|read|lint|sync|publish] ..."),
 ).pipe(
-	Command.withDescription("Spec requirement/link/publish operations"),
-	Command.withSubcommands([specReqCommand, specLinkCommand, specPublishCommand]),
+	Command.withDescription(
+		"Spec requirement/link/read/lint/sync operations (`publish` remains as deprecated alias)",
+	),
+	Command.withSubcommands([
+		specReqCommand,
+		specLinkCommand,
+		specLinkCommand,
+		specParityCommand,
+		specReadCommand,
+		specLintCommand,
+		specSyncCommand,
+		specPublishCommand,
+	]),
 )
 
 /**
@@ -3646,14 +5912,14 @@ const opencodeInitHandler = (args: {
 		const configExists = yield* fs.exists(opencodeJsonPath)
 		if (configExists) {
 			const existingContent = yield* fs.readFileString(opencodeJsonPath)
-			const existingConfig = yield* Effect.try({
-				try: () => JSON.parse(existingContent),
-				catch: () => ({}),
-			})
+			const existingConfig: Readonly<Record<string, unknown>> = yield* Schema.decode(
+				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
 
 			// Merge plugins - existingConfig.plugins could be undefined or an array
-			const existingPlugins = Array.isArray(existingConfig.plugins)
-				? (existingConfig.plugins as string[])
+			const pluginsValue = existingConfig.plugins
+			const existingPlugins = Array.isArray(pluginsValue)
+				? pluginsValue.filter((plugin): plugin is string => typeof plugin === "string")
 				: []
 			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker"])]
 			config = { ...existingConfig, ...config, plugins: newPlugins }
@@ -3886,6 +6152,35 @@ const projectCommand = Command.make("project", {}, () =>
 	Command.withDescription("Manage multiple projects"),
 )
 
+const configKeyArg = Args.text({ name: "key" }).pipe(
+	Args.withDescription("Config key (currently: spec.enabled)"),
+)
+
+const configValueArg = Args.text({ name: "value" }).pipe(Args.withDescription("Config value"))
+
+const configSetCommand = Command.make(
+	"set",
+	{
+		key: configKeyArg,
+		value: configValueArg,
+		projectDir: projectDirArg,
+	},
+	configSetHandler,
+).pipe(
+	Command.withDescription(
+		"Set a supported project config key (for example: az config set spec.enabled false)",
+	),
+)
+
+const configCommand = Command.make("config", {}, () =>
+	configUsageHandler("Usage: az config set spec.enabled <true|false>"),
+).pipe(
+	Command.withDescription(
+		"Inspect or update project config (for example, disable spec with 'az config set spec.enabled false')",
+	),
+	Command.withSubcommands([configSetCommand]),
+)
+
 // ============================================================================
 // Top-level Shortcut Commands
 // ============================================================================
@@ -3947,6 +6242,7 @@ const cli = az.pipe(
 		// Top-level shortcuts (most commonly used)
 		addCommand,
 		listCommand,
+		configCommand,
 		primeCommand,
 		// Session management
 		startCommand,
@@ -3956,6 +6252,7 @@ const cli = az.pipe(
 		statusCommand,
 		syncCommand,
 		issueCommand,
+		implCommand,
 		specCommand,
 		gateCommand,
 		devCommand,
@@ -3980,6 +6277,7 @@ const commandCli = az.pipe(
 	Command.withSubcommands([
 		addCommand,
 		listCommand,
+		configCommand,
 		primeCommand,
 		startCommand,
 		attachCommand,
@@ -3988,6 +6286,7 @@ const commandCli = az.pipe(
 		statusCommand,
 		syncCommand,
 		issueCommand,
+		implCommand,
 		specCommand,
 		gateCommand,
 		devCommandPlaceholder,
@@ -4001,37 +6300,14 @@ const commandCli = az.pipe(
 // ============================================================================
 // CLI Runner
 // ============================================================================
-
 const buildFullCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return fullCliLayer
-
-	return Layer.mergeAll(
-		fullCliLayer,
-		Layer.succeed(
-			AppConfigConfig,
-			AppConfigConfig.make({
-				configPath,
-				projectPath: process.cwd(),
-			}),
-		),
-	)
+	return createFullCliLayer(configPath)
 }
 
 const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return commandCliLayer
-
-	return Layer.mergeAll(
-		commandCliLayer,
-		Layer.succeed(
-			AppConfigConfig,
-			AppConfigConfig.make({
-				configPath,
-				projectPath: process.cwd(),
-			}),
-		),
-	)
+	return createCommandCliLayer(configPath)
 }
 
 /**
@@ -4071,12 +6347,17 @@ export { cliLayer, commandCliLayer }
  */
 export {
 	buildPrimeOutput,
+	buildCommandCliLayerForArgv,
 	cliRunner,
+	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
+	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
+	formatParentChildCheckOutput,
 	formatIssueSummaryLine,
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
+	summarizeIssueBulkUpdateResults,
 }

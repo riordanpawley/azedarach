@@ -91,3 +91,4 @@ coverage/
 /.beads
 /ts-opentui/az
 /.agents/memories/overview.md
+/.azedarach.schema.json

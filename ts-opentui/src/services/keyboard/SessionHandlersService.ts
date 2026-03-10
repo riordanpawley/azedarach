@@ -11,22 +11,22 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
-import { FileSystem, type CommandExecutor } from "@effect/platform"
+import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import {
-    getIssueSessionName,
-    getWorktreePath,
-    issueIdsEqualForLookup,
-    parseIssueSessionName,
-    WINDOW_NAMES,
+	getIssueSessionName,
+	getWorktreePath,
+	issueIdsEqualForLookup,
+	parseIssueSessionName,
+	WINDOW_NAMES,
 } from "../../core/paths.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
-import { type WorktreeNameClashError, WorktreeManager } from "../../core/WorktreeManager.js"
+import { WorktreeManager, type WorktreeNameClashError } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -71,8 +71,6 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const overlay = yield* OverlayService
 			const boardService = yield* BoardService
 			const gitConfig = yield* appConfig.getGitConfig()
-			const localModePromptGuardrails =
-				gitConfig.workflowMode === "local" || !gitConfig.pushEnabled || !gitConfig.fetchEnabled
 
 			const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
 				const aheadRisk =
@@ -164,7 +162,9 @@ Delete the duplicate worktree and retry?`
 			const isSafeImagePath = (imagePath: string): boolean => {
 				const trimmed = imagePath.trim()
 				if (trimmed.length === 0) return false
-				if (/[\u0000\r\n]/.test(trimmed)) return false
+				if (trimmed.includes("\u0000") || trimmed.includes("\r") || trimmed.includes("\n")) {
+					return false
+				}
 				return trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)
 			}
 
@@ -181,13 +181,15 @@ Delete the duplicate worktree and retry?`
 						return null
 					}
 
-					const exists = yield* fs.exists(candidatePath).pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(false)),
+					const exists = yield* fs
+						.exists(candidatePath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
 							),
-						),
-					)
+						)
 
 					if (!exists) {
 						yield* Effect.logWarning(
@@ -333,14 +335,12 @@ Delete the duplicate worktree and retry?`
 			/**
 			 * Start session with initial prompt (Space+S)
 			 *
-			 * Starts Claude with a detailed prompt containing the bead ID and title.
-			 * If the task has attached images, their paths are included so Claude
-			 * can use the Read tool to view them.
+			 * Starts the agent with a short task-specific prompt that tells it to run
+			 * `az prime` first and then continue working without waiting.
+			 * Codex still receives attached images as native CLI image arguments.
 			 *
-			 * If the task has an existing worktree (orphaned), includes additional
-			 * context about checking git status and continuing from previous work.
-			 *
-			 * This helps Claude understand that it should work on a specific tracker issue.
+			 * Existing worktrees are still surfaced through the success message so users
+			 * can distinguish fresh starts from resumed sessions.
 			 * Queued to prevent race conditions with other operations on the same task.
 			 * Blocked if task already has an operation in progress.
 			 */
@@ -361,20 +361,16 @@ Delete the duplicate worktree and retry?`
 					// Get current project path (from ProjectService or cwd fallback)
 					const projectPath = yield* helpers.getProjectPath()
 					const cliTool = yield* appConfig.getCliTool()
-
-					// Check for attached images and include only safe, existing paths.
-					// Non-Codex tools consume these via prompt text + Read tool.
-					// Codex receives them as native --image inputs (see sessionManager.start below).
-					const imagePaths = yield* resolveSessionImagePaths(task.id, projectPath)
-
-                    const initialPrompt = buildStartWorkPrompt({
-                        taskId: task.id,
-                        issueType: task.issue_type,
-                        title: task.title,
-                        hasWorktree: task.hasWorktree ?? false,
-                        attachmentPaths: cliTool === "codex" ? [] : imagePaths,
-                        localMode: localModePromptGuardrails,
-                    })
+					// Space+S uses a short task prompt that tells the agent to run
+					// `az prime` first; only Codex still needs native image arguments
+					// because they are out-of-band from primer text.
+					const imagePaths =
+						cliTool === "codex" ? yield* resolveSessionImagePaths(task.id, projectPath) : undefined
+					const initialPrompt = buildStartWorkPrompt({
+						taskId: task.id,
+						issueType: task.issue_type,
+						title: task.title,
+					})
 
 					yield* runStartWithClashRecovery({
 						issueId: task.id,
@@ -386,7 +382,7 @@ Delete the duplicate worktree and retry?`
 							issueId: task.id,
 							projectPath,
 							initialPrompt,
-							imagePaths: cliTool === "codex" ? imagePaths : undefined,
+							imagePaths,
 						}),
 					})
 				})
@@ -394,12 +390,10 @@ Delete the duplicate worktree and retry?`
 			/**
 			 * Start session with prompt and --dangerously-skip-permissions (Space+!)
 			 *
-			 * Starts Claude with a detailed prompt AND the --dangerously-skip-permissions flag.
-			 * This allows Claude to run without permission prompts - useful for trusted tasks
-			 * but should be used with caution.
-			 *
-			 * If the task has an existing worktree (orphaned), includes additional
-			 * context about checking git status and continuing from previous work.
+			 * Starts the agent with the same short task-specific prompt as Space+S and
+			 * also passes --dangerously-skip-permissions.
+			 * This allows the agent to run without permission prompts and should be used
+			 * only for trusted tasks.
 			 *
 			 * Queued to prevent race conditions with other operations on the same task.
 			 * Blocked if task already has an operation in progress.
@@ -421,17 +415,13 @@ Delete the duplicate worktree and retry?`
 					// Get current project path
 					const projectPath = yield* helpers.getProjectPath()
 					const cliTool = yield* appConfig.getCliTool()
-					// Check for attached images and include only safe, existing paths.
-					const imagePaths = yield* resolveSessionImagePaths(task.id, projectPath)
-
-                    const initialPrompt = buildStartWorkPrompt({
-                        taskId: task.id,
-                        issueType: task.issue_type,
-                        title: task.title,
-                        hasWorktree: task.hasWorktree ?? false,
-                        attachmentPaths: cliTool === "codex" ? [] : imagePaths,
-                        localMode: localModePromptGuardrails,
-                    })
+					const imagePaths =
+						cliTool === "codex" ? yield* resolveSessionImagePaths(task.id, projectPath) : undefined
+					const initialPrompt = buildStartWorkPrompt({
+						taskId: task.id,
+						issueType: task.issue_type,
+						title: task.title,
+					})
 
 					yield* runStartWithClashRecovery({
 						issueId: task.id,
@@ -443,14 +433,14 @@ Delete the duplicate worktree and retry?`
 							issueId: task.id,
 							projectPath,
 							initialPrompt,
-							imagePaths: cliTool === "codex" ? imagePaths : undefined,
+							imagePaths,
 							dangerouslySkipPermissions: true,
 						}),
 					})
 				})
 
-            const findAiSession = (issueId: string, projectPath?: string) =>
-                Effect.gen(function* () {
+			const findAiSession = (issueId: string, projectPath?: string) =>
+				Effect.gen(function* () {
 					const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
 					if (hasCanonicalSession) {
@@ -854,13 +844,13 @@ Delete the duplicate worktree and retry?`
 			// Public API
 			// ================================================================
 
-            return {
-                startSession,
-                startSessionWithPrompt,
-                startSessionDangerous,
-                attachExternal,
-                attachInline,
-                pauseSession,
+			return {
+				startSession,
+				startSessionWithPrompt,
+				startSessionDangerous,
+				attachExternal,
+				attachInline,
+				pauseSession,
 				resumeSession,
 				stopSession,
 				startHelixSession,

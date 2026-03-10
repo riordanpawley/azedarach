@@ -4,8 +4,7 @@
 
 import { useAtomValue } from "@effect-atom/atom-react"
 import type { MouseEvent } from "@opentui/core"
-import type { DevServerView } from "./atoms.js"
-import { issueDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
+import { taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { isSmallScreen } from "./responsive.js"
 import { getPriorityColor, theme } from "./theme.js"
@@ -91,16 +90,15 @@ export interface TaskCardProps {
  */
 export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
+	const isWaiting = props.task.sessionState === "waiting"
 	const maxTitleWidth = getTitleMaxWidth()
+	const canShowGitStatus = props.task.sessionState !== "idle" || props.task.hasWorktree === true
 
 	// Subscribe to running operation state for this task
 	const runningOperation = useAtomValue(taskRunningOperationAtom(props.task.id))
 	const operationIndicator = runningOperation
 		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
 		: ""
-
-	const devServers = useAtomValue(issueDevServerViewsAtom(props.task.id)) as DevServerView[]
-	const hasDevServer = devServers.some((s) => s.status === "running" || s.status === "starting")
 
 	// Get context health border color based on contextPercent
 	// Only applies when session is active (not idle) and has context data
@@ -126,6 +124,7 @@ export const TaskCard = (props: TaskCardProps) => {
 		// This ensures cursor is always visible even on selected tasks
 		if (props.isSelected) return theme.lavender
 		if (props.isMultiSelected) return theme.mauve
+		if (isWaiting) return theme.yellow
 		const healthColor = getContextHealthColor()
 		if (healthColor) return healthColor
 		return theme.surface1
@@ -168,6 +167,10 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Build git status parts for individual coloring
 	// Returns { statusPart, additions, deletions } so each can be colored separately
 	const getGitStatusParts = (availableWidth: number) => {
+		if (!canShowGitStatus) {
+			return { statusString: "", additions: undefined, deletions: undefined }
+		}
+
 		const { gitBehindCount, hasUncommittedChanges, gitAdditions, gitDeletions } = props.task
 		const statusParts: string[] = []
 
@@ -232,7 +235,7 @@ export const TaskCard = (props: TaskCardProps) => {
 			line += ` ${phaseIndicator}`
 		}
 		// Show dev server indicator when a dev server is running (e.g., "🔵 🖥️" = busy + dev server)
-		if (hasDevServer) {
+		if (props.task.hasDevServer) {
 			line += ` ${DEV_SERVER_INDICATOR}`
 		}
 		// Show operation indicator when an async operation is running (e.g., merge, cleanup)
@@ -252,6 +255,7 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Color for status indicators (↓N behind, ● dirty)
 	// Behind: yellow (needs attention), Dirty: red (uncommitted work), Both: red
 	const getStatusColor = (): string => {
+		if (!canShowGitStatus) return theme.overlay0
 		const { gitBehindCount, hasUncommittedChanges } = props.task
 		if (hasUncommittedChanges) return theme.red
 		if (gitBehindCount !== undefined && gitBehindCount > 0) return theme.yellow
@@ -274,6 +278,11 @@ export const TaskCard = (props: TaskCardProps) => {
 			<box flexDirection="row" gap={1}>
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
+				{isWaiting && (
+					<text fg={theme.yellow} attributes={ATTR_BOLD}>
+						WAIT
+					</text>
+				)}
 				{hasGitStatus && (
 					<box flexDirection="row">
 						{gitStatus.statusString && <text fg={getStatusColor()}>{gitStatus.statusString} </text>}
@@ -299,3 +308,5 @@ export const TaskCard = (props: TaskCardProps) => {
 		</box>
 	)
 }
+
+const ATTR_BOLD = 1

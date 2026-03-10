@@ -1,7 +1,12 @@
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { type AzedarachConfig, AzedarachConfigSchema } from "../config/schema.js"
+import {
+	type AzedarachConfig,
+	AzedarachConfigJsonSchema,
+	AzedarachConfigSchema,
+} from "../config/schema.js"
+import { getProjectStoragePaths, resolveConfigSchemaPath } from "../core/storagePaths.js"
 import { ProjectService, resolveConfigBasePath } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
@@ -25,13 +30,13 @@ export class SettingsConfigLoadError extends Data.TaggedError("SettingsConfigLoa
 }> {}
 
 const cycleStringValue = <T extends string>(current: T, options: readonly T[]): T => {
-	const currentIndex = options.findIndex((option) => option === current)
+	const currentIndex = options.indexOf(current)
 	if (currentIndex < 0) return options[0] ?? current
 	return options[(currentIndex + 1) % options.length] ?? current
 }
 
 const cycleNumberValue = <T extends number>(current: T, options: readonly T[]): T => {
-	const currentIndex = options.findIndex((option) => option === current)
+	const currentIndex = options.indexOf(current)
 	if (currentIndex < 0) return options[0] ?? current
 	return options[(currentIndex + 1) % options.length] ?? current
 }
@@ -85,6 +90,19 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 			git: {
 				...c.git,
 				workflowMode: cycleStringValue(c.git?.workflowMode ?? "origin", WORKFLOW_MODE_OPTIONS),
+			},
+		}),
+	},
+	{
+		key: "specEnabled",
+		group: ["Features"],
+		label: "Spec Enabled",
+		getValue: (c) => c.spec?.enabled ?? true,
+		nextValue: (c) => ({
+			...c,
+			spec: {
+				...c.spec,
+				enabled: !(c.spec?.enabled ?? true),
 			},
 		}),
 	},
@@ -467,32 +485,68 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 			isOpen: false,
 		})
 
-		const getConfigPath = (): Effect.Effect<string> =>
+		const getConfigPaths = (): Effect.Effect<{
+			readonly canonicalPath: string
+			readonly existingPath: string
+		}> =>
 			Effect.gen(function* () {
 				const projectPath = yield* projectService.getCurrentPath()
 				const effectiveProjectPath = projectPath ?? process.cwd()
 				const cwdPath = process.cwd()
-				const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
-				const cwdHasConfig = yield* fs.exists(cwdConfigPath).pipe(
+				const cwdStoragePaths = getProjectStoragePaths(cwdPath, pathService)
+				const cwdHasCanonicalConfig = yield* fs.exists(cwdStoragePaths.canonicalConfigPath).pipe(
 					Effect.tapError((error) =>
 						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
 					),
 					Effect.orElseSucceed(() => false),
 				)
+				const cwdHasLegacyConfig = cwdHasCanonicalConfig
+					? false
+					: yield* fs.exists(cwdStoragePaths.legacyConfigPath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => false),
+						)
 				const configBasePath = resolveConfigBasePath({
 					cwdPath,
 					projectPath: effectiveProjectPath,
 					pathOps: pathService,
-					cwdHasConfig,
+					cwdHasConfig: cwdHasCanonicalConfig || cwdHasLegacyConfig,
 				})
+				const storagePaths = getProjectStoragePaths(configBasePath, pathService)
+				const canonicalExists = yield* fs.exists(storagePaths.canonicalConfigPath).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => false),
+				)
+				const legacyExists = canonicalExists
+					? false
+					: yield* fs.exists(storagePaths.legacyConfigPath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => false),
+						)
 
-				return pathService.join(configBasePath, ".azedarach.json")
+				return {
+					canonicalPath: storagePaths.canonicalConfigPath,
+					existingPath: canonicalExists
+						? storagePaths.canonicalConfigPath
+						: legacyExists
+							? storagePaths.legacyConfigPath
+							: storagePaths.canonicalConfigPath,
+				}
 			})
+
+		const getConfigPath = (): Effect.Effect<string> =>
+			getConfigPaths().pipe(Effect.map((paths) => paths.canonicalPath))
 
 		const loadRawConfig = (): Effect.Effect<AzedarachConfig, SettingsConfigLoadError> =>
 			Effect.gen(function* () {
-				const configPath = yield* getConfigPath()
-				const exists = yield* fs.exists(configPath).pipe(
+				const configPaths = yield* getConfigPaths()
+				const exists = yield* fs.exists(configPaths.existingPath).pipe(
 					Effect.tapError((error) =>
 						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
 					),
@@ -510,41 +564,53 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					)
 				}
 
-				const content = yield* fs.readFileString(configPath).pipe(
+				const content = yield* fs.readFileString(configPaths.existingPath).pipe(
 					Effect.mapError(
 						(error) =>
 							new SettingsConfigLoadError({
-								message: "Failed to read .azedarach.json",
+								message: "Failed to read project config",
 								cause: String(error),
 							}),
 					),
 				)
 
-				const parsedJson = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: (error) =>
-						new SettingsConfigLoadError({
-							message: "Invalid JSON in .azedarach.json",
-							cause: String(error),
-						}),
-				})
-
-				return yield* Schema.decodeUnknown(AzedarachConfigSchema)(parsedJson).pipe(
+				return yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
 					Effect.mapError(
 						(error) =>
 							new SettingsConfigLoadError({
-								message: "Config validation failed for .azedarach.json",
+								message: "Config parse/validation failed for project config",
 								cause: String(error),
 							}),
 					),
 				)
 			})
 
+		const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+		const writeConfigJsonSchema = (configPath: string): Effect.Effect<void> => {
+			const schemaPath = resolveConfigSchemaPath(configPath, pathService)
+			return fs
+				.writeFileString(schemaPath, configJsonSchemaString)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Failed to write config JSON schema at ${schemaPath}: ${String(error)}`,
+						),
+					),
+				)
+		}
+
 		const saveConfig = (config: AzedarachConfig) =>
 			Effect.gen(function* () {
 				const configPath = yield* getConfigPath()
+				yield* fs.makeDirectory(pathService.dirname(configPath), { recursive: true }).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => undefined),
+				)
 				const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config)
 				yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
+				yield* writeConfigJsonSchema(configPath)
 			})
 
 		return {
@@ -617,7 +683,8 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 
 			openInEditor: () =>
 				Effect.gen(function* () {
-					const configPath = yield* getConfigPath()
+					const configPaths = yield* getConfigPaths()
+					const configPath = configPaths.canonicalPath
 
 					const exists = yield* fs.exists(configPath).pipe(
 						Effect.tapError((error) =>
@@ -626,7 +693,31 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 						Effect.orElseSucceed(() => false),
 					)
 					if (!exists) {
-						yield* fs.writeFileString(configPath, "{}\n").pipe(Effect.orDie)
+						yield* fs.makeDirectory(pathService.dirname(configPath), { recursive: true }).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => undefined),
+						)
+						const existingContent = yield* fs.readFileString(configPaths.existingPath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => ""),
+						)
+						const json =
+							existingContent.length > 0
+								? yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
+										existingContent,
+									).pipe(
+										Effect.flatMap((decoded) =>
+											Schema.encode(Schema.parseJson(AzedarachConfigSchema))(decoded),
+										),
+										Effect.orElse(() => Schema.encode(Schema.parseJson(AzedarachConfigSchema))({})),
+									)
+								: yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))({})
+						yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
+						yield* writeConfigJsonSchema(configPath)
 					}
 
 					const backupContent = yield* fs.readFileString(configPath).pipe(
@@ -635,6 +726,33 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 						),
 						Effect.orElseSucceed(() => "{}"),
 					)
+
+					// Mirror bead editor behavior: open $EDITOR in a blocking tmux popup.
+					const editor = process.env.EDITOR || "vim"
+					const channel = `az-settings-editor-${Date.now()}`
+					Bun.spawnSync(
+						[
+							"tmux",
+							"display-popup",
+							"-E",
+							"-w",
+							"90%",
+							"-h",
+							"90%",
+							"-T",
+							" Edit Config ",
+							"--",
+							"sh",
+							"-c",
+							`${editor} "${configPath}"; tmux wait-for -S ${channel}`,
+						],
+						{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+					)
+					Bun.spawnSync(["tmux", "wait-for", channel], {
+						stdin: "inherit",
+						stdout: "inherit",
+						stderr: "inherit",
+					})
 
 					return { configPath, backupContent }
 				}),
@@ -654,10 +772,13 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 
 					if (parseResult._tag === "Left") {
 						yield* fs.writeFileString(configPath, backupContent).pipe(Effect.orDie)
+						yield* appConfigService.reload()
 						yield* toast.show("error", `Invalid config, rolled back`)
 						return { valid: false, error: "Schema validation failed" }
 					}
 
+					yield* writeConfigJsonSchema(configPath)
+					yield* appConfigService.reload()
 					yield* toast.show("success", "Settings updated")
 					return { valid: true }
 				}),

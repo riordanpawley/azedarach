@@ -26,43 +26,49 @@ import {
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import {
+	type Issue,
 	IssueTrackerClient,
 	inferLinearIssueType,
-	type Issue,
 	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
+import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
+import { PTYMonitor } from "../core/PTYMonitor.js"
+import { getWorktreePath } from "../core/paths.js"
 import {
-	SessionManager,
 	type InvalidStateError,
 	type SessionError,
 	type SessionLimitError,
+	SessionManager,
 	type SessionNotFoundError,
 } from "../core/SessionManager.js"
-import { PTYMonitor } from "../core/PTYMonitor.js"
-import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import type {
-	SessionNotFoundError as TmuxSessionNotFoundError,
 	TmuxError,
+	SessionNotFoundError as TmuxSessionNotFoundError,
 } from "../core/TmuxService.js"
-import { getWorktreePath } from "../core/paths.js"
 import { WorktreeManager } from "../core/WorktreeManager.js"
+import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 import {
+	type LinearIssueWebhookEvent,
+	type LinearWebhookMode,
 	LinearWebhookService,
 	normalizePublicBaseUrl,
 	parseTailscaleDnsName,
-	type LinearIssueWebhookEvent,
-	type LinearWebhookMode,
 } from "./LinearWebhookService.js"
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
-import { ToastService } from "./ToastService.js"
 import { makeSessionRecoveryRetrySchedule } from "./sessionRecoveryRetrySchedule.js"
+import { ToastService } from "./ToastService.js"
+import {
+	isTransientOperationalError,
+	isTransientOperationalErrorMessage,
+} from "./transientError.js"
+import { makeTransientRetrySchedule } from "./transientRetrySchedule.js"
 
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
 const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
@@ -75,66 +81,32 @@ const LINEAR_WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
 const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
 const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
 const LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL = "2 minutes"
-const SQLITE_LOCK_RETRY_ATTEMPTS = 3
-const SQLITE_LOCK_RETRY_DELAY = "120 millis"
+const LOCAL_CREATE_VISIBILITY_GRACE_MS = 15000
+const TRANSIENT_RETRY_ATTEMPTS = 4
+const TRANSIENT_RETRY_BASE_DELAY_MS = 120
+const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
 const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
 const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
 
-const isSqliteLockMessage = (value: string): boolean => {
-	const normalized = value.toLowerCase()
-	return (
-		normalized.includes("database is locked") ||
-		normalized.includes("sqlite_busy") ||
-		normalized.includes("sqlite busy")
-	)
-}
-
-const isSqliteLockError = (error: unknown): boolean => {
-	if (typeof error === "string") {
-		return isSqliteLockMessage(error)
-	}
-
-	if (error instanceof Error) {
-		return isSqliteLockMessage(error.message)
-	}
-
-	if (typeof error === "object" && error !== null) {
-		if (
-			"message" in error &&
-			typeof error.message === "string" &&
-			isSqliteLockMessage(error.message)
-		) {
-			return true
-		}
-		if (
-			"stderr" in error &&
-			typeof error.stderr === "string" &&
-			isSqliteLockMessage(error.stderr)
-		) {
-			return true
-		}
-	}
-
-	return isSqliteLockMessage(String(error))
-}
-
-const withSqliteLockRetry = <A, E, R>(
+const withTransientRetry = <A, E, R>(
 	context: string,
 	effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> =>
 	effect.pipe(
 		Effect.tapError((error) =>
-			isSqliteLockError(error)
+			isTransientOperationalError(error)
 				? Effect.logWarning(
-						`SQLite lock detected during ${context}; retrying (max ${SQLITE_LOCK_RETRY_ATTEMPTS} attempts)`,
+						`Transient error detected during ${context}; retrying (max ${TRANSIENT_RETRY_ATTEMPTS} attempts)`,
 					)
 				: Effect.void,
 		),
 		Effect.retry({
-			schedule: Schedule.recurs(SQLITE_LOCK_RETRY_ATTEMPTS - 1).pipe(
-				Schedule.addDelay(() => SQLITE_LOCK_RETRY_DELAY),
-			),
-			while: (error) => isSqliteLockError(error),
+			schedule: makeTransientRetrySchedule({
+				retryBaseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS,
+				retryMaxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS,
+				retryMaxAttempts: TRANSIENT_RETRY_ATTEMPTS,
+				while: isTransientOperationalError,
+			}),
 		}),
 	)
 
@@ -148,18 +120,6 @@ type SessionRecoveryError =
 	| SessionLimitError
 
 export type SessionRecoveryRetryability = "transient" | "terminal"
-
-const isTransientSessionErrorMessage = (message: string): boolean => {
-	const normalized = message.toLowerCase()
-	return (
-		normalized.includes("temporarily unavailable") ||
-		normalized.includes("timed out") ||
-		normalized.includes("timeout") ||
-		normalized.includes("resource busy") ||
-		normalized.includes("connection reset") ||
-		normalized.includes("broken pipe")
-	)
-}
 
 const normalizeRecoveryRetryBaseDelayMs = (value: number): number =>
 	Number.isFinite(value)
@@ -184,7 +144,7 @@ export const classifySessionRecoveryError = (
 		case "SessionLimitError":
 			return "transient"
 		case "SessionError":
-			return isTransientSessionErrorMessage(error.message) ? "transient" : "terminal"
+			return isTransientOperationalErrorMessage(error.message) ? "transient" : "terminal"
 		case "InvalidStateError":
 			return "terminal"
 	}
@@ -249,8 +209,8 @@ const normalizeLinearWebhookPriority = (priority: number | undefined): number =>
 }
 
 interface LinearSdkEventsTickerBehavior {
-    readonly localRefreshOnly: boolean
-    readonly defensiveReconciliationInterval: Duration.DurationInput | undefined
+	readonly localRefreshOnly: boolean
+	readonly defensiveReconciliationInterval: Duration.DurationInput | undefined
 }
 
 export const resolveLinearSdkEventsTickerBehavior = (
@@ -262,10 +222,10 @@ export const resolveLinearSdkEventsTickerBehavior = (
 				localRefreshOnly: true,
 				defensiveReconciliationInterval: LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL,
 			}
-        : {
-                localRefreshOnly: false,
-                defensiveReconciliationInterval: undefined,
-            }
+		: {
+				localRefreshOnly: false,
+				defensiveReconciliationInterval: undefined,
+			}
 
 const normalizeLinearWebhookReason = (reason: string | undefined): string | undefined => {
 	if (reason === undefined) return undefined
@@ -316,46 +276,137 @@ const linearWebhookReasonKey = (reason: string | undefined): string => {
 export type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch" | "pty"
 
 interface BoardRefreshOptions {
-    readonly reason?: BoardRefreshReason
-    readonly forceRemote?: boolean
+	readonly reason?: BoardRefreshReason
+	readonly forceRemote?: boolean
 }
 
 type BoardRefreshExecutionMode = "remote" | "local-session-only" | "local-session-and-git"
 
 export const resolveBoardRefreshExecutionMode = (params: {
-    readonly localRefreshOnly: boolean
-    readonly options: BoardRefreshOptions | undefined
+	readonly localRefreshOnly: boolean
+	readonly options: BoardRefreshOptions | undefined
 }): BoardRefreshExecutionMode => {
-    if (params.options?.forceRemote === true) return "remote"
-    if (params.options?.reason === "pty") return "local-session-only"
-    if (!params.localRefreshOnly) return "remote"
-    switch (params.options?.reason ?? "default") {
-        case "mutation":
-        case "initial-load":
-        case "project-switch":
-            return "remote"
-        default:
-            return "local-session-and-git"
-    }
+	if (params.options?.forceRemote === true) return "remote"
+	if (params.options?.reason === "pty") return "local-session-only"
+	if (!params.localRefreshOnly) return "remote"
+	switch (params.options?.reason ?? "default") {
+		case "mutation":
+		case "initial-load":
+		case "project-switch":
+			return "remote"
+		default:
+			return "local-session-and-git"
+	}
 }
 
 export const applySessionRefreshPatch = (params: {
-    readonly task: TaskWithSession
-    readonly sessionState: TaskWithSession["sessionState"]
-    readonly sessionStartedAt: string | undefined
-    readonly estimatedTokens: number | undefined
-    readonly recentOutput: string | undefined
-    readonly agentPhase: TaskWithSession["agentPhase"]
-    readonly gitStatusPatch: GitStatus | undefined
+	readonly task: TaskWithSession
+	readonly sessionState: TaskWithSession["sessionState"]
+	readonly sessionStartedAt: string | undefined
+	readonly estimatedTokens: number | undefined
+	readonly recentOutput: string | undefined
+	readonly agentPhase: TaskWithSession["agentPhase"]
+	readonly gitStatusPatch: GitStatus | undefined
 }): TaskWithSession => ({
-    ...params.task,
-    ...(params.gitStatusPatch ?? {}),
-    sessionState: params.sessionState,
-    sessionStartedAt: params.sessionStartedAt,
-    estimatedTokens: params.estimatedTokens,
-    recentOutput: params.recentOutput,
-    agentPhase: params.agentPhase,
+	...params.task,
+	...(params.gitStatusPatch ?? {}),
+	sessionState: params.sessionState,
+	sessionStartedAt: params.sessionStartedAt,
+	estimatedTokens: params.estimatedTokens,
+	recentOutput: params.recentOutput,
+	agentPhase: params.agentPhase,
 })
+
+export const reconcileLoadedTasksWithLocalCreateGrace = (params: {
+	readonly loadedTasks: ReadonlyArray<TaskWithSession>
+	readonly currentTasks: ReadonlyArray<TaskWithSession>
+	readonly localCreateGraceExpiries: ReadonlyMap<string, number>
+	readonly nowMs: number
+}): {
+	readonly mergedTasks: ReadonlyArray<TaskWithSession>
+	readonly nextLocalCreateGraceExpiries: ReadonlyMap<string, number>
+} => {
+	const loadedTaskIds = new Set(params.loadedTasks.map((task) => task.id))
+	const retainedTasks = params.currentTasks.filter((task) => {
+		const expiry = params.localCreateGraceExpiries.get(task.id)
+		return expiry !== undefined && expiry > params.nowMs && !loadedTaskIds.has(task.id)
+	})
+
+	const mergedTasks = [...params.loadedTasks, ...retainedTasks].sort(
+		(left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+	)
+
+	const nextLocalCreateGraceExpiries = new Map<string, number>()
+	for (const [taskId, expiry] of params.localCreateGraceExpiries.entries()) {
+		if (expiry <= params.nowMs) {
+			continue
+		}
+		if (loadedTaskIds.has(taskId)) {
+			continue
+		}
+		nextLocalCreateGraceExpiries.set(taskId, expiry)
+	}
+
+	return {
+		mergedTasks,
+		nextLocalCreateGraceExpiries,
+	}
+}
+
+export const resolveHasWorktreeFlag = (params: {
+	readonly issueId: string
+	readonly persistedHasWorktree: boolean | undefined
+	readonly worktreeIssueIds: ReadonlySet<string>
+	readonly worktreeInventoryLoaded: boolean
+}): boolean | undefined => {
+	if (params.worktreeInventoryLoaded) {
+		return params.worktreeIssueIds.has(params.issueId) ? true : undefined
+	}
+
+	return params.persistedHasWorktree === true ? true : undefined
+}
+
+interface RetainedTaskGitStateSource extends GitStatus {
+	readonly hasMergeConflict?: boolean
+}
+
+const emptyGitStatus = (): GitStatus => ({
+	gitBehindCount: undefined,
+	hasUncommittedChanges: undefined,
+	gitAdditions: undefined,
+	gitDeletions: undefined,
+})
+
+export const shouldTaskExposeGitStatus = (params: {
+	readonly hasWorktree: boolean | undefined
+	readonly sessionState: TaskWithSession["sessionState"]
+}): boolean => params.hasWorktree === true || params.sessionState !== "idle"
+
+export const resolveRetainedTaskGitState = (params: {
+	readonly hasWorktree: boolean | undefined
+	readonly sessionState: TaskWithSession["sessionState"]
+	readonly source: RetainedTaskGitStateSource | undefined
+}): {
+	readonly hasMergeConflict: boolean
+	readonly gitStatus: GitStatus
+} => {
+	if (!shouldTaskExposeGitStatus(params)) {
+		return {
+			hasMergeConflict: false,
+			gitStatus: emptyGitStatus(),
+		}
+	}
+
+	return {
+		hasMergeConflict: params.source?.hasMergeConflict ?? false,
+		gitStatus: {
+			gitBehindCount: params.source?.gitBehindCount,
+			hasUncommittedChanges: params.source?.hasUncommittedChanges,
+			gitAdditions: params.source?.gitAdditions,
+			gitDeletions: params.source?.gitDeletions,
+		},
+	}
+}
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module
@@ -570,13 +621,13 @@ interface LinearWebhookListenerConfig {
 }
 
 interface ActiveLinearRefreshStrategy {
-    readonly key: string
-    readonly fiber: Fiber.RuntimeFiber<unknown, never>
+	readonly key: string
+	readonly fiber: Fiber.RuntimeFiber<unknown, never>
 }
 
 interface LinearRefreshStrategyPlan {
-    readonly key: string
-    readonly start: Effect.Effect<Fiber.RuntimeFiber<unknown, never>, never, unknown>
+	readonly key: string
+	readonly start: Effect.Effect<Fiber.RuntimeFiber<unknown, never>, never, unknown>
 }
 
 interface MutationTaskUpsertOptions {
@@ -614,6 +665,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		WorktreeManager.Default,
 		PRStateService.Default,
 		ToastService.Default,
+		LocalIssueStore.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -628,6 +680,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const worktreeManager = yield* WorktreeManager
 		const prStateService = yield* PRStateService
 		const toast = yield* ToastService
+		const localIssueStore = yield* LocalIssueStore
 
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
@@ -643,10 +696,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const isLoading = yield* SubscriptionRef.make<boolean>(false)
 		const isRefreshingGitStats = yield* SubscriptionRef.make<boolean>(false)
 		const visibleTaskIds = yield* SubscriptionRef.make<ReadonlySet<string>>(new Set())
+		const localCreateGraceExpiriesRef = yield* Ref.make<Map<string, number>>(new Map())
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
-		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
 		const linearRefreshStrategyRef = yield* Ref.make<ActiveLinearRefreshStrategy | null>(null)
@@ -694,6 +747,52 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			isLoading: false,
 		})
 
+		const toPersistedBoardTaskState = (task: TaskWithSession): PersistedBoardTaskState => ({
+			issueId: task.id,
+			hasWorktree: task.hasWorktree,
+			hasMergeConflict: task.hasMergeConflict,
+			parentEpicId: task.parentEpicId,
+			estimatedTokens: task.estimatedTokens,
+			recentOutput: task.recentOutput,
+			agentPhase: task.agentPhase,
+			hasPR: task.hasPR,
+			prUrl: task.prUrl,
+			prNumber: task.prNumber,
+			prState: task.prState,
+			gitBehindCount: task.gitBehindCount,
+			hasUncommittedChanges: task.hasUncommittedChanges,
+			gitAdditions: task.gitAdditions,
+			gitDeletions: task.gitDeletions,
+			hasDevServer: task.hasDevServer,
+		})
+
+		const persistBoardProjection = (
+			projectPath: string,
+			taskList: ReadonlyArray<TaskWithSession>,
+		): Effect.Effect<void> =>
+			localIssueStore
+				.replaceBoardTaskStates(taskList.map(toPersistedBoardTaskState), projectPath)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.void),
+						),
+					),
+				)
+
+		const loadBoardProjection = (
+			projectPath: string,
+		): Effect.Effect<ReadonlyArray<TaskWithSession>> =>
+			localIssueStore
+				.listBoardTasks(projectPath)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					),
+				)
+
 		/**
 		 * Get or create per-project state for a given project path
 		 */
@@ -730,6 +829,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					copy.set(path, state)
 					return copy
 				})
+				yield* persistBoardProjection(path, state.tasks)
 			})
 
 		/**
@@ -1129,6 +1229,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						gitConfig: appConfig.getGitConfig(),
 						startupConfig: SubscriptionRef.get(appConfig.config),
 						currentVisibleTaskIds: SubscriptionRef.get(visibleTaskIds),
+						persistedBoardTasks: loadBoardProjection(projectPath ?? process.cwd()),
 						issues: diagnostics.measure(
 							{
 								source: "BoardService",
@@ -1136,7 +1237,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								thresholdMs: 200,
 								details: projectPath ?? "default",
 							},
-							withSqliteLockRetry(
+							withTransientRetry(
 								"tracker.list",
 								issueTrackerClient
 									.list(undefined, projectPath ?? undefined, {
@@ -1162,13 +1263,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					},
 					{ concurrency: "unbounded" },
 				)
-				const { gitConfig, startupConfig, currentVisibleTaskIds, issues, activeSessions } =
-					startupBatch
+				const {
+					gitConfig,
+					startupConfig,
+					currentVisibleTaskIds,
+					persistedBoardTasks,
+					issues,
+					activeSessions,
+				} = startupBatch
 				const { baseBranch, showLineChanges } = gitConfig
 				const isLinearBackend = "linear" in startupConfig.issueTracker
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
 				)
+				const persistedTaskMap = new Map(persistedBoardTasks.map((task) => [task.id, task]))
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 				const ptySessionTargets = activeSessions
 					.filter((session) => session.state !== "idle" && session.state !== "crashed")
@@ -1273,7 +1381,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Get all worktrees ONCE upfront instead of per-issue exists() calls
 				// This eliminates 331 Effect operations → 1 operation
-				const worktreeList = projectPath
+				const worktreeInventory = projectPath
 					? yield* diagnostics.measure(
 							{
 								source: "BoardService",
@@ -1283,20 +1391,32 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							},
 							worktreeManager.list(projectPath).pipe(
 								Effect.withSpan("worktrees.list"),
+								Effect.map((worktreeList) => ({
+									loaded: true as const,
+									issueIds: new Set(worktreeList.map((wt) => wt.issueId)),
+								})),
 								Effect.catchAll((error) =>
 									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed([])),
+										Effect.zipRight(
+											Effect.succeed({
+												loaded: false as const,
+												issueIds: new Set<string>(),
+											}),
+										),
 									),
 								),
 							),
 						)
-					: []
-				const worktreeIssueIds = new Set(worktreeList.map((wt) => wt.issueId))
+					: {
+							loaded: false as const,
+							issueIds: new Set<string>(),
+						}
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
 						Effect.gen(function* () {
 							const session = sessionMap.get(issue.id)
+							const persistedTask = persistedTaskMap.get(issue.id)
 							const metricsOpt = HashMap.get(allMetrics, issue.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
@@ -1304,11 +1424,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							// Get parent epic ID (if this is an epic child)
 							const parentEpicId = parentEpicMap.get(issue.id)
 
-							// Check if worktree exists (using pre-fetched Set - instant lookup)
-							const hasWorktree = worktreeIssueIds.has(issue.id)
+							// Trust fresh worktree inventory when available; only fall back to persisted
+							// state if the inventory could not be loaded.
+							const hasWorktree = resolveHasWorktreeFlag({
+								issueId: issue.id,
+								persistedHasWorktree: persistedTask?.hasWorktree,
+								worktreeIssueIds: worktreeInventory.issueIds,
+								worktreeInventoryLoaded: worktreeInventory.loaded,
+							})
+							const retainedGitState = resolveRetainedTaskGitState({
+								hasWorktree,
+								sessionState,
+								source: persistedTask,
+							})
 
-							let hasMergeConflict = false
-							let gitStatus: GitStatus = {}
+							let hasMergeConflict = retainedGitState.hasMergeConflict
+							let gitStatus: GitStatus = retainedGitState.gitStatus
 							const isVisible = currentVisibleTaskIds.has(issue.id)
 							// Fetch git status only for visible tasks with active sessions or worktrees
 							if (isVisible && (sessionState !== "idle" || hasWorktree) && projectPath) {
@@ -1331,23 +1462,34 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								}
 							}
 
-							// Parse PR info from notes field (fast, local-only)
-							const prInfo = parsePRInfo(issue.notes)
+							const persistedHasPR = persistedTask?.hasPR === true
+							const hasPRFromNotes = parsePRInfo(issue.notes)
+							const prInfo = persistedHasPR
+								? {
+										hasPR: true,
+										prUrl: persistedTask?.prUrl,
+										prNumber: persistedTask?.prNumber,
+									}
+								: hasPRFromNotes
 
 							const baseTask: TaskWithSession = {
 								...issue,
 								sessionState,
-								hasWorktree: hasWorktree || undefined,
+								hasWorktree,
 								hasMergeConflict,
-								parentEpicId,
+								hasDevServer: persistedTask?.hasDevServer === true ? true : undefined,
+								parentEpicId: parentEpicId ?? persistedTask?.parentEpicId,
 								...gitStatus,
-								...prInfo, // hasPR, prUrl, prNumber from notes field
+								hasPR: prInfo.hasPR === true ? true : undefined,
+								prUrl: prInfo.prUrl ?? persistedTask?.prUrl,
+								prNumber: prInfo.prNumber ?? persistedTask?.prNumber,
+								prState: persistedTask?.prState,
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
 									: undefined,
-								estimatedTokens: metrics?.estimatedTokens,
-								recentOutput: metrics?.recentOutput,
-								agentPhase: metrics?.agentPhase,
+								estimatedTokens: metrics?.estimatedTokens ?? persistedTask?.estimatedTokens,
+								recentOutput: metrics?.recentOutput ?? persistedTask?.recentOutput,
+								agentPhase: metrics?.agentPhase ?? persistedTask?.agentPhase,
 							}
 
 							// Apply optimistic updates
@@ -1406,8 +1548,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return prState ? { ...task, prState } : task
 				})
 
+				const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const localCreateGraceExpiries = yield* Ref.get(localCreateGraceExpiriesRef)
+				const { mergedTasks, nextLocalCreateGraceExpiries } =
+					reconcileLoadedTasksWithLocalCreateGrace({
+						loadedTasks: tasksWithPRState,
+						currentTasks,
+						localCreateGraceExpiries,
+						nowMs,
+					})
+				yield* Ref.set(localCreateGraceExpiriesRef, new Map(nextLocalCreateGraceExpiries))
+
 				// Debug: count tasks with parentEpicId set
-				const tasksWithEpicParent = tasksWithPRState.filter((t) => t.parentEpicId !== undefined)
+				const tasksWithEpicParent = mergedTasks.filter((t) => t.parentEpicId !== undefined)
 				if (tasksWithEpicParent.length > 0) {
 					yield* Effect.logWarning(
 						`loadTasks: ${tasksWithEpicParent.length} tasks have parentEpicId (will be hidden on main board). Sample: ${JSON.stringify(tasksWithEpicParent.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })))}`,
@@ -1415,7 +1569,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 
 				// Debug: count by status
-				const statusCounts = tasksWithPRState.reduce(
+				const statusCounts = mergedTasks.reduce(
 					(acc, t) => {
 						acc[t.status] = (acc[t.status] || 0) + 1
 						return acc
@@ -1423,9 +1577,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					{} as Record<string, number>,
 				)
 				yield* Effect.log(
-					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${tasksWithPRState.length}, by status: ${JSON.stringify(statusCounts)}`,
+					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${mergedTasks.length}, by status: ${JSON.stringify(statusCounts)}`,
 				)
-				return tasksWithPRState
+				return mergedTasks
 			})
 
 		const groupTasksByColumn = (
@@ -1499,6 +1653,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const nextTasks = currentTasks.filter((task) => task.id !== taskId)
 				if (nextTasks.length === currentTasks.length) return
 				yield* replaceTasks(nextTasks)
+				yield* Ref.update(localCreateGraceExpiriesRef, (current) => {
+					if (!current.has(taskId)) {
+						return current
+					}
+					const next = new Map(current)
+					next.delete(taskId)
+					return next
+				})
 			})
 
 		const patchTaskFromMutation = (taskId: string, patch: Partial<Omit<TaskWithSession, "id">>) =>
@@ -1525,17 +1687,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				options?.parentEpicId === undefined
 					? existingTask?.parentEpicId
 					: (options.parentEpicId ?? undefined)
+			const retainedGitState = resolveRetainedTaskGitState({
+				hasWorktree: existingTask?.hasWorktree,
+				sessionState: existingTask?.sessionState ?? "idle",
+				source: existingTask,
+			})
 
 			return {
 				...issue,
 				sessionState: existingTask?.sessionState ?? "idle",
 				hasWorktree: existingTask?.hasWorktree,
-				hasMergeConflict: existingTask?.hasMergeConflict,
+				hasMergeConflict: retainedGitState.hasMergeConflict,
+				hasDevServer: existingTask?.hasDevServer,
 				parentEpicId,
-				gitBehindCount: existingTask?.gitBehindCount,
-				hasUncommittedChanges: existingTask?.hasUncommittedChanges,
-				gitAdditions: existingTask?.gitAdditions,
-				gitDeletions: existingTask?.gitDeletions,
+				...retainedGitState.gitStatus,
 				sessionStartedAt: existingTask?.sessionStartedAt,
 				estimatedTokens: existingTask?.estimatedTokens,
 				recentOutput: existingTask?.recentOutput,
@@ -1553,6 +1718,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const existingTask = currentTasks.find((task) => task.id === issue.id)
 				const nextTask = toTaskFromMutationIssue(issue, existingTask, options)
 				yield* upsertTaskInMemory(nextTask)
+				if (existingTask === undefined) {
+					const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
+					yield* Ref.update(localCreateGraceExpiriesRef, (current) => {
+						const next = new Map(current)
+						next.set(issue.id, nowMs + LOCAL_CREATE_VISIBILITY_GRACE_MS)
+						return next
+					})
+				}
 			})
 
 		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
@@ -1685,150 +1858,150 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			)
 
-        const refreshLocalSessionState = (params: {
-            readonly preferredProjectPath?: string | null
-            readonly includeGitStatus: boolean
-        }) =>
-            Effect.gen(function* () {
-                const projectPath = yield* resolveProjectPath(params.preferredProjectPath)
-                const activeSessions = yield* sessionManager
-                    .listActive(projectPath ?? undefined)
-                    .pipe(
-                        Effect.catchAll((error) =>
-                            Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+		const refreshLocalSessionState = (params: {
+			readonly preferredProjectPath?: string | null
+			readonly includeGitStatus: boolean
+		}) =>
+			Effect.gen(function* () {
+				const projectPath = yield* resolveProjectPath(params.preferredProjectPath)
+				const activeSessions = yield* sessionManager
+					.listActive(projectPath ?? undefined)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 								Effect.zipRight(Effect.succeed([])),
 							),
 						),
-                    )
-                const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
-                const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
-                const currentTasks = yield* SubscriptionRef.get(tasks)
-                const currentVisibleTaskIds = params.includeGitStatus
-                    ? yield* SubscriptionRef.get(visibleTaskIds)
-                    : undefined
-                const gitConfig = params.includeGitStatus ? yield* appConfig.getGitConfig() : undefined
+					)
+				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
+				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const currentVisibleTaskIds = params.includeGitStatus
+					? yield* SubscriptionRef.get(visibleTaskIds)
+					: undefined
+				const gitConfig = params.includeGitStatus ? yield* appConfig.getGitConfig() : undefined
 
-                const nextTasks = yield* Effect.all(
-                    currentTasks.map((task) =>
-                        Effect.gen(function* () {
-                            const session = sessionMap.get(task.id)
-                            const metricsOpt = HashMap.get(allMetrics, task.id)
-                            const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
-                            const sessionState = session?.state ?? "idle"
-                            const sessionStartedAt = session?.startedAt
-                                ? DateTime.formatIso(session.startedAt)
-                                : undefined
+				const nextTasks = yield* Effect.all(
+					currentTasks.map((task) =>
+						Effect.gen(function* () {
+							const session = sessionMap.get(task.id)
+							const metricsOpt = HashMap.get(allMetrics, task.id)
+							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
+							const sessionState = session?.state ?? "idle"
+							const sessionStartedAt = session?.startedAt
+								? DateTime.formatIso(session.startedAt)
+								: undefined
 
-                            let gitStatusPatch: GitStatus | undefined = params.includeGitStatus
-                                ? {
-                                        gitBehindCount: undefined,
-                                        hasUncommittedChanges: undefined,
-                                        gitAdditions: undefined,
-                                        gitDeletions: undefined,
-                                    }
-                                : undefined
-                            if (
-                                params.includeGitStatus &&
-                                gitConfig !== undefined &&
-                                projectPath &&
-                                currentVisibleTaskIds?.has(task.id) &&
-                                (sessionState !== "idle" || task.hasWorktree === true)
-                            ) {
-                                const worktreePath = getWorktreePath(projectPath, task.id)
-                                const effectiveBaseBranch = task.parentEpicId ?? gitConfig.baseBranch
-                                const cachedStatus = yield* getCachedGitStatus(
-                                    worktreePath,
-                                    effectiveBaseBranch,
-                                    gitConfig.showLineChanges,
-                                )
-                                gitStatusPatch = {
-                                    gitBehindCount: cachedStatus.gitBehindCount,
-                                    hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
-                                    gitAdditions: cachedStatus.gitAdditions,
-                                    gitDeletions: cachedStatus.gitDeletions,
-                                }
-                            }
+							let gitStatusPatch: GitStatus | undefined = params.includeGitStatus
+								? {
+										gitBehindCount: undefined,
+										hasUncommittedChanges: undefined,
+										gitAdditions: undefined,
+										gitDeletions: undefined,
+									}
+								: undefined
+							if (
+								params.includeGitStatus &&
+								gitConfig !== undefined &&
+								projectPath &&
+								currentVisibleTaskIds?.has(task.id) &&
+								(sessionState !== "idle" || task.hasWorktree === true)
+							) {
+								const worktreePath = getWorktreePath(projectPath, task.id)
+								const effectiveBaseBranch = task.parentEpicId ?? gitConfig.baseBranch
+								const cachedStatus = yield* getCachedGitStatus(
+									worktreePath,
+									effectiveBaseBranch,
+									gitConfig.showLineChanges,
+								)
+								gitStatusPatch = {
+									gitBehindCount: cachedStatus.gitBehindCount,
+									hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
+									gitAdditions: cachedStatus.gitAdditions,
+									gitDeletions: cachedStatus.gitDeletions,
+								}
+							}
 
-                            return applySessionRefreshPatch({
-                                task,
-                                sessionState,
-                                sessionStartedAt,
-                                estimatedTokens: metrics?.estimatedTokens,
-                                recentOutput: metrics?.recentOutput,
-                                agentPhase: metrics?.agentPhase,
-                                gitStatusPatch,
-                            })
-                        }),
-                    ),
-                    { concurrency: 4 },
-                )
+							return applySessionRefreshPatch({
+								task,
+								sessionState,
+								sessionStartedAt,
+								estimatedTokens: metrics?.estimatedTokens,
+								recentOutput: metrics?.recentOutput,
+								agentPhase: metrics?.agentPhase,
+								gitStatusPatch,
+							})
+						}),
+					),
+					{ concurrency: 4 },
+				)
 
 				yield* SubscriptionRef.set(tasks, nextTasks)
 				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
-                yield* updateFilteredTasks()
-                yield* saveCurrentToMap()
-            })
+				yield* updateFilteredTasks()
+				yield* saveCurrentToMap()
+			})
 
-        const refreshLocalSessionAndGitState = (preferredProjectPath?: string | null) =>
-            refreshLocalSessionState({
-                preferredProjectPath,
-                includeGitStatus: true,
-            })
+		const refreshLocalSessionAndGitState = (preferredProjectPath?: string | null) =>
+			refreshLocalSessionState({
+				preferredProjectPath,
+				includeGitStatus: true,
+			})
 
-        const refreshLocalSessionOnly = (preferredProjectPath?: string | null) =>
-            refreshLocalSessionState({
-                preferredProjectPath,
-                includeGitStatus: false,
-            })
+		const refreshLocalSessionOnly = (preferredProjectPath?: string | null) =>
+			refreshLocalSessionState({
+				preferredProjectPath,
+				includeGitStatus: false,
+			})
 
-        const refreshWithPolicy = (
-            options?: BoardRefreshOptions,
-            preferredProjectPath?: string | null,
-        ) =>
-            Effect.gen(function* () {
-                const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
-                const refreshMode = resolveBoardRefreshExecutionMode({
-                    localRefreshOnly,
-                    options,
-                })
-                const refreshEffect =
-                    refreshMode === "remote"
-                        ? refreshWithRecovery(preferredProjectPath)
-                        : refreshMode === "local-session-only"
-                          ? refreshLocalSessionOnly(preferredProjectPath)
-                          : refreshLocalSessionAndGitState(preferredProjectPath)
-                yield* refreshSemaphore.withPermits(1)(refreshEffect)
-            })
+		const refreshWithPolicy = (
+			options?: BoardRefreshOptions,
+			preferredProjectPath?: string | null,
+		) =>
+			Effect.gen(function* () {
+				const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+				const refreshMode = resolveBoardRefreshExecutionMode({
+					localRefreshOnly,
+					options,
+				})
+				const refreshEffect =
+					refreshMode === "remote"
+						? refreshWithRecovery(preferredProjectPath)
+						: refreshMode === "local-session-only"
+							? refreshLocalSessionOnly(preferredProjectPath)
+							: refreshLocalSessionAndGitState(preferredProjectPath)
+				yield* refreshSemaphore.withPermits(1)(refreshEffect)
+			})
 
-        const requestRefresh = (options?: BoardRefreshOptions) =>
-            Effect.gen(function* () {
+		const requestRefresh = (options?: BoardRefreshOptions) =>
+			Effect.gen(function* () {
 				const existingFiber = yield* Ref.get(debounceFiberRef)
-                if (existingFiber) {
-                    yield* Fiber.interrupt(existingFiber)
-                }
-                const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
-                const refreshMode = resolveBoardRefreshExecutionMode({
-                    localRefreshOnly,
-                    options,
-                })
-                // Fork into the service's scope (not daemon) so fiber is tied to service lifetime
-                const fiber = yield* Effect.gen(function* () {
-                    yield* Effect.sleep("500 millis")
-                    yield* refreshWithPolicy(options).pipe(
-                        Effect.catchAllCause((cause) =>
-                            Effect.logWarning(cause).pipe(
-                                Effect.zipRight(
-                                    logAndToastRefreshFailure(
-                                        refreshMode === "remote"
-                                            ? "debounced"
-                                            : refreshMode === "local-session-only"
-                                              ? "debounced-local-session"
-                                              : "debounced-local",
-                                        cause,
-                                    ),
-                                ),
-                            ),
-                        ),
+				if (existingFiber) {
+					yield* Fiber.interrupt(existingFiber)
+				}
+				const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+				const refreshMode = resolveBoardRefreshExecutionMode({
+					localRefreshOnly,
+					options,
+				})
+				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
+				const fiber = yield* Effect.gen(function* () {
+					yield* Effect.sleep("500 millis")
+					yield* refreshWithPolicy(options).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(cause).pipe(
+								Effect.zipRight(
+									logAndToastRefreshFailure(
+										refreshMode === "remote"
+											? "debounced"
+											: refreshMode === "local-session-only"
+												? "debounced-local-session"
+												: "debounced-local",
+										cause,
+									),
+								),
+							),
+						),
 					)
 				}).pipe(Effect.forkIn(serviceScope))
 				yield* Ref.set(debounceFiberRef, fiber)
@@ -1926,6 +2099,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								status === "closed"
 									? (payload.completedAt ?? payload.canceledAt ?? null)
 									: undefined,
+							implementations: ["default"],
 							labels,
 							parentEpicId: nextParentEpicId,
 							sessionState: "idle",
@@ -2178,42 +2352,42 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				return linearWebhookFallbackFiber
 			})
 
-        const runLinearSdkDefensiveReconciliationLoop = (interval: Duration.DurationInput) =>
-            Effect.repeat(Schedule.spaced(interval))(
-                Effect.gen(function* () {
-                    const projectPath = yield* projectService.getCurrentPath()
-                    if (projectPath !== null) {
-                        yield* issueTrackerClient.sync(projectPath).pipe(
-                            Effect.tap((syncResult) =>
-                                syncResult.pushed > 0 || syncResult.pulled > 0
-                                    ? Effect.log(
-                                            `Linear SDK defensive reconciliation sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
-                                        )
-                                    : Effect.void,
-                            ),
-                            Effect.catchAll((error) =>
-                                Effect.logWarning(
-                                    `Linear SDK defensive reconciliation sync failed for projectPath=${projectPath}: ${String(error)}`,
-                                ).pipe(Effect.asVoid),
-                            ),
-                        )
-                    }
+		const runLinearSdkDefensiveReconciliationLoop = (interval: Duration.DurationInput) =>
+			Effect.repeat(Schedule.spaced(interval))(
+				Effect.gen(function* () {
+					const projectPath = yield* projectService.getCurrentPath()
+					if (projectPath !== null) {
+						yield* issueTrackerClient.sync(projectPath).pipe(
+							Effect.tap((syncResult) =>
+								syncResult.pushed > 0 || syncResult.pulled > 0
+									? Effect.log(
+											`Linear SDK defensive reconciliation sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+										)
+									: Effect.void,
+							),
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`Linear SDK defensive reconciliation sync failed for projectPath=${projectPath}: ${String(error)}`,
+								).pipe(Effect.asVoid),
+							),
+						)
+					}
 
-                    yield* refreshWithPolicy({ forceRemote: true }).pipe(
-                        Effect.catchAllCause((cause) =>
-                            Effect.logWarning(
-                                `Linear SDK defensive reconciliation refresh failed: ${formatRefreshFailureMessage(cause)}`,
-                            ).pipe(Effect.asVoid),
-                        ),
-                    )
-                }).pipe(
-                    Effect.catchAllCause((cause) =>
-                        Effect.logWarning(
-                            `Linear SDK defensive reconciliation iteration failed: ${formatRefreshFailureMessage(cause)}`,
-                        ).pipe(Effect.asVoid),
-                    ),
-                ),
-            )
+					yield* refreshWithPolicy({ forceRemote: true }).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(
+								`Linear SDK defensive reconciliation refresh failed: ${formatRefreshFailureMessage(cause)}`,
+							).pipe(Effect.asVoid),
+						),
+					)
+				}).pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(
+							`Linear SDK defensive reconciliation iteration failed: ${formatRefreshFailureMessage(cause)}`,
+						).pipe(Effect.asVoid),
+					),
+				),
+			)
 
 		const startLinearSdkEventsFiber = (tickerBehavior: LinearSdkEventsTickerBehavior) =>
 			Effect.gen(function* () {
@@ -2490,12 +2664,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					{ concurrency: "unbounded" },
 				)
 
-				yield* SubscriptionRef.set(tasks, updatedTasks)
-				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(updatedTasks))
-				yield* updateFilteredTasks()
+				yield* replaceTasks(updatedTasks)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
 		yield* startAutoRecoveryWorkerFiber()
+
+		const initialProjectPath = yield* projectService.getCurrentPath()
+		if (initialProjectPath) {
+			yield* SubscriptionRef.set(currentProjectPath, initialProjectPath)
+			const cached = yield* loadBoardProjection(initialProjectPath).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed([])),
+					),
+				),
+			)
+			if (cached.length > 0) {
+				yield* replaceTasks(cached)
+			}
+		}
 
 		const startupBootstrapFiber = yield* Effect.forkScoped(
 			Effect.gen(function* () {
@@ -2587,30 +2774,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				if (currentTasks.length > 0) {
-					yield* Ref.update(boardCache, (cache) => {
-						const newCache = new Map(cache)
-						newCache.set(projectPath, currentTasks)
-						return newCache
-					})
+					yield* persistBoardProjection(projectPath, currentTasks)
 				}
 			})
 
 		const loadFromCache = (projectPath: string) =>
 			Effect.gen(function* () {
-				const cache = yield* Ref.get(boardCache)
-				const cached = cache.get(projectPath)
-				if (cached && cached.length > 0) {
-					// Clear git stats from cached tasks - they're stale and project-specific
-					const tasksWithClearedGitStats = cached.map((task) => ({
-						...task,
-						gitBehindCount: undefined,
-						hasUncommittedChanges: undefined,
-						gitAdditions: undefined,
-						gitDeletions: undefined,
-					}))
-					yield* SubscriptionRef.set(tasks, tasksWithClearedGitStats)
-					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(tasksWithClearedGitStats))
-					yield* updateFilteredTasks()
+				const cached = yield* loadBoardProjection(projectPath)
+				if (cached.length > 0) {
+					yield* replaceTasks(cached)
 					return true
 				}
 				return false
@@ -2665,31 +2837,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Update the current project path
 				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
 
-				// Try to load from per-project state map first (fast path)
-				const stateMap = yield* SubscriptionRef.get(perProjectState)
-				const cachedState = stateMap.get(newProjectPath)
-
-				let cacheHit = false
-				if (cachedState && cachedState.tasks.length > 0) {
-					// Clear git stats from cached tasks - they're stale and project-specific
-					const tasksWithClearedGitStats = cachedState.tasks.map((task) => ({
-						...task,
-						gitBehindCount: undefined,
-						hasUncommittedChanges: undefined,
-						gitAdditions: undefined,
-						gitDeletions: undefined,
-					}))
-					yield* SubscriptionRef.set(tasks, tasksWithClearedGitStats)
-					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(tasksWithClearedGitStats))
-					yield* SubscriptionRef.set(filteredTasksByColumn, cachedState.filteredTasksByColumn)
-					cacheHit = true
-				} else {
-					// Fall back to legacy boardCache
-					const legacyCacheHit = yield* loadFromCache(newProjectPath)
-					if (!legacyCacheHit) {
-						yield* clearBoard()
-					}
-					cacheHit = legacyCacheHit
+				const cacheHit = yield* loadFromCache(newProjectPath)
+				if (!cacheHit) {
+					yield* clearBoard()
 				}
 
 				// Fork the refresh into the service's scope - not a daemon fiber

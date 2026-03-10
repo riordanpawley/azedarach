@@ -4,6 +4,7 @@ import {
 	classifySessionStateForMissingCodeWindow,
 	isActiveSessionState,
 	resolveDiscoveredSessionState,
+	resolveSessionStateFromTmuxStatus,
 } from "./SessionManager.js"
 
 describe("SessionManager discovered session recovery", () => {
@@ -27,12 +28,29 @@ describe("SessionManager discovered session recovery", () => {
 		expect(resolveDiscoveredSessionState(undefined, false, true)).toBe("busy")
 	})
 
+	it("treats synthetic tmux disappearances for active sessions as crashed", () => {
+		expect(resolveSessionStateFromTmuxStatus("busy", "idle", true)).toBe("crashed")
+		expect(resolveSessionStateFromTmuxStatus("waiting", "idle", true)).toBe("crashed")
+		expect(resolveSessionStateFromTmuxStatus("paused", "idle", true)).toBe("crashed")
+	})
+
+	it("does not demote repeated synthetic disappearances once a session is crashed", () => {
+		expect(resolveSessionStateFromTmuxStatus("crashed", "idle", true)).toBe("crashed")
+	})
+
+	it("keeps real idle hooks and terminal states distinct from synthetic disappearance", () => {
+		expect(resolveSessionStateFromTmuxStatus("busy", "idle", false)).toBe("idle")
+		expect(resolveSessionStateFromTmuxStatus("done", "idle", true)).toBe("idle")
+		expect(resolveSessionStateFromTmuxStatus("error", "idle", true)).toBe("idle")
+	})
+
 	it("uses shared missing-window classifier for startup lock cases", () => {
 		expect(
 			classifySessionStateForMissingCodeWindow("initializing", {
 				hasCodeWindow: false,
 				hasStartLock: true,
 				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: false,
 			}),
 		).toBe("initializing")
 		expect(
@@ -40,6 +58,26 @@ describe("SessionManager discovered session recovery", () => {
 				hasCodeWindow: false,
 				hasStartLock: true,
 				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: false,
+			}),
+		).toBe("busy")
+	})
+
+	it("uses shared missing-window classifier for startup grace cases", () => {
+		expect(
+			classifySessionStateForMissingCodeWindow("initializing", {
+				hasCodeWindow: false,
+				hasStartLock: false,
+				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: true,
+			}),
+		).toBe("initializing")
+		expect(
+			classifySessionStateForMissingCodeWindow(undefined, {
+				hasCodeWindow: false,
+				hasStartLock: false,
+				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: true,
 			}),
 		).toBe("busy")
 	})

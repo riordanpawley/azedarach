@@ -136,6 +136,9 @@ export const DEFAULT_CONFIG = {
 		showLineChanges: true,
 		workflowMode: "origin" as WorkflowMode,
 	},
+	spec: {
+		enabled: true,
+	},
 	session: {
 		command: "claude",
 		shell: getLoginShellSync(),
@@ -163,7 +166,7 @@ export const DEFAULT_CONFIG = {
 		aiModel: undefined as SupportedModel | undefined,
 	},
 	merge: {
-		// No validation by default - must be explicitly configured in .azedarach.json
+		// No validation by default - must be explicitly configured in project config
 		validateCommands: [] satisfies string[],
 		fixCommand: "",
 		maxFixAttempts: 2,
@@ -202,6 +205,9 @@ export const DEFAULT_CONFIG = {
 	keyboard: {
 		/** Home row keys for QWERTY layout - customize for Colemak, Dvorak, etc. */
 		jumpLabelChars: "asdfjkl;",
+	},
+	issueEditor: {
+		defaultImplementation: undefined as string | undefined,
 	},
 	sessionRecovery: {
 		/**
@@ -283,6 +289,9 @@ export interface ResolvedConfig {
 		fetchEnabled: boolean
 		showLineChanges: boolean
 		workflowMode: WorkflowMode
+	}
+	spec: {
+		enabled: boolean
 	}
 	session: {
 		command: string
@@ -380,6 +389,9 @@ export interface ResolvedConfig {
 	}
 	keyboard: {
 		jumpLabelChars: string
+	}
+	issueEditor: {
+		defaultImplementation: string | undefined
 	}
 	sessionRecovery: {
 		mode: SessionRecoveryMode
@@ -557,6 +569,9 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			showLineChanges: config.git?.showLineChanges ?? DEFAULT_CONFIG.git.showLineChanges,
 			workflowMode: config.git?.workflowMode ?? DEFAULT_CONFIG.git.workflowMode,
 		},
+		spec: {
+			enabled: config.spec?.enabled ?? DEFAULT_CONFIG.spec.enabled,
+		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
 			done: config.patterns?.done ?? DEFAULT_CONFIG.patterns.done,
@@ -598,6 +613,11 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		},
 		keyboard: {
 			jumpLabelChars: config.keyboard?.jumpLabelChars ?? DEFAULT_CONFIG.keyboard.jumpLabelChars,
+		},
+		issueEditor: {
+			defaultImplementation:
+				config.issueEditor?.defaultImplementation ??
+				DEFAULT_CONFIG.issueEditor.defaultImplementation,
 		},
 		sessionRecovery: {
 			mode: config.sessionRecovery?.mode ?? DEFAULT_CONFIG.sessionRecovery.mode,

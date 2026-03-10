@@ -18,8 +18,10 @@ export {
 export { DEFAULT_CONFIG, mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
 // Schema and types
 export {
+	AZEDARACH_CONFIG_JSON_SCHEMA_URI,
 	type AzedarachConfig,
 	type AzedarachConfigInput,
+	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
 	type DevServerConfig,
 	type HooksConfig,
@@ -27,5 +29,6 @@ export {
 	type PatternsConfig,
 	type PRConfig,
 	type SessionConfig,
+	type SpecConfig,
 	type WorktreeConfig,
 } from "./schema.js"

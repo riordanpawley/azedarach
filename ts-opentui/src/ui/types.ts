@@ -138,6 +138,8 @@ export interface TaskWithSession extends Issue, SessionMetrics, GitStatus, Parti
 	hasWorktree?: boolean
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
 	hasMergeConflict?: boolean
+	/** Whether any configured dev server is active for this task. */
+	hasDevServer?: boolean
 	/**
 	 * Parent epic ID if this task is a child of an epic.
 	 * Used for:
@@ -312,7 +314,7 @@ export const DEFAULT_JUMP_LABEL_CHARS = "asdfjkl;"
  * Generate 2-char jump labels (aa, ab, ac... ba, bb, bc...)
  *
  * Uses configurable home row keys for ergonomics. Customize via
- * `keyboard.jumpLabelChars` in .azedarach.json for your layout:
+ * `keyboard.jumpLabelChars` in project config for your layout:
  * - QWERTY: "asdfjkl;" (default)
  * - Colemak: "cieahtsn"
  * - Dvorak: "aoeuhtns"

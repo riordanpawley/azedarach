@@ -1,188 +1,49 @@
 /**
  * ProjectStateService - Per-project UI state persistence
  *
- * Saves and restores UI state (cursor position, filters, sort config, view mode)
- * per project, stored in <project-path>/.azedarach/state.json
+ * Saves and restores UI state (cursor position, filters, sort config, view mode,
+ * search state, drill-down context) per project using the project's SQLite store.
  *
  * State is saved when switching away from a project and restored when switching to it.
  */
 
 import { FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Schema } from "effect"
+import { Data, Effect, Ref, Schema, Stream, SubscriptionRef } from "effect"
+import { LocalIssueStore } from "../core/LocalIssueStore.js"
+import { getProjectStoragePaths } from "../core/storagePaths.js"
+import { EditorService } from "./EditorService.js"
+import { NavigationService } from "./NavigationService.js"
+import { ProjectService } from "./ProjectService.js"
 import {
-	DEFAULT_FILTER_CONFIG,
-	DEFAULT_SORT_CONFIG,
-	type FilterConfig,
-	type SortConfig,
-} from "./EditorService.js"
-import type { ViewMode } from "./ViewService.js"
+	buildProjectUIState,
+	DEFAULT_UI_STATE,
+	extractDrillDownEpicId,
+	extractFilterConfig,
+	extractFocusedTaskId,
+	extractSavedFocusedTaskId,
+	extractSearchQuery,
+	extractSortConfig,
+	extractViewMode,
+	type ProjectUIState,
+	ProjectUIStateJsonSchema,
+} from "./projectUiState.js"
+import { ViewService } from "./ViewService.js"
 
-// ============================================================================
-// Schema Definitions
-// ============================================================================
-
-/**
- * Literal schemas for filter values
- */
-const IssueStatusLiteral = Schema.Literal("open", "in_progress", "blocked", "closed")
-const IssueTypeLiteral = Schema.Literal("bug", "feature", "task", "epic", "chore")
-const SessionStateLiteral = Schema.Literal(
-	"idle",
-	"initializing",
-	"busy",
-	"waiting",
-	"done",
-	"error",
-	"paused",
-)
-const SortFieldLiteral = Schema.Literal("session", "priority", "updated")
-const SortDirectionLiteral = Schema.Literal("asc", "desc")
-const ViewModeLiteral = Schema.Literal("kanban", "compact")
-
-/**
- * Schema for SortConfig serialization
- */
-const SortConfigSchema = Schema.Struct({
-	field: SortFieldLiteral,
-	direction: SortDirectionLiteral,
-})
-
-/**
- * Schema for FilterConfig serialization (uses arrays for JSON compatibility)
- * Transform handles Set <-> Array conversion
- */
-const FilterConfigSchema = Schema.transform(
-	// From (encoded/JSON form with arrays)
-	// hideEpicSubtasks is optional for backwards compatibility with old state files
-	Schema.Struct({
-		status: Schema.Array(IssueStatusLiteral),
-		priority: Schema.Array(Schema.Number),
-		type: Schema.Array(IssueTypeLiteral),
-		session: Schema.Array(SessionStateLiteral),
-		hideEpicSubtasks: Schema.optional(Schema.Boolean),
-		updatedDaysAgo: Schema.NullOr(Schema.Number),
-	}),
-	// To (runtime form with Sets matching FilterConfig interface)
-	// hideEpicSubtasks removed - epic children are always hidden on main board
-	Schema.Struct({
-		status: Schema.ReadonlySetFromSelf(IssueStatusLiteral),
-		priority: Schema.ReadonlySetFromSelf(Schema.Number),
-		type: Schema.ReadonlySetFromSelf(IssueTypeLiteral),
-		session: Schema.ReadonlySetFromSelf(SessionStateLiteral),
-		updatedDaysAgo: Schema.NullOr(Schema.Number),
-	}),
-	{
-		strict: true,
-		decode: (encoded) =>
-			Data.struct({
-				status: new Set(encoded.status),
-				priority: new Set(encoded.priority),
-				type: new Set(encoded.type),
-				session: new Set(encoded.session),
-				updatedDaysAgo: encoded.updatedDaysAgo,
-			}),
-		encode: (decoded) => ({
-			status: [...decoded.status],
-			priority: [...decoded.priority],
-			type: [...decoded.type],
-			session: [...decoded.session],
-			updatedDaysAgo: decoded.updatedDaysAgo,
-		}),
-	},
-)
-
-/**
- * Schema for the full UI state
- */
-const ProjectUIStateSchema = Schema.Struct({
-	focusedTaskId: Schema.NullOr(Schema.String),
-	filterConfig: FilterConfigSchema,
-	sortConfig: SortConfigSchema,
-	viewMode: ViewModeLiteral,
-	savedAt: Schema.String,
-})
-
-/**
- * Full schema with JSON parsing wrapper
- */
-const ProjectUIStateJsonSchema = Schema.parseJson(ProjectUIStateSchema)
-
-// ============================================================================
-// Types
-// ============================================================================
-
-/**
- * Full UI state for a project (derived from schema)
- */
-export type ProjectUIState = Schema.Schema.Type<typeof ProjectUIStateSchema>
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Create default UI state
- */
-const createDefaultUIState = (): ProjectUIState => ({
-	focusedTaskId: null,
-	filterConfig: DEFAULT_FILTER_CONFIG,
-	sortConfig: DEFAULT_SORT_CONFIG,
-	viewMode: "kanban",
-	savedAt: new Date().toISOString(),
-})
-
-/**
- * Default UI state when no saved state exists
- */
-export const DEFAULT_UI_STATE: ProjectUIState = createDefaultUIState()
-
-// ============================================================================
-// Error Types
-// ============================================================================
+export {
+	buildProjectUIState,
+	DEFAULT_UI_STATE,
+	extractDrillDownEpicId,
+	extractFilterConfig,
+	extractFocusedTaskId,
+	extractSavedFocusedTaskId,
+	extractSearchQuery,
+	extractSortConfig,
+	extractViewMode,
+}
 
 export class ProjectStateError extends Data.TaggedError("ProjectStateError")<{
 	readonly message: string
 }> {}
-
-// ============================================================================
-// Pure Functions for State Building
-// ============================================================================
-
-/**
- * Build ProjectUIState from components (type-safe construction)
- */
-export const buildProjectUIState = (
-	focusedTaskId: string | null,
-	filterConfig: FilterConfig,
-	sortConfig: SortConfig,
-	viewMode: ViewMode,
-): ProjectUIState => ({
-	focusedTaskId,
-	filterConfig,
-	sortConfig,
-	viewMode,
-	savedAt: new Date().toISOString(),
-})
-
-/**
- * Extract filter config from loaded state
- */
-export const extractFilterConfig = (state: ProjectUIState): FilterConfig => state.filterConfig
-
-/**
- * Extract sort config from loaded state
- */
-export const extractSortConfig = (state: ProjectUIState): SortConfig => state.sortConfig
-
-/**
- * Extract view mode from loaded state
- */
-export const extractViewMode = (state: ProjectUIState): ViewMode => state.viewMode
-
-/**
- * Extract focused task ID from loaded state
- */
-export const extractFocusedTaskId = (state: ProjectUIState): string | null => state.focusedTaskId
 
 // ============================================================================
 // Service Implementation
@@ -191,133 +52,235 @@ export const extractFocusedTaskId = (state: ProjectUIState): string | null => st
 export class ProjectStateService extends Effect.Service<ProjectStateService>()(
 	"ProjectStateService",
 	{
-		effect: Effect.gen(function* () {
+		dependencies: [
+			LocalIssueStore.Default,
+			EditorService.Default,
+			NavigationService.Default,
+			ProjectService.Default,
+			ViewService.Default,
+		],
+		scoped: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path
+			const localIssueStore = yield* LocalIssueStore
+			const editor = yield* EditorService
+			const navigation = yield* NavigationService
+			const projectService = yield* ProjectService
+			const view = yield* ViewService
+			const persistenceSuspended = yield* Ref.make(false)
 
 			/**
-			 * Get the state file path for a project
+			 * Get the canonical persistence path for project UI state.
 			 */
 			const getStateFilePath = (projectPath: string): string =>
-				pathService.join(projectPath, ".azedarach", "state.json")
+				getProjectStoragePaths(projectPath, pathService).canonicalDbPath
 
-			return {
-				/**
-				 * Save UI state for a project
-				 *
-				 * Creates .azedarach directory if it doesn't exist.
-				 * Silently succeeds even if write fails (state is non-critical).
-				 */
-				saveState: (projectPath: string, state: ProjectUIState): Effect.Effect<void> =>
-					Effect.gen(function* () {
-						const stateDir = pathService.join(projectPath, ".azedarach")
-						const stateFile = getStateFilePath(projectPath)
+			const buildCurrentUiState = (): Effect.Effect<ProjectUIState | undefined> =>
+				Effect.gen(function* () {
+					const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+					if (!currentProject) {
+						return undefined
+					}
 
-						// Ensure .azedarach directory exists
-						yield* fs
-							.makeDirectory(stateDir, { recursive: true })
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.void),
-									),
+					const navState = yield* navigation.getStateForSave()
+					const editorState = yield* editor.getStateForSave()
+					const viewMode = yield* view.getViewMode()
+
+					return buildProjectUIState({
+						focusedTaskId: navState.focusedTaskId,
+						filterConfig: editorState.filterConfig,
+						sortConfig: editorState.sortConfig,
+						viewMode,
+						searchQuery: editorState.searchQuery,
+						drillDownEpicId: navState.drillDownEpicId,
+						savedFocusedTaskId: navState.savedFocusedTaskId,
+					})
+				})
+
+			const saveState = (projectPath: string, state: ProjectUIState): Effect.Effect<void> =>
+				localIssueStore
+					.saveProjectUiState(state, projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logDebug("ProjectStateService: Failed to save state", { error, projectPath }),
+						),
+					)
+
+			const loadState = (projectPath: string): Effect.Effect<ProjectUIState> =>
+				Effect.gen(function* () {
+					const persisted = yield* localIssueStore
+						.loadProjectUiState(projectPath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(undefined)),
 								),
-							)
+							),
+						)
+					if (persisted !== undefined) {
+						return persisted
+					}
 
-						// Encode to JSON string using Schema (handles Set -> Array conversion)
-						const jsonString = yield* Schema.encode(ProjectUIStateJsonSchema)(state).pipe(
+					const legacyStatePath = getProjectStoragePaths(
+						projectPath,
+						pathService,
+					).legacyProjectUiStatePath
+					const legacyExists = yield* fs
+						.exists(legacyStatePath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
+					if (!legacyExists) {
+						return DEFAULT_UI_STATE
+					}
+
+					const content = yield* fs
+						.readFileString(legacyStatePath)
+						.pipe(
 							Effect.catchAll((error) =>
 								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 									Effect.zipRight(Effect.succeed("")),
 								),
 							),
 						)
+					if (!content) {
+						return DEFAULT_UI_STATE
+					}
 
-						if (!jsonString) {
-							return
-						}
-
-						// Write to file
-						yield* fs
-							.writeFileString(stateFile, jsonString)
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.void),
-									),
-								),
-							)
-					}).pipe(
+					const decoded = yield* Schema.decode(ProjectUIStateJsonSchema)(content).pipe(
 						Effect.catchAll((error) =>
-							Effect.logDebug("ProjectStateService: Failed to save state", { error, projectPath }),
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(undefined)),
+							),
+						),
+					)
+					if (decoded === undefined) {
+						return DEFAULT_UI_STATE
+					}
+
+					yield* saveState(projectPath, decoded)
+					return decoded
+				}).pipe(
+					Effect.catchAll((error) => {
+						Effect.logDebug("ProjectStateService: Failed to load state, using defaults", {
+							error,
+							projectPath,
+						})
+						return Effect.succeed(DEFAULT_UI_STATE)
+					}),
+				)
+
+			const applyState = (projectPath: string, state: ProjectUIState) =>
+				Effect.gen(function* () {
+					yield* editor.switchProject(projectPath)
+					yield* editor.restoreState(
+						extractSortConfig(state),
+						extractFilterConfig(state),
+						extractSearchQuery(state),
+					)
+					yield* navigation.switchProject(projectPath)
+					yield* navigation.restorePersistedState({
+						focusedTaskId: extractFocusedTaskId(state),
+						drillDownEpicId: extractDrillDownEpicId(state),
+						savedFocusedTaskId: extractSavedFocusedTaskId(state),
+					})
+					yield* view.setViewMode(extractViewMode(state))
+				})
+
+			const withPersistenceSuspended = <A, E, R>(
+				effect: Effect.Effect<A, E, R>,
+			): Effect.Effect<A, E, R> =>
+				Effect.gen(function* () {
+					const alreadySuspended = yield* Ref.get(persistenceSuspended)
+					if (alreadySuspended) {
+						return yield* effect
+					}
+					yield* Ref.set(persistenceSuspended, true)
+					return yield* effect.pipe(Effect.ensuring(Ref.set(persistenceSuspended, false)))
+				})
+
+			const saveCurrentProjectState = (projectPath?: string): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					if (yield* Ref.get(persistenceSuspended)) {
+						return
+					}
+
+					const currentProjectPath =
+						projectPath ?? (yield* SubscriptionRef.get(projectService.currentProject))?.path
+					if (!currentProjectPath) {
+						return
+					}
+
+					const state = yield* buildCurrentUiState()
+					if (state === undefined) {
+						return
+					}
+
+					yield* saveState(currentProjectPath, state)
+				})
+
+			const restoreProjectState = (projectPath: string) =>
+				Effect.gen(function* () {
+					const state = yield* loadState(projectPath)
+					yield* withPersistenceSuspended(applyState(projectPath, state))
+					return state
+				})
+
+			const uiStateChanges = Stream.merge(
+				Stream.merge(editor.mode.changes, editor.sortConfig.changes),
+				Stream.merge(
+					editor.filterConfig.changes,
+					Stream.merge(
+						navigation.focusedTaskId.changes,
+						Stream.merge(navigation.drillDownEpic.changes, view.viewMode.changes),
+					),
+				),
+			)
+
+			yield* Effect.forkScoped(
+				Stream.runForEach(uiStateChanges.pipe(Stream.debounce("150 millis")), () =>
+					saveCurrentProjectState().pipe(
+						Effect.catchAll((error) =>
+							Effect.logDebug("ProjectStateService: autosave failed", { error }).pipe(
+								Effect.asVoid,
+							),
 						),
 					),
+				),
+			)
+
+			const initialProject = yield* SubscriptionRef.get(projectService.currentProject)
+			if (initialProject) {
+				yield* restoreProjectState(initialProject.path)
+			}
+
+			return {
+				/**
+				 * Save UI state for a project
+				 *
+				 * Silently succeeds even if write fails (state is non-critical).
+				 */
+				saveState,
 
 				/**
 				 * Load UI state for a project
 				 *
-				 * Returns default state if file doesn't exist or is invalid.
+				 * Returns default state if no persisted state exists or legacy migration fails.
 				 */
-				loadState: (projectPath: string): Effect.Effect<ProjectUIState> =>
-					Effect.gen(function* () {
-						const stateFile = getStateFilePath(projectPath)
+				loadState,
 
-						// Check if file exists
-						const exists = yield* fs
-							.exists(stateFile)
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed(false)),
-									),
-								),
-							)
+				saveCurrentProjectState,
 
-						if (!exists) {
-							return createDefaultUIState()
-						}
+				restoreProjectState,
 
-						// Read file content
-						const content = yield* fs
-							.readFileString(stateFile)
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed("")),
-									),
-								),
-							)
-
-						if (!content) {
-							return createDefaultUIState()
-						}
-
-						// Decode from JSON string using Schema (handles Array -> Set conversion)
-						const decoded = yield* Schema.decode(ProjectUIStateJsonSchema)(content).pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed(null)),
-								),
-							),
-						)
-
-						if (!decoded) {
-							return createDefaultUIState()
-						}
-
-						return decoded
-					}).pipe(
-						Effect.catchAll((error) => {
-							Effect.logDebug("ProjectStateService: Failed to load state, using defaults", {
-								error,
-								projectPath,
-							})
-							return Effect.succeed(createDefaultUIState())
-						}),
-					),
+				withPersistenceSuspended,
 
 				/**
-				 * Get the state file path for debugging/display
+				 * Get the canonical sqlite path backing persisted UI state.
 				 */
 				getStateFilePath,
 			}

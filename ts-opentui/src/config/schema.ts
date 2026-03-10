@@ -5,21 +5,23 @@
  * migration. Old config formats are automatically upgraded to the current version.
  *
  * ## Version History
- * - Version 1: Original schema (no $schema field) - legacy format
- * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
+ * - Version 1: Original schema (no version field) - legacy format
+ * - Version 2: Adds numeric schema-version field (legacy `$schema`), moves pr.baseBranch → git.baseBranch
  * - Version 3: Adds top-level issueTracker selector + backend-specific config blocks
  * - Version 4: Nests backend config under top-level issueTracker object
  * - Version 5: Renames merge.startClaudeOnFailure → merge.startAiSessionOnFailure
  * - Version 6: Normalizes git.pr/git.merge aliases to canonical workflow config
+ * - Version 7: Adds spec.enabled feature gating for optional spec workflows
  *
  * ## Adding New Versions
- * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
+ * 1. Define ConfigVNSchema with numeric schema-version field
  * 2. Add VN-1ToVNTransform migration
  * 3. Update MigratingConfigSchema union
  * 4. Update CURRENT_CONFIG_VERSION
  */
 
 import { Effect } from "effect"
+import * as JSONSchema from "effect/JSONSchema"
 import * as ParseResult from "effect/ParseResult"
 import * as Schema from "effect/Schema"
 
@@ -28,7 +30,9 @@ import * as Schema from "effect/Schema"
 // ============================================================================
 
 /** Current config schema version */
-export const CURRENT_CONFIG_VERSION = 6
+export const CURRENT_CONFIG_VERSION = 7
+/** Relative schema URI used in `.azedarach/config.json` for JSON-LSP tooling */
+export const AZEDARACH_CONFIG_JSON_SCHEMA_URI = "./config.schema.json"
 
 // ============================================================================
 // CLI Tool Configuration
@@ -228,6 +232,8 @@ const GitScopedPRConfigSchema = Schema.Struct({
 	enabled: Schema.optional(Schema.Boolean),
 	autoDraft: Schema.optional(Schema.Boolean),
 	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to top-level pr.aiModel in v6 */
+	aiModel: Schema.optional(SupportedModelSchema),
 	/** @deprecated Moved to git.baseBranch in v2 */
 	baseBranch: Schema.optional(Schema.String),
 })
@@ -679,6 +685,20 @@ const KeyboardConfigSchema = Schema.Struct({
 })
 
 /**
+ * Issue editor configuration
+ *
+ * Controls defaults for the editor-backed issue creation flow in the TUI.
+ */
+const IssueEditorConfigSchema = Schema.Struct({
+	/**
+	 * Preferred implementation prefilled into the TUI issue editor create template.
+	 *
+	 * Falls back to the implementation registry default when unset or invalid.
+	 */
+	defaultImplementation: Schema.optional(Schema.String),
+})
+
+/**
  * Network configuration
  *
  * Controls automatic network connectivity detection.
@@ -738,6 +758,18 @@ const HooksConfigSchema = Schema.Struct({
 			enabled: Schema.optional(Schema.Boolean),
 		}),
 	),
+})
+
+/**
+ * Spec feature configuration
+ *
+ * Controls whether spec workflows are enabled for the project.
+ */
+const SpecConfigSchema = Schema.Struct({
+	/**
+	 * Enable az spec commands, guidance, and UI affordances (default: true)
+	 */
+	enabled: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -937,6 +969,7 @@ const migrations: readonly Migration[] = [
 							team: nestedIssueTracker.linear.team,
 							project: nestedIssueTracker.linear.project,
 							webhooks: nestedIssueTracker.linear.webhooks,
+							syncThrottle: nestedIssueTracker.linear.syncThrottle,
 						}
 					: undefined)
 			const localConfig =
@@ -1004,6 +1037,7 @@ const migrations: readonly Migration[] = [
 								team: linearConfig?.team,
 								project: linearConfig?.project,
 								webhooks: linearConfig?.webhooks,
+								syncThrottle: linearConfig?.syncThrottle,
 							}
 						: undefined,
 				local:
@@ -1083,6 +1117,7 @@ const migrations: readonly Migration[] = [
 										team: config.linear?.team,
 										project: config.linear?.project,
 										webhooks: config.linear?.webhooks,
+										syncThrottle: config.linear?.syncThrottle,
 									},
 								}
 							: {
@@ -1134,15 +1169,15 @@ const migrations: readonly Migration[] = [
 			const scopedMerge = git?.merge
 
 			const migratedPr =
-				config.pr ??
-				(scopedPr === undefined
-					? undefined
-					: {
-							enabled: scopedPr.enabled,
-							autoDraft: scopedPr.autoDraft,
-							autoMerge: scopedPr.autoMerge,
-							baseBranch: scopedPr.baseBranch,
-						})
+				config.pr !== undefined || scopedPr !== undefined
+					? {
+							enabled: config.pr?.enabled ?? scopedPr?.enabled,
+							autoDraft: config.pr?.autoDraft ?? scopedPr?.autoDraft,
+							autoMerge: config.pr?.autoMerge ?? scopedPr?.autoMerge,
+							aiModel: config.pr?.aiModel ?? scopedPr?.aiModel,
+							baseBranch: scopedPr?.baseBranch,
+						}
+					: undefined
 
 			const migratedMerge =
 				config.merge ??
@@ -1183,6 +1218,15 @@ const migrations: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		toVersion: 7,
+		description: "Add spec.enabled feature gating for optional spec workflows",
+		migrate: (config) => ({
+			...config,
+			$schema: 7,
+			spec: config.spec,
+		}),
+	},
 	// ────────────────────────────────────────────────────────────────────────
 	// Future migrations go here. Example:
 	// ────────────────────────────────────────────────────────────────────────
@@ -1205,7 +1249,8 @@ const migrations: readonly Migration[] = [
  */
 const applyMigrations = (config: RawConfig): CurrentConfig => {
 	let current = config
-	const startVersion = current.$schema ?? 1
+	const startVersion =
+		current.$version ?? (typeof current.$schema === "number" ? current.$schema : undefined) ?? 1
 
 	for (const migration of migrations) {
 		if (startVersion < migration.toVersion) {
@@ -1241,8 +1286,30 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					workflowMode: current.git.workflowMode,
 				}
 
-	const prSource = current.pr ?? current.git?.pr
-	const mergeSource = current.merge ?? current.git?.merge
+	const scopedPr = current.git?.pr
+	const scopedMerge = current.git?.merge
+	const prSource =
+		current.pr !== undefined || scopedPr !== undefined
+			? {
+					enabled: current.pr?.enabled ?? scopedPr?.enabled,
+					autoDraft: current.pr?.autoDraft ?? scopedPr?.autoDraft,
+					autoMerge: current.pr?.autoMerge ?? scopedPr?.autoMerge,
+					aiModel: current.pr?.aiModel ?? scopedPr?.aiModel,
+				}
+			: undefined
+	const mergeSource =
+		current.merge !== undefined || scopedMerge !== undefined
+			? {
+					validateCommands: current.merge?.validateCommands ?? scopedMerge?.validateCommands,
+					fixCommand: current.merge?.fixCommand ?? scopedMerge?.fixCommand,
+					maxFixAttempts: current.merge?.maxFixAttempts ?? scopedMerge?.maxFixAttempts,
+					startAiSessionOnFailure:
+						current.merge?.startAiSessionOnFailure ??
+						scopedMerge?.startAiSessionOnFailure ??
+						current.merge?.startClaudeOnFailure ??
+						scopedMerge?.startClaudeOnFailure,
+				}
+			: undefined
 
 	// Ensure version is set even if no migrations were needed
 	// Strip legacy fields to match CurrentConfig
@@ -1256,29 +1323,16 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		session: current.session,
 		patterns: current.patterns,
 		stateDetection: current.stateDetection,
-		pr: prSource
-			? {
-					enabled: prSource.enabled,
-					autoDraft: prSource.autoDraft,
-					autoMerge: prSource.autoMerge,
-					aiModel: current.pr?.aiModel,
-				}
-			: undefined,
-		merge: mergeSource
-			? {
-					validateCommands: mergeSource.validateCommands,
-					fixCommand: mergeSource.fixCommand,
-					maxFixAttempts: mergeSource.maxFixAttempts,
-					startAiSessionOnFailure:
-						mergeSource.startAiSessionOnFailure ?? mergeSource.startClaudeOnFailure,
-				}
-			: undefined,
+		pr: prSource,
+		merge: mergeSource,
 		devServer: current.devServer,
 		notifications: current.notifications,
 		network: current.network,
 		keyboard: current.keyboard,
+		issueEditor: current.issueEditor,
 		sessionRecovery: current.sessionRecovery,
 		hooks: current.hooks,
+		spec: current.spec,
 		projects: current.projects,
 		defaultProject: current.defaultProject,
 	}
@@ -1295,8 +1349,10 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
  * Used as the input side of the migration transform.
  */
 const RawConfigSchema = Schema.Struct({
-	/** Config version - undefined/1 for legacy, 2+ for current */
-	$schema: Schema.optional(Schema.Number),
+	/** Config schema metadata URI for editors, or legacy numeric version in older files */
+	$schema: Schema.optional(Schema.Union(Schema.String, Schema.Number)),
+	/** Canonical config version used for migration sequencing */
+	$version: Schema.optional(Schema.Number),
 
 	/**
 	 * CLI tool to use for AI sessions (default: "claude")
@@ -1343,18 +1399,24 @@ const RawConfigSchema = Schema.Struct({
 	/** Keyboard configuration */
 	keyboard: Schema.optional(KeyboardConfigSchema),
 
+	/** TUI issue editor configuration */
+	issueEditor: Schema.optional(IssueEditorConfigSchema),
+
 	/** Session recovery configuration */
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 
 	/** Hooks configuration for spawned sessions */
 	hooks: Schema.optional(HooksConfigSchema),
 
+	/** Spec workflow feature gating */
+	spec: Schema.optional(SpecConfigSchema),
+
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
 
 /**
- * Current config schema (v4)
+ * Current config schema (v7)
  *
  * This is the canonical schema after migration.
  * Does NOT include legacy fields - they should be migrated away.
@@ -1375,8 +1437,10 @@ const CurrentConfigSchema = Schema.Struct({
 	notifications: Schema.optional(NotificationsConfigSchema),
 	network: Schema.optional(NetworkConfigSchema),
 	keyboard: Schema.optional(KeyboardConfigSchema),
+	issueEditor: Schema.optional(IssueEditorConfigSchema),
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 	hooks: Schema.optional(HooksConfigSchema),
+	spec: Schema.optional(SpecConfigSchema),
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -1404,38 +1468,24 @@ export const AzedarachConfigSchema = Schema.transformOrFail(RawConfigSchema, Cur
 	encode: (current) =>
 		Effect.succeed({
 			...current,
-			$schema: CURRENT_CONFIG_VERSION,
-			git:
-				current.git === undefined && current.pr === undefined && current.merge === undefined
-					? undefined
-					: {
-							...current.git,
-							pr: current.pr
-								? {
-										enabled: current.pr.enabled,
-										autoDraft: current.pr.autoDraft,
-										autoMerge: current.pr.autoMerge,
-									}
-								: undefined,
-							merge: current.merge
-								? {
-										validateCommands: current.merge.validateCommands,
-										fixCommand: current.merge.fixCommand,
-										maxFixAttempts: current.merge.maxFixAttempts,
-										startAiSessionOnFailure: current.merge.startAiSessionOnFailure,
-									}
-								: undefined,
-						},
-			pr: undefined,
-			merge: undefined,
+			$schema: AZEDARACH_CONFIG_JSON_SCHEMA_URI,
+			$version: CURRENT_CONFIG_VERSION,
+			// Persist canonical v7 layout: top-level `pr`/`merge`, git aliases stripped.
+			git: current.git,
+			pr: current.pr,
+			merge: current.merge,
 		}),
+})
+
+export const AzedarachConfigJsonSchema = JSONSchema.make(AzedarachConfigSchema, {
+	target: "jsonSchema2020-12",
 })
 
 // ============================================================================
 // Type Exports
 // ============================================================================
 
-/** Input type for config (what users write in .azedarach.json) */
+/** Input type for config (what users write in project config JSON) */
 export type AzedarachConfigInput = Schema.Schema.Encoded<typeof AzedarachConfigSchema>
 
 /** Validated config type (after schema validation) */
@@ -1492,8 +1542,14 @@ export type ModelConfig = Schema.Schema.Type<typeof ModelConfigSchema>
 /** Keyboard config section type */
 export type KeyboardConfig = Schema.Schema.Type<typeof KeyboardConfigSchema>
 
+/** Issue editor config section type */
+export type IssueEditorConfig = Schema.Schema.Type<typeof IssueEditorConfigSchema>
+
 /** Session recovery config section type */
 export type SessionRecoveryConfig = Schema.Schema.Type<typeof SessionRecoveryConfigSchema>
 
 /** Hooks config section type */
 export type HooksConfig = Schema.Schema.Type<typeof HooksConfigSchema>
+
+/** Spec config section type */
+export type SpecConfig = Schema.Schema.Type<typeof SpecConfigSchema>

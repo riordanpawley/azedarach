@@ -15,6 +15,7 @@ const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	n: "notify",
 	h: "hooks",
 	o: "opencode",
+	cfg: "config",
 	d: "dev",
 	s: "status",
 	st: "start",
@@ -27,6 +28,8 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 			g: "get",
 			c: "create",
 			ch: "child",
+			ck: "check",
+			dr: "doctor",
 			u: "update",
 			d: "dep",
 			x: "close",
@@ -40,8 +43,10 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 		spec: {
 			r: "req",
 			l: "link",
-			p: "publish",
+			p: "sync",
 			c: "req",
+			sy: "sync",
+			publish: "publish",
 		},
 		"spec/req": {
 			l: "list",
@@ -62,6 +67,9 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 		"spec/publish": {
 			r: "run",
 			c: "config",
+		},
+		config: {
+			s: "set",
 		},
 		project: {
 			a: "add",
@@ -118,6 +126,7 @@ const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"notify",
 	"hooks",
 	"project",
+	"config",
 	"opencode",
 ])
 
@@ -152,69 +161,74 @@ export const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | n
  */
 export const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
 	const issueCommandIndex = argv.indexOf("issue")
-	if (issueCommandIndex === -1) return argv
 
-	const subcommand = argv[issueCommandIndex + 1]
-	if (subcommand === "dep") {
-		const depSubcommand = argv[issueCommandIndex + 2]
-		if (depSubcommand !== "add") {
-			return argv
+	if (issueCommandIndex !== -1) {
+		const subcommand = argv[issueCommandIndex + 1]
+		if (subcommand === "dep") {
+			const depSubcommand = argv[issueCommandIndex + 2]
+			if (depSubcommand !== "add") {
+				return argv
+			}
+
+			const issueIdIndex = issueCommandIndex + 3
+			const dependsOnIdIndex = issueCommandIndex + 4
+			if (dependsOnIdIndex >= argv.length) return argv
+
+			const issueId = argv[issueIdIndex]
+			const dependsOnId = argv[dependsOnIdIndex]
+			if (
+				issueId === undefined ||
+				dependsOnId === undefined ||
+				issueId.startsWith("-") ||
+				dependsOnId.startsWith("-")
+			) {
+				return argv
+			}
+
+			const hasOptionAfterPositionalIds = argv
+				.slice(dependsOnIdIndex + 1)
+				.some((token) => token.startsWith("-"))
+			if (!hasOptionAfterPositionalIds) return argv
+
+			const reordered = [...argv]
+			reordered.splice(issueIdIndex, 2)
+			reordered.push(issueId, dependsOnId)
+			return reordered
 		}
 
-		const issueIdIndex = issueCommandIndex + 3
-		const dependsOnIdIndex = issueCommandIndex + 4
-		if (dependsOnIdIndex >= argv.length) return argv
-
-		const issueId = argv[issueIdIndex]
-		const dependsOnId = argv[dependsOnIdIndex]
 		if (
-			issueId === undefined ||
-			dependsOnId === undefined ||
-			issueId.startsWith("-") ||
-			dependsOnId.startsWith("-")
+			subcommand !== "get" &&
+			subcommand !== "create" &&
+			subcommand !== "child" &&
+			subcommand !== "update" &&
+			subcommand !== "close" &&
+			subcommand !== "delete" &&
+			subcommand !== "check" &&
+			subcommand !== "doctor"
 		) {
 			return argv
 		}
 
-		const hasOptionAfterPositionalIds = argv
-			.slice(dependsOnIdIndex + 1)
+		const positionalArgIndex = issueCommandIndex + 2
+		if (positionalArgIndex >= argv.length) return argv
+
+		const positionalArg = argv[positionalArgIndex]
+		if (positionalArg === undefined || positionalArg.startsWith("-")) {
+			return argv
+		}
+
+		const hasOptionAfterPositional = argv
+			.slice(positionalArgIndex + 1)
 			.some((token) => token.startsWith("-"))
-		if (!hasOptionAfterPositionalIds) return argv
+		if (!hasOptionAfterPositional) return argv
 
 		const reordered = [...argv]
-		reordered.splice(issueIdIndex, 2)
-		reordered.push(issueId, dependsOnId)
+		reordered.splice(positionalArgIndex, 1)
+		reordered.push(positionalArg)
 		return reordered
 	}
 
-	if (
-		subcommand !== "get" &&
-		subcommand !== "create" &&
-		subcommand !== "child" &&
-		subcommand !== "update" &&
-		subcommand !== "close" &&
-		subcommand !== "delete"
-	) {
-		return argv
-	}
-
-	const positionalArgIndex = issueCommandIndex + 2
-	if (positionalArgIndex >= argv.length) return argv
-
-	const positionalArg = argv[positionalArgIndex]
-	if (positionalArg === undefined || positionalArg.startsWith("-")) {
-		return argv
-	}
-
-	const hasOptionAfterPositional = argv
-		.slice(positionalArgIndex + 1)
-		.some((token) => token.startsWith("-"))
-	if (!hasOptionAfterPositional) return argv
-
-	const reordered = [...argv]
-	reordered.splice(positionalArgIndex, 1)
-	reordered.push(positionalArg)
-	return reordered
+	return argv
 }
 
 // Backward-compatible name used by existing tests and imports.

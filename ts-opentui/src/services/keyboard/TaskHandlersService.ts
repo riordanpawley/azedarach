@@ -297,7 +297,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* overlay.push({
 						_tag: "create",
 						title: "Create Forked Task",
-						initial: { type: "task", priority: task.priority },
+						initial: {
+							type: "task",
+							priority: task.priority,
+							implementations: task.implementations,
+						},
 						context: { _tag: "forkChild", parentEpicId: task.id, sourceTaskId: task.id },
 					})
 				}).pipe(Effect.catchAll(handleForkError))
@@ -313,7 +317,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* overlay.push({
 						_tag: "create",
 						title: "Create Parent Epic",
-						initial: { type: "epic", priority: task.priority },
+						initial: {
+							type: "epic",
+							priority: task.priority,
+							implementations: task.implementations,
+						},
 						lockType: true,
 						context: { _tag: "forkEpic", sourceTaskId: task.id },
 					})
@@ -335,7 +343,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* overlay.push({
 						_tag: "create",
 						title: "Create Forked Task",
-						initial: { type: "task", priority: task.priority },
+						initial: {
+							type: "task",
+							priority: task.priority,
+							implementations: task.implementations,
+						},
 						context: { _tag: "forkChild", parentEpicId, sourceTaskId: task.id },
 					})
 				}).pipe(Effect.catchAll(handleForkError))

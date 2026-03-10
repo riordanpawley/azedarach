@@ -9,10 +9,13 @@ import { TmuxError } from "../core/TmuxService.js"
 import {
 	applySessionRefreshPatch,
 	classifySessionRecoveryError,
+	reconcileLoadedTasksWithLocalCreateGrace,
 	resolveBoardRefreshExecutionMode,
+	resolveHasWorktreeFlag,
 	resolveLinearSdkEventsTickerBehavior,
 	resolveLinearSdkPollingFallbackHealthMessage,
 	resolveLinearSdkPollingFallbackToastMessage,
+	resolveRetainedTaskGitState,
 } from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
@@ -33,8 +36,13 @@ describe("BoardService session recovery classification", () => {
 			message: "tmux resource temporarily unavailable",
 			issueId: "AZE-101",
 		})
+		const sqliteLockError = new SessionError({
+			message: "SQLite operation failed: database is locked",
+			issueId: "AZE-101",
+		})
 
 		expect(classifySessionRecoveryError(sessionError)).toBe("transient")
+		expect(classifySessionRecoveryError(sqliteLockError)).toBe("transient")
 	})
 
 	it("marks not-found, invalid-state, and terminal SessionError failures as terminal", () => {
@@ -126,7 +134,7 @@ describe("linear SDK polling fallback messaging", () => {
 			resolveLinearSdkPollingFallbackToastMessage({
 				mode: "misconfigured",
 				reason:
-					"Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export LINEAR_WEBHOOK_PUBLIC_URL, or run \"tailscale funnel --bg --yes 9000\"",
+					'Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export LINEAR_WEBHOOK_PUBLIC_URL, or run "tailscale funnel --bg --yes 9000"',
 			}),
 		).toContain("public webhook URL")
 	})
@@ -135,7 +143,8 @@ describe("linear SDK polling fallback messaging", () => {
 		expect(
 			resolveLinearSdkPollingFallbackToastMessage({
 				mode: "misconfigured",
-				reason: "Linear webhook SDK mode found multiple teams (AZE, OPS); set issueTracker.linear.team",
+				reason:
+					"Linear webhook SDK mode found multiple teams (AZE, OPS); set issueTracker.linear.team",
 			}),
 		).toBe(
 			"Linear webhooks unavailable (mode=misconfigured): Linear webhook SDK mode found multiple teams (AZE, OPS); set issueTracker.linear.team. Falling back to background polling.",
@@ -164,6 +173,7 @@ describe("applySessionRefreshPatch", () => {
 		issue_type: "task",
 		created_at: "2026-03-07T00:00:00.000Z",
 		updated_at: "2026-03-07T00:00:00.000Z",
+		implementations: ["default"],
 		sessionState: "busy",
 		gitBehindCount: 3,
 		hasUncommittedChanges: true,
@@ -209,5 +219,140 @@ describe("applySessionRefreshPatch", () => {
 		expect(updated.hasUncommittedChanges).toBe(false)
 		expect(updated.gitAdditions).toBe(0)
 		expect(updated.gitDeletions).toBe(0)
+	})
+})
+
+describe("reconcileLoadedTasksWithLocalCreateGrace", () => {
+	const localOnlyTask = {
+		id: "AZE-42",
+		title: "Created locally",
+		status: "open",
+		priority: 2,
+		issue_type: "task",
+		created_at: "2026-03-07T00:00:00.000Z",
+		updated_at: "2026-03-07T00:00:05.000Z",
+		implementations: ["default"],
+		sessionState: "idle",
+	} as const
+
+	it("retains recently created local task when refresh payload is temporarily missing it", () => {
+		const result = reconcileLoadedTasksWithLocalCreateGrace({
+			loadedTasks: [],
+			currentTasks: [localOnlyTask],
+			localCreateGraceExpiries: new Map([[localOnlyTask.id, 10_000]]),
+			nowMs: 5_000,
+		})
+
+		expect(result.mergedTasks.map((task) => task.id)).toEqual([localOnlyTask.id])
+		expect(result.nextLocalCreateGraceExpiries.get(localOnlyTask.id)).toBe(10_000)
+	})
+
+	it("drops local-create grace entry once backend includes the task", () => {
+		const result = reconcileLoadedTasksWithLocalCreateGrace({
+			loadedTasks: [localOnlyTask],
+			currentTasks: [localOnlyTask],
+			localCreateGraceExpiries: new Map([[localOnlyTask.id, 10_000]]),
+			nowMs: 5_000,
+		})
+
+		expect(result.mergedTasks.map((task) => task.id)).toEqual([localOnlyTask.id])
+		expect(result.nextLocalCreateGraceExpiries.has(localOnlyTask.id)).toBe(false)
+	})
+
+	it("stops retaining task after grace window expires", () => {
+		const result = reconcileLoadedTasksWithLocalCreateGrace({
+			loadedTasks: [],
+			currentTasks: [localOnlyTask],
+			localCreateGraceExpiries: new Map([[localOnlyTask.id, 10_000]]),
+			nowMs: 10_000,
+		})
+
+		expect(result.mergedTasks).toEqual([])
+		expect(result.nextLocalCreateGraceExpiries.has(localOnlyTask.id)).toBe(false)
+	})
+})
+
+describe("resolveHasWorktreeFlag", () => {
+	it("prefers fresh worktree inventory over stale persisted state", () => {
+		expect(
+			resolveHasWorktreeFlag({
+				issueId: "jt",
+				persistedHasWorktree: true,
+				worktreeIssueIds: new Set<string>(),
+				worktreeInventoryLoaded: true,
+			}),
+		).toBeUndefined()
+	})
+
+	it("keeps the folder indicator when fresh inventory confirms the worktree exists", () => {
+		expect(
+			resolveHasWorktreeFlag({
+				issueId: "jt",
+				persistedHasWorktree: undefined,
+				worktreeIssueIds: new Set(["jt"]),
+				worktreeInventoryLoaded: true,
+			}),
+		).toBe(true)
+	})
+
+	it("falls back to persisted state when worktree inventory is unavailable", () => {
+		expect(
+			resolveHasWorktreeFlag({
+				issueId: "jt",
+				persistedHasWorktree: true,
+				worktreeIssueIds: new Set<string>(),
+				worktreeInventoryLoaded: false,
+			}),
+		).toBe(true)
+	})
+})
+
+describe("resolveRetainedTaskGitState", () => {
+	it("clears persisted git state when there is no worktree and no active session", () => {
+		expect(
+			resolveRetainedTaskGitState({
+				hasWorktree: undefined,
+				sessionState: "idle",
+				source: {
+					hasMergeConflict: true,
+					gitBehindCount: 3,
+					hasUncommittedChanges: true,
+					gitAdditions: 20,
+					gitDeletions: 5,
+				},
+			}),
+		).toEqual({
+			hasMergeConflict: false,
+			gitStatus: {
+				gitBehindCount: undefined,
+				hasUncommittedChanges: undefined,
+				gitAdditions: undefined,
+				gitDeletions: undefined,
+			},
+		})
+	})
+
+	it("retains git state for tasks with a confirmed worktree", () => {
+		expect(
+			resolveRetainedTaskGitState({
+				hasWorktree: true,
+				sessionState: "idle",
+				source: {
+					hasMergeConflict: true,
+					gitBehindCount: 3,
+					hasUncommittedChanges: true,
+					gitAdditions: 20,
+					gitDeletions: 5,
+				},
+			}),
+		).toEqual({
+			hasMergeConflict: true,
+			gitStatus: {
+				gitBehindCount: 3,
+				hasUncommittedChanges: true,
+				gitAdditions: 20,
+				gitDeletions: 5,
+			},
+		})
 	})
 })

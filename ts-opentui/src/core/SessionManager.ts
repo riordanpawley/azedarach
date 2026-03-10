@@ -97,6 +97,33 @@ const INIT_DONE_OPTION = "@az_init_done"
 const BELL_CHAR = "\u0007"
 const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
 const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
+const SESSION_STARTUP_CRASH_GRACE_MS = 20_000
+
+const getCommandErrorField = (
+	error: unknown,
+	fieldName: "stdout" | "stderr",
+): string | undefined => {
+	if (typeof error !== "object" || error === null || !(fieldName in error)) {
+		return undefined
+	}
+	const value = Reflect.get(error, fieldName)
+	if (typeof value === "string") {
+		return value
+	}
+	if (value === undefined || value === null) {
+		return undefined
+	}
+	return String(value)
+}
+
+const getCommandErrorOutput = (error: unknown): string => {
+	const stderr = getCommandErrorField(error, "stderr")
+	const stdout = getCommandErrorField(error, "stdout")
+	return [stderr, stdout]
+		.filter((part): part is string => part !== undefined && part.length > 0)
+		.join("\n")
+		.trim()
+}
 
 const deriveWaitingAttentionPlan = (
 	status: TmuxAttentionStatus,
@@ -159,6 +186,7 @@ export interface MissingCodeWindowClassificationOptions {
 	readonly hasCodeWindow: boolean
 	readonly hasStartLock: boolean
 	readonly tmuxStartupInProgress: boolean
+	readonly withinStartupGracePeriod: boolean
 }
 
 export const classifySessionStateForMissingCodeWindow = (
@@ -168,14 +196,54 @@ export const classifySessionStateForMissingCodeWindow = (
 	resolveDiscoveredSessionState(
 		state,
 		options.hasCodeWindow,
-		options.hasCodeWindow ? false : options.hasStartLock || options.tmuxStartupInProgress,
+		options.hasCodeWindow
+			? false
+			: options.hasStartLock || options.tmuxStartupInProgress || options.withinStartupGracePeriod,
 	)
+
+export interface TmuxSessionStateUpdateMeta {
+	readonly sessionName: string
+	/**
+	 * tmux session creation time in seconds since epoch.
+	 * `0` means the update was synthesized after the session disappeared.
+	 */
+	readonly createdAt: number
+	readonly worktreePath: string | null
+	readonly projectPath: string | null
+}
+
+const isSyntheticTmuxDisappearance = (
+	sessionMeta: TmuxSessionStateUpdateMeta | undefined,
+): boolean => sessionMeta?.createdAt === 0
+
+export const resolveSessionStateFromTmuxStatus = (
+	currentState: SessionState,
+	status: "busy" | "waiting" | "idle",
+	isSyntheticDisappearance = false,
+): SessionState => {
+	if (status === "busy") {
+		return "busy"
+	}
+	if (status === "waiting") {
+		return "waiting"
+	}
+	if (
+		isSyntheticDisappearance &&
+		(currentState === "crashed" || isActiveSessionState(currentState))
+	) {
+		return "crashed"
+	}
+	return "idle"
+}
 
 interface SessionMissingWindowClassification {
 	readonly state: SessionState
 	readonly hasCodeWindow: boolean
 	readonly startupInProgress: boolean
 }
+
+const isWithinSessionStartupGracePeriod = (startedAt: DateTime.Utc, nowMs: number): boolean =>
+	nowMs - DateTime.toEpochMillis(startedAt) < SESSION_STARTUP_CRASH_GRACE_MS
 
 /**
  * Schema for persisted session - matches Session interface
@@ -410,8 +478,8 @@ export interface SessionManagerService {
 	/**
 	 * Update session state from tmux status
 	 *
-	 * Handles mapping TmuxStatus to SessionState and handles
-	 * secondary transitions like "done" detection.
+	 * Handles mapping TmuxStatus to SessionState while distinguishing
+	 * real idle hooks from synthesized "session disappeared" updates.
 	 *
 	 * If the session doesn't exist but sessionMeta is provided,
 	 * the session will be registered automatically (orphan recovery).
@@ -419,12 +487,7 @@ export interface SessionManagerService {
 	readonly updateStateFromTmux: (
 		issueId: string,
 		status: "busy" | "waiting" | "idle",
-		sessionMeta?: {
-			sessionName: string
-			createdAt: number
-			worktreePath: string | null
-			projectPath: string | null
-		},
+		sessionMeta?: TmuxSessionStateUpdateMeta,
 	) => Effect.Effect<void, SessionNotFoundError, never>
 
 	/**
@@ -719,6 +782,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const applyTmuxAttentionStyles = (sessionName: string) =>
 			Effect.gen(function* () {
 				yield* setTmuxSessionOption(sessionName, "monitor-bell", "on")
+				yield* setTmuxSessionOption(sessionName, "monitor-activity", "on")
+				yield* setTmuxSessionOption(sessionName, "bell-action", "any")
+				yield* setTmuxSessionOption(sessionName, "activity-action", "any")
 				yield* setTmuxSessionOption(
 					sessionName,
 					"window-status-bell-style",
@@ -1155,38 +1221,57 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					// Create WIP commit in worktree
 					// Git add all changes (including synced .azedarach/ directory)
-					const addCmd = Command.make("git", "add", "-A").pipe(
-						Command.workingDirectory(session.worktreePath),
-					)
-					yield* Command.exitCode(addCmd).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Failed to stage changes: ${e}`,
-									command: "git add -A",
-								}),
-						),
+					yield* Command.string(
+						Command.make("git", "add", "-A").pipe(Command.workingDirectory(session.worktreePath)),
+					).pipe(
+						Effect.mapError((error) => {
+							const output = getCommandErrorOutput(error)
+							return new GitError({
+								message: `Failed to stage changes: ${output.length > 0 ? output : String(error)}`,
+								command: "git add -A",
+							})
+						}),
 					)
 
+					const hasStagedChangesExitCode = yield* Command.exitCode(
+						Command.make("git", "diff", "--cached", "--quiet").pipe(
+							Command.workingDirectory(session.worktreePath),
+						),
+					).pipe(
+						Effect.mapError((error) => {
+							const output = getCommandErrorOutput(error)
+							return new GitError({
+								message: `Failed to inspect staged changes: ${output.length > 0 ? output : String(error)}`,
+								command: "git diff --cached --quiet",
+							})
+						}),
+					)
+					if (hasStagedChangesExitCode !== 0 && hasStagedChangesExitCode !== 1) {
+						return yield* Effect.fail(
+							new GitError({
+								message: `git diff --cached --quiet returned unexpected exit code: ${hasStagedChangesExitCode}`,
+								command: "git diff --cached --quiet",
+							}),
+						)
+					}
+					const hasStagedChanges = hasStagedChangesExitCode === 1
+
 					// Git commit with WIP message
-					const commitCmd = Command.make("git", "commit", "-m", "WIP: Paused session").pipe(
-						Command.workingDirectory(session.worktreePath),
-					)
-					yield* Command.exitCode(commitCmd).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Failed to create WIP commit: ${e}`,
-									command: "git commit -m 'WIP: Paused session'",
-								}),
-						),
-						// Ignore error if nothing to commit
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(0)),
+					if (hasStagedChanges) {
+						yield* Command.string(
+							Command.make("git", "commit", "-m", "WIP: Paused session").pipe(
+								Command.workingDirectory(session.worktreePath),
 							),
-						),
-					)
+						).pipe(
+							Effect.mapError((error) => {
+								const output = getCommandErrorOutput(error)
+								return new GitError({
+									message: `Failed to create WIP commit: ${output.length > 0 ? output : String(error)}`,
+									command: "git commit -m 'WIP: Paused session'",
+								})
+							}),
+						)
+					}
 
 					// Update session state to paused
 					const oldState = session.state
@@ -1463,12 +1548,14 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					const startsInProgressLookup = new Set(
 						Array.from(HashMap.keys(startsInProgress), normalizeIssueIdForLookup),
 					)
+					const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
 					const hasStartLock = (issueId: string): boolean =>
 						startsInProgressLookup.has(normalizeIssueIdForLookup(issueId))
 					const classifyStateForSession = (
 						issueId: string,
 						sessionName: string,
 						state: SessionState | undefined,
+						withinStartupGracePeriod: boolean,
 					): Effect.Effect<
 						SessionMissingWindowClassification,
 						TmuxError | SessionNotFoundError,
@@ -1481,12 +1568,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								: yield* isSessionStartupInProgress(sessionName)
 							const startupInProgress = hasCodeWindow
 								? false
-								: hasStartLock(issueId) || tmuxStartupInProgress
+								: hasStartLock(issueId) || tmuxStartupInProgress || withinStartupGracePeriod
 							return {
 								state: classifySessionStateForMissingCodeWindow(state, {
 									hasCodeWindow,
 									hasStartLock: hasStartLock(issueId),
 									tmuxStartupInProgress,
+									withinStartupGracePeriod,
 								}),
 								hasCodeWindow,
 								startupInProgress,
@@ -1505,10 +1593,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						{
 							const worktree = worktreeByIssueLookup.get(issueLookupKey)
 							const persisted = persistedByIssueLookup.get(issueLookupKey)
+							const withinStartupGracePeriod =
+								nowMs - tmuxSession.created.getTime() < SESSION_STARTUP_CRASH_GRACE_MS
 							const classifiedState = yield* classifyStateForSession(
 								issueId,
 								tmuxSession.name,
 								persisted?.state,
+								withinStartupGracePeriod,
 							)
 							const recoveredState = classifiedState.state
 							if (recoveredState === "crashed") {
@@ -1548,6 +1639,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							issueId,
 							inMemorySession.tmuxSessionName,
 							inMemorySession.state,
+							isWithinSessionStartupGracePeriod(inMemorySession.startedAt, nowMs),
 						)
 						if (classifiedState.hasCodeWindow) {
 							continue
@@ -1667,12 +1759,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 			updateStateFromTmux: (
 				issueId: string,
 				status: "busy" | "waiting" | "idle",
-				sessionMeta?: {
-					sessionName: string
-					createdAt: number
-					worktreePath: string | null
-					projectPath: string | null
-				},
+				sessionMeta?: TmuxSessionStateUpdateMeta,
 			) =>
 				Effect.gen(function* () {
 					const effectiveProjectPath = yield* getEffectiveProjectPath()
@@ -1693,6 +1780,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								sessionMeta.projectPath,
 							)
 						: issueId
+					const syntheticDisappearance = isSyntheticTmuxDisappearance(sessionMeta)
 
 					let sessions = yield* Ref.get(sessionsRef)
 					let sessionOpt = HashMap.get(sessions, resolvedIssueId)
@@ -1720,14 +1808,23 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					// If session doesn't exist but we have metadata, create it (orphan recovery)
 					if (sessionOpt._tag === "None") {
 						if (sessionMeta) {
+							if (status === "idle" && syntheticDisappearance) {
+								yield* Effect.logDebug(
+									`Ignoring synthetic tmux disappearance for untracked session ${resolvedIssueId}`,
+								)
+								return
+							}
+
 							yield* Effect.log(
 								`Recovering orphaned session for ${resolvedIssueId} (status: ${status})`,
 							)
 
 							// Map status to SessionState
-							let initialState: SessionState = "busy"
-							if (status === "waiting") initialState = "waiting"
-							if (status === "idle") initialState = "idle"
+							const initialState = resolveSessionStateFromTmuxStatus(
+								"idle",
+								status,
+								syntheticDisappearance,
+							)
 
 							const orphanedSession: Session = {
 								issueId: resolvedIssueId,
@@ -1767,19 +1864,19 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					}
 					const oldState = session.state
 
-					// Map TmuxStatus to SessionState
-					let newState: SessionState = session.state
-					if (status === "busy") newState = "busy"
-					if (status === "waiting") newState = "waiting"
-					if (status === "idle") {
-						// If we were busy or waiting and session disappeared, it might be "done"
-						// but for now we'll just map to idle. Transition to "done"
-						// is usually handled by output pattern matching in PTYMonitor
-						// or explicit az notify done.
-						newState = "idle"
-					}
+					const newState = resolveSessionStateFromTmuxStatus(
+						oldState,
+						status,
+						syntheticDisappearance,
+					)
 
 					if (oldState === newState) return
+
+					if (status === "idle" && syntheticDisappearance && newState === "crashed") {
+						yield* Effect.log(
+							`Classified tmux disappearance for ${resolvedIssueId} as crashed (previous state: ${oldState})`,
+						)
+					}
 
 					const updatedSession: Session = {
 						...session,

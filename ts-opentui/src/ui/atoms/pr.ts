@@ -48,10 +48,7 @@ export const cleanupAtom = appRuntime.fn((issueId: string) =>
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
-		yield* prWorkflow.cleanup({
-			issueId,
-			projectPath,
-		})
+		yield* prWorkflow.cleanup({ issueId, projectPath, closeIssue: true })
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

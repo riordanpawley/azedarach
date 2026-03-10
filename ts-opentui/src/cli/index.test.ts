@@ -1,17 +1,52 @@
 import { describe, expect, it } from "bun:test"
+import { BunContext } from "@effect/platform-bun"
+import { Effect } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
+import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
+	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
+	cliRunner,
+	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
+	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
+	formatParentChildCheckOutput,
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
+	summarizeIssueBulkUpdateResults,
 } from "./index.js"
+
+const makePrimeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): TrackedIssue => ({
+	id,
+	title: `Issue ${id}`,
+	status: "open",
+	priority: 3,
+	issue_type: "task",
+	created_at: "2026-03-08T00:00:00.000Z",
+	updated_at: "2026-03-08T00:00:00.000Z",
+	implementations: ["default"],
+	...overrides,
+})
 
 describe("buildPrimeOutput", () => {
 	it("includes issue-context guardrails and refresh instructions for active issues", () => {
-		const output = buildPrimeOutput("gq", "gq: Improve az prime")
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+					status: "in_progress",
+					priority: 2,
+					description: "Trim noisy guidance and keep the active issue block concise.",
+				}),
+				showImplementations: false,
+			},
+			undefined,
+			true,
+		)
 
 		expect(output).toContain("Issue-context guardrails:")
 		expect(output).toContain("AZEDARACH_ISSUE_ID` is set to `gq`")
@@ -21,20 +56,40 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("Do not go on history/log hunting tangents")
 		expect(output).toContain(
+			"In this repo, when guidance says `spec`, it means `az spec` requirement/link records",
+		)
+		expect(output).toContain(
 			"Before implementing behavior changes, inspect relevant `az spec` requirements/links",
 		)
-		expect(output).toContain("After implementing behavior changes, run a spec compliance pass")
+		expect(output).toContain("Spec boundary for `az spec` usage")
+		expect(output).toContain("Use `az spec` only for product behavior changes")
+		expect(output).toContain("Do NOT use `az spec` for infra-only work")
+		expect(output).toContain('default to no spec link and note: "Spec impact: none (infra-only)."')
+		expect(output).toContain(
+			"After implementing behavior changes, run an `az spec` compliance pass",
+		)
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
+		expect(output).toContain("For `az spec` commands, keep canonical Effect CLI ordering")
+		expect(output).toContain("az config set spec.enabled false")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
 		expect(output).toContain(
 			"Review flow policy: reviews target closed tasks, not in-progress tasks.",
 		)
 		expect(output).toContain("If review finds remaining work, move the issue back to in-progress")
 		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
+		expect(output).toContain("Refresh with `az issue get gq` if this looks stale.")
+		expect(output).toContain("gq: Improve az prime [status=in_progress priority=2 type=task")
+		expect(output).toContain(
+			"Description:\nTrim noisy guidance and keep the active issue block concise.",
+		)
+		expect(output).toContain("`az issue bulk-update --input updates.json --json`")
+		expect(output).toContain('`[{"id":"az-123","status":"blocked"}]`')
+		expect(output).not.toContain("Start each session with: `az prime`")
+		expect(output).not.toContain("Implementation guardrails:")
 	})
 
 	it("guides users to fetch an issue when no issue id is configured", () => {
-		const output = buildPrimeOutput(undefined, "")
+		const output = buildPrimeOutput(undefined, undefined, undefined, true)
 
 		expect(output).toContain("No active issue is preselected")
 		expect(output).toContain("run `az issue get <issue-id>`")
@@ -42,10 +97,130 @@ describe("buildPrimeOutput", () => {
 	})
 
 	it("falls back to explicit refresh command when issue details fail to load", () => {
-		const output = buildPrimeOutput("gq", "")
+		const output = buildPrimeOutput("gq", undefined, undefined, true)
 
-		expect(output).toContain("Active issue from AZEDARACH_ISSUE_ID=gq.")
+		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
 		expect(output).toContain("Could not load issue details automatically; run `az issue get gq`.")
+	})
+
+	it("keeps implementation guidance invisible while only one implementation exists", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+				}),
+			},
+			{
+				implementations: ["default"],
+			},
+			true,
+		)
+
+		expect(output).not.toContain("Implementation guardrails:")
+		expect(output).not.toContain("implicit `default` fallback")
+	})
+
+	it("warns explicitly when multiple implementations are configured", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+					implementations: ["default", "ts-opentui", "go-bubbletea"],
+				}),
+				showImplementations: true,
+			},
+			{
+				implementations: ["default", "ts-opentui", "go-bubbletea"],
+			},
+			true,
+		)
+
+		expect(output).toContain("Implementation guardrails:")
+		expect(output).toContain(
+			"This project has multiple implementations configured: default, ts-opentui, go-bubbletea.",
+		)
+		expect(output).toContain(
+			"New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections.",
+		)
+		expect(output).toContain(
+			"The implicit `default` fallback only applies while the project has exactly one implementation configured.",
+		)
+		expect(output).toContain(
+			"Repeated `--impl` flags mean intentionally shared work, for example `--impl ts-opentui --impl go-bubbletea`.",
+		)
+	})
+
+	it("omits all spec guidance when spec workflows are disabled", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+					implementations: ["default", "ts-opentui"],
+				}),
+				showImplementations: true,
+			},
+			{
+				implementations: ["default", "ts-opentui"],
+			},
+			false,
+		)
+
+		expect(output).not.toContain("`az spec`")
+		expect(output).toContain(
+			"New `az issue` writes must include one or more `--impl <impl>` selections.",
+		)
+		expect(output).not.toContain(
+			"New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections.",
+		)
+	})
+
+	it("applies --config overrides to command-layer AppConfig reads", async () => {
+		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-${crypto.randomUUID()}.json`
+		await Bun.write(
+			configPath,
+			`${JSON.stringify({ $version: 7, spec: { enabled: false } }, null, 2)}\n`,
+		)
+
+		const specEnabled = await Effect.runPromise(
+			Effect.gen(function* () {
+				const appConfig = yield* AppConfig
+				const specConfig = yield* appConfig.getSpecConfig()
+				return specConfig.enabled
+			}).pipe(
+				Effect.provide(buildCommandCliLayerForArgv(["bun", "az", "--config", configPath, "prime"])),
+			),
+		)
+
+		expect(specEnabled).toBe(false)
+	})
+
+	it("writes spec.enabled through az config set", async () => {
+		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-set-${crypto.randomUUID()}.json`
+		await Bun.write(
+			configPath,
+			`${JSON.stringify({ $version: 7, spec: { enabled: true } }, null, 2)}\n`,
+		)
+
+		await Effect.runPromise(
+			cliRunner([
+				"bun",
+				"az",
+				"--config",
+				configPath,
+				"config",
+				"set",
+				"spec.enabled",
+				"false",
+			]).pipe(Effect.provide(BunContext.layer)),
+		)
+
+		const updated = JSON.parse(await Bun.file(configPath).text()) as {
+			spec?: { enabled?: boolean }
+		}
+		expect(updated.spec?.enabled).toBe(false)
 	})
 })
 
@@ -117,6 +292,18 @@ describe("normalizeIssueJsonFlagOrder", () => {
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
 	})
 
+	it("keeps issue list parent filter order unchanged", () => {
+		const argv = ["bun", "az", "issue", "list", "--parent", "AZE-200", "--limit", "5"]
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
+	})
+
+	it("moves issue check options ahead of issue-id when issue-id is first", () => {
+		const argv = ["bun", "az", "issue", "check", "AZE-200", "--limit", "50"]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual(["bun", "az", "issue", "check", "--limit", "50", "AZE-200"])
+	})
+
 	it("moves issue dep add options ahead of positional ids when ids are first", () => {
 		const argv = [
 			"bun",
@@ -144,6 +331,91 @@ describe("normalizeIssueJsonFlagOrder", () => {
 	})
 })
 
+describe("decodeIssueBulkUpdatePayload", () => {
+	it("accepts a bare array payload", async () => {
+		const decoded = await Effect.runPromise(
+			decodeIssueBulkUpdatePayload(
+				JSON.stringify([
+					{
+						id: "dg",
+						status: "blocked",
+						labels: ["agent", "bulk"],
+					},
+				]),
+			),
+		)
+
+		expect(decoded).toEqual([
+			{
+				id: "dg",
+				status: "blocked",
+				labels: ["agent", "bulk"],
+			},
+		])
+	})
+
+	it("accepts an object payload with updates", async () => {
+		const decoded = await Effect.runPromise(
+			decodeIssueBulkUpdatePayload(
+				JSON.stringify({
+					updates: [
+						{
+							id: "dg",
+							notes: "bulk edit",
+						},
+						{
+							id: "dh",
+							parent: "dg",
+						},
+					],
+				}),
+			),
+		)
+
+		expect(decoded).toEqual([
+			{
+				id: "dg",
+				notes: "bulk edit",
+			},
+			{
+				id: "dh",
+				parent: "dg",
+			},
+		])
+	})
+
+	it("rejects an empty payload", async () => {
+		await expect(
+			Effect.runPromise(decodeIssueBulkUpdatePayload(JSON.stringify([]))),
+		).rejects.toThrow("Bulk update input must contain at least one update item.")
+	})
+})
+
+describe("summarizeIssueBulkUpdateResults", () => {
+	it("computes updated and failed counts from per-item results", () => {
+		const summary = summarizeIssueBulkUpdateResults([
+			{
+				index: 0,
+				requestedId: "dg",
+				issueId: "dg",
+				updated: true,
+			},
+			{
+				index: 1,
+				requestedId: "missing",
+				issueId: "missing",
+				updated: false,
+				error: "Issue not found: missing",
+			},
+		])
+
+		expect(summary.requestCount).toBe(2)
+		expect(summary.updatedCount).toBe(1)
+		expect(summary.failedCount).toBe(1)
+		expect(summary.results[1]?.error).toBe("Issue not found: missing")
+	})
+})
+
 describe("resolveCliExecutionMode", () => {
 	it("uses tui mode for bare az launch", () => {
 		expect(resolveCliExecutionMode(["bun", "az"])).toBe("tui")
@@ -152,8 +424,18 @@ describe("resolveCliExecutionMode", () => {
 	it("uses command mode for non-dev subcommands", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
 		expect(
-			resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
+			resolveCliExecutionMode([
+				"bun",
+				"az",
+				"--config",
+				"./.azedarach/config.json",
+				"project",
+				"list",
+			]),
 		).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "config", "set", "spec.enabled", "false"])).toBe(
+			"command",
+		)
 		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
@@ -258,6 +540,20 @@ describe("normalizeCliAliases", () => {
 			"child",
 			"Follow-up",
 		])
+		expect(normalizeCliAliases(["bun", "az", "i", "ck", "AZE-10"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"check",
+			"AZE-10",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "dr", "AZE-10"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"doctor",
+			"AZE-10",
+		])
 		expect(normalizeCliAliases(["bun", "az", "issue", "d", "add", "AZE-1", "AZE-2"])).toEqual([
 			"bun",
 			"az",
@@ -307,6 +603,13 @@ describe("normalizeCliAliases", () => {
 			"AZE-1",
 		])
 		expect(normalizeCliAliases(["bun", "az", "spec", "p", "c"])).toEqual([
+			"bun",
+			"az",
+			"spec",
+			"sync",
+			"c",
+		])
+		expect(normalizeCliAliases(["bun", "az", "spec", "publish", "c"])).toEqual([
 			"bun",
 			"az",
 			"spec",
@@ -453,6 +756,7 @@ describe("formatIssueSummaryLine", () => {
 			issue_type: "task",
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
+			implementations: ["default"],
 		})
 
 		expect(line.includes("\n")).toBe(false)
@@ -460,6 +764,24 @@ describe("formatIssueSummaryLine", () => {
 		expect(line).toContain("status=in_progress")
 		expect(line).toContain("priority=1")
 		expect(line).toContain("type=task")
+	})
+
+	it("includes implementation scope when a non-default assignment should be surfaced", () => {
+		const line = formatIssueSummaryLine(
+			{
+				id: "az-124",
+				title: "Ship ts-only work",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-05T10:00:00.000Z",
+				updated_at: "2026-03-05T11:00:00.000Z",
+				implementations: ["ts-opentui"],
+			},
+			{ showImplementations: true },
+		)
+
+		expect(line).toContain("impl=ts-opentui")
 	})
 })
 
@@ -477,6 +799,7 @@ describe("formatIssueDetailSections", () => {
 			design: "Move options before positional args",
 			acceptance: "description can be updated",
 			notes: "manual repro completed",
+			implementations: ["ts-opentui", "go-bubbletea"],
 			dependencies: [
 				{ id: "AZE-11", dependency_type: "blocks" },
 				{ id: "AZE-12", dependency_type: "related" },
@@ -489,6 +812,7 @@ describe("formatIssueDetailSections", () => {
 			"Design:\nMove options before positional args",
 			"Acceptance:\ndescription can be updated",
 			"Notes:\nmanual repro completed",
+			"Implementations:\nts-opentui, go-bubbletea",
 			"Dependency Counts: blockedBy: 1, related: 1, discoveredFrom: 1",
 			"Dependencies:\nAZE-11, AZE-12, AZE-13",
 		])
@@ -504,6 +828,7 @@ describe("formatIssueDetailSections", () => {
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
 			description: "   ",
+			implementations: ["default"],
 		})
 
 		expect(sections).toEqual([])
@@ -518,6 +843,7 @@ describe("formatIssueDetailSections", () => {
 			issue_type: "task",
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
+			implementations: ["default"],
 			dependencies: [
 				{ id: "AZE-1", dependency_type: "blocks" },
 				{ id: "AZE-1", dependency_type: "related" },
@@ -544,6 +870,7 @@ describe("formatIssueDetailSections", () => {
 			updated_at: "2026-03-05T11:00:00.000Z",
 			dependency_count: 2,
 			dependent_count: 1,
+			implementations: ["default"],
 		})
 
 		expect(sections).toEqual(["Dependencies: 2", "Dependents: 1"])
@@ -558,6 +885,7 @@ describe("formatIssueDetailSections", () => {
 			issue_type: "task",
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
+			implementations: ["default"],
 			dependencies: [
 				{ id: "AZE-11", dependency_type: "blocks" },
 				{ id: "AZE-12", dependency_type: "blocks" },
@@ -587,6 +915,7 @@ describe("formatIssueDetailSections", () => {
 				issue_type: "task",
 				created_at: "2026-03-05T10:00:00.000Z",
 				updated_at: "2026-03-05T11:00:00.000Z",
+				implementations: ["default"],
 			},
 			{
 				linkedSpecRequirements: [
@@ -597,6 +926,10 @@ describe("formatIssueDetailSections", () => {
 						title: "Persist requirements and links",
 						kind: "functional",
 						link_type: "implements",
+						implementations: ["default"],
+						fulfillment_status: "complete",
+						fulfillment_percent: 100,
+						evidence_note: null,
 					},
 					{
 						id: "AZ-AT-2901",
@@ -605,6 +938,10 @@ describe("formatIssueDetailSections", () => {
 						title: "Acceptance path is covered",
 						kind: "acceptance",
 						link_type: "tests",
+						implementations: ["default"],
+						fulfillment_status: "verified",
+						fulfillment_percent: 100,
+						evidence_note: null,
 					},
 				],
 			},
@@ -613,5 +950,69 @@ describe("formatIssueDetailSections", () => {
 		expect(sections).toEqual([
 			"Linked Spec Requirements:\nfr4201 (AZ-FR-4201) [functional] (implements) Persist requirements and links\nat2901 (AZ-AT-2901) [acceptance] (tests) Acceptance path is covered",
 		])
+	})
+})
+
+const makeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): TrackedIssue => ({
+	id,
+	title: `Issue ${id}`,
+	status: "open",
+	priority: 3,
+	issue_type: "task",
+	created_at: "2026-03-08T00:00:00.000Z",
+	updated_at: "2026-03-08T00:00:00.000Z",
+	implementations: ["default"],
+	...overrides,
+})
+
+describe("findLikelyParentChildTrackingMisses", () => {
+	it("flags non-parent-child dependencies to the target parent", () => {
+		const misses = findLikelyParentChildTrackingMisses("GX-1", [
+			makeIssue("GX-2", {
+				dependencies: [{ id: "GX-1", dependency_type: "blocks" }],
+			}),
+			makeIssue("GX-3", {
+				dependencies: [{ id: "GX-1", dependency_type: "parent-child" }],
+			}),
+		])
+
+		expect(misses).toHaveLength(1)
+		expect(misses[0]?.issue.id).toBe("GX-2")
+		expect(misses[0]?.reason).toContain("typed 'blocks' instead of 'parent-child'")
+		expect(misses[0]?.remediateCommand).toBe("az issue update GX-2 --parent GX-1")
+	})
+
+	it("flags issue text references to parent when no parent-child link exists", () => {
+		const misses = findLikelyParentChildTrackingMisses("GX-1", [
+			makeIssue("GX-4", {
+				title: "Follow-up for GX-1 parity fix",
+			}),
+		])
+
+		expect(misses).toHaveLength(1)
+		expect(misses[0]?.issue.id).toBe("GX-4")
+		expect(misses[0]?.reason).toContain("references GX-1")
+	})
+
+	it("ignores closed candidates and unrelated issues", () => {
+		const misses = findLikelyParentChildTrackingMisses("GX-1", [
+			makeIssue("GX-5", {
+				status: "closed",
+				dependencies: [{ id: "GX-1", dependency_type: "blocks" }],
+			}),
+			makeIssue("GX-6", {
+				title: "No mention",
+			}),
+		])
+
+		expect(misses).toHaveLength(0)
+	})
+})
+
+describe("formatParentChildCheckOutput", () => {
+	it("formats no-miss output", () => {
+		expect(formatParentChildCheckOutput("GX-1", [])).toBe(
+			"No likely parent-child tracking misses found for GX-1.",
+		)
 	})
 })

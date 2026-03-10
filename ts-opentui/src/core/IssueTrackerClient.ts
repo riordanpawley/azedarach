@@ -18,8 +18,8 @@ import { BackendSyncRouter } from "./BackendSyncRouter.js"
 import type { IssueSyncError } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import {
-	LocalIssueStore,
 	type ExternalIssueSnapshot,
+	LocalIssueStore,
 	type LocalIssueStoreError,
 	type SyncTarget,
 } from "./LocalIssueStore.js"
@@ -93,6 +93,7 @@ const IssueSchema = Schema.Struct({
 	acceptance_criteria: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	estimate: Schema.Number.pipe(Schema.optional),
 	estimated_minutes: Schema.Number.pipe(Schema.optional),
+	implementations: Schema.Array(Schema.String).pipe(Schema.optional),
 	dependent_count: Schema.Number.pipe(Schema.optional),
 	dependency_count: Schema.Number.pipe(Schema.optional),
 	dependents: Schema.Array(DependencySchema).pipe(Schema.optional),
@@ -117,6 +118,7 @@ export interface Issue {
 	readonly notes?: string
 	readonly acceptance?: string
 	readonly estimate?: number
+	readonly implementations: readonly string[]
 	readonly dependent_count?: number
 	readonly dependency_count?: number
 	readonly dependents?: readonly DependencyRef[]
@@ -127,6 +129,8 @@ export interface IssueListFilters {
 	readonly status?: string
 	readonly priority?: number
 	readonly type?: string
+	readonly parent?: string
+	readonly implementations?: readonly string[]
 }
 
 export type IssueListSortField = "updated_at" | "created_at" | "priority" | "title"
@@ -141,6 +145,39 @@ export interface IssueListOptions {
 
 export interface IssueReadSyncOptions {
 	readonly maxSyncWaitMs?: number
+}
+
+export interface ImplementationRecord {
+	readonly name: string
+	readonly description?: string
+	readonly created_at: string
+	readonly updated_at: string
+	readonly is_default: boolean
+	readonly is_builtin: boolean
+}
+
+export interface ImplementationRegistry {
+	readonly default_implementation: string
+	readonly implicit_default_allowed: boolean
+	readonly implementations: readonly ImplementationRecord[]
+}
+
+const DEFAULT_IMPLEMENTATION = "default"
+
+const normalizeIssueImplementations = (
+	implementations: readonly string[] | undefined,
+): readonly string[] => {
+	const seen = new Set<string>()
+	const normalized: string[] = []
+	for (const implementation of implementations ?? [DEFAULT_IMPLEMENTATION]) {
+		const value = implementation.trim().toLowerCase()
+		if (value.length === 0 || seen.has(value)) {
+			continue
+		}
+		seen.add(value)
+		normalized.push(value)
+	}
+	return normalized.length > 0 ? normalized : [DEFAULT_IMPLEMENTATION]
 }
 
 const parseIssueStatus = (status: string | undefined): IssueStatus | undefined => {
@@ -259,6 +296,7 @@ const normalizeIssue = (issue: IssueRaw): Issue => ({
 	notes: issue.notes ?? undefined,
 	acceptance: issue.acceptance ?? issue.acceptance_criteria ?? undefined,
 	estimate: issue.estimate ?? issue.estimated_minutes,
+	implementations: normalizeIssueImplementations(issue.implementations),
 	dependent_count: issue.dependent_count,
 	dependency_count: issue.dependency_count,
 	dependents: normalizeDependencies(issue.dependents, "dependents", issue.id),
@@ -737,6 +775,7 @@ export interface IssueTrackerClientService {
 			assignee?: string
 			estimate?: number
 			labels?: string[]
+			implementations?: readonly string[]
 			parent?: string
 		},
 		cwd?: string,
@@ -853,11 +892,80 @@ export interface IssueTrackerClientService {
 		assignee?: string
 		estimate?: number
 		labels?: string[]
+		implementations?: readonly string[]
 		parent?: string
 		cwd?: string
 	}) => Effect.Effect<
 		Issue,
 		IssueTrackerError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly listImplementations: (
+		cwd?: string,
+	) => Effect.Effect<
+		readonly ImplementationRecord[],
+		IssueTrackerError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly showImplementation: (
+		name: string,
+		cwd?: string,
+	) => Effect.Effect<
+		ImplementationRecord | undefined,
+		IssueTrackerError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly getImplementationRegistry: (
+		cwd?: string,
+	) => Effect.Effect<
+		ImplementationRegistry,
+		IssueTrackerError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly createImplementation: (params: {
+		name: string
+		description?: string
+		setDefault?: boolean
+		cwd?: string
+	}) => Effect.Effect<
+		ImplementationRecord,
+		IssueTrackerError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly updateImplementation: (
+		currentName: string,
+		fields: {
+			name?: string
+			description?: string | null
+			setDefault?: boolean
+		},
+		cwd?: string,
+	) => Effect.Effect<
+		ImplementationRecord,
+		IssueTrackerError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly deleteImplementation: (
+		name: string,
+		cwd?: string,
+	) => Effect.Effect<
+		boolean,
+		IssueTrackerError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
+
+	readonly setDefaultImplementation: (
+		name: string,
+		cwd?: string,
+	) => Effect.Effect<
+		ImplementationRegistry,
+		IssueTrackerError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -1278,6 +1386,9 @@ const buildListCommandArgs = (
 	if (filters?.type) {
 		args.push("--type", filters.type)
 	}
+	if (filters?.parent) {
+		args.push("--parent", filters.parent)
+	}
 
 	return args
 }
@@ -1595,17 +1706,15 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						IssueTrackerError,
 						CommandExecutor.CommandExecutor
 					> =>
-						linearSdk
-							.issues(buildLinearIssuesListPageQuery(afterCursor))
-							.pipe(
-								Effect.mapError(
-									(error) =>
-										new IssueTrackerError({
-											message: error.message,
-											command: "linear-sdk issues",
-										}),
-								),
-							)
+						linearSdk.issues(buildLinearIssuesListPageQuery(afterCursor)).pipe(
+							Effect.mapError(
+								(error) =>
+									new IssueTrackerError({
+										message: error.message,
+										command: "linear-sdk issues",
+									}),
+							),
+						)
 
 					const collectPages = (
 						afterCursor: string | null | undefined,
@@ -2667,6 +2776,15 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						)
 						return [...issues]
 					}
+					if (filters?.implementations !== undefined && filters.implementations.length > 0) {
+						return yield* Effect.fail(
+							new IssueTrackerError({
+								message:
+									"Issue implementation filters require the local-first tracker path in ts-opentui.",
+								command: "list",
+							}),
+						)
+					}
 
 					const pageSize = clampPositiveInt(
 						options?.pageSize ?? DEFAULT_ISSUE_LIST_PAGE_SIZE,
@@ -2875,6 +2993,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					assignee?: string
 					estimate?: number
 					labels?: string[]
+					implementations?: readonly string[]
 					parent?: string
 				},
 				cwd?: string,
@@ -2895,6 +3014,15 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							)
 						}
 						return
+					}
+					if (fields.implementations !== undefined && fields.implementations.length > 0) {
+						return yield* Effect.fail(
+							new IssueTrackerError({
+								message:
+									"Issue implementations require the local-first tracker path in ts-opentui.",
+								command: `update ${id}`,
+							}),
+						)
 					}
 
 					const args: string[] = ["update", id]
@@ -3113,6 +3241,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				assignee?: string
 				estimate?: number
 				labels?: string[]
+				implementations?: readonly string[]
 				parent?: string
 				cwd?: string
 			}) =>
@@ -3132,11 +3261,21 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 									assignee: params.assignee,
 									estimate: params.estimate,
 									labels: params.labels,
+									implementations: params.implementations,
 									parent: params.parent,
 								},
 								mutationSyncTarget,
 								effectiveCwd,
 							),
+						)
+					}
+					if (params.implementations !== undefined && params.implementations.length > 0) {
+						return yield* Effect.fail(
+							new IssueTrackerError({
+								message:
+									"Issue implementations require the local-first tracker path in ts-opentui.",
+								command: `create ${params.title}`,
+							}),
 						)
 					}
 
@@ -3176,6 +3315,90 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					// tracker create returns a single issue object (not an array)
 					const parsed = yield* parseJson(IssueSchema, output)
 					return normalizeIssue(parsed)
+				}),
+
+			listImplementations: (cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const implementations = yield* fromLocalStore(
+						"local-store listImplementations",
+						localIssueStore.listImplementations(effectiveCwd),
+					)
+					return [...implementations]
+				}),
+
+			showImplementation: (name: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					return yield* fromLocalStore(
+						"local-store showImplementation",
+						localIssueStore.showImplementation(name, effectiveCwd),
+					)
+				}),
+
+			getImplementationRegistry: (cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					return yield* fromLocalStore(
+						"local-store getImplementationRegistry",
+						localIssueStore.getImplementationRegistry(effectiveCwd),
+					)
+				}),
+
+			createImplementation: (params: {
+				name: string
+				description?: string
+				setDefault?: boolean
+				cwd?: string
+			}) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(params.cwd)
+					return yield* fromLocalStore(
+						"local-store createImplementation",
+						localIssueStore.createImplementation(
+							{
+								name: params.name,
+								description: params.description,
+								setDefault: params.setDefault,
+							},
+							effectiveCwd,
+						),
+					)
+				}),
+
+			updateImplementation: (
+				currentName: string,
+				fields: {
+					name?: string
+					description?: string | null
+					setDefault?: boolean
+				},
+				cwd?: string,
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					return yield* fromLocalStore(
+						"local-store updateImplementation",
+						localIssueStore.updateImplementation(currentName, fields, effectiveCwd),
+					)
+				}),
+
+			deleteImplementation: (name: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					return yield* fromLocalStore(
+						"local-store deleteImplementation",
+						localIssueStore.deleteImplementation(name, effectiveCwd),
+					)
+				}),
+
+			setDefaultImplementation: (name: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					return yield* fromLocalStore(
+						"local-store setDefaultImplementation",
+						localIssueStore.setDefaultImplementation(name, effectiveCwd),
+					)
 				}),
 
 			delete: (id: string, cwd?: string) =>
@@ -3429,6 +3652,7 @@ export const update = (
 		assignee?: string
 		estimate?: number
 		labels?: string[]
+		implementations?: readonly string[]
 	},
 	cwd?: string,
 ): Effect.Effect<
@@ -3497,6 +3721,7 @@ export const create = (params: {
 	assignee?: string
 	estimate?: number
 	labels?: string[]
+	implementations?: readonly string[]
 	parent?: string
 	cwd?: string
 }): Effect.Effect<

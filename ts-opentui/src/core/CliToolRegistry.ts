@@ -112,14 +112,14 @@ const claudeToolDefinition: CliToolDefinition = {
 	sessionNamePrefix: "claude",
 	hookStrategy: "hooks+pty",
 
-    buildCommand: (options) => {
-        const parts: string[] = []
+	buildCommand: (options) => {
+		const parts: string[] = []
 
-        if (options.issueId) {
-            parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
-        }
+		if (options.issueId) {
+			parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
+		}
 
-        parts.push("claude")
+		parts.push("claude")
 
 		// -c continues the most recent conversation in the current directory
 		if (options.continueConversation) {
@@ -211,14 +211,14 @@ const codexToolDefinition: CliToolDefinition = {
 	sessionNamePrefix: "codex",
 	hookStrategy: "pty",
 
-    buildCommand: (options) => {
-        const parts: string[] = []
+	buildCommand: (options) => {
+		const parts: string[] = []
 
-        if (options.issueId) {
-            parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
-        }
+		if (options.issueId) {
+			parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
+		}
 
-        parts.push("codex")
+		parts.push("codex")
 
 		if (options.model) {
 			parts.push(`--model ${options.model}`)
@@ -238,7 +238,9 @@ const codexToolDefinition: CliToolDefinition = {
 		if (options.continueConversation) {
 			parts.push("resume", "--last")
 		} else if (options.initialPrompt) {
-			parts.push(`"${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
+			// Codex declares `--image <FILE>...`, so terminate option parsing before
+			// the prompt to keep the positional argument from being consumed as another image.
+			parts.push("--", `"${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
 		}
 
 		return parts.join(" ")

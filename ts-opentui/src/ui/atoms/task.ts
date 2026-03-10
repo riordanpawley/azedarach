@@ -9,6 +9,7 @@ import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
 import type { CliTool } from "../../config/schema.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
+import { getIssueCreateImplementations } from "../../core/IssueImplementations.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { stripAnsi } from "../../lib/ansi.js"
 import { BoardService } from "../../services/BoardService.js"
@@ -178,7 +179,13 @@ export const moveTasksAtom = appRuntime.fn(
  *        await createTask({ title: "New task", type: "task", priority: 2 })
  */
 export const createTaskAtom = appRuntime.fn(
-	(params: { title: string; type?: string; priority?: number; description?: string }) =>
+	(params: {
+		title: string
+		type?: string
+		priority?: number
+		description?: string
+		implementations?: readonly string[]
+	}) =>
 		Effect.gen(function* () {
 			const client = yield* IssueTrackerClient
 			const board = yield* BoardService
@@ -188,7 +195,16 @@ export const createTaskAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const issue = yield* client.create(params)
+			const implementations = yield* getIssueCreateImplementations({
+				requestedImplementations: params.implementations,
+			})
+			const issue = yield* client.create({
+				title: params.title,
+				type: params.type,
+				priority: params.priority,
+				description: params.description,
+				implementations,
+			})
 
 			yield* board.upsertIssueFromMutation(issue)
 			yield* navigation.jumpToTask(issue.id)
@@ -209,7 +225,7 @@ export const forkCreateChildAtom = appRuntime.fn(
 	}: {
 		parentEpicId: string
 		sourceTaskId: string
-		params: { title: string; type: string; priority: number }
+		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
 			const client = yield* IssueTrackerClient
@@ -220,7 +236,15 @@ export const forkCreateChildAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const issue = yield* client.create(params)
+			const implementations = yield* getIssueCreateImplementations({
+				requestedImplementations: params.implementations,
+			})
+			const issue = yield* client.create({
+				title: params.title,
+				type: params.type,
+				priority: params.priority,
+				implementations,
+			})
 			const linkResult = yield* client.update(issue.id, { parent: parentEpicId }).pipe(
 				Effect.map(() => ({ linked: true as const })),
 				Effect.catchAll((error) =>
@@ -267,7 +291,7 @@ export const forkCreateEpicAtom = appRuntime.fn(
 		params,
 	}: {
 		sourceTaskId: string
-		params: { title: string; type: string; priority: number }
+		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
 			const client = yield* IssueTrackerClient
@@ -277,7 +301,15 @@ export const forkCreateEpicAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const epic = yield* client.create({ ...params, type: "epic" })
+			const implementations = yield* getIssueCreateImplementations({
+				requestedImplementations: params.implementations,
+			})
+			const epic = yield* client.create({
+				title: params.title,
+				type: "epic",
+				priority: params.priority,
+				implementations,
+			})
 			yield* board.upsertIssueFromMutation(epic)
 
 			const reparentResult = yield* client.update(sourceTaskId, { parent: epic.id }).pipe(
@@ -314,7 +346,11 @@ export const forkCreateEpicAtom = appRuntime.fn(
 			yield* overlay.push({
 				_tag: "create",
 				title: "Create Forked Task",
-				initial: { type: "task", priority: params.priority },
+				initial: {
+					type: "task",
+					priority: params.priority,
+					implementations: epic.implementations,
+				},
 				context: { _tag: "forkChild", parentEpicId: epic.id, sourceTaskId },
 			})
 		}).pipe(
@@ -454,11 +490,13 @@ Return ONLY the JSON object, no explanation or markdown.`
 				: 2
 
 		// Phase 2: Create the issue directly via IssueTrackerClient
+		const implementations = yield* getIssueCreateImplementations()
 		const createdIssue = yield* issueTrackerClient.create({
 			title: parsed.title,
 			type: taskType,
 			priority,
 			description: parsed.description,
+			implementations,
 		})
 
 		yield* board.upsertIssueFromMutation(createdIssue)

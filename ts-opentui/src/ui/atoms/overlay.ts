@@ -107,6 +107,7 @@ export const pushOverlayAtom = appRuntime.fn(
 						readonly title?: string
 						readonly type?: string
 						readonly priority?: number
+						readonly implementations?: readonly string[]
 					}
 					readonly lockType?: boolean
 					readonly context?:
@@ -136,6 +137,7 @@ export const pushOverlayAtom = appRuntime.fn(
 			  }
 			| { readonly _tag: "diagnostics" }
 			| { readonly _tag: "projectSelector" }
+			| { readonly _tag: "waitingSessionPicker" }
 			| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 			| {
 					readonly _tag: "devServerMenu"
@@ -279,7 +281,7 @@ export const toggleCurrentSettingAtom = appRuntime.fn(() =>
 )
 
 /**
- * Open settings in editor atom - open .azedarach.json in $EDITOR
+ * Open settings in editor atom - open project config in $EDITOR
  *
  * Returns configPath and backupContent for post-edit validation.
  *

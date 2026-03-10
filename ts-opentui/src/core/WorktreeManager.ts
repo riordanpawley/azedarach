@@ -28,6 +28,7 @@ import {
 	generateWorktreeSkill,
 	type HookConfigOptions,
 } from "./hooks.js"
+import { issueIdsEqualForLookup } from "./paths.js"
 
 // ============================================================================
 // Types
@@ -42,6 +43,26 @@ export interface Worktree {
 	readonly branch: string
 	readonly isLocked: boolean
 	readonly head: string
+}
+
+export const findWorktreeForIssue = (
+	worktrees: ReadonlyArray<Worktree>,
+	options: {
+		readonly issueId: string
+		readonly expectedWorktreePath: string
+		readonly pathMatches: (leftPath: string, rightPath: string) => boolean
+	},
+): Worktree | undefined => {
+	const matchByIssueId = worktrees.find((worktree) =>
+		issueIdsEqualForLookup(worktree.issueId, options.issueId),
+	)
+	if (matchByIssueId) {
+		return matchByIssueId
+	}
+
+	return worktrees.find((worktree) =>
+		options.pathMatches(worktree.path, options.expectedWorktreePath),
+	)
 }
 
 /**
@@ -535,12 +556,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							),
 						),
 					)
-				const parsed = yield* Effect.try({
-					try: () => JSON.parse(raw) as unknown,
-					catch: () => ({}),
-				})
+				const parsed = yield* Schema.decode(
+					Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+				)(raw).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed({})),
+						),
+					),
+				)
 
-				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				if (Array.isArray(parsed)) {
 					return {}
 				}
 
@@ -779,14 +805,11 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								),
 							),
 						)
-					existingSettings = yield* Effect.try({
-						try: () => JSON.parse(content) as Record<string, unknown>,
-						catch: () => ({}) as Record<string, unknown>,
-					}).pipe(
+					existingSettings = yield* Schema.decode(
+						Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+					)(content).pipe(
 						Effect.catchAll((error) =>
-							Effect.logWarning(error).pipe(
-								Effect.zipRight(Effect.succeed({} as Record<string, unknown>)),
-							),
+							Effect.logWarning(error).pipe(Effect.zipRight(Effect.succeed({}))),
 						),
 					)
 				}
@@ -1156,7 +1179,12 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						yield* refreshWorktrees(projectPath)
 						const allWorktrees = yield* Ref.get(worktreesRef)
 						const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-						const existingWorktree = projectWorktrees.get(issueId)
+						const worktreesBeforeCreate = Array.from(projectWorktrees.values())
+						const existingWorktree = findWorktreeForIssue(worktreesBeforeCreate, {
+							issueId,
+							expectedWorktreePath: worktreePath,
+							pathMatches: pathsEqualForLookup,
+						})
 
 						if (existingWorktree) {
 							// Idempotent: worktree already exists
@@ -1176,8 +1204,6 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 									return resolvedBaseBranch
 								})
 						})()
-
-						const worktreesBeforeCreate = Array.from(projectWorktrees.values())
 
 						const conflictingByPath = worktreesBeforeCreate.find(
 							(worktree) =>
@@ -1416,10 +1442,14 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					yield* forceRefreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					const worktree = projectWorktrees.get(issueId)
+					const expectedWorktreePath = getWorktreePath(projectPath, issueId)
+					const worktree = findWorktreeForIssue(Array.from(projectWorktrees.values()), {
+						issueId,
+						expectedWorktreePath,
+						pathMatches: pathsEqualForLookup,
+					})
 
 					if (!worktree) {
-						const expectedWorktreePath = getWorktreePath(projectPath, issueId)
 						const stalePathExists = yield* fs
 							.exists(expectedWorktreePath)
 							.pipe(Effect.catchAll(() => Effect.succeed(false)))
@@ -1469,7 +1499,14 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					yield* refreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					return projectWorktrees.has(issueId)
+					const expectedWorktreePath = getWorktreePath(projectPath, issueId)
+					return (
+						findWorktreeForIssue(Array.from(projectWorktrees.values()), {
+							issueId,
+							expectedWorktreePath,
+							pathMatches: pathsEqualForLookup,
+						}) !== undefined
+					)
 				}),
 
 			get: (options: { issueId: string; projectPath: string }) =>
@@ -1478,7 +1515,14 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					yield* refreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					return projectWorktrees.get(issueId) || null
+					const expectedWorktreePath = getWorktreePath(projectPath, issueId)
+					return (
+						findWorktreeForIssue(Array.from(projectWorktrees.values()), {
+							issueId,
+							expectedWorktreePath,
+							pathMatches: pathsEqualForLookup,
+						}) ?? null
+					)
 				}),
 
 			mergeClaudeLocalSettings,

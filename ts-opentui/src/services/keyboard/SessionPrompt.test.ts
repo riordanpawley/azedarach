@@ -2,57 +2,33 @@ import { describe, expect, it } from "bun:test"
 import { buildStartWorkPrompt } from "./SessionPrompt.js"
 
 describe("session prompts", () => {
-	it("uses az prime bootstrap in start prompt", () => {
+	it("uses a concise task prompt that boots through az prime", () => {
 		const prompt = buildStartWorkPrompt({
-			taskId: "az-f4625d",
+			taskId: "jk",
 			issueType: "task",
-			title: "Fix prompt backend",
-			hasWorktree: false,
-			attachmentPaths: [],
-			localMode: false,
+			title: "Register ts-opentui and go-bubbletea implementations",
 		})
 
-		expect(prompt).toContain("work on issue az-f4625d")
+		expect(prompt).toContain(
+			"work on issue jk (task): Register ts-opentui and go-bubbletea implementations",
+		)
 		expect(prompt).toContain("Start by running `az prime`.")
-		expect(prompt).toContain("`AZEDARACH_ISSUE_ID` is already set for this session")
-		expect(prompt).toContain("`az issue get az-f4625d`")
-		expect(prompt).toContain(
-			"Before implementing behavior changes, inspect relevant `az spec` requirements/links.",
-		)
-		expect(prompt).toContain(
-			"After implementing behavior changes, verify compliance against linked spec and update requirement/link records when scope changes.",
-		)
-		expect(prompt).not.toContain("tracker show")
-		expect(prompt).not.toContain("linear-cli")
+		expect(prompt).toContain("continue the task using the context it prints")
+		expect(prompt).not.toContain("`AZEDARACH_ISSUE_ID` is already set")
+		expect(prompt).not.toContain("`az issue get jk`")
+		expect(prompt).not.toContain("`az spec` requirement/link records")
 	})
 
-	it("adds local workflow guardrails when local mode is enabled", () => {
-		const prompt = buildStartWorkPrompt({
-			taskId: "ar",
-			issueType: "task",
-			title: "Keep local workflow local",
-			hasWorktree: false,
-			attachmentPaths: [],
-			localMode: true,
-		})
-
-		expect(prompt).toContain("Local workflow mode guardrails:")
-		expect(prompt).toContain("Do not use `git -C [path]` unless intentionally targeting")
-		expect(prompt).toContain("Do not run remote cleanup/sync commands unless explicitly asked.")
-	})
-
-	it("sanitizes tag-like and control-character input in prompt titles", () => {
+	it("sanitizes and truncates long titles to keep the startup prompt short", () => {
 		const prompt = buildStartWorkPrompt({
 			taskId: "ez",
 			issueType: "task",
-			title: "Fix parser <image name=[Image #1]>\nwith weird chars",
-			hasWorktree: false,
-			attachmentPaths: [],
-			localMode: false,
+			title: `Fix parser <image name=[Image #1]> ${"very long ".repeat(30)}`,
 		})
 
-		expect(prompt).toContain("Fix parser [image name=[Image #1]] with weird chars")
+		expect(prompt).toContain("Fix parser [image name=[Image #1]]")
 		expect(prompt).not.toContain("<image")
-		expect(prompt).not.toContain("\nwith weird chars")
+		expect(prompt).toContain("...")
+		expect(prompt.length).toBeLessThan(320)
 	})
 })

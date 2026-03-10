@@ -1,17 +1,17 @@
 import { describe, expect, it } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import {
-	buildLinearIssuesListPageQuery,
 	buildLinearFallbackSnapshots,
+	buildLinearIssuesListPageQuery,
 	collectLinearFallbackIssuesById,
 	extractJsonPayload,
 	getLinearCommandPerfMetadata,
 	getSyncTargetForBackend,
+	type Issue,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
 	resolveSyncProjectPathValue,
 	shouldUseLinearReadFallback,
-	type Issue,
 	withIssueDbTiming,
 } from "./IssueTrackerClient.js"
 
@@ -118,7 +118,18 @@ describe("extractJsonPayload", () => {
 			'[{"id":"AZE-1","title":"Board load","state":{"name":"Backlog"}}]\n' +
 			"process list refresh finished"
 
-		expect(JSON.parse(extractJsonPayload(output))).toEqual([
+		const parsed = Schema.decodeUnknownSync(
+			Schema.parseJson(
+				Schema.Array(
+					Schema.Struct({
+						id: Schema.String,
+						title: Schema.String,
+						state: Schema.Struct({ name: Schema.String }),
+					}),
+				),
+			),
+		)(extractJsonPayload(output))
+		expect(parsed).toEqual([
 			{
 				id: "AZE-1",
 				title: "Board load",
@@ -264,6 +275,7 @@ describe("buildLinearFallbackSnapshots", () => {
 		issue_type: "task",
 		created_at: now,
 		updated_at: now,
+		implementations: ["default"],
 		...overrides,
 	})
 
@@ -338,6 +350,7 @@ describe("collectLinearFallbackIssuesById", () => {
 		issue_type: "task",
 		created_at: now,
 		updated_at: now,
+		implementations: ["default"],
 	})
 
 	it("keeps successful fallback issues when some IDs fail and preserves requested order", async () => {

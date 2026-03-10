@@ -1,6 +1,9 @@
 /**
  * HelpOverlay component - modal showing all keybindings
  */
+import { Result } from "@effect-atom/atom"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { appConfigAtom } from "./atoms/config.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -31,6 +34,9 @@ const SectionHeader = ({ title }: { title: string }) => (
  * grouped by category. Uses Catppuccin theme colors.
  */
 export const HelpOverlay = () => {
+	const appConfigResult = useAtomValue(appConfigAtom)
+	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
+
 	return (
 		<box
 			position="absolute"
@@ -73,10 +79,10 @@ export const HelpOverlay = () => {
 				<KeyLine keys="gg" description="Go to first task" />
 				<KeyLine keys="ge" description="Go to last task" />
 				<KeyLine keys="gh" description="Go to first column" />
-                <KeyLine keys="gl" description="Go to last column" />
-                <KeyLine keys="gw" description="Jump mode (shows labels)" />
-                <KeyLine keys="gs" description="Enter Spec workspace" />
-                <text> </text>
+				<KeyLine keys="gl" description="Go to last column" />
+				<KeyLine keys="gw" description="Jump mode (shows labels)" />
+				{specEnabled && <KeyLine keys="gs" description="Enter Spec workspace" />}
+				<text> </text>
 
 				{/* Modes section */}
 				<SectionHeader title="Modes:" />
@@ -98,10 +104,10 @@ export const HelpOverlay = () => {
 				{/* Action mode section */}
 				<SectionHeader title="Action Mode (Space+):" />
 				<KeyLine keys="s / S / !" description="Start / Start+work / Yolo" />
-                <KeyLine keys="a / A" description="Attach external / Attach inline" />
-                <KeyLine keys="p / R / x" description="Pause / Resume / Stop session" />
-                <KeyLine keys="r / C-r" description="Toggle / Restart dev server" />
-                <KeyLine keys="H" description="Open Helix editor" />
+				<KeyLine keys="a / A" description="Attach external / Attach inline" />
+				<KeyLine keys="p / R / x" description="Pause / Resume / Stop session" />
+				<KeyLine keys="r / C-r" description="Toggle / Restart dev server" />
+				<KeyLine keys="H" description="Open Helix editor" />
 				<KeyLine keys="h / l" description="Move task(s) left / right" />
 				<KeyLine keys="e / E" description="Edit ($EDITOR) / Edit (AI)" />
 				<KeyLine keys="i" description="Attach image" />
@@ -111,7 +117,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="m / M" description="Merge / Abort merge" />
 				<KeyLine keys="b" description="Merge bead into another bead" />
 				<KeyLine keys="u" description="Update from main" />
-				<KeyLine keys="d / D" description="Delete worktree / Delete bead" />
+				<KeyLine keys="d / D" description="Cleanup worktree + branch / Delete bead" />
 				<text> </text>
 
 				{/* Create/Edit section */}
@@ -134,19 +140,24 @@ export const HelpOverlay = () => {
 				<KeyLine keys="0-4" description="Toggle P0-P4 priority" />
 				<KeyLine keys="o/i/b/d" description="Open / In progress / Blocked / Closed" />
 				<KeyLine keys="c" description="Clear all filters" />
-                <KeyLine keys="Esc / q" description="Exit filter mode" />
-                <text> </text>
+				<KeyLine keys="Esc / q" description="Exit filter mode" />
+				<text> </text>
 
-                {/* Spec workspace section */}
-                <SectionHeader title="Spec Workspace (gs):" />
-                <KeyLine keys="Tab" description="Cycle Requirements/Coverage/Publish" />
-                <KeyLine keys="Esc / q" description="Return to board view" />
-                <text> </text>
+				{/* Spec workspace section */}
+				{specEnabled && (
+					<>
+						<SectionHeader title="Spec Workspace (gs):" />
+						<KeyLine keys="Tab" description="Cycle Requirements/Coverage/Parity/Publish" />
+						<KeyLine keys="[ / ]" description="Change parity implementation" />
+						<KeyLine keys="Esc / q" description="Return to board view" />
+						<text> </text>
+					</>
+				)}
 
-                {/* General section */}
-                <SectionHeader title="General:" />
-                <KeyLine keys="Enter" description="Show task details / Enter epic" />
-                <KeyLine keys="Tab" description="Toggle board view (Kanban / Compact)" />
+				{/* General section */}
+				<SectionHeader title="General:" />
+				<KeyLine keys="Enter" description="Show task details / Enter epic" />
+				<KeyLine keys="Tab" description="Toggle board view (Kanban / Compact)" />
 				<KeyLine keys="a" description="Toggle VC auto-pilot" />
 				<KeyLine keys="d" description="Show diagnostics" />
 				<KeyLine keys="s" description="Show settings" />
