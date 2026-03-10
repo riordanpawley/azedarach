@@ -1693,7 +1693,24 @@ const specLintHandler = (args: {
 		}
 	})
 
+type SpecSyncTarget = "md" | "linear" | "all"
+
+const parseSpecSyncTarget = (target: Option.Option<string>) =>
+	Effect.gen(function* () {
+		const normalized = Option.match(target, {
+			onNone: () => "md",
+			onSome: (value) => value.trim().toLowerCase(),
+		})
+		if (normalized === "md" || normalized === "markdown") return "md" as const
+		if (normalized === "linear") return "linear" as const
+		if (normalized === "all") return "all" as const
+		return yield* Effect.fail(
+			new Error(`Invalid sync target '${normalized}'. Expected one of: md, linear, all.`),
+		)
+	})
+
 const specSyncHandler = (args: {
+	readonly target: Option.Option<string>
 	readonly outDir: Option.Option<string>
 	readonly check: boolean
 	readonly projectDir: Option.Option<string>
@@ -1703,8 +1720,32 @@ const specSyncHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const target = yield* parseSpecSyncTarget(args.target)
 
 		const specService = yield* SpecService
+		if (args.check && target !== "md") {
+			return yield* Effect.fail(
+				new Error("--check is supported only for --target md (or default target)."),
+			)
+		}
+
+		if (target === "linear") {
+			const outcome = yield* specService.publish(explicitProjectDir)
+			if (args.json) {
+				yield* Console.log(JSON.stringify(outcome, null, 2))
+				return
+			}
+			yield* Console.log(
+				`Spec sync linear ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
+			)
+			for (const documentOutcome of outcome.outcomes) {
+				yield* Console.log(
+					`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
+				)
+			}
+			return
+		}
+
 		const syncResult = yield* specService.syncMarkdown(
 			{
 				outDir: Option.getOrUndefined(args.outDir),
@@ -1712,19 +1753,52 @@ const specSyncHandler = (args: {
 			},
 			explicitProjectDir,
 		)
+		if (target === "md") {
+			if (args.json) {
+				yield* Console.log(JSON.stringify(syncResult, null, 2))
+			} else {
+				yield* Console.log(
+					`Spec sync md ${syncResult.check ? "check" : "write"}: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+				)
+				for (const document of syncResult.documents) {
+					yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
+				}
+			}
+
+			if (syncResult.check && !syncResult.ok) {
+				return yield* Effect.fail(new Error("Spec markdown snapshots are out of sync."))
+			}
+			return
+		}
+
+		const outcome = yield* specService.publish(explicitProjectDir)
 		if (args.json) {
-			yield* Console.log(JSON.stringify(syncResult, null, 2))
+			yield* Console.log(
+				JSON.stringify(
+					{
+						target: "all",
+						markdown: syncResult,
+						linear: outcome,
+					},
+					null,
+					2,
+				),
+			)
 		} else {
 			yield* Console.log(
-				`Spec sync ${syncResult.check ? "check" : "write"}: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+				`Spec sync md write: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
 			)
 			for (const document of syncResult.documents) {
 				yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
 			}
-		}
-
-		if (syncResult.check && !syncResult.ok) {
-			return yield* Effect.fail(new Error("Spec markdown snapshots are out of sync."))
+			yield* Console.log(
+				`Spec sync linear ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
+			)
+			for (const documentOutcome of outcome.outcomes) {
+				yield* Console.log(
+					`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
+				)
+			}
 		}
 	})
 
@@ -2292,25 +2366,16 @@ const specPublishRunHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(resolverCwd)
-
-		const specService = yield* SpecService
-		const outcome = yield* specService.publish(explicitProjectDir)
-		if (args.json) {
-			yield* Console.log(JSON.stringify(outcome, null, 2))
-			return
+		if (!args.json) {
+			yield* Console.log("Deprecated: use `az spec sync --target linear`.")
 		}
-
-		yield* Console.log(
-			`Publish ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
-		)
-		for (const documentOutcome of outcome.outcomes) {
-			yield* Console.log(
-				`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
-			)
-		}
+		return yield* specSyncHandler({
+			target: Option.some("linear"),
+			outDir: Option.none(),
+			check: false,
+			projectDir: args.projectDir,
+			json: args.json,
+		})
 	})
 
 /**
@@ -4151,7 +4216,7 @@ const specPublishRunCommand = Command.make(
 		),
 	},
 	specPublishRunHandler,
-).pipe(Command.withDescription("Run one-way spec publish to Linear project documents"))
+).pipe(Command.withDescription("Deprecated alias for `az spec sync --target linear`"))
 
 const specPublishConfigCommand = Command.make(
 	"config",
@@ -4207,7 +4272,7 @@ const specPublishConfigCommand = Command.make(
 const specPublishCommand = Command.make("publish", {}, () =>
 	Console.log("Usage: az spec publish [run|config] ..."),
 ).pipe(
-	Command.withDescription("Spec publish operations"),
+	Command.withDescription("Spec publish operations (deprecated export alias; use `az spec sync`)"),
 	Command.withSubcommands([specPublishRunCommand, specPublishConfigCommand]),
 )
 
@@ -4243,6 +4308,11 @@ const specLintCommand = Command.make(
 const specSyncCommand = Command.make(
 	"sync",
 	{
+		target: Options.text("target").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Sync target: md|linear|all (default: md)"),
+		),
 		outDir: Options.text("out-dir").pipe(
 			Options.withAlias("o"),
 			Options.optional,
@@ -4259,19 +4329,21 @@ const specSyncCommand = Command.make(
 		),
 	},
 	specSyncHandler,
-).pipe(Command.withDescription("Sync canonical markdown snapshots from spec store"))
+).pipe(Command.withDescription("Sync spec exports to markdown and/or Linear"))
 
 const specCommand = Command.make("spec", {}, () =>
-	Console.log("Usage: az spec [req|link|publish|read|lint|sync] ..."),
+	Console.log("Usage: az spec [req|link|read|lint|sync] ..."),
 ).pipe(
-	Command.withDescription("Spec requirement/link/lint/sync/publish operations"),
+	Command.withDescription(
+		"Spec requirement/link/read/lint/sync operations (`publish` remains as deprecated alias)",
+	),
 	Command.withSubcommands([
 		specReqCommand,
 		specLinkCommand,
-		specPublishCommand,
 		specReadCommand,
 		specLintCommand,
 		specSyncCommand,
+		specPublishCommand,
 	]),
 )
 
