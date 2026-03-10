@@ -15,6 +15,7 @@ import {
 	resolveLinearSdkEventsTickerBehavior,
 	resolveLinearSdkPollingFallbackHealthMessage,
 	resolveLinearSdkPollingFallbackToastMessage,
+	resolveRetainedTaskGitState,
 } from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
@@ -303,5 +304,55 @@ describe("resolveHasWorktreeFlag", () => {
 				worktreeInventoryLoaded: false,
 			}),
 		).toBe(true)
+	})
+})
+
+describe("resolveRetainedTaskGitState", () => {
+	it("clears persisted git state when there is no worktree and no active session", () => {
+		expect(
+			resolveRetainedTaskGitState({
+				hasWorktree: undefined,
+				sessionState: "idle",
+				source: {
+					hasMergeConflict: true,
+					gitBehindCount: 3,
+					hasUncommittedChanges: true,
+					gitAdditions: 20,
+					gitDeletions: 5,
+				},
+			}),
+		).toEqual({
+			hasMergeConflict: false,
+			gitStatus: {
+				gitBehindCount: undefined,
+				hasUncommittedChanges: undefined,
+				gitAdditions: undefined,
+				gitDeletions: undefined,
+			},
+		})
+	})
+
+	it("retains git state for tasks with a confirmed worktree", () => {
+		expect(
+			resolveRetainedTaskGitState({
+				hasWorktree: true,
+				sessionState: "idle",
+				source: {
+					hasMergeConflict: true,
+					gitBehindCount: 3,
+					hasUncommittedChanges: true,
+					gitAdditions: 20,
+					gitDeletions: 5,
+				},
+			}),
+		).toEqual({
+			hasMergeConflict: true,
+			gitStatus: {
+				gitBehindCount: 3,
+				hasUncommittedChanges: true,
+				gitAdditions: 20,
+				gitDeletions: 5,
+			},
+		})
 	})
 })
