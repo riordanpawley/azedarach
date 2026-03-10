@@ -18,12 +18,36 @@ type LinkedSpecRequirement = {
 	readonly title: string
 	readonly kind: string
 	readonly link_type: string
+	readonly implementations: readonly string[]
+}
+
+export interface PrimeImplementationContext {
+	readonly implementations: readonly string[]
 }
 
 export const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
 
-export const formatIssueSummaryLine = (issue: TrackedIssue): string =>
-	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
+const shouldShowIssueImplementations = (
+	issue: TrackedIssue,
+	showImplementations: boolean | undefined,
+): boolean => {
+	const implementations = issue.implementations ?? []
+	return (
+		(showImplementations === true && implementations.length > 0) ||
+		implementations.length > 1 ||
+		implementations.some((implementation) => implementation !== "default")
+	)
+}
+
+export const formatIssueSummaryLine = (
+	issue: TrackedIssue,
+	options?: {
+		readonly showImplementations?: boolean
+	},
+): string => {
+	const implementations = issue.implementations ?? []
+	return `${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type}${shouldShowIssueImplementations(issue, options?.showImplementations) ? ` impl=${implementations.join(",")}` : ""} updated_at=${issue.updated_at}]`
+}
 
 const normalizeIssueTextField = (value: string | undefined): string | undefined => {
 	const normalized = value?.trim()
@@ -145,10 +169,19 @@ const formatIssueLinkedSpecSection = (
 	return `Linked Spec Requirements:\n${lines.join("\n")}`
 }
 
+const formatIssueImplementationsSection = (
+	issue: TrackedIssue,
+	showImplementations: boolean | undefined,
+): string | undefined =>
+	shouldShowIssueImplementations(issue, showImplementations)
+		? `Implementations:\n${(issue.implementations ?? []).join(", ")}`
+		: undefined
+
 export const formatIssueDetailSections = (
 	issue: TrackedIssue,
 	options?: {
 		readonly linkedSpecRequirements?: ReadonlyArray<LinkedSpecRequirement> | undefined
+		readonly showImplementations?: boolean
 	},
 ): readonly string[] => {
 	const sections: string[] = []
@@ -156,6 +189,7 @@ export const formatIssueDetailSections = (
 	const design = normalizeIssueTextField(issue.design)
 	const acceptance = normalizeIssueTextField(issue.acceptance)
 	const notes = normalizeIssueTextField(issue.notes)
+	const implementations = formatIssueImplementationsSection(issue, options?.showImplementations)
 	const dependencyTypeCounts = formatIssueDependencyTypeCountsSection(issue)
 	const dependencies = formatIssueRelationshipSection(
 		"Dependencies",
@@ -181,6 +215,9 @@ export const formatIssueDetailSections = (
 	if (notes) {
 		sections.push(`Notes:\n${notes}`)
 	}
+	if (implementations) {
+		sections.push(implementations)
+	}
 	if (dependencyTypeCounts) {
 		sections.push(dependencyTypeCounts)
 	}
@@ -197,7 +234,52 @@ export const formatIssueDetailSections = (
 	return sections
 }
 
-export const buildPrimeOutput = (issueId: string | undefined, issueContext: string): string => {
+const normalizePrimeImplementations = (
+	implementationContext: PrimeImplementationContext | undefined,
+): readonly string[] => {
+	if (implementationContext === undefined) {
+		return []
+	}
+
+	const seen = new Set<string>()
+	const implementations: string[] = []
+	for (const implementation of implementationContext.implementations) {
+		const normalized = implementation.trim()
+		if (normalized.length === 0 || seen.has(normalized)) {
+			continue
+		}
+		seen.add(normalized)
+		implementations.push(normalized)
+	}
+	return implementations
+}
+
+const formatPrimeImplementationGuardrails = (
+	implementationContext: PrimeImplementationContext | undefined,
+	specEnabled: boolean,
+): string | undefined => {
+	const implementations = normalizePrimeImplementations(implementationContext)
+	if (implementations.length <= 1) {
+		return undefined
+	}
+
+	return [
+		"- Implementation guardrails:",
+		`  - This project has multiple implementations configured: ${implementations.join(", ")}.`,
+		specEnabled
+			? "  - New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections."
+			: "  - New `az issue` writes must include one or more `--impl <impl>` selections.",
+		"  - The implicit `default` fallback only applies while the project has exactly one implementation configured.",
+		"  - Repeated `--impl` flags mean intentionally shared work, for example `--impl ts-opentui --impl go-bubbletea`.",
+	].join("\n")
+}
+
+export const buildPrimeOutput = (
+	issueId: string | undefined,
+	issueContext: string,
+	implementationContext?: PrimeImplementationContext,
+	specEnabled = false,
+): string => {
 	const issueSection =
 		issueId === undefined
 			? ""
@@ -217,6 +299,24 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 		issueId === undefined
 			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
 			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
+	const implementationGuardrails = formatPrimeImplementationGuardrails(
+		implementationContext,
+		specEnabled,
+	)
+	const specGuardrails = specEnabled
+		? `  - In this repo, when guidance says \`spec\`, it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
+  - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
+  - Spec boundary for \`az spec\` usage:
+    - Use \`az spec\` only for product behavior changes (user flows, API contracts, state rules, acceptance criteria).
+    - Do NOT use \`az spec\` for infra-only work (hosting/VPS, DNS, TLS, CI/CD, cron host, vendor migration) when behavior is unchanged.
+    - Track infra-only tasks in \`az issue\` only.
+    - If unsure, default to no spec link and note: "Spec impact: none (infra-only)."
+    - Example: Vercel -> Vultr with unchanged behavior => issue only, no spec link.
+  - After implementing behavior changes, run an \`az spec\` compliance pass: verify behavior vs linked \`az spec\` requirements and update requirement/link records if scope changed.
+  - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
+  - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).
+  - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
+		: undefined
 
 	return `Azedarach Session Primer
 
@@ -239,20 +339,11 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
   - Do not go on history/log hunting tangents to backfill missing fields unless the user explicitly asks for that research.
+${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-  - In this repo, when guidance says \`spec\`, it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
-  - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
-  - Spec boundary for \`az spec\` usage:
-    - Use \`az spec\` only for product behavior changes (user flows, API contracts, state rules, acceptance criteria).
-    - Do NOT use \`az spec\` for infra-only work (hosting/VPS, DNS, TLS, CI/CD, cron host, vendor migration) when behavior is unchanged.
-    - Track infra-only tasks in \`az issue\` only.
-    - If unsure, default to no spec link and note: "Spec impact: none (infra-only)."
-    - Example: Vercel -> Vultr with unchanged behavior => issue only, no spec link.
-  - After implementing behavior changes, run an \`az spec\` compliance pass: verify behavior vs linked \`az spec\` requirements and update requirement/link records if scope changed.
-  - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
-  - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).
+${specGuardrails === undefined ? "" : `${specGuardrails}\n`}
 - Create follow-up/child work in the tracker instead of local TODOs.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - When work is complete:

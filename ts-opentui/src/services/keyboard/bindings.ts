@@ -683,7 +683,7 @@ done
 		key: "s",
 		mode: "goto-pending",
 		description: "Enter spec workspace",
-		action: bc.editor.enterSpecWorkspace(),
+		action: Effect.suspend(() => bc.inputHandlers.enterSpecWorkspace()),
 	},
 	{
 		key: "p",
@@ -1031,6 +1031,28 @@ done
 		mode: "spec",
 		description: "Cycle spec subview",
 		action: bc.editor.cycleSpecSubview(),
+	},
+	{
+		key: "[",
+		mode: "spec",
+		description: "Previous parity implementation",
+		action: Effect.gen(function* () {
+			const subview = yield* bc.editor.getSpecSubview()
+			if (subview === "parity") {
+				yield* bc.editor.cycleSpecImplementation("previous")
+			}
+		}),
+	},
+	{
+		key: "]",
+		mode: "spec",
+		description: "Next parity implementation",
+		action: Effect.gen(function* () {
+			const subview = yield* bc.editor.getSpecSubview()
+			if (subview === "parity") {
+				yield* bc.editor.cycleSpecImplementation("next")
+			}
+		}),
 	},
 
 	// ========================================================================

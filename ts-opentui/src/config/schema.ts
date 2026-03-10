@@ -11,6 +11,7 @@
  * - Version 4: Nests backend config under top-level issueTracker object
  * - Version 5: Renames merge.startClaudeOnFailure → merge.startAiSessionOnFailure
  * - Version 6: Normalizes git.pr/git.merge aliases to canonical workflow config
+ * - Version 7: Adds spec.enabled feature gating for optional spec workflows
  *
  * ## Adding New Versions
  * 1. Define ConfigVNSchema with numeric schema-version field
@@ -29,7 +30,7 @@ import * as Schema from "effect/Schema"
 // ============================================================================
 
 /** Current config schema version */
-export const CURRENT_CONFIG_VERSION = 6
+export const CURRENT_CONFIG_VERSION = 7
 /** Relative schema URI used in `.azedarach.json` for JSON-LSP tooling */
 export const AZEDARACH_CONFIG_JSON_SCHEMA_URI = "./.azedarach.schema.json"
 
@@ -746,6 +747,18 @@ const HooksConfigSchema = Schema.Struct({
 })
 
 /**
+ * Spec feature configuration
+ *
+ * Controls whether spec workflows are enabled for the project.
+ */
+const SpecConfigSchema = Schema.Struct({
+	/**
+	 * Enable az spec commands, guidance, and UI affordances (default: true)
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+})
+
+/**
  * Session recovery configuration
  *
  * Controls how sessions are recovered after computer restart or tmux crash.
@@ -1191,6 +1204,15 @@ const migrations: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		toVersion: 7,
+		description: "Add spec.enabled feature gating for optional spec workflows",
+		migrate: (config) => ({
+			...config,
+			$schema: 7,
+			spec: config.spec,
+		}),
+	},
 	// ────────────────────────────────────────────────────────────────────────
 	// Future migrations go here. Example:
 	// ────────────────────────────────────────────────────────────────────────
@@ -1295,6 +1317,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		keyboard: current.keyboard,
 		sessionRecovery: current.sessionRecovery,
 		hooks: current.hooks,
+		spec: current.spec,
 		projects: current.projects,
 		defaultProject: current.defaultProject,
 	}
@@ -1367,12 +1390,15 @@ const RawConfigSchema = Schema.Struct({
 	/** Hooks configuration for spawned sessions */
 	hooks: Schema.optional(HooksConfigSchema),
 
+	/** Spec workflow feature gating */
+	spec: Schema.optional(SpecConfigSchema),
+
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
 
 /**
- * Current config schema (v4)
+ * Current config schema (v7)
  *
  * This is the canonical schema after migration.
  * Does NOT include legacy fields - they should be migrated away.
@@ -1395,6 +1421,7 @@ const CurrentConfigSchema = Schema.Struct({
 	keyboard: Schema.optional(KeyboardConfigSchema),
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 	hooks: Schema.optional(HooksConfigSchema),
+	spec: Schema.optional(SpecConfigSchema),
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -1424,7 +1451,7 @@ export const AzedarachConfigSchema = Schema.transformOrFail(RawConfigSchema, Cur
 			...current,
 			$schema: AZEDARACH_CONFIG_JSON_SCHEMA_URI,
 			$version: CURRENT_CONFIG_VERSION,
-			// Persist canonical v6 layout: top-level `pr`/`merge`, git aliases stripped.
+			// Persist canonical v7 layout: top-level `pr`/`merge`, git aliases stripped.
 			git: current.git,
 			pr: current.pr,
 			merge: current.merge,
@@ -1501,3 +1528,6 @@ export type SessionRecoveryConfig = Schema.Schema.Type<typeof SessionRecoveryCon
 
 /** Hooks config section type */
 export type HooksConfig = Schema.Schema.Type<typeof HooksConfigSchema>
+
+/** Spec config section type */
+export type SpecConfig = Schema.Schema.Type<typeof SpecConfigSchema>

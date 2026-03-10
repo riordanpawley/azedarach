@@ -16,6 +16,7 @@ import { AICreatePrompt } from "./AICreatePrompt.js"
 import {
 	activeSessionsCountAtom,
 	aiCreateTaskAtom,
+	appConfigAtom,
 	boardIsLoadingAtom,
 	boardTasksAtom,
 	createTaskAtom,
@@ -24,6 +25,7 @@ import {
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	drillDownPhasesAtom,
+	exitToNormalAtom,
 	focusedIssuePrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	forkCreateChildAtom,
@@ -227,6 +229,7 @@ export const App = () => {
 		mode: "promise",
 	})
 	const jumpTo = useAtomSet(jumpToAtom, { mode: "promise" })
+	const exitToNormal = useAtomSet(exitToNormalAtom, { mode: "promise" })
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
@@ -255,6 +258,8 @@ export const App = () => {
 	)
 
 	const workflowMode = useAtomValue(workflowModeAtom)
+	const appConfigResult = useAtomValue(appConfigAtom)
+	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
 
 	// Board loading state for status bar indicator
 	const isLoading = useAtomValue(
@@ -312,7 +317,7 @@ export const App = () => {
 	)
 
 	useEffect(() => {
-		if (mode._tag !== "spec") {
+		if (mode._tag !== "spec" || !specEnabled) {
 			return
 		}
 
@@ -324,7 +329,13 @@ export const App = () => {
 		return () => {
 			clearInterval(interval)
 		}
-	}, [mode, refreshSpecWorkspace])
+	}, [mode, refreshSpecWorkspace, specEnabled])
+
+	useEffect(() => {
+		if (mode._tag === "spec" && !specEnabled) {
+			exitToNormal(undefined)
+		}
+	}, [exitToNormal, mode, specEnabled])
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
@@ -499,7 +510,7 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	const renderContent = () => {
-		if (mode._tag === "spec") {
+		if (mode._tag === "spec" && specEnabled) {
 			return (
 				<box flexGrow={1} flexDirection="column">
 					<SpecWorkspace subview={mode.subview} state={specWorkspaceState} />

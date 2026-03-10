@@ -124,6 +124,7 @@ just test               # Run tests
 - Canonical product spec and shared roadmap: `az spec` requirement/link records (`az spec req ...`, `az spec link ...`)
 - `ts-opentui` roadmap source: implement and validate against `az spec` requirements and acceptance records (for example `AZ-FR-*`, `AZ-AT-*` via `external_code`)
 - `go-bubbletea` roadmap source: [06-implementation-phases.md](./go-bubbletea/docs/06-implementation-phases.md) + [07-feature-matrix.md](./go-bubbletea/docs/07-feature-matrix.md)
+- Spec workflows are enabled by default. Disable them per project with `az config set spec.enabled false` (or set `spec.enabled` to `false` in `.azedarach.json`) if you do not want `az prime`, `az spec`, or spec workspace guidance.
 
 ---
 

@@ -10,6 +10,7 @@ describe("session prompts", () => {
 			hasWorktree: false,
 			attachmentPaths: [],
 			localMode: false,
+			specEnabled: true,
 		})
 
 		expect(prompt).toContain("work on issue az-f4625d")
@@ -37,6 +38,7 @@ describe("session prompts", () => {
 			hasWorktree: false,
 			attachmentPaths: [],
 			localMode: true,
+			specEnabled: true,
 		})
 
 		expect(prompt).toContain("Local workflow mode guardrails:")
@@ -52,10 +54,27 @@ describe("session prompts", () => {
 			hasWorktree: false,
 			attachmentPaths: [],
 			localMode: false,
+			specEnabled: true,
 		})
 
 		expect(prompt).toContain("Fix parser [image name=[Image #1]] with weird chars")
 		expect(prompt).not.toContain("<image")
 		expect(prompt).not.toContain("\nwith weird chars")
+	})
+
+	it("omits spec guidance when spec workflows are disabled", () => {
+		const prompt = buildStartWorkPrompt({
+			taskId: "ja",
+			issueType: "task",
+			title: "Respect spec gating",
+			hasWorktree: false,
+			attachmentPaths: [],
+			localMode: false,
+			specEnabled: false,
+		})
+
+		expect(prompt).not.toContain("`az spec`")
+		expect(prompt).toContain("Start by running `az prime`.")
+		expect(prompt).toContain("If context looks stale, refresh with `az issue get ja`.")
 	})
 })

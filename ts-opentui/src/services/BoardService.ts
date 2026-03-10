@@ -1992,6 +1992,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								status === "closed"
 									? (payload.completedAt ?? payload.canceledAt ?? null)
 									: undefined,
+							implementations: ["default"],
 							labels,
 							parentEpicId: nextParentEpicId,
 							sessionState: "idle",

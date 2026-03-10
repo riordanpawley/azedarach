@@ -12,6 +12,8 @@ import { ProjectService } from "../services/ProjectService.js"
 import type {
 	DependencyRef,
 	DependencyType,
+	ImplementationRecord,
+	ImplementationRegistry,
 	Issue,
 	IssueListFilters,
 	IssueListOptions,
@@ -27,6 +29,8 @@ import type {
 	SpecIssueRef,
 	SpecLinkFulfillmentStatus,
 	SpecLinkType,
+	SpecParityReport,
+	SpecParityRequirement,
 	SpecPublishConfig,
 	SpecPublishOutcome,
 	SpecRequirement,
@@ -39,6 +43,17 @@ import type {
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "./specTypes.js"
 
 const LabelsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
+const ImplementationRegistryJsonSchema = Schema.parseJson(
+	Schema.Array(
+		Schema.Struct({
+			name: Schema.String,
+			description: Schema.NullOr(Schema.String),
+			created_at: Schema.String,
+			updated_at: Schema.String,
+		}),
+	),
+)
+const SpecImplementationsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
 const SpecPublishConfigJsonSchema = Schema.parseJson(
 	Schema.Struct({
 		enabled: Schema.Boolean,
@@ -92,6 +107,7 @@ interface IssueRow {
 	readonly closed_at: string | null
 	readonly assignee: string | null
 	readonly labels_json: string | null
+	readonly implementations_json: string | null
 	readonly design: string | null
 	readonly notes: string | null
 	readonly acceptance: string | null
@@ -126,6 +142,7 @@ interface SpecIssueLinkRow {
 	readonly requirement_local_id: string
 	readonly requirement_external_code: string | null
 	readonly link_type: string
+	readonly implementations_json: string | null
 	readonly fulfillment_status: string | null
 	readonly fulfillment_percent: number | null
 	readonly evidence_note: string | null
@@ -229,6 +246,7 @@ export interface ExternalIssueSnapshot {
 	readonly closedAt?: string | null
 	readonly assignee?: string | null
 	readonly labels: readonly string[]
+	readonly implementations?: readonly string[]
 	readonly notes?: string
 	readonly design?: string
 	readonly acceptance?: string
@@ -260,12 +278,17 @@ const LOCAL_ISSUE_DB_DIRECTORY = ".azedarach"
 const LOCAL_ISSUE_DB_FILENAME = "issues.db"
 const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
 const LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META = "issue:id_next_alpha_index"
+const IMPLEMENTATION_REGISTRY_META_KEY = "impl:registry:v1"
+const IMPLEMENTATION_DEFAULT_META_KEY = "impl:default"
 const SPEC_PUBLISH_CONFIG_META_KEY = "spec:publish:config"
 const SPEC_PUBLISH_OUTCOME_META_KEY = "spec:publish:last_outcome"
+const DEFAULT_SPEC_IMPLEMENTATION = "default"
+const BUILTIN_IMPLEMENTATION_TIMESTAMP = "1970-01-01T00:00:00.000Z"
 const RESERVED_LOCAL_ISSUE_IDS = new Set(["az"])
 const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
 const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
 const SPEC_LOCAL_ID_PATTERN = /^[a-z][a-z0-9-]{0,47}$/
+const SPEC_IMPLEMENTATION_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
 
 const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
 	enabled: true,
@@ -327,6 +350,7 @@ const schemaStatements: readonly string[] = [
 		closed_at TEXT,
 		assignee TEXT,
 		labels_json TEXT,
+		implementations_json TEXT,
 		design TEXT,
 		notes TEXT,
 		acceptance TEXT,
@@ -357,6 +381,7 @@ const schemaStatements: readonly string[] = [
 		issue_id TEXT NOT NULL,
 		requirement_id TEXT NOT NULL,
 		link_type TEXT NOT NULL,
+		implementations_json TEXT NOT NULL,
 		fulfillment_status TEXT,
 		fulfillment_percent INTEGER,
 		evidence_note TEXT,
@@ -749,6 +774,22 @@ const normalizeSpecLinkType = (linkType: string | undefined): SpecLinkType => {
 	}
 }
 
+const normalizeSpecImplementation = (implementation: string): string => {
+	const normalized = implementation.trim().toLowerCase()
+	return SPEC_IMPLEMENTATION_PATTERN.test(normalized) ? normalized : DEFAULT_SPEC_IMPLEMENTATION
+}
+
+const normalizeSpecImplementations = (
+	implementations: readonly string[] | undefined,
+): readonly string[] => {
+	const normalized = (implementations ?? [DEFAULT_SPEC_IMPLEMENTATION])
+		.map((implementation) => normalizeSpecImplementation(implementation))
+		.filter((implementation, index, items) => items.indexOf(implementation) === index)
+		.sort((left, right) => left.localeCompare(right))
+
+	return normalized.length > 0 ? normalized : [DEFAULT_SPEC_IMPLEMENTATION]
+}
+
 const normalizeSpecLinkFulfillmentStatus = (
 	status: string | undefined | null,
 ): SpecLinkFulfillmentStatus => {
@@ -784,7 +825,6 @@ const normalizeSpecLinkEvidenceNote = (value: string | null | undefined): string
 	const trimmed = value.trim()
 	return trimmed.length > 0 ? trimmed : null
 }
-
 const toTimestampMs = (value: string): number => {
 	const parsed = Date.parse(value)
 	return Number.isNaN(parsed) ? 0 : parsed
@@ -822,6 +862,152 @@ const decodeLabels = (value: string | null): readonly string[] => {
 
 const encodeLabels = (labels: readonly string[] | undefined): string =>
 	Schema.encodeSync(LabelsJsonSchema)(labels === undefined ? [] : [...labels])
+
+type ImplementationRegistryEntry = Schema.Schema.Type<
+	typeof ImplementationRegistryJsonSchema
+>[number]
+
+const buildBuiltinDefaultImplementation = (): ImplementationRegistryEntry => ({
+	name: DEFAULT_SPEC_IMPLEMENTATION,
+	description: null,
+	created_at: BUILTIN_IMPLEMENTATION_TIMESTAMP,
+	updated_at: BUILTIN_IMPLEMENTATION_TIMESTAMP,
+})
+
+const normalizeImplementationName = (value: string): string => value.trim().toLowerCase()
+
+const parseImplementationName = (value: string): string | undefined => {
+	const normalized = normalizeImplementationName(value)
+	return SPEC_IMPLEMENTATION_PATTERN.test(normalized) ? normalized : undefined
+}
+
+const requireImplementationName = (value: string): Effect.Effect<string, LocalIssueStoreError> => {
+	const normalized = parseImplementationName(value)
+	return normalized === undefined
+		? Effect.fail(
+				new LocalIssueStoreError({
+					message: `Invalid implementation name: ${value}`,
+				}),
+			)
+		: Effect.succeed(normalized)
+}
+
+const normalizeImplementationDescription = (
+	value: string | null | undefined,
+): string | null | undefined => {
+	if (value === undefined) {
+		return undefined
+	}
+	if (value === null) {
+		return null
+	}
+	const normalized = value.trim()
+	return normalized.length === 0 ? null : normalized
+}
+
+const decodeImplementationRegistryEntries = (
+	value: string | undefined,
+): readonly ImplementationRegistryEntry[] => {
+	if (value === undefined) {
+		return [buildBuiltinDefaultImplementation()]
+	}
+
+	try {
+		const decoded = Schema.decodeUnknownSync(ImplementationRegistryJsonSchema)(value)
+		if (decoded.some((entry) => entry.name === DEFAULT_SPEC_IMPLEMENTATION)) {
+			return decoded
+		}
+		return [buildBuiltinDefaultImplementation(), ...decoded]
+	} catch {
+		return [buildBuiltinDefaultImplementation()]
+	}
+}
+
+const encodeImplementationRegistryEntries = (
+	value: readonly ImplementationRegistryEntry[],
+): Effect.Effect<string, LocalIssueStoreError> =>
+	Effect.try({
+		try: () => Schema.encodeSync(ImplementationRegistryJsonSchema)([...value]),
+		catch: (cause) =>
+			new LocalIssueStoreError({
+				message: "Failed to encode implementation registry metadata",
+				cause,
+			}),
+	})
+
+const resolveDefaultImplementationName = (
+	value: string | undefined,
+	entries: readonly ImplementationRegistryEntry[],
+): string => {
+	const normalized =
+		value === undefined ? DEFAULT_SPEC_IMPLEMENTATION : parseImplementationName(value)
+	if (normalized !== undefined && entries.some((entry) => entry.name === normalized)) {
+		return normalized
+	}
+
+	return (
+		entries.find((entry) => entry.name === DEFAULT_SPEC_IMPLEMENTATION)?.name ??
+		entries[0]?.name ??
+		DEFAULT_SPEC_IMPLEMENTATION
+	)
+}
+
+const sortImplementationEntries = (
+	entries: readonly ImplementationRegistryEntry[],
+	defaultImplementation: string,
+): readonly ImplementationRegistryEntry[] =>
+	[...entries].sort((left, right) => {
+		if (left.name === defaultImplementation && right.name !== defaultImplementation) {
+			return -1
+		}
+		if (right.name === defaultImplementation && left.name !== defaultImplementation) {
+			return 1
+		}
+		if (left.name === DEFAULT_SPEC_IMPLEMENTATION && right.name !== DEFAULT_SPEC_IMPLEMENTATION) {
+			return -1
+		}
+		if (right.name === DEFAULT_SPEC_IMPLEMENTATION && left.name !== DEFAULT_SPEC_IMPLEMENTATION) {
+			return 1
+		}
+		return left.name.localeCompare(right.name)
+	})
+
+const implementationEntryToRecord = (
+	entry: ImplementationRegistryEntry,
+	defaultImplementation: string,
+): ImplementationRecord => ({
+	name: entry.name,
+	description: entry.description ?? undefined,
+	created_at: entry.created_at,
+	updated_at: entry.updated_at,
+	is_default: entry.name === defaultImplementation,
+	is_builtin: entry.name === DEFAULT_SPEC_IMPLEMENTATION,
+})
+
+const buildImplementationRegistry = (
+	entries: readonly ImplementationRegistryEntry[],
+	defaultImplementation: string,
+): ImplementationRegistry => ({
+	default_implementation: defaultImplementation,
+	implicit_default_allowed:
+		entries.length === 1 && entries[0]?.name === DEFAULT_SPEC_IMPLEMENTATION,
+	implementations: sortImplementationEntries(entries, defaultImplementation).map((entry) =>
+		implementationEntryToRecord(entry, defaultImplementation),
+	),
+})
+
+const decodeSpecImplementations = (value: string | null): readonly string[] => {
+	if (value === null) {
+		return [DEFAULT_SPEC_IMPLEMENTATION]
+	}
+
+	return normalizeSpecImplementations(Schema.decodeSync(SpecImplementationsJsonSchema)(value))
+}
+
+const encodeSpecImplementations = (implementations: readonly string[] | undefined): string =>
+	Schema.encodeSync(SpecImplementationsJsonSchema)([
+		...normalizeSpecImplementations(implementations),
+	])
 
 const toUint8Array = (value: Uint8Array | ArrayBuffer): Uint8Array =>
 	value instanceof Uint8Array ? value : new Uint8Array(value)
@@ -900,6 +1086,7 @@ const rowToIssue = (
 		closed_at: row.closed_at,
 		assignee: row.assignee,
 		labels,
+		implementations: decodeSpecImplementations(row.implementations_json),
 		design: row.design ?? undefined,
 		notes: row.notes ?? undefined,
 		acceptance: row.acceptance ?? undefined,
@@ -973,6 +1160,7 @@ const rowToSpecIssueLink = (row: SpecIssueLinkRow): SpecIssueLink => ({
 	requirement_local_id: row.requirement_local_id,
 	requirement_external_code: row.requirement_external_code,
 	link_type: normalizeSpecLinkType(row.link_type),
+	implementations: decodeSpecImplementations(row.implementations_json),
 	fulfillment_status: normalizeSpecLinkFulfillmentStatus(row.fulfillment_status),
 	fulfillment_percent: normalizeSpecLinkFulfillmentPercent(row.fulfillment_percent),
 	evidence_note: normalizeSpecLinkEvidenceNote(row.evidence_note),
@@ -1042,6 +1230,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					{ name: "closed_at", definition: "TEXT" },
 					{ name: "assignee", definition: "TEXT" },
 					{ name: "labels_json", definition: "TEXT" },
+					{ name: "implementations_json", definition: "TEXT" },
 					{ name: "design", definition: "TEXT" },
 					{ name: "notes", definition: "TEXT" },
 					{ name: "acceptance", definition: "TEXT" },
@@ -1053,6 +1242,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					if (!columnNames.has(column.name)) {
 						yield* sql.unsafe(`ALTER TABLE issues ADD COLUMN ${column.name} ${column.definition}`)
 					}
+				}
+				if (!columnNames.has("implementations_json")) {
+					yield* sql`
+						UPDATE issues
+						SET implementations_json = ${encodeSpecImplementations([DEFAULT_SPEC_IMPLEMENTATION])}
+						WHERE implementations_json IS NULL
+					`
 				}
 			})
 
@@ -1263,6 +1459,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					return
 				}
 				const columnNames = new Set(columns.map((column) => column.name))
+				if (!columnNames.has("implementations_json")) {
+					yield* sql`ALTER TABLE spec_issue_links ADD COLUMN implementations_json TEXT`
+					yield* sql`
+						UPDATE spec_issue_links
+						SET implementations_json = ${encodeSpecImplementations([DEFAULT_SPEC_IMPLEMENTATION])}
+						WHERE implementations_json IS NULL
+					`
+				}
 				if (!columnNames.has("fulfillment_status")) {
 					yield* sql`ALTER TABLE spec_issue_links ADD COLUMN fulfillment_status TEXT`
 				}
@@ -1304,6 +1508,42 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				ON CONFLICT(key)
 				DO UPDATE SET value = ${value}
 			`.pipe(Effect.asVoid)
+
+		const loadImplementationRegistryState = (
+			sql: SqlClient.SqlClient,
+		): Effect.Effect<
+			{
+				readonly entries: readonly ImplementationRegistryEntry[]
+				readonly defaultImplementation: string
+			},
+			SqlError
+		> =>
+			Effect.all([
+				getMetaValue(sql, IMPLEMENTATION_REGISTRY_META_KEY),
+				getMetaValue(sql, IMPLEMENTATION_DEFAULT_META_KEY),
+			]).pipe(
+				Effect.map(([encodedEntries, encodedDefault]) => {
+					const entries = decodeImplementationRegistryEntries(encodedEntries)
+					const defaultImplementation = resolveDefaultImplementationName(encodedDefault, entries)
+					return { entries, defaultImplementation }
+				}),
+			)
+
+		const persistImplementationRegistryState = (
+			sql: SqlClient.SqlClient,
+			state: {
+				readonly entries: readonly ImplementationRegistryEntry[]
+				readonly defaultImplementation: string
+			},
+		): Effect.Effect<void, SqlError | LocalIssueStoreError> =>
+			encodeImplementationRegistryEntries(state.entries).pipe(
+				Effect.flatMap((encodedEntries) =>
+					Effect.all([
+						setMetaValue(sql, IMPLEMENTATION_REGISTRY_META_KEY, encodedEntries),
+						setMetaValue(sql, IMPLEMENTATION_DEFAULT_META_KEY, state.defaultImplementation),
+					]).pipe(Effect.asVoid),
+				),
+			)
 
 		const getLastBackupTimestampMs = (
 			sql: SqlClient.SqlClient,
@@ -1648,6 +1888,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					closed_at,
 					assignee,
 					labels_json,
+					implementations_json,
 					design,
 					notes,
 					acceptance,
@@ -1844,6 +2085,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						COALESCE(r.local_id, l.requirement_id) AS requirement_local_id,
 						r.external_code AS requirement_external_code,
 						l.link_type,
+						l.implementations_json,
 						l.fulfillment_status,
 						l.fulfillment_percent,
 						l.evidence_note,
@@ -1973,6 +2215,208 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				return issues.find((issue) => issue.id === id)
 			})
 
+		const parseImplementationNames = (
+			values: readonly string[],
+		): Effect.Effect<readonly string[], LocalIssueStoreError> =>
+			Effect.gen(function* () {
+				const parsed = yield* Effect.all(values.map((value) => requireImplementationName(value)))
+				return [...new Set(parsed)].sort((left, right) => left.localeCompare(right))
+			})
+
+		const ensureImplementationNamesExist = (
+			sql: SqlClient.SqlClient,
+			implementations: readonly string[],
+		): Effect.Effect<readonly string[], LocalIssueStoreError | SqlError> =>
+			Effect.gen(function* () {
+				const normalized = yield* parseImplementationNames(implementations)
+				const { entries } = yield* loadImplementationRegistryState(sql)
+				const knownNames = new Set(entries.map((entry) => entry.name))
+				const missing = normalized.filter((implementation) => !knownNames.has(implementation))
+				if (missing.length > 0) {
+					return yield* Effect.fail(
+						new LocalIssueStoreError({
+							message: `Unknown implementation(s): ${missing.join(", ")}`,
+						}),
+					)
+				}
+				return normalized
+			})
+
+		const resolveIssueImplementationsForWrite = (
+			sql: SqlClient.SqlClient,
+			requestedImplementations: readonly string[] | undefined,
+			existingImplementations: readonly string[] | undefined,
+		): Effect.Effect<readonly string[], LocalIssueStoreError | SqlError> =>
+			Effect.gen(function* () {
+				if (requestedImplementations !== undefined && requestedImplementations.length > 0) {
+					return yield* ensureImplementationNamesExist(sql, requestedImplementations)
+				}
+
+				const registry = yield* loadImplementationRegistryState(sql).pipe(
+					Effect.map(({ entries, defaultImplementation }) =>
+						buildImplementationRegistry(entries, defaultImplementation),
+					),
+				)
+				if (registry.implicit_default_allowed) {
+					return [registry.default_implementation] as const
+				}
+				if (existingImplementations !== undefined && existingImplementations.length > 0) {
+					return existingImplementations
+				}
+				return yield* Effect.fail(
+					new LocalIssueStoreError({
+						message:
+							"Multiple implementations are configured. Provide one or more --impl values for this issue write.",
+					}),
+				)
+			})
+
+		const resolveSpecLinkImplementationsForWrite = (
+			sql: SqlClient.SqlClient,
+			issueId: string,
+			requestedImplementations: readonly string[] | undefined,
+		): Effect.Effect<readonly string[], LocalIssueStoreError | SqlError> =>
+			Effect.gen(function* () {
+				if (requestedImplementations !== undefined && requestedImplementations.length > 0) {
+					return yield* ensureImplementationNamesExist(sql, requestedImplementations)
+				}
+
+				const registry = yield* loadImplementationRegistryState(sql).pipe(
+					Effect.map(({ entries, defaultImplementation }) =>
+						buildImplementationRegistry(entries, defaultImplementation),
+					),
+				)
+				if (registry.implicit_default_allowed) {
+					return [registry.default_implementation] as const
+				}
+
+				const issue = yield* loadIssueById(sql, issueId)
+				if (issue === undefined) {
+					return yield* Effect.fail(
+						new LocalIssueStoreError({
+							message: `Issue not found: ${issueId}`,
+						}),
+					)
+				}
+
+				const issueImplementations = issue.implementations ?? [DEFAULT_SPEC_IMPLEMENTATION]
+				const usesLegacyDefaultOnly =
+					issueImplementations.length === 1 &&
+					issueImplementations[0] === DEFAULT_SPEC_IMPLEMENTATION
+				if (issueImplementations.length === 1 && !usesLegacyDefaultOnly) {
+					return issueImplementations
+				}
+
+				return yield* Effect.fail(
+					new LocalIssueStoreError({
+						message:
+							"Multiple implementations are configured. Provide one or more --impl values or assign this issue to a single non-default implementation first.",
+					}),
+				)
+			})
+
+		const renameImplementationReferences = (
+			sql: SqlClient.SqlClient,
+			currentName: string,
+			nextName: string,
+			now: string,
+		): Effect.Effect<void, SqlError> =>
+			Effect.gen(function* () {
+				const issueRows = yield* sql<{
+					readonly id: string
+					readonly implementations_json: string | null
+				}>`
+					SELECT id, implementations_json
+					FROM issues
+					WHERE deleted_at IS NULL
+				`
+				for (const row of issueRows) {
+					const implementations = decodeSpecImplementations(row.implementations_json)
+					if (!implementations.includes(currentName)) {
+						continue
+					}
+					const renamed = implementations.map((implementation) =>
+						implementation === currentName ? nextName : implementation,
+					)
+					yield* sql`
+						UPDATE issues
+						SET
+							implementations_json = ${encodeSpecImplementations(renamed)},
+							updated_at = ${now}
+						WHERE id = ${row.id}
+					`
+				}
+
+				const linkRows = yield* sql<{
+					readonly issue_id: string
+					readonly requirement_id: string
+					readonly link_type: string
+					readonly implementations_json: string | null
+				}>`
+					SELECT issue_id, requirement_id, link_type, implementations_json
+					FROM spec_issue_links
+					WHERE deleted_at IS NULL
+				`
+				for (const row of linkRows) {
+					const implementations = decodeSpecImplementations(row.implementations_json)
+					if (!implementations.includes(currentName)) {
+						continue
+					}
+					const renamed = implementations.map((implementation) =>
+						implementation === currentName ? nextName : implementation,
+					)
+					yield* sql`
+						UPDATE spec_issue_links
+						SET
+							implementations_json = ${encodeSpecImplementations(renamed)},
+							updated_at = ${now}
+						WHERE
+							issue_id = ${row.issue_id}
+							AND requirement_id = ${row.requirement_id}
+							AND link_type = ${row.link_type}
+							AND deleted_at IS NULL
+					`
+				}
+			})
+
+		const ensureImplementationNotInUse = (
+			sql: SqlClient.SqlClient,
+			name: string,
+		): Effect.Effect<void, LocalIssueStoreError | SqlError> =>
+			Effect.gen(function* () {
+				const issueRows = yield* sql<{ readonly implementations_json: string | null }>`
+					SELECT implementations_json
+					FROM issues
+					WHERE deleted_at IS NULL
+				`
+				if (
+					issueRows.some((row) =>
+						decodeSpecImplementations(row.implementations_json).includes(name),
+					)
+				) {
+					return yield* Effect.fail(
+						new LocalIssueStoreError({
+							message: `Implementation ${name} is still assigned to one or more issues`,
+						}),
+					)
+				}
+
+				const linkRows = yield* sql<{ readonly implementations_json: string | null }>`
+					SELECT implementations_json
+					FROM spec_issue_links
+					WHERE deleted_at IS NULL
+				`
+				if (
+					linkRows.some((row) => decodeSpecImplementations(row.implementations_json).includes(name))
+				) {
+					return yield* Effect.fail(
+						new LocalIssueStoreError({
+							message: `Implementation ${name} is still referenced by one or more spec links`,
+						}),
+					)
+				}
+			})
+
 		return {
 			list: (
 				filters?: IssueListFilters,
@@ -1993,6 +2437,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								if (filters?.priority !== undefined && issue.priority !== filters.priority)
 									return false
 								if (filters?.type && issue.issue_type !== filters.type) return false
+								if (
+									filters?.implementations !== undefined &&
+									filters.implementations.length > 0 &&
+									!filters.implementations.some((implementation) =>
+										(issue.implementations ?? [DEFAULT_SPEC_IMPLEMENTATION]).includes(
+											normalizeImplementationName(implementation),
+										),
+									)
+								) {
+									return false
+								}
 								if (filters?.parent) {
 									const parentDependency = issue.dependencies?.find(
 										(dependency) => dependency.dependency_type === "parent-child",
@@ -2045,6 +2500,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					assignee?: string
 					estimate?: number
 					labels?: readonly string[]
+					implementations?: readonly string[]
 					parent?: string
 				},
 				syncTarget?: SyncTarget,
@@ -2065,6 +2521,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							nextAlphaIndex,
 							existingIds,
 						)
+						const implementations = yield* resolveIssueImplementationsForWrite(
+							sql,
+							params.implementations,
+							undefined,
+						)
 
 						yield* sql.withTransaction(
 							Effect.gen(function* () {
@@ -2081,6 +2542,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										closed_at,
 										assignee,
 										labels_json,
+										implementations_json,
 										design,
 										notes,
 										acceptance,
@@ -2099,6 +2561,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										${null},
 										${params.assignee ?? null},
 										${encodeLabels(params.labels)},
+										${encodeSpecImplementations(implementations)},
 										${params.design ?? null},
 										${null},
 										${params.acceptance ?? null},
@@ -2154,6 +2617,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					assignee?: string
 					estimate?: number
 					labels?: readonly string[]
+					implementations?: readonly string[]
 					parent?: string
 				},
 				syncTarget?: SyncTarget,
@@ -2174,6 +2638,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								closed_at,
 								assignee,
 								labels_json,
+								implementations_json,
 								design,
 								notes,
 								acceptance,
@@ -2195,6 +2660,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								: fields.status === undefined
 									? existing.closed_at
 									: null
+						const implementations = yield* resolveIssueImplementationsForWrite(
+							sql,
+							fields.implementations,
+							decodeSpecImplementations(existing.implementations_json),
+						)
 
 						yield* sql.withTransaction(
 							Effect.gen(function* () {
@@ -2214,6 +2684,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												? (existing.labels_json ?? encodeLabels([]))
 												: encodeLabels(fields.labels)
 										},
+										implementations_json = ${encodeSpecImplementations(implementations)},
 										design = ${fields.design ?? existing.design},
 										notes = ${fields.notes ?? existing.notes},
 										acceptance = ${fields.acceptance ?? existing.acceptance},
@@ -2307,6 +2778,238 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						)
 						return true
 					}),
+				),
+
+			listImplementations: (
+				cwd?: string,
+			): Effect.Effect<readonly ImplementationRecord[], LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					loadImplementationRegistryState(sql).pipe(
+						Effect.map(
+							({ entries, defaultImplementation }) =>
+								buildImplementationRegistry(entries, defaultImplementation).implementations,
+						),
+					),
+				),
+
+			showImplementation: (
+				name: string,
+				cwd?: string,
+			): Effect.Effect<ImplementationRecord | undefined, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					Effect.gen(function* () {
+						const normalizedName = yield* requireImplementationName(name)
+						const { entries, defaultImplementation } = yield* loadImplementationRegistryState(sql)
+						const entry = entries.find((candidate) => candidate.name === normalizedName)
+						return entry === undefined
+							? undefined
+							: implementationEntryToRecord(entry, defaultImplementation)
+					}),
+				),
+
+			getImplementationRegistry: (
+				cwd?: string,
+			): Effect.Effect<ImplementationRegistry, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					loadImplementationRegistryState(sql).pipe(
+						Effect.map(({ entries, defaultImplementation }) =>
+							buildImplementationRegistry(entries, defaultImplementation),
+						),
+					),
+				),
+
+			createImplementation: (
+				params: {
+					name: string
+					description?: string
+					setDefault?: boolean
+				},
+				cwd?: string,
+			): Effect.Effect<ImplementationRecord, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const normalizedName = yield* requireImplementationName(params.name)
+							const { entries, defaultImplementation } = yield* loadImplementationRegistryState(sql)
+							if (entries.some((entry) => entry.name === normalizedName)) {
+								return yield* Effect.fail(
+									new LocalIssueStoreError({
+										message: `Implementation already exists: ${normalizedName}`,
+									}),
+								)
+							}
+
+							const now = nowIso()
+							const nextEntries = [
+								...entries,
+								{
+									name: normalizedName,
+									description: normalizeImplementationDescription(params.description) ?? null,
+									created_at: now,
+									updated_at: now,
+								},
+							] satisfies readonly ImplementationRegistryEntry[]
+							const nextDefaultImplementation =
+								params.setDefault === true ? normalizedName : defaultImplementation
+							yield* persistImplementationRegistryState(sql, {
+								entries: nextEntries,
+								defaultImplementation: nextDefaultImplementation,
+							})
+							return implementationEntryToRecord(
+								nextEntries.find((entry) => entry.name === normalizedName)!,
+								nextDefaultImplementation,
+							)
+						}),
+					),
+				),
+
+			updateImplementation: (
+				currentName: string,
+				fields: {
+					name?: string
+					description?: string | null
+					setDefault?: boolean
+				},
+				cwd?: string,
+			): Effect.Effect<ImplementationRecord, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const normalizedCurrentName = yield* requireImplementationName(currentName)
+							const normalizedNextName =
+								fields.name === undefined
+									? normalizedCurrentName
+									: yield* requireImplementationName(fields.name)
+							if (
+								normalizedCurrentName === DEFAULT_SPEC_IMPLEMENTATION &&
+								normalizedNextName !== normalizedCurrentName
+							) {
+								return yield* Effect.fail(
+									new LocalIssueStoreError({
+										message: "The built-in default implementation cannot be renamed",
+									}),
+								)
+							}
+
+							const { entries, defaultImplementation } = yield* loadImplementationRegistryState(sql)
+							const existing = entries.find((entry) => entry.name === normalizedCurrentName)
+							if (existing === undefined) {
+								return yield* Effect.fail(
+									new LocalIssueStoreError({
+										message: `Implementation not found: ${normalizedCurrentName}`,
+									}),
+								)
+							}
+							if (
+								normalizedNextName !== normalizedCurrentName &&
+								entries.some((entry) => entry.name === normalizedNextName)
+							) {
+								return yield* Effect.fail(
+									new LocalIssueStoreError({
+										message: `Implementation already exists: ${normalizedNextName}`,
+									}),
+								)
+							}
+
+							const nextDescription = normalizeImplementationDescription(fields.description)
+							const now = nowIso()
+							const nextEntries = entries.map((entry) =>
+								entry.name !== normalizedCurrentName
+									? entry
+									: {
+											name: normalizedNextName,
+											description:
+												nextDescription === undefined ? entry.description : nextDescription,
+											created_at: entry.created_at,
+											updated_at: now,
+										},
+							)
+							const nextDefaultImplementation =
+								fields.setDefault === true
+									? normalizedNextName
+									: defaultImplementation === normalizedCurrentName
+										? normalizedNextName
+										: defaultImplementation
+							yield* persistImplementationRegistryState(sql, {
+								entries: nextEntries,
+								defaultImplementation: nextDefaultImplementation,
+							})
+							if (normalizedNextName !== normalizedCurrentName) {
+								yield* renameImplementationReferences(
+									sql,
+									normalizedCurrentName,
+									normalizedNextName,
+									now,
+								)
+							}
+							return implementationEntryToRecord(
+								nextEntries.find((entry) => entry.name === normalizedNextName)!,
+								nextDefaultImplementation,
+							)
+						}),
+					),
+				),
+
+			deleteImplementation: (
+				name: string,
+				cwd?: string,
+			): Effect.Effect<boolean, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const normalizedName = yield* requireImplementationName(name)
+							if (normalizedName === DEFAULT_SPEC_IMPLEMENTATION) {
+								return yield* Effect.fail(
+									new LocalIssueStoreError({
+										message: "The built-in default implementation cannot be deleted",
+									}),
+								)
+							}
+
+							const { entries, defaultImplementation } = yield* loadImplementationRegistryState(sql)
+							if (!entries.some((entry) => entry.name === normalizedName)) {
+								return false
+							}
+							yield* ensureImplementationNotInUse(sql, normalizedName)
+
+							const nextEntries = entries.filter((entry) => entry.name !== normalizedName)
+							const nextDefaultImplementation =
+								defaultImplementation === normalizedName
+									? DEFAULT_SPEC_IMPLEMENTATION
+									: defaultImplementation
+							yield* persistImplementationRegistryState(sql, {
+								entries: nextEntries,
+								defaultImplementation: nextDefaultImplementation,
+							})
+							return true
+						}),
+					),
+				),
+
+			setDefaultImplementation: (
+				name: string,
+				cwd?: string,
+			): Effect.Effect<ImplementationRegistry, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const normalizedName = yield* requireImplementationName(name)
+							const { entries } = yield* loadImplementationRegistryState(sql)
+							if (!entries.some((entry) => entry.name === normalizedName)) {
+								return yield* Effect.fail(
+									new LocalIssueStoreError({
+										message: `Implementation not found: ${normalizedName}`,
+									}),
+								)
+							}
+
+							yield* persistImplementationRegistryState(sql, {
+								entries,
+								defaultImplementation: normalizedName,
+							})
+							return buildImplementationRegistry(entries, normalizedName)
+						}),
+					),
 				),
 
 			ready: (cwd?: string): Effect.Effect<readonly Issue[], LocalIssueStoreError> =>
@@ -2699,6 +3402,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					issueId?: string
 					requirementId?: string
 					requirementSelector?: SpecRequirementLookupSelector
+					implementation?: string
 				},
 				cwd?: string,
 			): Effect.Effect<readonly SpecIssueLink[], LocalIssueStoreError> =>
@@ -2726,6 +3430,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 									link.requirement_id !== resolvedRequirementId
 								)
 									return false
+								if (
+									filters?.implementation !== undefined &&
+									!link.implementations.includes(
+										normalizeSpecImplementation(filters.implementation),
+									)
+								)
+									return false
 								return true
 							})
 					}),
@@ -2740,6 +3451,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				evidenceNote: string | null,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				implementations?: readonly string[],
 			): Effect.Effect<void, LocalIssueStoreError> =>
 				withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
@@ -2771,6 +3483,29 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								)
 							}
 
+							const normalizedImplementations = yield* resolveSpecLinkImplementationsForWrite(
+								sql,
+								issueId,
+								implementations,
+							)
+							const existingLinks = yield* sql<{
+								readonly implementations_json: string | null
+							}>`
+								SELECT implementations_json
+								FROM spec_issue_links
+								WHERE
+									issue_id = ${issueId}
+									AND requirement_id = ${requirement.id}
+									AND link_type = ${normalizeSpecLinkType(linkType)}
+								LIMIT 1
+							`
+							const mergedImplementations =
+								existingLinks.length === 0
+									? normalizedImplementations
+									: normalizeSpecImplementations([
+											...decodeSpecImplementations(existingLinks[0]?.implementations_json ?? null),
+											...normalizedImplementations,
+										])
 							const now = nowIso()
 							const normalizedFulfillmentStatus =
 								normalizeSpecLinkFulfillmentStatus(fulfillmentStatus)
@@ -2782,6 +3517,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 									issue_id,
 									requirement_id,
 									link_type,
+									implementations_json,
 									fulfillment_status,
 									fulfillment_percent,
 									evidence_note,
@@ -2793,6 +3529,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										${issueId},
 										${requirement.id},
 										${normalizeSpecLinkType(linkType)},
+										${encodeSpecImplementations(mergedImplementations)},
 										${normalizedFulfillmentStatus},
 										${normalizedFulfillmentPercent},
 										${normalizedEvidenceNote},
@@ -2802,6 +3539,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								)
 								ON CONFLICT(issue_id, requirement_id, link_type)
 								DO UPDATE SET
+									implementations_json = ${encodeSpecImplementations(mergedImplementations)},
 									deleted_at = ${null},
 									updated_at = ${now},
 									fulfillment_status = ${normalizedFulfillmentStatus},
@@ -2818,6 +3556,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				linkType: SpecLinkType | undefined,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				implementations: readonly string[] | undefined = undefined,
 			): Effect.Effect<number, LocalIssueStoreError> =>
 				withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
@@ -2855,25 +3594,91 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							}
 
 							const now = nowIso()
+							const normalizedImplementations = yield* resolveSpecLinkImplementationsForWrite(
+								sql,
+								issueId,
+								implementations,
+							)
 							if (linkType === undefined) {
-								yield* sql`
-										UPDATE spec_issue_links
-										SET deleted_at = ${now}, updated_at = ${now}
-										WHERE
-											issue_id = ${issueId}
-											AND requirement_id = ${requirement.id}
-											AND deleted_at IS NULL
-									`
+								const rows = yield* sql<{
+									readonly link_type: string
+									readonly implementations_json: string | null
+								}>`
+									SELECT link_type, implementations_json
+									FROM spec_issue_links
+									WHERE
+										issue_id = ${issueId}
+										AND requirement_id = ${requirement.id}
+										AND deleted_at IS NULL
+								`
+								for (const row of rows) {
+									const remaining = decodeSpecImplementations(row.implementations_json).filter(
+										(implementation) => !normalizedImplementations.includes(implementation),
+									)
+									if (remaining.length === 0) {
+										yield* sql`
+											UPDATE spec_issue_links
+											SET deleted_at = ${now}, updated_at = ${now}
+											WHERE
+												issue_id = ${issueId}
+												AND requirement_id = ${requirement.id}
+												AND link_type = ${normalizeSpecLinkType(row.link_type)}
+												AND deleted_at IS NULL
+										`
+									} else {
+										yield* sql`
+											UPDATE spec_issue_links
+											SET
+												implementations_json = ${encodeSpecImplementations(remaining)},
+												updated_at = ${now}
+											WHERE
+												issue_id = ${issueId}
+												AND requirement_id = ${requirement.id}
+												AND link_type = ${normalizeSpecLinkType(row.link_type)}
+												AND deleted_at IS NULL
+										`
+									}
+								}
 							} else {
-								yield* sql`
-										UPDATE spec_issue_links
-										SET deleted_at = ${now}, updated_at = ${now}
-										WHERE
-											issue_id = ${issueId}
-											AND requirement_id = ${requirement.id}
-											AND link_type = ${normalizeSpecLinkType(linkType)}
-											AND deleted_at IS NULL
-									`
+								const rows = yield* sql<{
+									readonly implementations_json: string | null
+								}>`
+									SELECT implementations_json
+									FROM spec_issue_links
+									WHERE
+										issue_id = ${issueId}
+										AND requirement_id = ${requirement.id}
+										AND link_type = ${normalizeSpecLinkType(linkType)}
+										AND deleted_at IS NULL
+								`
+								for (const row of rows) {
+									const remaining = decodeSpecImplementations(row.implementations_json).filter(
+										(implementation) => !normalizedImplementations.includes(implementation),
+									)
+									if (remaining.length === 0) {
+										yield* sql`
+											UPDATE spec_issue_links
+											SET deleted_at = ${now}, updated_at = ${now}
+											WHERE
+												issue_id = ${issueId}
+												AND requirement_id = ${requirement.id}
+												AND link_type = ${normalizeSpecLinkType(linkType)}
+												AND deleted_at IS NULL
+										`
+									} else {
+										yield* sql`
+											UPDATE spec_issue_links
+											SET
+												implementations_json = ${encodeSpecImplementations(remaining)},
+												updated_at = ${now}
+											WHERE
+												issue_id = ${issueId}
+												AND requirement_id = ${requirement.id}
+												AND link_type = ${normalizeSpecLinkType(linkType)}
+												AND deleted_at IS NULL
+										`
+									}
+								}
 							}
 							return removed
 						}),
@@ -3024,6 +3829,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						readonly title: string
 						readonly kind: string
 						readonly link_type: string
+						readonly implementations_json: string | null
 						readonly fulfillment_status: string | null
 						readonly fulfillment_percent: number | null
 						readonly evidence_note: string | null
@@ -3035,6 +3841,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								r.title,
 								r.kind,
 								l.link_type,
+								l.implementations_json,
 								l.fulfillment_status,
 								l.fulfillment_percent,
 								l.evidence_note
@@ -3054,6 +3861,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								title: row.title,
 								kind: normalizeSpecRequirementKind(row.kind),
 								link_type: normalizeSpecLinkType(row.link_type),
+								implementations: decodeSpecImplementations(row.implementations_json),
 								fulfillment_status: normalizeSpecLinkFulfillmentStatus(row.fulfillment_status),
 								fulfillment_percent: normalizeSpecLinkFulfillmentPercent(row.fulfillment_percent),
 								evidence_note: normalizeSpecLinkEvidenceNote(row.evidence_note),
@@ -3083,6 +3891,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							readonly status: string
 							readonly issue_type: string
 							readonly link_type: string
+							readonly implementations_json: string | null
 							readonly fulfillment_status: string | null
 							readonly fulfillment_percent: number | null
 							readonly evidence_note: string | null
@@ -3093,6 +3902,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 									i.status,
 									i.issue_type,
 									l.link_type,
+									l.implementations_json,
 									l.fulfillment_status,
 									l.fulfillment_percent,
 									l.evidence_note
@@ -3110,6 +3920,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							status: normalizeIssueStatus(row.status),
 							issue_type: normalizeIssueType(row.issue_type),
 							link_type: normalizeSpecLinkType(row.link_type),
+							implementations: decodeSpecImplementations(row.implementations_json),
 							fulfillment_status: normalizeSpecLinkFulfillmentStatus(row.fulfillment_status),
 							fulfillment_percent: normalizeSpecLinkFulfillmentPercent(row.fulfillment_percent),
 							evidence_note: normalizeSpecLinkEvidenceNote(row.evidence_note),
@@ -3213,6 +4024,115 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							fully_implemented_requirement_ids: fullyImplementedRequirementIds,
 							partially_implemented_requirement_ids: partiallyImplementedRequirementIds,
 							integrity_gaps: integrityGaps,
+						}
+					}),
+				),
+
+			getSpecParityReport: (
+				implementation: string,
+				cwd?: string,
+			): Effect.Effect<SpecParityReport, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					Effect.gen(function* () {
+						const normalizedImplementation = normalizeSpecImplementation(implementation)
+						const [requirements, links] = yield* Effect.all([
+							listSpecRequirementRows(sql),
+							listSpecIssueLinkRows(sql),
+						])
+
+						const parityRequirements = requirements.map((row) => ({
+							id: row.id,
+							local_id: row.local_id,
+							external_code: row.external_code,
+							title: row.title,
+							implements_issue_ids: [] as string[],
+							partial_issue_ids: [] as string[],
+							tests_issue_ids: [] as string[],
+							other_issue_ids: [] as string[],
+						}))
+						const parityRequirementById = new Map(
+							parityRequirements.map((requirement) => [requirement.id, requirement] as const),
+						)
+
+						for (const linkRow of links) {
+							const link = rowToSpecIssueLink(linkRow)
+							if (!link.implementations.includes(normalizedImplementation)) {
+								continue
+							}
+							const parityRequirement = parityRequirementById.get(link.requirement_id)
+							if (parityRequirement === undefined) {
+								continue
+							}
+
+							switch (link.link_type) {
+								case "implements":
+									if (
+										link.fulfillment_status === "complete" ||
+										link.fulfillment_status === "verified"
+									) {
+										parityRequirement.implements_issue_ids.push(link.issue_id)
+									} else if (link.fulfillment_status === "partial") {
+										parityRequirement.partial_issue_ids.push(link.issue_id)
+									} else {
+										parityRequirement.other_issue_ids.push(link.issue_id)
+									}
+									break
+								case "tests":
+									if (
+										link.fulfillment_status === "complete" ||
+										link.fulfillment_status === "verified"
+									) {
+										parityRequirement.tests_issue_ids.push(link.issue_id)
+									} else {
+										parityRequirement.other_issue_ids.push(link.issue_id)
+									}
+									break
+								default:
+									parityRequirement.other_issue_ids.push(link.issue_id)
+							}
+						}
+
+						const implementedRequirementIds = parityRequirements
+							.filter((requirement) => requirement.implements_issue_ids.length > 0)
+							.map((requirement) => requirement.local_id)
+						const partiallyImplementedRequirementIds = parityRequirements
+							.filter(
+								(requirement) =>
+									requirement.implements_issue_ids.length === 0 &&
+									requirement.partial_issue_ids.length > 0,
+							)
+							.map((requirement) => requirement.local_id)
+						const testedRequirementIds = parityRequirements
+							.filter((requirement) => requirement.tests_issue_ids.length > 0)
+							.map((requirement) => requirement.local_id)
+						const relatedOnlyRequirementIds = parityRequirements
+							.filter(
+								(requirement) =>
+									requirement.implements_issue_ids.length === 0 &&
+									requirement.partial_issue_ids.length === 0 &&
+									requirement.tests_issue_ids.length === 0 &&
+									requirement.other_issue_ids.length > 0,
+							)
+							.map((requirement) => requirement.local_id)
+						const uncoveredRequirementIds = parityRequirements
+							.filter(
+								(requirement) =>
+									requirement.implements_issue_ids.length === 0 &&
+									requirement.partial_issue_ids.length === 0 &&
+									requirement.tests_issue_ids.length === 0 &&
+									requirement.other_issue_ids.length === 0,
+							)
+							.map((requirement) => requirement.local_id)
+
+						return {
+							implementation: normalizedImplementation,
+							total_requirements: requirements.length,
+							implemented_requirement_ids: implementedRequirementIds,
+							partially_implemented_requirement_ids: partiallyImplementedRequirementIds,
+							tested_requirement_ids: testedRequirementIds,
+							uncovered_requirement_ids: uncoveredRequirementIds,
+							related_only_requirement_ids: relatedOnlyRequirementIds,
+							requirements: parityRequirements satisfies readonly SpecParityRequirement[],
 						}
 					}),
 				),
@@ -3920,9 +4840,18 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												readonly notes: string | null
 												readonly acceptance: string | null
 												readonly estimate: number | null
+												readonly implementations_json: string | null
 												readonly created_at: string
 											}>`
-												SELECT id, description, design, notes, acceptance, estimate, created_at
+												SELECT
+													id,
+													description,
+													design,
+													notes,
+													acceptance,
+													estimate,
+													implementations_json,
+													created_at
 												FROM issues
 												WHERE id = ${params.duplicateIssueId} AND deleted_at IS NULL
 												LIMIT 1
@@ -3944,6 +4873,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													notes = COALESCE(notes, ${duplicateIssue.notes}),
 													acceptance = COALESCE(acceptance, ${duplicateIssue.acceptance}),
 													estimate = COALESCE(estimate, ${duplicateIssue.estimate}),
+													implementations_json = CASE
+														WHEN implementations_json IS NULL THEN ${encodeSpecImplementations(
+															decodeSpecImplementations(duplicateIssue.implementations_json),
+														)}
+														ELSE implementations_json
+													END,
 													created_at = CASE
 														WHEN created_at <= ${duplicateIssue.created_at}
 															THEN created_at
@@ -4031,6 +4966,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													issue_id,
 													requirement_id,
 													link_type,
+													implementations_json,
 													fulfillment_status,
 													fulfillment_percent,
 													evidence_note,
@@ -4042,6 +4978,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													${params.canonicalIssueId},
 													requirement_id,
 													link_type,
+													implementations_json,
 													fulfillment_status,
 													fulfillment_percent,
 													evidence_note,
@@ -4061,6 +4998,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 														WHEN excluded.updated_at > spec_issue_links.updated_at
 															THEN excluded.updated_at
 															ELSE spec_issue_links.updated_at
+													END,
+													implementations_json = CASE
+														WHEN excluded.updated_at > spec_issue_links.updated_at
+															THEN excluded.implementations_json
+															ELSE spec_issue_links.implementations_json
 													END,
 													fulfillment_status = CASE
 														WHEN excluded.updated_at > spec_issue_links.updated_at
@@ -4121,6 +5063,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												closed_at,
 												assignee,
 												labels_json,
+												implementations_json,
 												design,
 												notes,
 												acceptance,
@@ -4139,6 +5082,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												${snapshot.closedAt ?? null},
 												${snapshot.assignee ?? null},
 												${encodeLabels(snapshot.labels)},
+												${encodeSpecImplementations(snapshot.implementations)},
 												${snapshot.design ?? null},
 												${snapshot.notes ?? null},
 												${snapshot.acceptance ?? null},
