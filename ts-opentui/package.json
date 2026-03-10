@@ -1,6 +1,6 @@
 {
 	"name": "azedarach",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"description": "TUI Kanban board for orchestrating parallel Claude Code sessions",
 	"type": "module",
 	"bin": {
