@@ -97,7 +97,7 @@ const INIT_DONE_OPTION = "@az_init_done"
 const BELL_CHAR = "\u0007"
 const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
 const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
-const SESSION_STARTUP_CRASH_GRACE_MS = 5_000
+const SESSION_STARTUP_CRASH_GRACE_MS = 20_000
 
 const getCommandErrorField = (
 	error: unknown,
