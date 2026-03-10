@@ -647,7 +647,7 @@ describe("spec requirements and links", () => {
 		}
 	})
 
-	it("supports requirement CRUD, bidirectional links, and coverage gaps", async () => {
+	it("supports impl-scoped spec links, bidirectional lookups, and parity reporting", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-"))
 		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
 
@@ -675,32 +675,66 @@ describe("spec requirements and links", () => {
 					)
 
 					yield* store.addSpecIssueLink(issue.id, requirement.id, "implements", projectPath)
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"implements",
+						projectPath,
+						"auto",
+						["ts-opentui"],
+					)
+					yield* store.addSpecIssueLink(issue.id, requirement.id, "tests", projectPath, "auto", [
+						"ts-opentui",
+					])
+					yield* store.addSpecIssueLink(issue.id, requirement.id, "relates", projectPath, "auto", [
+						"go-bubbletea",
+					])
 
+					const links = yield* store.listSpecIssueLinks(undefined, projectPath)
+					const tsOpenTuiLinks = yield* store.listSpecIssueLinks(
+						{ implementation: "ts-opentui" },
+						projectPath,
+					)
 					const issueRequirements = yield* store.listIssueSpecRequirements(issue.id, projectPath)
 					const requirementIssues = yield* store.listRequirementLinkedIssues(
 						requirement.id,
 						projectPath,
 					)
 					const coverage = yield* store.getSpecCoverageReport(projectPath)
+					const defaultParity = yield* store.getSpecParityReport("default", projectPath)
+					const tsOpenTuiParity = yield* store.getSpecParityReport("ts-opentui", projectPath)
+					const goBubbleteaParity = yield* store.getSpecParityReport("go-bubbletea", projectPath)
 
 					return {
+						links,
+						tsOpenTuiLinks,
 						requirement,
 						acceptanceRequirement,
 						issueRequirements,
 						requirementIssues,
 						coverage,
+						defaultParity,
+						tsOpenTuiParity,
+						goBubbleteaParity,
 					}
 				}).pipe(Effect.provide(testLayer)),
 			)
 
-			expect(result.issueRequirements).toHaveLength(1)
+			expect(result.links).toHaveLength(3)
+			expect(result.tsOpenTuiLinks).toHaveLength(2)
+			expect(result.links.find((link) => link.link_type === "implements")?.implementations).toEqual(
+				["default", "ts-opentui"],
+			)
+
+			expect(result.issueRequirements).toHaveLength(3)
 			expect(result.issueRequirements[0]?.id).toBe(result.requirement.id)
 			expect(result.issueRequirements[0]?.local_id).toBe("fr4201")
 			expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
 			expect(result.issueRequirements[0]?.link_type).toBe("implements")
+			expect(result.issueRequirements[0]?.implementations).toEqual(["default", "ts-opentui"])
 
-			expect(result.requirementIssues).toHaveLength(1)
-			expect(result.requirementIssues[0]?.link_type).toBe("implements")
+			expect(result.requirementIssues).toHaveLength(3)
+			expect(result.requirementIssues[0]?.implementations.length).toBeGreaterThan(0)
 
 			expect(result.coverage.requirements).toHaveLength(2)
 			expect(result.coverage.unlinked_requirement_ids).toContain(
@@ -713,6 +747,29 @@ describe("spec requirements and links", () => {
 						gap.requirement_id === result.acceptanceRequirement.local_id,
 				),
 			).toBe(true)
+
+			expect(result.defaultParity.implementation).toBe("default")
+			expect(result.defaultParity.implemented_requirement_ids).toContain(
+				result.requirement.local_id,
+			)
+			expect(result.defaultParity.tested_requirement_ids).not.toContain(result.requirement.local_id)
+
+			expect(result.tsOpenTuiParity.implementation).toBe("ts-opentui")
+			expect(result.tsOpenTuiParity.implemented_requirement_ids).toContain(
+				result.requirement.local_id,
+			)
+			expect(result.tsOpenTuiParity.tested_requirement_ids).toContain(result.requirement.local_id)
+			expect(result.tsOpenTuiParity.uncovered_requirement_ids).toContain(
+				result.acceptanceRequirement.local_id,
+			)
+
+			expect(result.goBubbleteaParity.implementation).toBe("go-bubbletea")
+			expect(result.goBubbleteaParity.implemented_requirement_ids).not.toContain(
+				result.requirement.local_id,
+			)
+			expect(result.goBubbleteaParity.related_only_requirement_ids).toContain(
+				result.requirement.local_id,
+			)
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

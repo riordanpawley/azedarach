@@ -26,6 +26,8 @@ import type {
 	SpecIssueLink,
 	SpecIssueRef,
 	SpecLinkType,
+	SpecParityReport,
+	SpecParityRequirement,
 	SpecPublishConfig,
 	SpecPublishOutcome,
 	SpecRequirement,
@@ -37,6 +39,7 @@ import type {
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "./specTypes.js"
 
 const LabelsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
+const SpecImplementationsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
 const SpecPublishConfigJsonSchema = Schema.parseJson(
 	Schema.Struct({
 		enabled: Schema.Boolean,
@@ -124,6 +127,7 @@ interface SpecIssueLinkRow {
 	readonly requirement_local_id: string
 	readonly requirement_external_code: string | null
 	readonly link_type: string
+	readonly implementations_json: string | null
 	readonly created_at: string
 	readonly updated_at: string
 	readonly deleted_at: string | null
@@ -257,10 +261,12 @@ const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
 const LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META = "issue:id_next_alpha_index"
 const SPEC_PUBLISH_CONFIG_META_KEY = "spec:publish:config"
 const SPEC_PUBLISH_OUTCOME_META_KEY = "spec:publish:last_outcome"
+const DEFAULT_SPEC_IMPLEMENTATION = "default"
 const RESERVED_LOCAL_ISSUE_IDS = new Set(["az"])
 const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
 const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
 const SPEC_LOCAL_ID_PATTERN = /^[a-z][a-z0-9-]{0,47}$/
+const SPEC_IMPLEMENTATION_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
 
 const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
 	enabled: true,
@@ -352,6 +358,7 @@ const schemaStatements: readonly string[] = [
 		issue_id TEXT NOT NULL,
 		requirement_id TEXT NOT NULL,
 		link_type TEXT NOT NULL,
+		implementations_json TEXT NOT NULL,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
 		deleted_at TEXT,
@@ -741,6 +748,22 @@ const normalizeSpecLinkType = (linkType: string | undefined): SpecLinkType => {
 	}
 }
 
+const normalizeSpecImplementation = (implementation: string): string => {
+	const normalized = implementation.trim().toLowerCase()
+	return SPEC_IMPLEMENTATION_PATTERN.test(normalized) ? normalized : DEFAULT_SPEC_IMPLEMENTATION
+}
+
+const normalizeSpecImplementations = (
+	implementations: readonly string[] | undefined,
+): readonly string[] => {
+	const normalized = (implementations ?? [DEFAULT_SPEC_IMPLEMENTATION])
+		.map((implementation) => normalizeSpecImplementation(implementation))
+		.filter((implementation, index, items) => items.indexOf(implementation) === index)
+		.sort((left, right) => left.localeCompare(right))
+
+	return normalized.length > 0 ? normalized : [DEFAULT_SPEC_IMPLEMENTATION]
+}
+
 const toTimestampMs = (value: string): number => {
 	const parsed = Date.parse(value)
 	return Number.isNaN(parsed) ? 0 : parsed
@@ -778,6 +801,19 @@ const decodeLabels = (value: string | null): readonly string[] => {
 
 const encodeLabels = (labels: readonly string[] | undefined): string =>
 	Schema.encodeSync(LabelsJsonSchema)(labels === undefined ? [] : [...labels])
+
+const decodeSpecImplementations = (value: string | null): readonly string[] => {
+	if (value === null) {
+		return [DEFAULT_SPEC_IMPLEMENTATION]
+	}
+
+	return normalizeSpecImplementations(Schema.decodeSync(SpecImplementationsJsonSchema)(value))
+}
+
+const encodeSpecImplementations = (implementations: readonly string[] | undefined): string =>
+	Schema.encodeSync(SpecImplementationsJsonSchema)([
+		...normalizeSpecImplementations(implementations),
+	])
 
 const toUint8Array = (value: Uint8Array | ArrayBuffer): Uint8Array =>
 	value instanceof Uint8Array ? value : new Uint8Array(value)
@@ -886,6 +922,7 @@ const rowToSpecIssueLink = (row: SpecIssueLinkRow): SpecIssueLink => ({
 	requirement_local_id: row.requirement_local_id,
 	requirement_external_code: row.requirement_external_code,
 	link_type: normalizeSpecLinkType(row.link_type),
+	implementations: decodeSpecImplementations(row.implementations_json),
 	created_at: row.created_at,
 	updated_at: row.updated_at,
 })
@@ -1284,6 +1321,24 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}
 			})
 
+		const ensureSpecIssueLinkColumns = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
+			Effect.gen(function* () {
+				const columns = yield* sql<TableInfoRow>`PRAGMA table_info(spec_issue_links)`
+				if (columns.length === 0) {
+					return
+				}
+
+				const columnNames = new Set(columns.map((column) => column.name))
+				if (!columnNames.has("implementations_json")) {
+					yield* sql`ALTER TABLE spec_issue_links ADD COLUMN implementations_json TEXT`
+					yield* sql`
+						UPDATE spec_issue_links
+						SET implementations_json = ${encodeSpecImplementations([DEFAULT_SPEC_IMPLEMENTATION])}
+						WHERE implementations_json IS NULL
+					`
+				}
+			})
+
 		const reportBackupFailure = (
 			dbPath: string,
 			backupConfig: LocalIssueBackupConfig,
@@ -1489,6 +1544,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						yield* ensureIssueColumns(sql)
 						yield* ensureSyncQueueColumns(sql)
 						yield* ensureSpecRequirementColumns(sql)
+						yield* ensureSpecIssueLinkColumns(sql)
 						yield* maybeRunStaleOpenBackup(sql, dbPath, storageRoot, backupConfig)
 
 						const result = yield* effect(sql)
@@ -1730,6 +1786,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						COALESCE(r.local_id, l.requirement_id) AS requirement_local_id,
 						r.external_code AS requirement_external_code,
 						l.link_type,
+						l.implementations_json,
 						l.created_at,
 						l.updated_at,
 						l.deleted_at
@@ -2579,6 +2636,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					issueId?: string
 					requirementId?: string
 					requirementSelector?: SpecRequirementLookupSelector
+					implementation?: string
 				},
 				cwd?: string,
 			): Effect.Effect<readonly SpecIssueLink[], LocalIssueStoreError> =>
@@ -2606,6 +2664,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 									link.requirement_id !== resolvedRequirementId
 								)
 									return false
+								if (
+									filters?.implementation !== undefined &&
+									!link.implementations.includes(
+										normalizeSpecImplementation(filters.implementation),
+									)
+								)
+									return false
 								return true
 							})
 					}),
@@ -2617,6 +2682,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				linkType: SpecLinkType,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				implementations?: readonly string[],
 			): Effect.Effect<void, LocalIssueStoreError> =>
 				withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
@@ -2648,12 +2714,32 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								)
 							}
 
+							const normalizedImplementations = normalizeSpecImplementations(implementations)
+							const existingLinks = yield* sql<{
+								readonly implementations_json: string | null
+							}>`
+								SELECT implementations_json
+								FROM spec_issue_links
+								WHERE
+									issue_id = ${issueId}
+									AND requirement_id = ${requirement.id}
+									AND link_type = ${normalizeSpecLinkType(linkType)}
+								LIMIT 1
+							`
+							const mergedImplementations =
+								existingLinks.length === 0
+									? normalizedImplementations
+									: normalizeSpecImplementations([
+											...decodeSpecImplementations(existingLinks[0]?.implementations_json ?? null),
+											...normalizedImplementations,
+										])
 							const now = nowIso()
 							yield* sql`
 								INSERT INTO spec_issue_links (
 									issue_id,
 									requirement_id,
 									link_type,
+									implementations_json,
 									created_at,
 									updated_at,
 									deleted_at
@@ -2662,12 +2748,16 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										${issueId},
 										${requirement.id},
 										${normalizeSpecLinkType(linkType)},
+										${encodeSpecImplementations(mergedImplementations)},
 										${now},
 										${now},
 									${null}
 								)
 								ON CONFLICT(issue_id, requirement_id, link_type)
-								DO UPDATE SET deleted_at = ${null}, updated_at = ${now}
+								DO UPDATE SET
+									implementations_json = ${encodeSpecImplementations(mergedImplementations)},
+									deleted_at = ${null},
+									updated_at = ${now}
 							`
 						}),
 					),
@@ -2679,6 +2769,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				linkType: SpecLinkType | undefined,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				implementations: readonly string[] | undefined = undefined,
 			): Effect.Effect<number, LocalIssueStoreError> =>
 				withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
@@ -2716,8 +2807,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							}
 
 							const now = nowIso()
+							const normalizedImplementations =
+								implementations === undefined
+									? undefined
+									: normalizeSpecImplementations(implementations)
 							if (linkType === undefined) {
-								yield* sql`
+								if (normalizedImplementations === undefined) {
+									yield* sql`
 										UPDATE spec_issue_links
 										SET deleted_at = ${now}, updated_at = ${now}
 										WHERE
@@ -2725,8 +2821,50 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 											AND requirement_id = ${requirement.id}
 											AND deleted_at IS NULL
 									`
+								} else {
+									const rows = yield* sql<{
+										readonly link_type: string
+										readonly implementations_json: string | null
+									}>`
+										SELECT link_type, implementations_json
+										FROM spec_issue_links
+										WHERE
+											issue_id = ${issueId}
+											AND requirement_id = ${requirement.id}
+											AND deleted_at IS NULL
+									`
+									for (const row of rows) {
+										const remaining = decodeSpecImplementations(row.implementations_json).filter(
+											(implementation) => !normalizedImplementations.includes(implementation),
+										)
+										if (remaining.length === 0) {
+											yield* sql`
+												UPDATE spec_issue_links
+												SET deleted_at = ${now}, updated_at = ${now}
+												WHERE
+													issue_id = ${issueId}
+													AND requirement_id = ${requirement.id}
+													AND link_type = ${normalizeSpecLinkType(row.link_type)}
+													AND deleted_at IS NULL
+											`
+										} else {
+											yield* sql`
+												UPDATE spec_issue_links
+												SET
+													implementations_json = ${encodeSpecImplementations(remaining)},
+													updated_at = ${now}
+												WHERE
+													issue_id = ${issueId}
+													AND requirement_id = ${requirement.id}
+													AND link_type = ${normalizeSpecLinkType(row.link_type)}
+													AND deleted_at IS NULL
+											`
+										}
+									}
+								}
 							} else {
-								yield* sql`
+								if (normalizedImplementations === undefined) {
+									yield* sql`
 										UPDATE spec_issue_links
 										SET deleted_at = ${now}, updated_at = ${now}
 										WHERE
@@ -2735,6 +2873,47 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 											AND link_type = ${normalizeSpecLinkType(linkType)}
 											AND deleted_at IS NULL
 									`
+								} else {
+									const rows = yield* sql<{
+										readonly implementations_json: string | null
+									}>`
+										SELECT implementations_json
+										FROM spec_issue_links
+										WHERE
+											issue_id = ${issueId}
+											AND requirement_id = ${requirement.id}
+											AND link_type = ${normalizeSpecLinkType(linkType)}
+											AND deleted_at IS NULL
+									`
+									for (const row of rows) {
+										const remaining = decodeSpecImplementations(row.implementations_json).filter(
+											(implementation) => !normalizedImplementations.includes(implementation),
+										)
+										if (remaining.length === 0) {
+											yield* sql`
+												UPDATE spec_issue_links
+												SET deleted_at = ${now}, updated_at = ${now}
+												WHERE
+													issue_id = ${issueId}
+													AND requirement_id = ${requirement.id}
+													AND link_type = ${normalizeSpecLinkType(linkType)}
+													AND deleted_at IS NULL
+											`
+										} else {
+											yield* sql`
+												UPDATE spec_issue_links
+												SET
+													implementations_json = ${encodeSpecImplementations(remaining)},
+													updated_at = ${now}
+												WHERE
+													issue_id = ${issueId}
+													AND requirement_id = ${requirement.id}
+													AND link_type = ${normalizeSpecLinkType(linkType)}
+													AND deleted_at IS NULL
+											`
+										}
+									}
+								}
 							}
 							return removed
 						}),
@@ -2753,6 +2932,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						readonly title: string
 						readonly kind: string
 						readonly link_type: string
+						readonly implementations_json: string | null
 					}>`
 							SELECT
 								r.id,
@@ -2760,7 +2940,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								r.external_code,
 								r.title,
 								r.kind,
-								l.link_type
+								l.link_type,
+								l.implementations_json
 						FROM spec_issue_links l
 						INNER JOIN spec_requirements r ON r.id = l.requirement_id
 						WHERE
@@ -2777,6 +2958,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								title: row.title,
 								kind: normalizeSpecRequirementKind(row.kind),
 								link_type: normalizeSpecLinkType(row.link_type),
+								implementations: decodeSpecImplementations(row.implementations_json),
 							})),
 						),
 					),
@@ -2803,13 +2985,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							readonly status: string
 							readonly issue_type: string
 							readonly link_type: string
+							readonly implementations_json: string | null
 						}>`
 								SELECT
 									i.id,
 									i.title,
 									i.status,
 									i.issue_type,
-									l.link_type
+									l.link_type,
+									l.implementations_json
 								FROM spec_issue_links l
 								INNER JOIN issues i ON i.id = l.issue_id
 								WHERE
@@ -2824,6 +3008,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							status: normalizeIssueStatus(row.status),
 							issue_type: normalizeIssueType(row.issue_type),
 							link_type: normalizeSpecLinkType(row.link_type),
+							implementations: decodeSpecImplementations(row.implementations_json),
 						}))
 					}),
 				),
@@ -2893,6 +3078,88 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							requirements: requirementStats,
 							unlinked_requirement_ids: unlinkedRequirementIds,
 							integrity_gaps: integrityGaps,
+						}
+					}),
+				),
+
+			getSpecParityReport: (
+				implementation: string,
+				cwd?: string,
+			): Effect.Effect<SpecParityReport, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					Effect.gen(function* () {
+						const normalizedImplementation = normalizeSpecImplementation(implementation)
+						const [requirements, links] = yield* Effect.all([
+							listSpecRequirementRows(sql),
+							listSpecIssueLinkRows(sql),
+						])
+
+						const parityRequirements = requirements.map((row) => ({
+							id: row.id,
+							local_id: row.local_id,
+							external_code: row.external_code,
+							title: row.title,
+							implements_issue_ids: [] as string[],
+							tests_issue_ids: [] as string[],
+							other_issue_ids: [] as string[],
+						}))
+						const parityRequirementById = new Map(
+							parityRequirements.map((requirement) => [requirement.id, requirement] as const),
+						)
+
+						for (const linkRow of links) {
+							const link = rowToSpecIssueLink(linkRow)
+							if (!link.implementations.includes(normalizedImplementation)) {
+								continue
+							}
+							const parityRequirement = parityRequirementById.get(link.requirement_id)
+							if (parityRequirement === undefined) {
+								continue
+							}
+
+							switch (link.link_type) {
+								case "implements":
+									parityRequirement.implements_issue_ids.push(link.issue_id)
+									break
+								case "tests":
+									parityRequirement.tests_issue_ids.push(link.issue_id)
+									break
+								default:
+									parityRequirement.other_issue_ids.push(link.issue_id)
+							}
+						}
+
+						const implementedRequirementIds = parityRequirements
+							.filter((requirement) => requirement.implements_issue_ids.length > 0)
+							.map((requirement) => requirement.local_id)
+						const testedRequirementIds = parityRequirements
+							.filter((requirement) => requirement.tests_issue_ids.length > 0)
+							.map((requirement) => requirement.local_id)
+						const relatedOnlyRequirementIds = parityRequirements
+							.filter(
+								(requirement) =>
+									requirement.implements_issue_ids.length === 0 &&
+									requirement.tests_issue_ids.length === 0 &&
+									requirement.other_issue_ids.length > 0,
+							)
+							.map((requirement) => requirement.local_id)
+						const uncoveredRequirementIds = parityRequirements
+							.filter(
+								(requirement) =>
+									requirement.implements_issue_ids.length === 0 &&
+									requirement.tests_issue_ids.length === 0 &&
+									requirement.other_issue_ids.length === 0,
+							)
+							.map((requirement) => requirement.local_id)
+
+						return {
+							implementation: normalizedImplementation,
+							total_requirements: requirements.length,
+							implemented_requirement_ids: implementedRequirementIds,
+							tested_requirement_ids: testedRequirementIds,
+							uncovered_requirement_ids: uncoveredRequirementIds,
+							related_only_requirement_ids: relatedOnlyRequirementIds,
+							requirements: parityRequirements satisfies readonly SpecParityRequirement[],
 						}
 					}),
 				),
@@ -3711,6 +3978,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													issue_id,
 													requirement_id,
 													link_type,
+													implementations_json,
 													created_at,
 													updated_at,
 													deleted_at
@@ -3719,6 +3987,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													${params.canonicalIssueId},
 													requirement_id,
 													link_type,
+													implementations_json,
 													created_at,
 													updated_at,
 													deleted_at

@@ -569,9 +569,45 @@ type SpecRequirementLookupInput = {
 }
 
 const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
+const SPEC_IMPLEMENTATION_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
+const DEFAULT_SPEC_IMPLEMENTATION = "default"
 
 const normalizeSpecExternalCodeForCli = (value: string): string =>
 	value.trim().toUpperCase().replace(/\s+/g, "")
+
+const normalizeSpecImplementationForCli = (value: string): string => value.trim().toLowerCase()
+
+const parseSpecImplementationForCli = (value: string): Effect.Effect<string, Error> => {
+	const normalized = normalizeSpecImplementationForCli(value)
+	if (!SPEC_IMPLEMENTATION_PATTERN.test(normalized)) {
+		return Effect.fail(
+			new Error(
+				`Invalid implementation '${value}'. Expected lowercase letters, digits, and hyphens, starting with a letter.`,
+			),
+		)
+	}
+	return Effect.succeed(normalized)
+}
+
+const parseOptionalSpecImplementationForCli = (
+	value: Option.Option<string>,
+): Effect.Effect<string, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(DEFAULT_SPEC_IMPLEMENTATION),
+		onSome: (implementation) => parseSpecImplementationForCli(implementation),
+	})
+
+const parseSpecImplementationsForCli = (
+	values: readonly string[],
+): Effect.Effect<readonly string[], Error> =>
+	Effect.gen(function* () {
+		if (values.length === 0) {
+			return [DEFAULT_SPEC_IMPLEMENTATION] as const
+		}
+
+		const parsed = yield* Effect.all(values.map((value) => parseSpecImplementationForCli(value)))
+		return [...new Set(parsed)].sort((left, right) => left.localeCompare(right))
+	})
 
 const inferSpecRequirementKindFromExternalCodeForCli = (
 	externalCode: string,
@@ -1873,6 +1909,7 @@ const specLinkListHandler = (args: {
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -1907,6 +1944,10 @@ const specLinkListHandler = (args: {
 				}).pipe(Effect.map((lookup) => lookup)),
 		})
 		const specService = yield* SpecService
+		const hasImplementationFilter = args.implementations.length > 0
+		const implementationFilter = hasImplementationFilter
+			? yield* parseSpecImplementationsForCli(args.implementations)
+			: undefined
 		const links = yield* specService.listLinks(
 			{
 				issueId,
@@ -1915,22 +1956,30 @@ const specLinkListHandler = (args: {
 			},
 			explicitProjectDir,
 		)
+		const filteredLinks =
+			implementationFilter === undefined
+				? links
+				: links.filter((link) =>
+						implementationFilter.some((implementation) =>
+							link.implementations.includes(implementation),
+						),
+					)
 
 		if (args.json) {
-			yield* Console.log(JSON.stringify(links, null, 2))
+			yield* Console.log(JSON.stringify(filteredLinks, null, 2))
 			return
 		}
-		if (links.length === 0) {
+		if (filteredLinks.length === 0) {
 			yield* Console.log("No spec links found.")
 			return
 		}
-		for (const link of links) {
+		for (const link of filteredLinks) {
 			const requirementRef =
 				link.requirement_external_code === null
 					? link.requirement_local_id
 					: `${link.requirement_local_id} (${link.requirement_external_code})`
 			yield* Console.log(
-				`${link.issue_id} -> ${requirementRef} [type=${link.link_type}] id=${link.requirement_id} updated_at=${link.updated_at}`,
+				`${link.issue_id} -> ${requirementRef} [type=${link.link_type}] impl=${link.implementations.join(",")} id=${link.requirement_id} updated_at=${link.updated_at}`,
 			)
 		}
 	})
@@ -1947,6 +1996,7 @@ const specLinkAddHandler = (args: {
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -1988,6 +2038,7 @@ const specLinkAddHandler = (args: {
 				return Effect.succeed(parsed)
 			},
 		})
+		const implementations = yield* parseSpecImplementationsForCli(args.implementations)
 
 		const specService = yield* SpecService
 		yield* specService.addIssueLink(
@@ -1996,6 +2047,7 @@ const specLinkAddHandler = (args: {
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
+			implementations,
 		)
 
 		if (args.json) {
@@ -2005,6 +2057,7 @@ const specLinkAddHandler = (args: {
 						issueId,
 						requirement: lookup,
 						type: linkType,
+						implementations,
 						updated: true,
 					},
 					null,
@@ -2013,7 +2066,9 @@ const specLinkAddHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(`Added spec link: ${issueId} -> ${lookup.reference} (${linkType})`)
+		yield* Console.log(
+			`Added spec link: ${issueId} -> ${lookup.reference} (${linkType}) [impl=${implementations.join(",")}]`,
+		)
 	})
 
 /**
@@ -2028,6 +2083,7 @@ const specLinkRemoveHandler = (args: {
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -2066,6 +2122,10 @@ const specLinkRemoveHandler = (args: {
 				),
 			)
 		}
+		const hasImplementationFilter = args.implementations.length > 0
+		const implementations = hasImplementationFilter
+			? yield* parseSpecImplementationsForCli(args.implementations)
+			: undefined
 
 		const specService = yield* SpecService
 		const removed = yield* specService.removeIssueLink(
@@ -2074,6 +2134,7 @@ const specLinkRemoveHandler = (args: {
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
+			implementations,
 		)
 
 		if (args.json) {
@@ -2081,6 +2142,33 @@ const specLinkRemoveHandler = (args: {
 			return
 		}
 		yield* Console.log(`Removed ${removed} spec link(s).`)
+	})
+
+const specParityHandler = (args: {
+	readonly implementation: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementation = yield* parseOptionalSpecImplementationForCli(args.implementation)
+		const specService = yield* SpecService
+		const report = yield* specService.getParityReport(implementation, explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(report, null, 2))
+			return
+		}
+
+		yield* Console.log(`implementation=${report.implementation}`)
+		yield* Console.log(`total=${report.total_requirements}`)
+		yield* Console.log(`implemented=${report.implemented_requirement_ids.length}`)
+		yield* Console.log(`tested=${report.tested_requirement_ids.length}`)
+		yield* Console.log(`uncovered=${report.uncovered_requirement_ids.length}`)
+		yield* Console.log(`related_only=${report.related_only_requirement_ids.length}`)
 	})
 
 /**
@@ -3645,6 +3733,16 @@ const requirementByExternalCodeOption = Options.text("external-code").pipe(
 	Options.withDescription("Lookup by requirement external code (for example AZ-FR-4201)"),
 )
 
+const specImplementationOption = Options.text("impl").pipe(
+	Options.repeated,
+	Options.withDescription("Implementation scope (repeatable). Default: default"),
+)
+
+const optionalSpecImplementationOption = Options.text("impl").pipe(
+	Options.optional,
+	Options.withDescription("Implementation scope. Default: default"),
+)
+
 const specReqListCommand = Command.make(
 	"list",
 	{
@@ -3817,6 +3915,7 @@ const specLinkListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by requirement external code"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -3841,6 +3940,7 @@ const specLinkAddCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -3865,6 +3965,7 @@ const specLinkRemoveCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Optional link type filter"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -3882,6 +3983,19 @@ const specLinkCommand = Command.make("link", {}, () =>
 	Command.withDescription("Manage typed issue/spec links"),
 	Command.withSubcommands([specLinkListCommand, specLinkAddCommand, specLinkRemoveCommand]),
 )
+
+const specParityCommand = Command.make(
+	"parity",
+	{
+		implementation: optionalSpecImplementationOption,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specParityHandler,
+).pipe(Command.withDescription("Report spec parity for a selected implementation"))
 
 const specPublishRunCommand = Command.make(
 	"run",
@@ -3954,10 +4068,10 @@ const specPublishCommand = Command.make("publish", {}, () =>
 )
 
 const specCommand = Command.make("spec", {}, () =>
-	Console.log("Usage: az spec [req|link|publish] ..."),
+	Console.log("Usage: az spec [req|link|parity|publish] ..."),
 ).pipe(
 	Command.withDescription("Spec requirement/link/publish operations"),
-	Command.withSubcommands([specReqCommand, specLinkCommand, specPublishCommand]),
+	Command.withSubcommands([specReqCommand, specLinkCommand, specParityCommand, specPublishCommand]),
 )
 
 /**
