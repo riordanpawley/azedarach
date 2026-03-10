@@ -206,6 +206,9 @@ export const DEFAULT_CONFIG = {
 		/** Home row keys for QWERTY layout - customize for Colemak, Dvorak, etc. */
 		jumpLabelChars: "asdfjkl;",
 	},
+	issueEditor: {
+		defaultImplementation: undefined as string | undefined,
+	},
 	sessionRecovery: {
 		/**
 		 * Auto-recovery is the default - crashed sessions are automatically respawned
@@ -386,6 +389,9 @@ export interface ResolvedConfig {
 	}
 	keyboard: {
 		jumpLabelChars: string
+	}
+	issueEditor: {
+		defaultImplementation: string | undefined
 	}
 	sessionRecovery: {
 		mode: SessionRecoveryMode
@@ -607,6 +613,11 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		},
 		keyboard: {
 			jumpLabelChars: config.keyboard?.jumpLabelChars ?? DEFAULT_CONFIG.keyboard.jumpLabelChars,
+		},
+		issueEditor: {
+			defaultImplementation:
+				config.issueEditor?.defaultImplementation ??
+				DEFAULT_CONFIG.issueEditor.defaultImplementation,
 		},
 		sessionRecovery: {
 			mode: config.sessionRecovery?.mode ?? DEFAULT_CONFIG.sessionRecovery.mode,

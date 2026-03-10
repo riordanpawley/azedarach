@@ -842,6 +842,23 @@ const logImplementationDetails = (
 		yield* Console.log(`Updated: ${implementation.updated_at}`)
 	})
 
+const withIssueEditorDefaultImplementation = (
+	config: AzedarachConfig,
+	defaultImplementation: string | undefined,
+): AzedarachConfig =>
+	defaultImplementation === undefined
+		? {
+				...config,
+				issueEditor: undefined,
+			}
+		: {
+				...config,
+				issueEditor: {
+					...(config.issueEditor ?? {}),
+					defaultImplementation,
+				},
+			}
+
 const inferSpecRequirementKindFromExternalCodeForCli = (
 	externalCode: string,
 ): "functional" | "acceptance" | "other" => {
@@ -1479,11 +1496,23 @@ const implListHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 
+		const appConfig = yield* AppConfig
 		const issueTrackerClient = yield* IssueTrackerClient
 		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const issueEditorConfig = yield* appConfig.getIssueEditorConfig()
 
 		if (args.json) {
-			yield* Console.log(JSON.stringify(registry, null, 2))
+			yield* Console.log(
+				JSON.stringify(
+					{
+						...registry,
+						tui_issue_editor_default_implementation:
+							issueEditorConfig.defaultImplementation ?? null,
+					},
+					null,
+					2,
+				),
+			)
 			return
 		}
 
@@ -1493,6 +1522,9 @@ const implListHandler = (args: {
 		if (args.verbose) {
 			yield* Console.error(`default=${registry.default_implementation}`)
 			yield* Console.error(`implicit_default_allowed=${registry.implicit_default_allowed}`)
+			yield* Console.error(
+				`tui_issue_editor_default=${issueEditorConfig.defaultImplementation ?? "<unset>"}`,
+			)
 		}
 	})
 
@@ -1657,6 +1689,81 @@ const implSetDefaultHandler = (args: {
 		}
 
 		yield* Console.log(`Default implementation: ${registry.default_implementation}`)
+	})
+
+const implSetEditorDefaultHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementationExists = registry.implementations.some(
+			(entry) => entry.name === implementationName,
+		)
+		if (!implementationExists) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const nextConfig = withIssueEditorDefaultImplementation(currentConfig, implementationName)
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						configPath,
+						defaultImplementation: implementationName,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log(`TUI issue editor default implementation: ${implementationName}`)
+		yield* Console.log(`Config: ${configPath}`)
+	})
+
+const implClearEditorDefaultHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const nextConfig = withIssueEditorDefaultImplementation(currentConfig, undefined)
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						configPath,
+						defaultImplementation: null,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log("Cleared TUI issue editor default implementation")
+		yield* Console.log(`Config: ${configPath}`)
 	})
 
 /**
@@ -4809,8 +4916,35 @@ const implSetDefaultCommand = Command.make(
 	implSetDefaultHandler,
 ).pipe(Command.withDescription("Set the registry default implementation"))
 
+const implSetEditorDefaultCommand = Command.make(
+	"set-editor-default",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implSetEditorDefaultHandler,
+).pipe(Command.withDescription("Set the TUI issue editor default implementation"))
+
+const implClearEditorDefaultCommand = Command.make(
+	"clear-editor-default",
+	{
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implClearEditorDefaultHandler,
+).pipe(Command.withDescription("Clear the TUI issue editor default implementation"))
+
 const implCommand = Command.make("impl", {}, () =>
-	Console.log("Usage: az impl [list|get|add|update|delete|set-default] ..."),
+	Console.log(
+		"Usage: az impl [list|get|add|update|delete|set-default|set-editor-default|clear-editor-default] ...",
+	),
 ).pipe(
 	Command.withDescription("Manage implementation registry metadata"),
 	Command.withSubcommands([
@@ -4820,6 +4954,8 @@ const implCommand = Command.make("impl", {}, () =>
 		implUpdateCommand,
 		implDeleteCommand,
 		implSetDefaultCommand,
+		implSetEditorDefaultCommand,
+		implClearEditorDefaultCommand,
 	]),
 )
 

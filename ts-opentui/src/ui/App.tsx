@@ -665,8 +665,16 @@ export const App = () => {
 					}
 					lockType={currentOverlay?._tag === "create" ? currentOverlay.lockType : undefined}
 					onSubmit={(params) => {
+						const nextParams =
+							currentOverlay?._tag === "create"
+								? {
+										...params,
+										implementations: currentOverlay.initial?.implementations,
+									}
+								: params
+
 						if (currentOverlay?._tag !== "create" || !currentOverlay.context) {
-							createTask(params)
+							createTask(nextParams)
 							return
 						}
 
@@ -675,13 +683,13 @@ export const App = () => {
 								forkCreateChild({
 									parentEpicId: currentOverlay.context.parentEpicId,
 									sourceTaskId: currentOverlay.context.sourceTaskId,
-									params,
+									params: nextParams,
 								})
 								return
 							case "forkEpic":
 								forkCreateEpic({
 									sourceTaskId: currentOverlay.context.sourceTaskId,
-									params,
+									params: nextParams,
 								})
 								return
 						}

@@ -7,6 +7,13 @@
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Data, Effect } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
+import {
+	formatIssueImplementations,
+	parseIssueImplementations,
+	resolveIssueCreateImplementations,
+	resolveIssueEditorDefaultImplementation,
+} from "./IssueImplementations.js"
 import type { Issue } from "./IssueTrackerClient.js"
 import { IssueTrackerClient } from "./IssueTrackerClient.js"
 
@@ -180,6 +187,7 @@ const serializeIssueToMarkdown = (issue: Issue): string => {
 	lines.push(`Status:   ${issue.status}`)
 	lines.push(`Assignee: ${issue.assignee || ""}`)
 	lines.push(`Labels:   ${(issue.labels || []).join(", ")}`)
+	lines.push(`Impl:     ${formatIssueImplementations(issue.implementations)}`)
 	lines.push(`Estimate: ${issue.estimate ?? ""}`)
 	lines.push("")
 
@@ -283,6 +291,7 @@ interface UpdatedFields {
 	status?: string
 	assignee?: string
 	labels?: string[]
+	implementations?: string[]
 	estimate?: number
 	title?: string
 	description?: string
@@ -396,6 +405,23 @@ const parseMarkdownToIssue = (
 					}
 				}
 
+				// Implementations
+				if (line.startsWith("Impl:")) {
+					const implementationValue = extractFieldValue(line, "Impl").split("(")[0]!.trim()
+					const parsedImplementations = parseIssueImplementations(implementationValue)
+					const originalImplementations = original.implementations
+					const implementationsChanged =
+						parsedImplementations !== undefined &&
+						(parsedImplementations.length !== originalImplementations.length ||
+							parsedImplementations.some(
+								(implementation, index) => implementation !== originalImplementations[index],
+							))
+
+					if (implementationsChanged) {
+						updates.implementations = [...parsedImplementations]
+					}
+				}
+
 				// Estimate
 				if (line.startsWith("Estimate:")) {
 					const estimateValue = extractFieldValue(line, "Estimate")
@@ -452,8 +478,15 @@ const ANCHORS = {
 /**
  * Create a blank issue template for editor creation
  */
-const createBlankIssueTemplate = (): string => {
+const createBlankIssueTemplate = (
+	defaultImplementation: string,
+	availableImplementations: readonly string[],
+): string => {
 	const lines: string[] = []
+	const implementationOptions =
+		availableImplementations.length > 0
+			? availableImplementations.join(" | ")
+			: defaultImplementation
 
 	// Header with single-word anchor for easy selection
 	lines.push(`# ${ANCHORS.TITLE}`)
@@ -466,6 +499,7 @@ const createBlankIssueTemplate = (): string => {
 	lines.push("Status:   open        (open | in_progress | blocked | closed)")
 	lines.push("Assignee: ")
 	lines.push("Labels:   ")
+	lines.push(`Impl:     ${defaultImplementation}        (${implementationOptions})`)
 	lines.push("Estimate: ")
 	lines.push("")
 
@@ -510,6 +544,7 @@ interface NewIssueFields {
 	status: string
 	assignee?: string
 	labels?: string[]
+	implementations?: string[]
 	estimate?: number
 	description?: string
 	design?: string
@@ -617,6 +652,15 @@ const parseMarkdownToNewIssue = (
 					}
 				}
 
+				// Implementations
+				if (line.startsWith("Impl:")) {
+					const implementationValue = extractFieldValue(line, "Impl").split("(")[0]!.trim()
+					const parsedImplementations = parseIssueImplementations(implementationValue)
+					if (parsedImplementations !== undefined) {
+						fields.implementations = [...parsedImplementations]
+					}
+				}
+
 				// Estimate
 				if (line.startsWith("Estimate:")) {
 					const estimateValue = extractFieldValue(line, "Estimate")
@@ -681,8 +725,9 @@ const parseMarkdownToNewIssue = (
  * ```
  */
 export class IssueEditorService extends Effect.Service<IssueEditorService>()("IssueEditorService", {
-	dependencies: [IssueTrackerClient.Default],
+	dependencies: [AppConfig.Default, IssueTrackerClient.Default],
 	effect: Effect.gen(function* () {
+		const appConfig = yield* AppConfig
 		const client = yield* IssueTrackerClient
 		// Inject FileSystem at service construction - never leak it through method return types
 		const fs = yield* FileSystem.FileSystem
@@ -789,6 +834,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 							assignee: updates.assignee,
 							estimate: updates.estimate,
 							labels: updates.labels,
+							implementations: updates.implementations,
 						})
 						.pipe(
 							Effect.mapError(
@@ -814,8 +860,18 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 
 			createIssue: () =>
 				Effect.gen(function* () {
+					const issueEditorConfig = yield* appConfig.getIssueEditorConfig()
+					const registry = yield* client.getImplementationRegistry()
+					const defaultImplementation = resolveIssueEditorDefaultImplementation(
+						registry,
+						issueEditorConfig.defaultImplementation,
+					)
+					const availableImplementations = registry.implementations.map(
+						(implementation) => implementation.name,
+					)
+
 					// 1. Create blank template
-					const markdown = createBlankIssueTemplate()
+					const markdown = createBlankIssueTemplate(defaultImplementation, availableImplementations)
 
 					// 2. Write to temp file
 					const tempFile = `/tmp/azedarach-new.md`
@@ -883,6 +939,10 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 					const fields = yield* parseMarkdownToNewIssue(editedMarkdown)
 
 					// 7. Create issue via IssueTrackerClient
+					const implementations = resolveIssueCreateImplementations(registry, {
+						requestedImplementations: fields.implementations,
+						configuredDefaultImplementation: issueEditorConfig.defaultImplementation,
+					})
 					const createdIssue = yield* client
 						.create({
 							title: fields.title,
@@ -894,6 +954,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 							assignee: fields.assignee,
 							estimate: fields.estimate,
 							labels: fields.labels,
+							implementations,
 						})
 						.pipe(
 							Effect.mapError(

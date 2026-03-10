@@ -24,6 +24,7 @@ export type OverlayType =
 				readonly title?: string
 				readonly type?: string
 				readonly priority?: number
+				readonly implementations?: readonly string[]
 			}
 			readonly lockType?: boolean
 			readonly context?:

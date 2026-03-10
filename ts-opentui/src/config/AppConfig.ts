@@ -116,6 +116,9 @@ export interface AppConfigService {
 	/** Get notifications configuration section */
 	readonly getNotificationsConfig: () => Effect.Effect<ResolvedConfig["notifications"]>
 
+	/** Get TUI issue editor configuration section */
+	readonly getIssueEditorConfig: () => Effect.Effect<ResolvedConfig["issueEditor"]>
+
 	/** Get effective issue backend configuration (tracker + sync flag) */
 	readonly getIssueTrackerSyncConfig: () => Effect.Effect<{
 		readonly issueTracker: ResolvedConfig["issueTracker"]
@@ -740,6 +743,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getMergeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.merge),
 			getNotificationsConfig: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) => c.notifications),
+			getIssueEditorConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.issueEditor),
 			getIssueTrackerSyncConfig: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) => ({
 					issueTracker: c.issueTracker,

@@ -685,6 +685,20 @@ const KeyboardConfigSchema = Schema.Struct({
 })
 
 /**
+ * Issue editor configuration
+ *
+ * Controls defaults for the editor-backed issue creation flow in the TUI.
+ */
+const IssueEditorConfigSchema = Schema.Struct({
+	/**
+	 * Preferred implementation prefilled into the TUI issue editor create template.
+	 *
+	 * Falls back to the implementation registry default when unset or invalid.
+	 */
+	defaultImplementation: Schema.optional(Schema.String),
+})
+
+/**
  * Network configuration
  *
  * Controls automatic network connectivity detection.
@@ -1315,6 +1329,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		notifications: current.notifications,
 		network: current.network,
 		keyboard: current.keyboard,
+		issueEditor: current.issueEditor,
 		sessionRecovery: current.sessionRecovery,
 		hooks: current.hooks,
 		spec: current.spec,
@@ -1384,6 +1399,9 @@ const RawConfigSchema = Schema.Struct({
 	/** Keyboard configuration */
 	keyboard: Schema.optional(KeyboardConfigSchema),
 
+	/** TUI issue editor configuration */
+	issueEditor: Schema.optional(IssueEditorConfigSchema),
+
 	/** Session recovery configuration */
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 
@@ -1419,6 +1437,7 @@ const CurrentConfigSchema = Schema.Struct({
 	notifications: Schema.optional(NotificationsConfigSchema),
 	network: Schema.optional(NetworkConfigSchema),
 	keyboard: Schema.optional(KeyboardConfigSchema),
+	issueEditor: Schema.optional(IssueEditorConfigSchema),
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 	hooks: Schema.optional(HooksConfigSchema),
 	spec: Schema.optional(SpecConfigSchema),
@@ -1522,6 +1541,9 @@ export type ModelConfig = Schema.Schema.Type<typeof ModelConfigSchema>
 
 /** Keyboard config section type */
 export type KeyboardConfig = Schema.Schema.Type<typeof KeyboardConfigSchema>
+
+/** Issue editor config section type */
+export type IssueEditorConfig = Schema.Schema.Type<typeof IssueEditorConfigSchema>
 
 /** Session recovery config section type */
 export type SessionRecoveryConfig = Schema.Schema.Type<typeof SessionRecoveryConfigSchema>
