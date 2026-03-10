@@ -6,6 +6,7 @@
 
 import { Effect } from "effect"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
+import { createWorktreeOnlyCleanupOptions } from "../../lib/cleanupPolicy.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
 
@@ -48,10 +49,7 @@ export const cleanupAtom = appRuntime.fn((issueId: string) =>
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
-		yield* prWorkflow.cleanup({
-			issueId,
-			projectPath,
-		})
+		yield* prWorkflow.cleanup(createWorktreeOnlyCleanupOptions(issueId, projectPath))
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

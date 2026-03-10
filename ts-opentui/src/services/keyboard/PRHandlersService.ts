@@ -16,12 +16,13 @@ import { Command } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import {
-    type MergeToMainDeferredPushStatus,
-    type MergeToMainProgressStage,
-    PRWorkflow,
+	type MergeToMainDeferredPushStatus,
+	type MergeToMainProgressStage,
+	PRWorkflow,
 } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { createWorktreeOnlyCleanupOptions } from "../../lib/cleanupPolicy.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
@@ -88,55 +89,52 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 								return `Merging ${issueId} into ${targetBranch}...`
 							case "validate":
 								return "Running post-merge validation..."
-                            case "push":
-                                return `Starting background push to ${targetBranch}...`
-                        }
-                    }
-                    const deferredPushMessage = (
-                        status: MergeToMainDeferredPushStatus,
-                    ): Effect.Effect<void, never, never> => {
-                        switch (status._tag) {
-                            case "started":
-                                return toast.show(
-                                    "info",
-                                    `Local merge complete for ${issueId}. Pushing ${status.branch} in background...`,
-                                )
-                            case "succeeded":
-                                return toast.show("success", `Background push completed for ${status.branch}`)
-                            case "failed":
-                                return toast.show(
-                                    "warning",
-                                    `Local merge succeeded, but background push failed: ${formatForToast(status.error)}`,
-                                )
-                        }
-                    }
+							case "push":
+								return `Starting background push to ${targetBranch}...`
+						}
+					}
+					const deferredPushMessage = (
+						status: MergeToMainDeferredPushStatus,
+					): Effect.Effect<void, never, never> => {
+						switch (status._tag) {
+							case "started":
+								return toast.show(
+									"info",
+									`Local merge complete for ${issueId}. Pushing ${status.branch} in background...`,
+								)
+							case "succeeded":
+								return toast.show("success", `Background push completed for ${status.branch}`)
+							case "failed":
+								return toast.show(
+									"warning",
+									`Local merge succeeded, but background push failed: ${formatForToast(status.error)}`,
+								)
+						}
+					}
 
-                    yield* prWorkflow
-                        .mergeToMain({
-                            issueId,
-                            projectPath,
-                            onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
-                            onDeferredPushStatus: deferredPushMessage,
-                        })
-                        .pipe(
-                            Effect.tap(() =>
-                                Effect.gen(function* () {
-                                    yield* board.patchTaskFromMutation(issueId, {
+					yield* prWorkflow
+						.mergeToMain({
+							issueId,
+							projectPath,
+							onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
+							onDeferredPushStatus: deferredPushMessage,
+						})
+						.pipe(
+							Effect.tap(() =>
+								Effect.gen(function* () {
+									yield* board.patchTaskFromMutation(issueId, {
 										hasMergeConflict: false,
 										updated_at: new Date().toISOString(),
-                                    })
-                                    yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
-                                }),
-                            ),
-                            Effect.tap(() =>
-                                toast.show(
-                                    "success",
-                                    `Merged ${issueId} into ${targetBranch} locally`,
-                                ),
-                            ),
-                            Effect.catchAll(helpers.showErrorToast("Merge failed")),
-                        )
-                }),
+									})
+									yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
+								}),
+							),
+							Effect.tap(() =>
+								toast.show("success", `Merged ${issueId} into ${targetBranch} locally`),
+							),
+							Effect.catchAll(helpers.showErrorToast("Merge failed")),
+						)
+				}),
 				projectPath,
 			)
 
@@ -155,7 +153,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* Effect.log(`[cleanup:execute] Running cleanup for issueId=${issueId}`)
 					yield* toast.show("info", `Cleaning up ${issueId}...`)
 
-					yield* prWorkflow.cleanup({ issueId, projectPath }).pipe(
+					yield* prWorkflow.cleanup(createWorktreeOnlyCleanupOptions(issueId, projectPath)).pipe(
 						Effect.tap(() => toast.show("success", `Cleaned up ${issueId}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to cleanup")),
 					)
@@ -315,44 +313,44 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Update from base first to resolve any conflicts
 				yield* toast.show("info", `Syncing with ${effectiveBaseBranch} before PR...`)
-                const updateResult = yield* prWorkflow
-                    .updateFromBase({ issueId: task.id, projectPath })
-                    .pipe(
-                        Effect.match({
-                            onFailure: (error) => {
-                                switch (error._tag) {
-                                    // MergeConflictError means AI is resolving - don't proceed
-                                    case "MergeConflictError":
-                                        return { _tag: "conflict" as const, error }
+				const updateResult = yield* prWorkflow
+					.updateFromBase({ issueId: task.id, projectPath })
+					.pipe(
+						Effect.match({
+							onFailure: (error) => {
+								switch (error._tag) {
+									// MergeConflictError means AI is resolving - don't proceed
+									case "MergeConflictError":
+										return { _tag: "conflict" as const, error }
 
-                                    // Base context has an in-progress git operation - block PR creation.
-                                    case "GitOperationInProgressError":
-                                        return { _tag: "blocked" as const, error }
+									// Base context has an in-progress git operation - block PR creation.
+									case "GitOperationInProgressError":
+										return { _tag: "blocked" as const, error }
 
-                                    default:
-                                        // Other errors - log but continue
-                                        return { _tag: "error" as const, error }
-                                }
-                            },
-                            onSuccess: () => ({ _tag: "success" as const }),
-                        }),
+									default:
+										// Other errors - log but continue
+										return { _tag: "error" as const, error }
+								}
+							},
+							onSuccess: () => ({ _tag: "success" as const }),
+						}),
 					)
 
-                if (updateResult._tag === "conflict") {
-                    yield* toast.show("info", "Resolving conflicts - retry PR after AI finishes")
-                    return
-                }
+				if (updateResult._tag === "conflict") {
+					yield* toast.show("info", "Resolving conflicts - retry PR after AI finishes")
+					return
+				}
 
-                if (updateResult._tag === "blocked") {
-                    yield* toast.show("error", formatForToast(updateResult.error))
-                    return
-                }
+				if (updateResult._tag === "blocked") {
+					yield* toast.show("error", formatForToast(updateResult.error))
+					return
+				}
 
-                if (updateResult._tag === "error") {
-                    yield* Effect.logWarning("Update from base failed, proceeding with PR creation anyway", {
-                        error: updateResult.error,
-                    })
-                }
+				if (updateResult._tag === "error") {
+					yield* Effect.logWarning("Update from base failed, proceeding with PR creation anyway", {
+						error: updateResult.error,
+					})
+				}
 
 				yield* helpers.withQueue(
 					task.id,
@@ -597,6 +595,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						}
 					}
 					message += "\n\nAll uncommitted changes will be lost."
+					message += "\nThe issue will stay open."
 
 					yield* overlay.push({
 						_tag: "confirm",

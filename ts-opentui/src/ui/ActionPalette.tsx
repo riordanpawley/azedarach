@@ -4,6 +4,7 @@
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useMemo, useState } from "react"
 import type { WorkflowMode } from "../config/schema.js"
+import { isActionPaletteNetworkAction } from "../lib/cleanupPolicy.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
@@ -12,7 +13,7 @@ export interface ActionPaletteProps {
 	task?: TaskWithSession
 	/** Running operation label (e.g., "merge", "cleanup") - dims queued actions */
 	runningOperation?: string | null
-	/** Whether network is available (affects PR/merge/cleanup actions) */
+	/** Whether network is available for remote-dependent actions */
 	isOnline?: boolean
 	/** Dev server status for the current task */
 	devServerStatus?: DevServerStatus
@@ -46,16 +47,13 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
  * When an operation is in progress (runningOperation is set), queued actions
  * are dimmed and will show an error toast if pressed.
  */
-/** Actions that require network connectivity */
-const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
-
 const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	h: "h",
 	l: "l",
-    s: "s",
-    S: "S-s",
-    "!": "!",
-    a: "a",
+	s: "s",
+	S: "S-s",
+	"!": "!",
+	a: "a",
 	p: "p",
 	R: "S-r",
 	x: "x",
@@ -102,8 +100,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "S": // Start+work - only if idle
 			case "!": // Start+work (skip permissions) - only if idle
 				return sessionState === "idle"
-            case "a": // Attach - only if not idle
-                return sessionState !== "idle"
+			case "a": // Attach - only if not idle
+				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
 			case "r": // Dev server toggle - only if worktree exists (session not idle)
@@ -167,7 +165,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			return false
 		}
 		// Network actions unavailable when offline
-		if (!isOnline && NETWORK_ACTIONS.has(action)) {
+		if (!isOnline && isActionPaletteNetworkAction(action)) {
 			return false
 		}
 		return isAvailableByState(action)
@@ -175,7 +173,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 	// Check if action is disabled due to offline
 	const isOfflineBlocked = (action: string): boolean => {
-		return !isOnline && NETWORK_ACTIONS.has(action)
+		return !isOnline && isActionPaletteNetworkAction(action)
 	}
 
 	const compactActions = useMemo<ReadonlyArray<ActionLineSpec>>(() => {
@@ -260,10 +258,10 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			<text fg={theme.surface1}>{"─────────"}</text>
 
 			{/* Session actions */}
-            <ActionLine keyName="s" description="start" />
-            <ActionLine keyName="S" description="start+work" />
-            <ActionLine keyName="!" description="start (yolo)" />
-            <ActionLine keyName="a" description="attach" />
+			<ActionLine keyName="s" description="start" />
+			<ActionLine keyName="S" description="start+work" />
+			<ActionLine keyName="!" description="start (yolo)" />
+			<ActionLine keyName="a" description="attach" />
 			<ActionLine keyName="p" description="pause" />
 			<ActionLine keyName="R" description="resume" />
 			<ActionLine keyName="x" description="stop" />
