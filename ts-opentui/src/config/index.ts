@@ -29,5 +29,6 @@ export {
 	type PatternsConfig,
 	type PRConfig,
 	type SessionConfig,
+	type SpecConfig,
 	type WorktreeConfig,
 } from "./schema.js"

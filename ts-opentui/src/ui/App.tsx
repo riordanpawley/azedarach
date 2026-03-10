@@ -10,11 +10,13 @@ import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
+import { deriveCurrentProjectWaitingIssueIds } from "../lib/waitingSessions.js"
 import { ActionPalette } from "./ActionPalette.js"
 import { AICreatePrompt } from "./AICreatePrompt.js"
 import {
 	activeSessionsCountAtom,
 	aiCreateTaskAtom,
+	appConfigAtom,
 	boardIsLoadingAtom,
 	boardTasksAtom,
 	createTaskAtom,
@@ -23,6 +25,7 @@ import {
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	drillDownPhasesAtom,
+	exitToNormalAtom,
 	focusedIssuePrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	forkCreateChildAtom,
@@ -39,6 +42,7 @@ import {
 	specWorkspaceStateAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
+	waitingSessionOptionsAtom,
 	workflowModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
@@ -208,13 +212,10 @@ export const App = () => {
 		boardTasksAtom,
 		Result.getOrElse(() => []),
 	)
+	const waitingSessions = useAtomValue(waitingSessionOptionsAtom)
 	const waitingIssueIds = useMemo(
-		() =>
-			tasksByColumn
-				.flat()
-				.filter((task) => task.sessionState === "waiting")
-				.map((task) => task.id),
-		[tasksByColumn],
+		() => deriveCurrentProjectWaitingIssueIds(waitingSessions),
+		[waitingSessions],
 	)
 
 	const projectName = useAtomValue(
@@ -228,6 +229,7 @@ export const App = () => {
 		mode: "promise",
 	})
 	const jumpTo = useAtomSet(jumpToAtom, { mode: "promise" })
+	const exitToNormal = useAtomSet(exitToNormalAtom, { mode: "promise" })
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
@@ -256,6 +258,8 @@ export const App = () => {
 	)
 
 	const workflowMode = useAtomValue(workflowModeAtom)
+	const appConfigResult = useAtomValue(appConfigAtom)
+	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
 
 	// Board loading state for status bar indicator
 	const isLoading = useAtomValue(
@@ -313,7 +317,7 @@ export const App = () => {
 	)
 
 	useEffect(() => {
-		if (mode._tag !== "spec") {
+		if (mode._tag !== "spec" || !specEnabled) {
 			return
 		}
 
@@ -325,7 +329,13 @@ export const App = () => {
 		return () => {
 			clearInterval(interval)
 		}
-	}, [mode, refreshSpecWorkspace])
+	}, [mode, refreshSpecWorkspace, specEnabled])
+
+	useEffect(() => {
+		if (mode._tag === "spec" && !specEnabled) {
+			exitToNormal(undefined)
+		}
+	}, [exitToNormal, mode, specEnabled])
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
@@ -500,7 +510,7 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	const renderContent = () => {
-		if (mode._tag === "spec") {
+		if (mode._tag === "spec" && specEnabled) {
 			return (
 				<box flexGrow={1} flexDirection="column">
 					<SpecWorkspace subview={mode.subview} state={specWorkspaceState} />

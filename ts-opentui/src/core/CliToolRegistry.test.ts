@@ -50,6 +50,7 @@ describe("CliToolRegistry", () => {
 			hasWorktree: false,
 			attachmentPaths: [],
 			localMode: true,
+			specEnabled: true,
 		})
 
 		const command = codex.buildCommand({

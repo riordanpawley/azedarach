@@ -1,6 +1,6 @@
 {
   "$schema": "./.azedarach.schema.json",
-  "$version": 6,
+  "$version": 7,
   "cliTool": "codex",
   "issueTracker": {
     "local": {
@@ -105,6 +105,9 @@
     "preCompact": {
       "enabled": true
     }
+  },
+  "spec": {
+    "enabled": true
   },
   "projects": []
 }

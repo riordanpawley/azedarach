@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test"
 import type { SessionStateUpdate } from "../core/TmuxSessionMonitor.js"
 import type { Project } from "../services/ProjectService.js"
-import { deriveWaitingSessionOptions } from "./waitingSessions.js"
+import {
+	deriveCurrentProjectWaitingIssueIds,
+	deriveWaitingSessionOptions,
+} from "./waitingSessions.js"
 
 const makeSession = (
 	overrides: Partial<SessionStateUpdate> & Pick<SessionStateUpdate, "issueId" | "sessionName">,
@@ -107,5 +110,61 @@ describe("deriveWaitingSessionOptions", () => {
 				isRegisteredProject: false,
 			},
 		])
+	})
+})
+
+describe("deriveCurrentProjectWaitingIssueIds", () => {
+	it("keeps current-project issue IDs in waiting-session order and removes duplicates", () => {
+		expect(
+			deriveCurrentProjectWaitingIssueIds([
+				{
+					issueId: "ia",
+					sessionName: "az-ia",
+					projectPath: "/tmp/alpha",
+					projectName: "alpha",
+					isCurrentProject: true,
+					isRegisteredProject: true,
+				},
+				{
+					issueId: "ia",
+					sessionName: "az-ia-shadow",
+					projectPath: "/tmp/alpha",
+					projectName: "alpha",
+					isCurrentProject: true,
+					isRegisteredProject: true,
+				},
+				{
+					issueId: "jj",
+					sessionName: "az-jj",
+					projectPath: "/tmp/alpha",
+					projectName: "alpha",
+					isCurrentProject: true,
+					isRegisteredProject: true,
+				},
+				{
+					issueId: "zz",
+					sessionName: "az-zz",
+					projectPath: "/tmp/other",
+					projectName: "other",
+					isCurrentProject: false,
+					isRegisteredProject: true,
+				},
+			]),
+		).toEqual(["ia", "jj"])
+	})
+
+	it("excludes waiting sessions from other projects", () => {
+		expect(
+			deriveCurrentProjectWaitingIssueIds([
+				{
+					issueId: "zz",
+					sessionName: "az-zz",
+					projectPath: "/tmp/other",
+					projectName: "other",
+					isCurrentProject: false,
+					isRegisteredProject: true,
+				},
+			]),
+		).toEqual([])
 	})
 })

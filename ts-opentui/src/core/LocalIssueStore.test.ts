@@ -618,6 +618,164 @@ describe("legacy issue schema migration", () => {
 	})
 })
 
+describe("implementation registry", () => {
+	it("exposes a built-in default implementation before any explicit setup", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-impl-default-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const registry = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					return yield* store.getImplementationRegistry(projectPath)
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(registry.default_implementation).toBe("default")
+			expect(registry.implicit_default_allowed).toBe(true)
+			expect(registry.implementations).toEqual([
+				{
+					name: "default",
+					description: undefined,
+					created_at: "1970-01-01T00:00:00.000Z",
+					updated_at: "1970-01-01T00:00:00.000Z",
+					is_default: true,
+					is_builtin: true,
+				},
+			])
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("supports add, update, delete, and set-default operations for named implementations", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-impl-ops-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					const added = yield* store.createImplementation(
+						{
+							name: "ts-opentui",
+							description: "TypeScript UI",
+						},
+						projectPath,
+					)
+					const updated = yield* store.updateImplementation(
+						"ts-opentui",
+						{
+							name: "go-bubbletea",
+							description: "Go UI",
+							setDefault: true,
+						},
+						projectPath,
+					)
+					const afterUpdate = yield* store.getImplementationRegistry(projectPath)
+					const deleted = yield* store.deleteImplementation("go-bubbletea", projectPath)
+					const afterDelete = yield* store.getImplementationRegistry(projectPath)
+
+					return {
+						added,
+						updated,
+						afterUpdate,
+						deleted,
+						afterDelete,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.added.name).toBe("ts-opentui")
+			expect(result.added.is_default).toBe(false)
+
+			expect(result.updated.name).toBe("go-bubbletea")
+			expect(result.updated.description).toBe("Go UI")
+			expect(result.updated.is_default).toBe(true)
+
+			expect(result.afterUpdate.default_implementation).toBe("go-bubbletea")
+			expect(result.afterUpdate.implicit_default_allowed).toBe(false)
+			expect(
+				result.afterUpdate.implementations.map((implementation) => implementation.name),
+			).toEqual(["go-bubbletea", "default"])
+
+			expect(result.deleted).toBe(true)
+			expect(result.afterDelete.default_implementation).toBe("default")
+			expect(result.afterDelete.implicit_default_allowed).toBe(true)
+			expect(result.afterDelete.implementations).toHaveLength(1)
+			expect(result.afterDelete.implementations[0]?.name).toBe("default")
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
+describe("issue implementations", () => {
+	it("requires explicit implementations on new issue writes once multiple implementations exist", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-issue-impl-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const store = await Effect.runPromise(
+				Effect.gen(function* () {
+					const resolvedStore = yield* LocalIssueStore
+					yield* resolvedStore.createImplementation({ name: "ts-opentui" }, projectPath)
+					return resolvedStore
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			await expect(
+				Effect.runPromise(store.create({ title: "Implicit impl issue" }, undefined, projectPath)),
+			).rejects.toThrow("Multiple implementations are configured")
+
+			const explicitIssue = await Effect.runPromise(
+				store.create(
+					{
+						title: "TS issue",
+						implementations: ["ts-opentui"],
+					},
+					undefined,
+					projectPath,
+				),
+			)
+			const sharedIssue = await Effect.runPromise(
+				store.create(
+					{
+						title: "Shared issue",
+						implementations: ["default", "ts-opentui"],
+					},
+					undefined,
+					projectPath,
+				),
+			)
+			await Effect.runPromise(
+				store.update(
+					explicitIssue.id,
+					{ notes: "keep current impl assignment" },
+					undefined,
+					projectPath,
+				),
+			)
+			const persistedExplicitIssue = await Effect.runPromise(
+				store.show(explicitIssue.id, projectPath),
+			)
+			const tsScopedIssues = await Effect.runPromise(
+				store.list({ implementations: ["ts-opentui"] }, projectPath),
+			)
+
+			expect(explicitIssue.implementations).toEqual(["ts-opentui"])
+			expect(sharedIssue.implementations).toEqual(["default", "ts-opentui"])
+			expect(persistedExplicitIssue?.implementations).toEqual(["ts-opentui"])
+			expect(tsScopedIssues.map((issue) => issue.id).sort()).toEqual(
+				[explicitIssue.id, sharedIssue.id].sort(),
+			)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
 describe("spec requirements and links", () => {
 	it("accepts suffixed spec requirement external codes", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-suffix-"))
@@ -647,7 +805,7 @@ describe("spec requirements and links", () => {
 		}
 	})
 
-	it("supports requirement CRUD, bidirectional links, and coverage gaps", async () => {
+	it("supports impl-scoped spec links, bidirectional lookups, and parity reporting", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-"))
 		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
 
@@ -673,48 +831,112 @@ describe("spec requirements and links", () => {
 						},
 						projectPath,
 					)
-
+					yield* store.createImplementation({ name: "ts-opentui" }, projectPath)
+					yield* store.createImplementation({ name: "go-bubbletea" }, projectPath)
 					yield* store.addSpecIssueLink(
 						issue.id,
 						requirement.id,
 						"implements",
+						"complete",
+						100,
+						"Shipped in default",
+						projectPath,
+						"auto",
+						["default"],
+					)
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"implements",
+						"complete",
+						100,
+						"Shipped in ts-opentui",
+						projectPath,
+						"auto",
+						["ts-opentui"],
+					)
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"tests",
+						"verified",
+						100,
+						"Tested in ts-opentui",
+						projectPath,
+						"auto",
+						["ts-opentui"],
+					)
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"relates",
 						"planned",
 						null,
 						null,
 						projectPath,
+						"auto",
+						["go-bubbletea"],
 					)
 
+					const links = yield* store.listSpecIssueLinks(undefined, projectPath)
+					const tsOpenTuiLinks = yield* store.listSpecIssueLinks(
+						{ implementation: "ts-opentui" },
+						projectPath,
+					)
 					const issueRequirements = yield* store.listIssueSpecRequirements(issue.id, projectPath)
 					const requirementIssues = yield* store.listRequirementLinkedIssues(
 						requirement.id,
 						projectPath,
 					)
 					const coverage = yield* store.getSpecCoverageReport(projectPath)
+					const defaultParity = yield* store.getSpecParityReport("default", projectPath)
+					const tsOpenTuiParity = yield* store.getSpecParityReport("ts-opentui", projectPath)
+					const goBubbleteaParity = yield* store.getSpecParityReport("go-bubbletea", projectPath)
 
 					return {
+						links,
+						tsOpenTuiLinks,
 						requirement,
 						acceptanceRequirement,
 						issueRequirements,
 						requirementIssues,
 						coverage,
+						defaultParity,
+						tsOpenTuiParity,
+						goBubbleteaParity,
 					}
 				}).pipe(Effect.provide(testLayer)),
 			)
 
-			expect(result.issueRequirements).toHaveLength(1)
+			expect(result.links).toHaveLength(3)
+			expect(result.tsOpenTuiLinks).toHaveLength(2)
+			expect(result.links.find((link) => link.link_type === "implements")?.implementations).toEqual(
+				["default", "ts-opentui"],
+			)
+
+			expect(result.issueRequirements).toHaveLength(3)
 			expect(result.issueRequirements[0]?.id).toBe(result.requirement.id)
 			expect(result.issueRequirements[0]?.local_id).toBe("fr4201")
 			expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
 			expect(result.issueRequirements[0]?.link_type).toBe("implements")
-			expect(result.issueRequirements[0]?.fulfillment_status).toBe("planned")
-			expect(result.issueRequirements[0]?.fulfillment_percent).toBeNull()
-			expect(result.issueRequirements[0]?.evidence_note).toBeNull()
+			expect(result.issueRequirements[0]?.implementations).toEqual(["default", "ts-opentui"])
+			expect(result.issueRequirements[0]?.implementations).toEqual(["default", "ts-opentui"])
+			expect(result.issueRequirements[0]?.fulfillment_status).toBe("complete")
+			expect(result.issueRequirements[0]?.fulfillment_percent).toBe(100)
+			expect(result.issueRequirements[0]?.evidence_note).toBe("Shipped in ts-opentui")
 
-			expect(result.requirementIssues).toHaveLength(1)
-			expect(result.requirementIssues[0]?.link_type).toBe("implements")
-			expect(result.requirementIssues[0]?.fulfillment_status).toBe("planned")
-			expect(result.requirementIssues[0]?.fulfillment_percent).toBeNull()
-			expect(result.requirementIssues[0]?.evidence_note).toBeNull()
+			expect(result.requirementIssues).toHaveLength(3)
+			const implementsLink = result.requirementIssues.find(
+				(item) => item.link_type === "implements",
+			)
+			const testsLink = result.requirementIssues.find((item) => item.link_type === "tests")
+			const relatesLink = result.requirementIssues.find((item) => item.link_type === "relates")
+			expect(implementsLink?.implementations).toEqual(["default", "ts-opentui"])
+			expect(implementsLink?.fulfillment_status).toBe("complete")
+			expect(testsLink?.implementations).toEqual(["ts-opentui"])
+			expect(testsLink?.fulfillment_status).toBe("verified")
+			expect(relatesLink?.implementations).toEqual(["go-bubbletea"])
+			expect(relatesLink?.fulfillment_status).toBe("planned")
 
 			expect(result.coverage.requirements).toHaveLength(2)
 			expect(result.coverage.unlinked_requirement_ids).toContain(
@@ -727,6 +949,29 @@ describe("spec requirements and links", () => {
 						gap.requirement_id === result.acceptanceRequirement.local_id,
 				),
 			).toBe(true)
+
+			expect(result.defaultParity.implementation).toBe("default")
+			expect(result.defaultParity.implemented_requirement_ids).toContain(
+				result.requirement.local_id,
+			)
+			expect(result.defaultParity.tested_requirement_ids).not.toContain(result.requirement.local_id)
+
+			expect(result.tsOpenTuiParity.implementation).toBe("ts-opentui")
+			expect(result.tsOpenTuiParity.implemented_requirement_ids).toContain(
+				result.requirement.local_id,
+			)
+			expect(result.tsOpenTuiParity.tested_requirement_ids).toContain(result.requirement.local_id)
+			expect(result.tsOpenTuiParity.uncovered_requirement_ids).toContain(
+				result.acceptanceRequirement.local_id,
+			)
+
+			expect(result.goBubbleteaParity.implementation).toBe("go-bubbletea")
+			expect(result.goBubbleteaParity.implemented_requirement_ids).not.toContain(
+				result.requirement.local_id,
+			)
+			expect(result.goBubbleteaParity.related_only_requirement_ids).toContain(
+				result.requirement.local_id,
+			)
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}
@@ -767,11 +1012,13 @@ describe("spec requirements and links", () => {
 					const links = yield* store.listSpecIssueLinks(undefined, projectPath)
 					const linkedRequirements = yield* store.listIssueSpecRequirements(issue.id, projectPath)
 					const linkedIssues = yield* store.listRequirementLinkedIssues(requirement.id, projectPath)
+					const parity = yield* store.getSpecParityReport("default", projectPath)
 
 					return {
 						links,
 						linkedRequirements,
 						linkedIssues,
+						parity,
 					}
 				}).pipe(Effect.provide(testLayer)),
 			)
@@ -788,6 +1035,9 @@ describe("spec requirements and links", () => {
 			expect(result.linkedIssues[0]?.fulfillment_status).toBe("partial")
 			expect(result.linkedIssues[0]?.fulfillment_percent).toBe(45)
 			expect(result.linkedIssues[0]?.evidence_note).toBe("Backend complete; UI pending")
+
+			expect(result.parity.partially_implemented_requirement_ids).toContain("fr4202")
+			expect(result.parity.implemented_requirement_ids).not.toContain("fr4202")
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

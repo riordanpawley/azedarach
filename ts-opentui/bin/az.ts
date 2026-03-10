@@ -49,6 +49,8 @@ const CLI_SUBCOMMANDS = new Set([
 	"h",
 	"hooks",
 	"project",
+	"config",
+	"cfg",
 	"o",
 	"opencode",
 	"dev",
