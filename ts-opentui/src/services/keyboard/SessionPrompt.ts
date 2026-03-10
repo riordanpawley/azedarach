@@ -5,6 +5,7 @@ export const buildStartWorkPrompt = (params: {
 	readonly hasWorktree: boolean
 	readonly attachmentPaths: readonly string[]
 	readonly localMode: boolean
+	readonly specEnabled: boolean
 }): string => {
 	const safeIssueType = sanitizePromptInline(params.issueType)
 	const safeTitle = sanitizePromptInline(params.title)
@@ -14,10 +15,14 @@ export const buildStartWorkPrompt = (params: {
 
 Start by running \`az prime\`.
 \`AZEDARACH_ISSUE_ID\` is already set for this session, so \`az prime\` should include issue-specific context.
-If context looks stale, refresh with \`${showCommand}\`.
+If context looks stale, refresh with \`${showCommand}\`.`
+
+	if (params.specEnabled) {
+		prompt += `
 In this repo, when a prompt says "spec", it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
 Before implementing behavior changes, inspect relevant \`az spec\` requirements/links.
 After implementing behavior changes, verify compliance against linked \`az spec\` requirements and update \`az spec\` requirement/link records when scope changes.`
+	}
 
 	if (params.localMode) {
 		prompt += `

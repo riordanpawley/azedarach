@@ -136,6 +136,9 @@ export const DEFAULT_CONFIG = {
 		showLineChanges: true,
 		workflowMode: "origin" as WorkflowMode,
 	},
+	spec: {
+		enabled: false,
+	},
 	session: {
 		command: "claude",
 		shell: getLoginShellSync(),
@@ -283,6 +286,9 @@ export interface ResolvedConfig {
 		fetchEnabled: boolean
 		showLineChanges: boolean
 		workflowMode: WorkflowMode
+	}
+	spec: {
+		enabled: boolean
 	}
 	session: {
 		command: string
@@ -556,6 +562,9 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
 			showLineChanges: config.git?.showLineChanges ?? DEFAULT_CONFIG.git.showLineChanges,
 			workflowMode: config.git?.workflowMode ?? DEFAULT_CONFIG.git.workflowMode,
+		},
+		spec: {
+			enabled: config.spec?.enabled ?? DEFAULT_CONFIG.spec.enabled,
 		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,

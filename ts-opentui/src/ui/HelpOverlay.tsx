@@ -1,6 +1,9 @@
 /**
  * HelpOverlay component - modal showing all keybindings
  */
+import { Result } from "@effect-atom/atom"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { appConfigAtom } from "./atoms/config.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -31,6 +34,9 @@ const SectionHeader = ({ title }: { title: string }) => (
  * grouped by category. Uses Catppuccin theme colors.
  */
 export const HelpOverlay = () => {
+	const appConfigResult = useAtomValue(appConfigAtom)
+	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
+
 	return (
 		<box
 			position="absolute"
@@ -75,7 +81,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="gh" description="Go to first column" />
 				<KeyLine keys="gl" description="Go to last column" />
 				<KeyLine keys="gw" description="Jump mode (shows labels)" />
-				<KeyLine keys="gs" description="Enter Spec workspace" />
+				{specEnabled && <KeyLine keys="gs" description="Enter Spec workspace" />}
 				<text> </text>
 
 				{/* Modes section */}
@@ -138,11 +144,15 @@ export const HelpOverlay = () => {
 				<text> </text>
 
 				{/* Spec workspace section */}
-				<SectionHeader title="Spec Workspace (gs):" />
-				<KeyLine keys="Tab" description="Cycle Requirements/Coverage/Parity/Publish" />
-				<KeyLine keys="[ / ]" description="Change parity implementation" />
-				<KeyLine keys="Esc / q" description="Return to board view" />
-				<text> </text>
+				{specEnabled && (
+					<>
+						<SectionHeader title="Spec Workspace (gs):" />
+						<KeyLine keys="Tab" description="Cycle Requirements/Coverage/Parity/Publish" />
+						<KeyLine keys="[ / ]" description="Change parity implementation" />
+						<KeyLine keys="Esc / q" description="Return to board view" />
+						<text> </text>
+					</>
+				)}
 
 				{/* General section */}
 				<SectionHeader title="General:" />

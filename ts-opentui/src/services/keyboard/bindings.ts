@@ -683,7 +683,7 @@ done
 		key: "s",
 		mode: "goto-pending",
 		description: "Enter spec workspace",
-		action: bc.editor.enterSpecWorkspace(),
+		action: Effect.suspend(() => bc.inputHandlers.enterSpecWorkspace()),
 	},
 	{
 		key: "p",

@@ -1012,6 +1012,20 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					}
 				})
 
+			const enterSpecWorkspace = () =>
+				Effect.gen(function* () {
+					const specConfig = yield* appConfig.getSpecConfig()
+					if (!specConfig.enabled) {
+						yield* toast.show(
+							"error",
+							"Spec workspace is disabled. Enable `spec.enabled` in `.azedarach.json` to use it.",
+						)
+						return
+					}
+
+					yield* editor.enterSpecWorkspace()
+				})
+
 			// ================================================================
 			// Public API
 			// ================================================================
@@ -1031,6 +1045,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleImagePreviewInput,
 				handleSettingsInput,
 				computeJumpLabels,
+				enterSpecWorkspace,
 				getEffectiveMode,
 			}
 		}),

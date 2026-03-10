@@ -5,6 +5,7 @@
  */
 
 import { Effect, SubscriptionRef } from "effect"
+import { AppConfig } from "../../config/index.js"
 import { type ImplementationRegistry, IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { SpecService } from "../../core/SpecService.js"
 import type {
@@ -133,10 +134,16 @@ export const specWorkspaceStateAtom = appRuntime.subscriptionRef((get) =>
 
 export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
 		const spec = yield* SpecService
 		const issueTrackerClient = yield* IssueTrackerClient
 		const editor = yield* EditorService
 		const stateRef = yield* get.result(specWorkspaceStateRefAtom)
+		const specConfig = yield* appConfig.getSpecConfig()
+		if (!specConfig.enabled) {
+			yield* SubscriptionRef.set(stateRef, DEFAULT_SPEC_WORKSPACE_STATE)
+			return
+		}
 		const selectedImplementation = yield* editor.getSpecSelectedImplementation()
 
 		yield* loadSpecWorkspaceState({

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test"
+import { Effect } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
+	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
@@ -14,7 +17,7 @@ import {
 
 describe("buildPrimeOutput", () => {
 	it("includes issue-context guardrails and refresh instructions for active issues", () => {
-		const output = buildPrimeOutput("gq", "gq: Improve az prime")
+		const output = buildPrimeOutput("gq", "gq: Improve az prime", undefined, true)
 
 		expect(output).toContain("Issue-context guardrails:")
 		expect(output).toContain("AZEDARACH_ISSUE_ID` is set to `gq`")
@@ -48,7 +51,7 @@ describe("buildPrimeOutput", () => {
 	})
 
 	it("guides users to fetch an issue when no issue id is configured", () => {
-		const output = buildPrimeOutput(undefined, "")
+		const output = buildPrimeOutput(undefined, "", undefined, true)
 
 		expect(output).toContain("No active issue is preselected")
 		expect(output).toContain("run `az issue get <issue-id>`")
@@ -56,25 +59,35 @@ describe("buildPrimeOutput", () => {
 	})
 
 	it("falls back to explicit refresh command when issue details fail to load", () => {
-		const output = buildPrimeOutput("gq", "")
+		const output = buildPrimeOutput("gq", "", undefined, true)
 
 		expect(output).toContain("Active issue from AZEDARACH_ISSUE_ID=gq.")
 		expect(output).toContain("Could not load issue details automatically; run `az issue get gq`.")
 	})
 
 	it("keeps implementation guidance invisible while only one implementation exists", () => {
-		const output = buildPrimeOutput("gq", "gq: Improve az prime", {
-			implementations: ["default"],
-		})
+		const output = buildPrimeOutput(
+			"gq",
+			"gq: Improve az prime",
+			{
+				implementations: ["default"],
+			},
+			true,
+		)
 
 		expect(output).not.toContain("Implementation guardrails:")
 		expect(output).not.toContain("implicit `default` fallback")
 	})
 
 	it("warns explicitly when multiple implementations are configured", () => {
-		const output = buildPrimeOutput("gq", "gq: Improve az prime", {
-			implementations: ["default", "ts-opentui", "go-bubbletea"],
-		})
+		const output = buildPrimeOutput(
+			"gq",
+			"gq: Improve az prime",
+			{
+				implementations: ["default", "ts-opentui", "go-bubbletea"],
+			},
+			true,
+		)
 
 		expect(output).toContain("Implementation guardrails:")
 		expect(output).toContain(
@@ -89,6 +102,45 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			"Repeated `--impl` flags mean intentionally shared work, for example `--impl ts-opentui --impl go-bubbletea`.",
 		)
+	})
+
+	it("omits all spec guidance when spec workflows are disabled", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			"gq: Improve az prime",
+			{
+				implementations: ["default", "ts-opentui"],
+			},
+			false,
+		)
+
+		expect(output).not.toContain("`az spec`")
+		expect(output).toContain(
+			"New `az issue` writes must include one or more `--impl <impl>` selections.",
+		)
+		expect(output).not.toContain(
+			"New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections.",
+		)
+	})
+
+	it("applies --config overrides to command-layer AppConfig reads", async () => {
+		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-${crypto.randomUUID()}.json`
+		await Bun.write(
+			configPath,
+			`${JSON.stringify({ $version: 7, spec: { enabled: true } }, null, 2)}\n`,
+		)
+
+		const specEnabled = await Effect.runPromise(
+			Effect.gen(function* () {
+				const appConfig = yield* AppConfig
+				const specConfig = yield* appConfig.getSpecConfig()
+				return specConfig.enabled
+			}).pipe(
+				Effect.provide(buildCommandCliLayerForArgv(["bun", "az", "--config", configPath, "prime"])),
+			),
+		)
+
+		expect(specEnabled).toBe(true)
 	})
 })
 

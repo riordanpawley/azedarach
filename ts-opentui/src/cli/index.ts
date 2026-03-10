@@ -126,67 +126,90 @@ const telemetryLayer =
 
 const CLI_VERSION = packageJson.version
 
+const buildAppConfigLayer = (configPath: string | null) => {
+	if (configPath === null) {
+		return AppConfig.Default
+	}
+
+	return AppConfig.Default.pipe(
+		Layer.provide(
+			Layer.succeed(
+				AppConfigConfig,
+				AppConfigConfig.make({
+					configPath,
+					projectPath: process.cwd(),
+				}),
+			),
+		),
+	)
+}
+
 /**
  * Full CLI layer used for TUI launch and commands that still depend on
  * TUI-coupled services (for now, `az dev`).
  */
-const fullCliLayer = Layer.mergeAll(
-	MutationQueue.Default,
-	SessionService.Default,
-	AttachmentService.Default,
-	OverlayService.Default,
-	ImageAttachmentService.Default,
-	BoardService.Default,
-	ClockService.Default,
-	TmuxService.Default,
-	IssueEditorService.Default,
-	PRWorkflow.Default,
-	TerminalService.Default,
-	EditorService.Default,
-	KeyboardService.Default,
-	ToastService.Default,
-	NavigationService.Default,
-	SessionManager.Default,
-	IssueTrackerClient.Default,
-	AppConfig.Default,
-	VCService.Default,
-	ViewService.Default,
-	TmuxSessionMonitor.Default,
-	CommandQueueService.Default,
-	PTYMonitor.Default,
-	DiagnosticsService.Default,
-	ProjectService.Default,
-	ProjectStateService.Default,
-	SettingsService.Default,
-	TemplateService.Default,
-	NetworkService.Default,
-	OfflineService.Default,
-	DevServerService.Default,
-	DiffService.Default,
-	PlanningService.Default,
-	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-	Layer.provideMerge(telemetryLayer),
-	Layer.provideMerge(BunContext.layer),
-)
+const createFullCliLayer = (configPath: string | null) =>
+	Layer.mergeAll(
+		MutationQueue.Default,
+		SessionService.Default,
+		AttachmentService.Default,
+		OverlayService.Default,
+		ImageAttachmentService.Default,
+		BoardService.Default,
+		ClockService.Default,
+		TmuxService.Default,
+		IssueEditorService.Default,
+		PRWorkflow.Default,
+		TerminalService.Default,
+		EditorService.Default,
+		KeyboardService.Default,
+		ToastService.Default,
+		NavigationService.Default,
+		SessionManager.Default,
+		IssueTrackerClient.Default,
+		buildAppConfigLayer(configPath),
+		VCService.Default,
+		ViewService.Default,
+		TmuxSessionMonitor.Default,
+		CommandQueueService.Default,
+		PTYMonitor.Default,
+		DiagnosticsService.Default,
+		ProjectService.Default,
+		ProjectStateService.Default,
+		SettingsService.Default,
+		TemplateService.Default,
+		NetworkService.Default,
+		OfflineService.Default,
+		DevServerService.Default,
+		DiffService.Default,
+		PlanningService.Default,
+		SpecService.Default,
+	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
 
 /**
  * Lean command layer for non-TUI CLI commands.
  * Intentionally excludes board/navigation/overlay/view services so command
  * invocations don't start board refresh polling or webhook listeners.
  */
-const commandCliLayer = Layer.mergeAll(
-	AppConfig.Default,
-	ProjectService.Default,
-	IssueTrackerClient.Default,
-	SessionManager.Default,
-	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-	Layer.provideMerge(telemetryLayer),
-	Layer.provideMerge(BunContext.layer),
-)
+const createCommandCliLayer = (configPath: string | null) =>
+	Layer.mergeAll(
+		buildAppConfigLayer(configPath),
+		ProjectService.Default,
+		IssueTrackerClient.Default,
+		SessionManager.Default,
+		SpecService.Default,
+	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
+
+const fullCliLayer = createFullCliLayer(null)
+const commandCliLayer = createCommandCliLayer(null)
 
 // ============================================================================
 // Shared Options
@@ -253,6 +276,24 @@ const validateIssueTrackerStore = (projectDir: string) =>
 				),
 			)
 		}
+	})
+
+/**
+ * Validate that spec workflows are enabled for the project before using az spec surfaces.
+ */
+const ensureSpecEnabled = (projectDir: string) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const specConfig = yield* appConfig.getSpecConfigForProjectPath(projectDir)
+		if (specConfig.enabled) {
+			return
+		}
+
+		return yield* Effect.fail(
+			new Error(
+				"Spec workflows are disabled for this project. Set `spec.enabled` to true in `.azedarach.json` to use `az spec` and spec-aware guidance.",
+			),
+		)
 	})
 
 // ============================================================================
@@ -1797,6 +1838,7 @@ const specReqListHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -1837,6 +1879,7 @@ const specReqGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -1917,6 +1960,7 @@ const specReqCreateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -2028,6 +2072,7 @@ const specReqUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -2117,6 +2162,7 @@ const specReqDeleteHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -2174,6 +2220,7 @@ const specLinkListHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueId = yield* Option.match(args.issueId, {
@@ -2261,6 +2308,7 @@ const specLinkAddHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
@@ -2358,6 +2406,7 @@ const specLinkRemoveHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
@@ -2416,6 +2465,7 @@ const specParityHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -2447,6 +2497,7 @@ const specPublishRunHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -2476,6 +2527,7 @@ const specPublishConfigGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -2521,6 +2573,7 @@ const specPublishConfigSetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -2901,6 +2954,8 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const appConfig = yield* AppConfig
+		const specConfig = yield* appConfig.getSpecConfig()
 		const issueContext =
 			issueId === undefined
 				? ""
@@ -2916,7 +2971,9 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 			Effect.catchAll(() => Effect.succeed(undefined)),
 		)
 
-		yield* Console.log(buildPrimeOutput(issueId, issueContext, implementationContext))
+		yield* Console.log(
+			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled),
+		)
 	})
 
 /**
@@ -4143,6 +4200,12 @@ const optionalSpecImplementationOption = Options.text("impl").pipe(
 	Options.withDescription("Implementation scope. Default: default"),
 )
 
+const specUsageHandler = (usage: string) =>
+	Effect.gen(function* () {
+		yield* ensureSpecEnabled(process.cwd())
+		yield* Console.log(usage)
+	})
+
 const specReqListCommand = Command.make(
 	"list",
 	{
@@ -4273,7 +4336,7 @@ const specReqDeleteCommand = Command.make(
 ).pipe(Command.withDescription("Delete a spec requirement"))
 
 const specReqCommand = Command.make("req", {}, () =>
-	Console.log(
+	specUsageHandler(
 		"Usage: az spec req [list|get|create|update|delete] [--req <requirement-ref>|<requirement-ref>] [--id|--local-id|--external-code] ...",
 	),
 ).pipe(
@@ -4376,7 +4439,7 @@ const specLinkRemoveCommand = Command.make(
 ).pipe(Command.withDescription("Remove typed issue<->requirement link"))
 
 const specLinkCommand = Command.make("link", {}, () =>
-	Console.log(
+	specUsageHandler(
 		"Usage: az spec link [list|add|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
 	),
 ).pipe(
@@ -4461,14 +4524,14 @@ const specPublishConfigCommand = Command.make(
 ).pipe(Command.withDescription("Inspect or update spec publish configuration"))
 
 const specPublishCommand = Command.make("publish", {}, () =>
-	Console.log("Usage: az spec publish [run|config] ..."),
+	specUsageHandler("Usage: az spec publish [run|config] ..."),
 ).pipe(
 	Command.withDescription("Spec publish operations"),
 	Command.withSubcommands([specPublishRunCommand, specPublishConfigCommand]),
 )
 
 const specCommand = Command.make("spec", {}, () =>
-	Console.log("Usage: az spec [req|link|parity|publish] ..."),
+	specUsageHandler("Usage: az spec [req|link|parity|publish] ..."),
 ).pipe(
 	Command.withDescription("Spec requirement/link/publish operations"),
 	Command.withSubcommands([specReqCommand, specLinkCommand, specParityCommand, specPublishCommand]),
@@ -4603,7 +4666,7 @@ const opencodeInitHandler = (args: {
 			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
 
 			// Merge plugins - existingConfig.plugins could be undefined or an array
-			const pluginsValue = existingConfig["plugins"]
+			const pluginsValue = existingConfig.plugins
 			const existingPlugins = Array.isArray(pluginsValue)
 				? pluginsValue.filter((plugin): plugin is string => typeof plugin === "string")
 				: []
@@ -4957,34 +5020,12 @@ const commandCli = az.pipe(
 // ============================================================================
 const buildFullCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return fullCliLayer
-
-	return Layer.mergeAll(
-		fullCliLayer,
-		Layer.succeed(
-			AppConfigConfig,
-			AppConfigConfig.make({
-				configPath,
-				projectPath: process.cwd(),
-			}),
-		),
-	)
+	return createFullCliLayer(configPath)
 }
 
 const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return commandCliLayer
-
-	return Layer.mergeAll(
-		commandCliLayer,
-		Layer.succeed(
-			AppConfigConfig,
-			AppConfigConfig.make({
-				configPath,
-				projectPath: process.cwd(),
-			}),
-		),
-	)
+	return createCommandCliLayer(configPath)
 }
 
 /**
@@ -5024,6 +5065,7 @@ export { cliLayer, commandCliLayer }
  */
 export {
 	buildPrimeOutput,
+	buildCommandCliLayerForArgv,
 	cliRunner,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,

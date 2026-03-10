@@ -6,6 +6,7 @@ const linearWebhooksSetting = EDITABLE_SETTINGS.find(
 	(setting) => setting.key === "linearWebhooksEnabled",
 )
 const workflowModeSetting = EDITABLE_SETTINGS.find((setting) => setting.key === "workflowMode")
+const specEnabledSetting = EDITABLE_SETTINGS.find((setting) => setting.key === "specEnabled")
 const issueTrackerBackendSetting = EDITABLE_SETTINGS.find(
 	(setting) => setting.key === "issueTrackerBackend",
 )
@@ -22,6 +23,10 @@ if (linearWebhooksSetting === undefined) {
 
 if (workflowModeSetting === undefined) {
 	throw new Error("Workflow mode setting definition is missing")
+}
+
+if (specEnabledSetting === undefined) {
+	throw new Error("Spec enabled setting definition is missing")
 }
 
 if (issueTrackerBackendSetting === undefined) {
@@ -119,6 +124,17 @@ describe("SettingsService non-boolean selectors", () => {
 			},
 		})
 		expect(toggled.issueTracker?.tracker?.syncEnabled).toBe(true)
+	})
+})
+
+describe("SettingsService spec feature setting", () => {
+	it("defaults missing spec config to disabled", () => {
+		expect(specEnabledSetting.getValue({})).toBe(false)
+	})
+
+	it("toggles spec feature from disabled to enabled", () => {
+		const toggled = specEnabledSetting.nextValue({})
+		expect(toggled.spec?.enabled).toBe(true)
 	})
 })
 

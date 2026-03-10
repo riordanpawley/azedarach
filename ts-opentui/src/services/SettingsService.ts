@@ -29,13 +29,13 @@ export class SettingsConfigLoadError extends Data.TaggedError("SettingsConfigLoa
 }> {}
 
 const cycleStringValue = <T extends string>(current: T, options: readonly T[]): T => {
-	const currentIndex = options.findIndex((option) => option === current)
+	const currentIndex = options.indexOf(current)
 	if (currentIndex < 0) return options[0] ?? current
 	return options[(currentIndex + 1) % options.length] ?? current
 }
 
 const cycleNumberValue = <T extends number>(current: T, options: readonly T[]): T => {
-	const currentIndex = options.findIndex((option) => option === current)
+	const currentIndex = options.indexOf(current)
 	if (currentIndex < 0) return options[0] ?? current
 	return options[(currentIndex + 1) % options.length] ?? current
 }
@@ -89,6 +89,19 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 			git: {
 				...c.git,
 				workflowMode: cycleStringValue(c.git?.workflowMode ?? "origin", WORKFLOW_MODE_OPTIONS),
+			},
+		}),
+	},
+	{
+		key: "specEnabled",
+		group: ["Features"],
+		label: "Spec Enabled",
+		getValue: (c) => c.spec?.enabled ?? false,
+		nextValue: (c) => ({
+			...c,
+			spec: {
+				...c.spec,
+				enabled: !(c.spec?.enabled ?? false),
 			},
 		}),
 	},
