@@ -62,6 +62,148 @@ Advantages of a first-class implementation model:
 
 ## Proposed CLI Model
 
+## Command Maps
+
+### Command Surface Overview
+
+```mermaid
+flowchart LR
+    User[User]
+
+    subgraph CLI[az CLI]
+        Impl[az impl]
+        Issue[az issue]
+        Spec[az spec]
+    end
+
+    subgraph Data[Structured Data]
+        ImplStore[Implementations]
+        Issues[Issues]
+        Reqs[Spec Requirements]
+        Links[Spec Links]
+    end
+
+    User --> Impl
+    User --> Issue
+    User --> Spec
+
+    Impl --> ImplStore
+    Issue --> Issues
+    Spec --> Reqs
+    Spec --> Links
+
+    Issue -. reads valid impls .-> ImplStore
+    Spec -. reads valid impls .-> ImplStore
+    Links --> Issues
+    Links --> Reqs
+    Links --> ImplStore
+```
+
+### `az impl` Command Map
+
+```mermaid
+flowchart TD
+    Impl[az impl]
+
+    Impl --> List[list]
+    Impl --> Get[get <impl>]
+    Impl --> Add[add <impl>]
+    Impl --> Update[update <impl>]
+    Impl --> Delete[delete <impl>]
+    Impl --> Default[default <impl>]
+
+    List --> ImplTable[(implementations)]
+    Get --> ImplTable
+    Add --> ImplTable
+    Update --> ImplTable
+    Delete --> ImplTable
+    Default --> ImplTable
+```
+
+### `az issue` With `--impl`
+
+```mermaid
+flowchart TD
+    Issue[az issue]
+
+    Issue --> Create[create --impl]
+    Issue --> Update[update --impl]
+    Issue --> Get[get]
+    Issue --> List[list]
+
+    Create --> ResolveImpl{--impl provided?}
+    Update --> ResolveImpl
+
+    ResolveImpl -- yes --> NamedImpl[use named impl]
+    ResolveImpl -- no --> DefaultImpl[use default impl]
+
+    NamedImpl --> ImplTable[(implementations)]
+    DefaultImpl --> ImplTable
+
+    NamedImpl --> Issues[(issues.impl)]
+    DefaultImpl --> Issues
+
+    Get --> Issues
+    List --> Issues
+```
+
+### `az spec` With Implementation-Scoped Links
+
+```mermaid
+flowchart TD
+    Spec[az spec]
+
+    Spec --> Req[req ...]
+    Spec --> Link[link ...]
+    Spec --> Parity[parity --impl]
+
+    Req --> ReqTable[(requirements)]
+
+    Link --> Add[link add --issue --req --type --impl]
+    Link --> Remove[link remove --issue --req --type --impl]
+    Link --> List[link list --issue --req --impl]
+
+    Add --> LinkTable[(spec_links)]
+    Remove --> LinkTable
+    List --> LinkTable
+
+    Add --> Issues[(issues)]
+    Add --> ReqTable
+    Add --> ImplTable[(implementations)]
+
+    Parity --> LinkTable
+    Parity --> ReqTable
+    Parity --> Issues
+    Parity --> ImplTable
+```
+
+### End-to-End Interaction
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant I as az impl
+    participant T as az issue
+    participant S as az spec
+    participant D as Data store
+
+    U->>I: add ts-opentui
+    I->>D: create implementation record
+
+    U->>T: create "Add goto mode" --impl ts-opentui
+    T->>D: create issue with impl=ts-opentui
+
+    U->>S: link add gx fr0305 --type implements --impl ts-opentui
+    S->>D: create spec link scoped to ts-opentui
+
+    U->>S: link add gx at0203 --type tests --impl ts-opentui
+    S->>D: create test evidence scoped to ts-opentui
+
+    U->>S: parity --impl ts-opentui
+    S->>D: read requirements + issues + impls + links
+    S-->>U: parity report for ts-opentui
+```
+
 ### `az impl`
 
 New command family for implementation registry management.
