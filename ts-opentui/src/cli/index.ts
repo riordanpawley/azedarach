@@ -51,7 +51,7 @@ import {
 } from "../core/paths.js"
 import { SessionManager } from "../core/SessionManager.js"
 import { SpecService } from "../core/SpecService.js"
-import type { SpecRequirementLookupSelector } from "../core/specTypes.js"
+import type { SpecLinkFulfillmentStatus, SpecRequirementLookupSelector } from "../core/specTypes.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -745,6 +745,48 @@ const parseRelationshipSpecLinkType = (
 		default:
 			return undefined
 	}
+}
+
+const parseSpecLinkFulfillmentStatus = (
+	value: string | undefined,
+): SpecLinkFulfillmentStatus | undefined => {
+	if (value === undefined) {
+		return undefined
+	}
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "planned":
+		case "partial":
+		case "complete":
+		case "verified":
+			return normalized
+		default:
+			return undefined
+	}
+}
+
+const parseSpecLinkFulfillmentPercent = (
+	value: Option.Option<number>,
+): Effect.Effect<number | null | undefined, Error> =>
+	Effect.gen(function* () {
+		if (Option.isNone(value)) {
+			return undefined
+		}
+		const rounded = Math.round(value.value)
+		if (!Number.isFinite(rounded) || rounded < 0 || rounded > 100) {
+			return yield* Effect.fail(
+				new Error("Invalid --fulfillment-percent. Expected an integer 0-100."),
+			)
+		}
+		return rounded
+	})
+
+const parseSpecLinkEvidenceNote = (value: Option.Option<string>): string | null | undefined => {
+	if (Option.isNone(value)) {
+		return undefined
+	}
+	const trimmed = value.value.trim()
+	return trimmed.length > 0 ? trimmed : null
 }
 
 const DEFAULT_ISSUE_GET_SYNC_MAX_WAIT_MS = 250
@@ -1622,6 +1664,9 @@ const specReadHandler = (args: {
 				requirement_count: requirements.length,
 				link_count: links.length,
 				unlinked_requirement_count: coverage.unlinked_requirement_ids.length,
+				fully_implemented_requirement_count: coverage.fully_implemented_requirement_ids.length,
+				partially_implemented_requirement_count:
+					coverage.partially_implemented_requirement_ids.length,
 				integrity_gap_count: coverage.integrity_gaps.length,
 			},
 			requirements,
@@ -1637,7 +1682,7 @@ const specReadHandler = (args: {
 		}
 
 		yield* Console.log(
-			`Spec summary: requirements=${requirements.length} links=${links.length} unlinked=${coverage.unlinked_requirement_ids.length} gaps=${coverage.integrity_gaps.length}`,
+			`Spec summary: requirements=${requirements.length} links=${links.length} fully_implemented=${coverage.fully_implemented_requirement_ids.length} partial=${coverage.partially_implemented_requirement_ids.length} unlinked=${coverage.unlinked_requirement_ids.length} gaps=${coverage.integrity_gaps.length}`,
 		)
 		yield* Console.log("")
 
@@ -1649,6 +1694,23 @@ const specReadHandler = (args: {
 				yield* Console.log(`- ${formatSpecRequirementSummaryLine(requirement)}`)
 				if (viewMode === "verbose") {
 					yield* Console.log(`  ${compactSingleLineText(requirement.body)}`)
+				}
+			}
+			yield* Console.log("")
+		}
+
+		if (links.length > 0) {
+			yield* Console.log(`LINKS (${links.length})`)
+			for (const link of links) {
+				const requirementRef =
+					link.requirement_external_code === null
+						? link.requirement_local_id
+						: `${link.requirement_local_id} (${link.requirement_external_code})`
+				yield* Console.log(
+					`- ${link.issue_id} -> ${requirementRef} [${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}]`,
+				)
+				if (viewMode === "verbose" && link.evidence_note !== null) {
+					yield* Console.log(`  note: ${compactSingleLineText(link.evidence_note)}`)
 				}
 			}
 			yield* Console.log("")
@@ -1867,7 +1929,7 @@ const specReqGetHandler = (args: {
 			yield* Console.log("Linked Issues:")
 			for (const issue of linkedIssues) {
 				yield* Console.log(
-					`${issue.id} [${issue.status ?? "unknown"} ${issue.issue_type ?? "task"}] (${issue.link_type}) ${issue.title ?? ""}`.trimEnd(),
+					`${issue.id} [${issue.status ?? "unknown"} ${issue.issue_type ?? "task"}] (${issue.link_type} fulfillment=${issue.fulfillment_status}${issue.fulfillment_percent === null ? "" : `:${issue.fulfillment_percent}%`}) ${issue.title ?? ""}`.trimEnd(),
 				)
 			}
 		}
@@ -2203,7 +2265,7 @@ const specLinkListHandler = (args: {
 					? link.requirement_local_id
 					: `${link.requirement_local_id} (${link.requirement_external_code})`
 			yield* Console.log(
-				`${link.issue_id} -> ${requirementRef} [type=${link.link_type}] id=${link.requirement_id} updated_at=${link.updated_at}`,
+				`${link.issue_id} -> ${requirementRef} [type=${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}] id=${link.requirement_id} updated_at=${link.updated_at}${link.evidence_note === null ? "" : ` note=${link.evidence_note}`}`,
 			)
 		}
 	})
@@ -2220,6 +2282,9 @@ const specLinkAddHandler = (args: {
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly fulfillmentStatus: Option.Option<string>
+	readonly fulfillmentPercent: Option.Option<number>
+	readonly evidenceNote: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -2261,6 +2326,22 @@ const specLinkAddHandler = (args: {
 				return Effect.succeed(parsed)
 			},
 		})
+		const fulfillmentStatus = yield* Option.match(args.fulfillmentStatus, {
+			onNone: () => Effect.succeed<SpecLinkFulfillmentStatus>("planned"),
+			onSome: (value) => {
+				const parsed = parseSpecLinkFulfillmentStatus(value)
+				if (parsed === undefined) {
+					return Effect.fail(
+						new Error(
+							`Invalid fulfillment status '${value}'. Expected one of: planned, partial, complete, verified.`,
+						),
+					)
+				}
+				return Effect.succeed(parsed)
+			},
+		})
+		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
+		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
 
 		const specService = yield* SpecService
 		yield* specService.addIssueLink(
@@ -2269,6 +2350,11 @@ const specLinkAddHandler = (args: {
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
+			{
+				status: fulfillmentStatus,
+				percent: fulfillmentPercent,
+				evidenceNote,
+			},
 		)
 
 		if (args.json) {
@@ -2278,6 +2364,9 @@ const specLinkAddHandler = (args: {
 						issueId,
 						requirement: lookup,
 						type: linkType,
+						fulfillment_status: fulfillmentStatus,
+						fulfillment_percent: fulfillmentPercent ?? null,
+						evidence_note: evidenceNote ?? null,
 						updated: true,
 					},
 					null,
@@ -2286,7 +2375,9 @@ const specLinkAddHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(`Added spec link: ${issueId} -> ${lookup.reference} (${linkType})`)
+		yield* Console.log(
+			`Added spec link: ${issueId} -> ${lookup.reference} (${linkType}, fulfillment=${fulfillmentStatus}${fulfillmentPercent === undefined || fulfillmentPercent === null ? "" : `:${fulfillmentPercent}%`})`,
+		)
 	})
 
 /**
@@ -2354,6 +2445,120 @@ const specLinkRemoveHandler = (args: {
 			return
 		}
 		yield* Console.log(`Removed ${removed} spec link(s).`)
+	})
+
+/**
+ * Update spec link fulfillment metadata
+ */
+const specLinkUpdateHandler = (args: {
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
+	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
+	readonly linkType: Option.Option<string>
+	readonly fulfillmentStatus: Option.Option<string>
+	readonly fulfillmentPercent: Option.Option<number>
+	readonly evidenceNote: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: mergedRequirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
+		const linkType = Option.match(args.linkType, {
+			onNone: () => undefined,
+			onSome: (value) => parseRelationshipSpecLinkType(value),
+		})
+		if (Option.isSome(args.linkType) && linkType === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid link type '${args.linkType.value}'. Expected one of: implements, tests, blocks, relates.`,
+				),
+			)
+		}
+
+		const fulfillmentStatus = Option.match(args.fulfillmentStatus, {
+			onNone: () => undefined,
+			onSome: (value) => parseSpecLinkFulfillmentStatus(value),
+		})
+		if (Option.isSome(args.fulfillmentStatus) && fulfillmentStatus === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid fulfillment status '${args.fulfillmentStatus.value}'. Expected one of: planned, partial, complete, verified.`,
+				),
+			)
+		}
+		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
+		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
+		if (
+			fulfillmentStatus === undefined &&
+			fulfillmentPercent === undefined &&
+			evidenceNote === undefined
+		) {
+			return yield* Effect.fail(
+				new Error(
+					"No fields provided. Use at least one --fulfillment-status/--fulfillment-percent/--evidence-note.",
+				),
+			)
+		}
+
+		const specService = yield* SpecService
+		const updated = yield* specService.updateIssueLink(
+			issueId,
+			lookup.reference,
+			{
+				status: fulfillmentStatus,
+				percent: fulfillmentPercent,
+				evidenceNote,
+			},
+			linkType,
+			explicitProjectDir,
+			lookup.selector,
+		)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						issueId,
+						requirement: lookup,
+						type: linkType ?? null,
+						fulfillment_status: fulfillmentStatus ?? null,
+						fulfillment_percent: fulfillmentPercent ?? null,
+						evidence_note: evidenceNote ?? null,
+						updated,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+		yield* Console.log(`Updated ${updated} spec link(s).`)
 	})
 
 /**
@@ -4162,6 +4367,21 @@ const specLinkAddCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
 		),
+		fulfillmentStatus: Options.text("fulfillment-status").pipe(
+			Options.withAlias("f"),
+			Options.optional,
+			Options.withDescription("Fulfillment status (planned|partial|complete|verified)"),
+		),
+		fulfillmentPercent: Options.integer("fulfillment-percent").pipe(
+			Options.withAlias("F"),
+			Options.optional,
+			Options.withDescription("Optional fulfillment percentage (0-100)"),
+		),
+		evidenceNote: Options.text("evidence-note").pipe(
+			Options.withAlias("N"),
+			Options.optional,
+			Options.withDescription("Optional fulfillment evidence note"),
+		),
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -4195,13 +4415,57 @@ const specLinkRemoveCommand = Command.make(
 	specLinkRemoveHandler,
 ).pipe(Command.withDescription("Remove typed issue<->requirement link"))
 
+const specLinkUpdateCommand = Command.make(
+	"update",
+	{
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
+		requirementRef: requirementRefArg,
+		requirementRefOption,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
+		linkType: Options.text("type").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Optional link type filter"),
+		),
+		fulfillmentStatus: Options.text("fulfillment-status").pipe(
+			Options.withAlias("f"),
+			Options.optional,
+			Options.withDescription("Set fulfillment status (planned|partial|complete|verified)"),
+		),
+		fulfillmentPercent: Options.integer("fulfillment-percent").pipe(
+			Options.withAlias("F"),
+			Options.optional,
+			Options.withDescription("Set fulfillment percentage (0-100)"),
+		),
+		evidenceNote: Options.text("evidence-note").pipe(
+			Options.withAlias("N"),
+			Options.optional,
+			Options.withDescription("Set fulfillment evidence note"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specLinkUpdateHandler,
+).pipe(Command.withDescription("Update typed issue<->requirement link fulfillment metadata"))
+
 const specLinkCommand = Command.make("link", {}, () =>
 	Console.log(
-		"Usage: az spec link [list|add|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
+		"Usage: az spec link [list|add|update|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
 	),
 ).pipe(
 	Command.withDescription("Manage typed issue/spec links"),
-	Command.withSubcommands([specLinkListCommand, specLinkAddCommand, specLinkRemoveCommand]),
+	Command.withSubcommands([
+		specLinkListCommand,
+		specLinkAddCommand,
+		specLinkUpdateCommand,
+		specLinkRemoveCommand,
+	]),
 )
 
 const specPublishRunCommand = Command.make(

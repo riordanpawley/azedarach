@@ -8,6 +8,7 @@ import type {
 	SpecCoverageReport,
 	SpecIssueLink,
 	SpecIssueRef,
+	SpecLinkFulfillmentStatus,
 	SpecLinkType,
 	SpecLintResult,
 	SpecMarkdownSyncDocumentResult,
@@ -146,10 +147,27 @@ export interface SpecServiceApi {
 		linkType: SpecLinkType,
 		cwd?: string,
 		requirementSelector?: SpecRequirementLookupSelector,
+		fulfillment?: {
+			status?: SpecLinkFulfillmentStatus
+			percent?: number | null
+			evidenceNote?: string | null
+		},
 	) => Effect.Effect<void, SpecServiceError>
 	readonly removeIssueLink: (
 		issueId: string,
 		requirementReference: string,
+		linkType?: SpecLinkType,
+		cwd?: string,
+		requirementSelector?: SpecRequirementLookupSelector,
+	) => Effect.Effect<number, SpecServiceError>
+	readonly updateIssueLink: (
+		issueId: string,
+		requirementReference: string,
+		fields: {
+			status?: SpecLinkFulfillmentStatus
+			percent?: number | null
+			evidenceNote?: string | null
+		},
 		linkType?: SpecLinkType,
 		cwd?: string,
 		requirementSelector?: SpecRequirementLookupSelector,
@@ -626,6 +644,11 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 				linkType: SpecLinkType,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				fulfillment?: {
+					status?: SpecLinkFulfillmentStatus
+					percent?: number | null
+					evidenceNote?: string | null
+				},
 			) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
@@ -635,6 +658,9 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 							issueId,
 							requirementReference,
 							linkType,
+							fulfillment?.status ?? "planned",
+							fulfillment?.percent ?? null,
+							fulfillment?.evidenceNote ?? null,
 							effectiveCwd,
 							requirementSelector,
 						),
@@ -664,6 +690,40 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 						yield* scheduleAutoPublishInternal("link_removed", effectiveCwd)
 					}
 					return removed
+				}),
+			updateIssueLink: (
+				issueId: string,
+				requirementReference: string,
+				fields: {
+					status?: SpecLinkFulfillmentStatus
+					percent?: number | null
+					evidenceNote?: string | null
+				},
+				linkType?: SpecLinkType,
+				cwd?: string,
+				requirementSelector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					const updated = yield* fromStore(
+						"updateSpecIssueLink",
+						localIssueStore.updateSpecIssueLink(
+							issueId,
+							requirementReference,
+							{
+								status: fields.status,
+								percent: fields.percent,
+								note: fields.evidenceNote,
+							},
+							linkType,
+							effectiveCwd,
+							requirementSelector,
+						),
+					)
+					if (updated > 0) {
+						yield* scheduleAutoPublishInternal("link_updated", effectiveCwd)
+					}
+					return updated
 				}),
 			listIssueRequirements: (issueId: string, cwd?: string) =>
 				Effect.gen(function* () {
@@ -729,12 +789,15 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 							missing_requirement: 0,
 						},
 					)
-					const unlinkedRequirementCount = report.unlinked_requirement_ids.length
+					const linkedRequirementCount = report.fully_implemented_requirement_ids.length
+					const unlinkedRequirementCount = Math.max(
+						0,
+						report.requirements.length - linkedRequirementCount,
+					)
 					const integrityGapCount = report.integrity_gaps.length
 					const requirementCount = report.requirements.length
-					const linkedRequirementCount = Math.max(0, requirementCount - unlinkedRequirementCount)
 					return {
-						ok: unlinkedRequirementCount === 0 && integrityGapCount === 0,
+						ok: linkedRequirementCount === requirementCount && integrityGapCount === 0,
 						requirement_count: requirementCount,
 						linked_requirement_count: linkedRequirementCount,
 						unlinked_requirement_count: unlinkedRequirementCount,

@@ -2,6 +2,7 @@ import type { DateTime } from "effect"
 
 export type SpecRequirementKind = "functional" | "acceptance" | "other"
 export type SpecLinkType = "implements" | "tests" | "blocks" | "relates"
+export type SpecLinkFulfillmentStatus = "planned" | "partial" | "complete" | "verified"
 export type SpecRequirementLookupSelector = "auto" | "id" | "local_id" | "external_code"
 
 export interface SpecRequirement {
@@ -23,6 +24,9 @@ export interface SpecIssueLink {
 	readonly requirement_local_id: string
 	readonly requirement_external_code: string | null
 	readonly link_type: SpecLinkType
+	readonly fulfillment_status: SpecLinkFulfillmentStatus
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 	readonly created_at: string
 	readonly updated_at: string
 }
@@ -33,6 +37,9 @@ export interface SpecIssueRef {
 	readonly status?: string
 	readonly issue_type?: string
 	readonly link_type: SpecLinkType
+	readonly fulfillment_status: SpecLinkFulfillmentStatus
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 }
 
 export interface SpecRequirementRef {
@@ -42,10 +49,14 @@ export interface SpecRequirementRef {
 	readonly title: string
 	readonly kind: SpecRequirementKind
 	readonly link_type: SpecLinkType
+	readonly fulfillment_status: SpecLinkFulfillmentStatus
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 }
 
 export interface SpecRequirementWithStats extends SpecRequirement {
 	readonly linked_issue_count: number
+	readonly implemented_issue_count: number
 }
 
 export interface SpecRequirementListFilters {
@@ -65,6 +76,8 @@ export interface SpecCoverageGap {
 export interface SpecCoverageReport {
 	readonly requirements: readonly SpecRequirementWithStats[]
 	readonly unlinked_requirement_ids: readonly string[]
+	readonly fully_implemented_requirement_ids: readonly string[]
+	readonly partially_implemented_requirement_ids: readonly string[]
 	readonly integrity_gaps: readonly SpecCoverageGap[]
 }
 

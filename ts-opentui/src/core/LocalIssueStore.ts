@@ -25,6 +25,7 @@ import type {
 	SpecCoverageReport,
 	SpecIssueLink,
 	SpecIssueRef,
+	SpecLinkFulfillmentStatus,
 	SpecLinkType,
 	SpecPublishConfig,
 	SpecPublishOutcome,
@@ -125,6 +126,9 @@ interface SpecIssueLinkRow {
 	readonly requirement_local_id: string
 	readonly requirement_external_code: string | null
 	readonly link_type: string
+	readonly fulfillment_status: string | null
+	readonly fulfillment_percent: number | null
+	readonly evidence_note: string | null
 	readonly created_at: string
 	readonly updated_at: string
 	readonly deleted_at: string | null
@@ -353,6 +357,9 @@ const schemaStatements: readonly string[] = [
 		issue_id TEXT NOT NULL,
 		requirement_id TEXT NOT NULL,
 		link_type TEXT NOT NULL,
+		fulfillment_status TEXT,
+		fulfillment_percent INTEGER,
+		evidence_note TEXT,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
 		deleted_at TEXT,
@@ -742,6 +749,42 @@ const normalizeSpecLinkType = (linkType: string | undefined): SpecLinkType => {
 	}
 }
 
+const normalizeSpecLinkFulfillmentStatus = (
+	status: string | undefined | null,
+): SpecLinkFulfillmentStatus => {
+	switch (status) {
+		case "planned":
+		case "partial":
+		case "complete":
+		case "verified":
+			return status
+		default:
+			return "planned"
+	}
+}
+
+const normalizeSpecLinkFulfillmentPercent = (value: number | null | undefined): number | null => {
+	if (value === null || value === undefined) {
+		return null
+	}
+	if (!Number.isFinite(value)) {
+		return null
+	}
+	const rounded = Math.round(value)
+	if (rounded < 0 || rounded > 100) {
+		return null
+	}
+	return rounded
+}
+
+const normalizeSpecLinkEvidenceNote = (value: string | null | undefined): string | null => {
+	if (value === null || value === undefined) {
+		return null
+	}
+	const trimmed = value.trim()
+	return trimmed.length > 0 ? trimmed : null
+}
+
 const toTimestampMs = (value: string): number => {
 	const parsed = Date.parse(value)
 	return Number.isNaN(parsed) ? 0 : parsed
@@ -930,6 +973,9 @@ const rowToSpecIssueLink = (row: SpecIssueLinkRow): SpecIssueLink => ({
 	requirement_local_id: row.requirement_local_id,
 	requirement_external_code: row.requirement_external_code,
 	link_type: normalizeSpecLinkType(row.link_type),
+	fulfillment_status: normalizeSpecLinkFulfillmentStatus(row.fulfillment_status),
+	fulfillment_percent: normalizeSpecLinkFulfillmentPercent(row.fulfillment_percent),
+	evidence_note: normalizeSpecLinkEvidenceNote(row.evidence_note),
 	created_at: row.created_at,
 	updated_at: row.updated_at,
 })
@@ -1208,6 +1254,29 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						ON spec_requirements(external_code)
 						WHERE deleted_at IS NULL AND external_code IS NOT NULL
 					`
+			})
+
+		const ensureSpecIssueLinkColumns = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
+			Effect.gen(function* () {
+				const columns = yield* sql<TableInfoRow>`PRAGMA table_info(spec_issue_links)`
+				if (columns.length === 0) {
+					return
+				}
+				const columnNames = new Set(columns.map((column) => column.name))
+				if (!columnNames.has("fulfillment_status")) {
+					yield* sql`ALTER TABLE spec_issue_links ADD COLUMN fulfillment_status TEXT`
+				}
+				if (!columnNames.has("fulfillment_percent")) {
+					yield* sql`ALTER TABLE spec_issue_links ADD COLUMN fulfillment_percent INTEGER`
+				}
+				if (!columnNames.has("evidence_note")) {
+					yield* sql`ALTER TABLE spec_issue_links ADD COLUMN evidence_note TEXT`
+				}
+				yield* sql`
+					UPDATE spec_issue_links
+					SET fulfillment_status = 'planned'
+					WHERE fulfillment_status IS NULL OR TRIM(fulfillment_status) = ''
+				`
 			})
 
 		const getBackupConfig = (): Effect.Effect<LocalIssueBackupConfig> =>
@@ -1533,6 +1602,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						yield* ensureIssueColumns(sql)
 						yield* ensureSyncQueueColumns(sql)
 						yield* ensureSpecRequirementColumns(sql)
+						yield* ensureSpecIssueLinkColumns(sql)
 						yield* maybeRunStaleOpenBackup(sql, dbPath, storageRoot, backupConfig)
 
 						const result = yield* effect(sql)
@@ -1774,6 +1844,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						COALESCE(r.local_id, l.requirement_id) AS requirement_local_id,
 						r.external_code AS requirement_external_code,
 						l.link_type,
+						l.fulfillment_status,
+						l.fulfillment_percent,
+						l.evidence_note,
 						l.created_at,
 						l.updated_at,
 						l.deleted_at
@@ -2662,6 +2735,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				issueId: string,
 				requirementReference: string,
 				linkType: SpecLinkType,
+				fulfillmentStatus: SpecLinkFulfillmentStatus,
+				fulfillmentPercent: number | null,
+				evidenceNote: string | null,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
 			): Effect.Effect<void, LocalIssueStoreError> =>
@@ -2696,11 +2772,19 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							}
 
 							const now = nowIso()
+							const normalizedFulfillmentStatus =
+								normalizeSpecLinkFulfillmentStatus(fulfillmentStatus)
+							const normalizedFulfillmentPercent =
+								normalizeSpecLinkFulfillmentPercent(fulfillmentPercent)
+							const normalizedEvidenceNote = normalizeSpecLinkEvidenceNote(evidenceNote)
 							yield* sql`
 								INSERT INTO spec_issue_links (
 									issue_id,
 									requirement_id,
 									link_type,
+									fulfillment_status,
+									fulfillment_percent,
+									evidence_note,
 									created_at,
 									updated_at,
 									deleted_at
@@ -2709,12 +2793,20 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										${issueId},
 										${requirement.id},
 										${normalizeSpecLinkType(linkType)},
+										${normalizedFulfillmentStatus},
+										${normalizedFulfillmentPercent},
+										${normalizedEvidenceNote},
 										${now},
 										${now},
 									${null}
 								)
 								ON CONFLICT(issue_id, requirement_id, link_type)
-								DO UPDATE SET deleted_at = ${null}, updated_at = ${now}
+								DO UPDATE SET
+									deleted_at = ${null},
+									updated_at = ${now},
+									fulfillment_status = ${normalizedFulfillmentStatus},
+									fulfillment_percent = ${normalizedFulfillmentPercent},
+									evidence_note = ${normalizedEvidenceNote}
 							`
 						}),
 					),
@@ -2788,6 +2880,138 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
+			updateSpecIssueLink: (
+				issueId: string,
+				requirementReference: string,
+				fields: {
+					status?: SpecLinkFulfillmentStatus
+					percent?: number | null
+					note?: string | null
+				},
+				linkType: SpecLinkType | undefined,
+				cwd?: string,
+				requirementSelector: SpecRequirementLookupSelector = "auto",
+			): Effect.Effect<number, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const requirement = yield* loadSpecRequirementRowByReference(
+								sql,
+								requirementReference,
+								requirementSelector,
+							)
+							if (requirement === undefined) {
+								return 0
+							}
+
+							if (
+								fields.status === undefined &&
+								fields.percent === undefined &&
+								fields.note === undefined
+							) {
+								return 0
+							}
+
+							const statusProvided = fields.status !== undefined
+							const percentProvided = fields.percent !== undefined
+							const noteProvided = fields.note !== undefined
+							const normalizedStatus = statusProvided
+								? normalizeSpecLinkFulfillmentStatus(fields.status)
+								: undefined
+							const normalizedPercent = percentProvided
+								? normalizeSpecLinkFulfillmentPercent(fields.percent)
+								: undefined
+							const normalizedNote = noteProvided
+								? normalizeSpecLinkEvidenceNote(fields.note)
+								: undefined
+
+							const existingRows =
+								linkType === undefined
+									? yield* sql<{
+											readonly count: number
+											readonly fulfillment_status: string | null
+											readonly fulfillment_percent: number | null
+											readonly evidence_note: string | null
+										}>`
+											SELECT
+												COUNT(*) AS count,
+												MAX(fulfillment_status) AS fulfillment_status,
+												MAX(fulfillment_percent) AS fulfillment_percent,
+												MAX(evidence_note) AS evidence_note
+											FROM spec_issue_links
+											WHERE
+												issue_id = ${issueId}
+												AND requirement_id = ${requirement.id}
+												AND deleted_at IS NULL
+										`
+									: yield* sql<{
+											readonly count: number
+											readonly fulfillment_status: string | null
+											readonly fulfillment_percent: number | null
+											readonly evidence_note: string | null
+										}>`
+											SELECT
+												COUNT(*) AS count,
+												MAX(fulfillment_status) AS fulfillment_status,
+												MAX(fulfillment_percent) AS fulfillment_percent,
+												MAX(evidence_note) AS evidence_note
+											FROM spec_issue_links
+											WHERE
+												issue_id = ${issueId}
+												AND requirement_id = ${requirement.id}
+												AND link_type = ${normalizeSpecLinkType(linkType)}
+												AND deleted_at IS NULL
+										`
+
+							const existing = existingRows[0]
+							const updatedCount = existing?.count ?? 0
+							if (updatedCount === 0) {
+								return 0
+							}
+
+							const finalStatus =
+								normalizedStatus ?? normalizeSpecLinkFulfillmentStatus(existing?.fulfillment_status)
+							const finalPercent =
+								normalizedPercent ??
+								normalizeSpecLinkFulfillmentPercent(existing?.fulfillment_percent)
+							const finalNote =
+								normalizedNote ?? normalizeSpecLinkEvidenceNote(existing?.evidence_note)
+							const now = nowIso()
+
+							if (linkType === undefined) {
+								yield* sql`
+									UPDATE spec_issue_links
+									SET
+										fulfillment_status = ${finalStatus},
+										fulfillment_percent = ${finalPercent},
+										evidence_note = ${finalNote},
+										updated_at = ${now}
+									WHERE
+										issue_id = ${issueId}
+										AND requirement_id = ${requirement.id}
+										AND deleted_at IS NULL
+								`
+								return updatedCount
+							}
+
+							yield* sql`
+								UPDATE spec_issue_links
+								SET
+									fulfillment_status = ${finalStatus},
+									fulfillment_percent = ${finalPercent},
+									evidence_note = ${finalNote},
+									updated_at = ${now}
+								WHERE
+									issue_id = ${issueId}
+									AND requirement_id = ${requirement.id}
+									AND link_type = ${normalizeSpecLinkType(linkType)}
+									AND deleted_at IS NULL
+							`
+							return updatedCount
+						}),
+					),
+				),
+
 			listIssueSpecRequirements: (
 				issueId: string,
 				cwd?: string,
@@ -2800,6 +3024,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						readonly title: string
 						readonly kind: string
 						readonly link_type: string
+						readonly fulfillment_status: string | null
+						readonly fulfillment_percent: number | null
+						readonly evidence_note: string | null
 					}>`
 							SELECT
 								r.id,
@@ -2807,7 +3034,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								r.external_code,
 								r.title,
 								r.kind,
-								l.link_type
+								l.link_type,
+								l.fulfillment_status,
+								l.fulfillment_percent,
+								l.evidence_note
 						FROM spec_issue_links l
 						INNER JOIN spec_requirements r ON r.id = l.requirement_id
 						WHERE
@@ -2824,6 +3054,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								title: row.title,
 								kind: normalizeSpecRequirementKind(row.kind),
 								link_type: normalizeSpecLinkType(row.link_type),
+								fulfillment_status: normalizeSpecLinkFulfillmentStatus(row.fulfillment_status),
+								fulfillment_percent: normalizeSpecLinkFulfillmentPercent(row.fulfillment_percent),
+								evidence_note: normalizeSpecLinkEvidenceNote(row.evidence_note),
 							})),
 						),
 					),
@@ -2850,13 +3083,19 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							readonly status: string
 							readonly issue_type: string
 							readonly link_type: string
+							readonly fulfillment_status: string | null
+							readonly fulfillment_percent: number | null
+							readonly evidence_note: string | null
 						}>`
 								SELECT
 									i.id,
 									i.title,
 									i.status,
 									i.issue_type,
-									l.link_type
+									l.link_type,
+									l.fulfillment_status,
+									l.fulfillment_percent,
+									l.evidence_note
 								FROM spec_issue_links l
 								INNER JOIN issues i ON i.id = l.issue_id
 								WHERE
@@ -2871,6 +3110,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							status: normalizeIssueStatus(row.status),
 							issue_type: normalizeIssueType(row.issue_type),
 							link_type: normalizeSpecLinkType(row.link_type),
+							fulfillment_status: normalizeSpecLinkFulfillmentStatus(row.fulfillment_status),
+							fulfillment_percent: normalizeSpecLinkFulfillmentPercent(row.fulfillment_percent),
+							evidence_note: normalizeSpecLinkEvidenceNote(row.evidence_note),
 						}))
 					}),
 				),
@@ -2889,20 +3131,49 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						const requirementById = new Map(requirements.map((row) => [row.id, row]))
 						const issueIdSet = new Set(issueRows.map((row) => row.id))
 						const linkCountByRequirement = new Map<string, number>()
+						const implementedCountByRequirement = new Map<string, number>()
+						const partialCountByRequirement = new Map<string, number>()
 						for (const link of links) {
 							linkCountByRequirement.set(
 								link.requirement_id,
 								(linkCountByRequirement.get(link.requirement_id) ?? 0) + 1,
 							)
+							const linkType = normalizeSpecLinkType(link.link_type)
+							const fulfillmentStatus = normalizeSpecLinkFulfillmentStatus(link.fulfillment_status)
+							if (
+								linkType === "implements" &&
+								(fulfillmentStatus === "complete" || fulfillmentStatus === "verified")
+							) {
+								implementedCountByRequirement.set(
+									link.requirement_id,
+									(implementedCountByRequirement.get(link.requirement_id) ?? 0) + 1,
+								)
+							} else if (linkType === "implements" && fulfillmentStatus === "partial") {
+								partialCountByRequirement.set(
+									link.requirement_id,
+									(partialCountByRequirement.get(link.requirement_id) ?? 0) + 1,
+								)
+							}
 						}
 
 						const requirementStats: SpecRequirementWithStats[] = requirements.map((row) => ({
 							...rowToSpecRequirement(row),
 							linked_issue_count: linkCountByRequirement.get(row.id) ?? 0,
+							implemented_issue_count: implementedCountByRequirement.get(row.id) ?? 0,
 						}))
 
 						const unlinkedRequirementIds = requirementStats
 							.filter((item) => item.linked_issue_count === 0)
+							.map((item) => item.local_id)
+						const fullyImplementedRequirementIds = requirementStats
+							.filter((item) => item.implemented_issue_count > 0)
+							.map((item) => item.local_id)
+						const partiallyImplementedRequirementIds = requirementStats
+							.filter(
+								(item) =>
+									item.implemented_issue_count === 0 &&
+									(partialCountByRequirement.get(item.id) ?? 0) > 0,
+							)
 							.map((item) => item.local_id)
 
 						const integrityGaps: SpecCoverageGap[] = []
@@ -2939,6 +3210,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						return {
 							requirements: requirementStats,
 							unlinked_requirement_ids: unlinkedRequirementIds,
+							fully_implemented_requirement_ids: fullyImplementedRequirementIds,
+							partially_implemented_requirement_ids: partiallyImplementedRequirementIds,
 							integrity_gaps: integrityGaps,
 						}
 					}),
@@ -3758,6 +4031,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													issue_id,
 													requirement_id,
 													link_type,
+													fulfillment_status,
+													fulfillment_percent,
+													evidence_note,
 													created_at,
 													updated_at,
 													deleted_at
@@ -3766,6 +4042,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													${params.canonicalIssueId},
 													requirement_id,
 													link_type,
+													fulfillment_status,
+													fulfillment_percent,
+													evidence_note,
 													created_at,
 													updated_at,
 													deleted_at
@@ -3782,6 +4061,21 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 														WHEN excluded.updated_at > spec_issue_links.updated_at
 															THEN excluded.updated_at
 															ELSE spec_issue_links.updated_at
+													END,
+													fulfillment_status = CASE
+														WHEN excluded.updated_at > spec_issue_links.updated_at
+															THEN excluded.fulfillment_status
+															ELSE spec_issue_links.fulfillment_status
+													END,
+													fulfillment_percent = CASE
+														WHEN excluded.updated_at > spec_issue_links.updated_at
+															THEN excluded.fulfillment_percent
+															ELSE spec_issue_links.fulfillment_percent
+													END,
+													evidence_note = CASE
+														WHEN excluded.updated_at > spec_issue_links.updated_at
+															THEN excluded.evidence_note
+															ELSE spec_issue_links.evidence_note
 													END
 											`
 											yield* sql`
