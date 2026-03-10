@@ -26,6 +26,10 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			"Before implementing behavior changes, inspect relevant `az spec` requirements/links",
 		)
+		expect(output).toContain("Spec boundary for `az spec` usage")
+		expect(output).toContain("Use `az spec` only for product behavior changes")
+		expect(output).toContain("Do NOT use `az spec` for infra-only work")
+		expect(output).toContain('default to no spec link and note: "Spec impact: none (infra-only)."')
 		expect(output).toContain("After implementing behavior changes, run a spec compliance pass")
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
 		expect(output).toContain("For `az spec` commands, keep canonical Effect CLI ordering")
