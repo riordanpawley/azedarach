@@ -1693,8 +1693,6 @@ const specLintHandler = (args: {
 		}
 	})
 
-type SpecSyncTarget = "md" | "linear" | "all"
-
 const parseSpecSyncTarget = (target: Option.Option<string>) =>
 	Effect.gen(function* () {
 		const normalized = Option.match(target, {
