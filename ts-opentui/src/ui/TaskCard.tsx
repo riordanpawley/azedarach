@@ -92,6 +92,7 @@ export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
 	const isWaiting = props.task.sessionState === "waiting"
 	const maxTitleWidth = getTitleMaxWidth()
+	const canShowGitStatus = props.task.sessionState !== "idle" || props.task.hasWorktree === true
 
 	// Subscribe to running operation state for this task
 	const runningOperation = useAtomValue(taskRunningOperationAtom(props.task.id))
@@ -166,6 +167,10 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Build git status parts for individual coloring
 	// Returns { statusPart, additions, deletions } so each can be colored separately
 	const getGitStatusParts = (availableWidth: number) => {
+		if (!canShowGitStatus) {
+			return { statusString: "", additions: undefined, deletions: undefined }
+		}
+
 		const { gitBehindCount, hasUncommittedChanges, gitAdditions, gitDeletions } = props.task
 		const statusParts: string[] = []
 
@@ -250,6 +255,7 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Color for status indicators (↓N behind, ● dirty)
 	// Behind: yellow (needs attention), Dirty: red (uncommitted work), Both: red
 	const getStatusColor = (): string => {
+		if (!canShowGitStatus) return theme.overlay0
 		const { gitBehindCount, hasUncommittedChanges } = props.task
 		if (hasUncommittedChanges) return theme.red
 		if (gitBehindCount !== undefined && gitBehindCount > 0) return theme.yellow

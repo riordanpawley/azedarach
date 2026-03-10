@@ -366,6 +366,48 @@ export const resolveHasWorktreeFlag = (params: {
 	return params.persistedHasWorktree === true ? true : undefined
 }
 
+interface RetainedTaskGitStateSource extends GitStatus {
+	readonly hasMergeConflict?: boolean
+}
+
+const emptyGitStatus = (): GitStatus => ({
+	gitBehindCount: undefined,
+	hasUncommittedChanges: undefined,
+	gitAdditions: undefined,
+	gitDeletions: undefined,
+})
+
+export const shouldTaskExposeGitStatus = (params: {
+	readonly hasWorktree: boolean | undefined
+	readonly sessionState: TaskWithSession["sessionState"]
+}): boolean => params.hasWorktree === true || params.sessionState !== "idle"
+
+export const resolveRetainedTaskGitState = (params: {
+	readonly hasWorktree: boolean | undefined
+	readonly sessionState: TaskWithSession["sessionState"]
+	readonly source: RetainedTaskGitStateSource | undefined
+}): {
+	readonly hasMergeConflict: boolean
+	readonly gitStatus: GitStatus
+} => {
+	if (!shouldTaskExposeGitStatus(params)) {
+		return {
+			hasMergeConflict: false,
+			gitStatus: emptyGitStatus(),
+		}
+	}
+
+	return {
+		hasMergeConflict: params.source?.hasMergeConflict ?? false,
+		gitStatus: {
+			gitBehindCount: params.source?.gitBehindCount,
+			hasUncommittedChanges: params.source?.hasUncommittedChanges,
+			gitAdditions: params.source?.gitAdditions,
+			gitDeletions: params.source?.gitDeletions,
+		},
+	}
+}
+
 // ============================================================================
 // Sort Orders using Effect's composable Order module
 // ============================================================================
@@ -1390,14 +1432,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								worktreeIssueIds: worktreeInventory.issueIds,
 								worktreeInventoryLoaded: worktreeInventory.loaded,
 							})
+							const retainedGitState = resolveRetainedTaskGitState({
+								hasWorktree,
+								sessionState,
+								source: persistedTask,
+							})
 
-							let hasMergeConflict = false
-							let gitStatus: GitStatus = {
-								gitBehindCount: persistedTask?.gitBehindCount,
-								hasUncommittedChanges: persistedTask?.hasUncommittedChanges,
-								gitAdditions: persistedTask?.gitAdditions,
-								gitDeletions: persistedTask?.gitDeletions,
-							}
+							let hasMergeConflict = retainedGitState.hasMergeConflict
+							let gitStatus: GitStatus = retainedGitState.gitStatus
 							const isVisible = currentVisibleTaskIds.has(issue.id)
 							// Fetch git status only for visible tasks with active sessions or worktrees
 							if (isVisible && (sessionState !== "idle" || hasWorktree) && projectPath) {
@@ -1418,8 +1460,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 									gitAdditions: cachedStatus.gitAdditions,
 									gitDeletions: cachedStatus.gitDeletions,
 								}
-							} else {
-								hasMergeConflict = persistedTask?.hasMergeConflict ?? false
 							}
 
 							const persistedHasPR = persistedTask?.hasPR === true
@@ -1647,18 +1687,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				options?.parentEpicId === undefined
 					? existingTask?.parentEpicId
 					: (options.parentEpicId ?? undefined)
+			const retainedGitState = resolveRetainedTaskGitState({
+				hasWorktree: existingTask?.hasWorktree,
+				sessionState: existingTask?.sessionState ?? "idle",
+				source: existingTask,
+			})
 
 			return {
 				...issue,
 				sessionState: existingTask?.sessionState ?? "idle",
 				hasWorktree: existingTask?.hasWorktree,
-				hasMergeConflict: existingTask?.hasMergeConflict,
+				hasMergeConflict: retainedGitState.hasMergeConflict,
 				hasDevServer: existingTask?.hasDevServer,
 				parentEpicId,
-				gitBehindCount: existingTask?.gitBehindCount,
-				hasUncommittedChanges: existingTask?.hasUncommittedChanges,
-				gitAdditions: existingTask?.gitAdditions,
-				gitDeletions: existingTask?.gitDeletions,
+				...retainedGitState.gitStatus,
 				sessionStartedAt: existingTask?.sessionStartedAt,
 				estimatedTokens: existingTask?.estimatedTokens,
 				recentOutput: existingTask?.recentOutput,
