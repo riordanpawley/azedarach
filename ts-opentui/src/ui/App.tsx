@@ -10,6 +10,7 @@ import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
+import { deriveCurrentProjectWaitingIssueIds } from "../lib/waitingSessions.js"
 import { ActionPalette } from "./ActionPalette.js"
 import { AICreatePrompt } from "./AICreatePrompt.js"
 import {
@@ -39,6 +40,7 @@ import {
 	specWorkspaceStateAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
+	waitingSessionOptionsAtom,
 	workflowModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
@@ -208,13 +210,10 @@ export const App = () => {
 		boardTasksAtom,
 		Result.getOrElse(() => []),
 	)
+	const waitingSessions = useAtomValue(waitingSessionOptionsAtom)
 	const waitingIssueIds = useMemo(
-		() =>
-			tasksByColumn
-				.flat()
-				.filter((task) => task.sessionState === "waiting")
-				.map((task) => task.id),
-		[tasksByColumn],
+		() => deriveCurrentProjectWaitingIssueIds(waitingSessions),
+		[waitingSessions],
 	)
 
 	const projectName = useAtomValue(
