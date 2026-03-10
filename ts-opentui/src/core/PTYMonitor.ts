@@ -23,7 +23,11 @@ import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
-import { deriveShellForegroundState, type ForegroundKind } from "./ptyHeuristics.js"
+import {
+	deriveShellForegroundState,
+	type ForegroundKind,
+	shouldApplyHighPriorityDetectedState,
+} from "./ptyHeuristics.js"
 import { SessionManager } from "./SessionManager.js"
 import { type DetectionResult, StateDetector } from "./StateDetector.js"
 import { TmuxService } from "./TmuxService.js"
@@ -615,13 +619,14 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 
 						if (isHighPriority) {
 							// Guard high-priority transitions so stale scrollback does not force
-							// idle/done sessions into error or waiting.
-							const canTransition =
-								detectedState === "waiting"
-									? currentState === "initializing" || currentState === "busy"
-									: currentState === "initializing" ||
-										currentState === "busy" ||
-										currentState === "waiting"
+							// idle/done sessions into error or waiting, and do not surface
+							// transient command failures as terminal errors while the agent is
+							// still actively running in the foreground.
+							const canTransition = shouldApplyHighPriorityDetectedState({
+								currentState,
+								detectedState,
+								foregroundKind,
+							})
 
 							if (canTransition && currentState !== detectedState) {
 								yield* sessionManager.updateState(issueId, detectedState)
