@@ -4,6 +4,7 @@ import {
 	classifySessionStateForMissingCodeWindow,
 	isActiveSessionState,
 	resolveDiscoveredSessionState,
+	resolveSessionStateFromTmuxStatus,
 } from "./SessionManager.js"
 
 describe("SessionManager discovered session recovery", () => {
@@ -25,6 +26,22 @@ describe("SessionManager discovered session recovery", () => {
 	it("does not mark sessions as crashed while startup is in progress", () => {
 		expect(resolveDiscoveredSessionState("initializing", false, true)).toBe("initializing")
 		expect(resolveDiscoveredSessionState(undefined, false, true)).toBe("busy")
+	})
+
+	it("treats synthetic tmux disappearances for active sessions as crashed", () => {
+		expect(resolveSessionStateFromTmuxStatus("busy", "idle", true)).toBe("crashed")
+		expect(resolveSessionStateFromTmuxStatus("waiting", "idle", true)).toBe("crashed")
+		expect(resolveSessionStateFromTmuxStatus("paused", "idle", true)).toBe("crashed")
+	})
+
+	it("does not demote repeated synthetic disappearances once a session is crashed", () => {
+		expect(resolveSessionStateFromTmuxStatus("crashed", "idle", true)).toBe("crashed")
+	})
+
+	it("keeps real idle hooks and terminal states distinct from synthetic disappearance", () => {
+		expect(resolveSessionStateFromTmuxStatus("busy", "idle", false)).toBe("idle")
+		expect(resolveSessionStateFromTmuxStatus("done", "idle", true)).toBe("idle")
+		expect(resolveSessionStateFromTmuxStatus("error", "idle", true)).toBe("idle")
 	})
 
 	it("uses shared missing-window classifier for startup lock cases", () => {

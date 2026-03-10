@@ -197,6 +197,41 @@ export const classifySessionStateForMissingCodeWindow = (
 		options.hasCodeWindow ? false : options.hasStartLock || options.tmuxStartupInProgress,
 	)
 
+export interface TmuxSessionStateUpdateMeta {
+	readonly sessionName: string
+	/**
+	 * tmux session creation time in seconds since epoch.
+	 * `0` means the update was synthesized after the session disappeared.
+	 */
+	readonly createdAt: number
+	readonly worktreePath: string | null
+	readonly projectPath: string | null
+}
+
+const isSyntheticTmuxDisappearance = (
+	sessionMeta: TmuxSessionStateUpdateMeta | undefined,
+): boolean => sessionMeta?.createdAt === 0
+
+export const resolveSessionStateFromTmuxStatus = (
+	currentState: SessionState,
+	status: "busy" | "waiting" | "idle",
+	isSyntheticDisappearance = false,
+): SessionState => {
+	if (status === "busy") {
+		return "busy"
+	}
+	if (status === "waiting") {
+		return "waiting"
+	}
+	if (
+		isSyntheticDisappearance &&
+		(currentState === "crashed" || isActiveSessionState(currentState))
+	) {
+		return "crashed"
+	}
+	return "idle"
+}
+
 interface SessionMissingWindowClassification {
 	readonly state: SessionState
 	readonly hasCodeWindow: boolean
@@ -436,8 +471,8 @@ export interface SessionManagerService {
 	/**
 	 * Update session state from tmux status
 	 *
-	 * Handles mapping TmuxStatus to SessionState and handles
-	 * secondary transitions like "done" detection.
+	 * Handles mapping TmuxStatus to SessionState while distinguishing
+	 * real idle hooks from synthesized "session disappeared" updates.
 	 *
 	 * If the session doesn't exist but sessionMeta is provided,
 	 * the session will be registered automatically (orphan recovery).
@@ -445,12 +480,7 @@ export interface SessionManagerService {
 	readonly updateStateFromTmux: (
 		issueId: string,
 		status: "busy" | "waiting" | "idle",
-		sessionMeta?: {
-			sessionName: string
-			createdAt: number
-			worktreePath: string | null
-			projectPath: string | null
-		},
+		sessionMeta?: TmuxSessionStateUpdateMeta,
 	) => Effect.Effect<void, SessionNotFoundError, never>
 
 	/**
@@ -1715,12 +1745,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 			updateStateFromTmux: (
 				issueId: string,
 				status: "busy" | "waiting" | "idle",
-				sessionMeta?: {
-					sessionName: string
-					createdAt: number
-					worktreePath: string | null
-					projectPath: string | null
-				},
+				sessionMeta?: TmuxSessionStateUpdateMeta,
 			) =>
 				Effect.gen(function* () {
 					const effectiveProjectPath = yield* getEffectiveProjectPath()
@@ -1741,6 +1766,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								sessionMeta.projectPath,
 							)
 						: issueId
+					const syntheticDisappearance = isSyntheticTmuxDisappearance(sessionMeta)
 
 					let sessions = yield* Ref.get(sessionsRef)
 					let sessionOpt = HashMap.get(sessions, resolvedIssueId)
@@ -1768,14 +1794,23 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					// If session doesn't exist but we have metadata, create it (orphan recovery)
 					if (sessionOpt._tag === "None") {
 						if (sessionMeta) {
+							if (status === "idle" && syntheticDisappearance) {
+								yield* Effect.logDebug(
+									`Ignoring synthetic tmux disappearance for untracked session ${resolvedIssueId}`,
+								)
+								return
+							}
+
 							yield* Effect.log(
 								`Recovering orphaned session for ${resolvedIssueId} (status: ${status})`,
 							)
 
 							// Map status to SessionState
-							let initialState: SessionState = "busy"
-							if (status === "waiting") initialState = "waiting"
-							if (status === "idle") initialState = "idle"
+							const initialState = resolveSessionStateFromTmuxStatus(
+								"idle",
+								status,
+								syntheticDisappearance,
+							)
 
 							const orphanedSession: Session = {
 								issueId: resolvedIssueId,
@@ -1815,19 +1850,19 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					}
 					const oldState = session.state
 
-					// Map TmuxStatus to SessionState
-					let newState: SessionState = session.state
-					if (status === "busy") newState = "busy"
-					if (status === "waiting") newState = "waiting"
-					if (status === "idle") {
-						// If we were busy or waiting and session disappeared, it might be "done"
-						// but for now we'll just map to idle. Transition to "done"
-						// is usually handled by output pattern matching in PTYMonitor
-						// or explicit az notify done.
-						newState = "idle"
-					}
+					const newState = resolveSessionStateFromTmuxStatus(
+						oldState,
+						status,
+						syntheticDisappearance,
+					)
 
 					if (oldState === newState) return
+
+					if (status === "idle" && syntheticDisappearance && newState === "crashed") {
+						yield* Effect.log(
+							`Classified tmux disappearance for ${resolvedIssueId} as crashed (previous state: ${oldState})`,
+						)
+					}
 
 					const updatedSession: Session = {
 						...session,
