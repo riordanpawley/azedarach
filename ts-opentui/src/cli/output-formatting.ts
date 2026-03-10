@@ -18,12 +18,36 @@ type LinkedSpecRequirement = {
 	readonly title: string
 	readonly kind: string
 	readonly link_type: string
+	readonly implementations: readonly string[]
+}
+
+export interface PrimeImplementationContext {
+	readonly implementations: readonly string[]
 }
 
 export const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
 
-export const formatIssueSummaryLine = (issue: TrackedIssue): string =>
-	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
+const shouldShowIssueImplementations = (
+	issue: TrackedIssue,
+	showImplementations: boolean | undefined,
+): boolean => {
+	const implementations = issue.implementations ?? []
+	return (
+		(showImplementations === true && implementations.length > 0) ||
+		implementations.length > 1 ||
+		implementations.some((implementation) => implementation !== "default")
+	)
+}
+
+export const formatIssueSummaryLine = (
+	issue: TrackedIssue,
+	options?: {
+		readonly showImplementations?: boolean
+	},
+): string => {
+	const implementations = issue.implementations ?? []
+	return `${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type}${shouldShowIssueImplementations(issue, options?.showImplementations) ? ` impl=${implementations.join(",")}` : ""} updated_at=${issue.updated_at}]`
+}
 
 const normalizeIssueTextField = (value: string | undefined): string | undefined => {
 	const normalized = value?.trim()
@@ -145,10 +169,19 @@ const formatIssueLinkedSpecSection = (
 	return `Linked Spec Requirements:\n${lines.join("\n")}`
 }
 
+const formatIssueImplementationsSection = (
+	issue: TrackedIssue,
+	showImplementations: boolean | undefined,
+): string | undefined =>
+	shouldShowIssueImplementations(issue, showImplementations)
+		? `Implementations:\n${(issue.implementations ?? []).join(", ")}`
+		: undefined
+
 export const formatIssueDetailSections = (
 	issue: TrackedIssue,
 	options?: {
 		readonly linkedSpecRequirements?: ReadonlyArray<LinkedSpecRequirement> | undefined
+		readonly showImplementations?: boolean
 	},
 ): readonly string[] => {
 	const sections: string[] = []
@@ -156,6 +189,7 @@ export const formatIssueDetailSections = (
 	const design = normalizeIssueTextField(issue.design)
 	const acceptance = normalizeIssueTextField(issue.acceptance)
 	const notes = normalizeIssueTextField(issue.notes)
+	const implementations = formatIssueImplementationsSection(issue, options?.showImplementations)
 	const dependencyTypeCounts = formatIssueDependencyTypeCountsSection(issue)
 	const dependencies = formatIssueRelationshipSection(
 		"Dependencies",
@@ -181,6 +215,9 @@ export const formatIssueDetailSections = (
 	if (notes) {
 		sections.push(`Notes:\n${notes}`)
 	}
+	if (implementations) {
+		sections.push(implementations)
+	}
 	if (dependencyTypeCounts) {
 		sections.push(dependencyTypeCounts)
 	}
@@ -197,7 +234,48 @@ export const formatIssueDetailSections = (
 	return sections
 }
 
-export const buildPrimeOutput = (issueId: string | undefined, issueContext: string): string => {
+const normalizePrimeImplementations = (
+	implementationContext: PrimeImplementationContext | undefined,
+): readonly string[] => {
+	if (implementationContext === undefined) {
+		return []
+	}
+
+	const seen = new Set<string>()
+	const implementations: string[] = []
+	for (const implementation of implementationContext.implementations) {
+		const normalized = implementation.trim()
+		if (normalized.length === 0 || seen.has(normalized)) {
+			continue
+		}
+		seen.add(normalized)
+		implementations.push(normalized)
+	}
+	return implementations
+}
+
+const formatPrimeImplementationGuardrails = (
+	implementationContext: PrimeImplementationContext | undefined,
+): string | undefined => {
+	const implementations = normalizePrimeImplementations(implementationContext)
+	if (implementations.length <= 1) {
+		return undefined
+	}
+
+	return [
+		"- Implementation guardrails:",
+		`  - This project has multiple implementations configured: ${implementations.join(", ")}.`,
+		"  - New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections.",
+		"  - The implicit `default` fallback only applies while the project has exactly one implementation configured.",
+		"  - Repeated `--impl` flags mean intentionally shared work, for example `--impl ts-opentui --impl go-bubbletea`.",
+	].join("\n")
+}
+
+export const buildPrimeOutput = (
+	issueId: string | undefined,
+	issueContext: string,
+	implementationContext?: PrimeImplementationContext,
+): string => {
 	const issueSection =
 		issueId === undefined
 			? ""
@@ -217,6 +295,7 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 		issueId === undefined
 			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
 			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
+	const implementationGuardrails = formatPrimeImplementationGuardrails(implementationContext)
 
 	return `Azedarach Session Primer
 
@@ -239,6 +318,7 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
   - Do not go on history/log hunting tangents to backfill missing fields unless the user explicitly asks for that research.
+${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.

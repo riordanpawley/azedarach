@@ -275,6 +275,7 @@ describe("buildLinearFallbackSnapshots", () => {
 		issue_type: "task",
 		created_at: now,
 		updated_at: now,
+		implementations: ["default"],
 		...overrides,
 	})
 
@@ -349,6 +350,7 @@ describe("collectLinearFallbackIssuesById", () => {
 		issue_type: "task",
 		created_at: now,
 		updated_at: now,
+		implementations: ["default"],
 	})
 
 	it("keeps successful fallback issues when some IDs fail and preserves requested order", async () => {

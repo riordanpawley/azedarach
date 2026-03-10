@@ -40,7 +40,12 @@ import { AttachmentService } from "../core/AttachmentService.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
-import { IssueTrackerClient, type Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+import {
+	type ImplementationRecord,
+	type ImplementationRegistry,
+	IssueTrackerClient,
+	type Issue as TrackedIssue,
+} from "../core/IssueTrackerClient.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
@@ -589,14 +594,6 @@ const parseSpecImplementationForCli = (value: string): Effect.Effect<string, Err
 	return Effect.succeed(normalized)
 }
 
-const parseOptionalSpecImplementationForCli = (
-	value: Option.Option<string>,
-): Effect.Effect<string, Error> =>
-	Option.match(value, {
-		onNone: () => Effect.succeed(DEFAULT_SPEC_IMPLEMENTATION),
-		onSome: (implementation) => parseSpecImplementationForCli(implementation),
-	})
-
 const parseSpecImplementationsForCli = (
 	values: readonly string[],
 ): Effect.Effect<readonly string[], Error> =>
@@ -607,6 +604,50 @@ const parseSpecImplementationsForCli = (
 
 		const parsed = yield* Effect.all(values.map((value) => parseSpecImplementationForCli(value)))
 		return [...new Set(parsed)].sort((left, right) => left.localeCompare(right))
+	})
+
+const parseOptionalImplementationListForCli = (
+	values: readonly string[],
+): Effect.Effect<readonly string[] | undefined, Error> =>
+	values.length === 0 ? Effect.succeed(undefined) : parseSpecImplementationsForCli(values)
+
+const resolveParityImplementationForCli = (
+	value: Option.Option<string>,
+	registry: ImplementationRegistry,
+): Effect.Effect<string, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(registry.default_implementation),
+		onSome: (implementation) => parseSpecImplementationForCli(implementation),
+	})
+
+const formatImplementationSummaryLine = (implementation: ImplementationRecord): string => {
+	const flags = [
+		implementation.is_default ? "default" : undefined,
+		implementation.is_builtin ? "builtin" : undefined,
+	].filter((flag): flag is string => flag !== undefined)
+	const description =
+		implementation.description === undefined
+			? ""
+			: ` - ${compactSingleLineText(implementation.description)}`
+	return `${implementation.name}${flags.length === 0 ? "" : ` [${flags.join(",")}]`}${description}`
+}
+
+const logImplementationDetails = (
+	implementation: ImplementationRecord,
+	registry: ImplementationRegistry,
+): Effect.Effect<void> =>
+	Effect.gen(function* () {
+		yield* Console.log(`Implementation: ${implementation.name}`)
+		yield* Console.log(`Default: ${implementation.is_default ? "yes" : "no"}`)
+		yield* Console.log(`Built-in: ${implementation.is_builtin ? "yes" : "no"}`)
+		yield* Console.log(
+			`Implicit default allowed: ${registry.implicit_default_allowed ? "yes" : "no"}`,
+		)
+		if (implementation.description !== undefined) {
+			yield* Console.log(`Description: ${implementation.description}`)
+		}
+		yield* Console.log(`Created: ${implementation.created_at}`)
+		yield* Console.log(`Updated: ${implementation.updated_at}`)
 	})
 
 const inferSpecRequirementKindFromExternalCodeForCli = (
@@ -848,6 +889,8 @@ const issueGetHandler = (args: {
 					).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
 				),
 			)
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const showImplementations = registry.implementations.length > 1
 
 		if (args.json) {
 			yield* Console.log(
@@ -863,8 +906,11 @@ const issueGetHandler = (args: {
 			return
 		}
 
-		yield* Console.log(formatIssueSummaryLine(issue))
-		const detailSections = formatIssueDetailSections(issue, { linkedSpecRequirements })
+		yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
+		const detailSections = formatIssueDetailSections(issue, {
+			linkedSpecRequirements,
+			showImplementations,
+		})
 		if (detailSections.length > 0) {
 			yield* Console.log("")
 			yield* Console.log(detailSections.join("\n\n"))
@@ -888,6 +934,7 @@ const issueListHandler = (args: {
 	readonly priority: Option.Option<number>
 	readonly issueType: Option.Option<string>
 	readonly parent: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly limit: Option.Option<number>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -908,6 +955,7 @@ const issueListHandler = (args: {
 			priority: Option.getOrUndefined(args.priority),
 			type: Option.getOrUndefined(args.issueType),
 			parent: Option.getOrUndefined(args.parent),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 		}
 		const hasFilters = Object.values(filters).some((value) => value !== undefined)
 
@@ -926,6 +974,8 @@ const issueListHandler = (args: {
 			yield* Console.log(JSON.stringify(issues, null, 2))
 			return
 		}
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const showImplementations = registry.implementations.length > 1
 
 		if (issues.length === 0) {
 			yield* Console.log("No issues found.")
@@ -933,7 +983,7 @@ const issueListHandler = (args: {
 		}
 
 		for (const issue of issues) {
-			yield* Console.log(formatIssueSummaryLine(issue))
+			yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
 		}
 
 		if (args.verbose) {
@@ -954,6 +1004,7 @@ const issueCreateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly deferred: boolean
 	readonly noDefaultParent: boolean
@@ -996,6 +1047,7 @@ const issueCreateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels: parseLabelsOption(args.labels),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -1008,6 +1060,12 @@ const issueCreateHandler = (args: {
 		yield* Console.log(`Created issue ${issue.id}`)
 		if (resolvedParent !== undefined) {
 			yield* Console.log(`Parent: ${resolvedParent}`)
+		}
+		if (
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default")
+		) {
+			yield* Console.log(`Implementations: ${issue.implementations.join(", ")}`)
 		}
 		if (args.verbose) {
 			yield* Console.error(
@@ -1031,6 +1089,7 @@ const issueChildHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -1073,6 +1132,7 @@ const issueChildHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels: parseLabelsOption(args.labels),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -1083,6 +1143,12 @@ const issueChildHandler = (args: {
 		}
 
 		yield* Console.log(`Created child issue ${issue.id} under ${resolvedParent}`)
+		if (
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default")
+		) {
+			yield* Console.log(`Implementations: ${issue.implementations.join(", ")}`)
+		}
 		if (args.verbose) {
 			yield* Console.error(
 				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
@@ -1106,6 +1172,7 @@ const issueUpdateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -1143,6 +1210,7 @@ const issueUpdateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels,
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 		}
 
@@ -1165,6 +1233,196 @@ const issueUpdateHandler = (args: {
 		if (args.verbose) {
 			yield* Console.error("Use `az issue get <issue-id>` to inspect the updated issue.")
 		}
+	})
+
+const implListHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(registry, null, 2))
+			return
+		}
+
+		for (const implementation of registry.implementations) {
+			yield* Console.log(formatImplementationSummaryLine(implementation))
+		}
+		if (args.verbose) {
+			yield* Console.error(`default=${registry.default_implementation}`)
+			yield* Console.error(`implicit_default_allowed=${registry.implicit_default_allowed}`)
+		}
+	})
+
+const implGetHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementation = registry.implementations.find(
+			(entry) => entry.name === implementationName,
+		)
+		if (implementation === undefined) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* logImplementationDetails(implementation, registry)
+	})
+
+const implAddHandler = (args: {
+	readonly implementation: string
+	readonly description: Option.Option<string>
+	readonly setDefault: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const implementation = yield* issueTrackerClient.createImplementation({
+			name: implementationName,
+			description: Option.getOrUndefined(args.description),
+			setDefault: args.setDefault,
+			cwd: explicitProjectDir,
+		})
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* Console.log(`Added implementation ${implementation.name}`)
+		if (implementation.is_default) {
+			yield* Console.log(`Default: ${implementation.name}`)
+		}
+	})
+
+const implUpdateHandler = (args: {
+	readonly implementation: string
+	readonly rename: Option.Option<string>
+	readonly description: Option.Option<string>
+	readonly setDefault: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const nextName = yield* Option.match(args.rename, {
+			onNone: () => Effect.succeed<string | undefined>(undefined),
+			onSome: (value) => parseSpecImplementationForCli(value).pipe(Effect.map((parsed) => parsed)),
+		})
+		const description = Option.match(args.description, {
+			onNone: () => undefined,
+			onSome: (value) => value,
+		})
+		if (nextName === undefined && description === undefined && !args.setDefault) {
+			return yield* Effect.fail(
+				new Error("No changes provided. Use --rename, --description, or --default."),
+			)
+		}
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const implementation = yield* issueTrackerClient.updateImplementation(
+			implementationName,
+			{
+				name: nextName,
+				description,
+				setDefault: args.setDefault ? true : undefined,
+			},
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* Console.log(`Updated implementation ${implementation.name}`)
+		if (implementation.is_default) {
+			yield* Console.log(`Default: ${implementation.name}`)
+		}
+	})
+
+const implDeleteHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const deleted = yield* issueTrackerClient.deleteImplementation(
+			implementationName,
+			explicitProjectDir,
+		)
+		if (!deleted) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify({ name: implementationName, deleted: true }, null, 2))
+			return
+		}
+
+		yield* Console.log(`Deleted implementation ${implementationName}`)
+	})
+
+const implSetDefaultHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.setDefaultImplementation(
+			implementationName,
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(registry, null, 2))
+			return
+		}
+
+		yield* Console.log(`Default implementation: ${registry.default_implementation}`)
 	})
 
 /**
@@ -2038,8 +2296,7 @@ const specLinkAddHandler = (args: {
 				return Effect.succeed(parsed)
 			},
 		})
-		const implementations = yield* parseSpecImplementationsForCli(args.implementations)
-
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
 		const specService = yield* SpecService
 		yield* specService.addIssueLink(
 			issueId,
@@ -2049,6 +2306,16 @@ const specLinkAddHandler = (args: {
 			lookup.selector,
 			implementations,
 		)
+		const matchingLinks = yield* specService.listLinks(
+			{
+				issueId,
+				requirementId: lookup.reference,
+				requirementSelector: lookup.selector,
+			},
+			explicitProjectDir,
+		)
+		const matchingLink = matchingLinks.find((link) => link.link_type === linkType)
+		const effectiveImplementations = matchingLink?.implementations ?? implementations ?? []
 
 		if (args.json) {
 			yield* Console.log(
@@ -2057,7 +2324,7 @@ const specLinkAddHandler = (args: {
 						issueId,
 						requirement: lookup,
 						type: linkType,
-						implementations,
+						implementations: effectiveImplementations,
 						updated: true,
 					},
 					null,
@@ -2066,9 +2333,10 @@ const specLinkAddHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(
-			`Added spec link: ${issueId} -> ${lookup.reference} (${linkType}) [impl=${implementations.join(",")}]`,
-		)
+		yield* Console.log(`Added spec link: ${issueId} -> ${lookup.reference} (${linkType})`)
+		if (effectiveImplementations.length > 0) {
+			yield* Console.log(`Implementations: ${effectiveImplementations.join(",")}`)
+		}
 	})
 
 /**
@@ -2122,11 +2390,7 @@ const specLinkRemoveHandler = (args: {
 				),
 			)
 		}
-		const hasImplementationFilter = args.implementations.length > 0
-		const implementations = hasImplementationFilter
-			? yield* parseSpecImplementationsForCli(args.implementations)
-			: undefined
-
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
 		const specService = yield* SpecService
 		const removed = yield* specService.removeIssueLink(
 			issueId,
@@ -2154,7 +2418,9 @@ const specParityHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const implementation = yield* parseOptionalSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementation = yield* resolveParityImplementationForCli(args.implementation, registry)
 		const specService = yield* SpecService
 		const report = yield* specService.getParityReport(implementation, explicitProjectDir)
 
@@ -2642,8 +2908,15 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 						Effect.map((output) => output.trim()),
 						Effect.catchAll(() => Effect.succeed("")),
 					)
+		const implementationContext = yield* IssueTrackerClient.pipe(
+			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
+			Effect.map((registry) => ({
+				implementations: registry.implementations.map((implementation) => implementation.name),
+			})),
+			Effect.catchAll(() => Effect.succeed(undefined)),
+		)
 
-		yield* Console.log(buildPrimeOutput(issueId, issueContext))
+		yield* Console.log(buildPrimeOutput(issueId, issueContext, implementationContext))
 	})
 
 /**
@@ -3271,6 +3544,12 @@ const primeCommand = Command.make(
 
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 
+const issueImplementationOption = Options.text("impl").pipe(
+	Options.repeated,
+	Options.withAlias("I"),
+	Options.withDescription("Implementation assignment (repeatable)"),
+)
+
 /**
  * az issue list - List issues
  */
@@ -3297,6 +3576,7 @@ const issueListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by parent issue ID"),
 		),
+		implementations: issueImplementationOption,
 		limit: Options.integer("limit").pipe(
 			Options.withAlias("l"),
 			Options.optional,
@@ -3385,6 +3665,7 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		implementations: issueImplementationOption,
 		deferred: Options.boolean("deferred").pipe(
 			Options.withDescription("Create issue without inheriting active parent context"),
 		),
@@ -3450,6 +3731,7 @@ const issueChildCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		implementations: issueImplementationOption,
 		parent: Options.text("parent").pipe(
 			Options.withAlias("r"),
 			Options.optional,
@@ -3527,6 +3809,7 @@ const issueUpdateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels (replaces labels)"),
 		),
+		implementations: issueImplementationOption,
 		parent: Options.text("parent").pipe(
 			Options.withAlias("P"),
 			Options.optional,
@@ -3684,6 +3967,123 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueDoctorCommand,
 		issueCloseCommand,
 		issueDeleteCommand,
+	]),
+)
+
+const implementationArg = Args.text({ name: "implementation" }).pipe(
+	Args.withDescription("Implementation name (for example default or ts-opentui)"),
+)
+
+const implListCommand = Command.make(
+	"list",
+	{
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implListHandler,
+).pipe(Command.withDescription("List registered implementations"))
+
+const implGetCommand = Command.make(
+	"get",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implGetHandler,
+).pipe(Command.withDescription("Show implementation details"))
+
+const implAddCommand = Command.make(
+	"add",
+	{
+		implementation: implementationArg,
+		description: Options.text("description").pipe(
+			Options.withAlias("d"),
+			Options.optional,
+			Options.withDescription("Optional implementation description"),
+		),
+		setDefault: Options.boolean("default").pipe(
+			Options.withDescription("Set the new implementation as the registry default"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implAddHandler,
+).pipe(Command.withDescription("Add a named implementation"))
+
+const implUpdateCommand = Command.make(
+	"update",
+	{
+		implementation: implementationArg,
+		rename: Options.text("rename").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Rename the implementation"),
+		),
+		description: Options.text("description").pipe(
+			Options.withAlias("d"),
+			Options.optional,
+			Options.withDescription("Update the implementation description (pass empty string to clear)"),
+		),
+		setDefault: Options.boolean("default").pipe(
+			Options.withDescription("Set this implementation as the registry default"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implUpdateHandler,
+).pipe(Command.withDescription("Update implementation metadata"))
+
+const implDeleteCommand = Command.make(
+	"delete",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implDeleteHandler,
+).pipe(Command.withDescription("Delete a named implementation"))
+
+const implSetDefaultCommand = Command.make(
+	"set-default",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implSetDefaultHandler,
+).pipe(Command.withDescription("Set the registry default implementation"))
+
+const implCommand = Command.make("impl", {}, () =>
+	Console.log("Usage: az impl [list|get|add|update|delete|set-default] ..."),
+).pipe(
+	Command.withDescription("Manage implementation registry metadata"),
+	Command.withSubcommands([
+		implListCommand,
+		implGetCommand,
+		implAddCommand,
+		implUpdateCommand,
+		implDeleteCommand,
+		implSetDefaultCommand,
 	]),
 )
 
@@ -4508,6 +4908,7 @@ const cli = az.pipe(
 		statusCommand,
 		syncCommand,
 		issueCommand,
+		implCommand,
 		specCommand,
 		gateCommand,
 		devCommand,
@@ -4540,6 +4941,7 @@ const commandCli = az.pipe(
 		statusCommand,
 		syncCommand,
 		issueCommand,
+		implCommand,
 		specCommand,
 		gateCommand,
 		devCommandPlaceholder,

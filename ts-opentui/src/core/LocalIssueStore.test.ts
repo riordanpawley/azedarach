@@ -618,6 +618,164 @@ describe("legacy issue schema migration", () => {
 	})
 })
 
+describe("implementation registry", () => {
+	it("exposes a built-in default implementation before any explicit setup", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-impl-default-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const registry = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					return yield* store.getImplementationRegistry(projectPath)
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(registry.default_implementation).toBe("default")
+			expect(registry.implicit_default_allowed).toBe(true)
+			expect(registry.implementations).toEqual([
+				{
+					name: "default",
+					description: undefined,
+					created_at: "1970-01-01T00:00:00.000Z",
+					updated_at: "1970-01-01T00:00:00.000Z",
+					is_default: true,
+					is_builtin: true,
+				},
+			])
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("supports add, update, delete, and set-default operations for named implementations", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-impl-ops-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					const added = yield* store.createImplementation(
+						{
+							name: "ts-opentui",
+							description: "TypeScript UI",
+						},
+						projectPath,
+					)
+					const updated = yield* store.updateImplementation(
+						"ts-opentui",
+						{
+							name: "go-bubbletea",
+							description: "Go UI",
+							setDefault: true,
+						},
+						projectPath,
+					)
+					const afterUpdate = yield* store.getImplementationRegistry(projectPath)
+					const deleted = yield* store.deleteImplementation("go-bubbletea", projectPath)
+					const afterDelete = yield* store.getImplementationRegistry(projectPath)
+
+					return {
+						added,
+						updated,
+						afterUpdate,
+						deleted,
+						afterDelete,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.added.name).toBe("ts-opentui")
+			expect(result.added.is_default).toBe(false)
+
+			expect(result.updated.name).toBe("go-bubbletea")
+			expect(result.updated.description).toBe("Go UI")
+			expect(result.updated.is_default).toBe(true)
+
+			expect(result.afterUpdate.default_implementation).toBe("go-bubbletea")
+			expect(result.afterUpdate.implicit_default_allowed).toBe(false)
+			expect(
+				result.afterUpdate.implementations.map((implementation) => implementation.name),
+			).toEqual(["go-bubbletea", "default"])
+
+			expect(result.deleted).toBe(true)
+			expect(result.afterDelete.default_implementation).toBe("default")
+			expect(result.afterDelete.implicit_default_allowed).toBe(true)
+			expect(result.afterDelete.implementations).toHaveLength(1)
+			expect(result.afterDelete.implementations[0]?.name).toBe("default")
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
+describe("issue implementations", () => {
+	it("requires explicit implementations on new issue writes once multiple implementations exist", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-issue-impl-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const store = await Effect.runPromise(
+				Effect.gen(function* () {
+					const resolvedStore = yield* LocalIssueStore
+					yield* resolvedStore.createImplementation({ name: "ts-opentui" }, projectPath)
+					return resolvedStore
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			await expect(
+				Effect.runPromise(store.create({ title: "Implicit impl issue" }, undefined, projectPath)),
+			).rejects.toThrow("Multiple implementations are configured")
+
+			const explicitIssue = await Effect.runPromise(
+				store.create(
+					{
+						title: "TS issue",
+						implementations: ["ts-opentui"],
+					},
+					undefined,
+					projectPath,
+				),
+			)
+			const sharedIssue = await Effect.runPromise(
+				store.create(
+					{
+						title: "Shared issue",
+						implementations: ["default", "ts-opentui"],
+					},
+					undefined,
+					projectPath,
+				),
+			)
+			await Effect.runPromise(
+				store.update(
+					explicitIssue.id,
+					{ notes: "keep current impl assignment" },
+					undefined,
+					projectPath,
+				),
+			)
+			const persistedExplicitIssue = await Effect.runPromise(
+				store.show(explicitIssue.id, projectPath),
+			)
+			const tsScopedIssues = await Effect.runPromise(
+				store.list({ implementations: ["ts-opentui"] }, projectPath),
+			)
+
+			expect(explicitIssue.implementations).toEqual(["ts-opentui"])
+			expect(sharedIssue.implementations).toEqual(["default", "ts-opentui"])
+			expect(persistedExplicitIssue?.implementations).toEqual(["ts-opentui"])
+			expect(tsScopedIssues.map((issue) => issue.id).sort()).toEqual(
+				[explicitIssue.id, sharedIssue.id].sort(),
+			)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
 describe("spec requirements and links", () => {
 	it("accepts suffixed spec requirement external codes", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-suffix-"))
@@ -675,6 +833,8 @@ describe("spec requirements and links", () => {
 					)
 
 					yield* store.addSpecIssueLink(issue.id, requirement.id, "implements", projectPath)
+					yield* store.createImplementation({ name: "ts-opentui" }, projectPath)
+					yield* store.createImplementation({ name: "go-bubbletea" }, projectPath)
 					yield* store.addSpecIssueLink(
 						issue.id,
 						requirement.id,

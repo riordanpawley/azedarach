@@ -44,6 +44,7 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("If review finds remaining work, move the issue back to in-progress")
 		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
+		expect(output).not.toContain("Implementation guardrails:")
 	})
 
 	it("guides users to fetch an issue when no issue id is configured", () => {
@@ -59,6 +60,35 @@ describe("buildPrimeOutput", () => {
 
 		expect(output).toContain("Active issue from AZEDARACH_ISSUE_ID=gq.")
 		expect(output).toContain("Could not load issue details automatically; run `az issue get gq`.")
+	})
+
+	it("keeps implementation guidance invisible while only one implementation exists", () => {
+		const output = buildPrimeOutput("gq", "gq: Improve az prime", {
+			implementations: ["default"],
+		})
+
+		expect(output).not.toContain("Implementation guardrails:")
+		expect(output).not.toContain("implicit `default` fallback")
+	})
+
+	it("warns explicitly when multiple implementations are configured", () => {
+		const output = buildPrimeOutput("gq", "gq: Improve az prime", {
+			implementations: ["default", "ts-opentui", "go-bubbletea"],
+		})
+
+		expect(output).toContain("Implementation guardrails:")
+		expect(output).toContain(
+			"This project has multiple implementations configured: default, ts-opentui, go-bubbletea.",
+		)
+		expect(output).toContain(
+			"New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections.",
+		)
+		expect(output).toContain(
+			"The implicit `default` fallback only applies while the project has exactly one implementation configured.",
+		)
+		expect(output).toContain(
+			"Repeated `--impl` flags mean intentionally shared work, for example `--impl ts-opentui --impl go-bubbletea`.",
+		)
 	})
 })
 
@@ -492,6 +522,7 @@ describe("formatIssueSummaryLine", () => {
 			issue_type: "task",
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
+			implementations: ["default"],
 		})
 
 		expect(line.includes("\n")).toBe(false)
@@ -499,6 +530,24 @@ describe("formatIssueSummaryLine", () => {
 		expect(line).toContain("status=in_progress")
 		expect(line).toContain("priority=1")
 		expect(line).toContain("type=task")
+	})
+
+	it("includes implementation scope when a non-default assignment should be surfaced", () => {
+		const line = formatIssueSummaryLine(
+			{
+				id: "az-124",
+				title: "Ship ts-only work",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-05T10:00:00.000Z",
+				updated_at: "2026-03-05T11:00:00.000Z",
+				implementations: ["ts-opentui"],
+			},
+			{ showImplementations: true },
+		)
+
+		expect(line).toContain("impl=ts-opentui")
 	})
 })
 
@@ -516,6 +565,7 @@ describe("formatIssueDetailSections", () => {
 			design: "Move options before positional args",
 			acceptance: "description can be updated",
 			notes: "manual repro completed",
+			implementations: ["ts-opentui", "go-bubbletea"],
 			dependencies: [
 				{ id: "AZE-11", dependency_type: "blocks" },
 				{ id: "AZE-12", dependency_type: "related" },
@@ -528,6 +578,7 @@ describe("formatIssueDetailSections", () => {
 			"Design:\nMove options before positional args",
 			"Acceptance:\ndescription can be updated",
 			"Notes:\nmanual repro completed",
+			"Implementations:\nts-opentui, go-bubbletea",
 			"Dependency Counts: blockedBy: 1, related: 1, discoveredFrom: 1",
 			"Dependencies:\nAZE-11, AZE-12, AZE-13",
 		])
@@ -543,6 +594,7 @@ describe("formatIssueDetailSections", () => {
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
 			description: "   ",
+			implementations: ["default"],
 		})
 
 		expect(sections).toEqual([])
@@ -557,6 +609,7 @@ describe("formatIssueDetailSections", () => {
 			issue_type: "task",
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
+			implementations: ["default"],
 			dependencies: [
 				{ id: "AZE-1", dependency_type: "blocks" },
 				{ id: "AZE-1", dependency_type: "related" },
@@ -583,6 +636,7 @@ describe("formatIssueDetailSections", () => {
 			updated_at: "2026-03-05T11:00:00.000Z",
 			dependency_count: 2,
 			dependent_count: 1,
+			implementations: ["default"],
 		})
 
 		expect(sections).toEqual(["Dependencies: 2", "Dependents: 1"])
@@ -597,6 +651,7 @@ describe("formatIssueDetailSections", () => {
 			issue_type: "task",
 			created_at: "2026-03-05T10:00:00.000Z",
 			updated_at: "2026-03-05T11:00:00.000Z",
+			implementations: ["default"],
 			dependencies: [
 				{ id: "AZE-11", dependency_type: "blocks" },
 				{ id: "AZE-12", dependency_type: "blocks" },
@@ -626,6 +681,7 @@ describe("formatIssueDetailSections", () => {
 				issue_type: "task",
 				created_at: "2026-03-05T10:00:00.000Z",
 				updated_at: "2026-03-05T11:00:00.000Z",
+				implementations: ["default"],
 			},
 			{
 				linkedSpecRequirements: [
@@ -636,6 +692,7 @@ describe("formatIssueDetailSections", () => {
 						title: "Persist requirements and links",
 						kind: "functional",
 						link_type: "implements",
+						implementations: ["default"],
 					},
 					{
 						id: "AZ-AT-2901",
@@ -644,6 +701,7 @@ describe("formatIssueDetailSections", () => {
 						title: "Acceptance path is covered",
 						kind: "acceptance",
 						link_type: "tests",
+						implementations: ["default"],
 					},
 				],
 			},
@@ -663,6 +721,7 @@ const makeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): TrackedIs
 	issue_type: "task",
 	created_at: "2026-03-08T00:00:00.000Z",
 	updated_at: "2026-03-08T00:00:00.000Z",
+	implementations: ["default"],
 	...overrides,
 })
 
