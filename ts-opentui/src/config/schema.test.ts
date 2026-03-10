@@ -610,5 +610,29 @@ describe("AzedarachConfigSchema", () => {
 			expect(encoded.git?.baseBranch).toBe("main")
 			expect(encoded.pr?.autoDraft).toBe(true)
 		})
+
+		it("encodes migrated config from resolved defaults", () => {
+			const decoded = decodeConfig({
+				pr: {
+					baseBranch: "develop",
+				},
+			})
+			const resolved = mergeWithDefaults(decoded)
+			const encoded = encodeConfig(resolved)
+
+			expect(encoded.$schema).toBe(AZEDARACH_CONFIG_JSON_SCHEMA_URI)
+			expect(encoded.$version).toBe(CURRENT_CONFIG_VERSION)
+			expect(encoded.git?.baseBranch).toBe("develop")
+			expect(encoded.session?.shell).toBeDefined()
+			const encodedIssueTracker = encoded.issueTracker
+			if (
+				encodedIssueTracker === undefined ||
+				typeof encodedIssueTracker !== "object" ||
+				encodedIssueTracker === null
+			) {
+				throw new Error("Expected encoded issueTracker object")
+			}
+			expect(encodedIssueTracker.local?.syncEnabled).toBe(false)
+		})
 	})
 })
