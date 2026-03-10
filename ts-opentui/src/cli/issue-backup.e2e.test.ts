@@ -38,7 +38,9 @@ const writeConfig = async (
 		readonly maxBackups?: number
 	},
 ): Promise<string> => {
-	const configPath = join(projectDir, ".azedarach.json")
+	const configDir = join(projectDir, ".azedarach")
+	await mkdir(configDir, { recursive: true })
+	const configPath = join(configDir, "config.json")
 	const config = {
 		$schema: 4,
 		issueTracker: {
@@ -100,7 +102,7 @@ describe("az issue backup e2e", () => {
 		const secondCreated = parseCreatedIssueId(secondCreateRaw)
 		expect(secondCreated).toBe("b")
 
-		const dbPath = join(projectDir, ".azedarach", "issues.db")
+		const dbPath = join(projectDir, ".azedarach", "azedarach.db")
 		const dbContent = await readFile(dbPath)
 		expect(dbContent.byteLength > 0).toBe(true)
 

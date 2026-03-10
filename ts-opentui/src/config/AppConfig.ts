@@ -3,7 +3,7 @@
  *
  * Loads configuration from (in priority order):
  * 1. Explicit config path (--config flag)
- * 2. .azedarach.json in project root
+ * 2. project config file (.azedarach/config.json, with legacy .azedarach.json fallback)
  * 3. package.json under "azedarach" key
  * 4. Defaults
  *
@@ -12,6 +12,7 @@
 
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effect"
+import { getProjectStoragePaths, resolveConfigSchemaPath } from "../core/storagePaths.js"
 import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ToastService } from "../services/ToastService.js"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
@@ -208,28 +209,13 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				)
 			})
 
-		/**
-		 * Try to load .azedarach.json from project root
-		 */
-		const loadJsonConfig = (
-			targetPath: string,
-		): Effect.Effect<ResolvedConfig | null, ConfigParseError> =>
+		const readJsonConfigAtPath = (
+			targetConfigPath: string,
+		): Effect.Effect<
+			{ readonly resolved: ResolvedConfig; readonly encoded: unknown; readonly raw: unknown },
+			ConfigParseError
+		> =>
 			Effect.gen(function* () {
-				const targetConfigPath = pathService.join(targetPath, ".azedarach.json")
-
-				const exists = yield* fs
-					.exists(targetConfigPath)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(false)),
-							),
-						),
-					)
-				if (!exists) {
-					return null
-				}
-
 				const content = yield* fs.readFileString(targetConfigPath).pipe(
 					Effect.mapError(
 						(e) =>
@@ -252,13 +238,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				// Schema.transform in AzedarachConfigSchema handles migration automatically
 				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
-					Effect.tap((config) =>
-						Effect.log(
-							`[DEBUG] Loaded .azedarach.json path=${targetConfigPath} cliTool=${config.cliTool}`,
-						),
-					),
 					Effect.mapError(
 						(e) =>
 							new ConfigParseError({
@@ -294,20 +274,83 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				if (shouldPersistMigratedConfig(json, encoded)) {
-					yield* fs.writeFileString(targetConfigPath, formatConfigJson(encoded)).pipe(
-						Effect.tap(() =>
-							Effect.log(
-								`[DEBUG] Persisted migrated config to .azedarach.json: ${targetConfigPath}`,
-							),
-						),
+				return { resolved, encoded, raw: json }
+			})
+
+		/**
+		 * Try to load project config, preferring the canonical .azedarach/config.json path
+		 * and falling back to legacy .azedarach.json when needed.
+		 */
+		const loadJsonConfig = (
+			targetPath: string,
+		): Effect.Effect<
+			{ readonly config: ResolvedConfig; readonly loadedConfigPath: string } | null,
+			ConfigParseError
+		> =>
+			Effect.gen(function* () {
+				const storagePaths = getProjectStoragePaths(targetPath, pathService)
+				const canonicalConfigExists = yield* fs
+					.exists(storagePaths.canonicalConfigPath)
+					.pipe(
 						Effect.catchAll((error) =>
-							Effect.logWarning(
-								`Failed to persist migrated .azedarach.json at ${targetConfigPath}: ${String(error)}`,
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
 							),
 						),
 					)
-					const schemaPath = pathService.join(targetPath, ".azedarach.schema.json")
+				const legacyConfigExists = canonicalConfigExists
+					? false
+					: yield* fs
+							.exists(storagePaths.legacyConfigPath)
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed(false)),
+									),
+								),
+							)
+
+				if (!canonicalConfigExists && !legacyConfigExists) {
+					return null
+				}
+
+				const sourceConfigPath = canonicalConfigExists
+					? storagePaths.canonicalConfigPath
+					: storagePaths.legacyConfigPath
+				const decoded = yield* readJsonConfigAtPath(sourceConfigPath).pipe(
+					Effect.tap(({ resolved }) =>
+						Effect.log(
+							`[DEBUG] Loaded config path=${sourceConfigPath} cliTool=${resolved.cliTool}`,
+						),
+					),
+				)
+
+				const canonicalTargetPath = storagePaths.canonicalConfigPath
+				const shouldPersistCanonical =
+					sourceConfigPath !== canonicalTargetPath ||
+					shouldPersistMigratedConfig(decoded.raw, decoded.encoded)
+
+				if (shouldPersistCanonical) {
+					yield* fs
+						.makeDirectory(storagePaths.storageDirectory, { recursive: true })
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`Failed to create config directory at ${storagePaths.storageDirectory}: ${String(error)}`,
+								),
+							),
+						)
+					yield* fs.writeFileString(canonicalTargetPath, formatConfigJson(decoded.encoded)).pipe(
+						Effect.tap(() =>
+							Effect.log(`[DEBUG] Persisted canonical config to ${canonicalTargetPath}`),
+						),
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Failed to persist canonical config at ${canonicalTargetPath}: ${String(error)}`,
+							),
+						),
+					)
+					const schemaPath = resolveConfigSchemaPath(canonicalTargetPath, pathService)
 					yield* fs
 						.writeFileString(schemaPath, configJsonSchemaString)
 						.pipe(
@@ -319,7 +362,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						)
 				}
 
-				return resolved
+				return {
+					config: decoded.resolved,
+					loadedConfigPath: shouldPersistCanonical ? canonicalTargetPath : sourceConfigPath,
+				}
 			})
 
 		/**
@@ -442,7 +488,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		/**
 		 * Load configuration for a project path with fallback chain
 		 *
-		 * Priority: explicit configPath > .azedarach.json > package.json > env vars > defaults
+		 * Priority: explicit configPath > project config file > package.json > env vars > defaults
 		 */
 		const loadConfigForPath = (
 			projectPath: string,
@@ -481,9 +527,9 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				}
 
 				const cwdPath = process.cwd()
-				const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
-				const cwdHasConfig = yield* fs
-					.exists(cwdConfigPath)
+				const cwdStoragePaths = getProjectStoragePaths(cwdPath, pathService)
+				const cwdHasCanonicalConfig = yield* fs
+					.exists(cwdStoragePaths.canonicalConfigPath)
 					.pipe(
 						Effect.catchAll((error) =>
 							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
@@ -491,18 +537,29 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 							),
 						),
 					)
+				const cwdHasLegacyConfig = cwdHasCanonicalConfig
+					? false
+					: yield* fs
+							.exists(cwdStoragePaths.legacyConfigPath)
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed(false)),
+									),
+								),
+							)
 				const configBasePath = resolveConfigBasePath({
 					cwdPath,
 					projectPath,
 					pathOps: pathService,
-					cwdHasConfig,
+					cwdHasConfig: cwdHasCanonicalConfig || cwdHasLegacyConfig,
 				})
 
-				// Try .azedarach.json first
+				// Try project config file first
 				const jsonConfig = yield* loadJsonConfig(configBasePath).pipe(
 					Effect.catchAll((warning) =>
 						Effect.logWarning(
-							`[DEBUG] Failed to load .azedarach.json for projectPath=${configBasePath}: ${warning.message} (path=${warning.path}${warning.details ? ` details=${warning.details}` : ""})`,
+							`[DEBUG] Failed to load project config for projectPath=${configBasePath}: ${warning.message} (path=${warning.path}${warning.details ? ` details=${warning.details}` : ""})`,
 						).pipe(
 							Effect.zipRight(SubscriptionRef.set(loadWarningRef, warning)),
 							Effect.zipRight(showConfigFallbackToast(warning)),
@@ -514,11 +571,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				if (jsonConfig) {
 					yield* SubscriptionRef.set(loadWarningRef, null)
 					yield* Effect.log(
-						`[DEBUG] Loaded resolved .azedarach.json config: cliTool=${jsonConfig.cliTool}`,
+						`[DEBUG] Loaded resolved project config: cliTool=${jsonConfig.config.cliTool}`,
 					)
 					return {
-						config: jsonConfig,
-						loadedConfigPath: pathService.join(configBasePath, ".azedarach.json"),
+						config: jsonConfig.config,
+						loadedConfigPath: jsonConfig.loadedConfigPath,
 					}
 				}
 

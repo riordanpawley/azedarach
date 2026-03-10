@@ -111,7 +111,7 @@ export const isWorktreePathForProject = (
 }
 
 /**
- * Resolve which base path should be used for loading `.azedarach.json`.
+ * Resolve which base path should be used for loading project config.
  *
  * When running from a sibling worktree, prefer the worktree path if it has its
  * own config file; otherwise keep using the registered project root.

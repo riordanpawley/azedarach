@@ -428,7 +428,7 @@ const ERROR_FORMATTERS: Record<
 			case "config":
 				return {
 					message: `${operation} disabled in configuration`,
-					suggestion: "Try: Check .azedarach.json settings",
+					suggestion: "Try: Check project config settings",
 					category: "pr",
 				}
 			case "offline":
@@ -440,7 +440,7 @@ const ERROR_FORMATTERS: Record<
 			case "both":
 				return {
 					message: `${operation} disabled (config + offline)`,
-					suggestion: "Try: Check both .azedarach.json settings and network connection",
+					suggestion: "Try: Check both project config settings and network connection",
 					category: "pr",
 				}
 			default:

@@ -176,6 +176,11 @@ export interface PerProjectEditorState {
 	readonly filterConfig: FilterConfig
 }
 
+const toPersistedEditorMode = (searchQuery: string): EditorMode =>
+	searchQuery.length > 0
+		? Data.struct({ _tag: "search" as const, query: searchQuery })
+		: Data.struct({ _tag: "normal" as const })
+
 export class EditorService extends Effect.Service<EditorService>()("EditorService", {
 	effect: Effect.gen(function* () {
 		const mode = yield* SubscriptionRef.make<EditorMode>(Data.struct({ _tag: "normal" as const }))
@@ -649,10 +654,26 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * Restore sort and filter configuration from saved state
 			 * Used when switching projects to restore previous UI state
 			 */
-			restoreState: (savedSort: SortConfig, savedFilter: FilterConfig) =>
+			restoreState: (savedSort: SortConfig, savedFilter: FilterConfig, savedSearchQuery?: string) =>
 				Effect.gen(function* () {
+					const restoredMode = toPersistedEditorMode(savedSearchQuery ?? "")
+					yield* SubscriptionRef.set(mode, restoredMode)
 					yield* SubscriptionRef.set(sortConfig, savedSort)
 					yield* SubscriptionRef.set(filterConfig, savedFilter)
+					const path = yield* SubscriptionRef.get(currentProjectPath)
+					if (path) {
+						yield* SubscriptionRef.update(perProjectState, (m) => {
+							const copy = new Map(m)
+							const existing = copy.get(path) ?? getDefaultState()
+							copy.set(path, {
+								...existing,
+								mode: restoredMode,
+								sortConfig: savedSort,
+								filterConfig: savedFilter,
+							})
+							return copy
+						})
+					}
 					yield* updateSortInMap(savedSort)
 					yield* updateFilterInMap(savedFilter)
 				}),
@@ -722,8 +743,9 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				}),
 
 			exitSpecWorkspace: () =>
-				SubscriptionRef.update(mode, (m): EditorMode =>
-					m._tag === "spec" ? Data.struct({ _tag: "normal" as const }) : m,
+				SubscriptionRef.update(
+					mode,
+					(m): EditorMode => (m._tag === "spec" ? Data.struct({ _tag: "normal" as const }) : m),
 				),
 
 			// ========================================================================
@@ -931,7 +953,11 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				Effect.gen(function* () {
 					const sort = yield* SubscriptionRef.get(sortConfig)
 					const filter = yield* SubscriptionRef.get(filterConfig)
-					return { sortConfig: sort, filterConfig: filter }
+					const searchQuery = yield* Effect.gen(function* () {
+						const currentMode = yield* SubscriptionRef.get(mode)
+						return currentMode._tag === "search" ? currentMode.query : ""
+					})
+					return { sortConfig: sort, filterConfig: filter, searchQuery }
 				}),
 		}
 	}),

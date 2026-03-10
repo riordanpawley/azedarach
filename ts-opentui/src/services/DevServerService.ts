@@ -11,6 +11,7 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/index.js"
+import { LocalIssueStore } from "../core/LocalIssueStore.js"
 import {
 	getDevWindowName,
 	getIssueSessionName,
@@ -20,6 +21,7 @@ import {
 } from "../core/paths.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { WorktreeSessionService } from "../core/WorktreeSessionService.js"
+import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { NavigationService } from "./NavigationService.js"
 import { OverlayService } from "./OverlayService.js"
@@ -157,9 +159,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		DiagnosticsService.Default,
 		OverlayService.Default,
 		WorktreeSessionService.Default,
+		LocalIssueStore.Default,
+		BoardService.Default,
 		NavigationService.Default,
 	],
 	scoped: Effect.gen(function* () {
+		const boardService = yield* BoardService
 		const navigationService = yield* NavigationService
 		const tmux = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
@@ -168,6 +173,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const pathService = yield* Path.Path
 		const overlayService = yield* OverlayService
 		const projectService = yield* ProjectService
+		const localIssueStore = yield* LocalIssueStore
 		const diagnostics = yield* DiagnosticsService
 		const serviceScope = yield* Effect.scope
 
@@ -336,6 +342,66 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return next
 			})
 
+		const hasActiveDevServer = (issueServers: IssueDevServersState): boolean =>
+			Array.from(HashMap.values(issueServers)).some(
+				(server) => server.status === "running" || server.status === "starting",
+			)
+
+		const syncIssueBoardProjection = (
+			issueId: string,
+			hasDevServer: boolean,
+		): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const effectiveProjectPath = yield* getEffectiveProjectPath()
+				yield* localIssueStore
+					.upsertBoardTaskState(
+						{
+							issueId,
+							hasDevServer: hasDevServer ? true : undefined,
+						},
+						effectiveProjectPath,
+					)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.void),
+							),
+						),
+					)
+				yield* boardService.patchTaskFromMutation(issueId, {
+					hasDevServer: hasDevServer ? true : undefined,
+				})
+			})
+
+		const syncBoardProjectionFromServers = (): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const effectiveProjectPath = yield* getEffectiveProjectPath()
+				const [persistedTasks, servers] = yield* Effect.all([
+					localIssueStore
+						.listBoardTasks(effectiveProjectPath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed([])),
+								),
+							),
+						),
+					SubscriptionRef.get(serversRef),
+				])
+				const issueIds = new Set<string>(persistedTasks.map((task) => task.id))
+				for (const issueId of HashMap.keys(servers)) {
+					issueIds.add(issueId)
+				}
+				for (const issueId of issueIds) {
+					const issueServers = HashMap.get(servers, issueId).pipe(
+						Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+					)
+					yield* syncIssueBoardProjection(issueId, hasActiveDevServer(issueServers))
+				}
+			})
+
+		yield* syncBoardProjectionFromServers()
+
 		const updateState = (
 			issueId: string,
 			serverName: string,
@@ -361,26 +427,34 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 							? HashMap.remove(servers, issueId)
 							: HashMap.set(servers, issueId, nextIssueServers)
 
-					return [next, nextServers]
+					return [
+						{
+							state: next,
+							hasDevServer: hasActiveDevServer(nextIssueServers),
+						},
+						nextServers,
+					]
 				})
 
-				if (newState.tmuxSession && newState.status !== "idle") {
+				if (newState.state.tmuxSession && newState.state.status !== "idle") {
+					const effectiveProjectPath = yield* getEffectiveProjectPath()
 					// Include issuePorts in metadata for persistence across restarts
 					const currentIssuePorts = yield* Ref.get(issuePortsRef)
-					yield* storeTmuxMetadata(newState.tmuxSession, {
+					yield* storeTmuxMetadata(newState.state.tmuxSession, {
 						issueId,
 						serverName,
-						status: newState.status,
-						port: newState.port,
-						windowName: newState.windowName,
-						worktreePath: newState.worktreePath,
-						projectPath: currentProjectPath,
-						startedAt: newState.startedAt?.toISOString(),
-						error: newState.error,
+						status: newState.state.status,
+						port: newState.state.port,
+						windowName: newState.state.windowName,
+						worktreePath: newState.state.worktreePath,
+						projectPath: effectiveProjectPath,
+						startedAt: newState.state.startedAt?.toISOString(),
+						error: newState.state.error,
 						issuePorts: currentIssuePorts.get(issueId),
 					})
 				}
-				return newState
+				yield* syncIssueBoardProjection(issueId, newState.hasDevServer)
+				return newState.state
 			})
 
 		const pollForPort = (session: string, pattern: RegExp) =>
@@ -654,7 +728,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				// Ensure the issue session exists
 				yield* worktreeSession.getOrCreateSession(issueId, {
 					worktreePath,
-					projectPath: currentProjectPath,
+					projectPath,
 					initCommands: (yield* appConfig.getWorktreeConfig()).initCommands,
 				})
 

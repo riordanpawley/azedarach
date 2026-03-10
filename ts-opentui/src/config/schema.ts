@@ -30,8 +30,8 @@ import * as Schema from "effect/Schema"
 
 /** Current config schema version */
 export const CURRENT_CONFIG_VERSION = 6
-/** Relative schema URI used in `.azedarach.json` for JSON-LSP tooling */
-export const AZEDARACH_CONFIG_JSON_SCHEMA_URI = "./.azedarach.schema.json"
+/** Relative schema URI used in `.azedarach/config.json` for JSON-LSP tooling */
+export const AZEDARACH_CONFIG_JSON_SCHEMA_URI = "./config.schema.json"
 
 // ============================================================================
 // CLI Tool Configuration
@@ -1439,7 +1439,7 @@ export const AzedarachConfigJsonSchema = JSONSchema.make(AzedarachConfigSchema, 
 // Type Exports
 // ============================================================================
 
-/** Input type for config (what users write in .azedarach.json) */
+/** Input type for config (what users write in project config JSON) */
 export type AzedarachConfigInput = Schema.Schema.Encoded<typeof AzedarachConfigSchema>
 
 /** Validated config type (after schema validation) */

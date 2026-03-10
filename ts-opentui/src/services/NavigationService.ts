@@ -13,8 +13,8 @@
  */
 
 import { Effect, Stream, SubscriptionRef } from "effect"
-import { IssueTrackerClient, type Issue } from "../core/IssueTrackerClient.js"
 import { computeDependencyPhases } from "../core/dependencyPhases.js"
+import { type Issue, IssueTrackerClient } from "../core/IssueTrackerClient.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
@@ -312,24 +312,13 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		 */
 		const refreshDrillDownCore = (epicId: string) =>
 			Effect.gen(function* () {
-				// Fetch current epic children
-				const children = yield* issueTrackerClient
-					.getEpicChildren(epicId)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
-							),
-						),
-					)
-
-				const newChildIds = new Set(children.map((c: { id: string }) => c.id))
+				const restoredState = yield* loadPersistedDrillDownState(epicId)
+				const newChildIds = restoredState.childIds
 
 				// Get existing child IDs to check for new children
 				const existingChildIds = yield* SubscriptionRef.get(drillDownChildIds)
 
-				// Find new children (not in existing set)
-				const addedChildren = children.filter((c) => !existingChildIds.has(c.id))
+				const addedChildren = [...newChildIds].filter((childId) => !existingChildIds.has(childId))
 
 				if (addedChildren.length === 0) {
 					// No new children - nothing to update
@@ -343,9 +332,34 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				// Update child IDs set
 				yield* SubscriptionRef.set(drillDownChildIds, newChildIds)
 
-				// Fetch details for new children only (incremental)
-				const newDetailResults = yield* Effect.all(
-					addedChildren.map((child: { id: string }) =>
+				// Merge new details into existing map
+				const existingDetails = yield* SubscriptionRef.get(drillDownChildDetails)
+				const updatedDetails = new Map(existingDetails)
+				for (const childId of addedChildren) {
+					const detail = restoredState.childDetails.get(childId)
+					if (detail !== undefined) {
+						updatedDetails.set(childId, detail)
+					}
+				}
+
+				yield* SubscriptionRef.set(drillDownChildDetails, updatedDetails)
+			})
+
+		const loadPersistedDrillDownState = (epicId: string) =>
+			Effect.gen(function* () {
+				const children = yield* issueTrackerClient
+					.getEpicChildren(epicId)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([])),
+							),
+						),
+					)
+
+				const childIds = new Set(children.map((child: { id: string }) => child.id))
+				const childDetailsResults = yield* Effect.all(
+					children.map((child: { id: string }) =>
 						issueTrackerClient
 							.show(child.id)
 							.pipe(Effect.map((issue) => [child.id, issue] as const))
@@ -360,16 +374,17 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					{ concurrency: "unbounded" },
 				)
 
-				// Merge new details into existing map
-				const existingDetails = yield* SubscriptionRef.get(drillDownChildDetails)
-				const updatedDetails = new Map(existingDetails)
-				for (const result of newDetailResults) {
+				const childDetails = new Map<string, Issue>()
+				for (const result of childDetailsResults) {
 					if (result !== null) {
-						updatedDetails.set(result[0], result[1])
+						childDetails.set(result[0], result[1])
 					}
 				}
 
-				yield* SubscriptionRef.set(drillDownChildDetails, updatedDetails)
+				return {
+					childIds,
+					childDetails,
+				}
 			})
 
 		// Watch for board task changes and refresh drill-down state when in drill-down mode
@@ -812,6 +827,29 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			 */
 			getDrillDownEpic: (): Effect.Effect<string | null> => SubscriptionRef.get(drillDownEpic),
 
+			restorePersistedState: (state: {
+				readonly focusedTaskId: string | null
+				readonly drillDownEpicId: string | null
+				readonly savedFocusedTaskId?: string | null
+			}) =>
+				Effect.gen(function* () {
+					if (state.drillDownEpicId === null) {
+						yield* SubscriptionRef.set(drillDownEpic, null)
+						yield* SubscriptionRef.set(drillDownChildIds, new Set())
+						yield* SubscriptionRef.set(drillDownChildDetails, new Map())
+						yield* SubscriptionRef.set(savedFocusedTaskId, null)
+						yield* SubscriptionRef.set(focusedTaskId, state.focusedTaskId)
+						return
+					}
+
+					const restored = yield* loadPersistedDrillDownState(state.drillDownEpicId)
+					yield* SubscriptionRef.set(drillDownChildIds, restored.childIds)
+					yield* SubscriptionRef.set(drillDownChildDetails, restored.childDetails)
+					yield* SubscriptionRef.set(drillDownEpic, state.drillDownEpicId)
+					yield* SubscriptionRef.set(savedFocusedTaskId, state.savedFocusedTaskId ?? null)
+					yield* SubscriptionRef.set(focusedTaskId, state.focusedTaskId)
+				}),
+
 			/**
 			 * Refresh drill-down state with current epic children
 			 *
@@ -835,13 +873,16 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 
 			/**
 			 * Get current state for saving before project switch.
-			 * Returns the focused task ID (drill-down state is not persisted).
-			 * Used for disk persistence (cross-session state).
+			 * Returns the focused task ID plus drill-down restore context.
+			 * Used for SQLite-backed cross-session persistence.
 			 */
 			getStateForSave: () =>
 				Effect.gen(function* () {
-					const taskId = yield* SubscriptionRef.get(focusedTaskId)
-					return { focusedTaskId: taskId }
+					return {
+						focusedTaskId: yield* SubscriptionRef.get(focusedTaskId),
+						drillDownEpicId: yield* SubscriptionRef.get(drillDownEpic),
+						savedFocusedTaskId: yield* SubscriptionRef.get(savedFocusedTaskId),
+					}
 				}),
 		}
 	}),

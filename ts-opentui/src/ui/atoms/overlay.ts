@@ -279,7 +279,7 @@ export const toggleCurrentSettingAtom = appRuntime.fn(() =>
 )
 
 /**
- * Open settings in editor atom - open .azedarach.json in $EDITOR
+ * Open settings in editor atom - open project config in $EDITOR
  *
  * Returns configPath and backupContent for post-edit validation.
  *

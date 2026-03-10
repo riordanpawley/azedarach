@@ -289,7 +289,7 @@ describe("AzedarachConfigSchema", () => {
 
 		it("preserves git-scoped fallback fields when schema is already v6", () => {
 			const decoded = decodeConfig({
-				$schema: "./.azedarach.schema.json",
+				$schema: "./config.schema.json",
 				$version: CURRENT_CONFIG_VERSION,
 				pr: {
 					enabled: true,
