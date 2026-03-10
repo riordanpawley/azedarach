@@ -349,6 +349,13 @@ describe("normalizeCliAliases", () => {
 			"bun",
 			"az",
 			"spec",
+			"sync",
+			"c",
+		])
+		expect(normalizeCliAliases(["bun", "az", "spec", "publish", "c"])).toEqual([
+			"bun",
+			"az",
+			"spec",
 			"publish",
 			"config",
 		])

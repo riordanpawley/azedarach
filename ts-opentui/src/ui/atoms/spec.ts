@@ -11,76 +11,78 @@ import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../../core/specTypes.js"
 import { appRuntime } from "./runtime.js"
 
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {
-    requirements: [],
-    unlinked_requirement_ids: [],
-    integrity_gaps: [],
+	requirements: [],
+	unlinked_requirement_ids: [],
+	fully_implemented_requirement_ids: [],
+	partially_implemented_requirement_ids: [],
+	integrity_gaps: [],
 }
 
 export interface SpecWorkspaceState {
-    readonly isLoading: boolean
-    readonly error: string | null
-    readonly coverageReport: SpecCoverageReport
-    readonly publishConfig: typeof DEFAULT_SPEC_PUBLISH_CONFIG
-    readonly lastPublishOutcome: SpecPublishOutcome | null
-    readonly refreshedAt: string | null
+	readonly isLoading: boolean
+	readonly error: string | null
+	readonly coverageReport: SpecCoverageReport
+	readonly publishConfig: typeof DEFAULT_SPEC_PUBLISH_CONFIG
+	readonly lastPublishOutcome: SpecPublishOutcome | null
+	readonly refreshedAt: string | null
 }
 
 export const DEFAULT_SPEC_WORKSPACE_STATE: SpecWorkspaceState = {
-    isLoading: false,
-    error: null,
-    coverageReport: EMPTY_COVERAGE_REPORT,
-    publishConfig: DEFAULT_SPEC_PUBLISH_CONFIG,
-    lastPublishOutcome: null,
-    refreshedAt: null,
+	isLoading: false,
+	error: null,
+	coverageReport: EMPTY_COVERAGE_REPORT,
+	publishConfig: DEFAULT_SPEC_PUBLISH_CONFIG,
+	lastPublishOutcome: null,
+	refreshedAt: null,
 }
 
 const errorMessage = (error: unknown): string =>
-    error instanceof Error ? error.message : String(error)
+	error instanceof Error ? error.message : String(error)
 
 export const specWorkspaceStateRefAtom = appRuntime.atom(
-    SubscriptionRef.make<SpecWorkspaceState>(DEFAULT_SPEC_WORKSPACE_STATE),
-    { initialValue: undefined },
+	SubscriptionRef.make<SpecWorkspaceState>(DEFAULT_SPEC_WORKSPACE_STATE),
+	{ initialValue: undefined },
 )
 
 export const specWorkspaceStateAtom = appRuntime.subscriptionRef((get) =>
-    get.result(specWorkspaceStateRefAtom),
+	get.result(specWorkspaceStateRefAtom),
 )
 
 export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
-    Effect.gen(function* () {
-        const spec = yield* SpecService
-        const stateRef = yield* get.result(specWorkspaceStateRefAtom)
+	Effect.gen(function* () {
+		const spec = yield* SpecService
+		const stateRef = yield* get.result(specWorkspaceStateRefAtom)
 
-        yield* SubscriptionRef.update(stateRef, (state) => ({
-            ...state,
-            isLoading: true,
-            error: null,
-        }))
+		yield* SubscriptionRef.update(stateRef, (state) => ({
+			...state,
+			isLoading: true,
+			error: null,
+		}))
 
-        const [coverageReport, publishConfig, lastPublishOutcome] = yield* Effect.all([
-            spec.getCoverageReport(),
-            spec.getPublishConfig(),
-            spec.getLastPublishOutcome(),
-        ])
+		const [coverageReport, publishConfig, lastPublishOutcome] = yield* Effect.all([
+			spec.getCoverageReport(),
+			spec.getPublishConfig(),
+			spec.getLastPublishOutcome(),
+		])
 
-        yield* SubscriptionRef.set(stateRef, {
-            isLoading: false,
-            error: null,
-            coverageReport,
-            publishConfig,
-            lastPublishOutcome: lastPublishOutcome ?? null,
-            refreshedAt: new Date().toISOString(),
-        })
-    }).pipe(
-        Effect.catchAll((error) =>
-            Effect.gen(function* () {
-                const stateRef = yield* get.result(specWorkspaceStateRefAtom)
-                yield* SubscriptionRef.update(stateRef, (state) => ({
-                    ...state,
-                    isLoading: false,
-                    error: errorMessage(error),
-                }))
-            }),
-        ),
-    ),
+		yield* SubscriptionRef.set(stateRef, {
+			isLoading: false,
+			error: null,
+			coverageReport,
+			publishConfig,
+			lastPublishOutcome: lastPublishOutcome ?? null,
+			refreshedAt: new Date().toISOString(),
+		})
+	}).pipe(
+		Effect.catchAll((error) =>
+			Effect.gen(function* () {
+				const stateRef = yield* get.result(specWorkspaceStateRefAtom)
+				yield* SubscriptionRef.update(stateRef, (state) => ({
+					...state,
+					isLoading: false,
+					error: errorMessage(error),
+				}))
+			}),
+		),
+	),
 )
