@@ -97,6 +97,7 @@ const INIT_DONE_OPTION = "@az_init_done"
 const BELL_CHAR = "\u0007"
 const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
 const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
+const SESSION_STARTUP_CRASH_GRACE_MS = 5_000
 
 const getCommandErrorField = (
 	error: unknown,
@@ -185,6 +186,7 @@ export interface MissingCodeWindowClassificationOptions {
 	readonly hasCodeWindow: boolean
 	readonly hasStartLock: boolean
 	readonly tmuxStartupInProgress: boolean
+	readonly withinStartupGracePeriod: boolean
 }
 
 export const classifySessionStateForMissingCodeWindow = (
@@ -194,7 +196,9 @@ export const classifySessionStateForMissingCodeWindow = (
 	resolveDiscoveredSessionState(
 		state,
 		options.hasCodeWindow,
-		options.hasCodeWindow ? false : options.hasStartLock || options.tmuxStartupInProgress,
+		options.hasCodeWindow
+			? false
+			: options.hasStartLock || options.tmuxStartupInProgress || options.withinStartupGracePeriod,
 	)
 
 export interface TmuxSessionStateUpdateMeta {
@@ -237,6 +241,9 @@ interface SessionMissingWindowClassification {
 	readonly hasCodeWindow: boolean
 	readonly startupInProgress: boolean
 }
+
+const isWithinSessionStartupGracePeriod = (startedAt: DateTime.Utc, nowMs: number): boolean =>
+	nowMs - DateTime.toEpochMillis(startedAt) < SESSION_STARTUP_CRASH_GRACE_MS
 
 /**
  * Schema for persisted session - matches Session interface
@@ -1541,12 +1548,14 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					const startsInProgressLookup = new Set(
 						Array.from(HashMap.keys(startsInProgress), normalizeIssueIdForLookup),
 					)
+					const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
 					const hasStartLock = (issueId: string): boolean =>
 						startsInProgressLookup.has(normalizeIssueIdForLookup(issueId))
 					const classifyStateForSession = (
 						issueId: string,
 						sessionName: string,
 						state: SessionState | undefined,
+						withinStartupGracePeriod: boolean,
 					): Effect.Effect<
 						SessionMissingWindowClassification,
 						TmuxError | SessionNotFoundError,
@@ -1559,12 +1568,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								: yield* isSessionStartupInProgress(sessionName)
 							const startupInProgress = hasCodeWindow
 								? false
-								: hasStartLock(issueId) || tmuxStartupInProgress
+								: hasStartLock(issueId) || tmuxStartupInProgress || withinStartupGracePeriod
 							return {
 								state: classifySessionStateForMissingCodeWindow(state, {
 									hasCodeWindow,
 									hasStartLock: hasStartLock(issueId),
 									tmuxStartupInProgress,
+									withinStartupGracePeriod,
 								}),
 								hasCodeWindow,
 								startupInProgress,
@@ -1583,10 +1593,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						{
 							const worktree = worktreeByIssueLookup.get(issueLookupKey)
 							const persisted = persistedByIssueLookup.get(issueLookupKey)
+							const withinStartupGracePeriod =
+								nowMs - tmuxSession.created.getTime() < SESSION_STARTUP_CRASH_GRACE_MS
 							const classifiedState = yield* classifyStateForSession(
 								issueId,
 								tmuxSession.name,
 								persisted?.state,
+								withinStartupGracePeriod,
 							)
 							const recoveredState = classifiedState.state
 							if (recoveredState === "crashed") {
@@ -1626,6 +1639,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							issueId,
 							inMemorySession.tmuxSessionName,
 							inMemorySession.state,
+							isWithinSessionStartupGracePeriod(inMemorySession.startedAt, nowMs),
 						)
 						if (classifiedState.hasCodeWindow) {
 							continue
