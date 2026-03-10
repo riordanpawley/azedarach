@@ -5,199 +5,228 @@ Issue: `ia`
 
 ## Problem
 
-We have a canonical product spec in `az spec`, but we do not have a fast way to answer:
+We need a quick way to answer:
 
-- how much of the spec is implemented
-- which implementation that answer refers to
-- whether the answer is based on shipped behavior, linked work, or testing evidence
+- what level of spec parity exists
+- for which implementation
+- based on what evidence
 
-This is especially important when the repository has multiple implementations, such as:
+This matters once the repo has more than one implementation, for example:
 
-- `ts-opentui` as the primary implementation
-- `go-bubbletea` as a rewrite track with partial parity
+- `default` or current primary implementation
+- `ts-opentui`
+- `go-bubbletea`
 
 ## Current State
 
 Observed in the repo and local data:
 
-- `az spec` has a substantial requirement corpus.
-- `az spec link` coverage is still sparse relative to the requirement count.
-- `ts-opentui` already has a Spec workspace, but it only shows:
-  - requirement counts
-  - unlinked requirements
-  - integrity gaps
-  - publish state
-- `go-bubbletea` has a manual feature matrix in docs, separate from `az spec`.
+- `az spec` has a large requirement corpus.
+- `az spec link` coverage is still sparse relative to the total requirement count.
+- `ts-opentui` already has a Spec workspace, but it currently shows link integrity, not implementation parity.
+- `go-bubbletea` tracks parity in a manual feature matrix that is disconnected from `az spec`.
 
-This means the current system can answer "is the spec linked to issues?" better than it can answer "is implementation X at parity with the spec?"
+At the moment, the system answers "which requirements have linked issues?" better than it answers "which implementation satisfies this requirement?"
 
-## Key Constraint
+## Revised Recommendation
 
-A single parity percentage is not trustworthy unless we define what counts as parity.
+Add a first-class implementation model instead of inferring implementation from labels.
 
-At least three distinct notions exist:
+Core idea:
 
-1. Work planned: a requirement has linked issues.
-2. Work implemented: a requirement has an issue that actually landed for a given implementation.
-3. Work verified: a requirement has implementation evidence and test or acceptance evidence.
+- add a new `az impl` command family for managing implementations
+- add `--impl <impl>` to issue workflows
+- add `--impl <impl>` to spec link workflows
 
-If these are collapsed into one number, the result will be easy to read and easy to misread.
+This makes implementation identity explicit in the data model instead of implicit in issue labels.
 
-## Recommendation
+## Why This Is Better Than Labels
 
-Use implementation-scoped issue labels as the issue-level flag instead of adding a brand new top-level issue field.
+Labels are flexible, but parity needs structure.
 
-Recommended label set:
+Problems with labels for this use case:
 
-- `impl:shared`
-- `impl:ts-opentui`
-- `impl:go-bubbletea`
-- optional later: `impl:gleam`
+- labels are too loose for something that drives parity reporting
+- labels do not define the set of valid implementations
+- labels make it harder to distinguish "shared work" from "work for impl X"
+- labels push important semantics into naming convention instead of schema
+- labels create drift risk when parity needs consistent machine-readable data
 
-Why labels instead of a new issue field:
+Advantages of a first-class implementation model:
 
-- `az issue create` and `az issue update` already support labels.
-- labels already persist through the issue model, local store, sync, and editor flows.
-- labels avoid a schema migration across all issue backends up front.
-- labels can represent shared work without forcing a single-valued field.
-- labels are enough to power grouped parity reporting.
+- implementations become discoverable and manageable
+- a repo can have a default implementation without extra setup
+- issue and spec-link semantics become explicit
+- parity can be computed from structured data rather than conventions
+- future UI can list valid implementations instead of relying on free-form strings
 
-The main downside is discipline: we need a constrained vocabulary and helper UX so labels do not drift.
+## Proposed CLI Model
 
-## Parity Models
+### `az impl`
 
-### Option A: Label-scoped issue/spec summary
+New command family for implementation registry management.
 
-Add a parity report that groups spec links by implementation label.
+Possible commands:
 
-Example output shape:
+- `az impl list`
+- `az impl get <impl>`
+- `az impl add <impl>`
+- `az impl update <impl>`
+- `az impl delete <impl>`
+- `az impl default <impl>`
 
-- `ts-opentui`: 41 requirements with linked implementation issues
-- `go-bubbletea`: 19 requirements with linked implementation issues
-- `shared`: 12 requirements with shared implementation work
-- unscoped: 87 linked issues missing an implementation label
+Possible implementation record fields:
 
-Pros:
+- `id`
+- `name`
+- `description`
+- `status`
+- `is_default`
+- optional `path`
+- optional `notes`
 
-- cheapest path
-- leverages existing issue labels and spec links
-- immediately exposes missing implementation metadata
+Example records:
 
-Cons:
+- `default`
+- `ts-opentui`
+- `go-bubbletea`
 
-- still measures linked work, not confirmed behavior
-- can overstate parity when linked issues are incomplete or stale
+### `az issue --impl`
 
-### Option B: Requirement-level implementation coverage
+Add implementation targeting to issues.
 
-Add implementation coverage records keyed by requirement and implementation.
+Examples:
 
-Example states:
+- `az issue create "Add goto mode" --impl ts-opentui`
+- `az issue create "Port goto mode to Go" --impl go-bubbletea`
+- `az issue update gx --impl default`
 
-- `not_started`
-- `planned`
-- `implemented`
-- `verified`
+Semantics:
 
-Pros:
+- an issue can target one implementation explicitly
+- if omitted, it resolves to the default implementation
+- shared cross-implementation work can be handled separately instead of overloading one implementation slot
 
-- honest and explicit
-- works even when one issue touches many requirements
-- supports real parity dashboards
+Open design question:
 
-Cons:
+- do we allow one issue to target multiple implementations, or require one issue per implementation?
 
-- new data model
-- more workflow overhead
-- likely needs dedicated commands and UI
+My bias is to keep issue-level `impl` single-valued and use separate issues for separate implementation work. That makes parity accounting cleaner.
 
-### Option C: Test/probe-derived parity
+### `az spec link --impl`
 
-For implementations that expose machine-readable behavior probes or targeted acceptance harnesses, derive parity from test evidence.
+Add implementation scoping to the issue<->requirement relationship.
 
-Pros:
+Examples:
 
-- strongest signal
-- least dependent on manual hygiene
+- `az spec link add gx fr0305 --type implements --impl ts-opentui`
+- `az spec link add hy at0702a --type tests --impl go-bubbletea`
 
-Cons:
+This is the key step for truthful parity reporting.
 
-- highest cost
-- not available uniformly across implementations today
+It means the same requirement can be:
 
-## Suggested Path
+- implemented for `ts-opentui`
+- not yet implemented for `go-bubbletea`
+- tested for one implementation but not another
 
-### Phase 1: Make implementation identity explicit
+without ambiguity.
 
-- standardize implementation labels on issues
-- add CLI and editor affordances so users can set labels consistently
-- surface missing implementation labels as a reportable hygiene gap
+## Parity Semantics
 
-### Phase 2: Add parity reporting
+Once links are implementation-scoped, parity can be reported per implementation.
 
-Build a report over:
+Example states for requirement `AZ-FR-0305`:
 
-- spec requirements
-- linked issues
-- issue labels
-- link types (`implements`, `tests`, `relates`)
+- `ts-opentui`: implemented, tested
+- `go-bubbletea`: planned only
+- `default`: implemented if `default` maps to the primary implementation
 
-Report should answer:
+This gives a much better answer than a repo-wide yes/no.
 
-- how many requirements have an `implements` issue for each implementation
-- how many have test evidence for each implementation
-- how many linked issues are missing implementation labels
-- which requirements are completely uncovered for a given implementation
+## Suggested Data Rules
 
-### Phase 3: Add UI surfacing
+If this model lands, parity reporting should use these rules:
 
-Extend the Spec workspace with an implementation-aware parity view.
+- `relates` does not count as coverage
+- `implements` counts as implementation evidence for the specified implementation
+- `tests` counts as verification evidence for the specified implementation
+- a requirement can be covered for one implementation and uncovered for another
+- default parity should be available even before users define additional implementations
 
-Good first slices:
+## Default Implementation Behavior
 
-- one subview or filter per implementation
-- headline counts for `planned`, `implemented`, `verified`
-- explicit "unknown due to unlabeled issue" bucket
+To keep the simple case simple:
 
-## Concrete UX Ideas
+- every repo starts with a built-in implementation named `default`
+- `az issue` and `az spec link` use `default` when `--impl` is omitted
+- teams that introduce rewrites can then add named implementations like `ts-opentui` and `go-bubbletea`
 
-Potential surfaces:
+This avoids forcing multi-implementation setup on users who only have one implementation.
+
+## Reporting Shape
+
+With explicit implementations, parity reporting can be honest.
+
+Potential command:
 
 - `az spec parity --impl ts-opentui`
-- `az spec parity --impl go-bubbletea --json`
-- Spec workspace parity tab with implementation summary cards
-- issue editor hint when saving an issue with a spec link but no `impl:*` label
-- README summary generated from parity report instead of a hand-maintained matrix
 
-## Data Rules
+Potential output categories:
 
-If we use labels as the implementation flag, we should enforce these rules:
+- total requirements
+- implemented requirements
+- tested requirements
+- requirements with no issue for this implementation
+- requirements with related work only
+- requirements with ambiguous or stale evidence
 
-- every issue linked with `implements` or `tests` should have at least one `impl:*` label
-- multiple `impl:*` labels are allowed only for truly shared work
-- `relates` links do not imply implementation coverage
-- parity summaries must distinguish planned, implemented, and verified states
-- unlabeled linked issues should reduce trust in the summary and be reported explicitly
+This is much stronger than grouping issue labels, because the implementation dimension lives directly in the parity data.
+
+## UI Implications
+
+In `ts-opentui`, the Spec workspace could grow a parity view that supports:
+
+- current implementation filter
+- side-by-side implementation comparison
+- per-requirement status for selected implementation
+- quick drill-down to implementing and testing issues for that implementation
+
+## Short Flag Note
+
+`-i` is already taken by `az spec link add` for `--issue`.
+
+So:
+
+- `--impl` is clear and should exist
+- shorthand can be decided later
+- if we add one, it should not fight existing issue or spec-link ergonomics
+
+I would not block the design on a short flag choice.
 
 ## Open Questions
 
-- Should acceptance requirements be counted separately from functional requirements in the headline parity score?
-- Should a requirement count as covered for `impl:X` only when it has an `implements` link, or can `tests` contribute independently?
-- Do we want one canonical matrix generated from `az spec`, replacing `go-bubbletea/docs/07-feature-matrix.md`, or should both coexist during migration?
-- Should `impl:shared` count toward both implementations, or remain separate until implementation-specific work lands?
+- Should issue-level `impl` be single-valued by design?
+- Should `az spec link` require explicit `--impl`, or inherit from the issue when omitted?
+- Should shared/meta work live outside implementation parity entirely?
+- Should `default` remain a stable ID even after named implementations are added?
+- Should parity distinguish planned vs implemented vs tested, or only implemented vs tested?
 
 ## Proposed Follow-up Work
 
-1. Add constrained implementation labels and helper affordances to issue workflows.
-2. Add an implementation-aware `az spec` parity report.
-3. Surface parity in the `ts-opentui` Spec workspace and decide whether to generate the rewrite matrix from that report.
+1. Add implementation registry support via `az impl`.
+2. Add `--impl` to `az issue create` and `az issue update`.
+3. Add `--impl` to `az spec link` records and commands.
+4. Add `az spec parity --impl ...`.
+5. Surface implementation-aware parity in the Spec workspace.
 
 ## Bottom Line
 
-The fastest credible path is:
+The clean model is:
 
-1. use labels as the implementation flag
-2. group spec links by those labels
-3. present parity as staged evidence, not a single raw percentage
+1. implementations are first-class
+2. issues can target an implementation
+3. spec links can state that an issue implements or tests a requirement for a specific implementation
+4. parity is then computed per implementation from structured evidence
 
-That gives us a useful parity signal quickly without committing to a heavy issue-schema migration too early.
+That gives us a stronger foundation than trying to reverse-engineer parity from labels.
