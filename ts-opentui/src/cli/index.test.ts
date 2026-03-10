@@ -82,6 +82,8 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			"Description:\nTrim noisy guidance and keep the active issue block concise.",
 		)
+		expect(output).toContain("`az issue bulk-update --input updates.json --json`")
+		expect(output).toContain('`[{"id":"az-123","status":"blocked"}]`')
 		expect(output).not.toContain("Start each session with: `az prime`")
 		expect(output).not.toContain("Implementation guardrails:")
 	})
