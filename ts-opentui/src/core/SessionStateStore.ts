@@ -5,6 +5,7 @@ import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Data, DateTime, Effect, HashMap, Schema } from "effect"
 import type { SessionState } from "../ui/types.js"
+import { getProjectStoragePaths } from "./storagePaths.js"
 
 export interface PersistedSession {
 	readonly issueId: string
@@ -30,8 +31,6 @@ export class SessionStateStoreError extends Data.TaggedError("SessionStateStoreE
 	readonly cause?: unknown
 }> {}
 
-const SESSION_DB_DIRECTORY = ".azedarach"
-const SESSION_DB_FILENAME = "issues.db"
 const LEGACY_SESSION_FILENAME = "sessions.json"
 const LEGACY_MIGRATION_NAME = "legacy_sessions_json_to_sqlite_v1"
 
@@ -151,11 +150,21 @@ export class SessionStateStore extends Effect.Service<SessionStateStore>()("Sess
 		): Effect.Effect<A, SessionStateStoreError> =>
 			Effect.gen(function* () {
 				const normalizedProjectPath = normalizeProjectPath(projectPath)
-				const dbDir = pathService.join(normalizedProjectPath, SESSION_DB_DIRECTORY)
-				const dbPath = pathService.join(dbDir, SESSION_DB_FILENAME)
+				const storagePaths = getProjectStoragePaths(normalizedProjectPath, pathService)
+				const canonicalDbExists = yield* fs
+					.exists(storagePaths.canonicalDbPath)
+					.pipe(Effect.orElseSucceed(() => false))
+				const legacyDbExists = canonicalDbExists
+					? false
+					: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
+				const dbPath = canonicalDbExists
+					? storagePaths.canonicalDbPath
+					: legacyDbExists
+						? storagePaths.legacyDbPath
+						: storagePaths.canonicalDbPath
 
 				yield* fs
-					.makeDirectory(dbDir, { recursive: true })
+					.makeDirectory(storagePaths.storageDirectory, { recursive: true })
 					.pipe(Effect.mapError((cause) => mapSqlError("Failed to create sqlite directory", cause)))
 
 				return yield* Effect.scoped(
@@ -291,11 +300,8 @@ export class SessionStateStore extends Effect.Service<SessionStateStore>()("Sess
 		): Effect.Effect<LegacyLoadResult, SessionStateStoreError> =>
 			Effect.gen(function* () {
 				const normalizedProjectPath = normalizeProjectPath(projectPath)
-				const filePath = pathService.join(
-					normalizedProjectPath,
-					SESSION_DB_DIRECTORY,
-					LEGACY_SESSION_FILENAME,
-				)
+				const storagePaths = getProjectStoragePaths(normalizedProjectPath, pathService)
+				const filePath = pathService.join(storagePaths.storageDirectory, LEGACY_SESSION_FILENAME)
 
 				const exists = yield* fs
 					.exists(filePath)

@@ -31,6 +31,7 @@ import {
 	inferLinearIssueType,
 	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
+import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
 import {
@@ -651,6 +652,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		WorktreeManager.Default,
 		PRStateService.Default,
 		ToastService.Default,
+		LocalIssueStore.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -665,6 +667,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const worktreeManager = yield* WorktreeManager
 		const prStateService = yield* PRStateService
 		const toast = yield* ToastService
+		const localIssueStore = yield* LocalIssueStore
 
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
@@ -684,7 +687,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
-		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
 		const linearRefreshStrategyRef = yield* Ref.make<ActiveLinearRefreshStrategy | null>(null)
@@ -732,6 +734,52 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			isLoading: false,
 		})
 
+		const toPersistedBoardTaskState = (task: TaskWithSession): PersistedBoardTaskState => ({
+			issueId: task.id,
+			hasWorktree: task.hasWorktree,
+			hasMergeConflict: task.hasMergeConflict,
+			parentEpicId: task.parentEpicId,
+			estimatedTokens: task.estimatedTokens,
+			recentOutput: task.recentOutput,
+			agentPhase: task.agentPhase,
+			hasPR: task.hasPR,
+			prUrl: task.prUrl,
+			prNumber: task.prNumber,
+			prState: task.prState,
+			gitBehindCount: task.gitBehindCount,
+			hasUncommittedChanges: task.hasUncommittedChanges,
+			gitAdditions: task.gitAdditions,
+			gitDeletions: task.gitDeletions,
+			hasDevServer: task.hasDevServer,
+		})
+
+		const persistBoardProjection = (
+			projectPath: string,
+			taskList: ReadonlyArray<TaskWithSession>,
+		): Effect.Effect<void> =>
+			localIssueStore
+				.replaceBoardTaskStates(taskList.map(toPersistedBoardTaskState), projectPath)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.void),
+						),
+					),
+				)
+
+		const loadBoardProjection = (
+			projectPath: string,
+		): Effect.Effect<ReadonlyArray<TaskWithSession>> =>
+			localIssueStore
+				.listBoardTasks(projectPath)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					),
+				)
+
 		/**
 		 * Get or create per-project state for a given project path
 		 */
@@ -768,6 +816,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					copy.set(path, state)
 					return copy
 				})
+				yield* persistBoardProjection(path, state.tasks)
 			})
 
 		/**
@@ -1167,6 +1216,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						gitConfig: appConfig.getGitConfig(),
 						startupConfig: SubscriptionRef.get(appConfig.config),
 						currentVisibleTaskIds: SubscriptionRef.get(visibleTaskIds),
+						persistedBoardTasks: loadBoardProjection(projectPath ?? process.cwd()),
 						issues: diagnostics.measure(
 							{
 								source: "BoardService",
@@ -1200,13 +1250,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					},
 					{ concurrency: "unbounded" },
 				)
-				const { gitConfig, startupConfig, currentVisibleTaskIds, issues, activeSessions } =
-					startupBatch
+				const {
+					gitConfig,
+					startupConfig,
+					currentVisibleTaskIds,
+					persistedBoardTasks,
+					issues,
+					activeSessions,
+				} = startupBatch
 				const { baseBranch, showLineChanges } = gitConfig
 				const isLinearBackend = "linear" in startupConfig.issueTracker
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
 				)
+				const persistedTaskMap = new Map(persistedBoardTasks.map((task) => [task.id, task]))
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 				const ptySessionTargets = activeSessions
 					.filter((session) => session.state !== "idle" && session.state !== "crashed")
@@ -1335,6 +1392,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					issues.map((issue) =>
 						Effect.gen(function* () {
 							const session = sessionMap.get(issue.id)
+							const persistedTask = persistedTaskMap.get(issue.id)
 							const metricsOpt = HashMap.get(allMetrics, issue.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
@@ -1346,7 +1404,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const hasWorktree = worktreeIssueIds.has(issue.id)
 
 							let hasMergeConflict = false
-							let gitStatus: GitStatus = {}
+							let gitStatus: GitStatus = {
+								gitBehindCount: persistedTask?.gitBehindCount,
+								hasUncommittedChanges: persistedTask?.hasUncommittedChanges,
+								gitAdditions: persistedTask?.gitAdditions,
+								gitDeletions: persistedTask?.gitDeletions,
+							}
 							const isVisible = currentVisibleTaskIds.has(issue.id)
 							// Fetch git status only for visible tasks with active sessions or worktrees
 							if (isVisible && (sessionState !== "idle" || hasWorktree) && projectPath) {
@@ -1367,25 +1430,38 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 									gitAdditions: cachedStatus.gitAdditions,
 									gitDeletions: cachedStatus.gitDeletions,
 								}
+							} else {
+								hasMergeConflict = persistedTask?.hasMergeConflict ?? false
 							}
 
-							// Parse PR info from notes field (fast, local-only)
-							const prInfo = parsePRInfo(issue.notes)
+							const persistedHasPR = persistedTask?.hasPR === true
+							const hasPRFromNotes = parsePRInfo(issue.notes)
+							const prInfo = persistedHasPR
+								? {
+										hasPR: true,
+										prUrl: persistedTask?.prUrl,
+										prNumber: persistedTask?.prNumber,
+									}
+								: hasPRFromNotes
 
 							const baseTask: TaskWithSession = {
 								...issue,
 								sessionState,
-								hasWorktree: hasWorktree || undefined,
+								hasWorktree: hasWorktree || persistedTask?.hasWorktree === true ? true : undefined,
 								hasMergeConflict,
-								parentEpicId,
+								hasDevServer: persistedTask?.hasDevServer === true ? true : undefined,
+								parentEpicId: parentEpicId ?? persistedTask?.parentEpicId,
 								...gitStatus,
-								...prInfo, // hasPR, prUrl, prNumber from notes field
+								hasPR: prInfo.hasPR === true ? true : undefined,
+								prUrl: prInfo.prUrl ?? persistedTask?.prUrl,
+								prNumber: prInfo.prNumber ?? persistedTask?.prNumber,
+								prState: persistedTask?.prState,
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
 									: undefined,
-								estimatedTokens: metrics?.estimatedTokens,
-								recentOutput: metrics?.recentOutput,
-								agentPhase: metrics?.agentPhase,
+								estimatedTokens: metrics?.estimatedTokens ?? persistedTask?.estimatedTokens,
+								recentOutput: metrics?.recentOutput ?? persistedTask?.recentOutput,
+								agentPhase: metrics?.agentPhase ?? persistedTask?.agentPhase,
 							}
 
 							// Apply optimistic updates
@@ -1589,6 +1665,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				sessionState: existingTask?.sessionState ?? "idle",
 				hasWorktree: existingTask?.hasWorktree,
 				hasMergeConflict: existingTask?.hasMergeConflict,
+				hasDevServer: existingTask?.hasDevServer,
 				parentEpicId,
 				gitBehindCount: existingTask?.gitBehindCount,
 				hasUncommittedChanges: existingTask?.hasUncommittedChanges,
@@ -2557,12 +2634,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					{ concurrency: "unbounded" },
 				)
 
-				yield* SubscriptionRef.set(tasks, updatedTasks)
-				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(updatedTasks))
-				yield* updateFilteredTasks()
+				yield* replaceTasks(updatedTasks)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
 		yield* startAutoRecoveryWorkerFiber()
+
+		const initialProjectPath = yield* projectService.getCurrentPath()
+		if (initialProjectPath) {
+			yield* SubscriptionRef.set(currentProjectPath, initialProjectPath)
+			const cached = yield* loadBoardProjection(initialProjectPath).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed([])),
+					),
+				),
+			)
+			if (cached.length > 0) {
+				yield* replaceTasks(cached)
+			}
+		}
 
 		const startupBootstrapFiber = yield* Effect.forkScoped(
 			Effect.gen(function* () {
@@ -2654,30 +2744,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				if (currentTasks.length > 0) {
-					yield* Ref.update(boardCache, (cache) => {
-						const newCache = new Map(cache)
-						newCache.set(projectPath, currentTasks)
-						return newCache
-					})
+					yield* persistBoardProjection(projectPath, currentTasks)
 				}
 			})
 
 		const loadFromCache = (projectPath: string) =>
 			Effect.gen(function* () {
-				const cache = yield* Ref.get(boardCache)
-				const cached = cache.get(projectPath)
-				if (cached && cached.length > 0) {
-					// Clear git stats from cached tasks - they're stale and project-specific
-					const tasksWithClearedGitStats = cached.map((task) => ({
-						...task,
-						gitBehindCount: undefined,
-						hasUncommittedChanges: undefined,
-						gitAdditions: undefined,
-						gitDeletions: undefined,
-					}))
-					yield* SubscriptionRef.set(tasks, tasksWithClearedGitStats)
-					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(tasksWithClearedGitStats))
-					yield* updateFilteredTasks()
+				const cached = yield* loadBoardProjection(projectPath)
+				if (cached.length > 0) {
+					yield* replaceTasks(cached)
 					return true
 				}
 				return false
@@ -2732,31 +2807,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Update the current project path
 				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
 
-				// Try to load from per-project state map first (fast path)
-				const stateMap = yield* SubscriptionRef.get(perProjectState)
-				const cachedState = stateMap.get(newProjectPath)
-
-				let cacheHit = false
-				if (cachedState && cachedState.tasks.length > 0) {
-					// Clear git stats from cached tasks - they're stale and project-specific
-					const tasksWithClearedGitStats = cachedState.tasks.map((task) => ({
-						...task,
-						gitBehindCount: undefined,
-						hasUncommittedChanges: undefined,
-						gitAdditions: undefined,
-						gitDeletions: undefined,
-					}))
-					yield* SubscriptionRef.set(tasks, tasksWithClearedGitStats)
-					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(tasksWithClearedGitStats))
-					yield* SubscriptionRef.set(filteredTasksByColumn, cachedState.filteredTasksByColumn)
-					cacheHit = true
-				} else {
-					// Fall back to legacy boardCache
-					const legacyCacheHit = yield* loadFromCache(newProjectPath)
-					if (!legacyCacheHit) {
-						yield* clearBoard()
-					}
-					cacheHit = legacyCacheHit
+				const cacheHit = yield* loadFromCache(newProjectPath)
+				if (!cacheHit) {
+					yield* clearBoard()
 				}
 
 				// Fork the refresh into the service's scope - not a daemon fiber

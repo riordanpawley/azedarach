@@ -26,14 +26,7 @@ import { EditorService, type JumpTarget } from "../EditorService.js"
 import { NavigationService } from "../NavigationService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ProjectService } from "../ProjectService.js"
-import {
-	buildProjectUIState,
-	extractFilterConfig,
-	extractFocusedTaskId,
-	extractSortConfig,
-	extractViewMode,
-	ProjectStateService,
-} from "../ProjectStateService.js"
+import { ProjectStateService } from "../ProjectStateService.js"
 import { SettingsService } from "../SettingsService.js"
 import { ToastService } from "../ToastService.js"
 import { ViewService } from "../ViewService.js"
@@ -110,40 +103,25 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					// Save current project state to disk (for cross-session persistence)
 					if (currentProject) {
-						const navState = yield* nav.getStateForSave()
-						const editorState = yield* editor.getStateForSave()
-						const viewMode = yield* SubscriptionRef.get(view.viewMode)
-
-						const state = buildProjectUIState(
-							navState.focusedTaskId,
-							editorState.filterConfig,
-							editorState.sortConfig,
-							viewMode,
-						)
-						yield* projectState.saveState(currentProject.path, state)
+						yield* projectState.saveCurrentProjectState(currentProject.path)
 						yield* board.saveToCache(currentProject.path)
 					}
 
-					// Load saved state for new project (from disk)
-					const savedState = yield* projectState.loadState(project.path)
-
-					// Switch each service to the new project (uses internal per-project state maps)
-					yield* editor.switchProject(project.path)
-					yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
-
-					yield* nav.switchProject(project.path)
-					const requestedFocusTaskId = options?.focusTaskId ?? extractFocusedTaskId(savedState)
-					if (requestedFocusTaskId) {
-						yield* nav.setFocusedTask(requestedFocusTaskId)
-					}
-
-					yield* projectService.switchProject(project.name)
-					yield* view.setViewMode(extractViewMode(savedState))
+					yield* projectState.withPersistenceSuspended(
+						Effect.gen(function* () {
+							yield* projectService.switchProject(project.name)
+							yield* projectState.restoreProjectState(project.path)
+							if (options?.focusTaskId) {
+								yield* nav.setFocusedTask(options.focusTaskId)
+							}
+						}),
+					)
 
 					yield* overlay.pop()
 
 					const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
 					const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
+					yield* projectState.saveCurrentProjectState(project.path)
 
 					if (cacheHit) {
 						yield* toast.show("success", `Loaded: ${project.name}`)

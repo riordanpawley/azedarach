@@ -9,6 +9,8 @@ import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
+import { type ProjectUIState, ProjectUIStateJsonSchema } from "../services/projectUiState.js"
+import type { AgentPhase, PRState, TaskWithSession } from "../ui/types.js"
 import type {
 	DependencyRef,
 	DependencyType,
@@ -41,6 +43,7 @@ import type {
 	SpecRequirementWithStats,
 } from "./specTypes.js"
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "./specTypes.js"
+import { getProjectStoragePaths } from "./storagePaths.js"
 
 const LabelsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
 const ImplementationRegistryJsonSchema = Schema.parseJson(
@@ -91,6 +94,26 @@ const SyncQueuePayloadJsonSchema = Schema.parseJson(
 		idempotencyKey: Schema.String,
 	}),
 )
+const BoardTaskStateSchema = Schema.Struct({
+	hasWorktree: Schema.optional(Schema.Boolean),
+	hasMergeConflict: Schema.optional(Schema.Boolean),
+	parentEpicId: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	estimatedTokens: Schema.optional(Schema.Number),
+	recentOutput: Schema.optional(Schema.String),
+	agentPhase: Schema.optional(
+		Schema.Literal("idle", "planning", "action", "verification", "planMode"),
+	),
+	hasPR: Schema.optional(Schema.Boolean),
+	prUrl: Schema.optional(Schema.String),
+	prNumber: Schema.optional(Schema.Number),
+	prState: Schema.optional(Schema.Literal("open", "draft", "merged", "closed")),
+	gitBehindCount: Schema.optional(Schema.Number),
+	hasUncommittedChanges: Schema.optional(Schema.Boolean),
+	gitAdditions: Schema.optional(Schema.Number),
+	gitDeletions: Schema.optional(Schema.Number),
+	hasDevServer: Schema.optional(Schema.Boolean),
+})
+const BoardTaskStateJsonSchema = Schema.parseJson(BoardTaskStateSchema)
 
 export type SyncTarget = "linear"
 export type SyncOperation = "upsert" | "close" | "delete"
@@ -171,6 +194,21 @@ interface ExternalRefRow {
 
 interface MetaRow {
 	readonly value: string
+}
+
+interface BoardTaskStateRow {
+	readonly issue_id: string
+	readonly state_json: string
+}
+
+interface ProjectUiStateRow {
+	readonly state_json: string
+}
+
+interface SessionStateProjectionRow {
+	readonly issue_id: string
+	readonly state: string
+	readonly started_at: string
 }
 
 interface IssueAttachmentRow {
@@ -267,6 +305,10 @@ export interface IssueAttachmentRecord extends IssueAttachmentMetadata {
 	readonly content: Uint8Array
 }
 
+export interface PersistedBoardTaskState extends Schema.Schema.Type<typeof BoardTaskStateSchema> {
+	readonly issueId: string
+}
+
 export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError")<{
 	readonly message: string
 	readonly cause?: unknown
@@ -274,8 +316,6 @@ export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError
 
 const DEFAULT_PAGE_SIZE = 200
 const SYNC_QUEUE_LEASE_SECONDS = 120
-const LOCAL_ISSUE_DB_DIRECTORY = ".azedarach"
-const LOCAL_ISSUE_DB_FILENAME = "issues.db"
 const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
 const LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META = "issue:id_next_alpha_index"
 const IMPLEMENTATION_REGISTRY_META_KEY = "impl:registry:v1"
@@ -329,6 +369,15 @@ export const resolveLocalIssueStorageRoot = ({
 	fallbackCwd,
 }: ResolveLocalIssueStorageRootInput): string =>
 	explicitProjectPath ?? currentProjectPath ?? fallbackCwd
+
+const normalizeProjectPath = (projectPath: string): string => {
+	const trimmed = projectPath.trim()
+	if (trimmed.length === 0) {
+		return process.cwd().replace(/\/+$/, "")
+	}
+	const withoutTrailingSlashes = trimmed.replace(/\/+$/, "")
+	return withoutTrailingSlashes.length === 0 ? "/" : withoutTrailingSlashes
+}
 
 interface LocalIssueStorageResolution {
 	readonly storageRoot: string
@@ -425,9 +474,32 @@ const schemaStatements: readonly string[] = [
 		updated_at TEXT NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS meta (
-		key TEXT PRIMARY KEY,
-		value TEXT NOT NULL
-	)`,
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )`,
+	`CREATE TABLE IF NOT EXISTS session_state (
+        project_path TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        tmux_session_name TEXT NOT NULL,
+        state TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        PRIMARY KEY (project_path, issue_id)
+    )`,
+	`CREATE TABLE IF NOT EXISTS session_state_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+    )`,
+	`CREATE TABLE IF NOT EXISTS board_task_state (
+        issue_id TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )`,
+	`CREATE TABLE IF NOT EXISTS project_ui_state (
+        scope TEXT PRIMARY KEY,
+        state_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )`,
 	`CREATE INDEX IF NOT EXISTS idx_sync_queue_pending ON sync_queue(target, status, next_attempt_at, id)`,
 	`CREATE INDEX IF NOT EXISTS idx_sync_queue_claimable ON sync_queue(target, status, next_attempt_at, lease_expires_at, id)`,
 	`CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON issue_dependencies(depends_on_id, dependency_type, tombstoned_at)`,
@@ -436,6 +508,7 @@ const schemaStatements: readonly string[] = [
 	`CREATE INDEX IF NOT EXISTS idx_spec_req_updated ON spec_requirements(updated_at, deleted_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_spec_links_issue ON spec_issue_links(issue_id, deleted_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_spec_links_requirement ON spec_issue_links(requirement_id, deleted_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_session_state_tmux ON session_state(project_path, tmux_session_name)`,
 ]
 
 const nowIso = (): string => new Date().toISOString()
@@ -710,6 +783,23 @@ const normalizeDependencyType = (dependencyType: string | undefined): Dependency
 			return dependencyType
 		default:
 			return "related"
+	}
+}
+
+const normalizeTaskSessionState = (state: string | undefined): TaskWithSession["sessionState"] => {
+	switch (state) {
+		case "idle":
+		case "initializing":
+		case "busy":
+		case "waiting":
+		case "done":
+		case "error":
+		case "paused":
+		case "warning":
+		case "crashed":
+			return state
+		default:
+			return "idle"
 	}
 }
 
@@ -1202,6 +1292,19 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}),
 			)
 
+		const resolveEffectiveProjectPath = (cwd?: string): Effect.Effect<string> =>
+			projectService.getCurrentPath().pipe(
+				Effect.map((projectPath) =>
+					normalizeProjectPath(
+						resolveLocalIssueStorageRoot({
+							explicitProjectPath: cwd,
+							currentProjectPath: projectPath ?? undefined,
+							fallbackCwd: process.cwd(),
+						}),
+					),
+				),
+			)
+
 		const ensureSyncQueueColumns = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
 			Effect.gen(function* () {
 				const columns = yield* sql<TableInfoRow>`PRAGMA table_info(sync_queue)`
@@ -1509,6 +1612,92 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				DO UPDATE SET value = ${value}
 			`.pipe(Effect.asVoid)
 
+		const encodeBoardTaskState = (
+			state: PersistedBoardTaskState,
+		): Effect.Effect<string, LocalIssueStoreError> =>
+			Effect.try({
+				try: () =>
+					Schema.encodeSync(BoardTaskStateJsonSchema)({
+						hasWorktree: state.hasWorktree,
+						hasMergeConflict: state.hasMergeConflict,
+						parentEpicId: state.parentEpicId,
+						estimatedTokens: state.estimatedTokens,
+						recentOutput: state.recentOutput,
+						agentPhase: state.agentPhase,
+						hasPR: state.hasPR,
+						prUrl: state.prUrl,
+						prNumber: state.prNumber,
+						prState: state.prState,
+						gitBehindCount: state.gitBehindCount,
+						hasUncommittedChanges: state.hasUncommittedChanges,
+						gitAdditions: state.gitAdditions,
+						gitDeletions: state.gitDeletions,
+						hasDevServer: state.hasDevServer,
+					}),
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: "Failed to encode board task state",
+						cause,
+					}),
+			})
+
+		const decodeBoardTaskState = (
+			issueId: string,
+			value: string,
+		): Effect.Effect<PersistedBoardTaskState, LocalIssueStoreError> =>
+			Effect.try({
+				try: () => {
+					const decoded = Schema.decodeUnknownSync(BoardTaskStateJsonSchema)(value)
+					return {
+						issueId,
+						hasWorktree: decoded.hasWorktree,
+						hasMergeConflict: decoded.hasMergeConflict,
+						parentEpicId: decoded.parentEpicId ?? undefined,
+						estimatedTokens: decoded.estimatedTokens,
+						recentOutput: decoded.recentOutput,
+						agentPhase: decoded.agentPhase,
+						hasPR: decoded.hasPR,
+						prUrl: decoded.prUrl,
+						prNumber: decoded.prNumber,
+						prState: decoded.prState,
+						gitBehindCount: decoded.gitBehindCount,
+						hasUncommittedChanges: decoded.hasUncommittedChanges,
+						gitAdditions: decoded.gitAdditions,
+						gitDeletions: decoded.gitDeletions,
+						hasDevServer: decoded.hasDevServer,
+					}
+				},
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: `Failed to decode board task state for ${issueId}`,
+						cause,
+					}),
+			})
+
+		const encodeProjectUiState = (
+			state: ProjectUIState,
+		): Effect.Effect<string, LocalIssueStoreError> =>
+			Effect.try({
+				try: () => Schema.encodeSync(ProjectUIStateJsonSchema)(state),
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: "Failed to encode project UI state",
+						cause,
+					}),
+			})
+
+		const decodeProjectUiState = (
+			value: string,
+		): Effect.Effect<ProjectUIState, LocalIssueStoreError> =>
+			Effect.try({
+				try: () => Schema.decodeUnknownSync(ProjectUIStateJsonSchema)(value),
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: "Failed to decode project UI state",
+						cause,
+					}),
+			})
+
 		const loadImplementationRegistryState = (
 			sql: SqlClient.SqlClient,
 		): Effect.Effect<
@@ -1808,14 +1997,24 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			Effect.gen(function* () {
 				const storageResolution = yield* resolveStorageRoot(cwd)
 				const storageRoot = storageResolution.storageRoot
-				const dbDir = pathService.join(storageRoot, LOCAL_ISSUE_DB_DIRECTORY)
-				const dbPath = pathService.join(dbDir, LOCAL_ISSUE_DB_FILENAME)
+				const storagePaths = getProjectStoragePaths(storageRoot, pathService)
+				const canonicalDbExists = yield* fs
+					.exists(storagePaths.canonicalDbPath)
+					.pipe(Effect.orElseSucceed(() => false))
+				const legacyDbExists = canonicalDbExists
+					? false
+					: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
+				const dbPath = canonicalDbExists
+					? storagePaths.canonicalDbPath
+					: legacyDbExists
+						? storagePaths.legacyDbPath
+						: storagePaths.canonicalDbPath
 				const backupConfig = yield* getBackupConfig()
 				yield* Effect.log(
 					`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
 				)
 
-				yield* fs.makeDirectory(dbDir, { recursive: true }).pipe(
+				yield* fs.makeDirectory(storagePaths.storageDirectory, { recursive: true }).pipe(
 					Effect.catchAll((cause) =>
 						Effect.logWarning(cause).pipe(
 							Effect.zipRight(
@@ -2214,6 +2413,99 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				const issues = yield* loadAllIssues(sql)
 				return issues.find((issue) => issue.id === id)
 			})
+		const loadBoardTaskStateMap = (
+			sql: SqlClient.SqlClient,
+		): Effect.Effect<
+			ReadonlyMap<string, PersistedBoardTaskState>,
+			LocalIssueStoreError | SqlError
+		> =>
+			Effect.gen(function* () {
+				const rows = yield* sql<BoardTaskStateRow>`
+                    SELECT issue_id, state_json
+                    FROM board_task_state
+                `
+				const decodedEntries = yield* Effect.all(
+					rows.map((row) =>
+						decodeBoardTaskState(row.issue_id, row.state_json).pipe(
+							Effect.map((state) => ({
+								issueId: row.issue_id,
+								state,
+							})),
+						),
+					),
+					{ concurrency: "unbounded" },
+				)
+				const mapped = new Map<string, PersistedBoardTaskState>()
+				for (const entry of decodedEntries) {
+					mapped.set(entry.issueId, entry.state)
+				}
+				return mapped
+			})
+
+		const loadProjectUiStateRow = (
+			sql: SqlClient.SqlClient,
+		): Effect.Effect<ProjectUIState | undefined, LocalIssueStoreError | SqlError> =>
+			sql<ProjectUiStateRow>`
+                SELECT state_json
+                FROM project_ui_state
+                WHERE scope = ${"default"}
+                LIMIT 1
+            `.pipe(
+				Effect.flatMap((rows) => {
+					const row = rows[0]
+					return row === undefined
+						? Effect.succeed(undefined)
+						: decodeProjectUiState(row.state_json)
+				}),
+			)
+
+		const loadSessionProjectionMap = (
+			sql: SqlClient.SqlClient,
+			normalizedProjectPath: string,
+		): Effect.Effect<ReadonlyMap<string, SessionStateProjectionRow>, SqlError> =>
+			sql<SessionStateProjectionRow>`
+                SELECT issue_id, state, started_at
+                FROM session_state
+                WHERE project_path = ${normalizedProjectPath}
+            `.pipe(
+				Effect.map((rows) => {
+					const mapped = new Map<string, SessionStateProjectionRow>()
+					for (const row of rows) {
+						mapped.set(row.issue_id, row)
+					}
+					return mapped
+				}),
+			)
+
+		const buildBoardTasks = (
+			issues: readonly Issue[],
+			runtimeStateByIssueId: ReadonlyMap<string, PersistedBoardTaskState>,
+			sessionStateByIssueId: ReadonlyMap<string, SessionStateProjectionRow>,
+		): readonly TaskWithSession[] =>
+			issues.map((issue) => {
+				const runtimeState = runtimeStateByIssueId.get(issue.id)
+				const sessionState = sessionStateByIssueId.get(issue.id)
+				return {
+					...issue,
+					sessionState: normalizeTaskSessionState(sessionState?.state),
+					sessionStartedAt: sessionState?.started_at,
+					hasWorktree: runtimeState?.hasWorktree,
+					hasMergeConflict: runtimeState?.hasMergeConflict,
+					parentEpicId: runtimeState?.parentEpicId ?? undefined,
+					estimatedTokens: runtimeState?.estimatedTokens,
+					recentOutput: runtimeState?.recentOutput,
+					agentPhase: runtimeState?.agentPhase,
+					hasPR: runtimeState?.hasPR,
+					prUrl: runtimeState?.prUrl,
+					prNumber: runtimeState?.prNumber,
+					prState: runtimeState?.prState,
+					gitBehindCount: runtimeState?.gitBehindCount,
+					hasUncommittedChanges: runtimeState?.hasUncommittedChanges,
+					gitAdditions: runtimeState?.gitAdditions,
+					gitDeletions: runtimeState?.gitDeletions,
+					hasDevServer: runtimeState?.hasDevServer,
+				}
+			})
 
 		const parseImplementationNames = (
 			values: readonly string[],
@@ -2488,6 +2780,117 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								}),
 							),
 						),
+
+			listBoardTasks: (
+				cwd?: string,
+			): Effect.Effect<readonly TaskWithSession[], LocalIssueStoreError> =>
+				Effect.gen(function* () {
+					const normalizedProjectPath = yield* resolveEffectiveProjectPath(cwd)
+					return yield* withSql(cwd, (sql) =>
+						Effect.all({
+							issues: loadAllIssues(sql),
+							runtimeStateByIssueId: loadBoardTaskStateMap(sql),
+							sessionStateByIssueId: loadSessionProjectionMap(sql, normalizedProjectPath),
+						}).pipe(
+							Effect.map(({ issues, runtimeStateByIssueId, sessionStateByIssueId }) =>
+								buildBoardTasks(issues, runtimeStateByIssueId, sessionStateByIssueId),
+							),
+						),
+					)
+				}),
+
+			replaceBoardTaskStates: (
+				states: readonly PersistedBoardTaskState[],
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const encodedStates = yield* Effect.all(
+								states.map((state) =>
+									encodeBoardTaskState(state).pipe(
+										Effect.map((encoded) => ({
+											issueId: state.issueId,
+											encoded,
+										})),
+									),
+								),
+								{ concurrency: "unbounded" },
+							)
+
+							yield* sql`DELETE FROM board_task_state`
+
+							const updatedAt = nowIso()
+							for (const state of encodedStates) {
+								yield* sql`
+                                    INSERT INTO board_task_state (issue_id, state_json, updated_at)
+                                    VALUES (${state.issueId}, ${state.encoded}, ${updatedAt})
+                                `
+							}
+						}),
+					),
+				),
+
+			upsertBoardTaskState: (
+				state: Partial<Omit<PersistedBoardTaskState, "issueId">> & { readonly issueId: string },
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const existingRows = yield* sql<BoardTaskStateRow>`
+                                SELECT issue_id, state_json
+                                FROM board_task_state
+                                WHERE issue_id = ${state.issueId}
+                                LIMIT 1
+                            `
+							const existingState =
+								existingRows[0] === undefined
+									? undefined
+									: yield* decodeBoardTaskState(
+											existingRows[0].issue_id,
+											existingRows[0].state_json,
+										)
+							const mergedState: PersistedBoardTaskState = {
+								...existingState,
+								...state,
+								issueId: state.issueId,
+							}
+							const encoded = yield* encodeBoardTaskState(mergedState)
+							const updatedAt = nowIso()
+							yield* sql`
+                                INSERT INTO board_task_state (issue_id, state_json, updated_at)
+                                VALUES (${state.issueId}, ${encoded}, ${updatedAt})
+                                ON CONFLICT(issue_id)
+                                DO UPDATE SET state_json = ${encoded}, updated_at = ${updatedAt}
+                            `
+						}),
+					),
+				),
+
+			loadProjectUiState: (
+				cwd?: string,
+			): Effect.Effect<ProjectUIState | undefined, LocalIssueStoreError> =>
+				withSql(cwd, (sql) => loadProjectUiStateRow(sql)),
+
+			saveProjectUiState: (
+				state: ProjectUIState,
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const encoded = yield* encodeProjectUiState(state)
+							const updatedAt = nowIso()
+							yield* sql`
+                                INSERT INTO project_ui_state (scope, state_json, updated_at)
+                                VALUES (${"default"}, ${encoded}, ${updatedAt})
+                                ON CONFLICT(scope)
+                                DO UPDATE SET state_json = ${encoded}, updated_at = ${updatedAt}
+                            `
+						}),
+					),
+				),
 
 			create: (
 				params: {
