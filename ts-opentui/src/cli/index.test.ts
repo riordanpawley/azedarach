@@ -7,6 +7,7 @@ import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
+	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
@@ -16,6 +17,7 @@ import {
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
+	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 } from "./index.js"
 
@@ -88,6 +90,8 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			"Description:\nTrim noisy guidance and keep the active issue block concise.",
 		)
+		expect(output).toContain("`az issue bulk-create --input issues.json --json`")
+		expect(output).toContain('`[{"title":"Agent-created task"}]`')
 		expect(output).toContain("`az issue bulk-update --input updates.json --json`")
 		expect(output).toContain('`[{"id":"az-123","status":"blocked"}]`')
 		expect(output).not.toContain("Start each session with: `az prime`")
@@ -337,6 +341,66 @@ describe("normalizeIssueJsonFlagOrder", () => {
 	})
 })
 
+describe("decodeIssueBulkCreatePayload", () => {
+	it("accepts a bare array payload", async () => {
+		const decoded = await Effect.runPromise(
+			decodeIssueBulkCreatePayload(
+				JSON.stringify([
+					{
+						title: "Bulk-created task",
+						type: "task",
+						labels: ["agent", "json"],
+					},
+				]),
+			),
+		)
+
+		expect(decoded).toEqual([
+			{
+				title: "Bulk-created task",
+				type: "task",
+				labels: ["agent", "json"],
+			},
+		])
+	})
+
+	it("accepts an object payload with issues", async () => {
+		const decoded = await Effect.runPromise(
+			decodeIssueBulkCreatePayload(
+				JSON.stringify({
+					issues: [
+						{
+							title: "First bulk-created task",
+							priority: 2,
+						},
+						{
+							title: "Second bulk-created task",
+							description: "Created via JSON wrapper",
+						},
+					],
+				}),
+			),
+		)
+
+		expect(decoded).toEqual([
+			{
+				title: "First bulk-created task",
+				priority: 2,
+			},
+			{
+				title: "Second bulk-created task",
+				description: "Created via JSON wrapper",
+			},
+		])
+	})
+
+	it("rejects an empty payload", async () => {
+		await expect(
+			Effect.runPromise(decodeIssueBulkCreatePayload(JSON.stringify([]))),
+		).rejects.toThrow("Bulk create input must contain at least one issue item.")
+	})
+})
+
 describe("decodeIssueBulkUpdatePayload", () => {
 	it("accepts a bare array payload", async () => {
 		const decoded = await Effect.runPromise(
@@ -394,6 +458,29 @@ describe("decodeIssueBulkUpdatePayload", () => {
 		await expect(
 			Effect.runPromise(decodeIssueBulkUpdatePayload(JSON.stringify([]))),
 		).rejects.toThrow("Bulk update input must contain at least one update item.")
+	})
+})
+
+describe("summarizeIssueBulkCreateResults", () => {
+	it("computes created and failed counts from per-item results", () => {
+		const summary = summarizeIssueBulkCreateResults([
+			{
+				index: 0,
+				requestedTitle: "First task",
+				issueId: "a",
+				created: true,
+			},
+			{
+				index: 1,
+				created: false,
+				error: "title is required",
+			},
+		])
+
+		expect(summary.requestCount).toBe(2)
+		expect(summary.createdCount).toBe(1)
+		expect(summary.failedCount).toBe(1)
+		expect(summary.results[1]?.error).toBe("title is required")
 	})
 })
 

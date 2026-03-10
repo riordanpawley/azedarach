@@ -361,6 +361,7 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
   - \`az issue list --limit 20\` (lists the most recently updated issues first)
   - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
   - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
+  - \`az issue bulk-create --input issues.json --json\` (for example, \`issues.json\` can contain \`[{"title":"Agent-created task"}]\`)
   - \`az issue bulk-update --input updates.json --json\` (for example, \`updates.json\` can contain \`[{"id":"az-123","status":"blocked"}]\`)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
