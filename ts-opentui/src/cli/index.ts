@@ -851,6 +851,7 @@ const issueListHandler = (args: {
 	readonly status: Option.Option<string>
 	readonly priority: Option.Option<number>
 	readonly issueType: Option.Option<string>
+	readonly parent: Option.Option<string>
 	readonly limit: Option.Option<number>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -870,6 +871,7 @@ const issueListHandler = (args: {
 			status: Option.getOrUndefined(args.status),
 			priority: Option.getOrUndefined(args.priority),
 			type: Option.getOrUndefined(args.issueType),
+			parent: Option.getOrUndefined(args.parent),
 		}
 		const hasFilters = Object.values(filters).some((value) => value !== undefined)
 
@@ -3201,6 +3203,11 @@ const issueListCommand = Command.make(
 			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Filter by issue type"),
+		),
+		parent: Options.text("parent").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Filter by parent issue ID"),
 		),
 		limit: Options.integer("limit").pipe(
 			Options.withAlias("l"),

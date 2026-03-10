@@ -18,8 +18,8 @@ import { BackendSyncRouter } from "./BackendSyncRouter.js"
 import type { IssueSyncError } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import {
-	LocalIssueStore,
 	type ExternalIssueSnapshot,
+	LocalIssueStore,
 	type LocalIssueStoreError,
 	type SyncTarget,
 } from "./LocalIssueStore.js"
@@ -127,6 +127,7 @@ export interface IssueListFilters {
 	readonly status?: string
 	readonly priority?: number
 	readonly type?: string
+	readonly parent?: string
 }
 
 export type IssueListSortField = "updated_at" | "created_at" | "priority" | "title"
@@ -1278,6 +1279,9 @@ const buildListCommandArgs = (
 	if (filters?.type) {
 		args.push("--type", filters.type)
 	}
+	if (filters?.parent) {
+		args.push("--parent", filters.parent)
+	}
 
 	return args
 }
@@ -1595,17 +1599,15 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						IssueTrackerError,
 						CommandExecutor.CommandExecutor
 					> =>
-						linearSdk
-							.issues(buildLinearIssuesListPageQuery(afterCursor))
-							.pipe(
-								Effect.mapError(
-									(error) =>
-										new IssueTrackerError({
-											message: error.message,
-											command: "linear-sdk issues",
-										}),
-								),
-							)
+						linearSdk.issues(buildLinearIssuesListPageQuery(afterCursor)).pipe(
+							Effect.mapError(
+								(error) =>
+									new IssueTrackerError({
+										message: error.message,
+										command: "linear-sdk issues",
+									}),
+							),
+						)
 
 					const collectPages = (
 						afterCursor: string | null | undefined,
