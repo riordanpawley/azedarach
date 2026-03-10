@@ -23,6 +23,7 @@ import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
+import { deriveShellForegroundState, type ForegroundKind } from "./ptyHeuristics.js"
 import { SessionManager } from "./SessionManager.js"
 import { type DetectionResult, StateDetector } from "./StateDetector.js"
 import { TmuxService } from "./TmuxService.js"
@@ -77,6 +78,7 @@ interface SessionMonitor {
 	 */
 	readonly pendingState: SessionState | null
 	readonly pendingCount: number
+	readonly lastBellFlag: boolean
 }
 
 // ============================================================================
@@ -256,9 +258,7 @@ const extractChecklistProgress = (output: string): readonly [number, number] | u
  *   - "subprocess"— agent launched a subprocess that is still running
  *   - "unknown"   — cmd is null/empty (tmux unavailable or pane just created)
  */
-const classifyForegroundProcess = (
-	cmd: string | null,
-): "agent" | "shell" | "subprocess" | "unknown" => {
+const classifyForegroundProcess = (cmd: string | null): ForegroundKind => {
 	if (!cmd) return "unknown"
 	const lower = cmd.toLowerCase()
 	// AI agent process names (node = Claude Code/Opencode, claude, npx, opencode, codex, gemini)
@@ -382,6 +382,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					lastHookTime: 0,
 					pendingState: null,
 					pendingCount: 0,
+					lastBellFlag: false,
 				}
 				return monitor
 			})
@@ -521,12 +522,17 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				// In parallel, check what process is currently in the foreground
 				const foregroundCmd = yield* tmux.getPaneCurrentCommand(monitor.tmuxSessionName)
 				const foregroundKind = classifyForegroundProcess(foregroundCmd)
+				const alertState = yield* tmux.getSessionAlertState(monitor.tmuxSessionName)
 
 				// Track whether output changed this poll (for activity sparkline)
 				const hadActivity = output !== monitor.lastOutput
 
 				// Skip output-based detection if output hasn't changed AND foreground process is the same
-				if (!hadActivity && foregroundCmd === monitor.lastForegroundCmd) {
+				if (
+					!hadActivity &&
+					foregroundCmd === monitor.lastForegroundCmd &&
+					alertState.bell === monitor.lastBellFlag
+				) {
 					return
 				}
 
@@ -570,13 +576,17 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					// was busy/initializing, Claude has finished its current task. With
 					// remain-on-exit=on the pane stays alive (a shell takes over), which is
 					// exactly this case. Promote to "done" so the user knows to review output.
-					if (
-						foregroundKind === "shell" &&
-						(currentState === "busy" || currentState === "initializing")
-					) {
-						yield* sessionManager.updateState(issueId, "done")
+					const shellForegroundState = deriveShellForegroundState({
+						currentState,
+						foregroundKind,
+						bellFlag: alertState.bell,
+						previousBellFlag: monitor.lastBellFlag,
+					})
+
+					if (shellForegroundState !== null) {
+						yield* sessionManager.updateState(issueId, shellForegroundState)
 						yield* Effect.log(
-							`PTYMonitor: ${issueId} state ${currentState} → done (shell is foreground process)`,
+							`PTYMonitor: ${issueId} state ${currentState} → ${shellForegroundState} (shell foreground${alertState.bell && !monitor.lastBellFlag ? ", fresh bell" : ""})`,
 						)
 						newPendingState = null
 						newPendingCount = 0
@@ -662,6 +672,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						...monitor,
 						lastOutput: output,
 						lastForegroundCmd: foregroundCmd,
+						lastBellFlag: alertState.bell,
 						pendingState: newPendingState,
 						pendingCount: newPendingCount,
 					}),
