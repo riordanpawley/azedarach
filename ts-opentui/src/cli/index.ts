@@ -1407,6 +1407,115 @@ const issueChildHandler = (args: {
 		}
 	})
 
+const issueBulkCreateHandler = (args: {
+	readonly input: string
+	readonly deferred: boolean
+	readonly noDefaultParent: boolean
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const defaultParentContext =
+			args.deferred || args.noDefaultParent
+				? Option.none<ActiveParentContext>()
+				: yield* resolveActiveParentContext(resolverCwd)
+		const defaultParent = Option.match(defaultParentContext, {
+			onNone: () => undefined,
+			onSome: (context) => context.issueId,
+		})
+
+		const inputContent = yield* readIssueBulkCreateInput(args.input)
+		const entries = yield* decodeIssueBulkCreatePayload(inputContent).pipe(
+			Effect.mapError(
+				(error) =>
+					new Error(
+						`Bulk create JSON parse/validation failed: ${formatIssueBulkCreateError(error)}`,
+					),
+			),
+		)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const results = yield* Effect.forEach(entries, (entry, index) =>
+			Effect.gen(function* () {
+				const requestedTitle = getIssueBulkCreateRequestedTitle(entry)
+				return yield* Schema.decodeUnknown(IssueBulkCreateEntrySchema)(entry).pipe(
+					Effect.flatMap((decodedEntry) =>
+						Effect.gen(function* () {
+							const resolvedParent =
+								decodedEntry.parent === undefined
+									? defaultParent
+									: yield* resolveCliIssueId(decodedEntry.parent, resolverCwd)
+							const issue = yield* issueTrackerClient.create({
+								title: decodedEntry.title,
+								type: decodedEntry.type,
+								priority: decodedEntry.priority,
+								description: decodedEntry.description,
+								design: decodedEntry.design,
+								acceptance: decodedEntry.acceptance,
+								assignee: decodedEntry.assignee,
+								estimate: decodedEntry.estimate,
+								labels: decodedEntry.labels === undefined ? undefined : [...decodedEntry.labels],
+								implementations: yield* parseOptionalImplementationListForCli(
+									decodedEntry.implementations ?? [],
+								),
+								parent: resolvedParent,
+								cwd: explicitProjectDir,
+							})
+
+							return {
+								index,
+								requestedTitle: decodedEntry.title,
+								issueId: issue.id,
+								created: true,
+							} satisfies IssueBulkCreateResult
+						}),
+					),
+					Effect.catchAll((error) =>
+						Effect.succeed<IssueBulkCreateResult>({
+							index,
+							requestedTitle,
+							created: false,
+							error: formatIssueBulkCreateError(error),
+						}),
+					),
+				)
+			}),
+		)
+
+		const summary = summarizeIssueBulkCreateResults(results)
+		if (args.json) {
+			yield* Console.log(JSON.stringify(summary, null, 2))
+			return
+		}
+
+		yield* Console.log(
+			`Bulk create finished: ${summary.createdCount} succeeded, ${summary.failedCount} failed.`,
+		)
+		for (const result of summary.results) {
+			const itemLabel =
+				result.requestedTitle === undefined
+					? `item ${result.index + 1}`
+					: `"${result.requestedTitle}"`
+			if (result.created) {
+				yield* Console.log(`- ${itemLabel}: created ${result.issueId ?? "<unknown>"}`)
+				continue
+			}
+			yield* Console.log(`- ${itemLabel}: failed (${result.error ?? "unknown error"})`)
+		}
+		if (args.verbose) {
+			const sourceDescription = Option.match(defaultParentContext, {
+				onNone: () => "none",
+				onSome: (context) => context.source,
+			})
+			yield* Console.error(`default_parent_source=${sourceDescription}`)
+		}
+	})
+
 /**
  * Update issue fields
  */
@@ -3762,6 +3871,44 @@ const parseLabelsOption = (labels: Option.Option<string>): string[] | undefined 
 				.filter((label) => label.length > 0),
 	})
 
+const IssueBulkCreateEntrySchema = Schema.Struct({
+	title: Schema.String,
+	type: Schema.String.pipe(Schema.optional),
+	priority: Schema.Number.pipe(Schema.optional),
+	description: Schema.String.pipe(Schema.optional),
+	design: Schema.String.pipe(Schema.optional),
+	acceptance: Schema.String.pipe(Schema.optional),
+	assignee: Schema.String.pipe(Schema.optional),
+	estimate: Schema.Number.pipe(Schema.optional),
+	labels: Schema.Array(Schema.String).pipe(Schema.optional),
+	implementations: Schema.Array(Schema.String).pipe(Schema.optional),
+	parent: Schema.String.pipe(Schema.optional),
+})
+
+const IssueBulkCreatePayloadSchema = Schema.Union(
+	Schema.Array(Schema.Unknown),
+	Schema.Struct({
+		issues: Schema.Array(Schema.Unknown),
+	}),
+)
+
+type IssueBulkCreatePayload = Schema.Schema.Type<typeof IssueBulkCreatePayloadSchema>
+
+interface IssueBulkCreateResult {
+	readonly index: number
+	readonly requestedTitle?: string
+	readonly issueId?: string
+	readonly created: boolean
+	readonly error?: string
+}
+
+interface IssueBulkCreateSummary {
+	readonly requestCount: number
+	readonly createdCount: number
+	readonly failedCount: number
+	readonly results: readonly IssueBulkCreateResult[]
+}
+
 interface IssueBulkUpdateFields {
 	readonly status?: string
 	readonly notes?: string
@@ -3818,6 +3965,29 @@ interface IssueBulkUpdateSummary {
 	readonly updatedCount: number
 	readonly failedCount: number
 	readonly results: readonly IssueBulkUpdateResult[]
+}
+
+const decodeIssueBulkCreatePayload = (content: string) =>
+	Schema.decode(Schema.parseJson(IssueBulkCreatePayloadSchema))(content).pipe(
+		Effect.flatMap((payload: IssueBulkCreatePayload) => {
+			const entries = isIssueBulkCreateEntryArray(payload) ? payload : payload.issues
+			return entries.length > 0
+				? Effect.succeed(entries)
+				: Effect.fail(new Error("Bulk create input must contain at least one issue item."))
+		}),
+	)
+
+const isIssueBulkCreateEntryArray = (
+	payload: IssueBulkCreatePayload,
+): payload is readonly unknown[] => Array.isArray(payload)
+
+const getIssueBulkCreateRequestedTitle = (entry: unknown): string | undefined => {
+	if (typeof entry !== "object" || entry === null || Array.isArray(entry) || !("title" in entry)) {
+		return undefined
+	}
+
+	const title = entry.title
+	return typeof title === "string" && title.trim().length > 0 ? title : undefined
 }
 
 const decodeIssueBulkUpdatePayload = (content: string) =>
@@ -3885,17 +4055,36 @@ const summarizeIssueBulkUpdateResults = (
 	}
 }
 
+const summarizeIssueBulkCreateResults = (
+	results: readonly IssueBulkCreateResult[],
+): IssueBulkCreateSummary => {
+	const createdCount = results.filter((result) => result.created).length
+	return {
+		requestCount: results.length,
+		createdCount,
+		failedCount: results.length - createdCount,
+		results,
+	}
+}
+
+const formatIssueBulkCreateError = (error: unknown): string =>
+	error instanceof Error ? error.message : String(error)
+
 const formatIssueBulkUpdateError = (error: unknown): string =>
 	error instanceof Error ? error.message : String(error)
 
-const readIssueBulkUpdateInput = (inputPath: string) =>
+const readIssueBulkInput = (inputPath: string, mode: "create" | "update") =>
 	Effect.gen(function* () {
 		if (inputPath === "-") {
 			return yield* Effect.tryPromise({
 				try: () => Bun.file("/dev/stdin").text(),
 				catch: (error) =>
 					new Error(
-						`Failed to read bulk update JSON from stdin: ${formatIssueBulkUpdateError(error)}`,
+						`Failed to read bulk ${mode} JSON from stdin: ${
+							mode === "create"
+								? formatIssueBulkCreateError(error)
+								: formatIssueBulkUpdateError(error)
+						}`,
 					),
 			})
 		}
@@ -3909,11 +4098,15 @@ const readIssueBulkUpdateInput = (inputPath: string) =>
 				Effect.mapError(
 					(error) =>
 						new Error(
-							`Failed to read bulk update JSON from ${resolvedInputPath}: ${String(error)}`,
+							`Failed to read bulk ${mode} JSON from ${resolvedInputPath}: ${String(error)}`,
 						),
 				),
 			)
 	})
+
+const readIssueBulkCreateInput = (inputPath: string) => readIssueBulkInput(inputPath, "create")
+
+const readIssueBulkUpdateInput = (inputPath: string) => readIssueBulkInput(inputPath, "update")
 
 const isOpenChildForCloseGuard = (issue: TrackedIssue): boolean =>
 	issue.status !== "closed" && issue.status !== "tombstone"
@@ -4921,6 +5114,29 @@ const issueBulkUpdateCommand = Command.make(
 	issueBulkUpdateHandler,
 ).pipe(Command.withDescription("Update multiple issues from a JSON payload"))
 
+const issueBulkCreateCommand = Command.make(
+	"bulk-create",
+	{
+		input: Options.text("input").pipe(
+			Options.withAlias("i"),
+			Options.withDescription("Path to bulk-create JSON payload, or - to read from stdin"),
+		),
+		deferred: Options.boolean("deferred").pipe(
+			Options.withDescription("Create issues without inheriting active parent context"),
+		),
+		noDefaultParent: Options.boolean("no-default-parent").pipe(
+			Options.withDescription("Deprecated alias for --deferred"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON summary"),
+		),
+	},
+	issueBulkCreateHandler,
+).pipe(Command.withDescription("Create multiple issues from a JSON payload"))
+
 /**
  * az issue dep add <issue-id> <depends-on-id> - Add dependency edge
  */
@@ -5056,6 +5272,7 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueListCommand,
 		issueGetCommand,
 		issueCreateCommand,
+		issueBulkCreateCommand,
 		issueChildCommand,
 		issueUpdateCommand,
 		issueBulkUpdateCommand,
@@ -6349,6 +6566,7 @@ export {
 	buildPrimeOutput,
 	buildCommandCliLayerForArgv,
 	cliRunner,
+	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
@@ -6359,5 +6577,6 @@ export {
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
+	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 }
