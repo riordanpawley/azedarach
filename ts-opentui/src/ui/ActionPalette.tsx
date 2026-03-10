@@ -52,10 +52,10 @@ const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
 const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	h: "h",
 	l: "l",
-    s: "s",
-    S: "S-s",
-    "!": "!",
-    a: "a",
+	s: "s",
+	S: "S-s",
+	"!": "!",
+	a: "a",
 	p: "p",
 	R: "S-r",
 	x: "x",
@@ -102,8 +102,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "S": // Start+work - only if idle
 			case "!": // Start+work (skip permissions) - only if idle
 				return sessionState === "idle"
-            case "a": // Attach - only if not idle
-                return sessionState !== "idle"
+			case "a": // Attach - only if not idle
+				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
 			case "r": // Dev server toggle - only if worktree exists (session not idle)
@@ -260,10 +260,10 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			<text fg={theme.surface1}>{"─────────"}</text>
 
 			{/* Session actions */}
-            <ActionLine keyName="s" description="start" />
-            <ActionLine keyName="S" description="start+work" />
-            <ActionLine keyName="!" description="start (yolo)" />
-            <ActionLine keyName="a" description="attach" />
+			<ActionLine keyName="s" description="start" />
+			<ActionLine keyName="S" description="start+work" />
+			<ActionLine keyName="!" description="start (yolo)" />
+			<ActionLine keyName="a" description="attach" />
 			<ActionLine keyName="p" description="pause" />
 			<ActionLine keyName="R" description="resume" />
 			<ActionLine keyName="x" description="stop" />
