@@ -16,6 +16,7 @@ import {
 	activeSessionsCountAtom,
 	aiCreateTaskAtom,
 	boardIsLoadingAtom,
+	boardTasksAtom,
 	createTaskAtom,
 	currentProjectAtom,
 	DEFAULT_SPEC_WORKSPACE_STATE,
@@ -70,6 +71,7 @@ import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import { COLUMNS } from "./types.js"
+import { WaitingSessionPicker } from "./WaitingSessionPicker.js"
 
 // ============================================================================
 // App Component
@@ -172,6 +174,7 @@ export const App = () => {
 		showingFork,
 		showingDiagnostics,
 		showingProjectSelector,
+		showingWaitingSessionPicker,
 		showingDiffViewer,
 		showingDevServerMenu,
 		showingPlanning,
@@ -201,6 +204,10 @@ export const App = () => {
 	// Use derived atom that handles both normal and drill-down filtering
 	// All computation happens in atoms - React just renders
 	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+	const boardTasks = useAtomValue(
+		boardTasksAtom,
+		Result.getOrElse(() => []),
+	)
 	const waitingIssueIds = useMemo(
 		() =>
 			tasksByColumn
@@ -454,6 +461,10 @@ export const App = () => {
 
 	const totalTasks = useAtomValue(totalTasksCountAtom)
 	const activeSessions = useAtomValue(activeSessionsCountAtom)
+	const detailTask =
+		currentOverlay?._tag === "detail"
+			? boardTasks.find((task) => task.id === currentOverlay.taskId)
+			: undefined
 
 	// Mode display text
 	const modeDisplay = useMemo(() => {
@@ -582,6 +593,8 @@ export const App = () => {
 
 			{showingProjectSelector && <ProjectSelector />}
 
+			{showingWaitingSessionPicker && <WaitingSessionPicker />}
+
 			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
 				<DevServerMenu issueId={currentOverlay.issueId} />
 			)}
@@ -625,8 +638,8 @@ export const App = () => {
 			{isSearch && <SearchInput query={searchQuery} />}
 
 			{/* Detail panel */}
-			{showingDetail && selectedTask && (
-				<DetailPanel task={selectedTask} forceSmallScreenLayout={isSmallScreen(terminalColumns)} />
+			{showingDetail && detailTask && (
+				<DetailPanel task={detailTask} forceSmallScreenLayout={isSmallScreen(terminalColumns)} />
 			)}
 
 			{/* Create task prompt */}
