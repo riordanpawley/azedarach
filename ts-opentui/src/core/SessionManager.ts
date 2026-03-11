@@ -201,6 +201,23 @@ export const classifySessionStateForMissingCodeWindow = (
 			: options.hasStartLock || options.tmuxStartupInProgress || options.withinStartupGracePeriod,
 	)
 
+const SHELL_FOREGROUND_COMMANDS = new Set(["bash", "zsh", "sh", "fish", "dash"])
+
+export const shouldReuseExistingCodeWindowDuringRecovery = (
+	foregroundCommand: string | null,
+): boolean => {
+	if (foregroundCommand === null) {
+		return false
+	}
+
+	const normalizedCommand = foregroundCommand.trim().toLowerCase()
+	if (normalizedCommand.length === 0) {
+		return false
+	}
+
+	return !SHELL_FOREGROUND_COMMANDS.has(normalizedCommand)
+}
+
 export interface TmuxSessionStateUpdateMeta {
 	readonly sessionName: string
 	/**
@@ -1424,6 +1441,42 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					// Get initCommands: merge worktree config + tool-specific init commands
 					const toolInitCommands = toolDef.getInitCommands()
 					const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
+					const codeWindowTarget = `${tmuxSessionName}:${WINDOW_NAMES.CODE}`
+					const existingCodeWindowIsLive = yield* tmuxService
+						.hasWindow(tmuxSessionName, WINDOW_NAMES.CODE)
+						.pipe(
+							Effect.flatMap((hasCodeWindow) =>
+								hasCodeWindow
+									? tmuxService
+											.getPaneCurrentCommand(codeWindowTarget)
+											.pipe(
+												Effect.map((foregroundCommand) =>
+													shouldReuseExistingCodeWindowDuringRecovery(foregroundCommand),
+												),
+											)
+									: Effect.succeed(false),
+							),
+						)
+
+					if (existingCodeWindowIsLive) {
+						const reattachedSession: Session = {
+							...session,
+							state: "busy",
+						}
+
+						yield* Ref.update(sessionsRef, (sessions) =>
+							HashMap.set(sessions, issueId, reattachedSession),
+						)
+
+						const allSessions = yield* Ref.get(sessionsRef)
+						yield* persistSessions(allSessions)
+						yield* publishStateChange(issueId, "crashed", "busy")
+						yield* Effect.log(
+							`Recovery found a live code window for ${issueId}; reusing the existing tmux process instead of injecting a resume command`,
+						)
+
+						return reattachedSession
+					}
 
 					// Create new tmux session in the existing worktree
 					yield* worktreeSession.getOrCreateSession(issueId, {
