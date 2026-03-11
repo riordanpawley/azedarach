@@ -53,7 +53,7 @@ import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 import {
-	type LinearIssueWebhookEvent,
+	type LinearIssueWebhookMessage,
 	type LinearWebhookMode,
 	LinearWebhookService,
 	normalizePublicBaseUrl,
@@ -267,6 +267,11 @@ export const resolveLinearSdkPollingFallbackToastMessage = (params: {
 
 	return `Linear webhooks unavailable (mode=${params.mode}): ${normalizedReason}. Falling back to background polling.`
 }
+
+export const shouldApplyLinearWebhookIssueEvent = (params: {
+	readonly eventConfigKey: string
+	readonly activeConfigKey: string | null
+}): boolean => params.activeConfigKey !== null && params.eventConfigKey === params.activeConfigKey
 
 const linearWebhookReasonKey = (reason: string | undefined): string => {
 	const normalizedReason = normalizeLinearWebhookReason(reason)
@@ -2012,8 +2017,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			return normalized === "remove" || normalized === "delete" || normalized === "archive"
 		}
 
-		const applyLinearWebhookIssueEvent = (event: LinearIssueWebhookEvent) =>
+		const applyLinearWebhookIssueEvent = (message: LinearIssueWebhookMessage) =>
 			Effect.gen(function* () {
+				const activeWebhookStatus = yield* SubscriptionRef.get(linearWebhookService.status)
+				if (
+					!shouldApplyLinearWebhookIssueEvent({
+						eventConfigKey: message.configKey,
+						activeConfigKey: activeWebhookStatus.configKey,
+					})
+				) {
+					yield* Effect.logDebug(
+						`Ignoring stale Linear webhook issue event for configKey=${message.configKey}; activeConfigKey=${activeWebhookStatus.configKey ?? "<none>"}`,
+					)
+					return
+				}
+
+				const event = message.payload
 				const payload = event.data
 				const issueId = payload.identifier
 				const status = normalizeLinearWebhookStatus(payload.state.name)
@@ -2438,10 +2457,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const buildLinearRefreshStrategyPlan = () =>
 			Effect.gen(function* () {
 				const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+				const currentProjectPath = yield* projectService.getCurrentPath()
+				const strategyScopeKey = encodeURIComponent((currentProjectPath ?? "").trim())
 				yield* linearWebhookService.reconfigure()
 				if (!("linear" in startupConfig.issueTracker)) {
 					return {
-						key: "non-linear:background-polling",
+						key: `non-linear:background-polling:${strategyScopeKey}`,
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, false)
 							yield* reportLinearWebhookHealth({
@@ -2460,7 +2481,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				if (webhookConfig.enabled === false) {
 					return {
-						key: "linear:disabled",
+						key: `linear:disabled:${strategyScopeKey}`,
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, false)
 							yield* Effect.log(
@@ -2481,7 +2502,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					const linearWebhookListenerConfig = yield* getLinearWebhookListenerConfig()
 					if (linearWebhookListenerConfig !== undefined) {
 						return {
-							key: `linear:cli-listener:${linearWebhookListenerConfigKey(linearWebhookListenerConfig)}`,
+							key: `linear:cli-listener:${strategyScopeKey}:${linearWebhookListenerConfigKey(linearWebhookListenerConfig)}`,
 							start: Effect.gen(function* () {
 								yield* Ref.set(localRefreshOnlyRef, false)
 								yield* reportLinearWebhookHealth({
@@ -2496,7 +2517,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					}
 
 					return {
-						key: "linear:cli-polling-fallback",
+						key: `linear:cli-polling-fallback:${strategyScopeKey}`,
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, false)
 							yield* Effect.logWarning(
@@ -2524,7 +2545,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const sdkTickerBehavior = resolveLinearSdkEventsTickerBehavior(sdkMode, sdkHealthy)
 				if (sdkTickerBehavior.localRefreshOnly) {
 					return {
-						key: "linear:sdk-events",
+						key: `linear:sdk-events:${strategyScopeKey}:${sdkStatus.configKey ?? "none"}`,
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, sdkTickerBehavior.localRefreshOnly)
 							yield* reportLinearWebhookHealth({
@@ -2543,7 +2564,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				})
 				if (listenerConfig !== undefined) {
 					return {
-						key: `linear:sdk-cli-fallback:${sdkMode}:${String(sdkHealthy)}:${linearWebhookReasonKey(sdkReason)}:${linearWebhookListenerConfigKey(listenerConfig)}`,
+						key: `linear:sdk-cli-fallback:${strategyScopeKey}:${sdkMode}:${String(sdkHealthy)}:${sdkStatus.configKey ?? "none"}:${linearWebhookReasonKey(sdkReason)}:${linearWebhookListenerConfigKey(listenerConfig)}`,
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, false)
 							yield* Effect.logWarning(
@@ -2564,7 +2585,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 
 				return {
-					key: `linear:sdk-polling-fallback:${sdkMode}:${String(sdkHealthy)}:${linearWebhookReasonKey(sdkReason)}`,
+					key: `linear:sdk-polling-fallback:${strategyScopeKey}:${sdkMode}:${String(sdkHealthy)}:${sdkStatus.configKey ?? "none"}:${linearWebhookReasonKey(sdkReason)}`,
 					start: Effect.gen(function* () {
 						yield* Ref.set(localRefreshOnlyRef, false)
 						yield* Effect.logWarning(

@@ -16,6 +16,7 @@ import {
 	resolveLinearSdkPollingFallbackHealthMessage,
 	resolveLinearSdkPollingFallbackToastMessage,
 	resolveRetainedTaskGitState,
+	shouldApplyLinearWebhookIssueEvent,
 } from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
@@ -161,6 +162,32 @@ describe("linear SDK polling fallback messaging", () => {
 		).toBe(
 			"SDK mode=failed healthy=false with no CLI fallback; reason=Timed out registering Linear webhook after 4000ms; using background polling.",
 		)
+	})
+})
+
+describe("shouldApplyLinearWebhookIssueEvent", () => {
+	it("accepts events from the active runtime config key", () => {
+		expect(
+			shouldApplyLinearWebhookIssueEvent({
+				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+				activeConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+			}),
+		).toBe(true)
+	})
+
+	it("drops stale events from a previous project/runtime config key", () => {
+		expect(
+			shouldApplyLinearWebhookIssueEvent({
+				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+				activeConfigKey: "backend=linear|projectPath=/tmp/project-b|team=CHE",
+			}),
+		).toBe(false)
+		expect(
+			shouldApplyLinearWebhookIssueEvent({
+				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+				activeConfigKey: null,
+			}),
+		).toBe(false)
 	})
 })
 

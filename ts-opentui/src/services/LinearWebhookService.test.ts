@@ -9,6 +9,7 @@ import { LinearWebhookClient } from "@linear/sdk/webhooks"
 import { Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import {
+	buildWebhookRuntimeConfigKey,
 	decodeLinearIssueWebhookEvent,
 	LinearWebhookService,
 	normalizePublicBaseUrl,
@@ -202,6 +203,39 @@ describe("Linear webhook URL resolution helpers", () => {
 })
 
 describe("LinearWebhookService reconfiguration", () => {
+	it("includes project path in the runtime config key", async () => {
+		const projectPath = await mkdtemp(join(tmpdir(), "az-linear-webhook-config-key-"))
+		const configDir = join(projectPath, ".azedarach")
+		const configPath = join(configDir, "config.json")
+
+		try {
+			await mkdir(configDir, { recursive: true })
+			await writeFile(configPath, cliTransportConfig, "utf8")
+
+			await runWithLinearWebhookService({
+				projectPath,
+				configPath,
+				program: Effect.gen(function* () {
+					const appConfig = yield* AppConfig
+					const config = yield* SubscriptionRef.get(appConfig.config)
+					const keyA = buildWebhookRuntimeConfigKey({
+						config,
+						projectPath,
+					})
+					const keyB = buildWebhookRuntimeConfigKey({
+						config,
+						projectPath: `${projectPath}-other`,
+					})
+
+					expect(keyA).not.toBe(keyB)
+					expect(keyA).toContain(`projectPath=${projectPath}`)
+				}),
+			})
+		} finally {
+			await rm(projectPath, { recursive: true, force: true })
+		}
+	})
+
 	it("reloads from default local mode into configured linear webhook mode", async () => {
 		const projectPath = await mkdtemp(join(tmpdir(), "az-linear-webhook-reload-"))
 		const configDir = join(projectPath, ".azedarach")
@@ -217,6 +251,7 @@ describe("LinearWebhookService reconfiguration", () => {
 					const initialStatus = yield* SubscriptionRef.get(webhookService.status)
 					expect(initialStatus.mode).toBe("disabled")
 					expect(initialStatus.reason).toBe("Linear backend not active")
+					expect(initialStatus.configKey).not.toBeNull()
 
 					yield* Effect.tryPromise(() => mkdir(configDir, { recursive: true }))
 					yield* Effect.tryPromise(() => writeFile(configPath, cliTransportConfig, "utf8"))
@@ -228,6 +263,7 @@ describe("LinearWebhookService reconfiguration", () => {
 					expect(reconfiguredStatus.mode).toBe("cli")
 					expect(reconfiguredStatus.healthy).toBe(false)
 					expect(reconfiguredStatus.reason).toBe("CLI webhook transport selected")
+					expect(reconfiguredStatus.configKey).not.toBeNull()
 				}),
 			})
 		} finally {
