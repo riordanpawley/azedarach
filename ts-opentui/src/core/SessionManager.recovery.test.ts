@@ -5,6 +5,7 @@ import {
 	isActiveSessionState,
 	resolveDiscoveredSessionState,
 	resolveSessionStateFromTmuxStatus,
+	shouldReuseExistingCodeWindowDuringRecovery,
 } from "./SessionManager.js"
 
 describe("SessionManager discovered session recovery", () => {
@@ -86,5 +87,12 @@ describe("SessionManager discovered session recovery", () => {
 		expect(ACTIVE_SESSION_STATES.has("waiting")).toBe(true)
 		expect(isActiveSessionState("paused")).toBe(true)
 		expect(isActiveSessionState("done")).toBe(false)
+	})
+
+	it("reuses existing live code windows during recovery", () => {
+		expect(shouldReuseExistingCodeWindowDuringRecovery("codex")).toBe(true)
+		expect(shouldReuseExistingCodeWindowDuringRecovery("hx")).toBe(true)
+		expect(shouldReuseExistingCodeWindowDuringRecovery("bash")).toBe(false)
+		expect(shouldReuseExistingCodeWindowDuringRecovery(null)).toBe(false)
 	})
 })

@@ -164,6 +164,146 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		},
 	},
 	{
+		key: "issueSyncEnabled",
+		group: ["Issue Tracker"],
+		label: "Issue Sync",
+		getValue: (c) => {
+			if (c.issueTracker?.tracker !== undefined) return c.issueTracker.tracker.syncEnabled ?? true
+			if (c.issueTracker?.legacy !== undefined) return c.issueTracker.legacy.syncEnabled ?? true
+			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
+			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
+			return false
+		},
+		nextValue: (c) => {
+			if (c.issueTracker?.tracker !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						tracker: {
+							...c.issueTracker.tracker,
+							syncEnabled: !(c.issueTracker.tracker.syncEnabled ?? true),
+						},
+					},
+				}
+			}
+			if (c.issueTracker?.legacy !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						legacy: {
+							...c.issueTracker.legacy,
+							syncEnabled: !(c.issueTracker.legacy.syncEnabled ?? true),
+						},
+					},
+				}
+			}
+			if (c.issueTracker?.linear !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						linear: {
+							...c.issueTracker.linear,
+							syncEnabled: !(c.issueTracker.linear.syncEnabled ?? true),
+						},
+					},
+				}
+			}
+			if (c.issueTracker?.local !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						local: {
+							...c.issueTracker.local,
+							syncEnabled: !(c.issueTracker.local.syncEnabled ?? false),
+						},
+					},
+				}
+			}
+			return {
+				...c,
+				issueTracker: {
+					local: {
+						syncEnabled: true,
+					},
+				},
+			}
+		},
+	},
+	{
+		key: "linearWebhooksEnabled",
+		group: ["Issue Tracker", "Linear"],
+		label: "Linear Webhooks",
+		getValue: (c) => {
+			if (c.issueTracker?.linear !== undefined)
+				return c.issueTracker.linear.webhooks?.enabled ?? true
+			return false
+		},
+		nextValue: (c) => {
+			if (c.issueTracker?.linear === undefined) return c
+			return {
+				...c,
+				issueTracker: {
+					linear: {
+						...c.issueTracker.linear,
+						webhooks: {
+							...c.issueTracker.linear.webhooks,
+							enabled: !(c.issueTracker.linear.webhooks?.enabled ?? true),
+						},
+					},
+				},
+			}
+		},
+		isVisible: isLinearBackend,
+	},
+	{
+		key: "localBackupsEnabled",
+		group: ["Issue Tracker", "Local"],
+		label: "SQLite Backups",
+		getValue: (c) => c.issueTracker?.local?.backups?.enabled ?? true,
+		nextValue: (c) => {
+			if (c.issueTracker?.local === undefined) return c
+			return {
+				...c,
+				issueTracker: {
+					local: {
+						...c.issueTracker.local,
+						backups: {
+							...c.issueTracker.local.backups,
+							enabled: !(c.issueTracker.local.backups?.enabled ?? true),
+						},
+					},
+				},
+			}
+		},
+		isVisible: isLocalBackend,
+	},
+	{
+		key: "localBackupsIntervalMinutes",
+		group: ["Issue Tracker", "Local", "Backups"],
+		label: "Backup Interval (m)",
+		getValue: (c) => c.issueTracker?.local?.backups?.intervalMinutes ?? 60,
+		nextValue: (c) => {
+			if (c.issueTracker?.local === undefined) return c
+			return {
+				...c,
+				issueTracker: {
+					local: {
+						...c.issueTracker.local,
+						backups: {
+							...c.issueTracker.local.backups,
+							intervalMinutes: cycleNumberValue(
+								c.issueTracker.local.backups?.intervalMinutes ?? 60,
+								[15, 30, 60, 120],
+							),
+						},
+					},
+				},
+			}
+		},
+		isVisible: (c) =>
+			c.issueTracker?.local !== undefined && (c.issueTracker.local.backups?.enabled ?? true),
+	},
+	{
 		key: "dangerouslySkipPermissions",
 		group: ["Session"],
 		label: "Skip Permissions",
@@ -307,146 +447,6 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 			},
 		}),
 		isVisible: (c) => c.network?.autoDetect ?? true,
-	},
-	{
-		key: "issueSyncEnabled",
-		group: ["Issue Tracker"],
-		label: "Issue Sync",
-		getValue: (c) => {
-			if (c.issueTracker?.tracker !== undefined) return c.issueTracker.tracker.syncEnabled ?? true
-			if (c.issueTracker?.legacy !== undefined) return c.issueTracker.legacy.syncEnabled ?? true
-			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
-			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
-			return false
-		},
-		nextValue: (c) => {
-			if (c.issueTracker?.tracker !== undefined) {
-				return {
-					...c,
-					issueTracker: {
-						tracker: {
-							...c.issueTracker.tracker,
-							syncEnabled: !(c.issueTracker.tracker.syncEnabled ?? true),
-						},
-					},
-				}
-			}
-			if (c.issueTracker?.legacy !== undefined) {
-				return {
-					...c,
-					issueTracker: {
-						legacy: {
-							...c.issueTracker.legacy,
-							syncEnabled: !(c.issueTracker.legacy.syncEnabled ?? true),
-						},
-					},
-				}
-			}
-			if (c.issueTracker?.linear !== undefined) {
-				return {
-					...c,
-					issueTracker: {
-						linear: {
-							...c.issueTracker.linear,
-							syncEnabled: !(c.issueTracker.linear.syncEnabled ?? true),
-						},
-					},
-				}
-			}
-			if (c.issueTracker?.local !== undefined) {
-				return {
-					...c,
-					issueTracker: {
-						local: {
-							...c.issueTracker.local,
-							syncEnabled: !(c.issueTracker.local.syncEnabled ?? false),
-						},
-					},
-				}
-			}
-			return {
-				...c,
-				issueTracker: {
-					local: {
-						syncEnabled: true,
-					},
-				},
-			}
-		},
-	},
-	{
-		key: "linearWebhooksEnabled",
-		group: ["Issue Tracker", "Linear"],
-		label: "Linear Webhooks",
-		getValue: (c) => {
-			if (c.issueTracker?.linear !== undefined)
-				return c.issueTracker.linear.webhooks?.enabled ?? true
-			return false
-		},
-		nextValue: (c) => {
-			if (c.issueTracker?.linear === undefined) return c
-			return {
-				...c,
-				issueTracker: {
-					linear: {
-						...c.issueTracker.linear,
-						webhooks: {
-							...c.issueTracker.linear.webhooks,
-							enabled: !(c.issueTracker.linear.webhooks?.enabled ?? true),
-						},
-					},
-				},
-			}
-		},
-		isVisible: isLinearBackend,
-	},
-	{
-		key: "localBackupsEnabled",
-		group: ["Issue Tracker", "Local"],
-		label: "SQLite Backups",
-		getValue: (c) => c.issueTracker?.local?.backups?.enabled ?? true,
-		nextValue: (c) => {
-			if (c.issueTracker?.local === undefined) return c
-			return {
-				...c,
-				issueTracker: {
-					local: {
-						...c.issueTracker.local,
-						backups: {
-							...c.issueTracker.local.backups,
-							enabled: !(c.issueTracker.local.backups?.enabled ?? true),
-						},
-					},
-				},
-			}
-		},
-		isVisible: isLocalBackend,
-	},
-	{
-		key: "localBackupsIntervalMinutes",
-		group: ["Issue Tracker", "Local", "Backups"],
-		label: "Backup Interval (m)",
-		getValue: (c) => c.issueTracker?.local?.backups?.intervalMinutes ?? 60,
-		nextValue: (c) => {
-			if (c.issueTracker?.local === undefined) return c
-			return {
-				...c,
-				issueTracker: {
-					local: {
-						...c.issueTracker.local,
-						backups: {
-							...c.issueTracker.local.backups,
-							intervalMinutes: cycleNumberValue(
-								c.issueTracker.local.backups?.intervalMinutes ?? 60,
-								[15, 30, 60, 120],
-							),
-						},
-					},
-				},
-			}
-		},
-		isVisible: (c) =>
-			c.issueTracker?.local !== undefined && (c.issueTracker.local.backups?.enabled ?? true),
 	},
 	{
 		key: "patternMatching",
