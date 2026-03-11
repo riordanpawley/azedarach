@@ -289,6 +289,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		if (props.task.hasWorktree && props.task.sessionState === "idle") {
 			actions.push("d - Cleanup worktree + branch (remove orphaned worktree)")
 		}
+		actions.push("T - Tombstone issue (keep branch/worktree)")
 
 		return actions
 	}, [props.task.status, props.task.hasWorktree, props.task.sessionState])

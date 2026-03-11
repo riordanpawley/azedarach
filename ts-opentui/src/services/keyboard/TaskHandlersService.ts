@@ -14,6 +14,7 @@ import { Effect } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { COLUMNS } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
@@ -37,6 +38,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			IssueTrackerClient.Default,
 			IssueEditorService.Default,
 			PRWorkflow.Default,
+			SessionManager.Default,
 			MutationQueue.Default,
 		],
 
@@ -50,6 +52,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const issueTrackerClient = yield* IssueTrackerClient
 			const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
+			const sessionManager = yield* SessionManager
 			const mutationQueue = yield* MutationQueue
 
 			const getTaskById = (taskId: string) =>
@@ -205,6 +208,48 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					})
 				})
 
+			const tombstoneIssue = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
+
+					const hasSession = task.sessionState !== "idle"
+					const sessionWarning = hasSession
+						? "\n\nThis will stop the active session, but keep the branch and worktree."
+						: "\n\nThis keeps the branch and worktree."
+
+					const tombstoneIssueOnly = Effect.gen(function* () {
+						if (hasSession) {
+							yield* toast.show("info", `Stopping session for ${task.id} before tombstoning...`)
+							yield* sessionManager
+								.stop(task.id)
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Failed to stop session for ${task.id}: ${error}`),
+									),
+								)
+						}
+
+						const updateMutation: Mutation = {
+							_tag: "Update",
+							id: task.id,
+							fields: { status: "tombstone" },
+							rollback: syncTaskFromBackend(task.id),
+						}
+						yield* board.removeTaskFromMutation(task.id)
+						yield* mutationQueue.add(updateMutation)
+						yield* toast.show("success", `Tombstoned ${task.id}`)
+						yield* mutationQueue.process(task.id)
+						yield* nav.initialize()
+					})
+
+					yield* overlay.push({
+						_tag: "confirm",
+						message: `Tombstone issue ${task.id}?${sessionWarning}`,
+						onConfirm: tombstoneIssueOnly,
+					})
+				})
+
 			const moveTasksToColumn = (direction: "left" | "right") =>
 				Effect.gen(function* () {
 					const columnIndex = yield* helpers.getColumnIndex()
@@ -356,6 +401,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				editIssue,
 				createIssue,
 				deleteIssue,
+				tombstoneIssue,
 				moveTasksToColumn,
 				forkIssue,
 				forkFromCurrent,

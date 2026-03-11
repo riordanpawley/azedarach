@@ -70,6 +70,7 @@ const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	m: "m",
 	d: "d",
 	D: "S-d",
+	T: "S-t",
 }
 
 interface ActionLineSpec {
@@ -122,7 +123,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle" || isOrphanedWorktree
 			case "u": // Update from main - only if session has worktree (not idle) OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
-			case "D": // Delete bead - always available
+			case "D": // Delete bead + cleanup - always available
+			case "T": // Tombstone bead - always available
 				return true
 			case "i": // Image attach - always available
 				return true
@@ -201,6 +203,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		actions.push({ keyName: "i", description: "image" })
 		actions.push({ keyName: "f", description: "diff" })
 		actions.push({ keyName: "d", description: "cleanup+branch" })
+		actions.push({ keyName: "T", description: "tombstone" })
 		return actions
 	}, [sessionState])
 
@@ -286,7 +289,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			<ActionLine keyName="O" description="open PR" />
 			<ActionLine keyName="m" description="merge" />
 			<ActionLine keyName="d" description="cleanup+branch" />
-			<ActionLine keyName="D" description="delete" />
+			<ActionLine keyName="D" description="delete+cleanup" />
+			<ActionLine keyName="T" description="tombstone" />
 		</>
 	)
 

@@ -611,9 +611,17 @@ done
 	{
 		key: "S-d",
 		mode: "action",
-		description: "Delete bead",
+		description: "Delete bead + cleanup",
 		action: Effect.suspend(() =>
 			bc.taskHandlers.deleteIssue().pipe(Effect.ensuring(bc.editor.exitToNormal())),
+		),
+	},
+	{
+		key: "S-t",
+		mode: "action",
+		description: "Tombstone bead",
+		action: Effect.suspend(() =>
+			bc.taskHandlers.tombstoneIssue().pipe(Effect.ensuring(bc.editor.exitToNormal())),
 		),
 	},
 	{
