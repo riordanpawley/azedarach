@@ -822,6 +822,8 @@ Toggle a dev server for the selected task's worktree. Each worktree can have its
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `b` | Merge bead into... | Worktree exists (merge into another bead) |
 | `Space` `d` | Cleanup worktree + branch | Worktree exists (delete worktree and branch) |
+| `Space` `T` | Tombstone bead | Hides issue without deleting branch/worktree; stops active session first |
+| `Space` `D` | Delete bead + cleanup | Permanently deletes issue and removes associated session/worktree state |
 
 #### Update from Main (Space+u)
 
