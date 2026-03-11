@@ -11,7 +11,7 @@
  * status automatically updates when they're interrupted/complete.
  */
 
-import { Effect, Fiber, FiberId, Ref, Scope, SubscriptionRef } from "effect"
+import { Cause, Effect, Fiber, FiberId, Ref, Scope, SubscriptionRef } from "effect"
 import type { LinearWebhookMode } from "./LinearWebhookService.js"
 
 // ============================================================================
@@ -149,9 +149,7 @@ const isBootstrapCompletenessSkip = (health: IssueSyncHealth): boolean => {
 		return false
 	}
 	const normalizedMessage = health.lastMessage.trim().toLowerCase()
-	return BOOTSTRAP_COMPLETENESS_SKIP_MARKERS.some((marker) =>
-		normalizedMessage.includes(marker),
-	)
+	return BOOTSTRAP_COMPLETENESS_SKIP_MARKERS.some((marker) => normalizedMessage.includes(marker))
 }
 
 const normalizeIssueSyncHealth = (
@@ -347,10 +345,15 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 					Fiber.await(fiber).pipe(
 						Effect.flatMap((exit) =>
 							SubscriptionRef.update(stateRef, (s) => {
-								const status: FiberStatus = exit._tag === "Success" ? "completed" : "failed"
+								const status: FiberStatus =
+									exit._tag === "Success"
+										? "completed"
+										: Cause.isInterruptedOnly(exit.cause)
+											? "interrupted"
+											: "failed"
 								const error =
-									exit._tag === "Failure"
-										? `${exit.cause._tag}: ${JSON.stringify(exit.cause)}`
+									exit._tag === "Failure" && !Cause.isInterruptedOnly(exit.cause)
+										? Cause.pretty(exit.cause)
 										: undefined
 
 								return {

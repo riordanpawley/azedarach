@@ -16,6 +16,8 @@ import {
 	resolveLinearSdkPollingFallbackHealthMessage,
 	resolveLinearSdkPollingFallbackToastMessage,
 	resolveRetainedTaskGitState,
+	shouldApplyLinearWebhookIssueEvent,
+	shouldRunProjectSwitchLinearSync,
 } from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
@@ -161,6 +163,58 @@ describe("linear SDK polling fallback messaging", () => {
 		).toBe(
 			"SDK mode=failed healthy=false with no CLI fallback; reason=Timed out registering Linear webhook after 4000ms; using background polling.",
 		)
+	})
+})
+
+describe("shouldApplyLinearWebhookIssueEvent", () => {
+	it("accepts events from the active runtime config key", () => {
+		expect(
+			shouldApplyLinearWebhookIssueEvent({
+				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+				activeConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+			}),
+		).toBe(true)
+	})
+
+	it("drops stale events from a previous project/runtime config key", () => {
+		expect(
+			shouldApplyLinearWebhookIssueEvent({
+				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+				activeConfigKey: "backend=linear|projectPath=/tmp/project-b|team=CHE",
+			}),
+		).toBe(false)
+		expect(
+			shouldApplyLinearWebhookIssueEvent({
+				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
+				activeConfigKey: null,
+			}),
+		).toBe(false)
+	})
+})
+
+describe("shouldRunProjectSwitchLinearSync", () => {
+	it("runs an explicit SDK sync for linear projects with sync enabled", () => {
+		expect(
+			shouldRunProjectSwitchLinearSync({
+				backend: "linear",
+				syncEnabled: true,
+			}),
+		).toBe(true)
+	})
+
+	it("skips the explicit SDK sync for non-linear or sync-disabled projects", () => {
+		expect(
+			shouldRunProjectSwitchLinearSync({
+				backend: "linear",
+				syncEnabled: false,
+			}),
+		).toBe(false)
+		expect(
+			shouldRunProjectSwitchLinearSync({
+				backend: "local",
+				syncEnabled: true,
+			}),
+		).toBe(false)
 	})
 })
 

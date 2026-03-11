@@ -15,6 +15,7 @@ import { Config, Data, Effect, Option, Queue, Ref, Schema, Stream, SubscriptionR
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { LinearSdk } from "../core/LinearSdk.js"
+import { ProjectService } from "./ProjectService.js"
 
 const WEBHOOK_PATH = "/linear/webhook"
 const DEFAULT_WEBHOOK_PORT = 9000
@@ -94,6 +95,11 @@ const IssueWebhookEnvelopeSchema = Schema.Struct({
 
 export type LinearIssueWebhookEvent = Schema.Schema.Type<typeof IssueWebhookEnvelopeSchema>
 
+export interface LinearIssueWebhookMessage {
+	readonly configKey: string
+	readonly payload: LinearIssueWebhookEvent
+}
+
 export const decodeLinearIssueWebhookEvent = (
 	payload: unknown,
 ): Option.Option<LinearIssueWebhookEvent> => {
@@ -105,10 +111,11 @@ export interface LinearWebhookRuntimeStatus {
 	readonly mode: LinearWebhookMode
 	readonly healthy: boolean
 	readonly reason: string | undefined
+	readonly configKey: string | null
 }
 
 export interface LinearWebhookServiceApi {
-	readonly issueEvents: Stream.Stream<LinearIssueWebhookEvent>
+	readonly issueEvents: Stream.Stream<LinearIssueWebhookMessage>
 	readonly healthy: SubscriptionRef.SubscriptionRef<boolean>
 	readonly mode: SubscriptionRef.SubscriptionRef<LinearWebhookMode>
 	readonly status: SubscriptionRef.SubscriptionRef<LinearWebhookRuntimeStatus>
@@ -249,11 +256,17 @@ interface ActiveLinearWebhookRuntime {
 	readonly cleanup: Effect.Effect<void, never>
 }
 
-const formatWebhookConfigSummary = (config: ResolvedConfig): string => {
+const normalizeWebhookProjectPath = (projectPath: string | undefined): string =>
+	projectPath?.trim() ?? ""
+
+const formatWebhookConfigSummary = (
+	config: ResolvedConfig,
+	projectPath: string | undefined,
+): string => {
 	if (!("linear" in config.issueTracker)) {
 		if ("tracker" in config.issueTracker) return "backend=tracker"
 		if ("legacy" in config.issueTracker) return "backend=legacy"
-		return "backend=local"
+		return `backend=local projectPath=${normalizeWebhookProjectPath(projectPath) || "<none>"}`
 	}
 
 	const linearConfig = config.issueTracker.linear
@@ -264,6 +277,7 @@ const formatWebhookConfigSummary = (config: ResolvedConfig): string => {
 			: DEFAULT_WEBHOOK_PORT
 	return [
 		"backend=linear",
+		`projectPath=${normalizeWebhookProjectPath(projectPath) || "<none>"}`,
 		`enabled=${String(webhookConfig.enabled)}`,
 		`transport=${webhookConfig.transport}`,
 		`team=${normalizeNonEmpty(linearConfig.team) ?? "<auto>"}`,
@@ -275,11 +289,19 @@ const formatWebhookConfigSummary = (config: ResolvedConfig): string => {
 	].join(" ")
 }
 
-const buildWebhookRuntimeConfigKey = (config: ResolvedConfig): string => {
+export const buildWebhookRuntimeConfigKey = (params: {
+	readonly config: ResolvedConfig
+	readonly projectPath: string | undefined
+}): string => {
+	const { config, projectPath } = params
 	if (!("linear" in config.issueTracker)) {
-		if ("tracker" in config.issueTracker) return "backend=tracker"
-		if ("legacy" in config.issueTracker) return "backend=legacy"
-		return "backend=local"
+		if ("tracker" in config.issueTracker) {
+			return `backend=tracker|projectPath=${normalizeWebhookProjectPath(projectPath)}`
+		}
+		if ("legacy" in config.issueTracker) {
+			return `backend=legacy|projectPath=${normalizeWebhookProjectPath(projectPath)}`
+		}
+		return `backend=local|projectPath=${normalizeWebhookProjectPath(projectPath)}`
 	}
 
 	const linearConfig = config.issueTracker.linear
@@ -290,6 +312,7 @@ const buildWebhookRuntimeConfigKey = (config: ResolvedConfig): string => {
 			: DEFAULT_WEBHOOK_PORT
 	return [
 		"backend=linear",
+		`projectPath=${normalizeWebhookProjectPath(projectPath)}`,
 		`enabled=${String(webhookConfig.enabled)}`,
 		`transport=${webhookConfig.transport}`,
 		`team=${normalizeNonEmpty(linearConfig.team) ?? ""}`,
@@ -305,18 +328,20 @@ const buildWebhookRuntimeConfigKey = (config: ResolvedConfig): string => {
 export class LinearWebhookService extends Effect.Service<LinearWebhookService>()(
 	"LinearWebhookService",
 	{
-		dependencies: [AppConfig.Default, LinearSdk.Default],
+		dependencies: [AppConfig.Default, LinearSdk.Default, ProjectService.Default],
 		scoped: Effect.gen(function* () {
 			const appConfig = yield* AppConfig
 			const linearSdk = yield* LinearSdk
+			const projectService = yield* ProjectService
 
-			const issueEventsQueue = yield* Queue.unbounded<LinearIssueWebhookEvent>()
+			const issueEventsQueue = yield* Queue.unbounded<LinearIssueWebhookMessage>()
 			const healthy = yield* SubscriptionRef.make(false)
 			const mode = yield* SubscriptionRef.make<LinearWebhookMode>("disabled")
 			const status = yield* SubscriptionRef.make<LinearWebhookRuntimeStatus>({
 				mode: "disabled",
 				healthy: false,
 				reason: "Linear webhook runtime not configured yet",
+				configKey: null,
 			})
 			const activeRuntimeRef = yield* Ref.make<ActiveLinearWebhookRuntime | null>(null)
 			const appliedConfigKeyRef = yield* Ref.make<string | null>(null)
@@ -509,6 +534,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							mode: "misconfigured",
 							healthy: false,
 							reason: runtimeConfigResult.left.message,
+							configKey: params.configKey,
 						})
 						yield* Effect.logWarning(
 							`LinearWebhookService: runtime config invalid for configKey=${params.configKey}: ${runtimeConfigResult.left.message}; falling back to polling`,
@@ -563,7 +589,10 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 												const payload = webhookClient.parseData(rawBody, signature, timestamp)
 												const decoded = decodeLinearIssueWebhookEvent(payload)
 												if (Option.isSome(decoded)) {
-													Queue.unsafeOffer(issueEventsQueue, decoded.value)
+													Queue.unsafeOffer(issueEventsQueue, {
+														configKey: params.configKey,
+														payload: decoded.value,
+													})
 													void Effect.runFork(SubscriptionRef.set(healthy, true))
 													void Effect.runFork(
 														Effect.logInfo(
@@ -674,6 +703,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							mode: "failed",
 							healthy: false,
 							reason: runtimeErrorMessage,
+							configKey: params.configKey,
 						})
 						yield* Effect.logWarning(
 							`Linear SDK webhook runtime failed for configKey=${params.configKey}: ${runtimeErrorMessage}; falling back to polling`,
@@ -689,6 +719,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						mode: "sdk",
 						healthy: true,
 						reason: undefined,
+						configKey: params.configKey,
 					})
 					yield* Effect.logInfo(
 						`Linear SDK webhook runtime started on :${runtimeConfig.port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${runtimeStartResult.right.webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeConfig.webhookSecretSource}, configKey=${params.configKey})`,
@@ -698,7 +729,11 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const reconfigure = (): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const config = yield* SubscriptionRef.get(appConfig.config)
-					const nextConfigKey = buildWebhookRuntimeConfigKey(config)
+					const currentProjectPath = yield* projectService.getCurrentPath()
+					const nextConfigKey = buildWebhookRuntimeConfigKey({
+						config,
+						projectPath: currentProjectPath,
+					})
 					const previousConfigKey = yield* Ref.get(appliedConfigKeyRef)
 					if (previousConfigKey === nextConfigKey) {
 						return
@@ -706,7 +741,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 					yield* Ref.set(appliedConfigKeyRef, nextConfigKey)
 					yield* Effect.logInfo(
-						`LinearWebhookService: applying config ${formatWebhookConfigSummary(config)} configKey=${nextConfigKey}`,
+						`LinearWebhookService: applying config ${formatWebhookConfigSummary(config, currentProjectPath)} configKey=${nextConfigKey}`,
 					)
 					yield* stopActiveRuntime(
 						previousConfigKey === null
@@ -719,6 +754,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							mode: "disabled",
 							healthy: false,
 							reason: "Linear backend not active",
+							configKey: nextConfigKey,
 						})
 						yield* Effect.logInfo(
 							"LinearWebhookService: backend is not linear; SDK runtime disabled",
@@ -733,6 +769,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							mode: "disabled",
 							healthy: false,
 							reason: "Linear webhooks disabled in config",
+							configKey: nextConfigKey,
 						})
 						yield* Effect.logInfo(
 							"LinearWebhookService: webhooks disabled in config; SDK runtime skipped",
@@ -745,6 +782,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							mode: "cli",
 							healthy: false,
 							reason: "CLI webhook transport selected",
+							configKey: nextConfigKey,
 						})
 						yield* Effect.logInfo(
 							"LinearWebhookService: CLI transport selected; SDK runtime skipped",

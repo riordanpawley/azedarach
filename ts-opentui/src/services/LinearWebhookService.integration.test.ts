@@ -1,11 +1,11 @@
-import { LINEAR_WEBHOOK_SIGNATURE_HEADER, LINEAR_WEBHOOK_TS_HEADER } from "@linear/sdk/webhooks"
-import { BunContext } from "@effect/platform-bun"
-import type { CommandExecutor } from "@effect/platform"
 import { describe, expect, it } from "bun:test"
 import { createHmac } from "node:crypto"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { CommandExecutor } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { LINEAR_WEBHOOK_SIGNATURE_HEADER, LINEAR_WEBHOOK_TS_HEADER } from "@linear/sdk/webhooks"
 import { Effect, Layer, Option, Stream, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { LinearWebhookService } from "./LinearWebhookService.js"
@@ -17,9 +17,7 @@ const maybeIt = RUN_LINEAR_WEBHOOK_INTEGRATION ? it : it.skip
 const requireLinearApiKey = (): void => {
 	const apiKey = process.env.LINEAR_API_KEY?.trim()
 	if (!apiKey) {
-		throw new Error(
-			"LINEAR_API_KEY must be set when AZEDARACH_RUN_LINEAR_WEBHOOK_INTEGRATION=1",
-		)
+		throw new Error("LINEAR_API_KEY must be set when AZEDARACH_RUN_LINEAR_WEBHOOK_INTEGRATION=1")
 	}
 }
 
@@ -145,9 +143,7 @@ describe("LinearWebhookService integration", () => {
 							},
 						}
 						const rawPayload = JSON.stringify(payload)
-						const signature = createHmac("sha256", webhookSecret)
-							.update(rawPayload)
-							.digest("hex")
+						const signature = createHmac("sha256", webhookSecret).update(rawPayload).digest("hex")
 
 						const response = yield* Effect.tryPromise(() =>
 							fetch(`http://127.0.0.1:${webhookPort}/linear/webhook`, {
@@ -171,7 +167,7 @@ describe("LinearWebhookService integration", () => {
 						)
 						expect(Option.isSome(nextEvent)).toBe(true)
 						if (Option.isSome(nextEvent)) {
-							expect(nextEvent.value.data.identifier).toBe("AZE-IT")
+							expect(nextEvent.value.payload.data.identifier).toBe("AZE-IT")
 						}
 					}),
 				})
