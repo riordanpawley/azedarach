@@ -12,9 +12,9 @@ import * as Schema from "effect/Schema"
 import { AppConfig } from "../config/AppConfig.js"
 import type { IssueDbPerfOperationKind } from "../services/DiagnosticsService.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { OfflineService } from "../services/OfflineService.js"
+import { NetworkService } from "../services/NetworkService.js"
 import { ProjectService } from "../services/ProjectService.js"
-import { BackendSyncRouter } from "./BackendSyncRouter.js"
+import { BackendSyncLinear } from "./BackendSyncLinear.js"
 import type { IssueSyncError } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import {
@@ -1210,6 +1210,17 @@ interface IssueDbClient {
 	>
 }
 
+interface IssueTrackerRuntime {
+	readonly effectiveCwd: string | undefined
+	readonly projectPath: string
+	readonly configuredBackend: ConfiguredIssueBackend
+	readonly useLocalFirstPath: boolean
+	readonly mutationSyncTarget: SyncTarget | undefined
+	readonly legacyIssueDbClient: IssueDbClient | undefined
+	readonly linearIssueDbClient: IssueDbClient | undefined
+	readonly syncEnabled: boolean
+}
+
 interface IssueDbTimingRecorder {
 	readonly recordIssueDbTiming: (options: {
 		backend: "linear"
@@ -1305,6 +1316,17 @@ interface LinearReadSyncAttempt {
 	readonly completedWithinBudget: boolean
 	readonly syncResult: SyncResult
 }
+
+interface IssueTrackerSyncEnabledStatus {
+	readonly enabled: true
+}
+
+interface IssueTrackerSyncDisabledStatus {
+	readonly enabled: false
+	readonly reason: "both" | "config" | "offline"
+}
+
+type IssueTrackerSyncStatus = IssueTrackerSyncEnabledStatus | IssueTrackerSyncDisabledStatus
 
 const DEFAULT_LINEAR_READ_SYNC_ATTEMPT: LinearReadSyncAttempt = {
 	completedWithinBudget: true,
@@ -1480,20 +1502,20 @@ const parseJson = <A, I, R>(
 export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("IssueTrackerClient", {
 	dependencies: [
 		ProjectService.Default,
-		OfflineService.Default,
+		NetworkService.Default,
 		AppConfig.Default,
 		DiagnosticsService.Default,
 		LocalIssueStore.Default,
-		BackendSyncRouter.Default,
+		BackendSyncLinear.Default,
 		LinearSdk.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const projectService = yield* ProjectService
-		const offlineService = yield* OfflineService
+		const networkService = yield* NetworkService
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
 		const localIssueStore = yield* LocalIssueStore
-		const backendSyncRouter = yield* BackendSyncRouter
+		const backendSyncLinear = yield* BackendSyncLinear
 		const linearSdk = yield* LinearSdk
 		const scope = yield* Effect.scope
 
@@ -1505,20 +1527,6 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		 */
 		const getEffectiveCwd = (explicitCwd?: string): Effect.Effect<string | undefined> =>
 			explicitCwd ? Effect.succeed(explicitCwd) : projectService.getCurrentPath()
-
-		/**
-		 * Resolve a stable, non-empty project path at call boundary for async sync flows.
-		 * This prevents later project switches from retargeting in-flight sync writes.
-		 */
-		const resolveSyncProjectPath = (explicitCwd?: string): Effect.Effect<string> =>
-			getEffectiveCwd(explicitCwd).pipe(
-				Effect.map((cwd) =>
-					resolveSyncProjectPathValue({
-						selectedPath: cwd,
-						fallbackProjectPath: process.cwd(),
-					}),
-				),
-			)
 
 		const executeLegacyJsonCommand = (
 			executable: LegacyIssueExecutable,
@@ -2555,19 +2563,6 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			}
 		}
 
-		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
-		const configuredBackend = resolveConfiguredIssueBackend(startupConfig.issueTracker)
-		const useLocalFirstPath = isLocalFirstIssueBackend(configuredBackend)
-		const mutationSyncTarget = getSyncTargetForBackend(configuredBackend)
-		const legacyIssueDbClient: IssueDbClient | undefined =
-			configuredBackend === "tracker"
-				? createBdIssueDbClient("tracker")
-				: configuredBackend === "legacy"
-					? createBrIssueDbClient("legacy")
-					: undefined
-		const linearIssueDbClient: IssueDbClient | undefined =
-			configuredBackend === "linear" ? _createLinearIssueDbClient({}) : undefined
-
 		const mapLocalIssueStoreError = (
 			command: string,
 			error: LocalIssueStoreError,
@@ -2597,22 +2592,56 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		): Effect.Effect<A, IssueTrackerError> =>
 			effect.pipe(Effect.mapError((error) => mapIssueSyncError(command, error)))
 
+		const resolveIssueTrackerRuntime = (
+			explicitCwd?: string,
+		): Effect.Effect<IssueTrackerRuntime, IssueTrackerError> =>
+			Effect.gen(function* () {
+				const effectiveCwd = yield* getEffectiveCwd(explicitCwd)
+				const projectPath = resolveSyncProjectPathValue({
+					selectedPath: effectiveCwd,
+					fallbackProjectPath: process.cwd(),
+				})
+				const syncConfig = yield* appConfig
+					.getIssueTrackerSyncConfigForProjectPath(projectPath)
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueTrackerError({
+									message: `Failed to load issue tracker config for projectPath=${projectPath}: ${error.message}`,
+									command: "config issueTracker",
+									stderr: error.details,
+								}),
+						),
+					)
+				const configuredBackend = resolveConfiguredIssueBackend(syncConfig.issueTracker)
+				return {
+					effectiveCwd,
+					projectPath,
+					configuredBackend,
+					useLocalFirstPath: isLocalFirstIssueBackend(configuredBackend),
+					mutationSyncTarget: getSyncTargetForBackend(configuredBackend),
+					legacyIssueDbClient:
+						configuredBackend === "tracker"
+							? createBdIssueDbClient("tracker")
+							: configuredBackend === "legacy"
+								? createBrIssueDbClient("legacy")
+								: undefined,
+					linearIssueDbClient:
+						configuredBackend === "linear" ? _createLinearIssueDbClient({}) : undefined,
+					syncEnabled: syncConfig.syncEnabled,
+				}
+			})
+
 		const ensureLinearReadSync = (
-			cwd?: string,
+			runtime: IssueTrackerRuntime,
 			maxSyncWaitMs = DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS,
 		): Effect.Effect<LinearReadSyncAttempt, IssueTrackerError> =>
-			configuredBackend !== "linear"
+			runtime.configuredBackend !== "linear"
 				? Effect.succeed(DEFAULT_LINEAR_READ_SYNC_ATTEMPT)
 				: Effect.gen(function* () {
-						const projectPath = yield* resolveSyncProjectPath(cwd)
-						const backendSync = yield* backendSyncRouter.resolve()
-						if (backendSync === undefined) {
-							return DEFAULT_LINEAR_READ_SYNC_ATTEMPT
-						}
-
 						const readSyncEffect = fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSync.flushQueue(projectPath),
+							backendSyncLinear.flushQueue(runtime.projectPath),
 						).pipe(
 							Effect.catchAll((error) =>
 								Effect.logWarning(`Linear read sync failed: ${error.message}`).pipe(
@@ -2635,7 +2664,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						)
 						if (!completedWithinBudget) {
 							yield* Effect.log(
-								`Linear read sync timed out after ${maxSyncWaitMs}ms; returning local-first data (projectPath=${projectPath})`,
+								`Linear read sync timed out after ${maxSyncWaitMs}ms; returning local-first data (projectPath=${runtime.projectPath})`,
 							)
 							return {
 								completedWithinBudget: false,
@@ -2650,6 +2679,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					})
 
 		const runBd = (
+			runtime: IssueTrackerRuntime,
 			args: readonly string[],
 			runCwd?: string,
 		): Effect.Effect<
@@ -2657,40 +2687,45 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			IssueTrackerError | SyncRequiredError,
 			CommandExecutor.CommandExecutor
 		> =>
-			legacyIssueDbClient !== undefined
-				? legacyIssueDbClient.runJson(args, runCwd)
+			runtime.legacyIssueDbClient !== undefined
+				? runtime.legacyIssueDbClient.runJson(args, runCwd)
 				: Effect.fail(
 						new IssueTrackerError({
-							message: `Legacy command path is unavailable for ${configuredBackend} backend`,
+							message: `Legacy command path is unavailable for ${runtime.configuredBackend} backend`,
 							command: `legacy ${args.join(" ")}`,
 						}),
 					)
 
 		const runBdDirect = (
+			runtime: IssueTrackerRuntime,
 			args: readonly string[],
 			runCwd?: string,
 		): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
-			legacyIssueDbClient !== undefined
-				? legacyIssueDbClient.runDirect(args, runCwd)
+			runtime.legacyIssueDbClient !== undefined
+				? runtime.legacyIssueDbClient.runDirect(args, runCwd)
 				: Effect.fail(
 						new IssueTrackerError({
-							message: `Legacy command path is unavailable for ${configuredBackend} backend`,
+							message: `Legacy command path is unavailable for ${runtime.configuredBackend} backend`,
 							command: `legacy ${args.join(" ")}`,
 						}),
 					)
 
-		const parseSyncResult = (output: string): Effect.Effect<SyncResult, ParseError> =>
-			legacyIssueDbClient !== undefined
-				? legacyIssueDbClient.parseSyncResult(output)
+		const parseSyncResult = (
+			runtime: IssueTrackerRuntime,
+			output: string,
+		): Effect.Effect<SyncResult, ParseError> =>
+			runtime.legacyIssueDbClient !== undefined
+				? runtime.legacyIssueDbClient.parseSyncResult(output)
 				: Effect.succeed(ZERO_SYNC_RESULT)
 
 		const runLinearReadFallback = (
+			runtime: IssueTrackerRuntime,
 			args: readonly string[],
 			runCwd?: string,
 		): Effect.Effect<readonly Issue[], never, CommandExecutor.CommandExecutor> =>
-			linearIssueDbClient === undefined
+			runtime.linearIssueDbClient === undefined
 				? Effect.succeed(EMPTY_ISSUES)
-				: linearIssueDbClient.runJson(args, runCwd).pipe(
+				: runtime.linearIssueDbClient.runJson(args, runCwd).pipe(
 						Effect.flatMap((output) => parseJson(Schema.Array(IssueSchema), output)),
 						Effect.map((parsed) => normalizeIssues(parsed)),
 						Effect.map((issues) => issues.filter((issue) => issue.status !== "tombstone")),
@@ -2702,23 +2737,24 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					)
 
 		const backfillLinearFallbackIssues = (
+			runtime: IssueTrackerRuntime,
 			issues: readonly Issue[],
 			runCwd?: string,
 		): Effect.Effect<void, never, CommandExecutor.CommandExecutor> => {
-			if (configuredBackend !== "linear" || mutationSyncTarget !== "linear") {
+			if (runtime.configuredBackend !== "linear" || runtime.mutationSyncTarget !== "linear") {
 				return Effect.void
 			}
 			if (issues.length === 0) {
 				return Effect.void
 			}
-			if (linearIssueDbClient?.resolveExternalRefsByIdentifier === undefined) {
+			if (runtime.linearIssueDbClient?.resolveExternalRefsByIdentifier === undefined) {
 				return Effect.logWarning(
 					"Linear fallback local-store backfill skipped: external ref resolver unavailable",
 				).pipe(Effect.asVoid)
 			}
 
 			const identifiers = issues.map((issue) => issue.id)
-			return linearIssueDbClient.resolveExternalRefsByIdentifier(identifiers).pipe(
+			return runtime.linearIssueDbClient.resolveExternalRefsByIdentifier(identifiers).pipe(
 				Effect.flatMap((externalRefsByIdentifier) => {
 					const snapshots = buildLinearFallbackSnapshots(issues, externalRefsByIdentifier)
 					if (snapshots.length === 0) {
@@ -2738,6 +2774,23 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				),
 			)
 		}
+
+		const getIssueTrackerSyncStatus = (
+			runtime: IssueTrackerRuntime,
+		): Effect.Effect<IssueTrackerSyncStatus> =>
+			Effect.gen(function* () {
+				const online = yield* networkService.getIsOnline()
+				if (runtime.syncEnabled && online) {
+					return { enabled: true }
+				}
+				if (!runtime.syncEnabled && !online) {
+					return { enabled: false, reason: "both" }
+				}
+				if (!runtime.syncEnabled) {
+					return { enabled: false, reason: "config" }
+				}
+				return { enabled: false, reason: "offline" }
+			})
 
 		const mergeIssuesByRequestedIds = (
 			requestedIds: readonly string[],
@@ -2767,9 +2820,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		return {
 			list: (filters?: IssueListFilters, cwd?: string, options?: IssueListOptions) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* ensureLinearReadSync(runtime)
 						const issues = yield* fromLocalStore(
 							"local-store list",
 							localIssueStore.list(filters, effectiveCwd, options),
@@ -2803,7 +2857,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					while (true) {
 						const args = buildListCommandArgs(currentLimit, filters, options, includeSortFlags)
-						const output = yield* runBd(args, effectiveCwd).pipe(
+						const output = yield* runBd(runtime, args, effectiveCwd).pipe(
 							Effect.catchAll((error) => {
 								if (
 									error._tag === "IssueTrackerError" &&
@@ -2813,7 +2867,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 									includeSortFlags = false
 									const fallbackArgs = buildListCommandArgs(currentLimit, filters, options, false)
 									return Effect.logWarning(error).pipe(
-										Effect.zipRight(runBd(fallbackArgs, effectiveCwd)),
+										Effect.zipRight(runBd(runtime, fallbackArgs, effectiveCwd)),
 									)
 								}
 
@@ -2855,12 +2909,13 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 			show: (id: string, cwd?: string, syncOptions?: IssueReadSyncOptions) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
 					const maxSyncWaitMs = Math.max(
 						0,
 						Math.floor(syncOptions?.maxSyncWaitMs ?? DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS),
 					)
-					if (useLocalFirstPath) {
+					if (runtime.useLocalFirstPath) {
 						const localIssue = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(id, effectiveCwd),
@@ -2873,8 +2928,8 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						// before returning not found. If refresh fails, still surface not found rather than
 						// leaking backend sync failures for missing issues.
 						let syncAttempt = DEFAULT_LINEAR_READ_SYNC_ATTEMPT
-						if (configuredBackend === "linear") {
-							syncAttempt = yield* ensureLinearReadSync(effectiveCwd, maxSyncWaitMs)
+						if (runtime.configuredBackend === "linear") {
+							syncAttempt = yield* ensureLinearReadSync(runtime, maxSyncWaitMs)
 						}
 
 						const refreshedIssue = yield* fromLocalStore(
@@ -2887,16 +2942,20 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 						if (
 							shouldUseLinearReadFallback({
-								backend: configuredBackend,
+								backend: runtime.configuredBackend,
 								requestedCount: 1,
 								localResultCount: 0,
 								syncPulledCount: syncAttempt.syncResult.pulled,
 							})
 						) {
-							const fallbackIssues = yield* runLinearReadFallback(["show", id], effectiveCwd)
+							const fallbackIssues = yield* runLinearReadFallback(
+								runtime,
+								["show", id],
+								effectiveCwd,
+							)
 							const fallbackIssue = fallbackIssues[0]
 							if (fallbackIssue !== undefined) {
-								yield* backfillLinearFallbackIssues([fallbackIssue], effectiveCwd)
+								yield* backfillLinearFallbackIssues(runtime, [fallbackIssue], effectiveCwd)
 								const backfilledIssue = yield* fromLocalStore(
 									"local-store show",
 									localIssueStore.show(id, effectiveCwd),
@@ -2911,7 +2970,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						return yield* Effect.fail(new NotFoundError({ issueId: id }))
 					}
 
-					const output = yield* runBd(["show", id], effectiveCwd)
+					const output = yield* runBd(runtime, ["show", id], effectiveCwd)
 
 					// tracker returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -2934,9 +2993,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				Effect.gen(function* () {
 					if (ids.length === 0) return []
 
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						const syncAttempt = yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						const syncAttempt = yield* ensureLinearReadSync(runtime)
 						const issues = yield* fromLocalStore(
 							"local-store showMultiple",
 							localIssueStore.showMultiple(ids, effectiveCwd),
@@ -2945,7 +3005,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 						if (
 							shouldUseLinearReadFallback({
-								backend: configuredBackend,
+								backend: runtime.configuredBackend,
 								requestedCount: ids.length,
 								localResultCount: localIssues.length,
 								syncPulledCount: syncAttempt.syncResult.pulled,
@@ -2956,9 +3016,9 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							if (missingIds.length > 0) {
 								const fallbackIssues = yield* collectLinearFallbackIssuesById(
 									missingIds,
-									(missingId) => runLinearReadFallback(["show", missingId], effectiveCwd),
+									(missingId) => runLinearReadFallback(runtime, ["show", missingId], effectiveCwd),
 								)
-								yield* backfillLinearFallbackIssues(fallbackIssues, effectiveCwd)
+								yield* backfillLinearFallbackIssues(runtime, fallbackIssues, effectiveCwd)
 								const backfilledLocalIssues = yield* fromLocalStore(
 									"local-store showMultiple",
 									localIssueStore.showMultiple(ids, effectiveCwd),
@@ -2971,7 +3031,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 
 					// tracker show accepts multiple IDs: tracker show id1 id2 id3 --json
-					const output = yield* runBd(["show", ...ids], effectiveCwd)
+					const output = yield* runBd(runtime, ["show", ...ids], effectiveCwd)
 
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
@@ -2999,11 +3059,12 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				cwd?: string,
 			) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
 						const updated = yield* fromLocalStore(
 							"local-store update",
-							localIssueStore.update(id, fields, mutationSyncTarget, effectiveCwd),
+							localIssueStore.update(id, fields, runtime.mutationSyncTarget, effectiveCwd),
 						)
 						if (!updated) {
 							return yield* Effect.fail(
@@ -3067,16 +3128,17 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						args.push("--parent", fields.parent)
 					}
 
-					yield* runBd(args, effectiveCwd)
+					yield* runBd(runtime, args, effectiveCwd)
 				}),
 
 			close: (id: string, reason?: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
 						const closed = yield* fromLocalStore(
 							"local-store close",
-							localIssueStore.close(id, mutationSyncTarget, effectiveCwd),
+							localIssueStore.close(id, runtime.mutationSyncTarget, effectiveCwd),
 						)
 						if (!closed) {
 							return yield* Effect.fail(
@@ -3095,53 +3157,46 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						args.push("--reason", reason)
 					}
 
-					yield* runBd(args, effectiveCwd)
+					yield* runBd(runtime, args, effectiveCwd)
 				}),
 
 			sync: (cwd?: string) =>
 				Effect.gen(function* () {
-					if (configuredBackend === "local") {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					if (runtime.configuredBackend === "local") {
 						yield* Effect.log(
 							"IssueTrackerClient.sync skipped: backend=local reason=local_only_backend",
 						)
 						return ZERO_SYNC_RESULT
 					}
 
-					// Check if tracker sync is enabled (config + network)
-					const syncStatus = yield* offlineService.isIssueTrackerSyncEnabled()
+					// Check if tracker sync is enabled for the target project (config + network)
+					const syncStatus = yield* getIssueTrackerSyncStatus(runtime)
 					if (!syncStatus.enabled) {
 						// Return empty result when offline - issues are tracked locally
 						yield* Effect.log(
-							`IssueTrackerClient.sync skipped: backend=${configuredBackend} reason=${syncStatus.reason}`,
+							`IssueTrackerClient.sync skipped: backend=${runtime.configuredBackend} projectPath=${runtime.projectPath} reason=${syncStatus.reason}`,
 						)
 						return ZERO_SYNC_RESULT
 					}
 
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (configuredBackend === "linear") {
-						const projectPath = yield* resolveSyncProjectPath(cwd)
-						const backendSync = yield* backendSyncRouter.resolve()
-						if (backendSync === undefined) {
-							yield* Effect.log(
-								`IssueTrackerClient.sync skipped: backend=linear projectPath=${projectPath} reason=no_backend_sync_service`,
-							)
-							return ZERO_SYNC_RESULT
-						}
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.configuredBackend === "linear") {
 						yield* Effect.log(
-							`IssueTrackerClient.sync linear flush start: projectPath=${projectPath}`,
+							`IssueTrackerClient.sync linear flush start: projectPath=${runtime.projectPath}`,
 						)
 						const syncResult = yield* fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSync.flushQueue(projectPath),
+							backendSyncLinear.flushQueue(runtime.projectPath),
 						)
 						yield* Effect.log(
-							`IssueTrackerClient.sync linear flush complete: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+							`IssueTrackerClient.sync linear flush complete: projectPath=${runtime.projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
 						)
 						return syncResult
 					}
 
-					const output = yield* runBd(["sync"], effectiveCwd)
-					return yield* parseSyncResult(output)
+					const output = yield* runBd(runtime, ["sync"], effectiveCwd)
+					return yield* parseSyncResult(runtime, output)
 				}),
 
 			/**
@@ -3151,22 +3206,24 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			 */
 			syncImportOnly: (cwd?: string) =>
 				Effect.gen(function* () {
-					if (useLocalFirstPath) {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					if (runtime.useLocalFirstPath) {
 						return ZERO_SYNC_RESULT
 					}
 
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					const output = yield* runBd(["sync", "--import-only"], effectiveCwd)
-					return yield* parseSyncResult(output)
+					const effectiveCwd = runtime.effectiveCwd
+					const output = yield* runBd(runtime, ["sync", "--import-only"], effectiveCwd)
+					return yield* parseSyncResult(runtime, output)
 				}),
 
 			recoverTombstones: (cwd?: string) =>
 				Effect.gen(function* () {
-					if (configuredBackend === "linear" || configuredBackend === "local") {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					if (runtime.configuredBackend === "linear" || runtime.configuredBackend === "local") {
 						return 0
 					}
 
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const effectiveCwd = runtime.effectiveCwd
 					// Run recovery script that fixes tombstoned issues from JSONL
 					// This is a workaround for tracker sync bug (see az-zby)
 					const scriptPath = effectiveCwd
@@ -3195,9 +3252,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 			ready: (cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* ensureLinearReadSync(runtime)
 						const issues = yield* fromLocalStore(
 							"local-store ready",
 							localIssueStore.ready(effectiveCwd),
@@ -3205,7 +3263,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						return [...issues]
 					}
 
-					const output = yield* runBd(["ready"], effectiveCwd)
+					const output = yield* runBd(runtime, ["ready"], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
 					// Filter out tombstone (deleted) issues
@@ -3214,9 +3272,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 			search: (query: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* ensureLinearReadSync(runtime)
 						const issues = yield* fromLocalStore(
 							"local-store search",
 							localIssueStore.search(query, effectiveCwd),
@@ -3224,7 +3283,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						return [...issues]
 					}
 
-					const output = yield* runBd(["search", query], effectiveCwd)
+					const output = yield* runBd(runtime, ["search", query], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
 					// Filter out tombstone (deleted) issues
@@ -3246,8 +3305,9 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				cwd?: string
 			}) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(params.cwd)
-					if (useLocalFirstPath) {
+					const runtime = yield* resolveIssueTrackerRuntime(params.cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
 						return yield* fromLocalStore(
 							"local-store create",
 							localIssueStore.create(
@@ -3264,7 +3324,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 									implementations: params.implementations,
 									parent: params.parent,
 								},
-								mutationSyncTarget,
+								runtime.mutationSyncTarget,
 								effectiveCwd,
 							),
 						)
@@ -3310,7 +3370,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						args.push("--parent", params.parent)
 					}
 
-					const output = yield* runBd(args, effectiveCwd)
+					const output = yield* runBd(runtime, args, effectiveCwd)
 
 					// tracker create returns a single issue object (not an array)
 					const parsed = yield* parseJson(IssueSchema, output)
@@ -3403,11 +3463,12 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 			delete: (id: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
 						const deleted = yield* fromLocalStore(
 							"local-store delete",
-							localIssueStore.delete(id, mutationSyncTarget, effectiveCwd),
+							localIssueStore.delete(id, runtime.mutationSyncTarget, effectiveCwd),
 						)
 						if (!deleted) {
 							return yield* Effect.fail(
@@ -3423,14 +3484,15 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					// Use runBdDirect because:
 					// 1. The daemon doesn't support the delete operation
 					// 2. --force is required to actually delete (not just preview)
-					yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
+					yield* runBdDirect(runtime, ["delete", id, "--force"], effectiveCwd)
 				}),
 
 			getEpicChildren: (epicId: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* ensureLinearReadSync(runtime)
 						const epic = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(epicId, effectiveCwd),
@@ -3446,7 +3508,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						return [...children]
 					}
 
-					const output = yield* runBd(["show", epicId], effectiveCwd)
+					const output = yield* runBd(runtime, ["show", epicId], effectiveCwd)
 
 					// tracker show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -3467,9 +3529,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 			getEpicWithChildren: (epicId: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* ensureLinearReadSync(runtime)
 						const epic = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(epicId, effectiveCwd),
@@ -3485,7 +3548,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						return { epic, children: [...children] }
 					}
 
-					const output = yield* runBd(["show", epicId], effectiveCwd)
+					const output = yield* runBd(runtime, ["show", epicId], effectiveCwd)
 
 					// tracker returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -3515,15 +3578,16 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				cwd?: string,
 			) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
 						yield* fromLocalStore(
 							"local-store addDependency",
 							localIssueStore.addDependency(
 								issueId,
 								dependsOnId,
 								type ?? "blocks",
-								mutationSyncTarget,
+								runtime.mutationSyncTarget,
 								effectiveCwd,
 							),
 						)
@@ -3536,14 +3600,15 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						args.push("--type", type)
 					}
 
-					yield* runBd(args, effectiveCwd)
+					yield* runBd(runtime, args, effectiveCwd)
 				}),
 
 			getParentEpic: (issueId: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					if (useLocalFirstPath) {
-						yield* ensureLinearReadSync(effectiveCwd)
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* ensureLinearReadSync(runtime)
 						const issue = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(issueId, effectiveCwd),
@@ -3558,7 +3623,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						)
 					}
 
-					const output = yield* runBd(["show", issueId], effectiveCwd)
+					const output = yield* runBd(runtime, ["show", issueId], effectiveCwd)
 
 					// tracker show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -3585,7 +3650,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 
 					// Fetch the full epic issue
-					const epicOutput = yield* runBd(["show", parentChildDep.id], effectiveCwd)
+					const epicOutput = yield* runBd(runtime, ["show", parentChildDep.id], effectiveCwd)
 					const epicParsed = yield* parseJson(Schema.Array(IssueSchema), epicOutput)
 					const epicNormalized = normalizeIssues(epicParsed)
 

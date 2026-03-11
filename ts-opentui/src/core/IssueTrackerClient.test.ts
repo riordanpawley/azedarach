@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test"
-import { Effect, Schema } from "effect"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type { CommandExecutor } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Layer, Schema } from "effect"
+import { AppConfigConfig } from "../config/AppConfig.js"
 import {
 	buildLinearFallbackSnapshots,
 	buildLinearIssuesListPageQuery,
@@ -8,6 +14,7 @@ import {
 	getLinearCommandPerfMetadata,
 	getSyncTargetForBackend,
 	type Issue,
+	IssueTrackerClient,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
 	resolveSyncProjectPathValue,
@@ -376,5 +383,81 @@ describe("collectLinearFallbackIssuesById", () => {
 
 		expect(calls).toEqual(["AZE-1", "AZE-2", "AZE-3"])
 		expect(issues.map((issue) => issue.id)).toEqual(["AZE-1", "AZE-3"])
+	})
+})
+
+describe("IssueTrackerClient mixed backend routing", () => {
+	const writeProjectConfig = async (
+		projectPath: string,
+		config: Record<string, unknown>,
+	): Promise<void> => {
+		const configDir = join(projectPath, ".azedarach")
+		await mkdir(configDir, { recursive: true })
+		await writeFile(join(configDir, "config.json"), `${JSON.stringify(config, null, 2)}\n`, "utf8")
+	}
+
+	it("resolves backend per call for mixed local and tracker projects", async () => {
+		const tempRoot = await mkdtemp(join(tmpdir(), "az-issue-tracker-client-mixed-"))
+		const localProjectPath = join(tempRoot, "local-project")
+		const trackerProjectPath = join(tempRoot, "tracker-project")
+
+		await writeProjectConfig(localProjectPath, {
+			$schema: 4,
+			issueTracker: {
+				local: {
+					syncEnabled: false,
+				},
+			},
+		})
+		await writeProjectConfig(trackerProjectPath, {
+			$schema: 4,
+			issueTracker: {
+				tracker: {
+					syncEnabled: true,
+				},
+			},
+		})
+		const recoveryScriptPath = join(trackerProjectPath, ".azedarach", "recover-tombstones.sh")
+		await writeFile(recoveryScriptPath, "#!/bin/sh\necho '=== Recovered 7 issues ==='\n", "utf8")
+		await chmod(recoveryScriptPath, 0o755)
+
+		const runWithIssueClient = <A, E>(params: {
+			readonly projectPath: string
+			readonly program: Effect.Effect<A, E, IssueTrackerClient | CommandExecutor.CommandExecutor>
+		}): Promise<A> =>
+			Effect.runPromise(
+				Effect.scoped(
+					params.program.pipe(
+						Effect.provide(
+							Layer.succeed(
+								AppConfigConfig,
+								AppConfigConfig.make({
+									configPath: null,
+									projectPath: params.projectPath,
+								}),
+							),
+						),
+						Effect.provide(IssueTrackerClient.Default),
+						Effect.provide(BunContext.layer),
+					),
+				),
+			)
+
+		try {
+			const result = await runWithIssueClient({
+				projectPath: localProjectPath,
+				program: Effect.gen(function* () {
+					const issueClient = yield* IssueTrackerClient
+					const localRecovered = yield* issueClient.recoverTombstones(localProjectPath)
+					const trackerRecovered = yield* issueClient.recoverTombstones(trackerProjectPath)
+					return { localRecovered, trackerRecovered }
+				}),
+			})
+
+			expect(result.localRecovered).toBe(0)
+			expect(result.trackerRecovered).toBe(7)
+		} finally {
+			await rm(tempRoot, { recursive: true, force: true })
+		}
 	})
 })
