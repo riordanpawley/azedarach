@@ -41,6 +41,11 @@ if (cliToolSetting === undefined) {
 	throw new Error("CLI tool setting definition is missing")
 }
 
+const getIssueTrackerKeys = (config: Parameters<typeof getVisibleSettings>[0]): readonly string[] =>
+	getVisibleSettings(config)
+		.filter((setting) => setting.group[0] === "Issue Tracker")
+		.map((setting) => setting.key)
+
 describe("SettingsService issue sync setting", () => {
 	it("treats missing issueTracker as disabled", () => {
 		expect(issueSyncSetting.getValue({})).toBe(false)
@@ -159,5 +164,40 @@ describe("SettingsService visibility gating", () => {
 		const keys = getVisibleSettings(withoutDefaults).map((setting) => setting.key)
 		expect(keys.includes("autoDraft")).toBe(false)
 		expect(keys.includes("autoMerge")).toBe(false)
+	})
+
+	it("keeps issue tracker settings contiguous for local backend", () => {
+		expect(
+			getIssueTrackerKeys({
+				issueTracker: {
+					local: {
+						syncEnabled: false,
+						backups: {
+							enabled: true,
+						},
+					},
+				},
+			}),
+		).toEqual([
+			"issueTrackerBackend",
+			"issueSyncEnabled",
+			"localBackupsEnabled",
+			"localBackupsIntervalMinutes",
+		])
+	})
+
+	it("keeps issue tracker settings contiguous for linear backend", () => {
+		expect(
+			getIssueTrackerKeys({
+				issueTracker: {
+					linear: {
+						syncEnabled: true,
+						webhooks: {
+							enabled: true,
+						},
+					},
+				},
+			}),
+		).toEqual(["issueTrackerBackend", "issueSyncEnabled", "linearWebhooksEnabled"])
 	})
 })
