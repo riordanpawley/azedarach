@@ -25,10 +25,12 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { BackendSyncLinear } from "../core/BackendSyncLinear.js"
 import {
 	type Issue,
 	IssueTrackerClient,
 	inferLinearIssueType,
+	resolveConfiguredIssueBackend,
 	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
 import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
@@ -272,6 +274,11 @@ export const shouldApplyLinearWebhookIssueEvent = (params: {
 	readonly eventConfigKey: string
 	readonly activeConfigKey: string | null
 }): boolean => params.activeConfigKey !== null && params.eventConfigKey === params.activeConfigKey
+
+export const shouldRunProjectSwitchLinearSync = (params: {
+	readonly backend: ReturnType<typeof resolveConfiguredIssueBackend>
+	readonly syncEnabled: boolean
+}): boolean => params.backend === "linear" && params.syncEnabled
 
 const linearWebhookReasonKey = (reason: string | undefined): string => {
 	const normalizedReason = normalizeLinearWebhookReason(reason)
@@ -660,6 +667,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	dependencies: [
 		SessionManager.Default,
 		IssueTrackerClient.Default,
+		BackendSyncLinear.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
 		ProjectService.Default,
@@ -675,6 +683,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* SessionManager
+		const backendSyncLinear = yield* BackendSyncLinear
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
@@ -1978,6 +1987,41 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* refreshSemaphore.withPermits(1)(refreshEffect)
 			})
 
+		const syncLinearProjectBeforeRefresh = (projectPath: string) =>
+			Effect.gen(function* () {
+				const syncConfigResult = yield* appConfig
+					.getIssueTrackerSyncConfigForProjectPath(projectPath)
+					.pipe(Effect.either)
+				if (syncConfigResult._tag === "Left") {
+					yield* Effect.logWarning(
+						`Project switch Linear sync config load failed for ${projectPath}: ${syncConfigResult.left.message}`,
+					)
+					return
+				}
+
+				if (
+					!shouldRunProjectSwitchLinearSync({
+						backend: resolveConfiguredIssueBackend(syncConfigResult.right.issueTracker),
+						syncEnabled: syncConfigResult.right.syncEnabled,
+					})
+				) {
+					return
+				}
+
+				yield* backendSyncLinear.flushQueue(projectPath).pipe(
+					Effect.tap((syncResult) =>
+						Effect.log(
+							`Project switch Linear sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+						),
+					),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Project switch Linear sync failed for projectPath=${projectPath}: ${String(error)}`,
+						).pipe(Effect.asVoid),
+					),
+				)
+			})
+
 		const requestRefresh = (options?: BoardRefreshOptions) =>
 			Effect.gen(function* () {
 				const existingFiber = yield* Ref.get(debounceFiberRef)
@@ -2866,6 +2910,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Fork the refresh into the service's scope - not a daemon fiber
 				yield* Effect.gen(function* () {
+					yield* syncLinearProjectBeforeRefresh(newProjectPath)
 					yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true }, newProjectPath)
 					yield* onRefreshComplete
 				}).pipe(

@@ -17,6 +17,7 @@ import {
 	resolveLinearSdkPollingFallbackToastMessage,
 	resolveRetainedTaskGitState,
 	shouldApplyLinearWebhookIssueEvent,
+	shouldRunProjectSwitchLinearSync,
 } from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
@@ -186,6 +187,32 @@ describe("shouldApplyLinearWebhookIssueEvent", () => {
 			shouldApplyLinearWebhookIssueEvent({
 				eventConfigKey: "backend=linear|projectPath=/tmp/project-a|team=CHE",
 				activeConfigKey: null,
+			}),
+		).toBe(false)
+	})
+})
+
+describe("shouldRunProjectSwitchLinearSync", () => {
+	it("runs an explicit SDK sync for linear projects with sync enabled", () => {
+		expect(
+			shouldRunProjectSwitchLinearSync({
+				backend: "linear",
+				syncEnabled: true,
+			}),
+		).toBe(true)
+	})
+
+	it("skips the explicit SDK sync for non-linear or sync-disabled projects", () => {
+		expect(
+			shouldRunProjectSwitchLinearSync({
+				backend: "linear",
+				syncEnabled: false,
+			}),
+		).toBe(false)
+		expect(
+			shouldRunProjectSwitchLinearSync({
+				backend: "local",
+				syncEnabled: true,
 			}),
 		).toBe(false)
 	})
