@@ -2908,6 +2908,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* clearBoard()
 				}
 
+				yield* applyLinearRefreshStrategy().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(
+							`Failed to reconfigure webhook strategy after project switch: ${formatRefreshFailureMessage(cause)}`,
+						).pipe(Effect.asVoid),
+					),
+				)
+
 				// Fork the refresh into the service's scope - not a daemon fiber
 				yield* Effect.gen(function* () {
 					yield* syncLinearProjectBeforeRefresh(newProjectPath)
