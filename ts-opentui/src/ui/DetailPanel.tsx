@@ -37,7 +37,7 @@ const ATTR_BOLD = 1
 /**
  * Status type for dependency visualization
  */
-type DependencyStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
+type DependencyStatus = "open" | "in_progress" | "blocked" | "closed" | "archived" | "tombstone"
 
 const resolveDependencyStatus = (status?: DependencyStatus): DependencyStatus => status ?? "open"
 
@@ -49,7 +49,7 @@ const resolveDependencyStatus = (status?: DependencyStatus): DependencyStatus =>
  */
 const getChildStatusIndicator = (child: { status?: DependencyStatus }): string => {
 	const status = resolveDependencyStatus(child.status)
-	if (status === "closed") return "✓"
+	if (status === "closed" || status === "archived") return "✓"
 	if (status === "open") return "○"
 	return "●"
 }
@@ -66,6 +66,7 @@ const getChildStatusColor = (status?: DependencyStatus): string => {
 		case "blocked":
 			return theme.red
 		case "closed":
+		case "archived":
 			return theme.green
 		default:
 			return theme.text

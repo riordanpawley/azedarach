@@ -8,6 +8,7 @@ import {
 	getLinearCommandPerfMetadata,
 	getSyncTargetForBackend,
 	type Issue,
+	isHiddenIssueStatus,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
 	resolveSyncProjectPathValue,
@@ -150,6 +151,18 @@ describe("buildLinearIssuesListPageQuery", () => {
 			first: 250,
 			after: "cursor-1",
 		})
+	})
+})
+
+describe("isHiddenIssueStatus", () => {
+	it("treats archived issues as hidden by default but allows explicit inclusion", () => {
+		expect(isHiddenIssueStatus("archived")).toBe(true)
+		expect(isHiddenIssueStatus("archived", { includeArchived: true })).toBe(false)
+	})
+
+	it("always hides tombstones and keeps board statuses visible", () => {
+		expect(isHiddenIssueStatus("tombstone")).toBe(true)
+		expect(isHiddenIssueStatus("closed")).toBe(false)
 	})
 })
 

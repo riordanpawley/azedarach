@@ -28,7 +28,7 @@ import {
 // Schema Definitions
 // ============================================================================
 
-export type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
+export type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "archived" | "tombstone"
 export type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
 export type DependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
 
@@ -139,6 +139,7 @@ export interface IssueListOptions {
 	readonly limit?: number
 	readonly pageSize?: number
 	readonly includeClosed?: boolean
+	readonly includeArchived?: boolean
 	readonly sortBy?: IssueListSortField
 	readonly sortDirection?: "asc" | "desc"
 }
@@ -164,6 +165,15 @@ export interface ImplementationRegistry {
 
 const DEFAULT_IMPLEMENTATION = "default"
 
+export const isHiddenIssueStatus = (
+	status: IssueStatus,
+	options?: { readonly includeArchived?: boolean },
+): boolean => {
+	if (status === "tombstone") return true
+	if (status === "archived") return !(options?.includeArchived ?? false)
+	return false
+}
+
 const normalizeIssueImplementations = (
 	implementations: readonly string[] | undefined,
 ): readonly string[] => {
@@ -186,6 +196,7 @@ const parseIssueStatus = (status: string | undefined): IssueStatus | undefined =
 		case "in_progress":
 		case "blocked":
 		case "closed":
+		case "archived":
 		case "tombstone":
 			return status
 		// legacy-native states: map into existing board model
@@ -369,6 +380,10 @@ const _LINEAR_DETAIL_FETCH_CHUNK_SIZE = 20
 const normalizeLinearStatus = (stateName: string | null | undefined): IssueStatus => {
 	if (!stateName) return "open"
 	const normalized = stateName.trim().toLowerCase()
+
+	if (normalized.includes("archiv")) {
+		return "archived"
+	}
 
 	if (
 		normalized.includes("done") ||
@@ -2100,6 +2115,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					switch (targetStatus) {
 						case "closed":
+						case "archived":
 							return (findByType(["completed"]) ?? findByType(["canceled"]) ?? teamStates[0]).id
 						case "in_progress":
 							return (
@@ -2693,7 +2709,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				: linearIssueDbClient.runJson(args, runCwd).pipe(
 						Effect.flatMap((output) => parseJson(Schema.Array(IssueSchema), output)),
 						Effect.map((parsed) => normalizeIssues(parsed)),
-						Effect.map((issues) => issues.filter((issue) => issue.status !== "tombstone")),
+						Effect.map((issues) => issues.filter((issue) => !isHiddenIssueStatus(issue.status))),
 						Effect.catchAll((error) =>
 							Effect.logWarning(
 								`Linear direct read fallback failed for '${args.join(" ")}': ${String(error)}`,
@@ -2798,6 +2814,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					let currentLimit = targetLimit !== undefined ? Math.min(targetLimit, pageSize) : pageSize
 					let previousIssueCount = -1
 					let includeSortFlags = true
+					const includeArchived = options?.includeArchived ?? false
 					const sortBy = options?.sortBy ?? "updated_at"
 					const sortDirection = options?.sortDirection ?? "desc"
 
@@ -2824,8 +2841,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						)
 						const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 						const normalized = normalizeIssues(parsed)
-						const withoutTombstones = normalized.filter((issue) => issue.status !== "tombstone")
-						const sorted = sortIssuesInMemory(withoutTombstones, sortBy, sortDirection)
+						const withoutHiddenIssues = normalized.filter(
+							(issue) => !isHiddenIssueStatus(issue.status, { includeArchived }),
+						)
+						const sorted = sortIssuesInMemory(withoutHiddenIssues, sortBy, sortDirection)
 
 						if (targetLimit !== undefined && sorted.length >= targetLimit) {
 							return sorted.slice(0, targetLimit)
@@ -2865,7 +2884,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store show",
 							localIssueStore.show(id, effectiveCwd),
 						)
-						if (localIssue !== undefined && localIssue.status !== "tombstone") {
+						if (localIssue !== undefined && !isHiddenIssueStatus(localIssue.status)) {
 							return localIssue
 						}
 
@@ -2881,7 +2900,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store show",
 							localIssueStore.show(id, effectiveCwd),
 						)
-						if (refreshedIssue !== undefined && refreshedIssue.status !== "tombstone") {
+						if (refreshedIssue !== undefined && !isHiddenIssueStatus(refreshedIssue.status)) {
 							return refreshedIssue
 						}
 
@@ -2901,7 +2920,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 									"local-store show",
 									localIssueStore.show(id, effectiveCwd),
 								).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
-								if (backfilledIssue !== undefined && backfilledIssue.status !== "tombstone") {
+								if (backfilledIssue !== undefined && !isHiddenIssueStatus(backfilledIssue.status)) {
 									return backfilledIssue
 								}
 								return fallbackIssue
@@ -2922,8 +2941,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 
 					const issue = normalized[0]!
-					// Tombstone issues are effectively deleted
-					if (issue.status === "tombstone") {
+					if (isHiddenIssueStatus(issue.status)) {
 						return yield* Effect.fail(new NotFoundError({ issueId: id }))
 					}
 
@@ -2941,7 +2959,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store showMultiple",
 							localIssueStore.showMultiple(ids, effectiveCwd),
 						)
-						const localIssues = [...issues]
+						const localIssues = issues.filter((issue) => !isHiddenIssueStatus(issue.status))
 
 						if (
 							shouldUseLinearReadFallback({
@@ -2963,7 +2981,11 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 									"local-store showMultiple",
 									localIssueStore.showMultiple(ids, effectiveCwd),
 								).pipe(Effect.catchAll(() => Effect.succeed(localIssues)))
-								return mergeIssuesByRequestedIds(ids, backfilledLocalIssues, fallbackIssues)
+								return mergeIssuesByRequestedIds(
+									ids,
+									backfilledLocalIssues.filter((issue) => !isHiddenIssueStatus(issue.status)),
+									fallbackIssues,
+								)
 							}
 						}
 
@@ -2975,8 +2997,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
-					// Filter out tombstone (deleted) issues
-					return normalized.filter((issue) => issue.status !== "tombstone")
+					return normalized.filter((issue) => !isHiddenIssueStatus(issue.status))
 				}),
 
 			update: (
@@ -3208,8 +3229,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					const output = yield* runBd(["ready"], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
-					// Filter out tombstone (deleted) issues
-					return normalized.filter((issue) => issue.status !== "tombstone")
+					return normalized.filter((issue) => !isHiddenIssueStatus(issue.status))
 				}),
 
 			search: (query: string, cwd?: string) =>
@@ -3227,8 +3247,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					const output = yield* runBd(["search", query], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
-					// Filter out tombstone (deleted) issues
-					return normalized.filter((issue) => issue.status !== "tombstone")
+					return normalized.filter((issue) => !isHiddenIssueStatus(issue.status))
 				}),
 
 			create: (params: {
@@ -3435,7 +3454,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store show",
 							localIssueStore.show(epicId, effectiveCwd),
 						)
-						if (epic === undefined || epic.status === "tombstone") {
+						if (epic === undefined || isHiddenIssueStatus(epic.status)) {
 							return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 						}
 
@@ -3443,7 +3462,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store getEpicChildren",
 							localIssueStore.getEpicChildren(epicId, effectiveCwd),
 						)
-						return [...children]
+						return children.filter((child) => !isHiddenIssueStatus(child.status ?? "open"))
 					}
 
 					const output = yield* runBd(["show", epicId], effectiveCwd)
@@ -3460,7 +3479,11 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					// Filter dependents to only parent-child relationships
 					const children =
-						epic.dependents?.filter((dep) => dep.dependency_type === "parent-child") ?? []
+						epic.dependents?.filter(
+							(dep) =>
+								dep.dependency_type === "parent-child" &&
+								(dep.status === undefined || !isHiddenIssueStatus(dep.status)),
+						) ?? []
 
 					return children
 				}),
@@ -3474,7 +3497,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store show",
 							localIssueStore.show(epicId, effectiveCwd),
 						)
-						if (epic === undefined || epic.status === "tombstone") {
+						if (epic === undefined || isHiddenIssueStatus(epic.status)) {
 							return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 						}
 
@@ -3482,7 +3505,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store getEpicChildren",
 							localIssueStore.getEpicChildren(epicId, effectiveCwd),
 						)
-						return { epic, children: [...children] }
+						return {
+							epic,
+							children: children.filter((child) => !isHiddenIssueStatus(child.status ?? "open")),
+						}
 					}
 
 					const output = yield* runBd(["show", epicId], effectiveCwd)
@@ -3496,14 +3522,17 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 
 					const epic = normalized[0]!
-					// Tombstone issues are effectively deleted
-					if (epic.status === "tombstone") {
+					if (isHiddenIssueStatus(epic.status)) {
 						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 					}
 
 					// Filter dependents to only include parent-child relationships
 					const children =
-						epic.dependents?.filter((dep) => dep.dependency_type === "parent-child") ?? []
+						epic.dependents?.filter(
+							(dep) =>
+								dep.dependency_type === "parent-child" &&
+								(dep.status === undefined || !isHiddenIssueStatus(dep.status)),
+						) ?? []
 
 					return { epic, children }
 				}),
@@ -3548,7 +3577,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							"local-store show",
 							localIssueStore.show(issueId, effectiveCwd),
 						)
-						if (issue === undefined || issue.status === "tombstone") {
+						if (issue === undefined || isHiddenIssueStatus(issue.status)) {
 							return yield* Effect.fail(new NotFoundError({ issueId }))
 						}
 
@@ -3569,9 +3598,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 
 					const issue = normalized[0]!
-
-					// Tombstone issues are effectively deleted
-					if (issue.status === "tombstone") {
+					if (isHiddenIssueStatus(issue.status)) {
 						return yield* Effect.fail(new NotFoundError({ issueId }))
 					}
 
@@ -3591,7 +3618,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					if (
 						epicNormalized.length === 0 ||
-						epicNormalized[0]!.status === "tombstone" ||
+						isHiddenIssueStatus(epicNormalized[0]!.status) ||
 						epicNormalized[0]!.issue_type !== "epic"
 					) {
 						// Epic was deleted, treat as no parent

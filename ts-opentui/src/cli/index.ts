@@ -4109,7 +4109,7 @@ const readIssueBulkCreateInput = (inputPath: string) => readIssueBulkInput(input
 const readIssueBulkUpdateInput = (inputPath: string) => readIssueBulkInput(inputPath, "update")
 
 const isOpenChildForCloseGuard = (issue: TrackedIssue): boolean =>
-	issue.status !== "closed" && issue.status !== "tombstone"
+	issue.status !== "closed" && issue.status !== "archived" && issue.status !== "tombstone"
 
 const formatCloseGuardMessage = (
 	parentIssueId: string,

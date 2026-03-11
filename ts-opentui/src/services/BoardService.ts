@@ -29,6 +29,7 @@ import {
 	type Issue,
 	IssueTrackerClient,
 	inferLinearIssueType,
+	isHiddenIssueStatus,
 	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
 import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
@@ -172,9 +173,13 @@ const formatSessionRecoveryError = (error: SessionRecoveryError): string => {
 	}
 }
 
-const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
+export const normalizeLinearWebhookStatus = (stateName: string | undefined): Issue["status"] => {
 	if (!stateName) return "open"
 	const normalized = stateName.trim().toLowerCase()
+
+	if (normalized.includes("archiv")) {
+		return "archived"
+	}
 
 	if (
 		normalized.includes("done") ||
@@ -1245,6 +1250,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 										sortBy: "updated_at",
 										sortDirection: "desc",
 										includeClosed: true,
+										includeArchived: true,
 									})
 									.pipe(Effect.withSpan("tracker.list")),
 							),
@@ -1559,9 +1565,18 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						nowMs,
 					})
 				yield* Ref.set(localCreateGraceExpiriesRef, new Map(nextLocalCreateGraceExpiries))
+				const archivedTasks = mergedTasks.filter((task) => task.status === "archived")
+				if (archivedTasks.length > 0) {
+					yield* Effect.forEach(
+						archivedTasks.filter((task) => task.sessionState !== "idle"),
+						(task) => stopArchivedIssueSession(task.id),
+						{ concurrency: 4, discard: true },
+					)
+				}
+				const visibleTasks = mergedTasks.filter((task) => !isHiddenIssueStatus(task.status))
 
 				// Debug: count tasks with parentEpicId set
-				const tasksWithEpicParent = mergedTasks.filter((t) => t.parentEpicId !== undefined)
+				const tasksWithEpicParent = visibleTasks.filter((t) => t.parentEpicId !== undefined)
 				if (tasksWithEpicParent.length > 0) {
 					yield* Effect.logWarning(
 						`loadTasks: ${tasksWithEpicParent.length} tasks have parentEpicId (will be hidden on main board). Sample: ${JSON.stringify(tasksWithEpicParent.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })))}`,
@@ -1569,7 +1584,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 
 				// Debug: count by status
-				const statusCounts = mergedTasks.reduce(
+				const statusCounts = visibleTasks.reduce(
 					(acc, t) => {
 						acc[t.status] = (acc[t.status] || 0) + 1
 						return acc
@@ -1577,9 +1592,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					{} as Record<string, number>,
 				)
 				yield* Effect.log(
-					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${mergedTasks.length}, by status: ${JSON.stringify(statusCounts)}`,
+					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${visibleTasks.length}, hidden=${archivedTasks.length}, by status: ${JSON.stringify(statusCounts)}`,
 				)
-				return mergedTasks
+				return visibleTasks
 			})
 
 		const groupTasksByColumn = (
@@ -1633,6 +1648,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* updateFilteredTasks()
 				yield* saveCurrentToMap()
 			})
+
+		const stopArchivedIssueSession = (issueId: string) =>
+			sessionManager
+				.stop(issueId)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Failed to stop session for hidden issue ${issueId}: ${String(error)}`,
+						).pipe(Effect.asVoid),
+					),
+				)
 
 		const upsertTaskInMemory = (task: TaskWithSession) =>
 			Effect.gen(function* () {
@@ -2035,6 +2061,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const withRemoved = currentTasks.filter((task) => task.id !== issueId)
 
 				if (isRemoveAction(event.action)) {
+					if (existingTask?.sessionState !== "idle") {
+						yield* stopArchivedIssueSession(issueId)
+					}
 					yield* SubscriptionRef.set(tasks, withRemoved)
 					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(withRemoved))
 					yield* updateFilteredTasks()
@@ -2104,6 +2133,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							parentEpicId: nextParentEpicId,
 							sessionState: "idle",
 						}
+
+				if (isHiddenIssueStatus(updatedTask.status)) {
+					if (existingTask?.sessionState !== "idle") {
+						yield* stopArchivedIssueSession(issueId)
+					}
+					yield* SubscriptionRef.set(tasks, withRemoved)
+					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(withRemoved))
+					yield* updateFilteredTasks()
+					yield* saveCurrentToMap()
+					return
+				}
 
 				const nextTasks = [...withRemoved, updatedTask].sort(
 					(left, right) =>
