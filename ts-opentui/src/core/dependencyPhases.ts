@@ -68,9 +68,9 @@ export const computeDependencyPhases = (
 			.filter((dep) => {
 				if (dep.dependency_type !== "blocks") return false
 				if (!childIds.has(dep.id)) return false
-				// Skip blockers that are already resolved (work complete or archived away)
+				// Skip blockers that are already closed (work complete)
 				const blockerIssue = childDetails.get(dep.id)
-				return blockerIssue?.status !== "closed" && blockerIssue?.status !== "archived"
+				return blockerIssue?.status !== "closed"
 			})
 			.map((dep) => dep.id)
 

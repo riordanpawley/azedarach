@@ -46,7 +46,7 @@ const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
 const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 60_000
 
-type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "archived" | "tombstone"
+type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
 
 interface CollapsedSyncItem {
@@ -109,10 +109,6 @@ export class IssueSyncError extends Data.TaggedError("IssueSyncError")<{
 const normalizeLinearStatus = (stateName: string | undefined): IssueStatus => {
 	if (stateName === undefined) return "open"
 	const normalized = stateName.trim().toLowerCase()
-
-	if (normalized.includes("archiv")) {
-		return "archived"
-	}
 
 	if (
 		normalized.includes("done") ||
@@ -1047,7 +1043,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					teamStates.find((state) => state.name.toLowerCase().includes(needle))
 
 				const selected =
-					targetStatus === "closed" || targetStatus === "archived"
+					targetStatus === "closed"
 						? (findByType(["completed"]) ?? findByType(["canceled"]) ?? teamStates[0])
 						: targetStatus === "in_progress"
 							? (findByType(["started"]) ?? findByName("progress") ?? teamStates[0])

@@ -754,7 +754,6 @@ const normalizeIssueStatus = (status: string | undefined): IssueStatus => {
 		case "in_progress":
 		case "blocked":
 		case "closed":
-		case "archived":
 		case "tombstone":
 			return status
 		default:
@@ -2720,14 +2719,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					loadAllIssues(sql).pipe(
 						Effect.map((issues) => {
 							const includeClosed = options?.includeClosed ?? true
-							const includeArchived = options?.includeArchived ?? false
 							const pageSize = options?.pageSize ?? DEFAULT_PAGE_SIZE
 							const sortBy = options?.sortBy ?? "updated_at"
 							const sortDirection = options?.sortDirection ?? "desc"
 
 							const filtered = issues.filter((issue) => {
 								if (!includeClosed && issue.status === "closed") return false
-								if (!includeArchived && issue.status === "archived") return false
 								if (filters?.status && issue.status !== filters.status) return false
 								if (filters?.priority !== undefined && issue.priority !== filters.priority)
 									return false
@@ -3060,15 +3057,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 
 						const now = nowIso()
 						const nextStatus = fields.status === undefined ? existing.status : fields.status
-						const normalizedNextStatus = normalizeIssueStatus(nextStatus)
 						const nextClosedAt =
-							normalizedNextStatus === "closed"
+							normalizeIssueStatus(nextStatus) === "closed"
 								? (existing.closed_at ?? now)
-								: normalizedNextStatus === "archived"
+								: fields.status === undefined
 									? existing.closed_at
-									: fields.status === undefined
-										? existing.closed_at
-										: null
+									: null
 						const implementations = yield* resolveIssueImplementationsForWrite(
 							sql,
 							fields.implementations,
@@ -3082,7 +3076,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 									SET
 										title = ${fields.title ?? existing.title},
 										description = ${fields.description ?? existing.description},
-										status = ${normalizedNextStatus},
+										status = ${normalizeIssueStatus(nextStatus)},
 										priority = ${fields.priority ?? existing.priority},
 										issue_type = ${normalizeIssueType(fields.type ?? existing.issue_type)},
 										updated_at = ${now},
@@ -3438,11 +3432,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					loadAllIssues(sql).pipe(
 						Effect.map((issues) => {
 							const needle = query.trim().toLowerCase()
-							const visibleIssues = issues.filter(
-								(issue) => issue.status !== "archived" && issue.status !== "tombstone",
-							)
-							if (needle.length === 0) return visibleIssues
-							return visibleIssues.filter((issue) => {
+							if (needle.length === 0) return issues
+							return issues.filter((issue) => {
 								const haystack =
 									`${issue.id} ${issue.title} ${issue.description ?? ""}`.toLowerCase()
 								return haystack.includes(needle)

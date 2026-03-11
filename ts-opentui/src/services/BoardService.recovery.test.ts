@@ -9,7 +9,6 @@ import { TmuxError } from "../core/TmuxService.js"
 import {
 	applySessionRefreshPatch,
 	classifySessionRecoveryError,
-	normalizeLinearWebhookStatus,
 	reconcileLoadedTasksWithLocalCreateGrace,
 	resolveBoardRefreshExecutionMode,
 	resolveHasWorktreeFlag,
@@ -79,13 +78,6 @@ describe("resolveLinearSdkEventsTickerBehavior", () => {
 			localRefreshOnly: false,
 			defensiveReconciliationInterval: undefined,
 		})
-	})
-})
-
-describe("normalizeLinearWebhookStatus", () => {
-	it("maps archived workflow names to the hidden archived status", () => {
-		expect(normalizeLinearWebhookStatus("Archived")).toBe("archived")
-		expect(normalizeLinearWebhookStatus("  archived in backlog  ")).toBe("archived")
 	})
 })
 

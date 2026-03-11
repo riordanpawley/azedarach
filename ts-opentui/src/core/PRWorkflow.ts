@@ -2107,7 +2107,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									)
 
 								for (const child of children) {
-									if (child.status !== "closed" && child.status !== "archived") {
+									if (child.status !== "closed") {
 										yield* issueTrackerClient.update(child.id, { status: "closed" }).pipe(
 											Effect.tap(() =>
 												Effect.log(`Closed child task ${child.id} as part of epic merge`),
