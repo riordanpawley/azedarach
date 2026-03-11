@@ -1,9 +1,16 @@
-import { LinearWebhookClient } from "@linear/sdk/webhooks"
 import { describe, expect, it } from "bun:test"
 import * as crypto from "node:crypto"
-import { Option } from "effect"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type { CommandExecutor } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { LinearWebhookClient } from "@linear/sdk/webhooks"
+import { Effect, Layer, Option, SubscriptionRef } from "effect"
+import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import {
 	decodeLinearIssueWebhookEvent,
+	LinearWebhookService,
 	normalizePublicBaseUrl,
 	parseTailscaleDnsName,
 } from "./LinearWebhookService.js"
@@ -37,6 +44,65 @@ const issueWebhookPayload = {
 		url: "https://linear.app/example/issue/AZE-123",
 	},
 }
+
+const cliTransportConfig = `${JSON.stringify(
+	{
+		$schema: 4,
+		issueTracker: {
+			linear: {
+				syncEnabled: true,
+				webhooks: {
+					enabled: true,
+					transport: "cli",
+				},
+			},
+		},
+	},
+	null,
+	2,
+)}\n`
+
+const buildLinearWebhookServiceTestLayer = (params: {
+	readonly projectPath: string
+	readonly configPath: string
+}) => {
+	const configOverrideLayer = Layer.succeed(
+		AppConfigConfig,
+		AppConfigConfig.make({
+			projectPath: params.projectPath,
+			configPath: params.configPath,
+		}),
+	)
+	const baseLayer = Layer.merge(BunContext.layer, configOverrideLayer)
+	const appConfigLayer = Layer.provide(AppConfig.Default, baseLayer)
+	const webhookLayer = Layer.provide(
+		LinearWebhookService.Default,
+		Layer.merge(baseLayer, appConfigLayer),
+	)
+	return Layer.merge(baseLayer, Layer.merge(appConfigLayer, webhookLayer))
+}
+
+const runWithLinearWebhookService = <A, E>(params: {
+	readonly projectPath: string
+	readonly configPath: string
+	readonly program: Effect.Effect<
+		A,
+		E,
+		AppConfig | LinearWebhookService | CommandExecutor.CommandExecutor
+	>
+}): Promise<A> =>
+	Effect.runPromise(
+		Effect.scoped(
+			params.program.pipe(
+				Effect.provide(
+					buildLinearWebhookServiceTestLayer({
+						projectPath: params.projectPath,
+						configPath: params.configPath,
+					}),
+				),
+			),
+		),
+	)
 
 describe("decodeLinearIssueWebhookEvent", () => {
 	it("decodes Issue payloads", () => {
@@ -132,5 +198,40 @@ describe("Linear webhook URL resolution helpers", () => {
 				),
 			),
 		).toBe(true)
+	})
+})
+
+describe("LinearWebhookService reconfiguration", () => {
+	it("reloads from default local mode into configured linear webhook mode", async () => {
+		const projectPath = await mkdtemp(join(tmpdir(), "az-linear-webhook-reload-"))
+		const configDir = join(projectPath, ".azedarach")
+		const configPath = join(configDir, "config.json")
+
+		try {
+			await runWithLinearWebhookService({
+				projectPath,
+				configPath,
+				program: Effect.gen(function* () {
+					const appConfig = yield* AppConfig
+					const webhookService = yield* LinearWebhookService
+					const initialStatus = yield* SubscriptionRef.get(webhookService.status)
+					expect(initialStatus.mode).toBe("disabled")
+					expect(initialStatus.reason).toBe("Linear backend not active")
+
+					yield* Effect.tryPromise(() => mkdir(configDir, { recursive: true }))
+					yield* Effect.tryPromise(() => writeFile(configPath, cliTransportConfig, "utf8"))
+
+					yield* appConfig.reload()
+					yield* webhookService.reconfigure()
+
+					const reconfiguredStatus = yield* SubscriptionRef.get(webhookService.status)
+					expect(reconfiguredStatus.mode).toBe("cli")
+					expect(reconfiguredStatus.healthy).toBe(false)
+					expect(reconfiguredStatus.reason).toBe("CLI webhook transport selected")
+				}),
+			})
+		} finally {
+			await rm(projectPath, { recursive: true, force: true })
+		}
 	})
 })
