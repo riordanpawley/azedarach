@@ -5,14 +5,15 @@
  * webhook at startup, and emits typed Issue webhook events for consumers.
  */
 
-import { Command } from "@effect/platform"
+import { Command, type CommandExecutor } from "@effect/platform"
 import {
 	LINEAR_WEBHOOK_SIGNATURE_HEADER,
 	LINEAR_WEBHOOK_TS_HEADER,
 	LinearWebhookClient,
 } from "@linear/sdk/webhooks"
-import { Config, Data, Effect, Option, Queue, Schema, Stream, SubscriptionRef } from "effect"
+import { Config, Data, Effect, Option, Queue, Ref, Schema, Stream, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import type { ResolvedConfig } from "../config/defaults.js"
 import { LinearSdk } from "../core/LinearSdk.js"
 
 const WEBHOOK_PATH = "/linear/webhook"
@@ -111,6 +112,7 @@ export interface LinearWebhookServiceApi {
 	readonly healthy: SubscriptionRef.SubscriptionRef<boolean>
 	readonly mode: SubscriptionRef.SubscriptionRef<LinearWebhookMode>
 	readonly status: SubscriptionRef.SubscriptionRef<LinearWebhookRuntimeStatus>
+	readonly reconfigure: () => Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 }
 
 const parseWebhookUrl = (publicBaseUrl: string): string => {
@@ -237,6 +239,69 @@ interface ResolvedSdkWebhookRuntimeConfig {
 	readonly webhookSecretSource: "config" | "generated"
 }
 
+type ResolvedLinearConfig = Extract<
+	ResolvedConfig["issueTracker"],
+	{ readonly linear: unknown }
+>["linear"]
+
+interface ActiveLinearWebhookRuntime {
+	readonly configKey: string
+	readonly cleanup: Effect.Effect<void, never>
+}
+
+const formatWebhookConfigSummary = (config: ResolvedConfig): string => {
+	if (!("linear" in config.issueTracker)) {
+		if ("tracker" in config.issueTracker) return "backend=tracker"
+		if ("legacy" in config.issueTracker) return "backend=legacy"
+		return "backend=local"
+	}
+
+	const linearConfig = config.issueTracker.linear
+	const webhookConfig = linearConfig.webhooks
+	const configuredPort =
+		Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
+			? webhookConfig.port
+			: DEFAULT_WEBHOOK_PORT
+	return [
+		"backend=linear",
+		`enabled=${String(webhookConfig.enabled)}`,
+		`transport=${webhookConfig.transport}`,
+		`team=${normalizeNonEmpty(linearConfig.team) ?? "<auto>"}`,
+		`configuredUrl=${normalizePublicBaseUrl(webhookConfig.url) ?? "<unset>"}`,
+		`envUrl=${normalizePublicBaseUrl(process.env[WEBHOOK_PUBLIC_URL_ENV]) ?? "<unset>"}`,
+		`port=${configuredPort}`,
+		`events=${normalizeWebhookEvents(webhookConfig.events).join(",")}`,
+		`secret=${normalizeNonEmpty(webhookConfig.secret) === undefined ? "generated" : "config"}`,
+	].join(" ")
+}
+
+const buildWebhookRuntimeConfigKey = (config: ResolvedConfig): string => {
+	if (!("linear" in config.issueTracker)) {
+		if ("tracker" in config.issueTracker) return "backend=tracker"
+		if ("legacy" in config.issueTracker) return "backend=legacy"
+		return "backend=local"
+	}
+
+	const linearConfig = config.issueTracker.linear
+	const webhookConfig = linearConfig.webhooks
+	const configuredPort =
+		Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
+			? webhookConfig.port
+			: DEFAULT_WEBHOOK_PORT
+	return [
+		"backend=linear",
+		`enabled=${String(webhookConfig.enabled)}`,
+		`transport=${webhookConfig.transport}`,
+		`team=${normalizeNonEmpty(linearConfig.team) ?? ""}`,
+		`configuredUrl=${normalizePublicBaseUrl(webhookConfig.url) ?? ""}`,
+		`envUrl=${normalizePublicBaseUrl(process.env[WEBHOOK_PUBLIC_URL_ENV]) ?? ""}`,
+		`port=${configuredPort}`,
+		`events=${normalizeWebhookEvents(webhookConfig.events).join(",")}`,
+		`secret=${normalizeNonEmpty(webhookConfig.secret) === undefined ? "generated" : "config"}`,
+		`apiKeyPresent=${String(normalizeNonEmpty(process.env.LINEAR_API_KEY) !== undefined)}`,
+	].join("|")
+}
+
 export class LinearWebhookService extends Effect.Service<LinearWebhookService>()(
 	"LinearWebhookService",
 	{
@@ -251,8 +316,10 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const status = yield* SubscriptionRef.make<LinearWebhookRuntimeStatus>({
 				mode: "disabled",
 				healthy: false,
-				reason: undefined,
+				reason: "Linear webhook runtime not configured yet",
 			})
+			const activeRuntimeRef = yield* Ref.make<ActiveLinearWebhookRuntime | null>(null)
+			const appliedConfigKeyRef = yield* Ref.make<string | null>(null)
 			const setRuntimeStatus = (nextStatus: LinearWebhookRuntimeStatus) =>
 				Effect.gen(function* () {
 					yield* SubscriptionRef.set(mode, nextStatus.mode)
@@ -260,56 +327,23 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					yield* SubscriptionRef.set(status, nextStatus)
 				})
 
-			const config = yield* SubscriptionRef.get(appConfig.config)
-			if (!("linear" in config.issueTracker)) {
-				return {
-					issueEvents: Stream.fromQueue(issueEventsQueue),
-					healthy,
-					mode,
-					status,
-				} satisfies LinearWebhookServiceApi
-			}
+			const stopActiveRuntime = (reason: string): Effect.Effect<void, never> =>
+				Effect.gen(function* () {
+					const activeRuntime = yield* Ref.get(activeRuntimeRef)
+					if (activeRuntime === null) {
+						return
+					}
 
-			const linearConfig = config.issueTracker.linear
-			const webhookConfig = linearConfig.webhooks
-			const transport = webhookConfig.transport
-			yield* Effect.logDebug(
-				`LinearWebhookService: init backend=linear enabled=${String(webhookConfig.enabled)} transport=${transport}`,
-			)
-			if (webhookConfig.enabled === false) {
-				yield* setRuntimeStatus({
-					mode: "disabled",
-					healthy: false,
-					reason: "Linear webhooks disabled in config",
+					yield* Ref.set(activeRuntimeRef, null)
+					yield* Effect.logInfo(
+						`LinearWebhookService: stopping SDK runtime (${reason}) configKey=${activeRuntime.configKey}`,
+					)
+					yield* activeRuntime.cleanup
 				})
-				yield* Effect.logDebug("LinearWebhookService: disabled in config")
-				return {
-					issueEvents: Stream.fromQueue(issueEventsQueue),
-					healthy,
-					mode,
-					status,
-				} satisfies LinearWebhookServiceApi
-			}
 
-			if (transport === "cli") {
-				yield* setRuntimeStatus({
-					mode: "cli",
-					healthy: false,
-					reason: "CLI webhook transport selected",
-				})
-				yield* Effect.logDebug("LinearWebhookService: CLI transport selected; SDK runtime skipped")
-				return {
-					issueEvents: Stream.fromQueue(issueEventsQueue),
-					healthy,
-					mode,
-					status,
-				} satisfies LinearWebhookServiceApi
-			}
-
-			const resolveWebhookTeamRef = (): Effect.Effect<
-				ResolvedWebhookTeamRef,
-				LinearWebhookRuntimeError
-			> =>
+			const resolveWebhookTeamRef = (
+				linearConfig: ResolvedLinearConfig,
+			): Effect.Effect<ResolvedWebhookTeamRef, LinearWebhookRuntimeError> =>
 				Effect.gen(function* () {
 					const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
 					if (configuredTeamRef !== undefined) {
@@ -362,7 +396,10 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					)
 				})
 
-			const resolveWebhookPublicUrl = (port: number) =>
+			const resolveWebhookPublicUrl = (
+				webhookConfig: ResolvedLinearConfig["webhooks"],
+				port: number,
+			) =>
 				Effect.gen(function* () {
 					const configuredPublicBaseUrl = normalizePublicBaseUrl(webhookConfig.url)
 					if (configuredPublicBaseUrl !== undefined) {
@@ -398,19 +435,20 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 					const tailscalePublicBaseUrlResult = yield* tryResolveTailscaleFunnelPublicUrl(port).pipe(
 						Effect.timeout(`${TAILSCALE_RESOLUTION_TIMEOUT_MS} millis`),
+						Effect.catchTag("TimeoutException", () => Effect.succeed(undefined)),
 					)
 					if (tailscalePublicBaseUrlResult === undefined) {
 						yield* Effect.logDebug(
 							`LinearWebhookService: tailscale URL resolution timed out after ${TAILSCALE_RESOLUTION_TIMEOUT_MS}ms`,
 						)
 					}
-					const tailscalePublicBaseUrl = tailscalePublicBaseUrlResult
-					if (tailscalePublicBaseUrl !== undefined) {
+
+					if (tailscalePublicBaseUrlResult !== undefined) {
 						yield* Effect.logDebug(
-							`LinearWebhookService: using tailscale funnel URL ${tailscalePublicBaseUrl}`,
+							`LinearWebhookService: using tailscale funnel URL ${tailscalePublicBaseUrlResult}`,
 						)
 						return {
-							publicBaseUrl: tailscalePublicBaseUrl,
+							publicBaseUrl: tailscalePublicBaseUrlResult,
 							source: "tailscale-funnel",
 						} satisfies ResolvedWebhookPublicUrl
 					}
@@ -422,15 +460,16 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					)
 				})
 
-			const runtimeConfigResult = yield* Effect.either(
+			const buildRuntimeConfig = (linearConfig: ResolvedLinearConfig) =>
 				Effect.gen(function* () {
+					const webhookConfig = linearConfig.webhooks
 					const port =
 						Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
 							? webhookConfig.port
 							: DEFAULT_WEBHOOK_PORT
 					const eventTypes = normalizeWebhookEvents(webhookConfig.events)
-					const team = yield* resolveWebhookTeamRef()
-					const webhookPublicUrl = yield* resolveWebhookPublicUrl(port)
+					const team = yield* resolveWebhookTeamRef(linearConfig)
+					const webhookPublicUrl = yield* resolveWebhookPublicUrl(webhookConfig, port)
 					const configuredSecret = normalizeNonEmpty(webhookConfig.secret)
 					const webhookSecretSource: "config" | "generated" =
 						configuredSecret !== undefined ? "config" : "generated"
@@ -446,28 +485,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						webhookSecret,
 						webhookSecretSource,
 					} satisfies ResolvedSdkWebhookRuntimeConfig
-				}),
-			)
-			if (runtimeConfigResult._tag === "Left") {
-				yield* setRuntimeStatus({
-					mode: "misconfigured",
-					healthy: false,
-					reason: runtimeConfigResult.left.message,
 				})
-				yield* Effect.logDebug(
-					"LinearWebhookService: runtime config resolution failed; entering misconfigured mode",
-				)
-				yield* Effect.logWarning(`${runtimeConfigResult.left.message}; falling back to polling`)
-				return {
-					issueEvents: Stream.fromQueue(issueEventsQueue),
-					healthy,
-					mode,
-					status,
-				} satisfies LinearWebhookServiceApi
-			}
-
-			const runtimeConfig = runtimeConfigResult.right
-			const webhookClient = new LinearWebhookClient(runtimeConfig.webhookSecret)
 
 			const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
 				failOnTimeout({
@@ -480,137 +498,275 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						}),
 				})
 
-			const startSdkWebhookRuntime = Effect.gen(function* () {
-				yield* Effect.logDebug(
-					`LinearWebhookService: starting SDK runtime (teamRef=${runtimeConfig.teamRef}, port=${runtimeConfig.port}, urlSource=${runtimeConfig.publicUrlSource})`,
-				)
-				const teamId = yield* resolveTeamId(runtimeConfig.teamRef)
-				const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
-				const eventTypes = runtimeConfig.eventTypes
-				const port = runtimeConfig.port
-
-				const webhookIdRef = yield* Effect.sync((): { id: string | undefined } => ({
-					id: undefined,
-				}))
-				const server = Bun.serve({
-					port,
-					fetch: async (request: Request): Promise<Response> => {
-						const requestUrl = new URL(request.url)
-						if (request.method !== "POST") {
-							return new Response("Method not allowed", { status: 405 })
-						}
-						if (requestUrl.pathname !== WEBHOOK_PATH) {
-							return new Response("Not found", { status: 404 })
-						}
-
-						const signature = request.headers.get(LINEAR_WEBHOOK_SIGNATURE_HEADER)
-						if (!signature) {
-							return new Response("Missing webhook signature", { status: 400 })
-						}
-
-						const rawBody = Buffer.from(await request.arrayBuffer())
-						const timestamp = request.headers.get(LINEAR_WEBHOOK_TS_HEADER) ?? undefined
-						try {
-							const payload = webhookClient.parseData(rawBody, signature, timestamp)
-							const decoded = decodeLinearIssueWebhookEvent(payload)
-							if (Option.isSome(decoded)) {
-								Queue.unsafeOffer(issueEventsQueue, decoded.value)
-								Effect.runFork(SubscriptionRef.set(healthy, true))
-							}
-							return new Response("OK", { status: 200 })
-						} catch (error) {
-							void error
-							return new Response("Invalid webhook", { status: 400 })
-						}
-					},
-				})
-
-				yield* Effect.addFinalizer(() =>
-					Effect.gen(function* () {
-						yield* Effect.sync(() => {
-							server.stop(true)
+			const startSdkWebhookRuntime = (params: {
+				readonly configKey: string
+				readonly linearConfig: ResolvedLinearConfig
+			}) =>
+				Effect.gen(function* () {
+					const runtimeConfigResult = yield* Effect.either(buildRuntimeConfig(params.linearConfig))
+					if (runtimeConfigResult._tag === "Left") {
+						yield* setRuntimeStatus({
+							mode: "misconfigured",
+							healthy: false,
+							reason: runtimeConfigResult.left.message,
 						})
-						const webhookId = webhookIdRef.id
-						if (!webhookId) return
-						yield* linearSdk.deleteWebhook(webhookId).pipe(
-							Effect.mapError(
-								() =>
-									new LinearWebhookRuntimeError({
-										message: "delete-webhook-failed",
-									}),
-							),
-							Effect.catchAll((error) =>
-								Effect.logWarning(error).pipe(
-									Effect.zipRight(
-										Effect.logWarning(`Linear webhook cleanup failed for webhook id ${webhookId}`),
-									),
-								),
-							),
+						yield* Effect.logWarning(
+							`LinearWebhookService: runtime config invalid for configKey=${params.configKey}: ${runtimeConfigResult.left.message}; falling back to polling`,
 						)
-					}),
-				)
+						return
+					}
 
-				const registrationPayload = yield* failOnTimeout({
-					effect: linearSdk.createWebhook({
-						teamId,
-						url: webhookUrl,
-						resourceTypes: [...eventTypes],
-						secret: runtimeConfig.webhookSecret,
-						enabled: true,
-					}),
-					timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
-					timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
-					mapError: (error) =>
-						new LinearWebhookRuntimeError({
-							message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
-						}),
-				})
+					const runtimeConfig = runtimeConfigResult.right
+					const webhookClient = new LinearWebhookClient(runtimeConfig.webhookSecret)
+					const runtimeStartResult = yield* Effect.either(
+						Effect.gen(function* () {
+							yield* Effect.logInfo(
+								`LinearWebhookService: starting SDK runtime configKey=${params.configKey} team=${runtimeConfig.teamRef} port=${runtimeConfig.port} urlSource=${runtimeConfig.publicUrlSource}`,
+							)
+							const teamId = yield* resolveTeamId(runtimeConfig.teamRef)
+							const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
+							const port = runtimeConfig.port
+							const webhookIdRef: { id: string | undefined } = { id: undefined }
+							const server = yield* Effect.try({
+								try: () =>
+									Bun.serve({
+										port,
+										fetch: async (request: Request): Promise<Response> => {
+											const requestUrl = new URL(request.url)
+											if (request.method !== "POST") {
+												if (requestUrl.pathname === WEBHOOK_PATH) {
+													void Effect.runFork(
+														Effect.logInfo(
+															`LinearWebhookService: rejected ${request.method} ${requestUrl.pathname} with 405`,
+														),
+													)
+												}
+												return new Response("Method not allowed", { status: 405 })
+											}
+											if (requestUrl.pathname !== WEBHOOK_PATH) {
+												return new Response("Not found", { status: 404 })
+											}
 
-				const registeredWebhookId = registrationPayload.webhookId
-				if (registeredWebhookId) {
-					webhookIdRef.id = registeredWebhookId
-				}
+											const signature = request.headers.get(LINEAR_WEBHOOK_SIGNATURE_HEADER)
+											if (!signature) {
+												void Effect.runFork(
+													Effect.logWarning(
+														`LinearWebhookService: missing signature header for ${requestUrl.pathname}`,
+													),
+												)
+												return new Response("Missing webhook signature", { status: 400 })
+											}
 
-				yield* setRuntimeStatus({
-					mode: "sdk",
-					healthy: true,
-					reason: undefined,
-				})
-				yield* Effect.log(
-					`Linear SDK webhook runtime started on :${port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeConfig.webhookSecretSource})`,
-				)
-			})
+											const rawBody = Buffer.from(await request.arrayBuffer())
+											const timestamp = request.headers.get(LINEAR_WEBHOOK_TS_HEADER) ?? undefined
+											try {
+												const payload = webhookClient.parseData(rawBody, signature, timestamp)
+												const decoded = decodeLinearIssueWebhookEvent(payload)
+												if (Option.isSome(decoded)) {
+													Queue.unsafeOffer(issueEventsQueue, decoded.value)
+													void Effect.runFork(SubscriptionRef.set(healthy, true))
+													void Effect.runFork(
+														Effect.logInfo(
+															`LinearWebhookService: accepted issue webhook action=${decoded.value.action} identifier=${decoded.value.data.identifier}`,
+														),
+													)
+												} else {
+													void Effect.runFork(
+														Effect.logInfo(
+															"LinearWebhookService: ignored non-Issue webhook payload",
+														),
+													)
+												}
+												return new Response("OK", { status: 200 })
+											} catch (error) {
+												void Effect.runFork(
+													Effect.logWarning(
+														`LinearWebhookService: invalid webhook rejected: ${formatErrorMessage(error)}`,
+													),
+												)
+												return new Response("Invalid webhook", { status: 400 })
+											}
+										},
+									}),
+								catch: (error) =>
+									new LinearWebhookRuntimeError({
+										message: `Failed to start local webhook listener on :${port}: ${formatErrorMessage(error)}`,
+									}),
+							})
+							const cleanup = Effect.gen(function* () {
+								yield* Effect.try({
+									try: () => {
+										server.stop(true)
+									},
+									catch: (error) =>
+										new LinearWebhookRuntimeError({
+											message: `Failed to stop local webhook listener on :${port}: ${formatErrorMessage(error)}`,
+										}),
+								}).pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`LinearWebhookService: ${error.message}`).pipe(Effect.asVoid),
+									),
+								)
 
-			yield* startSdkWebhookRuntime.pipe(
-				Effect.timeout(`${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS} millis`),
-				Effect.flatMap((result) =>
-					result !== undefined
-						? Effect.void
-						: Effect.fail(
-								new LinearWebhookRuntimeError({
-									message: `Linear SDK webhook startup timed out after ${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS}ms`,
+								const webhookId = webhookIdRef.id
+								if (webhookId === undefined) {
+									return
+								}
+
+								yield* linearSdk
+									.deleteWebhook(webhookId)
+									.pipe(
+										Effect.catchAll((error) =>
+											Effect.logWarning(
+												`Linear webhook cleanup failed for webhook id ${webhookId}: ${error.message}`,
+											).pipe(Effect.asVoid),
+										),
+									)
+							})
+
+							const registrationResult = yield* Effect.either(
+								failOnTimeout({
+									effect: linearSdk.createWebhook({
+										teamId,
+										url: webhookUrl,
+										resourceTypes: [...runtimeConfig.eventTypes],
+										secret: runtimeConfig.webhookSecret,
+										enabled: true,
+									}),
+									timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+									timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+									mapError: (error) =>
+										new LinearWebhookRuntimeError({
+											message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
+										}),
 								}),
+							)
+							if (registrationResult._tag === "Left") {
+								yield* cleanup
+								return yield* Effect.fail(registrationResult.left)
+							}
+
+							if (registrationResult.right.webhookId !== undefined) {
+								webhookIdRef.id = registrationResult.right.webhookId
+							}
+
+							return {
+								webhookUrl,
+								cleanup,
+							}
+						}).pipe(
+							Effect.timeout(`${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS} millis`),
+							Effect.flatMap((result) =>
+								result !== undefined
+									? Effect.succeed(result)
+									: Effect.fail(
+											new LinearWebhookRuntimeError({
+												message: `Linear SDK webhook startup timed out after ${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS}ms`,
+											}),
+										),
 							),
-				),
-				Effect.catchAll((error) =>
-					Effect.gen(function* () {
+						),
+					)
+
+					if (runtimeStartResult._tag === "Left") {
+						const runtimeErrorMessage = formatErrorMessage(runtimeStartResult.left)
 						yield* setRuntimeStatus({
 							mode: "failed",
 							healthy: false,
-							reason: formatErrorMessage(error),
+							reason: runtimeErrorMessage,
 						})
 						yield* Effect.logWarning(
-							`Linear SDK webhook runtime failed: ${formatErrorMessage(error)}; falling back to polling`,
+							`Linear SDK webhook runtime failed for configKey=${params.configKey}: ${runtimeErrorMessage}; falling back to polling`,
 						)
-					}),
-				),
-			)
+						return
+					}
+
+					yield* Ref.set(activeRuntimeRef, {
+						configKey: params.configKey,
+						cleanup: runtimeStartResult.right.cleanup,
+					})
+					yield* setRuntimeStatus({
+						mode: "sdk",
+						healthy: true,
+						reason: undefined,
+					})
+					yield* Effect.logInfo(
+						`Linear SDK webhook runtime started on :${runtimeConfig.port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${runtimeStartResult.right.webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeConfig.webhookSecretSource}, configKey=${params.configKey})`,
+					)
+				})
+
+			const reconfigure = (): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const config = yield* SubscriptionRef.get(appConfig.config)
+					const nextConfigKey = buildWebhookRuntimeConfigKey(config)
+					const previousConfigKey = yield* Ref.get(appliedConfigKeyRef)
+					if (previousConfigKey === nextConfigKey) {
+						return
+					}
+
+					yield* Ref.set(appliedConfigKeyRef, nextConfigKey)
+					yield* Effect.logInfo(
+						`LinearWebhookService: applying config ${formatWebhookConfigSummary(config)} configKey=${nextConfigKey}`,
+					)
+					yield* stopActiveRuntime(
+						previousConfigKey === null
+							? "initial runtime configuration"
+							: `config changed from ${previousConfigKey}`,
+					)
+
+					if (!("linear" in config.issueTracker)) {
+						yield* setRuntimeStatus({
+							mode: "disabled",
+							healthy: false,
+							reason: "Linear backend not active",
+						})
+						yield* Effect.logInfo(
+							"LinearWebhookService: backend is not linear; SDK runtime disabled",
+						)
+						return
+					}
+
+					const linearConfig = config.issueTracker.linear
+					const webhookConfig = linearConfig.webhooks
+					if (webhookConfig.enabled === false) {
+						yield* setRuntimeStatus({
+							mode: "disabled",
+							healthy: false,
+							reason: "Linear webhooks disabled in config",
+						})
+						yield* Effect.logInfo(
+							"LinearWebhookService: webhooks disabled in config; SDK runtime skipped",
+						)
+						return
+					}
+
+					if (webhookConfig.transport === "cli") {
+						yield* setRuntimeStatus({
+							mode: "cli",
+							healthy: false,
+							reason: "CLI webhook transport selected",
+						})
+						yield* Effect.logInfo(
+							"LinearWebhookService: CLI transport selected; SDK runtime skipped",
+						)
+						return
+					}
+
+					yield* startSdkWebhookRuntime({
+						configKey: nextConfigKey,
+						linearConfig,
+					})
+				})
+
+			yield* Effect.addFinalizer(() => stopActiveRuntime("service shutdown"))
+			yield* reconfigure()
 
 			return {
 				issueEvents: Stream.fromQueue(issueEventsQueue),
 				healthy,
 				mode,
 				status,
+				reconfigure,
 			} satisfies LinearWebhookServiceApi
 		}),
 	},

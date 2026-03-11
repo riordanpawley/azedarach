@@ -2438,6 +2438,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const buildLinearRefreshStrategyPlan = () =>
 			Effect.gen(function* () {
 				const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+				yield* linearWebhookService.reconfigure()
 				if (!("linear" in startupConfig.issueTracker)) {
 					return {
 						key: "non-linear:background-polling",
