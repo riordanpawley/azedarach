@@ -1280,6 +1280,49 @@ describe("spec requirements and links", () => {
 	})
 })
 
+describe("linear webhook runtime lease metadata", () => {
+	it("stores, reads, and clears the runtime lease in sqlite meta", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-webhook-lease-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					yield* store.setLinearWebhookRuntimeLease(
+						{
+							webhookId: "wh_123",
+							webhookUrl: "https://example.ts.net/linear/webhook",
+							teamId: "team_123",
+							resourceTypes: ["Issue"],
+							webhookSecret: "whsec_123",
+						},
+						projectPath,
+					)
+					const saved = yield* store.getLinearWebhookRuntimeLease(projectPath)
+					yield* store.clearLinearWebhookRuntimeLease(projectPath)
+					const cleared = yield* store.getLinearWebhookRuntimeLease(projectPath)
+					return {
+						saved,
+						cleared,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.saved).toEqual({
+				webhookId: "wh_123",
+				webhookUrl: "https://example.ts.net/linear/webhook",
+				teamId: "team_123",
+				resourceTypes: ["Issue"],
+				webhookSecret: "whsec_123",
+			})
+			expect(result.cleared).toBeUndefined()
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
 describe("getSyncQueueSummary", () => {
 	it("reports delayed and failed queue states for diagnostics", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-sync-summary-"))

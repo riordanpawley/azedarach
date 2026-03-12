@@ -156,6 +156,10 @@ type LinearUpdateDocumentInput = Parameters<LinearClient["updateDocument"]>[1]
 type LinearUpdateDocumentResult = Awaited<ReturnType<LinearClient["updateDocument"]>>
 type LinearCreateWebhookInput = Parameters<LinearClient["createWebhook"]>[0]
 type LinearCreateWebhookResult = Awaited<ReturnType<LinearClient["createWebhook"]>>
+type LinearWebhooksArgs = Parameters<LinearClient["webhooks"]>[0]
+type LinearWebhooksResult = Awaited<ReturnType<LinearClient["webhooks"]>>
+type LinearUpdateWebhookInput = Parameters<LinearClient["updateWebhook"]>[1]
+type LinearUpdateWebhookResult = Awaited<ReturnType<LinearClient["updateWebhook"]>>
 type LinearDeleteWebhookResult = Awaited<ReturnType<LinearClient["deleteWebhook"]>>
 type LinearTeamResult = Awaited<ReturnType<LinearClient["team"]>>
 type LinearTeamsResult = Awaited<ReturnType<LinearClient["teams"]>>
@@ -229,6 +233,15 @@ export interface LinearSdkApi {
 		input: LinearCreateWebhookInput,
 		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearCreateWebhookResult, LinearSdkError>
+	readonly webhooks: (
+		args: LinearWebhooksArgs,
+		options?: LinearSdkRequestOptions,
+	) => Effect.Effect<LinearWebhooksResult, LinearSdkError>
+	readonly updateWebhook: (
+		id: string,
+		input: LinearUpdateWebhookInput,
+		options?: LinearSdkRequestOptions,
+	) => Effect.Effect<LinearUpdateWebhookResult, LinearSdkError>
 	readonly deleteWebhook: (
 		id: string,
 		options?: LinearSdkRequestOptions,
@@ -451,6 +464,24 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				fallbackError: "Failed to create webhook in Linear",
 			})
 
+		const webhooks: LinearSdkApi["webhooks"] = (args, options) =>
+			runWithClient({
+				operation: "webhooks",
+				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
+				request: (client) => client.webhooks(args),
+				fallbackError: "Failed to fetch webhooks from Linear",
+			})
+
+		const updateWebhook: LinearSdkApi["updateWebhook"] = (id, input, options) =>
+			runWithClient({
+				operation: "updateWebhook",
+				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
+				request: (client) => client.updateWebhook(id, input),
+				fallbackError: `Failed to update webhook ${id} in Linear`,
+			})
+
 		const deleteWebhook: LinearSdkApi["deleteWebhook"] = (id, options) =>
 			runWithClient({
 				operation: "deleteWebhook",
@@ -629,6 +660,8 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			archiveIssue,
 			updateDocument,
 			createWebhook,
+			webhooks,
+			updateWebhook,
 			deleteWebhook,
 			resolveTeamId,
 			resolveProjectId,

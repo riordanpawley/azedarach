@@ -10,6 +10,7 @@ import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
+import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
 import { deriveCurrentProjectWaitingIssueIds } from "../lib/waitingSessions.js"
 import { ActionPalette } from "./ActionPalette.js"
 import { AICreatePrompt } from "./AICreatePrompt.js"
@@ -258,6 +259,7 @@ export const App = () => {
 	)
 
 	const workflowMode = useAtomValue(workflowModeAtom)
+	const tmuxCapabilities = useMemo(() => detectTmuxCapabilities(), [])
 	const appConfigResult = useAtomValue(appConfigAtom)
 	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
 
@@ -631,6 +633,7 @@ export const App = () => {
 					devServerPort={displayDevServer.port}
 					workflowMode={workflowMode}
 					drillDownEpicId={drillDownEpicId}
+					tmuxCapabilities={tmuxCapabilities}
 					compact={isSmallScreen(terminalColumns)}
 					onActionSelect={(keySeq) => {
 						void handleKey(keySeq)
