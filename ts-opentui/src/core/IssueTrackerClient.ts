@@ -2578,14 +2578,12 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			new IssueTrackerError({
 				message: error.message,
 				command,
-				stderr: error.cause === undefined ? undefined : String(error.cause),
 			})
 
 		const mapIssueSyncError = (command: string, error: IssueSyncError): IssueTrackerError =>
 			new IssueTrackerError({
 				message: error.message,
 				command,
-				stderr: error.cause === undefined ? undefined : String(error.cause),
 			})
 
 		const fromLocalStore = <A>(
