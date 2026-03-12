@@ -77,7 +77,7 @@ export type IssueSyncRuntimeReason =
 	| "sync_disabled"
 	| "missing_api_key"
 	| "config_error"
-export type IssueSyncApiKeySource = "config-provider" | "none" | "unknown"
+export type IssueSyncApiKeySource = "direnv" | "config-provider" | "none" | "unknown"
 export type IssueSyncRunOperation = "bootstrap" | "flush"
 
 export interface IssueSyncRuntimeHealth {

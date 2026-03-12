@@ -5,13 +5,30 @@
  * webhook at startup, and emits typed Issue webhook events for consumers.
  */
 
-import { Command, type CommandExecutor } from "@effect/platform"
+import {
+	Command,
+	type CommandExecutor,
+	FileSystem,
+	Path,
+	PlatformConfigProvider,
+} from "@effect/platform"
 import {
 	LINEAR_WEBHOOK_SIGNATURE_HEADER,
 	LINEAR_WEBHOOK_TS_HEADER,
 	LinearWebhookClient,
 } from "@linear/sdk/webhooks"
-import { Config, Data, Effect, Option, Queue, Ref, Schema, Stream, SubscriptionRef } from "effect"
+import {
+	Config,
+	ConfigProvider,
+	Data,
+	Effect,
+	Option,
+	Queue,
+	Ref,
+	Schema,
+	Stream,
+	SubscriptionRef,
+} from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { LinearSdk } from "../core/LinearSdk.js"
@@ -236,6 +253,7 @@ interface ResolvedWebhookPublicUrl {
 }
 
 interface ResolvedSdkWebhookRuntimeConfig {
+	readonly apiKey: string
 	readonly teamRef: string
 	readonly teamSource: ResolvedWebhookTeamSource
 	readonly publicBaseUrl: string
@@ -333,6 +351,8 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const appConfig = yield* AppConfig
 			const linearSdk = yield* LinearSdk
 			const projectService = yield* ProjectService
+			const fs = yield* FileSystem.FileSystem
+			const pathService = yield* Path.Path
 
 			const issueEventsQueue = yield* Queue.unbounded<LinearIssueWebhookMessage>()
 			const healthy = yield* SubscriptionRef.make(false)
@@ -366,8 +386,105 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					yield* activeRuntime.cleanup
 				})
 
+			const resolveDotEnvProvider = (
+				filePath: string,
+			): Effect.Effect<Option.Option<ConfigProvider.ConfigProvider>, never> =>
+				Effect.gen(function* () {
+					const exists = yield* fs
+						.exists(filePath)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					if (!exists) {
+						return Option.none()
+					}
+					return yield* PlatformConfigProvider.fromDotEnv(filePath).pipe(
+						Effect.provideService(FileSystem.FileSystem, fs),
+						Effect.map(Option.some),
+						Effect.catchAll(() => Effect.succeed(Option.none())),
+					)
+				})
+
+			const readApiKeyFromProvider = (
+				provider: ConfigProvider.ConfigProvider,
+			): Effect.Effect<string | undefined, never> =>
+				Config.option(Config.string("LINEAR_API_KEY")).pipe(
+					Effect.withConfigProvider(provider),
+					Effect.map((option) => {
+						if (Option.isNone(option)) return undefined
+						const value = option.value.trim()
+						return value.length > 0 ? value : undefined
+					}),
+					Effect.catchAll(() => Effect.succeed(undefined)),
+				)
+
+			const resolveWebhookApiKey = (projectPath: string | undefined) =>
+				Effect.gen(function* () {
+					const envProvider = ConfigProvider.fromEnv()
+					const envApiKey = yield* readApiKeyFromProvider(envProvider)
+					const parseEnvValue = (envOutput: string, key: string): string | undefined => {
+						const prefix = `${key}=`
+						for (const line of envOutput.split("\n")) {
+							if (!line.startsWith(prefix)) continue
+							const value = line.slice(prefix.length).trim()
+							return value.length > 0 ? value : undefined
+						}
+						return undefined
+					}
+
+					if (projectPath === undefined) {
+						if (envApiKey !== undefined) {
+							return envApiKey
+						}
+						return yield* Effect.fail(
+							new LinearWebhookRuntimeError({
+								message:
+									"LINEAR_API_KEY is missing and no active project path is selected for webhook runtime",
+							}),
+						)
+					}
+
+					const dotEnvLocalPath = pathService.join(projectPath, ".env.local")
+					const dotEnvPath = pathService.join(projectPath, ".env")
+					const envrcPath = pathService.join(projectPath, ".envrc")
+					const hasEnvrc = yield* fs
+						.exists(envrcPath)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					const direnvApiKey = hasEnvrc
+						? yield* Command.string(Command.make("direnv", "exec", projectPath, "env")).pipe(
+								Effect.map((output) => parseEnvValue(output, "LINEAR_API_KEY")),
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`LinearWebhookService: direnv exec failed for projectPath=${projectPath}: ${String(error)}`,
+									).pipe(Effect.as(undefined)),
+								),
+							)
+						: undefined
+					const dotEnvLocalProviderOption = yield* resolveDotEnvProvider(dotEnvLocalPath)
+					const dotEnvProviderOption = yield* resolveDotEnvProvider(dotEnvPath)
+
+					const dotEnvLocalApiKey = yield* Option.match(dotEnvLocalProviderOption, {
+						onNone: () => Effect.succeed(undefined),
+						onSome: readApiKeyFromProvider,
+					})
+					const dotEnvApiKey = yield* Option.match(dotEnvProviderOption, {
+						onNone: () => Effect.succeed(undefined),
+						onSome: readApiKeyFromProvider,
+					})
+					const resolvedApiKey = direnvApiKey ?? dotEnvLocalApiKey ?? dotEnvApiKey ?? envApiKey
+
+					if (resolvedApiKey === undefined) {
+						return yield* Effect.fail(
+							new LinearWebhookRuntimeError({
+								message: `LINEAR_API_KEY not found for projectPath=${projectPath} (.env.local/.env/env)`,
+							}),
+						)
+					}
+
+					return resolvedApiKey
+				})
+
 			const resolveWebhookTeamRef = (
 				linearConfig: ResolvedLinearConfig,
+				apiKey: string,
 			): Effect.Effect<ResolvedWebhookTeamRef, LinearWebhookRuntimeError> =>
 				Effect.gen(function* () {
 					const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
@@ -385,7 +502,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						"LinearWebhookService: no configured team, discovering via Linear API",
 					)
 					const teams = yield* failOnTimeout({
-						effect: linearSdk.teams({ first: 50 }),
+						effect: linearSdk.teams({ first: 50 }, { apiKey }),
 						timeoutMs: LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS,
 						timeoutMessage: `Timed out discovering Linear teams after ${LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS}ms; set issueTracker.linear.team explicitly`,
 						mapError: (error) =>
@@ -485,7 +602,10 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					)
 				})
 
-			const buildRuntimeConfig = (linearConfig: ResolvedLinearConfig) =>
+			const buildRuntimeConfig = (
+				linearConfig: ResolvedLinearConfig,
+				projectPath: string | undefined,
+			) =>
 				Effect.gen(function* () {
 					const webhookConfig = linearConfig.webhooks
 					const port =
@@ -493,7 +613,8 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							? webhookConfig.port
 							: DEFAULT_WEBHOOK_PORT
 					const eventTypes = normalizeWebhookEvents(webhookConfig.events)
-					const team = yield* resolveWebhookTeamRef(linearConfig)
+					const apiKey = yield* resolveWebhookApiKey(projectPath)
+					const team = yield* resolveWebhookTeamRef(linearConfig, apiKey)
 					const webhookPublicUrl = yield* resolveWebhookPublicUrl(webhookConfig, port)
 					const configuredSecret = normalizeNonEmpty(webhookConfig.secret)
 					const webhookSecretSource: "config" | "generated" =
@@ -501,6 +622,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					const webhookSecret = configuredSecret ?? `azw_${crypto.randomUUID().replaceAll("-", "")}`
 
 					return {
+						apiKey,
 						teamRef: team.teamRef,
 						teamSource: team.source,
 						publicBaseUrl: webhookPublicUrl.publicBaseUrl,
@@ -512,9 +634,12 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					} satisfies ResolvedSdkWebhookRuntimeConfig
 				})
 
-			const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
+			const resolveTeamId = (
+				reference: string,
+				apiKey: string,
+			): Effect.Effect<string, LinearWebhookRuntimeError> =>
 				failOnTimeout({
-					effect: linearSdk.resolveTeamId(reference),
+					effect: linearSdk.resolveTeamId(reference, { apiKey }),
 					timeoutMs: LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS,
 					timeoutMessage: `Timed out resolving Linear team '${reference}' after ${LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS}ms`,
 					mapError: (error) =>
@@ -526,9 +651,12 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const startSdkWebhookRuntime = (params: {
 				readonly configKey: string
 				readonly linearConfig: ResolvedLinearConfig
+				readonly projectPath: string | undefined
 			}) =>
 				Effect.gen(function* () {
-					const runtimeConfigResult = yield* Effect.either(buildRuntimeConfig(params.linearConfig))
+					const runtimeConfigResult = yield* Effect.either(
+						buildRuntimeConfig(params.linearConfig, params.projectPath),
+					)
 					if (runtimeConfigResult._tag === "Left") {
 						yield* setRuntimeStatus({
 							mode: "misconfigured",
@@ -549,7 +677,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							yield* Effect.logInfo(
 								`LinearWebhookService: starting SDK runtime configKey=${params.configKey} team=${runtimeConfig.teamRef} port=${runtimeConfig.port} urlSource=${runtimeConfig.publicUrlSource}`,
 							)
-							const teamId = yield* resolveTeamId(runtimeConfig.teamRef)
+							const teamId = yield* resolveTeamId(runtimeConfig.teamRef, runtimeConfig.apiKey)
 							const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
 							const port = runtimeConfig.port
 							const webhookIdRef: { id: string | undefined } = { id: undefined }
@@ -643,7 +771,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 								}
 
 								yield* linearSdk
-									.deleteWebhook(webhookId)
+									.deleteWebhook(webhookId, { apiKey: runtimeConfig.apiKey })
 									.pipe(
 										Effect.catchAll((error) =>
 											Effect.logWarning(
@@ -655,13 +783,16 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 							const registrationResult = yield* Effect.either(
 								failOnTimeout({
-									effect: linearSdk.createWebhook({
-										teamId,
-										url: webhookUrl,
-										resourceTypes: [...runtimeConfig.eventTypes],
-										secret: runtimeConfig.webhookSecret,
-										enabled: true,
-									}),
+									effect: linearSdk.createWebhook(
+										{
+											teamId,
+											url: webhookUrl,
+											resourceTypes: [...runtimeConfig.eventTypes],
+											secret: runtimeConfig.webhookSecret,
+											enabled: true,
+										},
+										{ apiKey: runtimeConfig.apiKey },
+									),
 									timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
 									timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
 									mapError: (error) =>
@@ -793,6 +924,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					yield* startSdkWebhookRuntime({
 						configKey: nextConfigKey,
 						linearConfig,
+						projectPath: currentProjectPath,
 					})
 				})
 
