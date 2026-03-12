@@ -1248,6 +1248,7 @@ const issueListHandler = (args: {
 const issueCreateHandler = (args: {
 	readonly title: string
 	readonly issueType: Option.Option<string>
+	readonly status: Option.Option<string>
 	readonly priority: Option.Option<number>
 	readonly description: Option.Option<string>
 	readonly design: Option.Option<string>
@@ -1286,11 +1287,13 @@ const issueCreateHandler = (args: {
 			onNone: () => undefined,
 			onSome: (value) => value.issueId,
 		})
+		const status = yield* parseIssueCreateStatusOption(args.status)
 
 		const issueTrackerClient = yield* IssueTrackerClient
 		const issue = yield* issueTrackerClient.create({
 			title: args.title,
 			type: Option.getOrUndefined(args.issueType),
+			status,
 			priority: Option.getOrUndefined(args.priority),
 			description: Option.getOrUndefined(args.description),
 			design: Option.getOrUndefined(args.design),
@@ -1333,6 +1336,7 @@ const issueCreateHandler = (args: {
 const issueChildHandler = (args: {
 	readonly title: string
 	readonly issueType: Option.Option<string>
+	readonly status: Option.Option<string>
 	readonly priority: Option.Option<number>
 	readonly description: Option.Option<string>
 	readonly design: Option.Option<string>
@@ -1371,11 +1375,13 @@ const issueChildHandler = (args: {
 			)
 		}
 		const resolvedParent = parentContext.value.issueId
+		const status = yield* parseIssueCreateStatusOption(args.status)
 
 		const issueTrackerClient = yield* IssueTrackerClient
 		const issue = yield* issueTrackerClient.create({
 			title: args.title,
 			type: Option.getOrUndefined(args.issueType),
+			status,
 			priority: Option.getOrUndefined(args.priority),
 			description: Option.getOrUndefined(args.description),
 			design: Option.getOrUndefined(args.design),
@@ -3871,6 +3877,28 @@ const parseLabelsOption = (labels: Option.Option<string>): string[] | undefined 
 				.filter((label) => label.length > 0),
 	})
 
+const parseIssueCreateStatusOption = (
+	status: Option.Option<string>,
+): Effect.Effect<"open" | "in_progress" | "blocked" | "closed" | undefined, Error> =>
+	Option.match(status, {
+		onNone: () => Effect.succeed(undefined),
+		onSome: (value) => {
+			switch (value) {
+				case "open":
+				case "in_progress":
+				case "blocked":
+				case "closed":
+					return Effect.succeed(value)
+				default:
+					return Effect.fail(
+						new Error(
+							`Invalid --status value '${value}'. Expected one of: open, in_progress, blocked, closed.`,
+						),
+					)
+			}
+		},
+	})
+
 const IssueBulkCreateEntrySchema = Schema.Struct({
 	title: Schema.String,
 	type: Schema.String.pipe(Schema.optional),
@@ -4902,6 +4930,10 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Issue type (task, bug, epic, chore)"),
 		),
+		status: Options.text("status").pipe(
+			Options.optional,
+			Options.withDescription("Initial issue status (open, in_progress, blocked, closed)"),
+		),
 		priority: Options.integer("priority").pipe(
 			Options.withAlias("p"),
 			Options.optional,
@@ -4967,6 +4999,10 @@ const issueChildCommand = Command.make(
 			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Issue type (task, bug, epic, chore)"),
+		),
+		status: Options.text("status").pipe(
+			Options.optional,
+			Options.withDescription("Initial issue status (open, in_progress, blocked, closed)"),
 		),
 		priority: Options.integer("priority").pipe(
 			Options.withAlias("p"),
