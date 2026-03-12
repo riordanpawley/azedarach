@@ -45,6 +45,7 @@ const WEBHOOK_PATH = "/linear/webhook"
 const DEFAULT_WEBHOOK_PORT = 9000
 const DEFAULT_WEBHOOK_EVENTS: readonly string[] = ["Issue"]
 const WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
+const WEBHOOK_RUNTIME_STATE_FILE_NAME = "linear-webhook-runtime.json"
 const LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS = 5000
 const LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS = 3000
 const LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS = 3000
@@ -281,6 +282,14 @@ interface ActiveLinearWebhookRuntime {
 	readonly cleanup: Effect.Effect<void, never>
 }
 
+const PersistedWebhookRuntimeStateSchema = Schema.Struct({
+	webhookId: Schema.String,
+	webhookUrl: Schema.String,
+	teamId: Schema.String,
+})
+
+type PersistedWebhookRuntimeState = Schema.Schema.Type<typeof PersistedWebhookRuntimeStateSchema>
+
 const normalizeWebhookProjectPath = (projectPath: string | undefined): string =>
 	projectPath?.trim() ?? ""
 
@@ -377,6 +386,80 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					yield* SubscriptionRef.set(mode, nextStatus.mode)
 					yield* SubscriptionRef.set(healthy, nextStatus.healthy)
 					yield* SubscriptionRef.set(status, nextStatus)
+				})
+			const resolveRuntimeStatePath = (projectPath: string | undefined): string | undefined =>
+				projectPath === undefined
+					? undefined
+					: pathService.join(projectPath, ".azedarach", WEBHOOK_RUNTIME_STATE_FILE_NAME)
+
+			const readPersistedRuntimeState = (
+				projectPath: string | undefined,
+			): Effect.Effect<Option.Option<PersistedWebhookRuntimeState>, never> =>
+				Effect.gen(function* () {
+					const runtimeStatePath = resolveRuntimeStatePath(projectPath)
+					if (runtimeStatePath === undefined) {
+						return Option.none<PersistedWebhookRuntimeState>()
+					}
+
+					const runtimeStateRaw = yield* fs
+						.readFileString(runtimeStatePath)
+						.pipe(Effect.catchAll(() => Effect.succeed(undefined)))
+					if (runtimeStateRaw === undefined) {
+						return Option.none<PersistedWebhookRuntimeState>()
+					}
+
+					const decodedState = Schema.decodeUnknownEither(
+						Schema.parseJson(PersistedWebhookRuntimeStateSchema),
+					)(runtimeStateRaw)
+					if (decodedState._tag === "Left") {
+						yield* Effect.logWarning(
+							`LinearWebhookService: ignoring invalid webhook runtime state at ${runtimeStatePath}`,
+						)
+						return Option.none<PersistedWebhookRuntimeState>()
+					}
+
+					return Option.some(decodedState.right)
+				})
+
+			const writePersistedRuntimeState = (
+				projectPath: string | undefined,
+				state: PersistedWebhookRuntimeState,
+			): Effect.Effect<void, never> =>
+				Effect.gen(function* () {
+					const runtimeStatePath = resolveRuntimeStatePath(projectPath)
+					if (runtimeStatePath === undefined) {
+						return
+					}
+
+					yield* fs
+						.makeDirectory(pathService.dirname(runtimeStatePath), { recursive: true })
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`LinearWebhookService: failed to prepare runtime state directory: ${formatErrorMessage(error)}`,
+								).pipe(Effect.asVoid),
+							),
+						)
+					yield* fs
+						.writeFileString(runtimeStatePath, `${JSON.stringify(state, null, 2)}\n`)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`LinearWebhookService: failed to persist runtime state at ${runtimeStatePath}: ${formatErrorMessage(error)}`,
+								).pipe(Effect.asVoid),
+							),
+						)
+				})
+
+			const clearPersistedRuntimeState = (
+				projectPath: string | undefined,
+			): Effect.Effect<void, never> =>
+				Effect.gen(function* () {
+					const runtimeStatePath = resolveRuntimeStatePath(projectPath)
+					if (runtimeStatePath === undefined) {
+						return
+					}
+					yield* fs.remove(runtimeStatePath, { force: true }).pipe(Effect.ignore)
 				})
 
 			const stopActiveRuntime = (reason: string): Effect.Effect<void, never> =>
@@ -688,6 +771,32 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
 							const port = runtimeConfig.port
 							const webhookIdRef: { id: string | undefined } = { id: undefined }
+							const persistedRuntimeStateOption = yield* readPersistedRuntimeState(
+								params.projectPath,
+							)
+							if (Option.isSome(persistedRuntimeStateOption)) {
+								const persistedRuntimeState = persistedRuntimeStateOption.value
+								const shouldCleanupPersistedWebhook =
+									persistedRuntimeState.teamId === teamId &&
+									persistedRuntimeState.webhookUrl === webhookUrl
+								if (shouldCleanupPersistedWebhook) {
+									yield* Effect.logInfo(
+										`LinearWebhookService: deleting stale webhook id=${persistedRuntimeState.webhookId} for ${webhookUrl}`,
+									)
+									yield* linearSdk
+										.deleteWebhook(persistedRuntimeState.webhookId, {
+											apiKey: runtimeConfig.apiKey,
+										})
+										.pipe(
+											Effect.catchAll((error) =>
+												Effect.logWarning(
+													`LinearWebhookService: stale webhook cleanup failed for id ${persistedRuntimeState.webhookId}: ${error.message}`,
+												).pipe(Effect.asVoid),
+											),
+										)
+									yield* clearPersistedRuntimeState(params.projectPath)
+								}
+							}
 							const webhookRoute = HttpLayerRouter.add("*", WEBHOOK_PATH, (request) =>
 								Effect.gen(function* () {
 									const requestPath = Option.match(HttpServerRequest.toURL(request), {
@@ -776,6 +885,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 								const webhookId = webhookIdRef.id
 								if (webhookId === undefined) {
+									yield* clearPersistedRuntimeState(params.projectPath)
 									return
 								}
 
@@ -788,6 +898,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 											).pipe(Effect.asVoid),
 										),
 									)
+								yield* clearPersistedRuntimeState(params.projectPath)
 							})
 
 							const registrationResult = yield* Effect.either(
@@ -817,6 +928,11 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 							if (registrationResult.right.webhookId !== undefined) {
 								webhookIdRef.id = registrationResult.right.webhookId
+								yield* writePersistedRuntimeState(params.projectPath, {
+									webhookId: registrationResult.right.webhookId,
+									webhookUrl,
+									teamId,
+								})
 							}
 
 							return {
