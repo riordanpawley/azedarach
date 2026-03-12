@@ -29,6 +29,7 @@ export const deriveShellForegroundState = (params: {
 	readonly foregroundKind: ForegroundKind
 	readonly bellFlag: boolean
 	readonly previousBellFlag: boolean
+	readonly detectedState: SessionState | null
 }): SessionState | null => {
 	if (params.foregroundKind !== "shell") {
 		return null
@@ -38,9 +39,9 @@ export const deriveShellForegroundState = (params: {
 		return null
 	}
 
-	// Codex often returns to a shell prompt and rings the pane bell when it needs
-	// the user. Treat a fresh bell edge as "waiting" instead of generic "done".
-	if (params.bellFlag && !params.previousBellFlag) {
+	// Treat a shell bell edge as "waiting" only when PTY pattern matching also
+	// identified a waiting prompt in the current capture.
+	if (params.bellFlag && !params.previousBellFlag && params.detectedState === "waiting") {
 		return "waiting"
 	}
 

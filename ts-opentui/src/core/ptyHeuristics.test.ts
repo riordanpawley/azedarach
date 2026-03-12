@@ -12,6 +12,7 @@ describe("ptyHeuristics", () => {
 				foregroundKind: "shell",
 				bellFlag: true,
 				previousBellFlag: false,
+				detectedState: "waiting",
 			}),
 		).toBe("waiting")
 	})
@@ -23,6 +24,7 @@ describe("ptyHeuristics", () => {
 				foregroundKind: "shell",
 				bellFlag: false,
 				previousBellFlag: false,
+				detectedState: "waiting",
 			}),
 		).toBe("done")
 		expect(
@@ -31,6 +33,19 @@ describe("ptyHeuristics", () => {
 				foregroundKind: "shell",
 				bellFlag: true,
 				previousBellFlag: true,
+				detectedState: "waiting",
+			}),
+		).toBe("done")
+	})
+
+	it("treats shell bell edge as done when no waiting prompt is detected", () => {
+		expect(
+			deriveShellForegroundState({
+				currentState: "busy",
+				foregroundKind: "shell",
+				bellFlag: true,
+				previousBellFlag: false,
+				detectedState: "busy",
 			}),
 		).toBe("done")
 	})
@@ -42,6 +57,7 @@ describe("ptyHeuristics", () => {
 				foregroundKind: "shell",
 				bellFlag: true,
 				previousBellFlag: false,
+				detectedState: "waiting",
 			}),
 		).toBeNull()
 		expect(
@@ -50,6 +66,7 @@ describe("ptyHeuristics", () => {
 				foregroundKind: "agent",
 				bellFlag: false,
 				previousBellFlag: false,
+				detectedState: "busy",
 			}),
 		).toBeNull()
 	})
