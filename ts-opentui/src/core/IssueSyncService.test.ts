@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
-	buildLinearIssuesPageQuery,
 	buildLinearIssueFilter,
+	buildLinearIssuesPageQuery,
 	groupLinearSyncBatchByIdentity,
 	resolveCollapsedSyncOperation,
 	shouldRetryUpsertForMissingParent,
@@ -163,7 +163,10 @@ describe("buildLinearIssueFilter", () => {
 	it("treats non-UUID project values as slug/name filters only", () => {
 		expect(buildLinearIssueFilter({ team: undefined, project: "core-platform" })).toEqual({
 			project: {
-				or: [{ slugId: { eqIgnoreCase: "core-platform" } }, { name: { eqIgnoreCase: "core-platform" } }],
+				or: [
+					{ slugId: { eqIgnoreCase: "core-platform" } },
+					{ name: { eqIgnoreCase: "core-platform" } },
+				],
 			},
 		})
 	})
@@ -182,6 +185,37 @@ describe("buildLinearIssueFilter", () => {
 					{ name: { eqIgnoreCase: "3f8f18b7-1c70-4374-a327-c0a5f8faec2c" } },
 				],
 			},
+		})
+	})
+
+	it("adds updatedAt filter for incremental pulls", () => {
+		expect(
+			buildLinearIssueFilter({
+				team: "AZE",
+				project: "core-platform",
+				updatedAfterIso: "2026-03-12T00:00:00.000Z",
+			}),
+		).toEqual({
+			and: [
+				{
+					team: {
+						or: [{ key: { eqIgnoreCase: "AZE" } }, { name: { eqIgnoreCase: "AZE" } }],
+					},
+				},
+				{
+					project: {
+						or: [
+							{ slugId: { eqIgnoreCase: "core-platform" } },
+							{ name: { eqIgnoreCase: "core-platform" } },
+						],
+					},
+				},
+				{
+					updatedAt: {
+						gt: "2026-03-12T00:00:00.000Z",
+					},
+				},
+			],
 		})
 	})
 })
