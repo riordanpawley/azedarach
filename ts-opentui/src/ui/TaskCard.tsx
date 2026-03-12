@@ -124,7 +124,6 @@ export const TaskCard = (props: TaskCardProps) => {
 		// This ensures cursor is always visible even on selected tasks
 		if (props.isSelected) return theme.lavender
 		if (props.isMultiSelected) return theme.mauve
-		if (isWaiting) return theme.yellow
 		const healthColor = getContextHealthColor()
 		if (healthColor) return healthColor
 		return theme.surface1
