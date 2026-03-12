@@ -39,13 +39,13 @@ import {
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { LinearSdk } from "../core/LinearSdk.js"
+import { LocalIssueStore } from "../core/LocalIssueStore.js"
 import { ProjectService } from "./ProjectService.js"
 
 const WEBHOOK_PATH = "/linear/webhook"
 const DEFAULT_WEBHOOK_PORT = 9000
 const DEFAULT_WEBHOOK_EVENTS: readonly string[] = ["Issue"]
 const WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
-const WEBHOOK_RUNTIME_STATE_FILE_NAME = "linear-webhook-runtime.json"
 const LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS = 5000
 const LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS = 3000
 const LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS = 3000
@@ -282,14 +282,6 @@ interface ActiveLinearWebhookRuntime {
 	readonly cleanup: Effect.Effect<void, never>
 }
 
-const PersistedWebhookRuntimeStateSchema = Schema.Struct({
-	webhookId: Schema.String,
-	webhookUrl: Schema.String,
-	teamId: Schema.String,
-})
-
-type PersistedWebhookRuntimeState = Schema.Schema.Type<typeof PersistedWebhookRuntimeStateSchema>
-
 const normalizeWebhookProjectPath = (projectPath: string | undefined): string =>
 	projectPath?.trim() ?? ""
 
@@ -362,10 +354,16 @@ export const buildWebhookRuntimeConfigKey = (params: {
 export class LinearWebhookService extends Effect.Service<LinearWebhookService>()(
 	"LinearWebhookService",
 	{
-		dependencies: [AppConfig.Default, LinearSdk.Default, ProjectService.Default],
+		dependencies: [
+			AppConfig.Default,
+			LinearSdk.Default,
+			LocalIssueStore.Default,
+			ProjectService.Default,
+		],
 		scoped: Effect.gen(function* () {
 			const appConfig = yield* AppConfig
 			const linearSdk = yield* LinearSdk
+			const localIssueStore = yield* LocalIssueStore
 			const projectService = yield* ProjectService
 			const fs = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path
@@ -387,80 +385,46 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					yield* SubscriptionRef.set(healthy, nextStatus.healthy)
 					yield* SubscriptionRef.set(status, nextStatus)
 				})
-			const resolveRuntimeStatePath = (projectPath: string | undefined): string | undefined =>
-				projectPath === undefined
-					? undefined
-					: pathService.join(projectPath, ".azedarach", WEBHOOK_RUNTIME_STATE_FILE_NAME)
-
-			const readPersistedRuntimeState = (
-				projectPath: string | undefined,
-			): Effect.Effect<Option.Option<PersistedWebhookRuntimeState>, never> =>
-				Effect.gen(function* () {
-					const runtimeStatePath = resolveRuntimeStatePath(projectPath)
-					if (runtimeStatePath === undefined) {
-						return Option.none<PersistedWebhookRuntimeState>()
-					}
-
-					const runtimeStateRaw = yield* fs
-						.readFileString(runtimeStatePath)
-						.pipe(Effect.catchAll(() => Effect.succeed(undefined)))
-					if (runtimeStateRaw === undefined) {
-						return Option.none<PersistedWebhookRuntimeState>()
-					}
-
-					const decodedState = Schema.decodeUnknownEither(
-						Schema.parseJson(PersistedWebhookRuntimeStateSchema),
-					)(runtimeStateRaw)
-					if (decodedState._tag === "Left") {
-						yield* Effect.logWarning(
-							`LinearWebhookService: ignoring invalid webhook runtime state at ${runtimeStatePath}`,
-						)
-						return Option.none<PersistedWebhookRuntimeState>()
-					}
-
-					return Option.some(decodedState.right)
-				})
+			const readPersistedRuntimeState = (projectPath: string | undefined) =>
+				localIssueStore.getLinearWebhookRuntimeLease(projectPath).pipe(
+					Effect.map((state) => (state === undefined ? Option.none() : Option.some(state))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`LinearWebhookService: failed to load webhook runtime lease metadata: ${error.message}`,
+						).pipe(Effect.as(Option.none())),
+					),
+				)
 
 			const writePersistedRuntimeState = (
 				projectPath: string | undefined,
-				state: PersistedWebhookRuntimeState,
+				state: {
+					readonly webhookId: string
+					readonly webhookUrl: string
+					readonly teamId: string
+				},
 			): Effect.Effect<void, never> =>
-				Effect.gen(function* () {
-					const runtimeStatePath = resolveRuntimeStatePath(projectPath)
-					if (runtimeStatePath === undefined) {
-						return
-					}
-
-					yield* fs
-						.makeDirectory(pathService.dirname(runtimeStatePath), { recursive: true })
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(
-									`LinearWebhookService: failed to prepare runtime state directory: ${formatErrorMessage(error)}`,
-								).pipe(Effect.asVoid),
-							),
-						)
-					yield* fs
-						.writeFileString(runtimeStatePath, `${JSON.stringify(state, null, 2)}\n`)
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(
-									`LinearWebhookService: failed to persist runtime state at ${runtimeStatePath}: ${formatErrorMessage(error)}`,
-								).pipe(Effect.asVoid),
-							),
-						)
-				})
+				localIssueStore
+					.setLinearWebhookRuntimeLease(state, projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`LinearWebhookService: failed to persist webhook runtime lease metadata: ${error.message}`,
+							).pipe(Effect.asVoid),
+						),
+					)
 
 			const clearPersistedRuntimeState = (
 				projectPath: string | undefined,
 			): Effect.Effect<void, never> =>
-				Effect.gen(function* () {
-					const runtimeStatePath = resolveRuntimeStatePath(projectPath)
-					if (runtimeStatePath === undefined) {
-						return
-					}
-					yield* fs.remove(runtimeStatePath, { force: true }).pipe(Effect.ignore)
-				})
+				localIssueStore
+					.clearLinearWebhookRuntimeLease(projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`LinearWebhookService: failed to clear webhook runtime lease metadata: ${error.message}`,
+							).pipe(Effect.asVoid),
+						),
+					)
 
 			const stopActiveRuntime = (reason: string): Effect.Effect<void, never> =>
 				Effect.gen(function* () {
