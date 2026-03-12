@@ -1048,6 +1048,19 @@ export interface IssueTrackerClientService {
 	) => Effect.Effect<void, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
+	 * Remove dependency edge(s) between two issues
+	 *
+	 * Removes dependency records where `issueId` depends on `dependsOnId`.
+	 * When `type` is omitted, all dependency types between the pair are removed.
+	 */
+	readonly removeDependency: (
+		issueId: string,
+		dependsOnId: string,
+		type?: "blocks" | "related" | "parent-child" | "discovered-from",
+		cwd?: string,
+	) => Effect.Effect<void, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
+
+	/**
 	 * Get the parent epic of an issue, if it has one
 	 *
 	 * Looks for a parent-child dependency where this issue depends on an epic.
@@ -2483,11 +2496,11 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							return JSON.stringify(ZERO_SYNC_RESULT)
 
 						case "dep": {
-							if (rest[0] !== "add") {
+							if (rest[0] !== "add" && rest[0] !== "remove") {
 								return yield* Effect.fail(
 									new IssueTrackerError({
-										message: "Only dependency add is supported",
-										command: "linear-sdk dep add",
+										message: "Only dependency add/remove is supported",
+										command: "linear-sdk dep",
 									}),
 								)
 							}
@@ -2497,8 +2510,8 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							if (!issueIdentifier || !dependsOnIdentifier) {
 								return yield* Effect.fail(
 									new IssueTrackerError({
-										message: "Dependency add requires child and parent ids",
-										command: "linear-sdk dep add",
+										message: "Dependency operation requires child and parent ids",
+										command: "linear-sdk dep",
 									}),
 								)
 							}
@@ -2506,24 +2519,39 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								return yield* Effect.fail(
 									new IssueTrackerError({
 										message: "Linear backend currently supports only parent-child dependencies",
-										command: "linear-sdk dep add",
+										command: `linear-sdk dep ${rest[0]}`,
 									}),
 								)
 							}
 							const childId = yield* resolveLinearIssueId(issueIdentifier)
-							const parentId = yield* resolveLinearIssueId(dependsOnIdentifier)
-							yield* withLinearSdkTiming(
-								["i", "update"],
-								linearSdk.updateIssue(childId, { parentId }).pipe(
-									Effect.mapError(
-										(error) =>
-											new IssueTrackerError({
-												message: error.message,
-												command: "linear-sdk dep add",
-											}),
+							if (rest[0] === "add") {
+								const parentId = yield* resolveLinearIssueId(dependsOnIdentifier)
+								yield* withLinearSdkTiming(
+									["i", "update"],
+									linearSdk.updateIssue(childId, { parentId }).pipe(
+										Effect.mapError(
+											(error) =>
+												new IssueTrackerError({
+													message: error.message,
+													command: "linear-sdk dep add",
+												}),
+										),
 									),
-								),
-							)
+								)
+							} else {
+								yield* withLinearSdkTiming(
+									["i", "update"],
+									linearSdk.updateIssue(childId, { parentId: null }).pipe(
+										Effect.mapError(
+											(error) =>
+												new IssueTrackerError({
+													message: error.message,
+													command: "linear-sdk dep remove",
+												}),
+										),
+									),
+								)
+							}
 							return "{}"
 						}
 
@@ -3630,6 +3658,36 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					yield* runBd(runtime, args, effectiveCwd)
 				}),
 
+			removeDependency: (
+				issueId: string,
+				dependsOnId: string,
+				type?: "blocks" | "related" | "parent-child" | "discovered-from",
+				cwd?: string,
+			) =>
+				Effect.gen(function* () {
+					const runtime = yield* resolveIssueTrackerRuntime(cwd)
+					const effectiveCwd = runtime.effectiveCwd
+					if (runtime.useLocalFirstPath) {
+						yield* fromLocalStore(
+							"local-store removeDependency",
+							localIssueStore.removeDependency(
+								issueId,
+								dependsOnId,
+								type,
+								runtime.mutationSyncTarget,
+								effectiveCwd,
+							),
+						)
+						return
+					}
+
+					const args: string[] = ["dep", "remove", issueId, dependsOnId]
+					if (type) {
+						args.push("--type", type)
+					}
+					yield* runBd(runtime, args, effectiveCwd)
+				}),
+
 			getParentEpic: (issueId: string, cwd?: string) =>
 				Effect.gen(function* () {
 					const runtime = yield* resolveIssueTrackerRuntime(cwd)
@@ -3862,6 +3920,23 @@ export const addDependency = (
 > =>
 	Effect.flatMap(IssueTrackerClient, (client) =>
 		client.addDependency(issueId, dependsOnId, type, cwd),
+	)
+
+/**
+ * Remove dependency edge(s) between two issues
+ */
+export const removeDependency = (
+	issueId: string,
+	dependsOnId: string,
+	type?: "blocks" | "related" | "parent-child" | "discovered-from",
+	cwd?: string,
+): Effect.Effect<
+	void,
+	IssueTrackerError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> =>
+	Effect.flatMap(IssueTrackerClient, (client) =>
+		client.removeDependency(issueId, dependsOnId, type, cwd),
 	)
 
 /**
