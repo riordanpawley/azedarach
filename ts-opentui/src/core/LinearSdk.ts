@@ -52,7 +52,8 @@ const findFirstValidationConstraint = (
 ): { readonly path: string; readonly message: string; readonly value: unknown } | undefined => {
 	if (!isRecord(node)) return undefined
 	const propertySegment = normalizePathSegment(node.property)
-	const nextPath = propertySegment === undefined ? [...pathPrefix] : [...pathPrefix, propertySegment]
+	const nextPath =
+		propertySegment === undefined ? [...pathPrefix] : [...pathPrefix, propertySegment]
 
 	const constraints = node.constraints
 	if (isRecord(constraints)) {
@@ -425,10 +426,11 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 
 		const resolveTeamId: LinearSdkApi["resolveTeamId"] = (reference, options) =>
 			Effect.gen(function* () {
+				const trimmedReference = reference.trim()
 				const directTeamIdOption = yield* runWithClient<LinearTeamResult>({
 					operation: "team",
 					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.team(reference),
+					request: (client) => client.team(trimmedReference),
 					fallbackError: `Unable to resolve Linear team '${reference}'`,
 				}).pipe(
 					Effect.map((team) => (team?.id ? Option.some(team.id) : Option.none<string>())),
@@ -443,24 +445,46 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					return directTeamIdOption.value
 				}
 
-				const teams = yield* runWithClient<LinearTeamsResult>({
-					operation: "teams",
-					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.teams({ first: 250 }),
-					fallbackError: `Unable to resolve Linear team '${reference}'`,
-				})
+				const normalizedReference = trimmedReference.toLowerCase()
+				const matchTeamId = (teams: LinearTeamsResult): string | undefined => {
+					const matched = teams.nodes.find((team) => {
+						const byId = team.id === trimmedReference
+						const byKey =
+							typeof team.key === "string" && team.key.trim().toLowerCase() === normalizedReference
+						const byName =
+							typeof team.name === "string" &&
+							team.name.trim().toLowerCase() === normalizedReference
+						return byId || byKey || byName
+					})
+					return matched?.id
+				}
+				const resolveFromTeamsPage = (
+					afterCursor: string | undefined,
+				): Effect.Effect<string | undefined, LinearSdkError> =>
+					runWithClient<LinearTeamsResult>({
+						operation: "teams",
+						maxWaitMs: options?.maxWaitMs,
+						request: (client) =>
+							client.teams({
+								first: 250,
+								...(afterCursor === undefined ? {} : { after: afterCursor }),
+							}),
+						fallbackError: `Unable to resolve Linear team '${reference}'`,
+					}).pipe(
+						Effect.flatMap((teamsPage) => {
+							const matchedTeamId = matchTeamId(teamsPage)
+							if (matchedTeamId !== undefined) {
+								return Effect.succeed(matchedTeamId)
+							}
+							if (!teamsPage.pageInfo.hasNextPage || !teamsPage.pageInfo.endCursor) {
+								return Effect.succeed(undefined)
+							}
+							return resolveFromTeamsPage(teamsPage.pageInfo.endCursor)
+						}),
+					)
 
-				const normalizedReference = reference.trim().toLowerCase()
-				const matched = teams.nodes.find((team) => {
-					const byId = team.id === reference
-					const byKey =
-						typeof team.key === "string" && team.key.trim().toLowerCase() === normalizedReference
-					const byName =
-						typeof team.name === "string" && team.name.trim().toLowerCase() === normalizedReference
-					return byId || byKey || byName
-				})
-
-				if (matched === undefined) {
+				const resolvedTeamId = yield* resolveFromTeamsPage(undefined)
+				if (resolvedTeamId === undefined) {
 					return yield* Effect.fail(
 						new LinearSdkError({
 							message: `Unable to resolve Linear team '${reference}'`,
@@ -468,12 +492,13 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					)
 				}
 
-				return matched.id
+				return resolvedTeamId
 			})
 
 		const resolveProjectId: LinearSdkApi["resolveProjectId"] = (reference, options) =>
 			Effect.gen(function* () {
-				const normalizedReference = reference.trim().toLowerCase()
+				const trimmedReference = reference.trim()
+				const normalizedReference = trimmedReference.toLowerCase()
 				if (normalizedReference.length === 0) {
 					return yield* Effect.fail(
 						new LinearSdkError({
@@ -485,7 +510,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				const directProjectIdOption = yield* runWithClient<LinearProjectResult>({
 					operation: "project",
 					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.project(reference),
+					request: (client) => client.project(trimmedReference),
 					fallbackError: `Unable to resolve Linear project '${reference}'`,
 				}).pipe(
 					Effect.map((project) => (project?.id ? Option.some(project.id) : Option.none<string>())),
@@ -500,23 +525,44 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					return directProjectIdOption.value
 				}
 
-				const projects = yield* runWithClient<LinearProjectsResult>({
-					operation: "projects",
-					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.projects({ first: 250 }),
-					fallbackError: `Unable to resolve Linear project '${reference}'`,
-				})
+				const matchProjectId = (projects: LinearProjectsResult): string | undefined => {
+					const matched = projects.nodes.find((project) => {
+						const byId = project.id === trimmedReference
+						const bySlugId = project.slugId.trim().toLowerCase() === normalizedReference
+						const byName =
+							typeof project.name === "string" &&
+							project.name.trim().toLowerCase() === normalizedReference
+						return byId || bySlugId || byName
+					})
+					return matched?.id
+				}
+				const resolveFromProjectsPage = (
+					afterCursor: string | undefined,
+				): Effect.Effect<string | undefined, LinearSdkError> =>
+					runWithClient<LinearProjectsResult>({
+						operation: "projects",
+						maxWaitMs: options?.maxWaitMs,
+						request: (client) =>
+							client.projects({
+								first: 250,
+								...(afterCursor === undefined ? {} : { after: afterCursor }),
+							}),
+						fallbackError: `Unable to resolve Linear project '${reference}'`,
+					}).pipe(
+						Effect.flatMap((projectsPage) => {
+							const matchedProjectId = matchProjectId(projectsPage)
+							if (matchedProjectId !== undefined) {
+								return Effect.succeed(matchedProjectId)
+							}
+							if (!projectsPage.pageInfo.hasNextPage || !projectsPage.pageInfo.endCursor) {
+								return Effect.succeed(undefined)
+							}
+							return resolveFromProjectsPage(projectsPage.pageInfo.endCursor)
+						}),
+					)
 
-				const matched = projects.nodes.find((project) => {
-					const byId = project.id === reference
-					const bySlugId = project.slugId.trim().toLowerCase() === normalizedReference
-					const byName =
-						typeof project.name === "string" &&
-						project.name.trim().toLowerCase() === normalizedReference
-					return byId || bySlugId || byName
-				})
-
-				if (matched === undefined) {
+				const resolvedProjectId = yield* resolveFromProjectsPage(undefined)
+				if (resolvedProjectId === undefined) {
 					return yield* Effect.fail(
 						new LinearSdkError({
 							message: `Unable to resolve Linear project '${reference}'`,
@@ -524,7 +570,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					)
 				}
 
-				return matched.id
+				return resolvedProjectId
 			})
 
 		return {
