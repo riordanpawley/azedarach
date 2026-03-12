@@ -162,38 +162,37 @@ export const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | n
  *   az issue update --description "..." <issue-id>
  */
 export const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
-	const withImplicitDepOperation = normalizeIssueDepOperation(argv)
-	const issueCommandIndex = withImplicitDepOperation.indexOf("issue")
+	const issueCommandIndex = argv.indexOf("issue")
 
 	if (issueCommandIndex !== -1) {
-		const subcommand = withImplicitDepOperation[issueCommandIndex + 1]
+		const subcommand = argv[issueCommandIndex + 1]
 		if (subcommand === "dep") {
-			const depSubcommand = withImplicitDepOperation[issueCommandIndex + 2]
+			const depSubcommand = argv[issueCommandIndex + 2]
 			if (depSubcommand !== "add" && depSubcommand !== "remove") {
-				return withImplicitDepOperation
+				return argv
 			}
 
 			const issueIdIndex = issueCommandIndex + 3
 			const dependsOnIdIndex = issueCommandIndex + 4
-			if (dependsOnIdIndex >= withImplicitDepOperation.length) return withImplicitDepOperation
+			if (dependsOnIdIndex >= argv.length) return argv
 
-			const issueId = withImplicitDepOperation[issueIdIndex]
-			const dependsOnId = withImplicitDepOperation[dependsOnIdIndex]
+			const issueId = argv[issueIdIndex]
+			const dependsOnId = argv[dependsOnIdIndex]
 			if (
 				issueId === undefined ||
 				dependsOnId === undefined ||
 				issueId.startsWith("-") ||
 				dependsOnId.startsWith("-")
 			) {
-				return withImplicitDepOperation
+				return argv
 			}
 
-			const hasOptionAfterPositionalIds = withImplicitDepOperation
+			const hasOptionAfterPositionalIds = argv
 				.slice(dependsOnIdIndex + 1)
 				.some((token) => token.startsWith("-"))
-			if (!hasOptionAfterPositionalIds) return withImplicitDepOperation
+			if (!hasOptionAfterPositionalIds) return argv
 
-			const reordered = [...withImplicitDepOperation]
+			const reordered = [...argv]
 			reordered.splice(issueIdIndex, 2)
 			reordered.push(issueId, dependsOnId)
 			return reordered
@@ -209,64 +208,33 @@ export const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): Readonly
 			subcommand !== "check" &&
 			subcommand !== "doctor"
 		) {
-			return withImplicitDepOperation
+			return argv
 		}
 
 		const positionalArgIndex = issueCommandIndex + 2
-		if (positionalArgIndex >= withImplicitDepOperation.length) return withImplicitDepOperation
+		if (positionalArgIndex >= argv.length) return argv
 
-		const positionalArg = withImplicitDepOperation[positionalArgIndex]
+		const positionalArg = argv[positionalArgIndex]
 		if (positionalArg === undefined || positionalArg.startsWith("-")) {
-			return withImplicitDepOperation
+			return argv
 		}
 
-		const hasOptionAfterPositional = withImplicitDepOperation
+		const hasOptionAfterPositional = argv
 			.slice(positionalArgIndex + 1)
 			.some((token) => token.startsWith("-"))
-		if (!hasOptionAfterPositional) return withImplicitDepOperation
+		if (!hasOptionAfterPositional) return argv
 
-		const reordered = [...withImplicitDepOperation]
+		const reordered = [...argv]
 		reordered.splice(positionalArgIndex, 1)
 		reordered.push(positionalArg)
 		return reordered
 	}
 
-	return withImplicitDepOperation
+	return argv
 }
 
 // Backward-compatible name used by existing tests and imports.
 export const normalizeIssueJsonFlagOrder = normalizeIssueOptionOrder
-
-const normalizeIssueDepOperation = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
-	const issueCommandIndex = argv.indexOf("issue")
-	if (issueCommandIndex === -1) return argv
-	if (argv[issueCommandIndex + 1] !== "dep") return argv
-
-	const depSubcommand = argv[issueCommandIndex + 2]
-	if (depSubcommand === undefined || depSubcommand === "add" || depSubcommand === "remove") {
-		return argv
-	}
-	if (
-		depSubcommand === "--help" ||
-		depSubcommand === "-h" ||
-		depSubcommand === "--version" ||
-		depSubcommand === "--wizard" ||
-		depSubcommand === "--completions"
-	) {
-		return argv
-	}
-
-	const normalized = [...argv]
-	const removeFlagIndex = normalized.findIndex(
-		(token, index) => index > issueCommandIndex + 1 && token === "--remove",
-	)
-	const operation = removeFlagIndex === -1 ? "add" : "remove"
-	if (removeFlagIndex !== -1) {
-		normalized.splice(removeFlagIndex, 1)
-	}
-	normalized.splice(issueCommandIndex + 2, 0, operation)
-	return normalized
-}
 
 export const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
 	argv.includes("--verbose") || argv.includes("-v")

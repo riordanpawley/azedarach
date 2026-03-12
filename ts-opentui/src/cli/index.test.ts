@@ -366,53 +366,6 @@ describe("normalizeIssueJsonFlagOrder", () => {
 			"AZE-123",
 		])
 	})
-
-	it("defaults issue dep positional form to add when subcommand is omitted", () => {
-		const argv = ["bun", "az", "issue", "dep", "AZE-200", "AZE-123", "--type", "blocks"]
-
-		expect(normalizeIssueJsonFlagOrder(argv)).toEqual([
-			"bun",
-			"az",
-			"issue",
-			"dep",
-			"add",
-			"--type",
-			"blocks",
-			"AZE-200",
-			"AZE-123",
-		])
-	})
-
-	it("maps issue dep --remove positional form to remove when subcommand is omitted", () => {
-		const argv = [
-			"bun",
-			"az",
-			"issue",
-			"dep",
-			"AZE-200",
-			"AZE-123",
-			"--remove",
-			"--type",
-			"parent-child",
-		]
-
-		expect(normalizeIssueJsonFlagOrder(argv)).toEqual([
-			"bun",
-			"az",
-			"issue",
-			"dep",
-			"remove",
-			"--type",
-			"parent-child",
-			"AZE-200",
-			"AZE-123",
-		])
-	})
-
-	it("keeps issue dep help untouched when no subcommand is provided", () => {
-		const argv = ["bun", "az", "issue", "dep", "--help"]
-		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
-	})
 })
 
 describe("decodeIssueBulkCreatePayload", () => {

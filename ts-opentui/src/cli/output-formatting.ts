@@ -348,6 +348,7 @@ ${issueSection}
   - When working under a parent issue, create follow-up work with \`az issue child "Title"\`.
   - When fanning out to subagents, tell each subagent to use \`az issue\` and create/maintain its own child issue under the active parent; reserve \`az prime\` for the orchestrator unless a subagent explicitly needs a fresh primer.
   - \`az issue create "Title"\` defaults to the active parent context (including \`AZEDARACH_ISSUE_ID\`) unless \`--deferred\` is set.
+  - There is no top-level \`az dep\` command; use \`az issue dep ...\`.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
   - Use \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to remove dependency relationships.
 - Issue-context guardrails:
