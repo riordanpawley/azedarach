@@ -3,107 +3,16 @@
 /**
  * Azedarach CLI Entry Point
  *
- * Auto-wraps in tmux ONLY for the bare TUI command (no subcommands), then
- * parses command-line arguments and executes the appropriate command.
- *
- * Environment variables:
- * - AZ_NO_TMUX=1      Skip auto-wrap (for debugging, CI)
- * - AZ_TMUX_SESSION   Custom tmux session name (default: "azedarach")
+ * Launches in the current terminal context and executes the appropriate
+ * command/TUI mode without implicit tmux wrapping.
  */
+export {}
 
-import { execInTmux, shouldWrapInTmux } from "../src/lib/tmux-wrap.js"
+const { BunContext, BunRuntime } = await import("@effect/platform-bun")
+const { Effect } = await import("effect")
+const { cliRunner } = await import("../src/cli/index.js")
 
-/**
- * Known subcommands that should NOT trigger tmux wrapping.
- * These commands run in the current terminal and don't need the TUI.
- */
-const CLI_SUBCOMMANDS = new Set([
-	"add",
-	"a",
-	"ls",
-	"l",
-	"list",
-	"i",
-	"pr",
-	"start",
-	"st",
-	"s",
-	"se",
-	"at",
-	"pa",
-	"k",
-	"attach",
-	"pause",
-	"kill",
-	"status",
-	"g",
-	"sy",
-	"sync",
-	"issue",
-	"p",
-	"sp",
-	"spec",
-	"prime",
-	"n",
-	"notify",
-	"h",
-	"hooks",
-	"project",
-	"config",
-	"cfg",
-	"o",
-	"opencode",
-	"dev",
-	"d",
-	"--help",
-	"-h",
-	"--version",
-])
-
-function looksLikeScriptPath(value: string): boolean {
-	if (value.endsWith(".ts") || value.endsWith(".tsx")) return true
-	if (value.endsWith(".js") || value.endsWith(".mjs") || value.endsWith(".cjs")) return true
-	return /(^|\/)az\.ts$/.test(value)
-}
-
-function getFirstUserArg(argv: readonly string[]): string | undefined {
-	// Runtime differences:
-	// - bun run bin/az.ts foo => [bun, bin/az.ts, foo]
-	// - compiled binary ./az foo => [./az, foo]
-	if (argv.length <= 1) return undefined
-	const second = argv[1]
-	if (second && looksLikeScriptPath(second)) {
-		return argv[2]
-	}
-	return second
-}
-
-/**
- * Check if this invocation is a CLI subcommand (not the TUI).
- * Returns true if we should skip tmux wrapping.
- */
-function isCliSubcommand(): boolean {
-	const firstArg = getFirstUserArg(process.argv)
-	if (!firstArg) return false
-
-	// Check if it's a known subcommand
-	return CLI_SUBCOMMANDS.has(firstArg)
-}
-
-// CRITICAL: Check tmux BEFORE any Effect initialization
-// This must happen early to avoid loading heavy modules we'll discard when exec'ing
-// Only wrap in tmux for the bare TUI command, NOT for CLI subcommands
-if (shouldWrapInTmux() && !isCliSubcommand()) {
-	// This never returns - it execs into tmux and exits with that process's code
-	await execInTmux(process.argv)
-} else {
-	// Normal startup path - dynamic imports keep the fast path minimal
-	const { BunContext, BunRuntime } = await import("@effect/platform-bun")
-	const { Effect } = await import("effect")
-	const { cliRunner } = await import("../src/cli/index.js")
-
-	// Two-level layer provision (idiomatic @effect/cli pattern):
-	// 1. Command.provide(cliLayer) - our app services (done in cli/index.ts)
-	// 2. Effect.provide(BunContext.layer) - platform services for @effect/cli internals
-	cliRunner(process.argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain)
-}
+// Two-level layer provision (idiomatic @effect/cli pattern):
+// 1. Command.provide(cliLayer) - our app services (done in cli/index.ts)
+// 2. Effect.provide(BunContext.layer) - platform services for @effect/cli internals
+cliRunner(process.argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain)
