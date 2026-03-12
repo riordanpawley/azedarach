@@ -51,6 +51,7 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
  */
 /** Actions that require network connectivity */
 const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
+const TMUX_REQUIRED_ACTIONS = new Set(["s", "S", "!", "a", "p", "R", "x", "r", "H"])
 
 const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	h: "h",
@@ -91,6 +92,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const workflowMode = props.workflowMode ?? "origin"
 	const drillDownEpicId = props.drillDownEpicId
 	const compact = props.compact ?? false
+	const tmuxActionsEnabled = props.tmuxCapabilities?.tmuxActionsEnabled ?? false
 	const parentEpicId = props.task?.parentEpicId
 	const issueType = props.task?.issue_type
 	const isEpic = issueType === "epic"
@@ -161,6 +163,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 	// Full availability check: state + queue busyness + network + workflow mode
 	const isAvailable = (action: string): boolean => {
+		if (!tmuxActionsEnabled && TMUX_REQUIRED_ACTIONS.has(action)) return false
+
 		// Merge is blocked in origin mode UNLESS task is epic child or in drilldown
 		// (epic children merge to parent epic, not main - so they're allowed)
 		if (action === "m" && workflowMode === "origin" && !parentEpicId && !drillDownEpicId)
@@ -207,8 +211,10 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		actions.push({ keyName: "f", description: "diff" })
 		actions.push({ keyName: "d", description: "cleanup+branch" })
 		actions.push({ keyName: "T", description: "tombstone" })
-		return actions
-	}, [sessionState])
+		return actions.filter(
+			(action) => tmuxActionsEnabled || !TMUX_REQUIRED_ACTIONS.has(action.keyName),
+		)
+	}, [sessionState, tmuxActionsEnabled])
 
 	// Action line component
 	const ActionLine = ({ keyName, description }: { keyName: string; description: string }) => {
@@ -266,21 +272,29 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			<text fg={theme.surface1}>{"─────────"}</text>
 
 			{/* Session actions */}
-			<ActionLine keyName="s" description="start" />
-			<ActionLine keyName="S" description="start+work" />
-			<ActionLine keyName="!" description="start (yolo)" />
-			<ActionLine keyName="a" description="attach" />
-			<ActionLine keyName="p" description="pause" />
-			<ActionLine keyName="R" description="resume" />
-			<ActionLine keyName="x" description="stop" />
-			<text fg={theme.surface1}>{"─────────"}</text>
+			{tmuxActionsEnabled && (
+				<>
+					<ActionLine keyName="s" description="start" />
+					<ActionLine keyName="S" description="start+work" />
+					<ActionLine keyName="!" description="start (yolo)" />
+					<ActionLine keyName="a" description="attach" />
+					<ActionLine keyName="p" description="pause" />
+					<ActionLine keyName="R" description="resume" />
+					<ActionLine keyName="x" description="stop" />
+					<text fg={theme.surface1}>{"─────────"}</text>
+				</>
+			)}
 
 			{/* Dev server */}
-			<ActionLine keyName="r" description={getDevServerLabel()} />
-			<text fg={theme.surface1}>{"─────────"}</text>
+			{tmuxActionsEnabled && (
+				<>
+					<ActionLine keyName="r" description={getDevServerLabel()} />
+					<text fg={theme.surface1}>{"─────────"}</text>
+				</>
+			)}
 
 			{/* Task actions */}
-			<ActionLine keyName="H" description="helix" />
+			{tmuxActionsEnabled && <ActionLine keyName="H" description="helix" />}
 			<ActionLine keyName="i" description="image" />
 			<ActionLine keyName="F" description="fork" />
 			<text fg={theme.surface1}>{"─────────"}</text>
