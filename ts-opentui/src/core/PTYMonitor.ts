@@ -585,6 +585,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						foregroundKind,
 						bellFlag: alertState.bell,
 						previousBellFlag: monitor.lastBellFlag,
+						detectedState,
 					})
 
 					if (shellForegroundState !== null) {
