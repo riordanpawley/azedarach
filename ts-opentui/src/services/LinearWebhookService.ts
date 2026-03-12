@@ -25,6 +25,7 @@ import {
 	Option,
 	Queue,
 	Ref,
+	Runtime,
 	Schema,
 	Stream,
 	SubscriptionRef,
@@ -355,6 +356,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const pathService = yield* Path.Path
 
 			const issueEventsQueue = yield* Queue.unbounded<LinearIssueWebhookMessage>()
+			const serviceRuntime = yield* Effect.runtime<CommandExecutor.CommandExecutor>()
 			const healthy = yield* SubscriptionRef.make(false)
 			const mode = yield* SubscriptionRef.make<LinearWebhookMode>("disabled")
 			const status = yield* SubscriptionRef.make<LinearWebhookRuntimeStatus>({
@@ -689,7 +691,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 											const requestUrl = new URL(request.url)
 											if (request.method !== "POST") {
 												if (requestUrl.pathname === WEBHOOK_PATH) {
-													void Effect.runFork(
+													void Runtime.runFork(serviceRuntime)(
 														Effect.logInfo(
 															`LinearWebhookService: rejected ${request.method} ${requestUrl.pathname} with 405`,
 														),
@@ -703,7 +705,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 											const signature = request.headers.get(LINEAR_WEBHOOK_SIGNATURE_HEADER)
 											if (!signature) {
-												void Effect.runFork(
+												void Runtime.runFork(serviceRuntime)(
 													Effect.logWarning(
 														`LinearWebhookService: missing signature header for ${requestUrl.pathname}`,
 													),
@@ -721,14 +723,14 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 														configKey: params.configKey,
 														payload: decoded.value,
 													})
-													void Effect.runFork(SubscriptionRef.set(healthy, true))
-													void Effect.runFork(
+													void Runtime.runFork(serviceRuntime)(SubscriptionRef.set(healthy, true))
+													void Runtime.runFork(serviceRuntime)(
 														Effect.logInfo(
 															`LinearWebhookService: accepted issue webhook action=${decoded.value.action} identifier=${decoded.value.data.identifier}`,
 														),
 													)
 												} else {
-													void Effect.runFork(
+													void Runtime.runFork(serviceRuntime)(
 														Effect.logInfo(
 															"LinearWebhookService: ignored non-Issue webhook payload",
 														),
@@ -736,7 +738,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 												}
 												return new Response("OK", { status: 200 })
 											} catch (error) {
-												void Effect.runFork(
+												void Runtime.runFork(serviceRuntime)(
 													Effect.logWarning(
 														`LinearWebhookService: invalid webhook rejected: ${formatErrorMessage(error)}`,
 													),
