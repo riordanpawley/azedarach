@@ -11,6 +11,7 @@ import {
 	FileSystem,
 	Headers,
 	HttpLayerRouter,
+	HttpServerRequest,
 	HttpServerResponse,
 	Path,
 	PlatformConfigProvider,
@@ -689,13 +690,10 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							const webhookIdRef: { id: string | undefined } = { id: undefined }
 							const webhookRoute = HttpLayerRouter.add("*", WEBHOOK_PATH, (request) =>
 								Effect.gen(function* () {
-									const requestPath = (() => {
-										try {
-											return new URL(request.url, "http://localhost").pathname
-										} catch {
-											return request.url
-										}
-									})()
+									const requestPath = Option.match(HttpServerRequest.toURL(request), {
+										onNone: () => request.url,
+										onSome: (url) => url.pathname,
+									})
 									if (request.method !== "POST") {
 										yield* Effect.logInfo(
 											`LinearWebhookService: rejected ${request.method} ${requestPath} with 405`,
@@ -717,30 +715,38 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 										? timestampOption.value
 										: undefined
 
-									try {
-										const payload = webhookClient.parseData(rawBody, signature.value, timestamp)
-										const decoded = decodeLinearIssueWebhookEvent(payload)
-										if (Option.isSome(decoded)) {
-											yield* Queue.offer(issueEventsQueue, {
-												configKey: params.configKey,
-												payload: decoded.value,
-											})
-											yield* SubscriptionRef.set(healthy, true)
-											yield* Effect.logInfo(
-												`LinearWebhookService: accepted issue webhook action=${decoded.value.action} identifier=${decoded.value.data.identifier}`,
-											)
-										} else {
-											yield* Effect.logInfo(
-												"LinearWebhookService: ignored non-Issue webhook payload",
-											)
-										}
-										return HttpServerResponse.text("OK", { status: 200 })
-									} catch (error) {
-										yield* Effect.logWarning(
-											`LinearWebhookService: invalid webhook rejected: ${formatErrorMessage(error)}`,
-										)
-										return HttpServerResponse.text("Invalid webhook", { status: 400 })
-									}
+									return yield* Effect.try({
+										try: () => webhookClient.parseData(rawBody, signature.value, timestamp),
+										catch: formatErrorMessage,
+									}).pipe(
+										Effect.map(decodeLinearIssueWebhookEvent),
+										Effect.flatMap((decoded) =>
+											Option.match(decoded, {
+												onSome: (event) =>
+													Queue.offer(issueEventsQueue, {
+														configKey: params.configKey,
+														payload: event,
+													}).pipe(
+														Effect.zipRight(SubscriptionRef.set(healthy, true)),
+														Effect.zipRight(
+															Effect.logInfo(
+																`LinearWebhookService: accepted issue webhook action=${event.action} identifier=${event.data.identifier}`,
+															),
+														),
+													),
+												onNone: () =>
+													Effect.logInfo("LinearWebhookService: ignored non-Issue webhook payload"),
+											}),
+										),
+										Effect.as(HttpServerResponse.text("OK", { status: 200 })),
+										Effect.catchAll((errorMessage) =>
+											Effect.logWarning(
+												`LinearWebhookService: invalid webhook rejected: ${errorMessage}`,
+											).pipe(
+												Effect.as(HttpServerResponse.text("Invalid webhook", { status: 400 })),
+											),
+										),
+									)
 								}),
 							)
 							const serverLayer = HttpLayerRouter.serve(webhookRoute, {
