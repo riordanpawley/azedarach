@@ -9,9 +9,14 @@ import {
 	Command,
 	type CommandExecutor,
 	FileSystem,
+	Headers,
+	HttpLayerRouter,
+	HttpServerRequest,
+	HttpServerResponse,
 	Path,
 	PlatformConfigProvider,
 } from "@effect/platform"
+import * as BunHttpServer from "@effect/platform-bun/BunHttpServer"
 import {
 	LINEAR_WEBHOOK_SIGNATURE_HEADER,
 	LINEAR_WEBHOOK_TS_HEADER,
@@ -22,10 +27,11 @@ import {
 	ConfigProvider,
 	Data,
 	Effect,
+	Fiber,
+	Layer,
 	Option,
 	Queue,
 	Ref,
-	Runtime,
 	Schema,
 	Stream,
 	SubscriptionRef,
@@ -356,7 +362,6 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const pathService = yield* Path.Path
 
 			const issueEventsQueue = yield* Queue.unbounded<LinearIssueWebhookMessage>()
-			const serviceRuntime = yield* Effect.runtime<CommandExecutor.CommandExecutor>()
 			const healthy = yield* SubscriptionRef.make(false)
 			const mode = yield* SubscriptionRef.make<LinearWebhookMode>("disabled")
 			const status = yield* SubscriptionRef.make<LinearWebhookRuntimeStatus>({
@@ -683,85 +688,87 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
 							const port = runtimeConfig.port
 							const webhookIdRef: { id: string | undefined } = { id: undefined }
-							const server = yield* Effect.try({
-								try: () =>
-									Bun.serve({
-										port,
-										fetch: async (request: Request): Promise<Response> => {
-											const requestUrl = new URL(request.url)
-											if (request.method !== "POST") {
-												if (requestUrl.pathname === WEBHOOK_PATH) {
-													void Runtime.runFork(serviceRuntime)(
-														Effect.logInfo(
-															`LinearWebhookService: rejected ${request.method} ${requestUrl.pathname} with 405`,
-														),
-													)
-												}
-												return new Response("Method not allowed", { status: 405 })
-											}
-											if (requestUrl.pathname !== WEBHOOK_PATH) {
-												return new Response("Not found", { status: 404 })
-											}
+							const webhookRoute = HttpLayerRouter.add("*", WEBHOOK_PATH, (request) =>
+								Effect.gen(function* () {
+									const requestPath = Option.match(HttpServerRequest.toURL(request), {
+										onNone: () => request.url,
+										onSome: (url) => url.pathname,
+									})
+									if (request.method !== "POST") {
+										yield* Effect.logInfo(
+											`LinearWebhookService: rejected ${request.method} ${requestPath} with 405`,
+										)
+										return HttpServerResponse.text("Method not allowed", { status: 405 })
+									}
 
-											const signature = request.headers.get(LINEAR_WEBHOOK_SIGNATURE_HEADER)
-											if (!signature) {
-												void Runtime.runFork(serviceRuntime)(
-													Effect.logWarning(
-														`LinearWebhookService: missing signature header for ${requestUrl.pathname}`,
-													),
-												)
-												return new Response("Missing webhook signature", { status: 400 })
-											}
+									const signature = Headers.get(request.headers, LINEAR_WEBHOOK_SIGNATURE_HEADER)
+									if (Option.isNone(signature)) {
+										yield* Effect.logWarning(
+											`LinearWebhookService: missing signature header for ${requestPath}`,
+										)
+										return HttpServerResponse.text("Missing webhook signature", { status: 400 })
+									}
 
-											const rawBody = Buffer.from(await request.arrayBuffer())
-											const timestamp = request.headers.get(LINEAR_WEBHOOK_TS_HEADER) ?? undefined
-											try {
-												const payload = webhookClient.parseData(rawBody, signature, timestamp)
-												const decoded = decodeLinearIssueWebhookEvent(payload)
-												if (Option.isSome(decoded)) {
-													Queue.unsafeOffer(issueEventsQueue, {
+									const rawBody = Buffer.from(yield* request.arrayBuffer)
+									const timestampOption = Headers.get(request.headers, LINEAR_WEBHOOK_TS_HEADER)
+									const timestamp = Option.isSome(timestampOption)
+										? timestampOption.value
+										: undefined
+
+									return yield* Effect.try({
+										try: () => webhookClient.parseData(rawBody, signature.value, timestamp),
+										catch: formatErrorMessage,
+									}).pipe(
+										Effect.map(decodeLinearIssueWebhookEvent),
+										Effect.flatMap((decoded) =>
+											Option.match(decoded, {
+												onSome: (event) =>
+													Queue.offer(issueEventsQueue, {
 														configKey: params.configKey,
-														payload: decoded.value,
-													})
-													void Runtime.runFork(serviceRuntime)(SubscriptionRef.set(healthy, true))
-													void Runtime.runFork(serviceRuntime)(
-														Effect.logInfo(
-															`LinearWebhookService: accepted issue webhook action=${decoded.value.action} identifier=${decoded.value.data.identifier}`,
+														payload: event,
+													}).pipe(
+														Effect.zipRight(SubscriptionRef.set(healthy, true)),
+														Effect.zipRight(
+															Effect.logInfo(
+																`LinearWebhookService: accepted issue webhook action=${event.action} identifier=${event.data.identifier}`,
+															),
 														),
-													)
-												} else {
-													void Runtime.runFork(serviceRuntime)(
-														Effect.logInfo(
-															"LinearWebhookService: ignored non-Issue webhook payload",
-														),
-													)
-												}
-												return new Response("OK", { status: 200 })
-											} catch (error) {
-												void Runtime.runFork(serviceRuntime)(
-													Effect.logWarning(
-														`LinearWebhookService: invalid webhook rejected: ${formatErrorMessage(error)}`,
 													),
-												)
-												return new Response("Invalid webhook", { status: 400 })
-											}
-										},
-									}),
-								catch: (error) =>
-									new LinearWebhookRuntimeError({
-										message: `Failed to start local webhook listener on :${port}: ${formatErrorMessage(error)}`,
-									}),
-							})
-							const cleanup = Effect.gen(function* () {
-								yield* Effect.try({
-									try: () => {
-										server.stop(true)
-									},
-									catch: (error) =>
+												onNone: () =>
+													Effect.logInfo("LinearWebhookService: ignored non-Issue webhook payload"),
+											}),
+										),
+										Effect.as(HttpServerResponse.text("OK", { status: 200 })),
+										Effect.catchAll((errorMessage) =>
+											Effect.logWarning(
+												`LinearWebhookService: invalid webhook rejected: ${errorMessage}`,
+											).pipe(
+												Effect.as(HttpServerResponse.text("Invalid webhook", { status: 400 })),
+											),
+										),
+									)
+								}),
+							)
+							const serverLayer = HttpLayerRouter.serve(webhookRoute, {
+								disableListenLog: true,
+							}).pipe(Layer.provide(BunHttpServer.layer({ port })))
+							const serverFiber = yield* Layer.launch(serverLayer).pipe(
+								Effect.mapError(
+									(error) =>
 										new LinearWebhookRuntimeError({
-											message: `Failed to stop local webhook listener on :${port}: ${formatErrorMessage(error)}`,
+											message: `Failed to start local webhook listener on :${port}: ${formatErrorMessage(error)}`,
 										}),
-								}).pipe(
+								),
+								Effect.forkDaemon,
+							)
+							const cleanup = Effect.gen(function* () {
+								yield* Fiber.interrupt(serverFiber).pipe(
+									Effect.mapError(
+										(error) =>
+											new LinearWebhookRuntimeError({
+												message: `Failed to stop local webhook listener on :${port}: ${formatErrorMessage(error)}`,
+											}),
+									),
 									Effect.catchAll((error) =>
 										Effect.logWarning(`LinearWebhookService: ${error.message}`).pipe(Effect.asVoid),
 									),
