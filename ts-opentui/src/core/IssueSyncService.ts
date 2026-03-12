@@ -1414,22 +1414,34 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					externalIssue.teamId,
 					`Linear issue ${externalRef.externalId} is missing team id`,
 				)
-				const closedStateId = yield* findStateIdForStatus(teamId, "closed", runtime.apiKey)
-				yield* linearSdk
-					.updateIssue(
-						externalRef.externalId,
-						{ stateId: closedStateId },
-						{ apiKey: runtime.apiKey },
-					)
-					.pipe(
+				if (request.operation === "delete") {
+					yield* linearSdk.archiveIssue(externalRef.externalId, { apiKey: runtime.apiKey }).pipe(
 						Effect.asVoid,
 						Effect.mapError(
 							(error) =>
 								new IssueSyncError({
-									message: `Failed to close Linear issue for ${request.issueId}: ${error.message}`,
+									message: `Failed to archive Linear issue for ${request.issueId}: ${error.message}`,
 								}),
 						),
 					)
+				} else {
+					const closedStateId = yield* findStateIdForStatus(teamId, "closed", runtime.apiKey)
+					yield* linearSdk
+						.updateIssue(
+							externalRef.externalId,
+							{ stateId: closedStateId },
+							{ apiKey: runtime.apiKey },
+						)
+						.pipe(
+							Effect.asVoid,
+							Effect.mapError(
+								(error) =>
+									new IssueSyncError({
+										message: `Failed to close Linear issue for ${request.issueId}: ${error.message}`,
+									}),
+							),
+						)
+				}
 				yield* Effect.log(
 					`Linear sync ${request.operation} complete: issue=${request.issueId} externalId=${externalRef.externalId} projectPath=${projectPath}`,
 				)

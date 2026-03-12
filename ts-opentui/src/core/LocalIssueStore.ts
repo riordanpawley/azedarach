@@ -192,6 +192,14 @@ interface ExternalRefRow {
 	readonly last_synced_at: string | null
 }
 
+interface DeletedExternalRefRow {
+	readonly local_id: string
+	readonly target: string
+	readonly external_id: string
+	readonly external_key: string | null
+	readonly deleted_at: string
+}
+
 interface MetaRow {
 	readonly value: string
 }
@@ -476,6 +484,14 @@ const schemaStatements: readonly string[] = [
 		external_key TEXT,
 		last_synced_at TEXT,
 		PRIMARY KEY (issue_id, target)
+	)`,
+	`CREATE TABLE IF NOT EXISTS deleted_issue_external_refs (
+		local_id TEXT NOT NULL,
+		target TEXT NOT NULL,
+		external_id TEXT NOT NULL,
+		external_key TEXT,
+		deleted_at TEXT NOT NULL,
+		PRIMARY KEY (target, external_id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS sync_queue (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2434,6 +2450,37 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				`
 			})
 
+		const recordDeletedExternalRef = (
+			sql: SqlClient.SqlClient,
+			params: {
+				readonly issueId: string
+				readonly target: SyncTarget
+				readonly externalId: string
+				readonly externalKey: string | null
+			},
+		): Effect.Effect<void, SqlError> =>
+			sql`
+				INSERT INTO deleted_issue_external_refs (
+					local_id,
+					target,
+					external_id,
+					external_key,
+					deleted_at
+				)
+				VALUES (
+					${params.issueId},
+					${params.target},
+					${params.externalId},
+					${params.externalKey},
+					${nowIso()}
+				)
+				ON CONFLICT(target, external_id)
+				DO UPDATE SET
+					local_id = ${params.issueId},
+					external_key = ${params.externalKey},
+					deleted_at = ${nowIso()}
+			`.pipe(Effect.asVoid)
+
 		const loadIssueById = (
 			sql: SqlClient.SqlClient,
 			id: string,
@@ -3199,9 +3246,27 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						if (existing.length === 0) {
 							return false
 						}
+						const externalRefsForDeletion =
+							syncTarget === undefined
+								? []
+								: yield* sql<ExternalRefRow>`
+									SELECT issue_id, target, external_id, external_key, last_synced_at
+									FROM issue_external_refs
+									WHERE issue_id = ${id} AND target = ${syncTarget}
+								`
 
 						yield* sql.withTransaction(
 							Effect.gen(function* () {
+								if (syncTarget !== undefined) {
+									for (const externalRef of externalRefsForDeletion) {
+										yield* recordDeletedExternalRef(sql, {
+											issueId: id,
+											target: syncTarget,
+											externalId: externalRef.external_id,
+											externalKey: externalRef.external_key,
+										})
+									}
+								}
 								yield* sql`DELETE FROM issue_dependencies WHERE issue_id = ${id} OR depends_on_id = ${id}`
 								yield* sql`DELETE FROM issue_attachments WHERE issue_id = ${id}`
 								yield* sql`DELETE FROM issues WHERE id = ${id}`
@@ -5173,6 +5238,35 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												WHERE key = ${LINEAR_LEGACY_DUPLICATE_CLEANUP_META_KEY}
 												LIMIT 1
 											`.pipe(Effect.map((rows) => rows[0]?.value !== "1"))))
+									const deletedExternalRefs = yield* sql<DeletedExternalRefRow>`
+										SELECT local_id, target, external_id, external_key, deleted_at
+										FROM deleted_issue_external_refs
+										WHERE target = ${target}
+									`
+									const deletedExternalIds = new Set(
+										deletedExternalRefs.map((row) => row.external_id),
+									)
+									const deletedExternalKeys = new Set(
+										deletedExternalRefs
+											.map((row) => row.external_key)
+											.filter((value): value is string => value !== null),
+									)
+									const deletedLocalIds = new Set(deletedExternalRefs.map((row) => row.local_id))
+									const eligibleSnapshots = snapshots.filter((snapshot) => {
+										if (deletedExternalIds.has(snapshot.externalId)) {
+											return false
+										}
+										if (
+											snapshot.externalKey !== undefined &&
+											deletedExternalKeys.has(snapshot.externalKey)
+										) {
+											return false
+										}
+										return !deletedLocalIds.has(snapshot.localId)
+									})
+									if (eligibleSnapshots.length === 0) {
+										return 0
+									}
 
 									const activeIssueRows = yield* sql<{
 										readonly id: string
@@ -5221,7 +5315,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 
 									const snapshotLocalIdRemap = new Map<string, string>()
 									const duplicateIdsByCanonicalId = new Map<string, Set<string>>()
-									for (const snapshot of snapshots) {
+									for (const snapshot of eligibleSnapshots) {
 										const candidates = new Set<string>()
 										const externalIdCandidates = localIdsByExternalId.get(snapshot.externalId)
 										if (externalIdCandidates !== undefined) {
@@ -5475,7 +5569,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 											`
 										})
 
-									for (const snapshot of snapshots) {
+									for (const snapshot of eligibleSnapshots) {
 										const localId = snapshotLocalIdRemap.get(snapshot.localId) ?? snapshot.localId
 										const parentLocalId =
 											snapshot.parentLocalId === undefined
@@ -5631,7 +5725,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										`
 									}
 
-									return snapshots.length
+									return eligibleSnapshots.length
 								}),
 							),
 						),

@@ -546,6 +546,59 @@ describe("importExternalSnapshot", () => {
 			rmSync(projectPath, { recursive: true, force: true })
 		}
 	})
+
+	it("suppresses reimport for external refs deleted locally", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-delete-suppress-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const created = yield* store.create({ title: "Delete me" }, undefined, projectPath)
+					yield* store.upsertExternalRef(
+						{
+							issueId: created.id,
+							target: "linear",
+							externalId: "lin-delete-1",
+							externalKey: "AZE-999",
+						},
+						projectPath,
+					)
+					yield* store.delete(created.id, "linear", projectPath)
+
+					const importedCount = yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-999",
+								externalId: "lin-delete-1",
+								externalKey: "AZE-999",
+								title: "Should not resurrect",
+								status: "closed",
+								priority: 2,
+								issueType: "task",
+								createdAt: created.created_at,
+								updatedAt: created.updated_at,
+								labels: [],
+							},
+						],
+						projectPath,
+					)
+
+					const originalIssue = yield* store.show(created.id, projectPath)
+					const mirroredIssue = yield* store.show("AZE-999", projectPath)
+					return { importedCount, originalIssue, mirroredIssue }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.importedCount).toBe(0)
+			expect(result.originalIssue).toBeUndefined()
+			expect(result.mirroredIssue).toBeUndefined()
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
 })
 
 describe("list", () => {

@@ -149,6 +149,7 @@ type LinearCreateIssueInput = Parameters<LinearClient["createIssue"]>[0]
 type LinearCreateIssueResult = Awaited<ReturnType<LinearClient["createIssue"]>>
 type LinearUpdateIssueInput = Parameters<LinearClient["updateIssue"]>[1]
 type LinearUpdateIssueResult = Awaited<ReturnType<LinearClient["updateIssue"]>>
+type LinearArchiveIssueResult = Awaited<ReturnType<LinearClient["archiveIssue"]>>
 type LinearCreateDocumentInput = Parameters<LinearClient["createDocument"]>[0]
 type LinearCreateDocumentResult = Awaited<ReturnType<LinearClient["createDocument"]>>
 type LinearUpdateDocumentInput = Parameters<LinearClient["updateDocument"]>[1]
@@ -215,6 +216,10 @@ export interface LinearSdkApi {
 		input: LinearUpdateIssueInput,
 		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearUpdateIssueResult, LinearSdkError>
+	readonly archiveIssue: (
+		id: string,
+		options?: LinearSdkRequestOptions,
+	) => Effect.Effect<LinearArchiveIssueResult, LinearSdkError>
 	readonly updateDocument: (
 		id: string,
 		input: LinearUpdateDocumentInput,
@@ -419,6 +424,15 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				fallbackError: `Failed to update issue ${id} in Linear`,
 			})
 
+		const archiveIssue: LinearSdkApi["archiveIssue"] = (id, options) =>
+			runWithClient({
+				operation: "archiveIssue",
+				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
+				request: (client) => client.archiveIssue(id),
+				fallbackError: `Failed to archive issue ${id} in Linear`,
+			})
+
 		const updateDocument: LinearSdkApi["updateDocument"] = (id, input, options) =>
 			runWithClient({
 				operation: "updateDocument",
@@ -612,6 +626,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			createIssue,
 			createDocument,
 			updateIssue,
+			archiveIssue,
 			updateDocument,
 			createWebhook,
 			deleteWebhook,
