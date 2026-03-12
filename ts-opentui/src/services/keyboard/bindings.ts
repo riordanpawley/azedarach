@@ -86,6 +86,21 @@ export interface BindingContext {
  */
 const BOARD_NAV_MODES = ["normal", "select", "mergeSelect"] as const
 
+const tmuxUnavailableMessage = (label: string): string => `${label} is unavailable outside tmux`
+
+const guardTmuxAction = <E, R>(
+	bc: BindingContext,
+	label: string,
+	action: Effect.Effect<void, E, R>,
+): Effect.Effect<void, E, R> =>
+	Effect.gen(function* () {
+		if (!bc.tmuxCapabilities.tmuxActionsEnabled) {
+			yield* bc.toast.show("info", tmuxUnavailableMessage(label))
+			return
+		}
+		yield* action
+	})
+
 export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybinding> => [
 	// ========================================================================
 	// Board Navigation (shared across normal, select, mergeSelect modes)
@@ -340,13 +355,21 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "S-r",
 		mode: "normal",
 		description: "Recover crashed session",
-		action: Effect.suspend(() => bc.sessionHandlers.recoverCrashedSession()),
+		action: Effect.suspend(() =>
+			guardTmuxAction(bc, "Recover crashed session", bc.sessionHandlers.recoverCrashedSession()),
+		),
 	},
 	{
 		key: "C-r",
 		mode: "normal",
 		description: "Recover all crashed sessions",
-		action: Effect.suspend(() => bc.sessionHandlers.recoverAllCrashedSessions()),
+		action: Effect.suspend(() =>
+			guardTmuxAction(
+				bc,
+				"Recover crashed sessions",
+				bc.sessionHandlers.recoverAllCrashedSessions(),
+			),
+		),
 	},
 	{
 		key: "p",
@@ -358,14 +381,17 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "S-l",
 		mode: "normal",
 		description: "View logs in tmux popup",
-		action: Effect.gen(function* () {
-			const projectPath = yield* bc.helpers.getProjectPath()
-			const logFile = `${projectPath}/az.log`
-			// Shell wrapper providing menu with view/edit/quit options
-			// Note: We use bash intentionally because this script uses bash-specific syntax
-			// (`read -rsn1`, `case` statement). These utility popups don't need the user's
-			// shell environment - they just run simple scripts.
-			const wrapperScript = `
+		action: guardTmuxAction(
+			bc,
+			"Log popup",
+			Effect.gen(function* () {
+				const projectPath = yield* bc.helpers.getProjectPath()
+				const logFile = `${projectPath}/az.log`
+				// Shell wrapper providing menu with view/edit/quit options
+				// Note: We use bash intentionally because this script uses bash-specific syntax
+				// (`read -rsn1`, `case` statement). These utility popups don't need the user's
+				// shell environment - they just run simple scripts.
+				const wrapperScript = `
 while true; do
   clear
   echo ""
@@ -383,14 +409,15 @@ while true; do
   esac
 done
 `
-			yield* bc.tmux.displayPopup({
-				command: `bash -c '${wrapperScript.replace(/'/g, "'\\''")}'`,
-				width: "90%",
-				height: "90%",
-				title: " az.log ",
-				cwd: projectPath,
-			})
-		}).pipe(Effect.catchAll(Effect.logError)),
+				yield* bc.tmux.displayPopup({
+					command: `bash -c '${wrapperScript.replace(/'/g, "'\\''")}'`,
+					width: "90%",
+					height: "90%",
+					title: " az.log ",
+					cwd: projectPath,
+				})
+			}).pipe(Effect.catchAll(Effect.logError)),
+		),
 	},
 
 	// ========================================================================
@@ -433,7 +460,11 @@ done
 		mode: "action",
 		description: "Start session",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSession())),
+			guardTmuxAction(
+				bc,
+				"Start session",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSession())),
+			),
 		),
 	},
 	{
@@ -441,7 +472,13 @@ done
 		mode: "action",
 		description: "Start+work (prompt AI)",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSessionWithPrompt())),
+			guardTmuxAction(
+				bc,
+				"Start session with prompt",
+				bc.editor
+					.exitToNormal()
+					.pipe(Effect.tap(() => bc.sessionHandlers.startSessionWithPrompt())),
+			),
 		),
 	},
 	{
@@ -449,7 +486,11 @@ done
 		mode: "action",
 		description: "Start+work (skip permissions)",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSessionDangerous())),
+			guardTmuxAction(
+				bc,
+				"Start session (skip permissions)",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSessionDangerous())),
+			),
 		),
 	},
 	{
@@ -457,7 +498,11 @@ done
 		mode: "action",
 		description: "Attach to session",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachExternal())),
+			guardTmuxAction(
+				bc,
+				"Attach to session",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachExternal())),
+			),
 		),
 	},
 	{
@@ -465,7 +510,11 @@ done
 		mode: "action",
 		description: "Attach inline",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachInline())),
+			guardTmuxAction(
+				bc,
+				"Attach inline",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachInline())),
+			),
 		),
 	},
 	{
@@ -473,7 +522,11 @@ done
 		mode: "action",
 		description: "Pause session",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.pauseSession())),
+			guardTmuxAction(
+				bc,
+				"Pause session",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.pauseSession())),
+			),
 		),
 	},
 	{
@@ -481,13 +534,17 @@ done
 		mode: "action",
 		description: "Toggle dev server",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(
-				Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
-				Effect.catchAll((e) =>
-					Effect.gen(function* () {
-						yield* Effect.logError("Dev server toggle failed", e)
-						yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
-					}),
+			guardTmuxAction(
+				bc,
+				"Dev server toggle",
+				bc.editor.exitToNormal().pipe(
+					Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
+					Effect.catchAll((e) =>
+						Effect.gen(function* () {
+							yield* Effect.logError("Dev server toggle failed", e)
+							yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
+						}),
+					),
 				),
 			),
 		),
@@ -497,13 +554,17 @@ done
 		mode: "action",
 		description: "Restart dev server",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(
-				Effect.tap(() => bc.devServerHandlers.restartDevServer()),
-				Effect.catchAll((e) =>
-					Effect.gen(function* () {
-						yield* Effect.logError("Dev server restart failed", e)
-						yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
-					}),
+			guardTmuxAction(
+				bc,
+				"Dev server restart",
+				bc.editor.exitToNormal().pipe(
+					Effect.tap(() => bc.devServerHandlers.restartDevServer()),
+					Effect.catchAll((e) =>
+						Effect.gen(function* () {
+							yield* Effect.logError("Dev server restart failed", e)
+							yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
+						}),
+					),
 				),
 			),
 		),
@@ -513,7 +574,11 @@ done
 		mode: "action",
 		description: "Resume session",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.resumeSession())),
+			guardTmuxAction(
+				bc,
+				"Resume session",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.resumeSession())),
+			),
 		),
 	},
 	{
@@ -521,7 +586,11 @@ done
 		mode: "action",
 		description: "Stop session",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.stopSession())),
+			guardTmuxAction(
+				bc,
+				"Stop session",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.stopSession())),
+			),
 		),
 	},
 	{
@@ -643,7 +712,11 @@ done
 		mode: "action",
 		description: "Open Helix editor",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startHelixSession())),
+			guardTmuxAction(
+				bc,
+				"Helix session",
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startHelixSession())),
+			),
 		),
 	},
 	{
@@ -707,9 +780,13 @@ done
 		key: "S-w",
 		mode: "goto-pending",
 		description: "Open waiting session picker",
-		action: bc.overlay
-			.push({ _tag: "waitingSessionPicker" })
-			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
+		action: guardTmuxAction(
+			bc,
+			"Waiting session picker",
+			bc.overlay
+				.push({ _tag: "waitingSessionPicker" })
+				.pipe(Effect.tap(() => bc.editor.exitToNormal())),
+		),
 	},
 
 	// ========================================================================
