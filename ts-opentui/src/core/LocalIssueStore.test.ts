@@ -1294,6 +1294,8 @@ describe("linear webhook runtime lease metadata", () => {
 							webhookId: "wh_123",
 							webhookUrl: "https://example.ts.net/linear/webhook",
 							teamId: "team_123",
+							resourceTypes: ["Issue"],
+							webhookSecret: "whsec_123",
 						},
 						projectPath,
 					)
@@ -1311,6 +1313,8 @@ describe("linear webhook runtime lease metadata", () => {
 				webhookId: "wh_123",
 				webhookUrl: "https://example.ts.net/linear/webhook",
 				teamId: "team_123",
+				resourceTypes: ["Issue"],
+				webhookSecret: "whsec_123",
 			})
 			expect(result.cleared).toBeUndefined()
 		} finally {

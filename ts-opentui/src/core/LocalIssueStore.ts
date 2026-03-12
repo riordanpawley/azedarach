@@ -99,6 +99,8 @@ const LinearWebhookRuntimeLeaseJsonSchema = Schema.parseJson(
 		webhookId: Schema.String,
 		webhookUrl: Schema.String,
 		teamId: Schema.String,
+		resourceTypes: Schema.Array(Schema.String),
+		webhookSecret: Schema.String,
 	}),
 )
 const BoardTaskStateSchema = Schema.Struct({
