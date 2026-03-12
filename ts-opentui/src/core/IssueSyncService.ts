@@ -52,6 +52,10 @@ const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
 const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 60_000
 
+export interface IssueSyncFlushOptions {
+	readonly hydrateRemote?: boolean
+}
+
 type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
 
@@ -1921,6 +1925,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 			flushLinearQueue: (
 				projectPath: string,
+				options?: IssueSyncFlushOptions,
 			): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
 				Effect.gen(function* () {
 					const inFlight = yield* Ref.get(flushInFlightRef).pipe(
@@ -2064,11 +2069,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							)
 						}
 
-						const pulled = yield* pullRemoteSnapshots({
-							runtime: runtimeOption.value,
-							projectPath,
-							flushRun,
-						})
+						const pulled =
+							options?.hydrateRemote === false
+								? 0
+								: yield* pullRemoteSnapshots({
+										runtime: runtimeOption.value,
+										projectPath,
+										flushRun,
+									})
 						const queueSummaryAfter = yield* fromStore(
 							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, projectPath),
 						)

@@ -344,6 +344,10 @@ export interface SyncResult {
 	readonly pulled: number
 }
 
+export interface SyncOptions {
+	readonly hydrateRemote?: boolean
+}
+
 const normalizeLegacySyncResult = (result: LegacySyncResult): SyncResult => result
 
 const normalizeBrSyncResult = (result: BrSyncResult): SyncResult => ({
@@ -807,6 +811,7 @@ export interface IssueTrackerClientService {
 	 */
 	readonly sync: (
 		cwd?: string,
+		options?: SyncOptions,
 	) => Effect.Effect<
 		SyncResult,
 		IssueTrackerError | ParseError | SyncRequiredError,
@@ -3166,7 +3171,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					yield* runBd(runtime, args, effectiveCwd)
 				}),
 
-			sync: (cwd?: string) =>
+			sync: (cwd?: string, options?: SyncOptions) =>
 				Effect.gen(function* () {
 					const runtime = yield* resolveIssueTrackerRuntime(cwd)
 					if (runtime.configuredBackend === "local") {
@@ -3193,7 +3198,9 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						)
 						const syncResult = yield* fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSyncLinear.flushQueue(runtime.projectPath),
+							backendSyncLinear.flushQueue(runtime.projectPath, {
+								hydrateRemote: options?.hydrateRemote,
+							}),
 						)
 						yield* Effect.log(
 							`IssueTrackerClient.sync linear flush complete: projectPath=${runtime.projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
@@ -3764,11 +3771,12 @@ export const close = (
  */
 export const sync = (
 	cwd?: string,
+	options?: SyncOptions,
 ): Effect.Effect<
 	SyncResult,
 	IssueTrackerError | ParseError | SyncRequiredError,
 	IssueTrackerClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(IssueTrackerClient, (client) => client.sync(cwd))
+> => Effect.flatMap(IssueTrackerClient, (client) => client.sync(cwd, options))
 
 /**
  * Get ready issues
