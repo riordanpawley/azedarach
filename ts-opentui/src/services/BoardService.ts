@@ -84,6 +84,7 @@ const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
 const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
 const LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL = "2 minutes"
 const LOCAL_CREATE_VISIBILITY_GRACE_MS = 15000
+const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
 const TRANSIENT_RETRY_ATTEMPTS = 4
 const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
@@ -591,9 +592,9 @@ const filterTasks = (
 // Cache Types
 // ============================================================================
 
-/** TTL for git status cache in milliseconds (10 seconds)
- * Must be longer than the board refresh interval so cache survives between refreshes. */
-const GIT_STATUS_CACHE_TTL_MS = 10000
+/** TTL for git status cache in milliseconds.
+ * Keep this short so git badges feel responsive during active work. */
+const GIT_STATUS_CACHE_TTL_MS = 3000
 
 /**
  * Cached git status entry with timestamp
@@ -944,17 +945,31 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				return result
 			})
 
+		const runGitStatusCommand = <A, E, R>(
+			label: string,
+			command: Effect.Effect<A, E, R>,
+		): Effect.Effect<A | undefined, never, R> =>
+			command.pipe(
+				Effect.timeout(`${GIT_STATUS_COMMAND_TIMEOUT_MS} millis`),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Git status command failed (${label}): ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(undefined)),
+					),
+				),
+				Effect.tap((result) =>
+					result === undefined
+						? Effect.logWarning(
+								`Git status command timed out or failed (${label}) after ${GIT_STATUS_COMMAND_TIMEOUT_MS}ms`,
+							)
+						: Effect.void,
+				),
+			)
+
 		const checkMergeConflict = (worktreePath: string) =>
 			Effect.gen(function* () {
-				const command = Command.make("git", "-C", worktreePath, "rev-parse", "MERGE_HEAD").pipe(
-					Command.exitCode,
-				)
-				const exitCode = yield* command.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-							Effect.zipRight(Effect.succeed(128)),
-						),
-					),
+				const exitCode = yield* runGitStatusCommand(
+					"rev-parse MERGE_HEAD",
+					Command.make("git", "-C", worktreePath, "rev-parse", "MERGE_HEAD").pipe(Command.exitCode),
 				)
 				return exitCode === 0
 			})
@@ -977,17 +992,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						`HEAD..${baseBranch}`,
 					).pipe(Command.string)
 
-					const behindCount = yield* behindCommand.pipe(
-						Effect.map((output) => {
-							const count = Number.parseInt(output.trim(), 10)
-							return Number.isNaN(count) ? 0 : count
-						}),
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(0)),
-							),
-						),
+					const behindOutput = yield* runGitStatusCommand(
+						`rev-list HEAD..${baseBranch}`,
+						behindCommand,
 					)
+					const behindCount =
+						behindOutput === undefined
+							? 0
+							: (() => {
+									const count = Number.parseInt(behindOutput.trim(), 10)
+									return Number.isNaN(count) ? 0 : count
+								})()
 
 					const dirtyCommand = Command.make(
 						"git",
@@ -997,14 +1012,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						"--porcelain",
 					).pipe(Command.string)
 
-					const hasUncommittedChanges = yield* dirtyCommand.pipe(
-						Effect.map((output) => output.trim().length > 0),
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(false)),
-							),
-						),
-					)
+					const dirtyOutput = yield* runGitStatusCommand("status --porcelain", dirtyCommand)
+					const hasUncommittedChanges = dirtyOutput !== undefined && dirtyOutput.trim().length > 0
 
 					let gitAdditions: number | undefined
 					let gitDeletions: number | undefined
@@ -1020,14 +1029,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							"HEAD",
 						).pipe(Command.string)
 
-						const mergeBase = yield* mergeBaseCommand.pipe(
-							Effect.map((output) => output.trim()),
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed(baseBranch)),
-								),
-							), // Fallback to branch name
+						const mergeBaseOutput = yield* runGitStatusCommand(
+							`merge-base ${baseBranch} HEAD`,
+							mergeBaseCommand,
 						)
+						const mergeBase = mergeBaseOutput?.trim() || baseBranch
 
 						// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
 						// Excludes .azedarach/ directory - users care about code changes, not tracker metadata
@@ -1043,29 +1049,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							":^.azedarach",
 						).pipe(Command.string)
 
-						const diffStats = yield* diffCommand.pipe(
-							Effect.map((output) => {
-								let additions = 0
-								let deletions = 0
-								for (const line of output.trim().split("\n")) {
-									if (!line) continue
-									const parts = line.split("\t")
-									const add = Number.parseInt(parts[0] ?? "0", 10)
-									const del = Number.parseInt(parts[1] ?? "0", 10)
-									if (!Number.isNaN(add)) additions += add
-									if (!Number.isNaN(del)) deletions += del
-								}
-								return { additions, deletions }
-							}),
-							Effect.catchAll((error) =>
-								Effect.logWarning(error).pipe(
-									Effect.zipRight(Effect.succeed({ additions: 0, deletions: 0 })),
-								),
-							),
+						const diffOutput = yield* runGitStatusCommand(
+							`diff --numstat ${mergeBase} HEAD`,
+							diffCommand,
 						)
-
-						gitAdditions = diffStats.additions
-						gitDeletions = diffStats.deletions
+						if (diffOutput !== undefined) {
+							let additions = 0
+							let deletions = 0
+							for (const line of diffOutput.trim().split("\n")) {
+								if (!line) continue
+								const parts = line.split("\t")
+								const add = Number.parseInt(parts[0] ?? "0", 10)
+								const del = Number.parseInt(parts[1] ?? "0", 10)
+								if (!Number.isNaN(add)) additions += add
+								if (!Number.isNaN(del)) deletions += del
+							}
+							gitAdditions = additions
+							gitDeletions = deletions
+						} else {
+							gitAdditions = 0
+							gitDeletions = 0
+						}
 					}
 
 					return {
