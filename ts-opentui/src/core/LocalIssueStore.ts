@@ -3630,6 +3630,44 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
+			removeDependency: (
+				issueId: string,
+				dependsOnId: string,
+				type: DependencyType | undefined,
+				syncTarget?: SyncTarget,
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const tombstonedAt = nowIso()
+							if (type === undefined) {
+								yield* sql`
+									UPDATE issue_dependencies
+									SET tombstoned_at = ${tombstonedAt}
+									WHERE
+										issue_id = ${issueId}
+										AND depends_on_id = ${dependsOnId}
+										AND tombstoned_at IS NULL
+								`
+							} else {
+								yield* sql`
+									UPDATE issue_dependencies
+									SET tombstoned_at = ${tombstonedAt}
+									WHERE
+										issue_id = ${issueId}
+										AND depends_on_id = ${dependsOnId}
+										AND dependency_type = ${type}
+										AND tombstoned_at IS NULL
+								`
+							}
+							if (syncTarget !== undefined) {
+								yield* enqueueSync(sql, issueId, "upsert", syncTarget)
+							}
+						}),
+					),
+				),
+
 			getEpicChildren: (
 				epicId: string,
 				cwd?: string,

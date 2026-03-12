@@ -349,6 +349,7 @@ ${issueSection}
   - When fanning out to subagents, tell each subagent to use \`az issue\` and create/maintain its own child issue under the active parent; reserve \`az prime\` for the orchestrator unless a subagent explicitly needs a fresh primer.
   - \`az issue create "Title"\` defaults to the active parent context (including \`AZEDARACH_ISSUE_ID\`) unless \`--deferred\` is set.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
+  - Use \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to remove dependency relationships.
 - Issue-context guardrails:
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.

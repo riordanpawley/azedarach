@@ -2195,6 +2195,80 @@ const issueDepAddHandler = (args: {
 	})
 
 /**
+ * Remove an issue dependency edge
+ */
+const issueDepRemoveHandler = (args: {
+	readonly issueId: string
+	readonly dependsOnId: string
+	readonly dependencyType: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const dependencyType = yield* Option.match(args.dependencyType, {
+			onNone: () => Effect.succeed<RelationshipDependencyType | undefined>(undefined),
+			onSome: (value) => {
+				const parsed = parseRelationshipDependencyType(value)
+				if (parsed === undefined) {
+					return Effect.fail(
+						new Error(
+							`Invalid dependency type '${value}'. Expected one of: blocks, related, parent-child, discovered-from.`,
+						),
+					)
+				}
+				return Effect.succeed(parsed)
+			},
+		})
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		yield* issueTrackerClient.removeDependency(
+			issueId,
+			dependsOnId,
+			dependencyType,
+			explicitProjectDir,
+		)
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue dep remove",
+			verbose: args.verbose,
+		})
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						issueId,
+						dependsOnId,
+						type: dependencyType ?? null,
+						updated: true,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		if (dependencyType === undefined) {
+			yield* Console.log(`Removed dependency edge(s): ${issueId} -> ${dependsOnId}`)
+		} else {
+			yield* Console.log(`Removed ${dependencyType} dependency: ${issueId} -> ${dependsOnId}`)
+		}
+		if (args.verbose) {
+			yield* Console.error("Use `az issue get <issue-id>` to inspect dependencies.")
+		}
+	})
+
+/**
  * Close an issue
  */
 const issueCloseHandler = (args: {
@@ -5355,7 +5429,7 @@ const issueBulkCreateCommand = Command.make(
 ).pipe(Command.withDescription("Create multiple issues from a JSON payload"))
 
 /**
- * az issue dep add <issue-id> <depends-on-id> - Add dependency edge
+ * az issue dep add|remove <issue-id> <depends-on-id> - Manage dependency edge
  */
 const issueDepAddCommand = Command.make(
 	"add",
@@ -5379,14 +5453,36 @@ const issueDepAddCommand = Command.make(
 	issueDepAddHandler,
 ).pipe(Command.withDescription("Add a dependency edge between issues"))
 
+const issueDepRemoveCommand = Command.make(
+	"remove",
+	{
+		issueId: issueIdArg,
+		dependsOnId: dependsOnIssueIdArg,
+		dependencyType: Options.text("type").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription(
+				"Optional dependency type filter (blocks, related, parent-child, discovered-from)",
+			),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON confirmation"),
+		),
+	},
+	issueDepRemoveHandler,
+).pipe(Command.withDescription("Remove dependency edge(s) between issues"))
+
 /**
  * az issue dep - Parent command for dependency edge operations
  */
 const issueDepCommand = Command.make("dep", {}, () =>
-	Console.log("Usage: az issue dep add [--type <type>] <issue-id> <depends-on-id>"),
+	Console.log("Usage: az issue dep add|remove [--type <type>] <issue-id> <depends-on-id>"),
 ).pipe(
 	Command.withDescription("Manage issue dependency edges"),
-	Command.withSubcommands([issueDepAddCommand]),
+	Command.withSubcommands([issueDepAddCommand, issueDepRemoveCommand]),
 )
 
 /**

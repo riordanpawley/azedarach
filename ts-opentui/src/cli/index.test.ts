@@ -340,6 +340,32 @@ describe("normalizeIssueJsonFlagOrder", () => {
 			"AZE-123",
 		])
 	})
+
+	it("moves issue dep remove options ahead of positional ids when ids are first", () => {
+		const argv = [
+			"bun",
+			"az",
+			"issue",
+			"dep",
+			"remove",
+			"AZE-200",
+			"AZE-123",
+			"--type",
+			"parent-child",
+		]
+
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"dep",
+			"remove",
+			"--type",
+			"parent-child",
+			"AZE-200",
+			"AZE-123",
+		])
+	})
 })
 
 describe("decodeIssueBulkCreatePayload", () => {
@@ -654,6 +680,15 @@ describe("normalizeCliAliases", () => {
 			"issue",
 			"dep",
 			"add",
+			"AZE-1",
+			"AZE-2",
+		])
+		expect(normalizeCliAliases(["bun", "az", "issue", "d", "rm", "AZE-1", "AZE-2"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"dep",
+			"remove",
 			"AZE-1",
 			"AZE-2",
 		])

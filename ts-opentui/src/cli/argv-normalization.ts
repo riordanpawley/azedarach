@@ -39,6 +39,8 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 		},
 		"issue/dep": {
 			a: "add",
+			r: "remove",
+			rm: "remove",
 		},
 		spec: {
 			r: "req",
@@ -166,7 +168,7 @@ export const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): Readonly
 		const subcommand = argv[issueCommandIndex + 1]
 		if (subcommand === "dep") {
 			const depSubcommand = argv[issueCommandIndex + 2]
-			if (depSubcommand !== "add") {
+			if (depSubcommand !== "add" && depSubcommand !== "remove") {
 				return argv
 			}
 
