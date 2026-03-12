@@ -314,6 +314,12 @@ export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError
 	readonly cause?: unknown
 }> {}
 
+const isLocalIssueStoreError = (value: unknown): value is LocalIssueStoreError =>
+	typeof value === "object" &&
+	value !== null &&
+	"_tag" in value &&
+	value._tag === "LocalIssueStoreError"
+
 const DEFAULT_PAGE_SIZE = 200
 const SYNC_QUEUE_LEASE_SECONDS = 120
 const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
@@ -2020,7 +2026,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							Effect.zipRight(
 								Effect.fail(
 									new LocalIssueStoreError({
-										message: `Failed to create sqlite directory: ${String(cause)}`,
+										message:
+											"Failed to prepare local issue database directory. Check filesystem permissions and available disk space, then retry.",
 										cause,
 									}),
 								),
@@ -2052,16 +2059,19 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					}),
 				).pipe(
 					Effect.catchAll((cause) =>
-						Effect.logWarning(cause).pipe(
-							Effect.zipRight(
-								Effect.fail(
-									new LocalIssueStoreError({
-										message: `SQLite operation failed: ${String(cause)}`,
-										cause,
-									}),
+						isLocalIssueStoreError(cause)
+							? Effect.fail(cause)
+							: Effect.logWarning(cause).pipe(
+									Effect.zipRight(
+										Effect.fail(
+											new LocalIssueStoreError({
+												message:
+													"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
+												cause,
+											}),
+										),
+									),
 								),
-							),
-						),
 					),
 				)
 			})
