@@ -320,6 +320,19 @@ const isLocalIssueStoreError = (value: unknown): value is LocalIssueStoreError =
 	"_tag" in value &&
 	value._tag === "LocalIssueStoreError"
 
+const isSqlError = (value: unknown): value is SqlError =>
+	typeof value === "object" && value !== null && "_tag" in value && value._tag === "SqlError"
+
+const containsSqlError = (value: unknown): boolean => {
+	if (isSqlError(value)) {
+		return true
+	}
+	if (isLocalIssueStoreError(value) && value.cause !== undefined) {
+		return containsSqlError(value.cause)
+	}
+	return false
+}
+
 const DEFAULT_PAGE_SIZE = 200
 const SYNC_QUEUE_LEASE_SECONDS = 120
 const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
@@ -2059,19 +2072,25 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					}),
 				).pipe(
 					Effect.catchAll((cause) =>
-						isLocalIssueStoreError(cause)
-							? Effect.fail(cause)
-							: Effect.logWarning(cause).pipe(
-									Effect.zipRight(
-										Effect.fail(
-											new LocalIssueStoreError({
-												message:
-													"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
-												cause,
-											}),
-										),
-									),
-								),
+						Effect.gen(function* () {
+							if (containsSqlError(cause)) {
+								yield* Effect.logError("LocalIssueStore SQL failure")
+								yield* Effect.logError(cause)
+							}
+
+							if (isLocalIssueStoreError(cause)) {
+								return yield* Effect.fail(cause)
+							}
+
+							yield* Effect.logWarning(cause)
+							return yield* Effect.fail(
+								new LocalIssueStoreError({
+									message:
+										"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
+									cause,
+								}),
+							)
+						}),
 					),
 				)
 			})
