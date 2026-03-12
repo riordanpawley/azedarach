@@ -11,6 +11,7 @@
 
 import { Effect, Ref } from "effect"
 import { IssueTrackerClient } from "../core/IssueTrackerClient.js"
+import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { BoardService } from "./BoardService.js"
 import { EditorService } from "./EditorService.js"
@@ -83,6 +84,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const editor = yield* EditorService
 		const viewService = yield* ViewService
 		const tmux = yield* TmuxService
+		const tmuxCapabilities = detectTmuxCapabilities()
 		const issueTrackerClient = yield* IssueTrackerClient
 		const board = yield* BoardService
 		const gitSync = yield* GitSyncService
@@ -107,6 +109,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			toast,
 			viewService,
 			tmux,
+			tmuxCapabilities,
 			issueTrackerClient,
 			board,
 			gitSync,

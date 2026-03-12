@@ -7,6 +7,7 @@
 
 import { Effect } from "effect"
 import type { Issue, IssueTrackerClient } from "../../core/IssueTrackerClient.js"
+import type { TmuxCapabilities } from "../../core/TmuxCapabilities.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
@@ -53,6 +54,7 @@ export interface BindingContext {
 	toast: ToastService
 	viewService: ViewService
 	tmux: TmuxService
+	tmuxCapabilities: TmuxCapabilities
 	issueTrackerClient: IssueTrackerClient
 	board: BoardService
 	gitSync: GitSyncService

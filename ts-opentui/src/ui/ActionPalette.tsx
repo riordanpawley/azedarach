@@ -4,6 +4,7 @@
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useMemo, useState } from "react"
 import type { WorkflowMode } from "../config/schema.js"
+import type { TmuxCapabilities } from "../core/TmuxCapabilities.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
@@ -26,6 +27,8 @@ export interface ActionPaletteProps {
 	compact?: boolean
 	/** Execute an action key sequence (same path as keyboard handler) */
 	onActionSelect?: (keySeq: string) => void
+	/** Runtime tmux capability snapshot (for action gating). */
+	tmuxCapabilities?: TmuxCapabilities
 }
 
 const _ATTR_BOLD = 1
