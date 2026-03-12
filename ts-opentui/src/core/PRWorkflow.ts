@@ -874,6 +874,31 @@ const hasPseudoRef = (
 		return exitCode === 0
 	})
 
+const hasRemoteBranchHead = (options: {
+	cwd: string
+	remoteName: string
+	branchName: string
+}): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const { cwd, remoteName, branchName } = options
+		const command = Command.make(
+			"git",
+			"ls-remote",
+			"--exit-code",
+			"--heads",
+			remoteName,
+			branchName,
+		).pipe(Command.workingDirectory(cwd))
+		const exitCode = yield* Command.exitCode(command).pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(
+					`Failed checking remote branch ${remoteName}/${branchName}: ${String(error)}`,
+				).pipe(Effect.zipRight(Effect.succeed(2))),
+			),
+		)
+		return exitCode === 0
+	})
+
 /**
  * Detect the first in-progress git operation in the target repository.
  */
@@ -2921,6 +2946,30 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								Effect.logWarning(`Failed to pop stash: ${e.message}`).pipe(Effect.asVoid),
 							),
 						)
+					}
+
+					const pushStatus = yield* offlineService.isGitPushEnabled()
+					if (pushStatus.enabled) {
+						const remoteName = gitConfig.remote ?? "origin"
+						const remoteBranchExists = yield* hasRemoteBranchHead({
+							cwd: projectPath,
+							remoteName,
+							branchName: worktree.branch,
+						})
+						if (remoteBranchExists) {
+							yield* runGit(["push", remoteName, worktree.branch], worktree.path).pipe(
+								Effect.tap(() =>
+									Effect.log(
+										`Successfully pushed ${worktree.branch} to ${remoteName} after merging ${baseBranch}`,
+									),
+								),
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`Merged ${baseBranch} into ${issueId}, but failed to push ${worktree.branch} to ${remoteName}: ${error.message}`,
+									).pipe(Effect.asVoid),
+								),
+							)
+						}
 					}
 
 					yield* Effect.log(`Successfully merged ${baseBranch} into ${issueId}`)
