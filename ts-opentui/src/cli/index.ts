@@ -794,7 +794,7 @@ const syncLinearAfterIssueMutation = (params: {
 		}
 
 		const syncResult = yield* params.issueTrackerClient
-			.sync(params.explicitProjectDir)
+			.sync(params.explicitProjectDir, { hydrateRemote: false })
 			.pipe(
 				Effect.mapError(
 					(error) =>
