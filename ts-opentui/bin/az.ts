@@ -60,13 +60,30 @@ const CLI_SUBCOMMANDS = new Set([
 	"--version",
 ])
 
+function looksLikeScriptPath(value: string): boolean {
+	if (value.endsWith(".ts") || value.endsWith(".tsx")) return true
+	if (value.endsWith(".js") || value.endsWith(".mjs") || value.endsWith(".cjs")) return true
+	return /(^|\/)az\.ts$/.test(value)
+}
+
+function getFirstUserArg(argv: readonly string[]): string | undefined {
+	// Runtime differences:
+	// - bun run bin/az.ts foo => [bun, bin/az.ts, foo]
+	// - compiled binary ./az foo => [./az, foo]
+	if (argv.length <= 1) return undefined
+	const second = argv[1]
+	if (second && looksLikeScriptPath(second)) {
+		return argv[2]
+	}
+	return second
+}
+
 /**
  * Check if this invocation is a CLI subcommand (not the TUI).
  * Returns true if we should skip tmux wrapping.
  */
 function isCliSubcommand(): boolean {
-	// argv[0] = bun, argv[1] = script path, argv[2] = first user arg
-	const firstArg = process.argv[2]
+	const firstArg = getFirstUserArg(process.argv)
 	if (!firstArg) return false
 
 	// Check if it's a known subcommand

@@ -39,11 +39,8 @@ export function shouldWrapInTmux(): boolean {
  * @param argv - Full process.argv to pass through
  */
 export async function execInTmux(argv: string[]): Promise<never> {
-	// Build the command to run inside tmux
-	// argv[0] is bun, argv[1] is the script path, rest are args
-	const command = argv.join(" ")
-
-	const proc = Bun.spawn(["tmux", "new-session", "-A", "-s", SESSION_NAME, command], {
+	// Forward argv as discrete command+arguments to avoid shell-string quoting issues.
+	const proc = Bun.spawn(["tmux", "new-session", "-A", "-s", SESSION_NAME, ...argv], {
 		stdin: "inherit",
 		stdout: "inherit",
 		stderr: "inherit",

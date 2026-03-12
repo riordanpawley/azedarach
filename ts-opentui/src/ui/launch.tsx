@@ -50,11 +50,11 @@ async function registerReturnBinding(): Promise<void> {
 export async function launchTUI(): Promise<void> {
 	await truncateAzLogOnStartup()
 
-	// Register SIGINT handler to clean up any active tmux popup
-	// This prevents orphaned popups when user presses Ctrl-C during editor operations
+	// Register SIGINT handler to clean up any active tmux popup.
+	// Avoid forcing process.exit here: hard-exiting from a signal handler during
+	// renderer lifecycle can trigger OpenTUI/React teardown failures.
 	process.on("SIGINT", () => {
 		killActivePopup()
-		process.exit(0)
 	})
 
 	// Register return-to-board tmux keybinding (fire-and-forget)
