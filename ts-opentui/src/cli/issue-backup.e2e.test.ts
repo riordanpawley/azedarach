@@ -30,6 +30,8 @@ const runAz = (args: readonly string[], cwd: string): string => {
 	return stdout
 }
 
+const runAzJson = <T>(args: readonly string[], cwd: string): T => JSON.parse(runAz(args, cwd)) as T
+
 const writeConfig = async (
 	projectDir: string,
 	overrides?: {
@@ -83,6 +85,32 @@ afterEach(async () => {
 })
 
 describe("az issue backup e2e", () => {
+	it("accepts --status on issue create", async () => {
+		const projectDir = await createTempProject()
+		await writeConfig(projectDir)
+
+		const created = runAzJson<{ id: string; status: string }>(
+			[
+				"issue",
+				"create",
+				"--project-dir",
+				projectDir,
+				"--status",
+				"in_progress",
+				"--json",
+				"Create with status",
+			],
+			projectDir,
+		)
+		expect(created.status).toBe("in_progress")
+
+		const fetched = runAzJson<{ id: string; status: string }>(
+			["issue", "get", "--project-dir", projectDir, "--json", created.id],
+			projectDir,
+		)
+		expect(fetched.status).toBe("in_progress")
+	})
+
 	it("creates an automatic sqlite backup during issue create", async () => {
 		const projectDir = await createTempProject()
 		await writeConfig(projectDir)

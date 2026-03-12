@@ -885,6 +885,7 @@ export interface IssueTrackerClientService {
 	readonly create: (params: {
 		title: string
 		type?: string
+		status?: IssueStatus
 		priority?: number
 		description?: string
 		design?: string
@@ -2242,10 +2243,12 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							const assignee = parseArgumentValue(rest, "--assignee")
 							const estimate = parseArgumentValue(rest, "--estimate")
 							const parent = parseArgumentValue(rest, "--parent")
+							const status = parseArgumentValue(rest, "--status")
 							const priorityArg = parseArgumentValue(rest, "--priority")
 							const priority = toLinearPriorityValue(
 								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
 							)
+							const parsedStatus = parseIssueStatus(status)
 							const labelArgs = parseRepeatedArgumentValues(rest, "--labels")
 							const labels = labelArgs
 								.flatMap((value) => value.split(","))
@@ -2267,6 +2270,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								parent !== undefined && parent.trim().length > 0
 									? yield* resolveLinearIssueId(parent)
 									: undefined
+							const stateId =
+								parsedStatus !== undefined
+									? yield* findTeamStateIdForStatus(teamId, parsedStatus)
+									: undefined
 
 							const extraSections: string[] = []
 							if (design) extraSections.push(`## Design\n${design}`)
@@ -2286,6 +2293,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 										assigneeId,
 										estimate: estimateValue,
 										parentId,
+										stateId,
 										labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
 									})
 									.pipe(
@@ -2327,7 +2335,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								return JSON.stringify({
 									id: createdLinearIssue.identifier,
 									title: createdLinearIssue.title,
-									status: "open",
+									status: parsedStatus ?? "open",
 									priority: normalizeLinearPriority(createdLinearIssue.priority),
 									issue_type: inferLinearIssueType([], false, undefined),
 									created_at: createdLinearIssue.createdAt.toISOString(),
@@ -3293,6 +3301,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			create: (params: {
 				title: string
 				type?: string
+				status?: IssueStatus
 				priority?: number
 				description?: string
 				design?: string
@@ -3314,6 +3323,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								{
 									title: params.title,
 									type: params.type,
+									status: params.status,
 									priority: params.priority,
 									description: params.description,
 									design: params.design,
@@ -3374,7 +3384,19 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					// tracker create returns a single issue object (not an array)
 					const parsed = yield* parseJson(IssueSchema, output)
-					return normalizeIssue(parsed)
+					const createdIssue = normalizeIssue(parsed)
+					if (params.status !== undefined && params.status !== "open") {
+						yield* runBd(
+							runtime,
+							["update", createdIssue.id, "--status", params.status],
+							effectiveCwd,
+						)
+						return {
+							...createdIssue,
+							status: params.status,
+						}
+					}
+					return createdIssue
 				}),
 
 			listImplementations: (cwd?: string) =>

@@ -2896,6 +2896,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				params: {
 					title: string
 					type?: string
+					status?: string
 					priority?: number
 					description?: string
 					design?: string
@@ -2912,6 +2913,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				withSqlMutation(cwd, (sql) =>
 					Effect.gen(function* () {
 						const now = nowIso()
+						const normalizedStatus = normalizeIssueStatus(params.status)
 						const nextAlphaIndex = yield* getMetaValue(
 							sql,
 							LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META,
@@ -2956,12 +2958,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										${issueId},
 										${params.title},
 										${params.description ?? null},
-										${"open"},
+										${normalizedStatus},
 										${params.priority ?? 2},
 										${normalizeIssueType(params.type)},
 										${now},
 										${now},
-										${null},
+										${normalizedStatus === "closed" ? now : null},
 										${params.assignee ?? null},
 										${encodeLabels(params.labels)},
 										${encodeSpecImplementations(implementations)},
