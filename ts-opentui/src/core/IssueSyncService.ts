@@ -50,7 +50,10 @@ const LINEAR_LABELS_PAGE_SIZE = 250
 const API_KEY_CACHE_TTL_MS = 30_000
 const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
-const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 60_000
+const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 30_000
+const LINEAR_SYNC_THROTTLE_DEFAULT_MAX_PER_MINUTE = 10
+const LINEAR_SYNC_THROTTLE_DEFAULT_BURST = 10
+const LINEAR_INCREMENTAL_PULL_OVERLAP_MS = 5_000
 
 export interface IssueSyncFlushOptions {
 	readonly hydrateRemote?: boolean
@@ -73,6 +76,8 @@ interface LinearRuntime {
 	readonly defaultTeam: string | undefined
 	readonly defaultProject: string | undefined
 	readonly apiKey: string
+	readonly maxPullsPerMinute: number
+	readonly pullBurst: number
 }
 
 type ApiKeySource = "direnv" | "config-provider" | "none"
@@ -316,6 +321,61 @@ export const shouldRetryUpsertForMissingParent = (params: {
 	readonly parentExternalId: string | undefined
 }): boolean => params.parentLocalId !== undefined && params.parentExternalId === undefined
 
+const sanitizePositiveInteger = (value: number | undefined, fallback: number): number => {
+	if (value === undefined || !Number.isFinite(value)) return fallback
+	const floor = Math.floor(value)
+	return floor >= 1 ? floor : fallback
+}
+
+const computeTokenBucketState = (params: {
+	readonly nowMs: number
+	readonly maxPerMinute: number
+	readonly burst: number
+	readonly state: {
+		readonly tokens?: number
+		readonly refillAtMs?: number
+	}
+}): { readonly tokens: number; readonly refillAtMs: number } => {
+	const maxPerMinute = sanitizePositiveInteger(
+		params.maxPerMinute,
+		LINEAR_SYNC_THROTTLE_DEFAULT_MAX_PER_MINUTE,
+	)
+	const burst = sanitizePositiveInteger(params.burst, LINEAR_SYNC_THROTTLE_DEFAULT_BURST)
+	const refillRatePerMs = maxPerMinute / 60_000
+	const seedTokens = params.state.tokens ?? burst
+	const seedRefillAtMs = params.state.refillAtMs ?? params.nowMs
+	const elapsedMs = Math.max(0, params.nowMs - seedRefillAtMs)
+	const refilledTokens = Math.min(burst, seedTokens + elapsedMs * refillRatePerMs)
+	return {
+		tokens: refilledTokens,
+		refillAtMs: params.nowMs,
+	}
+}
+
+const consumePullToken = (params: {
+	readonly nowMs: number
+	readonly maxPerMinute: number
+	readonly burst: number
+	readonly state: {
+		readonly tokens?: number
+		readonly refillAtMs?: number
+	}
+}): { readonly allowed: boolean; readonly tokens: number; readonly refillAtMs: number } => {
+	const bucket = computeTokenBucketState(params)
+	if (bucket.tokens < 1) {
+		return {
+			allowed: false,
+			tokens: bucket.tokens,
+			refillAtMs: bucket.refillAtMs,
+		}
+	}
+	return {
+		allowed: true,
+		tokens: bucket.tokens - 1,
+		refillAtMs: bucket.refillAtMs,
+	}
+}
+
 const toRetryDelaySeconds = (attempt: number): number => {
 	const cappedAttempt = Math.max(0, Math.min(8, attempt))
 	return BASE_RETRY_SECONDS * 2 ** cappedAttempt
@@ -334,6 +394,7 @@ const isUuid = (value: string): boolean => UUID_PATTERN.test(value)
 interface LinearIssueScope {
 	readonly team: string | undefined
 	readonly project: string | undefined
+	readonly updatedAfterIso?: string
 }
 
 interface LinearWorkflowState {
@@ -346,6 +407,7 @@ interface LinearWorkflowState {
 export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFilter | undefined => {
 	const team = normalizeScopeValue(scope.team)
 	const project = normalizeScopeValue(scope.project)
+	const updatedAfterIso = normalizeScopeValue(scope.updatedAfterIso)
 	const constraints: LinearIssuesFilter[] = []
 
 	if (team !== undefined) {
@@ -376,6 +438,14 @@ export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFil
 		constraints.push({
 			project: {
 				or: projectOr,
+			},
+		})
+	}
+
+	if (updatedAfterIso !== undefined) {
+		constraints.push({
+			updatedAt: {
+				gt: updatedAfterIso,
 			},
 		})
 	}
@@ -440,8 +510,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				Deferred.Deferred<{ readonly pushed: number; readonly pulled: number }, IssueSyncError>
 			>
 		>(new Map())
-		const lastRemoteHydrationAtRef = yield* Ref.make<Map<string, number>>(new Map())
-
 		const mapLocalStoreError = (error: LocalIssueStoreError): IssueSyncError =>
 			new IssueSyncError({
 				message: error.message,
@@ -833,6 +901,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					defaultTeam: config.issueTracker.linear.team,
 					defaultProject: config.issueTracker.linear.project,
 					apiKey: apiKeyOption.value,
+					maxPullsPerMinute: sanitizePositiveInteger(
+						config.issueTracker.linear.syncThrottle.maxPerMinute,
+						LINEAR_SYNC_THROTTLE_DEFAULT_MAX_PER_MINUTE,
+					),
+					pullBurst: sanitizePositiveInteger(
+						config.issueTracker.linear.syncThrottle.burst,
+						LINEAR_SYNC_THROTTLE_DEFAULT_BURST,
+					),
 				}
 				yield* setRuntimeHealthReady({
 					projectPath,
@@ -1585,7 +1661,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
 			Effect.gen(function* () {
 				yield* Effect.log(
-					`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
+					`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"} updatedAfter=${scope.updatedAfterIso ?? "<none>"}`,
 				)
 				const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
 				const issues = yield* fetchAllLinearIssues(scope, apiKey).pipe(
@@ -1682,9 +1758,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			Effect.gen(function* () {
 				const projectPath = params.projectPath
 				const nowMs = Date.now()
-				const lastHydrationAt = yield* Ref.get(lastRemoteHydrationAtRef).pipe(
-					Effect.map((entries) => entries.get(projectPath)),
+				const runtimeState = yield* fromStore(
+					localStore.getLinearSyncRuntimeState(projectPath, projectPath),
 				)
+				const lastHydrationAt = runtimeState.lastPullAtMs
 				const dueToInterval = shouldRunRemoteHydration({
 					nowMs,
 					lastHydrationAtMs: lastHydrationAt,
@@ -1699,14 +1776,49 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return 0
 				}
 
+				const tokenAttempt = consumePullToken({
+					nowMs,
+					maxPerMinute: params.runtime.maxPullsPerMinute,
+					burst: params.runtime.pullBurst,
+					state: {
+						tokens: runtimeState.tokens,
+						refillAtMs: runtimeState.refillAtMs,
+					},
+				})
+				if (!tokenAttempt.allowed) {
+					yield* fromStore(
+						localStore.setLinearSyncRuntimeState(
+							projectPath,
+							{
+								lastPullAtMs: runtimeState.lastPullAtMs,
+								tokens: tokenAttempt.tokens,
+								refillAtMs: tokenAttempt.refillAtMs,
+							},
+							projectPath,
+						),
+					)
+					yield* Effect.log(
+						`Linear remote hydration skipped: run=${params.flushRun.runId} projectPath=${projectPath} reason=rate_limited tokens=${tokenAttempt.tokens.toFixed(2)} maxPerMinute=${params.runtime.maxPullsPerMinute} burst=${params.runtime.pullBurst}`,
+					)
+					return 0
+				}
+
+				const updatedAfterMs =
+					runtimeState.lastPullAtMs === undefined
+						? undefined
+						: Math.max(0, runtimeState.lastPullAtMs - LINEAR_INCREMENTAL_PULL_OVERLAP_MS)
+				const updatedAfterIso =
+					updatedAfterMs === undefined ? undefined : new Date(updatedAfterMs).toISOString()
+
 				yield* Effect.log(
-					`Linear remote hydration start: run=${params.flushRun.runId} projectPath=${projectPath} reason=interval`,
+					`Linear remote hydration start: run=${params.flushRun.runId} projectPath=${projectPath} reason=interval updatedAfter=${updatedAfterIso ?? "<none>"} tokensRemaining=${tokenAttempt.tokens.toFixed(2)} maxPerMinute=${params.runtime.maxPullsPerMinute} burst=${params.runtime.pullBurst}`,
 				)
 
 				const snapshots = yield* buildBootstrapSnapshots(
 					{
 						team: params.runtime.defaultTeam,
 						project: params.runtime.defaultProject,
+						updatedAfterIso,
 					},
 					params.runtime.apiKey,
 				)
@@ -1721,11 +1833,17 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 								),
 							)
 				yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, params.projectPath))
-				yield* Ref.update(lastRemoteHydrationAtRef, (entries) => {
-					const next = new Map(entries)
-					next.set(projectPath, nowMs)
-					return next
-				})
+				yield* fromStore(
+					localStore.setLinearSyncRuntimeState(
+						projectPath,
+						{
+							lastPullAtMs: nowMs,
+							tokens: tokenAttempt.tokens,
+							refillAtMs: tokenAttempt.refillAtMs,
+						},
+						projectPath,
+					),
+				)
 				yield* Effect.log(
 					`Linear remote hydration complete: run=${params.flushRun.runId} projectPath=${projectPath} pulled=${pulled} snapshots=${snapshots.length}`,
 				)

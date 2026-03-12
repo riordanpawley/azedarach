@@ -317,6 +317,19 @@ export interface PersistedBoardTaskState extends Schema.Schema.Type<typeof Board
 	readonly issueId: string
 }
 
+const LinearSyncRuntimeStateSchema = Schema.Struct({
+	lastPullAtMs: Schema.optional(Schema.Number),
+	tokens: Schema.optional(Schema.Number),
+	refillAtMs: Schema.optional(Schema.Number),
+})
+const LinearSyncRuntimeStateJsonSchema = Schema.parseJson(LinearSyncRuntimeStateSchema)
+
+export interface LinearSyncRuntimeState {
+	readonly lastPullAtMs?: number
+	readonly tokens?: number
+	readonly refillAtMs?: number
+}
+
 export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError")<{
 	readonly message: string
 	readonly cause?: unknown
@@ -356,6 +369,7 @@ const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
 const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
 const SPEC_LOCAL_ID_PATTERN = /^[a-z][a-z0-9-]{0,47}$/
 const SPEC_IMPLEMENTATION_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
+const LINEAR_SYNC_RUNTIME_META_PREFIX = "sync:linear:runtime:v1:"
 
 const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
 	enabled: true,
@@ -404,6 +418,12 @@ const normalizeProjectPath = (projectPath: string): string => {
 	}
 	const withoutTrailingSlashes = trimmed.replace(/\/+$/, "")
 	return withoutTrailingSlashes.length === 0 ? "/" : withoutTrailingSlashes
+}
+
+const buildLinearSyncRuntimeMetaKey = (projectPath: string): string => {
+	const normalizedProjectPath = normalizeProjectPath(projectPath)
+	const digest = createHash("sha256").update(normalizedProjectPath).digest("hex")
+	return `${LINEAR_SYNC_RUNTIME_META_PREFIX}${digest}`
 }
 
 interface LocalIssueStorageResolution {
@@ -5754,6 +5774,48 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						ON CONFLICT(key)
 						DO UPDATE SET value = ${"1"}
 					`.pipe(Effect.asVoid),
+				),
+
+			getLinearSyncRuntimeState: (
+				projectPath: string,
+				cwd?: string,
+			): Effect.Effect<LinearSyncRuntimeState, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					getMetaValue(sql, buildLinearSyncRuntimeMetaKey(projectPath)).pipe(
+						Effect.flatMap((value) => {
+							if (value === undefined) {
+								return Effect.succeed({})
+							}
+							return Effect.try({
+								try: () => Schema.decodeUnknownSync(LinearSyncRuntimeStateJsonSchema)(value),
+								catch: (cause) =>
+									new LocalIssueStoreError({
+										message: "Failed to decode linear sync runtime state",
+										cause,
+									}),
+							})
+						}),
+					),
+				),
+
+			setLinearSyncRuntimeState: (
+				projectPath: string,
+				state: LinearSyncRuntimeState,
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					Effect.try({
+						try: () => Schema.encodeSync(LinearSyncRuntimeStateJsonSchema)(state),
+						catch: (cause) =>
+							new LocalIssueStoreError({
+								message: "Failed to encode linear sync runtime state",
+								cause,
+							}),
+					}).pipe(
+						Effect.flatMap((encoded) =>
+							setMetaValue(sql, buildLinearSyncRuntimeMetaKey(projectPath), encoded),
+						),
+					),
 				),
 		}
 	}),
