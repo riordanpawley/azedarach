@@ -731,6 +731,32 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						}),
 				})
 
+			const findExistingWebhookIdByUrl = (
+				apiKey: string,
+				webhookUrl: string,
+			): Effect.Effect<string | undefined, LinearWebhookRuntimeError> =>
+				failOnTimeout({
+					effect: linearSdk
+						.webhooks(
+							{
+								first: 250,
+							},
+							{ apiKey },
+						)
+						.pipe(
+							Effect.map(
+								(webhooksConnection) =>
+									webhooksConnection.nodes.find((webhook) => webhook.url === webhookUrl)?.id,
+							),
+						),
+					timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+					timeoutMessage: `Timed out discovering existing Linear webhooks after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+					mapError: (error) =>
+						new LinearWebhookRuntimeError({
+							message: `Failed to discover existing Linear webhooks: ${formatErrorMessage(error)}`,
+						}),
+				})
+
 			const startSdkWebhookRuntime = (params: {
 				readonly configKey: string
 				readonly linearConfig: ResolvedLinearConfig
@@ -954,6 +980,48 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 									)
 								yield* clearPersistedRuntimeState(params.projectPath)
 							})
+
+							if (!webhookReused) {
+								const discoveredWebhookId = yield* Effect.either(
+									findExistingWebhookIdByUrl(runtimeConfig.apiKey, webhookUrl),
+								).pipe(Effect.map((result) => (result._tag === "Right" ? result.right : undefined)))
+								if (discoveredWebhookId !== undefined) {
+									yield* Effect.logInfo(
+										`LinearWebhookService: discovered existing webhook id=${discoveredWebhookId} for ${webhookUrl}; adopting it`,
+									)
+									const adoptResult = yield* Effect.either(
+										failOnTimeout({
+											effect: linearSdk.updateWebhook(
+												discoveredWebhookId,
+												{
+													url: webhookUrl,
+													resourceTypes: [...normalizedResourceTypes],
+													secret: effectiveWebhookSecret,
+													enabled: true,
+												},
+												{ apiKey: runtimeConfig.apiKey },
+											),
+											timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+											timeoutMessage: `Timed out adopting existing Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+											mapError: (error) =>
+												new LinearWebhookRuntimeError({
+													message: `Failed to adopt existing Linear webhook: ${formatErrorMessage(error)}`,
+												}),
+										}),
+									)
+									if (adoptResult._tag === "Right") {
+										webhookReused = true
+										webhookIdRef.id = discoveredWebhookId
+										yield* writePersistedRuntimeState(params.projectPath, {
+											webhookId: discoveredWebhookId,
+											webhookUrl,
+											teamId,
+											resourceTypes: [...normalizedResourceTypes],
+											webhookSecret: effectiveWebhookSecret,
+										})
+									}
+								}
+							}
 
 							if (!webhookReused) {
 								const registrationResult = yield* Effect.either(
