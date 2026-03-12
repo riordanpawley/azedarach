@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto"
-import { FileSystem, Path, PlatformConfigProvider } from "@effect/platform"
+import {
+	Command,
+	CommandExecutor,
+	FileSystem,
+	Path,
+	PlatformConfigProvider,
+} from "@effect/platform"
 import type { LinearClient, Issue as LinearSdkIssue } from "@linear/sdk"
 import {
 	Config,
@@ -62,9 +68,10 @@ interface CollapsedSyncItem {
 interface LinearRuntime {
 	readonly defaultTeam: string | undefined
 	readonly defaultProject: string | undefined
+	readonly apiKey: string
 }
 
-type ApiKeySource = "config-provider" | "none"
+type ApiKeySource = "direnv" | "config-provider" | "none"
 
 interface ApiKeyCacheEntry {
 	readonly apiKey: string | undefined
@@ -408,6 +415,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const diagnostics = yield* DiagnosticsService
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
+		const commandExecutor = yield* CommandExecutor.CommandExecutor
 		const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
 		const viewerIdCacheRef = yield* Ref.make<Map<string, string>>(new Map())
 		const warnedMissingApiKeyRef = yield* Ref.make(false)
@@ -664,17 +672,44 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						}),
 					)
 
-		const resolveLinearApiKey = (
-			projectPath: string,
-		): Effect.Effect<
-			Readonly<{ apiKey: string | undefined; source: ApiKeySource }>,
-			IssueSyncError
-		> =>
+		const resolveLinearApiKey = (projectPath: string) =>
 			Effect.gen(function* () {
 				const now = Date.now()
 				const cached = yield* Ref.get(apiKeyCacheRef).pipe(
 					Effect.map((cache) => cache.get(projectPath)),
 				)
+
+				const parseEnvValue = (envOutput: string, key: string): string | undefined => {
+					const prefix = `${key}=`
+					for (const line of envOutput.split("\n")) {
+						if (!line.startsWith(prefix)) continue
+						const value = line.slice(prefix.length).trim()
+						return value.length > 0 ? value : undefined
+					}
+					return undefined
+				}
+
+				const resolveDirenvApiKey = (projectPath: string) =>
+					Effect.gen(function* () {
+						const envrcPath = pathService.join(projectPath, ".envrc")
+						const hasEnvrc = yield* fs
+							.exists(envrcPath)
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						if (!hasEnvrc) return undefined
+
+						const envOutput = yield* Command.string(
+							Command.make("direnv", "exec", projectPath, "env"),
+						).pipe(
+							Effect.provideService(CommandExecutor.CommandExecutor, commandExecutor),
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`IssueSyncService: direnv exec failed for projectPath=${projectPath}: ${String(error)}`,
+								).pipe(Effect.as(undefined)),
+							),
+						)
+						if (envOutput === undefined) return undefined
+						return parseEnvValue(envOutput, "LINEAR_API_KEY")
+					})
 				if (cached !== undefined && now - cached.resolvedAtMs < API_KEY_CACHE_TTL_MS) {
 					return {
 						apiKey: cached.apiKey,
@@ -682,8 +717,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					}
 				}
 
+				const direnvApiKey = yield* resolveDirenvApiKey(projectPath)
 				const providers = yield* resolveProjectConfigProviders(projectPath)
-				const resolvedApiKey = yield* readLinearApiKeyFromProvider(providers.provider)
+				const providerApiKey = yield* readLinearApiKeyFromProvider(providers.provider)
+				const resolvedApiKey = direnvApiKey ?? providerApiKey
 				const dotEnvLocalApiKey = yield* Option.match(providers.dotEnvLocalProviderOption, {
 					onNone: () => Effect.succeed(undefined),
 					onSome: readLinearApiKeyFromProvider,
@@ -693,9 +730,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					onSome: readLinearApiKeyFromProvider,
 				})
 				const envApiKey = yield* readLinearApiKeyFromProvider(providers.envProvider)
-				const source: ApiKeySource = resolvedApiKey !== undefined ? "config-provider" : "none"
+				const source: ApiKeySource =
+					direnvApiKey !== undefined
+						? "direnv"
+						: providerApiKey !== undefined
+							? "config-provider"
+							: "none"
 				yield* Effect.log(
-					`IssueSyncService: LINEAR_API_KEY diagnostics projectPath=${projectPath} source=${source} .env.local=${formatApiKeyFingerprint(dotEnvLocalApiKey)} .env=${formatApiKeyFingerprint(dotEnvApiKey)} env=${formatApiKeyFingerprint(envApiKey)} selected=${formatApiKeyFingerprint(resolvedApiKey)}`,
+					`IssueSyncService: LINEAR_API_KEY diagnostics projectPath=${projectPath} source=${source} direnv=${formatApiKeyFingerprint(direnvApiKey)} .env.local=${formatApiKeyFingerprint(dotEnvLocalApiKey)} .env=${formatApiKeyFingerprint(dotEnvApiKey)} env=${formatApiKeyFingerprint(envApiKey)} selected=${formatApiKeyFingerprint(resolvedApiKey)}`,
 				)
 				yield* Ref.update(apiKeyCacheRef, (cache) => {
 					const next = new Map(cache)
@@ -715,9 +757,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				}
 			})
 
-		const getLinearRuntime = (
-			projectPath: string,
-		): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
+		const getLinearRuntime = (projectPath: string) =>
 			Effect.gen(function* () {
 				const config = yield* appConfig.getIssueTrackerSyncConfigForProjectPath(projectPath).pipe(
 					Effect.mapError(
@@ -788,6 +828,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				const runtime: LinearRuntime = {
 					defaultTeam: config.issueTracker.linear.team,
 					defaultProject: config.issueTracker.linear.project,
+					apiKey: apiKeyOption.value,
 				}
 				yield* setRuntimeHealthReady({
 					projectPath,
@@ -805,6 +846,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			configuredProject: string | undefined,
 			issueId: string,
 			projectPath: string,
+			apiKey: string,
 		): Effect.Effect<string | undefined, IssueSyncError> =>
 			Effect.gen(function* () {
 				const normalizedProject = normalizeScopeValue(configuredProject)
@@ -820,14 +862,16 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return cachedProjectId
 				}
 
-				const resolvedProjectId = yield* linearSdk.resolveProjectId(normalizedProject).pipe(
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: `Failed to resolve configured Linear project '${normalizedProject}' for issue ${issueId}: ${error.message}`,
-							}),
-					),
-				)
+				const resolvedProjectId = yield* linearSdk
+					.resolveProjectId(normalizedProject, { apiKey })
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: `Failed to resolve configured Linear project '${normalizedProject}' for issue ${issueId}: ${error.message}`,
+								}),
+						),
+					)
 				yield* Ref.update(projectIdCacheRef, (cache) => {
 					const next = new Map(cache)
 					next.set(cacheKey, resolvedProjectId)
@@ -841,6 +885,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const resolveViewerIdForProject = (
 			projectPath: string,
+			apiKey: string,
 		): Effect.Effect<string, IssueSyncError> =>
 			Effect.gen(function* () {
 				const cachedViewerId = yield* Ref.get(viewerIdCacheRef).pipe(
@@ -850,7 +895,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return cachedViewerId
 				}
 
-				const viewer = yield* linearSdk.viewer().pipe(
+				const viewer = yield* linearSdk.viewer({ apiKey }).pipe(
 					Effect.mapError(
 						(error) =>
 							new IssueSyncError({
@@ -877,11 +922,12 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const fetchAllLinearIssues = (
 			scope: LinearIssueScope,
+			apiKey: string,
 		): Effect.Effect<readonly LinearSdkIssue[], IssueSyncError> =>
 			Effect.gen(function* () {
 				const filter = buildLinearIssueFilter(scope)
 				const fetchIssuesPage = (afterCursor: string | undefined) =>
-					linearSdk.issues(buildLinearIssuesPageQuery({ afterCursor, filter })).pipe(
+					linearSdk.issues(buildLinearIssuesPageQuery({ afterCursor, filter }), { apiKey }).pipe(
 						Effect.mapError(
 							(error) =>
 								new IssueSyncError({
@@ -907,14 +953,19 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				return yield* collectPages(undefined, [])
 			})
 
-		const fetchLabelNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
+		const fetchLabelNameById = (
+			apiKey: string,
+		): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
 			Effect.gen(function* () {
 				const fetchLabelsPage = (afterCursor: string | undefined) =>
 					linearSdk
-						.issueLabels({
-							first: LINEAR_LABELS_PAGE_SIZE,
-							...(afterCursor === undefined ? {} : { after: afterCursor }),
-						})
+						.issueLabels(
+							{
+								first: LINEAR_LABELS_PAGE_SIZE,
+								...(afterCursor === undefined ? {} : { after: afterCursor }),
+							},
+							{ apiKey },
+						)
 						.pipe(
 							Effect.mapError(
 								(error) =>
@@ -945,14 +996,19 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				return yield* collectPages(undefined, new Map())
 			})
 
-		const fetchWorkflowStates = (): Effect.Effect<readonly LinearWorkflowState[], IssueSyncError> =>
+		const fetchWorkflowStates = (
+			apiKey: string,
+		): Effect.Effect<readonly LinearWorkflowState[], IssueSyncError> =>
 			Effect.gen(function* () {
 				const fetchWorkflowStatesPage = (afterCursor: string | undefined) =>
 					linearSdk
-						.workflowStates({
-							first: LINEAR_WORKFLOW_STATES_PAGE_SIZE,
-							...(afterCursor === undefined ? {} : { after: afterCursor }),
-						})
+						.workflowStates(
+							{
+								first: LINEAR_WORKFLOW_STATES_PAGE_SIZE,
+								...(afterCursor === undefined ? {} : { after: afterCursor }),
+							},
+							{ apiKey },
+						)
 						.pipe(
 							Effect.mapError(
 								(error) =>
@@ -987,8 +1043,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				return yield* collectPages(undefined, [])
 			})
 
-		const fetchStateNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
-			fetchWorkflowStates().pipe(
+		const fetchStateNameById = (
+			apiKey: string,
+		): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
+			fetchWorkflowStates(apiKey).pipe(
 				Effect.map(
 					(workflowStates) =>
 						new Map(workflowStates.map((state) => [state.id, state.name] as const)),
@@ -997,12 +1055,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const resolveLabelIds = (
 			labels: readonly string[],
+			apiKey: string,
 		): Effect.Effect<readonly string[], IssueSyncError> =>
 			Effect.gen(function* () {
 				if (labels.length === 0) {
 					return []
 				}
-				const labelNameById = yield* fetchLabelNameById()
+				const labelNameById = yield* fetchLabelNameById(apiKey)
 				const normalized = labels.map((label) => label.trim().toLowerCase())
 				const ids: string[] = []
 				for (const [id, labelName] of labelNameById.entries()) {
@@ -1016,6 +1075,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const findStateIdForStatus = (
 			teamId: string,
 			targetStatus: IssueStatus,
+			apiKey: string,
 		): Effect.Effect<string, IssueSyncError> =>
 			Effect.gen(function* () {
 				const cacheKey = `${teamId}:${targetStatus}`
@@ -1026,7 +1086,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return cached
 				}
 
-				const workflowStates = yield* fetchWorkflowStates()
+				const workflowStates = yield* fetchWorkflowStates(apiKey)
 
 				const teamStates = workflowStates.filter((state) => state.teamId === teamId)
 				if (teamStates.length === 0) {
@@ -1094,6 +1154,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					configuredProject,
 					issue.id,
 					projectPath,
+					runtime.apiKey,
 				)
 
 				const externalRef = yield* fromStore(
@@ -1115,11 +1176,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						}),
 					)
 				}
-				const labelIds = yield* resolveLabelIds(issue.labels ?? [])
+				const labelIds = yield* resolveLabelIds(issue.labels ?? [], runtime.apiKey)
 				const description = buildMergedDescription(issue)
 				const assigneeId =
 					issue.status === "in_progress"
-						? yield* resolveViewerIdForProject(projectPath).pipe(
+						? yield* resolveViewerIdForProject(projectPath, runtime.apiKey).pipe(
 								Effect.tap((viewerId) =>
 									Effect.log(
 										`Linear sync upsert auto-assign resolved: issue=${issue.id} assigneeId=${viewerId} projectPath=${projectPath}`,
@@ -1139,17 +1200,19 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				): Effect.Effect<void, IssueSyncError> =>
 					issue.status === "open"
 						? Effect.void
-						: findStateIdForStatus(teamId, issue.status).pipe(
+						: findStateIdForStatus(teamId, issue.status, runtime.apiKey).pipe(
 								Effect.flatMap((stateId) =>
-									linearSdk.updateIssue(externalIssueId, { stateId }).pipe(
-										Effect.asVoid,
-										Effect.mapError(
-											(error) =>
-												new IssueSyncError({
-													message: `Failed to apply status for ${issue.id}: ${error.message}`,
-												}),
+									linearSdk
+										.updateIssue(externalIssueId, { stateId }, { apiKey: runtime.apiKey })
+										.pipe(
+											Effect.asVoid,
+											Effect.mapError(
+												(error) =>
+													new IssueSyncError({
+														message: `Failed to apply status for ${issue.id}: ${error.message}`,
+													}),
+											),
 										),
-									),
 								),
 							)
 
@@ -1178,14 +1241,16 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							),
 						)
 
-					const externalIssue = yield* linearSdk.issue(externalRef.externalId).pipe(
-						Effect.mapError(
-							(error) =>
-								new IssueSyncError({
-									message: `Failed to fetch Linear issue metadata for ${issue.id}: ${error.message}`,
-								}),
-						),
-					)
+					const externalIssue = yield* linearSdk
+						.issue(externalRef.externalId, { apiKey: runtime.apiKey })
+						.pipe(
+							Effect.mapError(
+								(error) =>
+									new IssueSyncError({
+										message: `Failed to fetch Linear issue metadata for ${issue.id}: ${error.message}`,
+									}),
+							),
+						)
 					const teamId = yield* requireTeamId(
 						externalIssue.teamId,
 						`Linear issue ${externalRef.externalId} is missing team id`,
@@ -1209,32 +1274,37 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					)
 				}
 
-				const createTeamId = yield* linearSdk.resolveTeamId(configuredTeam).pipe(
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: error.message,
-							}),
-					),
-				)
+				const createTeamId = yield* linearSdk
+					.resolveTeamId(configuredTeam, { apiKey: runtime.apiKey })
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: error.message,
+								}),
+						),
+					)
 				const createExternalId = deterministicLinearCreateId(issue.id, request.payloadJson)
 				yield* Effect.log(
 					`Linear sync upsert create: issue=${issue.id} projectPath=${projectPath} configuredTeam=${configuredTeam} configuredProject=${configuredProject ?? "<none>"} projectId=${projectId ?? "<none>"} createExternalId=${createExternalId}`,
 				)
 
 				const createIssueId = yield* linearSdk
-					.createIssue({
-						id: createExternalId,
-						teamId: createTeamId,
-						title: issue.title,
-						description,
-						priority: toLinearPriority(issue.priority),
-						estimate: issue.estimate,
-						labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
-						parentId,
-						projectId,
-						assigneeId,
-					})
+					.createIssue(
+						{
+							id: createExternalId,
+							teamId: createTeamId,
+							title: issue.title,
+							description,
+							priority: toLinearPriority(issue.priority),
+							estimate: issue.estimate,
+							labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+							parentId,
+							projectId,
+							assigneeId,
+						},
+						{ apiKey: runtime.apiKey },
+					)
 					.pipe(
 						Effect.mapError(
 							(error) =>
@@ -1254,7 +1324,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						Effect.catchAll((createError) =>
 							Effect.logWarning(createError).pipe(
 								Effect.zipRight(
-									linearSdk.issue(createExternalId).pipe(
+									linearSdk.issue(createExternalId, { apiKey: runtime.apiKey }).pipe(
 										Effect.map((existingIssue) => existingIssue.id),
 										Effect.mapError(() => createError),
 									),
@@ -1277,14 +1347,16 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					),
 				)
 
-				const createdLinearIssue = yield* linearSdk.issue(createIssueId).pipe(
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: `Failed to fetch newly created Linear issue for ${issue.id}: ${error.message}`,
-							}),
-					),
-				)
+				const createdLinearIssue = yield* linearSdk
+					.issue(createIssueId, { apiKey: runtime.apiKey })
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: `Failed to fetch newly created Linear issue for ${issue.id}: ${error.message}`,
+								}),
+						),
+					)
 
 				yield* fromStore(
 					localStore.upsertExternalRef(
@@ -1327,29 +1399,37 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return
 				}
 
-				const externalIssue = yield* linearSdk.issue(externalRef.externalId).pipe(
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: `Failed to fetch Linear issue metadata for ${request.issueId}: ${error.message}`,
-							}),
-					),
-				)
+				const externalIssue = yield* linearSdk
+					.issue(externalRef.externalId, { apiKey: runtime.apiKey })
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: `Failed to fetch Linear issue metadata for ${request.issueId}: ${error.message}`,
+								}),
+						),
+					)
 
 				const teamId = yield* requireTeamId(
 					externalIssue.teamId,
 					`Linear issue ${externalRef.externalId} is missing team id`,
 				)
-				const closedStateId = yield* findStateIdForStatus(teamId, "closed")
-				yield* linearSdk.updateIssue(externalRef.externalId, { stateId: closedStateId }).pipe(
-					Effect.asVoid,
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: `Failed to close Linear issue for ${request.issueId}: ${error.message}`,
-							}),
-					),
-				)
+				const closedStateId = yield* findStateIdForStatus(teamId, "closed", runtime.apiKey)
+				yield* linearSdk
+					.updateIssue(
+						externalRef.externalId,
+						{ stateId: closedStateId },
+						{ apiKey: runtime.apiKey },
+					)
+					.pipe(
+						Effect.asVoid,
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: `Failed to close Linear issue for ${request.issueId}: ${error.message}`,
+								}),
+						),
+					)
 				yield* Effect.log(
 					`Linear sync ${request.operation} complete: issue=${request.issueId} externalId=${externalRef.externalId} projectPath=${projectPath}`,
 				)
@@ -1485,13 +1565,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const buildBootstrapSnapshots = (
 			scope: LinearIssueScope,
+			apiKey: string,
 		): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
 			Effect.gen(function* () {
 				yield* Effect.log(
 					`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
 				)
 				const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
-				const issues = yield* fetchAllLinearIssues(scope).pipe(
+				const issues = yield* fetchAllLinearIssues(scope, apiKey).pipe(
 					Effect.tapError((error) =>
 						Effect.logWarning(`Linear bootstrap: fetch issues failed (${error.message}); retrying`),
 					),
@@ -1505,14 +1586,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				yield* Effect.log(
 					`Linear bootstrap: fetched ${issues.length} issues before metadata enrichment`,
 				)
-				const stateNameById = yield* fetchStateNameById().pipe(
+				const stateNameById = yield* fetchStateNameById(apiKey).pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(
 							`Linear bootstrap: workflow states unavailable, continuing with fallback status mapping (${error.message})`,
 						).pipe(Effect.as(emptyMetadataMap)),
 					),
 				)
-				const labelNameById = yield* fetchLabelNameById().pipe(
+				const labelNameById = yield* fetchLabelNameById(apiKey).pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(
 							`Linear bootstrap: labels unavailable, continuing without label metadata (${error.message})`,
@@ -1606,10 +1687,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					`Linear remote hydration start: run=${params.flushRun.runId} projectPath=${projectPath} reason=interval`,
 				)
 
-				const snapshots = yield* buildBootstrapSnapshots({
-					team: params.runtime.defaultTeam,
-					project: params.runtime.defaultProject,
-				})
+				const snapshots = yield* buildBootstrapSnapshots(
+					{
+						team: params.runtime.defaultTeam,
+						project: params.runtime.defaultProject,
+					},
+					params.runtime.apiKey,
+				)
 				const pulled =
 					snapshots.length === 0
 						? 0
@@ -1753,10 +1837,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							return 0
 						}
 
-						const snapshots = yield* buildBootstrapSnapshots({
-							team: runtimeOption.value.defaultTeam,
-							project: runtimeOption.value.defaultProject,
-						})
+						const snapshots = yield* buildBootstrapSnapshots(
+							{
+								team: runtimeOption.value.defaultTeam,
+								project: runtimeOption.value.defaultProject,
+							},
+							runtimeOption.value.apiKey,
+						)
 						yield* Effect.log(
 							`Linear bootstrap imported ${snapshots.length} issues (run=${bootstrapRun.runId} team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
 						)

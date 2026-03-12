@@ -52,7 +52,8 @@ const findFirstValidationConstraint = (
 ): { readonly path: string; readonly message: string; readonly value: unknown } | undefined => {
 	if (!isRecord(node)) return undefined
 	const propertySegment = normalizePathSegment(node.property)
-	const nextPath = propertySegment === undefined ? [...pathPrefix] : [...pathPrefix, propertySegment]
+	const nextPath =
+		propertySegment === undefined ? [...pathPrefix] : [...pathPrefix, propertySegment]
 
 	const constraints = node.constraints
 	if (isRecord(constraints)) {
@@ -160,75 +161,80 @@ type LinearTeamsResult = Awaited<ReturnType<LinearClient["teams"]>>
 type LinearProjectResult = Awaited<ReturnType<LinearClient["project"]>>
 type LinearProjectsResult = Awaited<ReturnType<LinearClient["projects"]>>
 
+export interface LinearSdkRequestOptions {
+	readonly maxWaitMs?: number
+	readonly apiKey?: string
+}
+
 export interface LinearSdkApi {
 	readonly issues: (
 		args: LinearIssuesArgs,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearIssuesResult, LinearSdkError>
 	readonly issue: (
 		id: string,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearIssueResult, LinearSdkError>
 	readonly documents: (
 		args?: LinearDocumentsArgs,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearDocumentsResult, LinearSdkError>
 	readonly document: (
 		id: string,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearDocumentResult, LinearSdkError>
 	readonly workflowStates: (
 		args: Parameters<LinearClient["workflowStates"]>[0],
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearWorkflowStatesResult, LinearSdkError>
 	readonly issueLabels: (
 		args: Parameters<LinearClient["issueLabels"]>[0],
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearIssueLabelsResult, LinearSdkError>
 	readonly users: (
 		args: Parameters<LinearClient["users"]>[0],
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearUsersResult, LinearSdkError>
-	readonly viewer: (options?: {
-		readonly maxWaitMs?: number
-	}) => Effect.Effect<LinearViewerResult, LinearSdkError>
+	readonly viewer: (
+		options?: LinearSdkRequestOptions,
+	) => Effect.Effect<LinearViewerResult, LinearSdkError>
 	readonly teams: (
 		args: LinearTeamsArgs,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearTeamsResult, LinearSdkError>
 	readonly createIssue: (
 		input: LinearCreateIssueInput,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearCreateIssueResult, LinearSdkError>
 	readonly createDocument: (
 		input: LinearCreateDocumentInput,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearCreateDocumentResult, LinearSdkError>
 	readonly updateIssue: (
 		id: string,
 		input: LinearUpdateIssueInput,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearUpdateIssueResult, LinearSdkError>
 	readonly updateDocument: (
 		id: string,
 		input: LinearUpdateDocumentInput,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearUpdateDocumentResult, LinearSdkError>
 	readonly createWebhook: (
 		input: LinearCreateWebhookInput,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearCreateWebhookResult, LinearSdkError>
 	readonly deleteWebhook: (
 		id: string,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<LinearDeleteWebhookResult, LinearSdkError>
 	readonly resolveTeamId: (
 		reference: string,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<string, LinearSdkError>
 	readonly resolveProjectId: (
 		reference: string,
-		options?: { readonly maxWaitMs?: number },
+		options?: LinearSdkRequestOptions,
 	) => Effect.Effect<string, LinearSdkError>
 }
 
@@ -274,11 +280,13 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 		const runWithClient = <A>(params: {
 			readonly operation: string
 			readonly maxWaitMs?: number
+			readonly apiKey?: string
 			readonly request: (client: LinearClient) => Promise<A>
 			readonly fallbackError: string
 		}): Effect.Effect<A, LinearSdkError> =>
 			Effect.gen(function* () {
-				const client = yield* getClientFromEnv
+				const client =
+					params.apiKey !== undefined ? yield* getClient(params.apiKey) : yield* getClientFromEnv
 				const executed = yield* throttle.enqueue({
 					effect: Effect.tryPromise({
 						try: () => params.request(client),
@@ -307,6 +315,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "issues",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.issues(args),
 				fallbackError: "Failed to fetch issues from Linear",
 			})
@@ -315,6 +324,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "issue",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.issue(id),
 				fallbackError: `Failed to fetch issue ${id} from Linear`,
 			})
@@ -323,6 +333,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "documents",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.documents(args),
 				fallbackError: "Failed to fetch documents from Linear",
 			})
@@ -331,6 +342,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "document",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.document(id),
 				fallbackError: `Failed to fetch document ${id} from Linear`,
 			})
@@ -339,6 +351,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "workflowStates",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.workflowStates(args),
 				fallbackError: "Failed to fetch workflow states from Linear",
 			})
@@ -347,6 +360,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "issueLabels",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.issueLabels(args),
 				fallbackError: "Failed to fetch issue labels from Linear",
 			})
@@ -355,6 +369,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "users",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.users(args),
 				fallbackError: "Failed to fetch users from Linear",
 			})
@@ -363,6 +378,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "viewer",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.viewer,
 				fallbackError: "Failed to fetch current user from Linear",
 			})
@@ -371,6 +387,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "teams",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.teams(args),
 				fallbackError: "Failed to fetch teams from Linear",
 			})
@@ -379,6 +396,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "createIssue",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.createIssue(input),
 				fallbackError: "Failed to create issue in Linear",
 			})
@@ -387,6 +405,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "createDocument",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.createDocument(input),
 				fallbackError: "Failed to create document in Linear",
 			})
@@ -395,6 +414,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "updateIssue",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.updateIssue(id, input),
 				fallbackError: `Failed to update issue ${id} in Linear`,
 			})
@@ -403,6 +423,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "updateDocument",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.updateDocument(id, input),
 				fallbackError: `Failed to update document ${id} in Linear`,
 			})
@@ -411,6 +432,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "createWebhook",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.createWebhook(input),
 				fallbackError: "Failed to create webhook in Linear",
 			})
@@ -419,16 +441,19 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			runWithClient({
 				operation: "deleteWebhook",
 				maxWaitMs: options?.maxWaitMs,
+				apiKey: options?.apiKey,
 				request: (client) => client.deleteWebhook(id),
 				fallbackError: `Failed to delete webhook ${id} in Linear`,
 			})
 
 		const resolveTeamId: LinearSdkApi["resolveTeamId"] = (reference, options) =>
 			Effect.gen(function* () {
+				const trimmedReference = reference.trim()
 				const directTeamIdOption = yield* runWithClient<LinearTeamResult>({
 					operation: "team",
 					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.team(reference),
+					apiKey: options?.apiKey,
+					request: (client) => client.team(trimmedReference),
 					fallbackError: `Unable to resolve Linear team '${reference}'`,
 				}).pipe(
 					Effect.map((team) => (team?.id ? Option.some(team.id) : Option.none<string>())),
@@ -443,24 +468,47 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					return directTeamIdOption.value
 				}
 
-				const teams = yield* runWithClient<LinearTeamsResult>({
-					operation: "teams",
-					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.teams({ first: 250 }),
-					fallbackError: `Unable to resolve Linear team '${reference}'`,
-				})
+				const normalizedReference = trimmedReference.toLowerCase()
+				const matchTeamId = (teams: LinearTeamsResult): string | undefined => {
+					const matched = teams.nodes.find((team) => {
+						const byId = team.id === trimmedReference
+						const byKey =
+							typeof team.key === "string" && team.key.trim().toLowerCase() === normalizedReference
+						const byName =
+							typeof team.name === "string" &&
+							team.name.trim().toLowerCase() === normalizedReference
+						return byId || byKey || byName
+					})
+					return matched?.id
+				}
+				const resolveFromTeamsPage = (
+					afterCursor: string | undefined,
+				): Effect.Effect<string | undefined, LinearSdkError> =>
+					runWithClient<LinearTeamsResult>({
+						operation: "teams",
+						maxWaitMs: options?.maxWaitMs,
+						apiKey: options?.apiKey,
+						request: (client) =>
+							client.teams({
+								first: 250,
+								...(afterCursor === undefined ? {} : { after: afterCursor }),
+							}),
+						fallbackError: `Unable to resolve Linear team '${reference}'`,
+					}).pipe(
+						Effect.flatMap((teamsPage) => {
+							const matchedTeamId = matchTeamId(teamsPage)
+							if (matchedTeamId !== undefined) {
+								return Effect.succeed(matchedTeamId)
+							}
+							if (!teamsPage.pageInfo.hasNextPage || !teamsPage.pageInfo.endCursor) {
+								return Effect.succeed(undefined)
+							}
+							return resolveFromTeamsPage(teamsPage.pageInfo.endCursor)
+						}),
+					)
 
-				const normalizedReference = reference.trim().toLowerCase()
-				const matched = teams.nodes.find((team) => {
-					const byId = team.id === reference
-					const byKey =
-						typeof team.key === "string" && team.key.trim().toLowerCase() === normalizedReference
-					const byName =
-						typeof team.name === "string" && team.name.trim().toLowerCase() === normalizedReference
-					return byId || byKey || byName
-				})
-
-				if (matched === undefined) {
+				const resolvedTeamId = yield* resolveFromTeamsPage(undefined)
+				if (resolvedTeamId === undefined) {
 					return yield* Effect.fail(
 						new LinearSdkError({
 							message: `Unable to resolve Linear team '${reference}'`,
@@ -468,12 +516,13 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					)
 				}
 
-				return matched.id
+				return resolvedTeamId
 			})
 
 		const resolveProjectId: LinearSdkApi["resolveProjectId"] = (reference, options) =>
 			Effect.gen(function* () {
-				const normalizedReference = reference.trim().toLowerCase()
+				const trimmedReference = reference.trim()
+				const normalizedReference = trimmedReference.toLowerCase()
 				if (normalizedReference.length === 0) {
 					return yield* Effect.fail(
 						new LinearSdkError({
@@ -485,7 +534,8 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				const directProjectIdOption = yield* runWithClient<LinearProjectResult>({
 					operation: "project",
 					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.project(reference),
+					apiKey: options?.apiKey,
+					request: (client) => client.project(trimmedReference),
 					fallbackError: `Unable to resolve Linear project '${reference}'`,
 				}).pipe(
 					Effect.map((project) => (project?.id ? Option.some(project.id) : Option.none<string>())),
@@ -500,23 +550,45 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					return directProjectIdOption.value
 				}
 
-				const projects = yield* runWithClient<LinearProjectsResult>({
-					operation: "projects",
-					maxWaitMs: options?.maxWaitMs,
-					request: (client) => client.projects({ first: 250 }),
-					fallbackError: `Unable to resolve Linear project '${reference}'`,
-				})
+				const matchProjectId = (projects: LinearProjectsResult): string | undefined => {
+					const matched = projects.nodes.find((project) => {
+						const byId = project.id === trimmedReference
+						const bySlugId = project.slugId.trim().toLowerCase() === normalizedReference
+						const byName =
+							typeof project.name === "string" &&
+							project.name.trim().toLowerCase() === normalizedReference
+						return byId || bySlugId || byName
+					})
+					return matched?.id
+				}
+				const resolveFromProjectsPage = (
+					afterCursor: string | undefined,
+				): Effect.Effect<string | undefined, LinearSdkError> =>
+					runWithClient<LinearProjectsResult>({
+						operation: "projects",
+						maxWaitMs: options?.maxWaitMs,
+						apiKey: options?.apiKey,
+						request: (client) =>
+							client.projects({
+								first: 250,
+								...(afterCursor === undefined ? {} : { after: afterCursor }),
+							}),
+						fallbackError: `Unable to resolve Linear project '${reference}'`,
+					}).pipe(
+						Effect.flatMap((projectsPage) => {
+							const matchedProjectId = matchProjectId(projectsPage)
+							if (matchedProjectId !== undefined) {
+								return Effect.succeed(matchedProjectId)
+							}
+							if (!projectsPage.pageInfo.hasNextPage || !projectsPage.pageInfo.endCursor) {
+								return Effect.succeed(undefined)
+							}
+							return resolveFromProjectsPage(projectsPage.pageInfo.endCursor)
+						}),
+					)
 
-				const matched = projects.nodes.find((project) => {
-					const byId = project.id === reference
-					const bySlugId = project.slugId.trim().toLowerCase() === normalizedReference
-					const byName =
-						typeof project.name === "string" &&
-						project.name.trim().toLowerCase() === normalizedReference
-					return byId || bySlugId || byName
-				})
-
-				if (matched === undefined) {
+				const resolvedProjectId = yield* resolveFromProjectsPage(undefined)
+				if (resolvedProjectId === undefined) {
 					return yield* Effect.fail(
 						new LinearSdkError({
 							message: `Unable to resolve Linear project '${reference}'`,
@@ -524,7 +596,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					)
 				}
 
-				return matched.id
+				return resolvedProjectId
 			})
 
 		return {
