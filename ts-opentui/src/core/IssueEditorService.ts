@@ -8,6 +8,7 @@
 import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Data, Effect } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { ProjectService } from "../services/ProjectService.js"
 import {
 	formatIssueImplementations,
 	parseIssueImplementations,
@@ -725,16 +726,18 @@ const parseMarkdownToNewIssue = (
  * ```
  */
 export class IssueEditorService extends Effect.Service<IssueEditorService>()("IssueEditorService", {
-	dependencies: [AppConfig.Default, IssueTrackerClient.Default],
+	dependencies: [AppConfig.Default, IssueTrackerClient.Default, ProjectService.Default],
 	effect: Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const client = yield* IssueTrackerClient
+		const projectService = yield* ProjectService
 		// Inject FileSystem at service construction - never leak it through method return types
 		const fs = yield* FileSystem.FileSystem
 
 		return {
 			editIssue: (issue: Issue) =>
 				Effect.gen(function* () {
+					const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 					// 1. Serialize to markdown
 					const markdown = serializeIssueToMarkdown(issue)
 
@@ -823,19 +826,23 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 
 					// 9. Apply updates via IssueTrackerClient
 					yield* client
-						.update(issue.id, {
-							status: updates.status,
-							notes: updates.notes,
-							priority: updates.priority,
-							title: updates.title,
-							description: updates.description,
-							design: updates.design,
-							acceptance: updates.acceptance,
-							assignee: updates.assignee,
-							estimate: updates.estimate,
-							labels: updates.labels,
-							implementations: updates.implementations,
-						})
+						.update(
+							issue.id,
+							{
+								status: updates.status,
+								notes: updates.notes,
+								priority: updates.priority,
+								title: updates.title,
+								description: updates.description,
+								design: updates.design,
+								acceptance: updates.acceptance,
+								assignee: updates.assignee,
+								estimate: updates.estimate,
+								labels: updates.labels,
+								implementations: updates.implementations,
+							},
+							projectPath,
+						)
 						.pipe(
 							Effect.mapError(
 								(error) =>
@@ -860,8 +867,9 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 
 			createIssue: () =>
 				Effect.gen(function* () {
+					const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 					const issueEditorConfig = yield* appConfig.getIssueEditorConfig()
-					const registry = yield* client.getImplementationRegistry()
+					const registry = yield* client.getImplementationRegistry(projectPath)
 					const defaultImplementation = resolveIssueEditorDefaultImplementation(
 						registry,
 						issueEditorConfig.defaultImplementation,
@@ -955,6 +963,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 							estimate: fields.estimate,
 							labels: fields.labels,
 							implementations,
+							cwd: projectPath,
 						})
 						.pipe(
 							Effect.mapError(
@@ -969,10 +978,14 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 					const needsUpdate = (fields.status && fields.status !== "open") || fields.notes
 					if (needsUpdate) {
 						yield* client
-							.update(createdIssue.id, {
-								status: fields.status !== "open" ? fields.status : undefined,
-								notes: fields.notes,
-							})
+							.update(
+								createdIssue.id,
+								{
+									status: fields.status !== "open" ? fields.status : undefined,
+									notes: fields.notes,
+								},
+								projectPath,
+							)
 							.pipe(
 								Effect.mapError(
 									(error) =>

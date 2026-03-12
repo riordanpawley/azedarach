@@ -192,11 +192,14 @@ export const createTaskAtom = appRuntime.fn(
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
+			const projectService = yield* ProjectService
+			const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 			yield* overlay.pop()
 
 			const implementations = yield* getIssueCreateImplementations({
 				requestedImplementations: params.implementations,
+				cwd: projectPath,
 			})
 			const issue = yield* client.create({
 				title: params.title,
@@ -204,6 +207,7 @@ export const createTaskAtom = appRuntime.fn(
 				priority: params.priority,
 				description: params.description,
 				implementations,
+				cwd: projectPath,
 			})
 
 			yield* board.upsertIssueFromMutation(issue)
@@ -233,19 +237,23 @@ export const forkCreateChildAtom = appRuntime.fn(
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
+			const projectService = yield* ProjectService
+			const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 			yield* overlay.pop()
 
 			const implementations = yield* getIssueCreateImplementations({
 				requestedImplementations: params.implementations,
+				cwd: projectPath,
 			})
 			const issue = yield* client.create({
 				title: params.title,
 				type: params.type,
 				priority: params.priority,
 				implementations,
+				cwd: projectPath,
 			})
-			const linkResult = yield* client.update(issue.id, { parent: parentEpicId }).pipe(
+			const linkResult = yield* client.update(issue.id, { parent: parentEpicId }, projectPath).pipe(
 				Effect.map(() => ({ linked: true as const })),
 				Effect.catchAll((error) =>
 					Effect.gen(function* () {
@@ -298,36 +306,42 @@ export const forkCreateEpicAtom = appRuntime.fn(
 			const board = yield* BoardService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
+			const projectService = yield* ProjectService
+			const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 			yield* overlay.pop()
 
 			const implementations = yield* getIssueCreateImplementations({
 				requestedImplementations: params.implementations,
+				cwd: projectPath,
 			})
 			const epic = yield* client.create({
 				title: params.title,
 				type: "epic",
 				priority: params.priority,
 				implementations,
+				cwd: projectPath,
 			})
 			yield* board.upsertIssueFromMutation(epic)
 
-			const reparentResult = yield* client.update(sourceTaskId, { parent: epic.id }).pipe(
-				Effect.map(() => ({ reparented: true as const })),
-				Effect.catchAll((error) =>
-					Effect.gen(function* () {
-						yield* Effect.logWarning(
-							`Fork create epic created ${epic.id} but failed to reparent ${sourceTaskId}: ${formatForToast(error)}`,
-						)
-						const toast = yield* ToastService
-						yield* toast.show(
-							"warning",
-							`Created epic ${epic.id} but failed to reparent ${sourceTaskId}`,
-						)
-						return { reparented: false as const }
-					}),
-				),
-			)
+			const reparentResult = yield* client
+				.update(sourceTaskId, { parent: epic.id }, projectPath)
+				.pipe(
+					Effect.map(() => ({ reparented: true as const })),
+					Effect.catchAll((error) =>
+						Effect.gen(function* () {
+							yield* Effect.logWarning(
+								`Fork create epic created ${epic.id} but failed to reparent ${sourceTaskId}: ${formatForToast(error)}`,
+							)
+							const toast = yield* ToastService
+							yield* toast.show(
+								"warning",
+								`Created epic ${epic.id} but failed to reparent ${sourceTaskId}`,
+							)
+							return { reparented: false as const }
+						}),
+					),
+				)
 
 			if (reparentResult.reparented) {
 				yield* board.patchTaskFromMutation(sourceTaskId, {
@@ -490,13 +504,14 @@ Return ONLY the JSON object, no explanation or markdown.`
 				: 2
 
 		// Phase 2: Create the issue directly via IssueTrackerClient
-		const implementations = yield* getIssueCreateImplementations()
+		const implementations = yield* getIssueCreateImplementations({ cwd: projectPath })
 		const createdIssue = yield* issueTrackerClient.create({
 			title: parsed.title,
 			type: taskType,
 			priority,
 			description: parsed.description,
 			implementations,
+			cwd: projectPath,
 		})
 
 		yield* board.upsertIssueFromMutation(createdIssue)
