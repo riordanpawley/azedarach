@@ -39,6 +39,7 @@ import {
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { LinearSdk } from "../core/LinearSdk.js"
+import { LocalIssueStore } from "../core/LocalIssueStore.js"
 import { ProjectService } from "./ProjectService.js"
 
 const WEBHOOK_PATH = "/linear/webhook"
@@ -165,6 +166,33 @@ const normalizeWebhookEvents = (events: readonly string[] | undefined): readonly
 		?.map((eventType) => eventType.trim())
 		.filter((eventType) => eventType.length > 0)
 	return configured !== undefined && configured.length > 0 ? configured : DEFAULT_WEBHOOK_EVENTS
+}
+
+const normalizeWebhookResourceTypes = (events: readonly string[]): readonly string[] =>
+	Array.from(
+		new Set(
+			events.map((eventType) => eventType.trim()).filter((eventType) => eventType.length > 0),
+		),
+	).sort()
+
+const webhookResourceTypesMatch = (
+	left: readonly string[] | undefined,
+	right: readonly string[],
+): boolean => {
+	if (left === undefined) {
+		return false
+	}
+	const normalizedLeft = normalizeWebhookResourceTypes(left)
+	const normalizedRight = normalizeWebhookResourceTypes(right)
+	if (normalizedLeft.length !== normalizedRight.length) {
+		return false
+	}
+	for (let index = 0; index < normalizedLeft.length; index += 1) {
+		if (normalizedLeft[index] !== normalizedRight[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 const TailscaleStatusSchema = Schema.Struct({
@@ -353,10 +381,16 @@ export const buildWebhookRuntimeConfigKey = (params: {
 export class LinearWebhookService extends Effect.Service<LinearWebhookService>()(
 	"LinearWebhookService",
 	{
-		dependencies: [AppConfig.Default, LinearSdk.Default, ProjectService.Default],
+		dependencies: [
+			AppConfig.Default,
+			LinearSdk.Default,
+			LocalIssueStore.Default,
+			ProjectService.Default,
+		],
 		scoped: Effect.gen(function* () {
 			const appConfig = yield* AppConfig
 			const linearSdk = yield* LinearSdk
+			const localIssueStore = yield* LocalIssueStore
 			const projectService = yield* ProjectService
 			const fs = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path
@@ -378,6 +412,48 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					yield* SubscriptionRef.set(healthy, nextStatus.healthy)
 					yield* SubscriptionRef.set(status, nextStatus)
 				})
+			const readPersistedRuntimeState = (projectPath: string | undefined) =>
+				localIssueStore.getLinearWebhookRuntimeLease(projectPath).pipe(
+					Effect.map((state) => (state === undefined ? Option.none() : Option.some(state))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`LinearWebhookService: failed to load webhook runtime lease metadata: ${error.message}`,
+						).pipe(Effect.as(Option.none())),
+					),
+				)
+
+			const writePersistedRuntimeState = (
+				projectPath: string | undefined,
+				state: {
+					readonly webhookId: string
+					readonly webhookUrl: string
+					readonly teamId: string
+					readonly resourceTypes: readonly string[]
+					readonly webhookSecret: string
+				},
+			): Effect.Effect<void, never> =>
+				localIssueStore
+					.setLinearWebhookRuntimeLease(state, projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`LinearWebhookService: failed to persist webhook runtime lease metadata: ${error.message}`,
+							).pipe(Effect.asVoid),
+						),
+					)
+
+			const clearPersistedRuntimeState = (
+				projectPath: string | undefined,
+			): Effect.Effect<void, never> =>
+				localIssueStore
+					.clearLinearWebhookRuntimeLease(projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`LinearWebhookService: failed to clear webhook runtime lease metadata: ${error.message}`,
+							).pipe(Effect.asVoid),
+						),
+					)
 
 			const stopActiveRuntime = (reason: string): Effect.Effect<void, never> =>
 				Effect.gen(function* () {
@@ -678,7 +754,6 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					}
 
 					const runtimeConfig = runtimeConfigResult.right
-					const webhookClient = new LinearWebhookClient(runtimeConfig.webhookSecret)
 					const runtimeStartResult = yield* Effect.either(
 						Effect.gen(function* () {
 							yield* Effect.logInfo(
@@ -688,6 +763,94 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 							const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
 							const port = runtimeConfig.port
 							const webhookIdRef: { id: string | undefined } = { id: undefined }
+							const persistedRuntimeStateOption = yield* readPersistedRuntimeState(
+								params.projectPath,
+							)
+							const normalizedResourceTypes = normalizeWebhookResourceTypes(
+								runtimeConfig.eventTypes,
+							)
+							const persistedRuntimeState = Option.getOrUndefined(persistedRuntimeStateOption)
+							const persistedLeaseMatchesTarget =
+								persistedRuntimeState !== undefined &&
+								persistedRuntimeState.teamId === teamId &&
+								persistedRuntimeState.webhookUrl === webhookUrl &&
+								webhookResourceTypesMatch(
+									persistedRuntimeState.resourceTypes,
+									normalizedResourceTypes,
+								)
+							let effectiveWebhookSecret = runtimeConfig.webhookSecret
+							let effectiveWebhookSecretSource: "config" | "generated" | "persisted-generated" =
+								runtimeConfig.webhookSecretSource
+							if (
+								persistedLeaseMatchesTarget &&
+								persistedRuntimeState !== undefined &&
+								runtimeConfig.webhookSecretSource === "generated"
+							) {
+								effectiveWebhookSecret = persistedRuntimeState.webhookSecret
+								effectiveWebhookSecretSource = "persisted-generated"
+								yield* Effect.logInfo(
+									`LinearWebhookService: reusing persisted generated webhook secret for ${webhookUrl}`,
+								)
+							}
+							const webhookClient = new LinearWebhookClient(effectiveWebhookSecret)
+							let webhookReused = false
+							if (persistedRuntimeState !== undefined && persistedLeaseMatchesTarget) {
+								const reuseResult = yield* Effect.either(
+									failOnTimeout({
+										effect: linearSdk.updateWebhook(
+											persistedRuntimeState.webhookId,
+											{
+												url: webhookUrl,
+												resourceTypes: [...normalizedResourceTypes],
+												secret: effectiveWebhookSecret,
+												enabled: true,
+											},
+											{ apiKey: runtimeConfig.apiKey },
+										),
+										timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+										timeoutMessage: `Timed out reusing Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+										mapError: (error) =>
+											new LinearWebhookRuntimeError({
+												message: `Failed to reuse Linear webhook: ${formatErrorMessage(error)}`,
+											}),
+									}),
+								)
+								if (reuseResult._tag === "Right") {
+									webhookReused = true
+									webhookIdRef.id = persistedRuntimeState.webhookId
+									yield* writePersistedRuntimeState(params.projectPath, {
+										webhookId: persistedRuntimeState.webhookId,
+										webhookUrl,
+										teamId,
+										resourceTypes: [...normalizedResourceTypes],
+										webhookSecret: effectiveWebhookSecret,
+									})
+									yield* Effect.logInfo(
+										`LinearWebhookService: reused existing webhook id=${persistedRuntimeState.webhookId} for ${webhookUrl}`,
+									)
+								} else {
+									yield* Effect.logWarning(
+										`LinearWebhookService: webhook reuse failed for id ${persistedRuntimeState.webhookId}; creating a new webhook`,
+									)
+									yield* clearPersistedRuntimeState(params.projectPath)
+								}
+							} else if (persistedRuntimeState !== undefined) {
+								yield* Effect.logInfo(
+									`LinearWebhookService: deleting mismatched persisted webhook id=${persistedRuntimeState.webhookId}`,
+								)
+								yield* linearSdk
+									.deleteWebhook(persistedRuntimeState.webhookId, {
+										apiKey: runtimeConfig.apiKey,
+									})
+									.pipe(
+										Effect.catchAll((error) =>
+											Effect.logWarning(
+												`LinearWebhookService: failed to delete mismatched persisted webhook id ${persistedRuntimeState.webhookId}: ${error.message}`,
+											).pipe(Effect.asVoid),
+										),
+									)
+								yield* clearPersistedRuntimeState(params.projectPath)
+							}
 							const webhookRoute = HttpLayerRouter.add("*", WEBHOOK_PATH, (request) =>
 								Effect.gen(function* () {
 									const requestPath = Option.match(HttpServerRequest.toURL(request), {
@@ -776,6 +939,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 								const webhookId = webhookIdRef.id
 								if (webhookId === undefined) {
+									yield* clearPersistedRuntimeState(params.projectPath)
 									return
 								}
 
@@ -788,40 +952,51 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 											).pipe(Effect.asVoid),
 										),
 									)
+								yield* clearPersistedRuntimeState(params.projectPath)
 							})
 
-							const registrationResult = yield* Effect.either(
-								failOnTimeout({
-									effect: linearSdk.createWebhook(
-										{
-											teamId,
-											url: webhookUrl,
-											resourceTypes: [...runtimeConfig.eventTypes],
-											secret: runtimeConfig.webhookSecret,
-											enabled: true,
-										},
-										{ apiKey: runtimeConfig.apiKey },
-									),
-									timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
-									timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
-									mapError: (error) =>
-										new LinearWebhookRuntimeError({
-											message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
-										}),
-								}),
-							)
-							if (registrationResult._tag === "Left") {
-								yield* cleanup
-								return yield* Effect.fail(registrationResult.left)
-							}
+							if (!webhookReused) {
+								const registrationResult = yield* Effect.either(
+									failOnTimeout({
+										effect: linearSdk.createWebhook(
+											{
+												teamId,
+												url: webhookUrl,
+												resourceTypes: [...normalizedResourceTypes],
+												secret: effectiveWebhookSecret,
+												enabled: true,
+											},
+											{ apiKey: runtimeConfig.apiKey },
+										),
+										timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+										timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+										mapError: (error) =>
+											new LinearWebhookRuntimeError({
+												message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
+											}),
+									}),
+								)
+								if (registrationResult._tag === "Left") {
+									yield* cleanup
+									return yield* Effect.fail(registrationResult.left)
+								}
 
-							if (registrationResult.right.webhookId !== undefined) {
-								webhookIdRef.id = registrationResult.right.webhookId
+								if (registrationResult.right.webhookId !== undefined) {
+									webhookIdRef.id = registrationResult.right.webhookId
+									yield* writePersistedRuntimeState(params.projectPath, {
+										webhookId: registrationResult.right.webhookId,
+										webhookUrl,
+										teamId,
+										resourceTypes: [...normalizedResourceTypes],
+										webhookSecret: effectiveWebhookSecret,
+									})
+								}
 							}
 
 							return {
 								webhookUrl,
 								cleanup,
+								webhookSecretSource: effectiveWebhookSecretSource,
 							}
 						}).pipe(
 							Effect.timeout(`${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS} millis`),
@@ -862,7 +1037,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						configKey: params.configKey,
 					})
 					yield* Effect.logInfo(
-						`Linear SDK webhook runtime started on :${runtimeConfig.port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${runtimeStartResult.right.webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeConfig.webhookSecretSource}, configKey=${params.configKey})`,
+						`Linear SDK webhook runtime started on :${runtimeConfig.port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${runtimeStartResult.right.webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeStartResult.right.webhookSecretSource}, configKey=${params.configKey})`,
 					)
 				})
 

@@ -94,6 +94,15 @@ const SyncQueuePayloadJsonSchema = Schema.parseJson(
 		idempotencyKey: Schema.String,
 	}),
 )
+const LinearWebhookRuntimeLeaseJsonSchema = Schema.parseJson(
+	Schema.Struct({
+		webhookId: Schema.String,
+		webhookUrl: Schema.String,
+		teamId: Schema.String,
+		resourceTypes: Schema.Array(Schema.String),
+		webhookSecret: Schema.String,
+	}),
+)
 const BoardTaskStateSchema = Schema.Struct({
 	hasWorktree: Schema.optional(Schema.Boolean),
 	hasMergeConflict: Schema.optional(Schema.Boolean),
@@ -317,6 +326,9 @@ export interface PersistedBoardTaskState extends Schema.Schema.Type<typeof Board
 	readonly issueId: string
 }
 
+export interface LinearWebhookRuntimeLease
+	extends Schema.Schema.Type<typeof LinearWebhookRuntimeLeaseJsonSchema> {}
+
 export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError")<{
 	readonly message: string
 	readonly cause?: unknown
@@ -349,6 +361,7 @@ const IMPLEMENTATION_REGISTRY_META_KEY = "impl:registry:v1"
 const IMPLEMENTATION_DEFAULT_META_KEY = "impl:default"
 const SPEC_PUBLISH_CONFIG_META_KEY = "spec:publish:config"
 const SPEC_PUBLISH_OUTCOME_META_KEY = "spec:publish:last_outcome"
+const LINEAR_WEBHOOK_RUNTIME_LEASE_META_KEY = "linear:webhook:runtime_lease:v1"
 const DEFAULT_SPEC_IMPLEMENTATION = "default"
 const BUILTIN_IMPLEMENTATION_TIMESTAMP = "1970-01-01T00:00:00.000Z"
 const RESERVED_LOCAL_ISSUE_IDS = new Set(["az"])
@@ -2370,6 +2383,20 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			}
 		}
 
+		const decodeLinearWebhookRuntimeLeaseMeta = (
+			value: string | undefined,
+		): LinearWebhookRuntimeLease | undefined => {
+			if (value === undefined) {
+				return undefined
+			}
+
+			try {
+				return Schema.decodeUnknownSync(LinearWebhookRuntimeLeaseJsonSchema)(value)
+			} catch {
+				return undefined
+			}
+		}
+
 		const encodeSpecPublishConfigMeta = (
 			value: SpecPublishConfig,
 		): Effect.Effect<string, LocalIssueStoreError> =>
@@ -2390,6 +2417,18 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				catch: (cause) =>
 					new LocalIssueStoreError({
 						message: "Failed to encode spec publish outcome metadata",
+						cause,
+					}),
+			})
+
+		const encodeLinearWebhookRuntimeLeaseMeta = (
+			value: LinearWebhookRuntimeLease,
+		): Effect.Effect<string, LocalIssueStoreError> =>
+			Effect.try({
+				try: () => Schema.encodeSync(LinearWebhookRuntimeLeaseJsonSchema)(value),
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: "Failed to encode linear webhook runtime lease metadata",
 						cause,
 					}),
 			})
@@ -4672,6 +4711,35 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					encodeSpecPublishOutcomeMeta(outcome).pipe(
 						Effect.flatMap((encoded) => setMetaValue(sql, SPEC_PUBLISH_OUTCOME_META_KEY, encoded)),
 					),
+				),
+
+			getLinearWebhookRuntimeLease: (
+				cwd?: string,
+			): Effect.Effect<LinearWebhookRuntimeLease | undefined, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					getMetaValue(sql, LINEAR_WEBHOOK_RUNTIME_LEASE_META_KEY).pipe(
+						Effect.map((value) => decodeLinearWebhookRuntimeLeaseMeta(value)),
+					),
+				),
+
+			setLinearWebhookRuntimeLease: (
+				lease: LinearWebhookRuntimeLease,
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					encodeLinearWebhookRuntimeLeaseMeta(lease).pipe(
+						Effect.flatMap((encoded) =>
+							setMetaValue(sql, LINEAR_WEBHOOK_RUNTIME_LEASE_META_KEY, encoded),
+						),
+					),
+				),
+
+			clearLinearWebhookRuntimeLease: (cwd?: string): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					sql`
+						DELETE FROM meta
+						WHERE key = ${LINEAR_WEBHOOK_RUNTIME_LEASE_META_KEY}
+					`.pipe(Effect.asVoid),
 				),
 
 			countIssues: (cwd?: string): Effect.Effect<number, LocalIssueStoreError> =>
