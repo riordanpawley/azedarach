@@ -16,6 +16,7 @@ import {
 	formatParentChildCheckOutput,
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
+	parseGitWorktreeListPaths,
 	resolveCliExecutionMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
@@ -808,6 +809,37 @@ describe("normalizeCliAliases", () => {
 			"AZE-1",
 		])
 		expect(normalizeCliAliases(["bun", "az", "d", "ls"])).toEqual(["bun", "az", "dev", "list"])
+	})
+})
+
+describe("parseGitWorktreeListPaths", () => {
+	it("extracts worktree paths from git porcelain output", () => {
+		const output = [
+			"worktree /repo/main",
+			"HEAD 1234567890",
+			"branch refs/heads/main",
+			"",
+			"worktree /repo/feature-a",
+			"HEAD abcdef0123",
+			"branch refs/heads/feature-a",
+			"locked",
+			"",
+		].join("\n")
+
+		expect(parseGitWorktreeListPaths(output)).toEqual(["/repo/main", "/repo/feature-a"])
+	})
+
+	it("deduplicates repeated worktree entries and ignores unrelated lines", () => {
+		const output = [
+			"worktree /repo/main",
+			"HEAD 1234567890",
+			"worktree /repo/main",
+			"prunable gitdir file points to non-existent location",
+			"random text",
+			"worktree   ",
+		].join("\n")
+
+		expect(parseGitWorktreeListPaths(output)).toEqual(["/repo/main"])
 	})
 })
 

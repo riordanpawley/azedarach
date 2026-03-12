@@ -726,6 +726,46 @@ const statusHandler = (args: {
 		}
 	})
 
+export const parseGitWorktreeListPaths = (porcelainOutput: string): readonly string[] => {
+	const uniquePaths = new Set<string>()
+	for (const rawLine of porcelainOutput.split("\n")) {
+		if (!rawLine.startsWith("worktree ")) continue
+		const path = rawLine.slice("worktree ".length).trim()
+		if (path.length === 0) continue
+		uniquePaths.add(path)
+	}
+	return [...uniquePaths]
+}
+
+const listSyncTargetPaths = (cwd: string, includeAllWorktrees: boolean) =>
+	Effect.gen(function* () {
+		if (!includeAllWorktrees) {
+			return [cwd] as const
+		}
+
+		const output = yield* PlatformCommand.string(
+			PlatformCommand.make("git", "-C", cwd, "worktree", "list", "--porcelain"),
+		).pipe(Effect.mapError((error) => new Error(`Failed to list git worktrees: ${String(error)}`)))
+		const parsedPaths = parseGitWorktreeListPaths(output)
+		return parsedPaths.length > 0 ? parsedPaths : [cwd]
+	})
+
+const hasStringMessage = (value: unknown): value is { readonly message: string } =>
+	typeof value === "object" &&
+	value !== null &&
+	"message" in value &&
+	typeof value.message === "string"
+
+const getSyncFailureMessage = (error: unknown): string => {
+	if (error instanceof Error) {
+		return error.message
+	}
+	if (hasStringMessage(error)) {
+		return error.message
+	}
+	return String(error)
+}
+
 /**
  * Sync issue tracker state in current or all worktrees
  */
@@ -736,6 +776,7 @@ const syncHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueTrackerClient = yield* IssueTrackerClient
 
 		yield* Console.log("Syncing issue tracker state...")
 		yield* Console.log(`Project: ${cwd}`)
@@ -744,17 +785,52 @@ const syncHandler = (args: {
 			yield* Console.log("Verbose mode enabled")
 		}
 
-		// Validate issue tracker store
-		yield* validateIssueTrackerStore(cwd)
-
+		const targetPaths = yield* listSyncTargetPaths(cwd, args.all)
 		if (args.all) {
-			// TODO: Sync all worktrees
-			yield* Console.log("[Stub] Syncing all worktrees...")
-			yield* Console.log("[Stub] Synced 3 worktrees")
-		} else {
-			// TODO: Sync current directory only
-			yield* Console.log("[Stub] Syncing current directory...")
-			yield* Console.log("[Stub] Pushed: 2, Pulled: 1")
+			yield* Console.log(`Targets: ${targetPaths.length} worktree(s)`)
+		}
+
+		let totalPushed = 0
+		let totalPulled = 0
+		let syncedCount = 0
+		const failures: Array<{ readonly path: string; readonly message: string }> = []
+
+		for (const targetPath of targetPaths) {
+			if (args.verbose || args.all) {
+				yield* Console.log(`Syncing: ${targetPath}`)
+			}
+
+			const result = yield* validateIssueTrackerStore(targetPath).pipe(
+				Effect.zipRight(issueTrackerClient.sync(targetPath)),
+				Effect.either,
+			)
+			if (result._tag === "Left") {
+				const message = getSyncFailureMessage(result.left)
+				failures.push({ path: targetPath, message })
+				yield* Console.error(`  Failed: ${message}`)
+				continue
+			}
+
+			syncedCount += 1
+			totalPushed += result.right.pushed
+			totalPulled += result.right.pulled
+			yield* Console.log(`  Pushed: ${result.right.pushed}, Pulled: ${result.right.pulled}`)
+		}
+
+		yield* Console.log("")
+		yield* Console.log(
+			`Sync summary: targets=${targetPaths.length}, succeeded=${syncedCount}, failed=${failures.length}, pushed=${totalPushed}, pulled=${totalPulled}`,
+		)
+
+		if (failures.length > 0) {
+			for (const failure of failures) {
+				yield* Console.error(`  ${failure.path}: ${failure.message}`)
+			}
+			return yield* Effect.fail(
+				new Error(
+					`Sync failed for ${failures.length} target(s). Successful targets: ${syncedCount}/${targetPaths.length}.`,
+				),
+			)
 		}
 	})
 
