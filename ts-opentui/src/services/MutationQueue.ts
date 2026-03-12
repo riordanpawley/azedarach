@@ -26,17 +26,20 @@ export type Mutation =
 			_tag: "Move"
 			id: string
 			status: ColumnStatus
+			cwd?: string
 			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 	  }
 	| {
 			_tag: "Delete"
 			id: string
+			cwd?: string
 			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 	  }
 	| {
 			_tag: "Update"
 			id: string
 			fields: IssueUpdateFields
+			cwd?: string
 			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 	  }
 
@@ -78,30 +81,34 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 			switch (mutation._tag) {
 				case "Update":
 					// IssueUpdateFields is structurally compatible with IssueTrackerClient.update's fields parameter
-					return issueTrackerClient.update(mutation.id, {
-						status: mutation.fields.status,
-						notes: mutation.fields.notes,
-						priority: mutation.fields.priority,
-						title: mutation.fields.title,
-						description: mutation.fields.description,
-						design: mutation.fields.design,
-						acceptance: mutation.fields.acceptance,
-						assignee: mutation.fields.assignee,
-						estimate: mutation.fields.estimate,
-						labels: mutation.fields.labels ? [...mutation.fields.labels] : undefined,
-					})
+					return issueTrackerClient.update(
+						mutation.id,
+						{
+							status: mutation.fields.status,
+							notes: mutation.fields.notes,
+							priority: mutation.fields.priority,
+							title: mutation.fields.title,
+							description: mutation.fields.description,
+							design: mutation.fields.design,
+							acceptance: mutation.fields.acceptance,
+							assignee: mutation.fields.assignee,
+							estimate: mutation.fields.estimate,
+							labels: mutation.fields.labels ? [...mutation.fields.labels] : undefined,
+						},
+						mutation.cwd,
+					)
 				case "Delete":
-					return issueTrackerClient.delete(mutation.id)
+					return issueTrackerClient.delete(mutation.id, mutation.cwd)
 				case "Move":
-					return issueTrackerClient.update(mutation.id, { status: mutation.status })
+					return issueTrackerClient.update(mutation.id, { status: mutation.status }, mutation.cwd)
 			}
 		}
 
-		const syncAfterMutation = (taskId: string) =>
-			issueTrackerClient.sync().pipe(
+		const syncAfterMutation = (taskId: string, cwd?: string) =>
+			issueTrackerClient.sync(cwd).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(
-						`MutationQueue post-mutation sync failed for task ${taskId}: ${String(error)}`,
+						`MutationQueue post-mutation sync failed for task ${taskId} (projectPath=${cwd ?? "<default>"}): ${String(error)}`,
 					).pipe(Effect.asVoid),
 				),
 				Effect.asVoid,
@@ -123,6 +130,9 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 					)
 					return
 				}
+				yield* Effect.log(
+					`Processing ${queued.mutation._tag} mutation for task ${taskId} (projectPath=${queued.mutation.cwd ?? "<default>"})`,
+				)
 
 				yield* Ref.update(mutationsRef, (queue) => {
 					const newQueue = new Map(queue)
@@ -143,9 +153,9 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 								newQueue.delete(taskId)
 								return newQueue
 							})
-							yield* syncAfterMutation(taskId)
+							yield* syncAfterMutation(taskId, queued.mutation.cwd)
 							yield* Effect.log(
-								`Successfully processed ${queued.mutation._tag} mutation for task ${taskId}`,
+								`Successfully processed ${queued.mutation._tag} mutation for task ${taskId} (projectPath=${queued.mutation.cwd ?? "<default>"})`,
 							)
 						}),
 					),

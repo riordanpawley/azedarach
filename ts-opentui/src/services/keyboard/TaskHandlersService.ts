@@ -10,7 +10,7 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
-import { Effect } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
@@ -55,6 +55,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const sessionManager = yield* SessionManager
 			const mutationQueue = yield* MutationQueue
 
+			const getActiveProjectPath = (): Effect.Effect<string | undefined> =>
+				SubscriptionRef.get(board.currentProjectPath).pipe(
+					Effect.map((projectPath) => projectPath ?? undefined),
+				)
+
 			const getTaskById = (taskId: string) =>
 				Effect.gen(function* () {
 					const tasks = yield* board.getTasks()
@@ -86,6 +91,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 			const deleteIssueAndCleanup = (taskId: string, hasSession: boolean) =>
 				Effect.gen(function* () {
+					const projectPath = yield* getActiveProjectPath()
 					if (hasSession) {
 						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
 						yield* prWorkflow
@@ -104,6 +110,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const deleteMutation: Mutation = {
 						_tag: "Delete",
 						id: taskId,
+						cwd: projectPath,
 						rollback: syncTaskFromBackend(taskId),
 					}
 					yield* board.removeTaskFromMutation(taskId)
@@ -145,27 +152,30 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* issueEditor.createIssue().pipe(
 						Effect.flatMap((result) =>
 							Effect.gen(function* () {
+								const projectPath = yield* getActiveProjectPath()
 								const epicId = yield* nav.getDrillDownEpic()
 								let parentEpicId: string | null | undefined
 
 								if (epicId) {
-									yield* issueTrackerClient.addDependency(result.id, epicId, "parent-child").pipe(
-										Effect.tap(() => {
-											parentEpicId = epicId
-											return toast.show("success", `Created ${result.id} (added to epic)`)
-										}),
-										Effect.catchAll((error) =>
-											Effect.gen(function* () {
-												yield* Effect.logWarning(
-													`Failed to link ${result.id} to epic ${epicId}: ${error}`,
-												)
-												yield* toast.show(
-													"warning",
-													`Created ${result.id} (failed to link to epic)`,
-												)
+									yield* issueTrackerClient
+										.addDependency(result.id, epicId, "parent-child", projectPath)
+										.pipe(
+											Effect.tap(() => {
+												parentEpicId = epicId
+												return toast.show("success", `Created ${result.id} (added to epic)`)
 											}),
-										),
-									)
+											Effect.catchAll((error) =>
+												Effect.gen(function* () {
+													yield* Effect.logWarning(
+														`Failed to link ${result.id} to epic ${epicId}: ${error}`,
+													)
+													yield* toast.show(
+														"warning",
+														`Created ${result.id} (failed to link to epic)`,
+													)
+												}),
+											),
+										)
 								} else {
 									yield* toast.show("success", `Created ${result.id}`)
 								}
@@ -219,6 +229,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						: "\n\nThis keeps the branch and worktree."
 
 					const tombstoneIssueOnly = Effect.gen(function* () {
+						const projectPath = yield* getActiveProjectPath()
 						if (hasSession) {
 							yield* toast.show("info", `Stopping session for ${task.id} before tombstoning...`)
 							yield* sessionManager
@@ -234,6 +245,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 							_tag: "Update",
 							id: task.id,
 							fields: { status: "tombstone" },
+							cwd: projectPath,
 							rollback: syncTaskFromBackend(task.id),
 						}
 						yield* board.removeTaskFromMutation(task.id)
@@ -273,6 +285,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const firstTaskId = taskIdsToMove[0]
 
 					if (taskIdsToMove.length > 0) {
+						const projectPath = yield* getActiveProjectPath()
 						const previousStatusByTaskId = new Map<string, (typeof COLUMNS)[number]["status"]>()
 						for (const id of taskIdsToMove) {
 							const task = yield* board.findTaskById(id)
@@ -301,6 +314,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								_tag: "Move",
 								id,
 								status: targetStatus,
+								cwd: projectPath,
 								rollback: board.applyOptimisticMove(id, previousStatus),
 							}
 							yield* mutationQueue.add(moveMutation)
@@ -332,7 +346,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					if (task.issue_type !== "epic") {
 						yield* toast.show("info", `Converting ${task.id} to epic...`)
-						yield* issueTrackerClient.update(task.id, { type: "epic" })
+						const projectPath = yield* getActiveProjectPath()
+						yield* issueTrackerClient.update(task.id, { type: "epic" }, projectPath)
 						yield* board.patchTaskFromMutation(task.id, {
 							issue_type: "epic",
 							updated_at: new Date().toISOString(),
