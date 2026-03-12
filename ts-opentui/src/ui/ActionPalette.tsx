@@ -53,6 +53,11 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
 const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
 const TMUX_REQUIRED_ACTIONS = new Set(["s", "S", "!", "a", "p", "R", "x", "r", "H"])
 
+export const shouldShowActionForTmuxMode = (
+	actionKey: string,
+	tmuxActionsEnabled: boolean,
+): boolean => tmuxActionsEnabled || !TMUX_REQUIRED_ACTIONS.has(actionKey)
+
 const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	h: "h",
 	l: "l",
@@ -163,7 +168,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 	// Full availability check: state + queue busyness + network + workflow mode
 	const isAvailable = (action: string): boolean => {
-		if (!tmuxActionsEnabled && TMUX_REQUIRED_ACTIONS.has(action)) return false
+		if (!shouldShowActionForTmuxMode(action, tmuxActionsEnabled)) return false
 
 		// Merge is blocked in origin mode UNLESS task is epic child or in drilldown
 		// (epic children merge to parent epic, not main - so they're allowed)
@@ -211,8 +216,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		actions.push({ keyName: "f", description: "diff" })
 		actions.push({ keyName: "d", description: "cleanup+branch" })
 		actions.push({ keyName: "T", description: "tombstone" })
-		return actions.filter(
-			(action) => tmuxActionsEnabled || !TMUX_REQUIRED_ACTIONS.has(action.keyName),
+		return actions.filter((action) =>
+			shouldShowActionForTmuxMode(action.keyName, tmuxActionsEnabled),
 		)
 	}, [sessionState, tmuxActionsEnabled])
 
