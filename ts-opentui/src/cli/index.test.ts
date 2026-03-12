@@ -68,6 +68,12 @@ describe("buildPrimeOutput", () => {
 			"In this repo, when guidance says `spec`, it means `az spec` requirement/link records",
 		)
 		expect(output).toContain(
+			"Treat `az spec link` records as required traceability for behavior work",
+		)
+		expect(output).toContain(
+			"Before coding behavior changes, confirm the issue has the right requirement links",
+		)
+		expect(output).toContain(
 			"Before implementing behavior changes, inspect relevant `az spec` requirements/links",
 		)
 		expect(output).toContain("Spec boundary for `az spec` usage")
@@ -180,6 +186,7 @@ describe("buildPrimeOutput", () => {
 		)
 
 		expect(output).not.toContain("`az spec`")
+		expect(output).not.toContain("required traceability for behavior work")
 		expect(output).toContain(
 			"New `az issue` writes must include one or more `--impl <impl>` selections.",
 		)

@@ -325,6 +325,8 @@ export const buildPrimeOutput = (
 	)
 	const specGuardrails = specEnabled
 		? `  - In this repo, when guidance says \`spec\`, it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
+  - Treat \`az spec link\` records as required traceability for behavior work: they are how planning, implementation, and review stay aligned to requirements.
+  - Before coding behavior changes, confirm the issue has the right requirement links (or add/update them) so acceptance checks stay explicit.
   - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
   - Spec boundary for \`az spec\` usage:
     - Use \`az spec\` only for product behavior changes (user flows, API contracts, state rules, acceptance criteria).
