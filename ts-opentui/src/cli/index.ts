@@ -48,6 +48,7 @@ import {
 	type ImplementationRecord,
 	type ImplementationRegistry,
 	IssueTrackerClient,
+	resolveConfiguredIssueBackend,
 	type Issue as TrackedIssue,
 } from "../core/IssueTrackerClient.js"
 import { PlanningService } from "../core/PlanningService.js"
@@ -766,6 +767,50 @@ const getSyncFailureMessage = (error: unknown): string => {
 	return String(error)
 }
 
+const syncLinearAfterIssueMutation = (params: {
+	readonly issueTrackerClient: IssueTrackerClient
+	readonly explicitProjectDir: string | undefined
+	readonly resolverCwd: string
+	readonly commandLabel: string
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const projectPath = params.explicitProjectDir ?? params.resolverCwd
+		const syncConfig = yield* appConfig
+			.getIssueTrackerSyncConfigForProjectPath(projectPath)
+			.pipe(
+				Effect.mapError(
+					(error) =>
+						new Error(
+							`Failed to load issue tracker sync config for post-mutation sync (${projectPath}): ${error.message}`,
+						),
+				),
+			)
+
+		const backend = resolveConfiguredIssueBackend(syncConfig.issueTracker)
+		if (backend !== "linear" || !syncConfig.syncEnabled) {
+			return
+		}
+
+		const syncResult = yield* params.issueTrackerClient
+			.sync(params.explicitProjectDir)
+			.pipe(
+				Effect.mapError(
+					(error) =>
+						new Error(
+							`Post-mutation linear sync failed after ${params.commandLabel}: ${getSyncFailureMessage(error)}`,
+						),
+				),
+			)
+
+		if (params.verbose) {
+			yield* Console.error(
+				`post_sync pushed=${syncResult.pushed} pulled=${syncResult.pulled} backend=${backend}`,
+			)
+		}
+	})
+
 /**
  * Sync issue tracker state in current or all worktrees
  */
@@ -1381,6 +1426,13 @@ const issueCreateHandler = (args: {
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue create",
+			verbose: args.verbose,
+		})
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
@@ -1468,6 +1520,13 @@ const issueChildHandler = (args: {
 			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
+		})
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue child",
+			verbose: args.verbose,
 		})
 
 		if (args.json) {
@@ -1570,6 +1629,15 @@ const issueBulkCreateHandler = (args: {
 		)
 
 		const summary = summarizeIssueBulkCreateResults(results)
+		if (summary.createdCount > 0) {
+			yield* syncLinearAfterIssueMutation({
+				issueTrackerClient,
+				explicitProjectDir,
+				resolverCwd,
+				commandLabel: "issue bulk-create",
+				verbose: args.verbose,
+			})
+		}
 		if (args.json) {
 			yield* Console.log(JSON.stringify(summary, null, 2))
 			return
@@ -1667,6 +1735,13 @@ const issueUpdateHandler = (args: {
 
 		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient.update(issueId, fields, explicitProjectDir)
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue update",
+			verbose: args.verbose,
+		})
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, updated: true }, null, 2))
 			return
@@ -1737,6 +1812,15 @@ const issueBulkUpdateHandler = (args: {
 		)
 
 		const summary = summarizeIssueBulkUpdateResults(results)
+		if (summary.updatedCount > 0) {
+			yield* syncLinearAfterIssueMutation({
+				issueTrackerClient,
+				explicitProjectDir,
+				resolverCwd,
+				commandLabel: "issue bulk-update",
+				verbose: args.verbose,
+			})
+		}
 		if (args.json) {
 			yield* Console.log(JSON.stringify(summary, null, 2))
 			return
@@ -2080,6 +2164,13 @@ const issueDepAddHandler = (args: {
 			dependencyType,
 			explicitProjectDir,
 		)
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue dep add",
+			verbose: args.verbose,
+		})
 
 		if (args.json) {
 			yield* Console.log(
@@ -2150,6 +2241,13 @@ const issueCloseHandler = (args: {
 		}
 
 		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), explicitProjectDir)
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue close",
+			verbose: args.verbose,
+		})
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
@@ -2382,6 +2480,13 @@ const issueDeleteHandler = (args: {
 
 		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient.delete(issueId, explicitProjectDir)
+		yield* syncLinearAfterIssueMutation({
+			issueTrackerClient,
+			explicitProjectDir,
+			resolverCwd,
+			commandLabel: "issue delete",
+			verbose: false,
+		})
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, deleted: true }, null, 2))
 			return
