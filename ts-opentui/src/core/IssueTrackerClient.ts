@@ -14,7 +14,8 @@ import type { IssueDbPerfOperationKind } from "../services/DiagnosticsService.js
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { ProjectService } from "../services/ProjectService.js"
-import { BackendSyncLinear } from "./BackendSyncLinear.js"
+import type { BackendSyncInterface } from "./BackendSyncInterface.js"
+import { BackendSyncRouter } from "./BackendSyncRouter.js"
 import type { IssueSyncError } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import {
@@ -1525,7 +1526,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		AppConfig.Default,
 		DiagnosticsService.Default,
 		LocalIssueStore.Default,
-		BackendSyncLinear.Default,
+		BackendSyncRouter.Default,
 		LinearSdk.Default,
 	],
 	scoped: Effect.gen(function* () {
@@ -1534,7 +1535,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
 		const localIssueStore = yield* LocalIssueStore
-		const backendSyncLinear = yield* BackendSyncLinear
+		const backendSyncRouter = yield* BackendSyncRouter
 		const linearSdk = yield* LinearSdk
 		const scope = yield* Effect.scope
 
@@ -2671,6 +2672,21 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				}
 			})
 
+		const resolveLinearBackendSync = (
+			runtime: IssueTrackerRuntime,
+		): Effect.Effect<BackendSyncInterface | undefined, IssueTrackerError> =>
+			runtime.configuredBackend !== "linear"
+				? Effect.succeed(undefined)
+				: backendSyncRouter.resolve().pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueTrackerError({
+									message: `Failed to resolve backend sync route for projectPath=${runtime.projectPath}: ${String(error)}`,
+									command: "backend-sync resolve",
+								}),
+						),
+					)
+
 		const ensureLinearReadSync = (
 			runtime: IssueTrackerRuntime,
 			maxSyncWaitMs = DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS,
@@ -2678,9 +2694,16 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			runtime.configuredBackend !== "linear"
 				? Effect.succeed(DEFAULT_LINEAR_READ_SYNC_ATTEMPT)
 				: Effect.gen(function* () {
+						const backendSync = yield* resolveLinearBackendSync(runtime)
+						if (backendSync === undefined) {
+							yield* Effect.log(
+								`Linear read sync skipped: backend route unavailable (projectPath=${runtime.projectPath})`,
+							)
+							return DEFAULT_LINEAR_READ_SYNC_ATTEMPT
+						}
 						const readSyncEffect = fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSyncLinear.flushQueue(runtime.projectPath),
+							backendSync.flushQueue(runtime.projectPath),
 						).pipe(
 							Effect.catchAll((error) =>
 								Effect.logWarning(`Linear read sync failed: ${error.message}`).pipe(
@@ -3221,12 +3244,19 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					const effectiveCwd = runtime.effectiveCwd
 					if (runtime.configuredBackend === "linear") {
+						const backendSync = yield* resolveLinearBackendSync(runtime)
+						if (backendSync === undefined) {
+							yield* Effect.log(
+								`IssueTrackerClient.sync skipped: backend=linear projectPath=${runtime.projectPath} reason=backend_route_unavailable`,
+							)
+							return ZERO_SYNC_RESULT
+						}
 						yield* Effect.log(
 							`IssueTrackerClient.sync linear flush start: projectPath=${runtime.projectPath}`,
 						)
 						const syncResult = yield* fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSyncLinear.flushQueue(runtime.projectPath, {
+							backendSync.flushQueue(runtime.projectPath, {
 								hydrateRemote: options?.hydrateRemote,
 							}),
 						)

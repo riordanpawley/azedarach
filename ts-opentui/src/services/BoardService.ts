@@ -25,7 +25,7 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { BackendSyncLinear } from "../core/BackendSyncLinear.js"
+import { BackendSyncRouter } from "../core/BackendSyncRouter.js"
 import {
 	type Issue,
 	IssueTrackerClient,
@@ -668,7 +668,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	dependencies: [
 		SessionManager.Default,
 		IssueTrackerClient.Default,
-		BackendSyncLinear.Default,
+		BackendSyncRouter.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
 		ProjectService.Default,
@@ -684,7 +684,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* SessionManager
-		const backendSyncLinear = yield* BackendSyncLinear
+		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
@@ -2012,7 +2012,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return
 				}
 
-				yield* backendSyncLinear.flushQueue(projectPath).pipe(
+				const backendSync = yield* backendSyncRouter.resolve()
+				if (backendSync === undefined) {
+					yield* Effect.logWarning(
+						`Project switch Linear sync skipped for ${projectPath}: no backend sync runtime available`,
+					)
+					return
+				}
+
+				yield* backendSync.flushQueue(projectPath).pipe(
 					Effect.tap((syncResult) =>
 						Effect.log(
 							`Project switch Linear sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
