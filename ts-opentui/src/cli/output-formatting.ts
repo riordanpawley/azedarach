@@ -336,7 +336,7 @@ export const buildPrimeOutput = (
     - Example: Vercel -> Vultr with unchanged behavior => issue only, no spec link.
   - After implementing behavior changes, run an \`az spec\` compliance pass: verify behavior vs linked \`az spec\` requirements and update requirement/link records if scope changed.
   - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
-  - For \`az\` commands, keep canonical CLI ordering: options/flags before positional refs.
+  - For \`az\` commands, keep canonical CLI ordering: options/flags before positional refs, and prefer named flags over positional refs when either form is supported.
   - For \`az spec link add\`, use either explicit refs (\`az spec link add --issue <issue-id> --req <requirement-ref> --type relates --fulfillment-status planned --impl <impl>\`) or place flags before positional refs (\`az spec link add --type relates --fulfillment-status planned --impl <impl> <issue-id> <requirement-ref>\`).
   - Avoid positional-first ordering like \`az spec link add <issue-id> <requirement-ref> -t relates -f planned\`; Effect CLI parsing can reject late flags as unknown arguments.
   - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
