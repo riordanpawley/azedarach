@@ -1,22 +1,32 @@
 import { describe, expect, it } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { FileSystem, Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
 import { Effect, Ref } from "effect"
 import {
 	type BackendSyncDaemonServiceApi,
 	makeBackendSyncDaemonService,
 } from "./BackendSyncDaemonService.js"
 import type { BackendSyncInterface } from "./BackendSyncInterface.js"
+import { makeDaemonStateStore, resolveDaemonStateStorePaths } from "./DaemonStateStore.js"
 import { IssueSyncError } from "./IssueSyncService.js"
 
 const makeProgram = <A>(
 	router: { readonly resolve: () => Effect.Effect<BackendSyncInterface | undefined> },
+	stateStore: Parameters<typeof makeBackendSyncDaemonService>[1] | undefined,
 	effect: (daemon: BackendSyncDaemonServiceApi) => Effect.Effect<A, never>,
 ): Effect.Effect<A, never> =>
 	Effect.scoped(
 		Effect.gen(function* () {
-			const daemon = yield* makeBackendSyncDaemonService(router)
+			const daemon = yield* makeBackendSyncDaemonService(router, stateStore)
 			return yield* effect(daemon)
 		}),
 	)
+
+const runWithBunContext = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
+	Effect.runPromise(effect.pipe(Effect.provide(BunContext.layer)))
 
 describe("BackendSyncDaemonService", () => {
 	it("records skipped runs when no backend runtime is available", async () => {
@@ -25,6 +35,7 @@ describe("BackendSyncDaemonService", () => {
 				{
 					resolve: () => Effect.succeed(undefined),
 				},
+				undefined,
 				(daemon) =>
 					Effect.gen(function* () {
 						yield* daemon.start({ projectPath: "/tmp/project", intervalMs: 50 })
@@ -71,6 +82,7 @@ describe("BackendSyncDaemonService", () => {
 				{
 					resolve: () => Effect.succeed(backend),
 				},
+				undefined,
 				(daemon) =>
 					Effect.gen(function* () {
 						yield* daemon.start({ projectPath: "/tmp/project", intervalMs: 50 })
@@ -128,6 +140,7 @@ describe("BackendSyncDaemonService", () => {
 				{
 					resolve: () => Effect.succeed(backend),
 				},
+				undefined,
 				(daemon) =>
 					Effect.gen(function* () {
 						const first = yield* daemon.start({ projectPath: "/tmp/project", intervalMs: 80 })
@@ -174,6 +187,7 @@ describe("BackendSyncDaemonService", () => {
 				{
 					resolve: () => Effect.succeed(backend),
 				},
+				undefined,
 				(daemon) =>
 					Effect.gen(function* () {
 						yield* daemon.start({ projectPath: "/tmp/alpha", intervalMs: 60 })
@@ -230,6 +244,7 @@ describe("BackendSyncDaemonService", () => {
 				{
 					resolve: () => Effect.succeed(backend),
 				},
+				undefined,
 				(daemon) =>
 					Effect.gen(function* () {
 						yield* daemon.start({ projectPath: "/tmp/project", intervalMs: 50 })
@@ -285,6 +300,7 @@ describe("BackendSyncDaemonService", () => {
 				{
 					resolve: () => Effect.succeed(backend),
 				},
+				undefined,
 				(daemon) =>
 					Effect.gen(function* () {
 						yield* daemon.start({ projectPath: "/tmp/project", intervalMs: 50 })
@@ -305,5 +321,105 @@ describe("BackendSyncDaemonService", () => {
 		expect(recovered.lastRun?.result).toBe("flushed")
 		expect(recovered.lastError).toBeNull()
 		expect(recovered.lastSuccessfulRunAtMs).not.toBeNull()
+	})
+
+	it("recovers persisted daemon counters on restart and stays coherent", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-daemon-recovery-"))
+		try {
+			const firstRun = await runWithBunContext(
+				Effect.gen(function* () {
+					const fs = yield* FileSystem.FileSystem
+					const path = yield* Path.Path
+					const stateStore = makeDaemonStateStore({ fs, path })
+					return yield* makeProgram(
+						{
+							resolve: () =>
+								Effect.succeed({
+									target: "linear",
+									bootstrap: () => Effect.succeed(0),
+									flushQueue: () => Effect.succeed({ pushed: 1, pulled: 1 }),
+								}),
+						},
+						stateStore,
+						(daemon) =>
+							Effect.gen(function* () {
+								yield* daemon.start({ projectPath, intervalMs: 50 })
+								yield* Effect.sleep("140 millis")
+								const status = yield* daemon.getStatus()
+								yield* daemon.stop()
+								return status
+							}),
+					)
+				}),
+			)
+
+			const secondRun = await runWithBunContext(
+				Effect.gen(function* () {
+					const fs = yield* FileSystem.FileSystem
+					const path = yield* Path.Path
+					const stateStore = makeDaemonStateStore({ fs, path })
+					return yield* makeProgram(
+						{
+							resolve: () =>
+								Effect.succeed({
+									target: "linear",
+									bootstrap: () => Effect.succeed(0),
+									flushQueue: () => Effect.succeed({ pushed: 1, pulled: 1 }),
+								}),
+						},
+						stateStore,
+						(daemon) =>
+							Effect.gen(function* () {
+								const started = yield* daemon.start({ projectPath, intervalMs: 50 })
+								yield* daemon.stop()
+								return started
+							}),
+					)
+				}),
+			)
+
+			expect(firstRun.runCount).toBeGreaterThanOrEqual(2)
+			expect(firstRun.successCount).toBeGreaterThanOrEqual(2)
+			expect(secondRun.generation).toBeGreaterThan(firstRun.generation)
+			expect(secondRun.runCount).toBeGreaterThanOrEqual(firstRun.runCount)
+			expect(secondRun.successCount).toBeGreaterThanOrEqual(firstRun.successCount)
+			expect(secondRun.state).toBe("running")
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("ignores corrupted persisted daemon state and starts from fresh baseline", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-daemon-corrupt-recovery-"))
+		try {
+			const status = await runWithBunContext(
+				Effect.gen(function* () {
+					const fs = yield* FileSystem.FileSystem
+					const path = yield* Path.Path
+					const stateStore = makeDaemonStateStore({ fs, path })
+					const paths = resolveDaemonStateStorePaths(projectPath, path)
+					yield* fs.makeDirectory(paths.daemonDirectory, { recursive: true })
+					yield* fs.writeFileString(paths.statePath, "{corrupt")
+					return yield* makeProgram(
+						{
+							resolve: () => Effect.succeed(undefined),
+						},
+						stateStore,
+						(daemon) =>
+							Effect.gen(function* () {
+								const started = yield* daemon.start({ projectPath, intervalMs: 50 })
+								yield* daemon.stop()
+								return started
+							}),
+					)
+				}),
+			)
+
+			expect(status.generation).toBe(1)
+			expect(status.runCount).toBe(0)
+			expect(status.state).toBe("running")
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
 	})
 })

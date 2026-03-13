@@ -47,6 +47,77 @@ const waitForSyncStatus = (
 	})
 
 describe("Daemon supervisor integration", () => {
+	it("covers cli-only, tui-only, and mixed-client convergence on a shared daemon contract", async () => {
+		const cliOnly = await Effect.runPromise(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				const attach = yield* daemon.registerClientAttach({
+					clientId: "cli-client",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 1_000,
+				})
+				const state = yield* daemon.getState()
+				return { attach, state }
+			}).pipe(Effect.provide(BackendDaemonService.Default)),
+		)
+
+		const tuiOnly = await Effect.runPromise(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				const attach = yield* daemon.registerClientAttach({
+					clientId: "tui-client",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 1_100,
+				})
+				const state = yield* daemon.getState()
+				return { attach, state }
+			}).pipe(Effect.provide(BackendDaemonService.Default)),
+		)
+
+		const mixed = await Effect.runPromise(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				const cliAttach = yield* daemon.registerClientAttach({
+					clientId: "cli-client",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 1_200,
+				})
+				const tuiAttach = yield* daemon.registerClientAttach({
+					clientId: "tui-client",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 1_210,
+				})
+				const cliReconnect = yield* daemon.markClientReconnect({
+					clientId: "cli-client",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					lastSeenRevision: cliAttach.snapshot.revision,
+					lastSeenLifecycleGeneration: cliAttach.snapshot.lifecycleGeneration,
+					requestedAtMs: 1_220,
+				})
+				const state = yield* daemon.getState()
+				return {
+					cliAttach,
+					tuiAttach,
+					cliReconnect,
+					state,
+				}
+			}).pipe(Effect.provide(BackendDaemonService.Default)),
+		)
+
+		expect(cliOnly.attach.snapshot.runtimePhase).toBe("ready")
+		expect(Object.keys(cliOnly.state.clients)).toEqual(["cli-client"])
+		expect(tuiOnly.attach.snapshot.runtimePhase).toBe("ready")
+		expect(Object.keys(tuiOnly.state.clients)).toEqual(["tui-client"])
+
+		expect(mixed.cliAttach.snapshot.revision).toBe(1)
+		expect(mixed.tuiAttach.snapshot.revision).toBe(2)
+		expect(mixed.cliReconnect.snapshot.revision).toBe(3)
+		expect(Object.keys(mixed.state.clients).sort()).toEqual(["cli-client", "tui-client"])
+		expect(mixed.state.clients["cli-client"]?.lastReconnectAtMs).toBe(1_220)
+		expect(mixed.state.clients["tui-client"]?.lastReconnectAtMs).toBeNull()
+		expect(mixed.state.runtimePhase).toBe("ready")
+	})
+
 	it("enforces singleton lease ownership and allows deterministic reacquire after release", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-daemon-supervisor-singleton-"))
 

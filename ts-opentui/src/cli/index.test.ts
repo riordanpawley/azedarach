@@ -615,6 +615,7 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "daemon", "sync"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "daemon", "logs"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "dm", "sync"])).toBe("command")
 	})
 
@@ -930,6 +931,29 @@ describe("daemon control CLI commands", () => {
 		}
 		expect(failure.value.message).toContain("Cannot restart daemon: no project path available.")
 		expect(failure.value.message).toContain("az daemon sync --project-dir <path>")
+	})
+
+	it("surfaces actionable error when daemon logs are unavailable for a project", async () => {
+		const projectDir = `${process.env.TMPDIR ?? "/tmp"}/az-daemon-logs-${crypto.randomUUID()}`
+
+		const exit = await Effect.runPromiseExit(
+			cliRunner(["bun", "az", "daemon", "logs", projectDir]).pipe(Effect.provide(BunContext.layer)),
+		)
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected daemon logs command to fail")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected logs command failure message")
+		}
+		expect(failure.value instanceof Error).toBe(true)
+		if (!(failure.value instanceof Error)) {
+			throw new Error("Expected logs failure to be Error")
+		}
+		expect(failure.value.message).toContain("No daemon log file found")
+		expect(failure.value.message).toContain("az daemon sync --project-dir")
 	})
 })
 

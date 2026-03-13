@@ -48,6 +48,10 @@ import {
 	formatDaemonInstanceAlreadyRunningMessage,
 	releaseDaemonSyncInstanceLease,
 } from "../core/DaemonInstanceRegistry.js"
+import {
+	resolveDaemonIntervalMsFromEnv,
+	resolveDaemonOperationsPolicy,
+} from "../core/DaemonOperationsPolicy.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -238,6 +242,10 @@ const commandCliLayer = createCommandCliLayer(null)
 const verboseOption = Options.boolean("verbose").pipe(
 	Options.withAlias("v"),
 	Options.withDescription("Enable verbose logging"),
+)
+
+const noDaemonOption = Options.boolean("no-daemon").pipe(
+	Options.withDescription("Disable automatic daemon startup for this command"),
 )
 
 /**
@@ -469,10 +477,17 @@ const setConfigValue = (
 const defaultHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly noDaemon: boolean
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureDaemonAutoStartForCliCommand({
+			command: "tui-default",
+			projectPath: cwd,
+			noDaemonFlag: args.noDaemon,
+			verbose: args.verbose,
+		})
 
 		if (args.verbose) {
 			yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
@@ -778,6 +793,70 @@ const getSyncFailureMessage = (error: unknown): string => {
 	return String(error)
 }
 
+const ensureDaemonAutoStartForCliCommand = (params: {
+	readonly command: "tui-default" | "sync"
+	readonly projectPath: string
+	readonly noDaemonFlag: boolean
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const policy = resolveDaemonOperationsPolicy({
+			command: params.command,
+			noDaemonFlag: params.noDaemonFlag,
+			env: process.env,
+		})
+		if (!policy.autoDaemonize) {
+			if (params.verbose) {
+				yield* Console.log(`Auto-daemonize disabled (${policy.decision}).`)
+			}
+			return
+		}
+
+		const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
+		if (warning !== undefined) {
+			yield* Console.error(`Warning: ${warning}`)
+		}
+
+		const daemonControl = yield* BackendDaemonControlService
+		const currentStatus = yield* daemonControl.status()
+		const alreadyRunningForPath =
+			currentStatus.sync.state === "running" &&
+			currentStatus.sync.projectPath === params.projectPath
+		if (alreadyRunningForPath) {
+			if (params.verbose) {
+				yield* Console.log(
+					`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
+				)
+			}
+			return
+		}
+
+		yield* daemonControl
+			.restart({
+				projectPath: params.projectPath,
+				...(intervalMs === undefined ? {} : { intervalMs }),
+			})
+			.pipe(
+				Effect.catchTag("BackendDaemonControlRestartConfigurationError", (error) =>
+					Effect.fail(
+						new Error(
+							`Auto-daemonize failed (${error.reason}). Provide --no-daemon to skip startup, or inspect daemon state with \`az daemon status\`.`,
+						),
+					),
+				),
+				Effect.catchAll((error) =>
+					Effect.fail(
+						new Error(
+							`Auto-daemonize failed for ${params.projectPath}: ${error instanceof Error ? error.message : String(error)}. Use \`az daemon health\` and \`az daemon logs\` for diagnostics.`,
+						),
+					),
+				),
+			)
+		if (params.verbose) {
+			yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+		}
+	})
+
 const syncLinearAfterIssueMutation = (params: {
 	readonly issueTrackerClient: IssueTrackerClient
 	readonly explicitProjectDir: string | undefined
@@ -829,10 +908,17 @@ const syncHandler = (args: {
 	readonly all: boolean
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly noDaemon: boolean
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const issueTrackerClient = yield* IssueTrackerClient
+		yield* ensureDaemonAutoStartForCliCommand({
+			command: "sync",
+			projectPath: cwd,
+			noDaemonFlag: args.noDaemon,
+			verbose: args.verbose,
+		})
 
 		yield* Console.log("Syncing issue tracker state...")
 		yield* Console.log(`Project: ${cwd}`)
@@ -1019,6 +1105,12 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 		if (args.verbose) {
 			yield* Console.log(JSON.stringify(health, null, 2))
 		}
+		if (health.state !== "healthy") {
+			yield* Console.log("Suggested diagnostics:")
+			yield* Console.log("- az daemon status")
+			yield* Console.log("- az daemon logs --lines 100")
+			yield* Console.log("- az daemon restart --project-dir <path>")
+		}
 	})
 
 const daemonStopHandler = (args: { readonly verbose: boolean }) =>
@@ -1069,6 +1161,57 @@ const daemonRestartHandler = (args: {
 		)
 		if (args.verbose) {
 			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const daemonLogsHandler = (args: {
+	readonly lines: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const logPath = pathService.join(cwd, "az-cli.log")
+		const lineLimit = Option.getOrElse(args.lines, () => 100)
+		const exists = yield* fs.exists(logPath)
+		if (!exists) {
+			return yield* Effect.fail(
+				new Error(
+					`No daemon log file found at ${logPath}. Start daemon-aware commands first (for example: \`az sync\` or \`az daemon sync --project-dir ${cwd}\`).`,
+				),
+			)
+		}
+
+		const rawLog = yield* fs
+			.readFileString(logPath)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to read daemon logs at ${logPath}: ${String(error)}`),
+				),
+			)
+		const lines = rawLog
+			.split("\n")
+			.map((line) => line.trimEnd())
+			.filter((line) => line.length > 0)
+		const tail = lines.slice(Math.max(0, lines.length - lineLimit))
+		if (tail.length === 0) {
+			yield* Console.log(`No daemon log lines available in ${logPath}.`)
+			return
+		}
+
+		yield* Console.log(
+			`Showing ${tail.length} of ${lines.length} daemon log line(s) from ${logPath} (tail=${lineLimit})`,
+		)
+		for (const line of tail) {
+			yield* Console.log(line)
+		}
+		if (args.verbose) {
+			yield* Console.log("Diagnostics:")
+			yield* Console.log("- az daemon status")
+			yield* Console.log("- az daemon health")
+			yield* Console.log(`- az daemon logs --project-dir ${cwd} --lines 200`)
 		}
 	})
 
@@ -5282,6 +5425,7 @@ const syncCommand = Command.make(
 		),
 		projectDir: projectDirArg,
 		verbose: verboseOption,
+		noDaemon: noDaemonOption,
 	},
 	syncHandler,
 ).pipe(Command.withDescription("Sync issue tracker state in worktrees"))
@@ -5338,9 +5482,22 @@ const daemonRestartCommand = Command.make(
 	daemonRestartHandler,
 ).pipe(Command.withDescription("Restart headless backend sync daemon runtime"))
 
+const daemonLogsCommand = Command.make(
+	"logs",
+	{
+		lines: Options.integer("lines").pipe(
+			Options.optional,
+			Options.withDescription("Number of trailing log lines to show (default: 100)"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	daemonLogsHandler,
+).pipe(Command.withDescription("Show daemon operation logs"))
+
 const daemonCommand = Command.make("daemon", {}, () =>
 	Console.log(
-		"Usage: az daemon <sync|status|health|stop|restart> [--interval-ms <ms>] [--project-dir <path>]",
+		"Usage: az daemon <sync|status|health|stop|restart|logs> [--interval-ms <ms>] [--project-dir <path>]",
 	),
 ).pipe(
 	Command.withDescription("Headless backend daemon commands"),
@@ -5350,6 +5507,7 @@ const daemonCommand = Command.make("daemon", {}, () =>
 		daemonHealthCommand,
 		daemonStopCommand,
 		daemonRestartCommand,
+		daemonLogsCommand,
 	]),
 )
 
@@ -7049,6 +7207,7 @@ const az = Command.make(
 	{
 		projectDir: projectDirArg,
 		verbose: verboseOption,
+		noDaemon: noDaemonOption,
 		config: configOption,
 	},
 	defaultHandler,

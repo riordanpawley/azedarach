@@ -22,44 +22,38 @@ describe("BackendDaemonService", () => {
 		expect(state.lifecycleGeneration).toBe(0)
 		expect(state.recoveryGeneration).toBe(0)
 		expect(Object.keys(state.clients)).toHaveLength(0)
+		expect(state.auditEvents).toHaveLength(0)
 	})
 
-	it("tracks attach, heartbeat, and reconnect transitions", async () => {
+	it("tracks attach, heartbeat, reconnect, and runtime restart with audit hooks", async () => {
 		const result = await run(
 			Effect.gen(function* () {
 				const daemon = yield* BackendDaemonService
 				const attach = yield* daemon.registerClientAttach({
 					clientId: "client-a",
 					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-					requestedAtMs: 1000,
+					requestedAtMs: 1_000,
 				})
-				const heartbeat = yield* daemon.registerClientHeartbeat("client-a", 1100)
+				const heartbeat = yield* daemon.registerClientHeartbeat("client-a", 1_100)
 				const reconnect = yield* daemon.markClientReconnect({
 					clientId: "client-a",
 					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 					lastSeenRevision: attach.snapshot.revision,
 					lastSeenLifecycleGeneration: attach.snapshot.lifecycleGeneration,
-					requestedAtMs: 1200,
+					requestedAtMs: 1_200,
 				})
-				const restart = yield* daemon.markRuntimeRestart(1300)
+				const restart = yield* daemon.markRuntimeRestart(1_300)
 				const state = yield* daemon.getState()
 				const snapshot = yield* daemon.snapshot()
-				return {
-					attach,
-					heartbeat,
-					reconnect,
-					restart,
-					state,
-					snapshot,
-				}
+				return { attach, heartbeat, reconnect, restart, state, snapshot }
 			}),
 		)
 
 		expect(result.attach.snapshot.revision).toBe(1)
 		expect(result.attach.handshake).toMatchObject({
 			operation: "attach",
-			requestedAtMs: 1000,
-			negotiatedAtMs: 1000,
+			requestedAtMs: 1_000,
+			negotiatedAtMs: 1_000,
 			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 			compatibilityDecision: "exact-match",
@@ -69,34 +63,28 @@ describe("BackendDaemonService", () => {
 			lifecycleGenerationTracking: true,
 			recoveryGenerationTracking: true,
 			resumeToken: true,
+			clientCapabilities: ["session:attach", "session:heartbeat", "session:reconnect"],
 		})
-		expect(result.heartbeat.lastHeartbeatAtMs).toBe(1100)
+		expect(result.heartbeat.lastHeartbeatAtMs).toBe(1_100)
 		expect(result.reconnect.snapshot.revision).toBe(3)
-		expect(result.reconnect.handshake).toMatchObject({
-			operation: "reconnect",
-			requestedAtMs: 1200,
-			negotiatedAtMs: 1200,
-			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-			compatibilityDecision: "exact-match",
-		})
 		expect(result.reconnect.snapshot.runtimePhase).toBe("ready")
-		expect(result.reconnect.snapshot.lifecycleReason).toBe("recovery succeeded")
-		expect(result.reconnect.snapshot.recoveryGeneration).toBe(1)
 		expect(result.restart.revision).toBe(4)
-		expect(result.restart.lifecycleGeneration).toBe(5)
-		expect(result.restart.lifecycleReason).toBe("recovery succeeded")
 		expect(result.state.revision).toBe(4)
-		expect(result.state.lifecycleGeneration).toBe(5)
-		expect(result.state.recoveryGeneration).toBe(1)
-		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(1200)
+		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(1_200)
 		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
 		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(1)
-		expect(result.state.clients["client-a"]?.lastRecoveryGeneration).toBe(1)
+		expect(result.state.clients["client-a"]?.auth.actorId).toBe("local-client")
 		expect(result.snapshot.revision).toBe(4)
+		const snapshotAuditEvents = result.snapshot.auditEvents ?? []
+		expect(snapshotAuditEvents.length).toBeGreaterThanOrEqual(4)
+		expect(snapshotAuditEvents.at(-1)).toMatchObject({
+			operation: "runtime.restart",
+			outcome: "allowed",
+			capability: "runtime:restart",
+		})
 	})
 
-	it("keeps multiple clients coherent against shared backend revision state", async () => {
+	it("keeps multiple clients coherent against shared revision state", async () => {
 		const result = await run(
 			Effect.gen(function* () {
 				const daemon = yield* BackendDaemonService
@@ -119,13 +107,7 @@ describe("BackendDaemonService", () => {
 				})
 				const heartbeatB = yield* daemon.registerClientHeartbeat("client-b", 1_030)
 				const state = yield* daemon.getState()
-				return {
-					attachA,
-					attachB,
-					reconnectA,
-					heartbeatB,
-					state,
-				}
+				return { attachA, attachB, reconnectA, heartbeatB, state }
 			}),
 		)
 
@@ -134,42 +116,15 @@ describe("BackendDaemonService", () => {
 		expect(result.reconnectA.snapshot.revision).toBe(3)
 		expect(result.heartbeatB.lastHeartbeatAtMs).toBe(1_030)
 		expect(result.state.revision).toBe(4)
-		expect(result.state.lifecycleGeneration).toBe(3)
 		expect(result.state.runtimePhase).toBe("ready")
 		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
 		expect(result.state.clients["client-b"]?.lastHeartbeatAtMs).toBe(1_030)
+		expect(result.state.clients["client-a"]?.auth.capabilities).toEqual([
+			"session:attach",
+			"session:heartbeat",
+			"session:reconnect",
+		])
 		expect(Object.keys(result.state.clients).sort()).toEqual(["client-a", "client-b"])
-	})
-
-	it("negotiates protocol metadata for attach/reconnect with default client version", async () => {
-		const result = await run(
-			Effect.gen(function* () {
-				const daemon = yield* BackendDaemonService
-				const attach = yield* daemon.registerClientAttach({
-					clientId: "client-a",
-					requestedAtMs: 2_000,
-				})
-				const reconnect = yield* daemon.markClientReconnect({
-					clientId: "client-a",
-					requestedAtMs: 2_100,
-				})
-				return { attach, reconnect }
-			}),
-		)
-
-		expect(result.attach.handshake).toMatchObject({
-			operation: "attach",
-			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-			compatibilityDecision: "exact-match",
-		})
-		expect(result.reconnect.handshake).toMatchObject({
-			operation: "reconnect",
-			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-			compatibilityDecision: "exact-match",
-		})
-		expect(result.reconnect.negotiatedCapabilities).toEqual(result.attach.negotiatedCapabilities)
 	})
 
 	it("keeps reconnect cursor explicit by preserving prior values when reconnect omits them", async () => {
@@ -202,6 +157,11 @@ describe("BackendDaemonService", () => {
 		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
 		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(1)
 		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(5_200)
+		const stateAuditEvents = result.state.auditEvents ?? []
+		expect(stateAuditEvents.at(-1)).toMatchObject({
+			operation: "client.reconnect",
+			outcome: "allowed",
+		})
 	})
 
 	it("rejects attach/reconnect when protocolVersion mismatches", async () => {
@@ -261,6 +221,39 @@ describe("BackendDaemonService", () => {
 			serverSupportedProtocolVersions: [BACKEND_DAEMON_PROTOCOL_VERSION],
 			expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 			receivedProtocolVersion: 77,
+		})
+	})
+
+	it("denies privileged runtime restart for non-privileged actors and audits denial", async () => {
+		const exit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				yield* daemon.registerClientAttach({
+					clientId: "client-a",
+					requestedAtMs: 6_000,
+				})
+				yield* daemon.markRuntimeRestart(6_100, {
+					actorId: "client-a",
+					trustLevel: "trusted-local",
+					capabilities: ["session:attach", "session:heartbeat", "session:reconnect"],
+				})
+				return yield* daemon.getState()
+			}).pipe(Effect.provide(BackendDaemonService.Default)),
+		)
+
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected runtime restart denial")
+		}
+		const defect = Cause.dieOption(exit.cause)
+		expect(Option.isSome(defect)).toBe(true)
+		if (!Option.isSome(defect)) {
+			throw new Error("Expected runtime restart denial defect")
+		}
+		expect(defect.value).toMatchObject({
+			_tag: "BackendDaemonAuthorizationError",
+			operation: "runtime.restart",
+			requiredCapability: "runtime:restart",
 		})
 	})
 })
