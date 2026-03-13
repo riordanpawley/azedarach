@@ -4421,11 +4421,33 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
 		const appConfig = yield* AppConfig
 		const specConfig = yield* appConfig.getSpecConfig()
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const cwd = process.cwd()
 		const implementationContext = yield* IssueTrackerClient.pipe(
 			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
-			Effect.map((registry) => ({
-				implementations: registry.implementations.map((implementation) => implementation.name),
-			})),
+			Effect.flatMap((registry) =>
+				Effect.forEach(registry.implementations, (implementation) =>
+					Effect.gen(function* () {
+						const inferredDirectory =
+							implementation.name === DEFAULT_SPEC_IMPLEMENTATION ? "." : implementation.name
+						const hasDirectory = yield* fs
+							.exists(pathService.join(cwd, inferredDirectory))
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						return {
+							name: implementation.name,
+							description: implementation.description,
+							directory: hasDirectory
+								? implementation.name === DEFAULT_SPEC_IMPLEMENTATION
+									? "."
+									: `${implementation.name}/`
+								: undefined,
+							is_default: implementation.is_default,
+							is_builtin: implementation.is_builtin,
+						}
+					}),
+				).pipe(Effect.map((implementations) => ({ implementations }))),
+			),
 			Effect.catchAll(() => Effect.succeed(undefined)),
 		)
 		const showImplementations =

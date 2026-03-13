@@ -13,7 +13,13 @@ type DependencyCountLabel =
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
 
 export interface PrimeImplementationContext {
-	readonly implementations: readonly string[]
+	readonly implementations: ReadonlyArray<{
+		readonly name: string
+		readonly description?: string
+		readonly directory?: string
+		readonly is_default: boolean
+		readonly is_builtin: boolean
+	}>
 }
 
 export interface PrimeIssueContext {
@@ -241,7 +247,7 @@ const normalizePrimeImplementations = (
 	const seen = new Set<string>()
 	const implementations: string[] = []
 	for (const implementation of implementationContext.implementations) {
-		const normalized = implementation.trim()
+		const normalized = implementation.name.trim()
 		if (normalized.length === 0 || seen.has(normalized)) {
 			continue
 		}
@@ -249,6 +255,34 @@ const normalizePrimeImplementations = (
 		implementations.push(normalized)
 	}
 	return implementations
+}
+
+const formatPrimeImplementationMetadata = (
+	implementationContext: PrimeImplementationContext | undefined,
+): string | undefined => {
+	if (implementationContext === undefined || implementationContext.implementations.length === 0) {
+		return undefined
+	}
+
+	const items = implementationContext.implementations.map((implementation) => {
+		const metadata = [
+			implementation.directory === undefined ? undefined : `dir=${implementation.directory}`,
+			implementation.is_default ? "default" : undefined,
+			implementation.is_builtin ? "builtin" : undefined,
+		].filter((value): value is string => value !== undefined)
+		const description =
+			implementation.description === undefined
+				? undefined
+				: compactSingleLineText(implementation.description)
+		const suffix = [metadata.length === 0 ? undefined : metadata.join(", "), description].filter(
+			(value): value is string => value !== undefined,
+		)
+		return suffix.length === 0
+			? implementation.name
+			: `${implementation.name} (${suffix.join("; ")})`
+	})
+
+	return items.length === 0 ? undefined : items.join(", ")
 }
 
 const formatPrimeImplementationGuardrails = (
@@ -263,6 +297,10 @@ const formatPrimeImplementationGuardrails = (
 	return [
 		"- Implementation guardrails:",
 		`  - This project has multiple implementations configured: ${implementations.join(", ")}.`,
+		...(() => {
+			const metadata = formatPrimeImplementationMetadata(implementationContext)
+			return metadata === undefined ? [] : [`  - Implementation metadata: ${metadata}.`]
+		})(),
 		specEnabled
 			? "  - New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections."
 			: "  - New `az issue` writes must include one or more `--impl <impl>` selections.",
