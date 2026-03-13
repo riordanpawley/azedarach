@@ -41,6 +41,7 @@ import {
 	AzedarachConfigSchema,
 } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
+import { BackendDaemonControlService } from "../core/BackendDaemonControlService.js"
 import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
 import {
 	acquireDaemonSyncInstanceLease,
@@ -162,6 +163,7 @@ const buildAppConfigLayer = (configPath: string | null) => {
  */
 const createFullCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		BackendDaemonControlService.Default,
 		BackendSyncDaemonService.Default,
 		MutationQueue.Default,
 		SessionService.Default,
@@ -210,6 +212,7 @@ const createFullCliLayer = (configPath: string | null) =>
  */
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		BackendDaemonControlService.Default,
 		BackendSyncDaemonService.Default,
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
@@ -967,6 +970,106 @@ const daemonSyncHandler = (args: {
 					),
 				),
 		)
+	})
+
+const formatDaemonControlStatusLine = (params: {
+	readonly mode: "status" | "stop" | "restart" | "health"
+	readonly status: {
+		readonly runtime: {
+			readonly runtimePhase: string
+			readonly lifecycleGeneration: number
+			readonly revision: number
+		}
+		readonly sync: {
+			readonly state: string
+			readonly generation: number
+			readonly projectPath: string | null
+			readonly intervalMs: number | null
+		}
+	}
+}): string =>
+	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} projectPath=${params.status.sync.projectPath ?? "<none>"} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
+
+const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const daemonControl = yield* BackendDaemonControlService
+		const status = yield* daemonControl.status()
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "status",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const daemonControl = yield* BackendDaemonControlService
+		const health = yield* daemonControl.health()
+		yield* Console.log(`daemon health: ${health.state} (${health.reason})`)
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "health",
+				status: health.status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(health, null, 2))
+		}
+	})
+
+const daemonStopHandler = (args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const daemonControl = yield* BackendDaemonControlService
+		const status = yield* daemonControl.stop()
+		yield* Console.log("Headless backend sync daemon stopped.")
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "stop",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const daemonRestartHandler = (args: {
+	readonly intervalMs: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const daemonControl = yield* BackendDaemonControlService
+		const status = yield* daemonControl
+			.restart({
+				projectPath: Option.getOrUndefined(args.projectDir),
+				intervalMs: Option.getOrUndefined(args.intervalMs),
+			})
+			.pipe(
+				Effect.catchTag("BackendDaemonControlRestartConfigurationError", (error) =>
+					Effect.fail(
+						new Error(
+							error.reason === "missing-project-path"
+								? "Cannot restart daemon: no project path available. Provide --project-dir <path> or run `az daemon sync --project-dir <path>` first."
+								: `Cannot restart daemon: ${error.message}`,
+						),
+					),
+				),
+			)
+		yield* Console.log("Headless backend sync daemon restarted.")
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "restart",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
 	})
 
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
@@ -5197,11 +5300,57 @@ const daemonSyncCommand = Command.make(
 	daemonSyncHandler,
 ).pipe(Command.withDescription("Run headless backend sync daemon loop"))
 
+const daemonStatusCommand = Command.make(
+	"status",
+	{
+		verbose: verboseOption,
+	},
+	daemonStatusHandler,
+).pipe(Command.withDescription("Show daemon runtime and sync status"))
+
+const daemonHealthCommand = Command.make(
+	"health",
+	{
+		verbose: verboseOption,
+	},
+	daemonHealthHandler,
+).pipe(Command.withDescription("Show aggregated daemon health"))
+
+const daemonStopCommand = Command.make(
+	"stop",
+	{
+		verbose: verboseOption,
+	},
+	daemonStopHandler,
+).pipe(Command.withDescription("Stop headless backend sync daemon runtime"))
+
+const daemonRestartCommand = Command.make(
+	"restart",
+	{
+		intervalMs: Options.integer("interval-ms").pipe(
+			Options.withAlias("i"),
+			Options.optional,
+			Options.withDescription("Sync loop interval in milliseconds"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	daemonRestartHandler,
+).pipe(Command.withDescription("Restart headless backend sync daemon runtime"))
+
 const daemonCommand = Command.make("daemon", {}, () =>
-	Console.log("Usage: az daemon sync [--interval-ms <ms>] [--project-dir <path>]"),
+	Console.log(
+		"Usage: az daemon <sync|status|health|stop|restart> [--interval-ms <ms>] [--project-dir <path>]",
+	),
 ).pipe(
 	Command.withDescription("Headless backend daemon commands"),
-	Command.withSubcommands([daemonSyncCommand]),
+	Command.withSubcommands([
+		daemonSyncCommand,
+		daemonStatusCommand,
+		daemonHealthCommand,
+		daemonStopCommand,
+		daemonRestartCommand,
+	]),
 )
 
 /**

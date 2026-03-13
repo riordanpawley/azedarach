@@ -172,6 +172,38 @@ describe("BackendDaemonService", () => {
 		expect(result.reconnect.negotiatedCapabilities).toEqual(result.attach.negotiatedCapabilities)
 	})
 
+	it("keeps reconnect cursor explicit by preserving prior values when reconnect omits them", async () => {
+		const result = await run(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				const attach = yield* daemon.registerClientAttach({
+					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 5_000,
+				})
+				yield* daemon.markClientReconnect({
+					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					lastSeenRevision: attach.snapshot.revision,
+					lastSeenLifecycleGeneration: attach.snapshot.lifecycleGeneration,
+					requestedAtMs: 5_100,
+				})
+				const reconnectWithoutCursor = yield* daemon.markClientReconnect({
+					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 5_200,
+				})
+				const state = yield* daemon.getState()
+				return { reconnectWithoutCursor, state }
+			}),
+		)
+
+		expect(result.reconnectWithoutCursor.handshake.operation).toBe("reconnect")
+		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
+		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(1)
+		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(5_200)
+	})
+
 	it("rejects attach/reconnect when protocolVersion mismatches", async () => {
 		const attachExit = await Effect.runPromiseExit(
 			Effect.gen(function* () {

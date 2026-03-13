@@ -1,4 +1,16 @@
-import { Data, Effect, Ref } from "effect"
+import { Effect, Ref } from "effect"
+import {
+	BACKEND_CLIENT_SESSION_NEGOTIATED_CAPABILITIES,
+	BACKEND_CLIENT_SESSION_PROTOCOL_VERSION,
+	type BackendClientProtocolCompatibilityDecision,
+	type BackendClientProtocolHandshakeMetadata,
+	type BackendClientProtocolOperation,
+	type BackendClientSessionNegotiatedCapabilities,
+	createBackendClientAttachIntent,
+	createBackendClientReconnectIntent,
+	createBackendClientResumeToken,
+	negotiateBackendClientProtocolHandshake,
+} from "./BackendClientSessionProtocol.js"
 import {
 	type DaemonLifecycleEvent,
 	type DaemonLifecycleState,
@@ -56,33 +68,13 @@ export interface BackendDaemonReconnectRequest {
 	readonly requestedAtMs?: number
 }
 
-export type BackendDaemonProtocolOperation = "attach" | "reconnect"
+export type BackendDaemonProtocolOperation = BackendClientProtocolOperation
 
-export type BackendDaemonProtocolCompatibilityDecision =
-	| "exact-match"
-	| "client-older-compatible"
-	| "server-older-compatible"
-	| "incompatible"
+export type BackendDaemonProtocolCompatibilityDecision = BackendClientProtocolCompatibilityDecision
 
-export interface BackendDaemonNegotiatedCapabilities {
-	readonly authoritativeRuntime: true
-	readonly lifecycleGenerationTracking: true
-	readonly recoveryGenerationTracking: true
-	readonly resumeToken: true
-}
+export type BackendDaemonNegotiatedCapabilities = BackendClientSessionNegotiatedCapabilities
 
-export interface BackendDaemonHandshakeMetadata {
-	readonly operation: BackendDaemonProtocolOperation
-	readonly requestedAtMs: number
-	readonly negotiatedAtMs: number
-	readonly requestedProtocolVersion: number
-	readonly negotiatedProtocolVersion: number
-	readonly serverSupportedProtocolVersions: ReadonlyArray<number>
-	readonly compatibilityDecision: Exclude<
-		BackendDaemonProtocolCompatibilityDecision,
-		"incompatible"
-	>
-}
+export type BackendDaemonHandshakeMetadata = BackendClientProtocolHandshakeMetadata
 
 export interface BackendDaemonAttachResponse {
 	readonly clientId: string
@@ -122,27 +114,9 @@ interface BackendDaemonMutableState {
 	readonly clients: Map<string, BackendDaemonClientState>
 }
 
-export const BACKEND_DAEMON_PROTOCOL_VERSION = 1
-const BACKEND_DAEMON_SUPPORTED_PROTOCOL_VERSIONS: ReadonlyArray<number> = [
-	BACKEND_DAEMON_PROTOCOL_VERSION,
-]
-
-const BACKEND_DAEMON_NEGOTIATED_CAPABILITIES: BackendDaemonNegotiatedCapabilities = {
-	authoritativeRuntime: true,
-	lifecycleGenerationTracking: true,
-	recoveryGenerationTracking: true,
-	resumeToken: true,
-}
-
-export class BackendDaemonProtocolVersionMismatchError extends Data.TaggedError(
-	"BackendDaemonProtocolVersionMismatchError",
-)<{
-	readonly operation: BackendDaemonProtocolOperation
-	readonly compatibilityDecision: "incompatible"
-	readonly serverSupportedProtocolVersions: ReadonlyArray<number>
-	readonly expectedProtocolVersion: number
-	readonly receivedProtocolVersion: number
-}> {}
+export const BACKEND_DAEMON_PROTOCOL_VERSION = BACKEND_CLIENT_SESSION_PROTOCOL_VERSION
+const BACKEND_DAEMON_NEGOTIATED_CAPABILITIES: BackendDaemonNegotiatedCapabilities =
+	BACKEND_CLIENT_SESSION_NEGOTIATED_CAPABILITIES
 
 const toClientsRecord = (
 	clients: ReadonlyMap<string, BackendDaemonClientState>,
@@ -176,9 +150,6 @@ const toSnapshot = (state: BackendDaemonMutableState): BackendDaemonSnapshot => 
 	clients: toClientsRecord(state.clients),
 })
 
-const nextResumeToken = (clientId: string, revision: number): string =>
-	`${clientId}:${String(revision)}`
-
 const upsertClient = (params: {
 	readonly state: BackendDaemonMutableState
 	readonly clientId: string
@@ -189,6 +160,14 @@ const upsertClient = (params: {
 }): BackendDaemonClientState => {
 	const existing = params.state.clients.get(params.clientId)
 	const baseConnectedAtMs = existing?.connectedAtMs ?? params.observedAtMs
+	const reconnectLastSeenRevision =
+		params.lastSeenRevision !== null
+			? params.lastSeenRevision
+			: (existing?.lastSeenRevision ?? null)
+	const reconnectLastSeenLifecycleGeneration =
+		params.lastSeenLifecycleGeneration !== null
+			? params.lastSeenLifecycleGeneration
+			: (existing?.lastSeenLifecycleGeneration ?? null)
 	const clientState: BackendDaemonClientState = {
 		clientId: params.clientId,
 		connectedAtMs: baseConnectedAtMs,
@@ -196,16 +175,12 @@ const upsertClient = (params: {
 		lastReconnectAtMs: params.reconnect
 			? params.observedAtMs
 			: (existing?.lastReconnectAtMs ?? null),
-		lastSeenRevision:
-			params.lastSeenRevision ??
-			(params.reconnect
-				? (existing?.lastSeenRevision ?? null)
-				: (existing?.lastSeenRevision ?? null)),
-		lastSeenLifecycleGeneration:
-			params.lastSeenLifecycleGeneration ??
-			(params.reconnect
-				? (existing?.lastSeenLifecycleGeneration ?? null)
-				: (existing?.lastSeenLifecycleGeneration ?? null)),
+		lastSeenRevision: params.reconnect
+			? reconnectLastSeenRevision
+			: (existing?.lastSeenRevision ?? null),
+		lastSeenLifecycleGeneration: params.reconnect
+			? reconnectLastSeenLifecycleGeneration
+			: (existing?.lastSeenLifecycleGeneration ?? null),
 		lastRecoveryGeneration: params.reconnect
 			? params.state.recoveryGeneration
 			: (existing?.lastRecoveryGeneration ?? null),
@@ -286,34 +261,6 @@ const transitionForClientMutation = (
 	return nextState
 }
 
-const negotiateProtocolHandshake = (
-	operation: BackendDaemonProtocolOperation,
-	requestedAtMs: number,
-	protocolVersion: number | undefined,
-): Effect.Effect<BackendDaemonHandshakeMetadata> => {
-	const requestedProtocolVersion = protocolVersion ?? BACKEND_DAEMON_PROTOCOL_VERSION
-	if (requestedProtocolVersion !== BACKEND_DAEMON_PROTOCOL_VERSION) {
-		return Effect.die(
-			new BackendDaemonProtocolVersionMismatchError({
-				operation,
-				compatibilityDecision: "incompatible",
-				serverSupportedProtocolVersions: BACKEND_DAEMON_SUPPORTED_PROTOCOL_VERSIONS,
-				expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-				receivedProtocolVersion: requestedProtocolVersion,
-			}),
-		)
-	}
-	return Effect.succeed({
-		operation,
-		requestedAtMs,
-		negotiatedAtMs: requestedAtMs,
-		requestedProtocolVersion,
-		negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
-		serverSupportedProtocolVersions: BACKEND_DAEMON_SUPPORTED_PROTOCOL_VERSIONS,
-		compatibilityDecision: "exact-match",
-	})
-}
-
 export class BackendDaemonService extends Effect.Service<BackendDaemonService>()(
 	"BackendDaemonService",
 	{
@@ -338,22 +285,23 @@ export class BackendDaemonService extends Effect.Service<BackendDaemonService>()
 				registerClientAttach: (request: BackendDaemonAttachRequest) =>
 					Effect.gen(function* () {
 						const observedAtMs = request.requestedAtMs ?? Date.now()
-						const handshake = yield* negotiateProtocolHandshake(
-							"attach",
-							observedAtMs,
-							request.protocolVersion,
-						)
-						const { state } = yield* withClientMutation(stateRef, {
+						const intent = createBackendClientAttachIntent({
 							clientId: request.clientId,
+							requestedAtMs: observedAtMs,
+							requestedProtocolVersion: request.protocolVersion,
+						})
+						const handshake = yield* negotiateBackendClientProtocolHandshake(intent)
+						const { state } = yield* withClientMutation(stateRef, {
+							clientId: intent.identity.clientId,
 							observedAtMs,
 							reconnect: false,
 							lastSeenRevision: null,
 							lastSeenLifecycleGeneration: null,
 						})
 						return {
-							clientId: request.clientId,
+							clientId: intent.identity.clientId,
 							acceptedAtMs: observedAtMs,
-							resumeToken: nextResumeToken(request.clientId, state.revision),
+							resumeToken: createBackendClientResumeToken(intent.identity, state.revision),
 							negotiatedCapabilities: BACKEND_DAEMON_NEGOTIATED_CAPABILITIES,
 							handshake,
 							snapshot: toSnapshot(state),
@@ -374,22 +322,25 @@ export class BackendDaemonService extends Effect.Service<BackendDaemonService>()
 				markClientReconnect: (request: BackendDaemonReconnectRequest) =>
 					Effect.gen(function* () {
 						const observedAtMs = request.requestedAtMs ?? Date.now()
-						const handshake = yield* negotiateProtocolHandshake(
-							"reconnect",
-							observedAtMs,
-							request.protocolVersion,
-						)
-						const { state } = yield* withClientMutation(stateRef, {
+						const intent = createBackendClientReconnectIntent({
 							clientId: request.clientId,
+							requestedAtMs: observedAtMs,
+							requestedProtocolVersion: request.protocolVersion,
+							lastSeenRevision: request.lastSeenRevision,
+							lastSeenLifecycleGeneration: request.lastSeenLifecycleGeneration,
+						})
+						const handshake = yield* negotiateBackendClientProtocolHandshake(intent)
+						const { state } = yield* withClientMutation(stateRef, {
+							clientId: intent.identity.clientId,
 							observedAtMs,
 							reconnect: true,
-							lastSeenRevision: request.lastSeenRevision ?? null,
-							lastSeenLifecycleGeneration: request.lastSeenLifecycleGeneration ?? null,
+							lastSeenRevision: intent.lastSeenRevision,
+							lastSeenLifecycleGeneration: intent.lastSeenLifecycleGeneration,
 						})
 						return {
-							clientId: request.clientId,
+							clientId: intent.identity.clientId,
 							acceptedAtMs: observedAtMs,
-							resumeToken: nextResumeToken(request.clientId, state.revision),
+							resumeToken: createBackendClientResumeToken(intent.identity, state.revision),
 							negotiatedCapabilities: BACKEND_DAEMON_NEGOTIATED_CAPABILITIES,
 							handshake,
 							snapshot: toSnapshot(state),

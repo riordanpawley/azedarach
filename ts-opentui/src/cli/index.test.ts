@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { BunContext } from "@effect/platform-bun"
-import { Effect } from "effect"
+import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
@@ -901,6 +901,35 @@ describe("normalizeCliAliases", () => {
 			"AZE-1",
 		])
 		expect(normalizeCliAliases(["bun", "az", "d", "ls"])).toEqual(["bun", "az", "dev", "list"])
+	})
+})
+
+describe("daemon control CLI commands", () => {
+	it("executes `az daemon health` on the command layer", async () => {
+		await Effect.runPromise(
+			cliRunner(["bun", "az", "daemon", "health"]).pipe(Effect.provide(BunContext.layer)),
+		)
+	})
+
+	it("surfaces actionable error for `az daemon restart` without project context", async () => {
+		const exit = await Effect.runPromiseExit(
+			cliRunner(["bun", "az", "daemon", "restart"]).pipe(Effect.provide(BunContext.layer)),
+		)
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected restart command to fail")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected restart command failure message")
+		}
+		expect(failure.value instanceof Error).toBe(true)
+		if (!(failure.value instanceof Error)) {
+			throw new Error("Expected failure to be Error")
+		}
+		expect(failure.value.message).toContain("Cannot restart daemon: no project path available.")
+		expect(failure.value.message).toContain("az daemon sync --project-dir <path>")
 	})
 })
 
