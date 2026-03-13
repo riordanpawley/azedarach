@@ -42,6 +42,11 @@ import {
 } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
 import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
+import {
+	acquireDaemonSyncInstanceLease,
+	formatDaemonInstanceAlreadyRunningMessage,
+	releaseDaemonSyncInstanceLease,
+} from "../core/DaemonInstanceRegistry.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -913,24 +918,55 @@ const daemonSyncHandler = (args: {
 		const daemon = yield* BackendSyncDaemonService
 
 		yield* validateIssueTrackerStore(cwd)
-		yield* daemon.start({
+		const lease = yield* acquireDaemonSyncInstanceLease({
 			projectPath: cwd,
-			...(intervalMs === undefined ? {} : { intervalMs }),
-		})
-
-		yield* Console.log(
-			`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
+			endpoint: {
+				protocol: "local-sync",
+				address: cwd,
+			},
+		}).pipe(
+			Effect.catchTag("DaemonInstanceAlreadyRunningError", (error) =>
+				Effect.fail(new Error(formatDaemonInstanceAlreadyRunningMessage(error))),
+			),
+			Effect.catchTag("DaemonInstanceRegistryError", (error) =>
+				Effect.fail(new Error(error.message)),
+			),
 		)
-		yield* Console.log("Press Ctrl+C to stop.")
-		if (args.verbose) {
-			const status = yield* daemon.getStatus()
-			yield* Console.log(`status=${status.state} projectPath=${status.projectPath ?? "<none>"}`)
-		}
 
-		const signal = yield* awaitDaemonShutdownSignal()
-		yield* Console.log(`Received ${signal}, stopping daemon...`)
-		yield* daemon.stop().pipe(Effect.catchAllCause(() => Effect.void))
-		yield* Console.log("Headless backend sync daemon stopped.")
+		yield* Effect.acquireUseRelease(
+			Effect.succeed(lease),
+			() =>
+				Effect.gen(function* () {
+					yield* daemon.start({
+						projectPath: cwd,
+						...(intervalMs === undefined ? {} : { intervalMs }),
+					})
+
+					yield* Console.log(
+						`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
+					)
+					yield* Console.log("Press Ctrl+C to stop.")
+					if (args.verbose) {
+						const status = yield* daemon.getStatus()
+						yield* Console.log(
+							`status=${status.state} projectPath=${status.projectPath ?? "<none>"}`,
+						)
+					}
+
+					const signal = yield* awaitDaemonShutdownSignal()
+					yield* Console.log(`Received ${signal}, stopping daemon...`)
+					yield* daemon.stop().pipe(Effect.catchAllCause(() => Effect.void))
+					yield* Console.log("Headless backend sync daemon stopped.")
+				}).pipe(Effect.ensuring(daemon.stop().pipe(Effect.catchAllCause(() => Effect.void)))),
+			(acquiredLease) =>
+				releaseDaemonSyncInstanceLease(acquiredLease).pipe(
+					Effect.catchAll((error) =>
+						Console.error(
+							`Warning: failed to release daemon sync lock (${acquiredLease.paths.lockDirectory}): ${error.message}`,
+						),
+					),
+				),
+		)
 	})
 
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"

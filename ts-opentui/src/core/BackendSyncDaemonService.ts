@@ -4,6 +4,9 @@ import { BackendSyncRouter } from "./BackendSyncRouter.js"
 
 const DEFAULT_INTERVAL_MS = 5_000
 const MIN_INTERVAL_MS = 50
+const DEGRADED_FAILURE_STREAK_THRESHOLD = 2
+const CRASHED_FAILURE_STREAK_THRESHOLD = 4
+const MAX_FAILURE_BACKOFF_MS = 200
 
 export type BackendSyncDaemonRunResult = "flushed" | "skipped" | "failed"
 
@@ -16,7 +19,7 @@ export interface BackendSyncDaemonRunStatus {
 }
 
 export interface BackendSyncDaemonStatus {
-	readonly state: "stopped" | "running"
+	readonly state: "stopped" | "running" | "degraded" | "crashed"
 	readonly generation: number
 	readonly projectPath: string | null
 	readonly intervalMs: number | null
@@ -24,6 +27,9 @@ export interface BackendSyncDaemonStatus {
 	readonly runCount: number
 	readonly successCount: number
 	readonly failureCount: number
+	readonly failureStreak: number
+	readonly restartStreak: number
+	readonly lastBackoffMs: number | null
 	readonly lastSuccessfulRunAtMs: number | null
 	readonly lastRun: BackendSyncDaemonRunStatus | null
 	readonly lastError: string | null
@@ -60,10 +66,19 @@ const emptyStatus = (): BackendSyncDaemonStatus => ({
 	runCount: 0,
 	successCount: 0,
 	failureCount: 0,
+	failureStreak: 0,
+	restartStreak: 0,
+	lastBackoffMs: null,
 	lastSuccessfulRunAtMs: null,
 	lastRun: null,
 	lastError: null,
 })
+
+const calculateBackoffMs = (intervalMs: number, restartStreak: number): number => {
+	if (restartStreak <= 0) return intervalMs
+	const scaled = intervalMs * 2 ** Math.max(0, restartStreak - 1)
+	return Math.min(MAX_FAILURE_BACKOFF_MS, Math.max(intervalMs, Math.floor(scaled)))
+}
 
 const runOnce = (
 	router: { readonly resolve: () => Effect.Effect<BackendSyncInterface | undefined> },
@@ -114,10 +129,10 @@ const pollingLoop = (
 	projectPath: string,
 	intervalMs: number,
 ): Effect.Effect<void, never> =>
-	Effect.forever(
-		runOnce(router, projectPath).pipe(
+	Effect.gen(function* () {
+		const loop: Effect.Effect<void, never> = runOnce(router, projectPath).pipe(
 			Effect.flatMap((run) =>
-				Ref.update(runtimeRef, (runtime) => {
+				Ref.modify(runtimeRef, (runtime) => {
 					const isSuccess = run.result === "flushed"
 					const isFailure = run.result === "failed"
 					const nextRunCount = runtime.status.runCount + 1
@@ -127,27 +142,48 @@ const pollingLoop = (
 					const nextFailureCount = isFailure
 						? runtime.status.failureCount + 1
 						: runtime.status.failureCount
+					const nextFailureStreak = isFailure ? runtime.status.failureStreak + 1 : 0
+					const nextRestartStreak = isFailure ? runtime.status.restartStreak + 1 : 0
 					const nextLastSuccessfulRunAtMs = isSuccess
 						? run.runAtMs
 						: runtime.status.lastSuccessfulRunAtMs
 					const nextError = isFailure ? run.message : null
-					return {
-						...runtime,
-						status: {
-							...runtime.status,
-							runCount: nextRunCount,
-							successCount: nextSuccessCount,
-							failureCount: nextFailureCount,
-							lastSuccessfulRunAtMs: nextLastSuccessfulRunAtMs,
-							lastRun: run,
-							lastError: nextError,
+					const nextState: BackendSyncDaemonStatus["state"] = isFailure
+						? nextFailureStreak >= CRASHED_FAILURE_STREAK_THRESHOLD
+							? "crashed"
+							: nextFailureStreak >= DEGRADED_FAILURE_STREAK_THRESHOLD
+								? "degraded"
+								: "running"
+						: "running"
+					const nextBackoffMs = isFailure ? calculateBackoffMs(intervalMs, nextRestartStreak) : null
+					const nextDelayMs: number = isFailure ? (nextBackoffMs ?? intervalMs) : intervalMs
+
+					return [
+						nextDelayMs,
+						{
+							...runtime,
+							status: {
+								...runtime.status,
+								state: nextState,
+								runCount: nextRunCount,
+								successCount: nextSuccessCount,
+								failureCount: nextFailureCount,
+								failureStreak: nextFailureStreak,
+								restartStreak: nextRestartStreak,
+								lastBackoffMs: nextBackoffMs,
+								lastSuccessfulRunAtMs: nextLastSuccessfulRunAtMs,
+								lastRun: run,
+								lastError: nextError,
+							},
 						},
-					}
+					]
 				}),
 			),
-			Effect.zipRight(Effect.sleep(`${intervalMs} millis`)),
-		),
-	).pipe(Effect.catchAllCause(() => Effect.void))
+			Effect.flatMap((delayMs) => Effect.sleep(`${delayMs} millis`)),
+			Effect.zipRight(Effect.suspend(() => loop)),
+		)
+		yield* loop
+	}).pipe(Effect.catchAllCause(() => Effect.void))
 
 export const makeBackendSyncDaemonService = (router: {
 	readonly resolve: () => Effect.Effect<BackendSyncInterface | undefined>
@@ -193,6 +229,9 @@ export const makeBackendSyncDaemonService = (router: {
 							runCount: runtime.status.runCount,
 							successCount: runtime.status.successCount,
 							failureCount: runtime.status.failureCount,
+							failureStreak: runtime.status.failureStreak,
+							restartStreak: runtime.status.restartStreak,
+							lastBackoffMs: runtime.status.lastBackoffMs,
 							lastSuccessfulRunAtMs: runtime.status.lastSuccessfulRunAtMs,
 							lastRun: runtime.status.lastRun,
 							lastError: runtime.status.lastError,
@@ -230,6 +269,9 @@ export const makeBackendSyncDaemonService = (router: {
 							runCount: runtime.status.runCount,
 							successCount: runtime.status.successCount,
 							failureCount: runtime.status.failureCount,
+							failureStreak: runtime.status.failureStreak,
+							restartStreak: runtime.status.restartStreak,
+							lastBackoffMs: runtime.status.lastBackoffMs,
 							lastSuccessfulRunAtMs: runtime.status.lastSuccessfulRunAtMs,
 							lastRun: runtime.status.lastRun,
 							lastError: runtime.status.lastError,

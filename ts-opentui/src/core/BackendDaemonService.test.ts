@@ -18,6 +18,7 @@ describe("BackendDaemonService", () => {
 		expect(state.protocolVersion).toBe(BACKEND_DAEMON_PROTOCOL_VERSION)
 		expect(state.revision).toBe(0)
 		expect(state.runtimePhase).toBe("starting")
+		expect(state.lifecycleReason).toBe("daemon bootstrapping")
 		expect(state.lifecycleGeneration).toBe(0)
 		expect(state.recoveryGeneration).toBe(0)
 		expect(Object.keys(state.clients)).toHaveLength(0)
@@ -55,18 +56,42 @@ describe("BackendDaemonService", () => {
 		)
 
 		expect(result.attach.snapshot.revision).toBe(1)
+		expect(result.attach.handshake).toMatchObject({
+			operation: "attach",
+			requestedAtMs: 1000,
+			negotiatedAtMs: 1000,
+			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			compatibilityDecision: "exact-match",
+		})
+		expect(result.attach.negotiatedCapabilities).toEqual({
+			authoritativeRuntime: true,
+			lifecycleGenerationTracking: true,
+			recoveryGenerationTracking: true,
+			resumeToken: true,
+		})
 		expect(result.heartbeat.lastHeartbeatAtMs).toBe(1100)
 		expect(result.reconnect.snapshot.revision).toBe(3)
-		expect(result.reconnect.snapshot.runtimePhase).toBe("running")
+		expect(result.reconnect.handshake).toMatchObject({
+			operation: "reconnect",
+			requestedAtMs: 1200,
+			negotiatedAtMs: 1200,
+			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			compatibilityDecision: "exact-match",
+		})
+		expect(result.reconnect.snapshot.runtimePhase).toBe("ready")
+		expect(result.reconnect.snapshot.lifecycleReason).toBe("recovery succeeded")
 		expect(result.reconnect.snapshot.recoveryGeneration).toBe(1)
 		expect(result.restart.revision).toBe(4)
-		expect(result.restart.lifecycleGeneration).toBe(1)
+		expect(result.restart.lifecycleGeneration).toBe(5)
+		expect(result.restart.lifecycleReason).toBe("recovery succeeded")
 		expect(result.state.revision).toBe(4)
-		expect(result.state.lifecycleGeneration).toBe(1)
+		expect(result.state.lifecycleGeneration).toBe(5)
 		expect(result.state.recoveryGeneration).toBe(1)
 		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(1200)
 		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
-		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(0)
+		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(1)
 		expect(result.state.clients["client-a"]?.lastRecoveryGeneration).toBe(1)
 		expect(result.snapshot.revision).toBe(4)
 	})
@@ -109,9 +134,42 @@ describe("BackendDaemonService", () => {
 		expect(result.reconnectA.snapshot.revision).toBe(3)
 		expect(result.heartbeatB.lastHeartbeatAtMs).toBe(1_030)
 		expect(result.state.revision).toBe(4)
+		expect(result.state.lifecycleGeneration).toBe(3)
+		expect(result.state.runtimePhase).toBe("ready")
 		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
 		expect(result.state.clients["client-b"]?.lastHeartbeatAtMs).toBe(1_030)
 		expect(Object.keys(result.state.clients).sort()).toEqual(["client-a", "client-b"])
+	})
+
+	it("negotiates protocol metadata for attach/reconnect with default client version", async () => {
+		const result = await run(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				const attach = yield* daemon.registerClientAttach({
+					clientId: "client-a",
+					requestedAtMs: 2_000,
+				})
+				const reconnect = yield* daemon.markClientReconnect({
+					clientId: "client-a",
+					requestedAtMs: 2_100,
+				})
+				return { attach, reconnect }
+			}),
+		)
+
+		expect(result.attach.handshake).toMatchObject({
+			operation: "attach",
+			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			compatibilityDecision: "exact-match",
+		})
+		expect(result.reconnect.handshake).toMatchObject({
+			operation: "reconnect",
+			requestedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			negotiatedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			compatibilityDecision: "exact-match",
+		})
+		expect(result.reconnect.negotiatedCapabilities).toEqual(result.attach.negotiatedCapabilities)
 	})
 
 	it("rejects attach/reconnect when protocolVersion mismatches", async () => {
@@ -136,6 +194,8 @@ describe("BackendDaemonService", () => {
 		expect(attachDefect.value).toMatchObject({
 			_tag: "BackendDaemonProtocolVersionMismatchError",
 			operation: "attach",
+			compatibilityDecision: "incompatible",
+			serverSupportedProtocolVersions: [BACKEND_DAEMON_PROTOCOL_VERSION],
 			expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 			receivedProtocolVersion: 99,
 		})
@@ -165,6 +225,8 @@ describe("BackendDaemonService", () => {
 		expect(reconnectDefect.value).toMatchObject({
 			_tag: "BackendDaemonProtocolVersionMismatchError",
 			operation: "reconnect",
+			compatibilityDecision: "incompatible",
+			serverSupportedProtocolVersions: [BACKEND_DAEMON_PROTOCOL_VERSION],
 			expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 			receivedProtocolVersion: 77,
 		})
