@@ -51,6 +51,7 @@ const ImplementationRegistryJsonSchema = Schema.parseJson(
 		Schema.Struct({
 			name: Schema.String,
 			description: Schema.NullOr(Schema.String),
+			directory: Schema.NullOr(Schema.String).pipe(Schema.optional),
 			created_at: Schema.String,
 			updated_at: Schema.String,
 		}),
@@ -1026,6 +1027,7 @@ type ImplementationRegistryEntry = Schema.Schema.Type<
 const buildBuiltinDefaultImplementation = (): ImplementationRegistryEntry => ({
 	name: DEFAULT_SPEC_IMPLEMENTATION,
 	description: null,
+	directory: null,
 	created_at: BUILTIN_IMPLEMENTATION_TIMESTAMP,
 	updated_at: BUILTIN_IMPLEMENTATION_TIMESTAMP,
 })
@@ -1049,6 +1051,19 @@ const requireImplementationName = (value: string): Effect.Effect<string, LocalIs
 }
 
 const normalizeImplementationDescription = (
+	value: string | null | undefined,
+): string | null | undefined => {
+	if (value === undefined) {
+		return undefined
+	}
+	if (value === null) {
+		return null
+	}
+	const normalized = value.trim()
+	return normalized.length === 0 ? null : normalized
+}
+
+const normalizeImplementationDirectory = (
 	value: string | null | undefined,
 ): string | null | undefined => {
 	if (value === undefined) {
@@ -1134,6 +1149,7 @@ const implementationEntryToRecord = (
 ): ImplementationRecord => ({
 	name: entry.name,
 	description: entry.description ?? undefined,
+	directory: entry.directory ?? undefined,
 	created_at: entry.created_at,
 	updated_at: entry.updated_at,
 	is_default: entry.name === defaultImplementation,
@@ -3378,6 +3394,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				params: {
 					name: string
 					description?: string
+					directory?: string
 					setDefault?: boolean
 				},
 				cwd?: string,
@@ -3401,6 +3418,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								{
 									name: normalizedName,
 									description: normalizeImplementationDescription(params.description) ?? null,
+									directory: normalizeImplementationDirectory(params.directory) ?? null,
 									created_at: now,
 									updated_at: now,
 								},
@@ -3424,6 +3442,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				fields: {
 					name?: string
 					description?: string | null
+					directory?: string | null
 					setDefault?: boolean
 				},
 				cwd?: string,
@@ -3468,6 +3487,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							}
 
 							const nextDescription = normalizeImplementationDescription(fields.description)
+							const nextDirectory = normalizeImplementationDirectory(fields.directory)
 							const now = nowIso()
 							const nextEntries = entries.map((entry) =>
 								entry.name !== normalizedCurrentName
@@ -3476,6 +3496,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 											name: normalizedNextName,
 											description:
 												nextDescription === undefined ? entry.description : nextDescription,
+											directory:
+												nextDirectory === undefined ? (entry.directory ?? null) : nextDirectory,
 											created_at: entry.created_at,
 											updated_at: now,
 										},

@@ -942,7 +942,9 @@ const formatImplementationSummaryLine = (implementation: ImplementationRecord): 
 		implementation.description === undefined
 			? ""
 			: ` - ${compactSingleLineText(implementation.description)}`
-	return `${implementation.name}${flags.length === 0 ? "" : ` [${flags.join(",")}]`}${description}`
+	const directory =
+		implementation.directory === undefined ? "" : ` (dir=${implementation.directory})`
+	return `${implementation.name}${flags.length === 0 ? "" : ` [${flags.join(",")}]`}${directory}${description}`
 }
 
 const logImplementationDetails = (
@@ -958,6 +960,9 @@ const logImplementationDetails = (
 		)
 		if (implementation.description !== undefined) {
 			yield* Console.log(`Description: ${implementation.description}`)
+		}
+		if (implementation.directory !== undefined) {
+			yield* Console.log(`Directory: ${implementation.directory}`)
 		}
 		yield* Console.log(`Created: ${implementation.created_at}`)
 		yield* Console.log(`Updated: ${implementation.updated_at}`)
@@ -1917,6 +1922,7 @@ const implGetHandler = (args: {
 const implAddHandler = (args: {
 	readonly implementation: string
 	readonly description: Option.Option<string>
+	readonly directory: Option.Option<string>
 	readonly setDefault: boolean
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
@@ -1931,6 +1937,7 @@ const implAddHandler = (args: {
 		const implementation = yield* issueTrackerClient.createImplementation({
 			name: implementationName,
 			description: Option.getOrUndefined(args.description),
+			directory: Option.getOrUndefined(args.directory),
 			setDefault: args.setDefault,
 			cwd: explicitProjectDir,
 		})
@@ -1950,6 +1957,7 @@ const implUpdateHandler = (args: {
 	readonly implementation: string
 	readonly rename: Option.Option<string>
 	readonly description: Option.Option<string>
+	readonly directory: Option.Option<string>
 	readonly setDefault: boolean
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
@@ -1968,9 +1976,18 @@ const implUpdateHandler = (args: {
 			onNone: () => undefined,
 			onSome: (value) => value,
 		})
-		if (nextName === undefined && description === undefined && !args.setDefault) {
+		const directory = Option.match(args.directory, {
+			onNone: () => undefined,
+			onSome: (value) => value,
+		})
+		if (
+			nextName === undefined &&
+			description === undefined &&
+			directory === undefined &&
+			!args.setDefault
+		) {
 			return yield* Effect.fail(
-				new Error("No changes provided. Use --rename, --description, or --default."),
+				new Error("No changes provided. Use --rename, --description, --dir, or --default."),
 			)
 		}
 
@@ -1980,6 +1997,7 @@ const implUpdateHandler = (args: {
 			{
 				name: nextName,
 				description,
+				directory,
 				setDefault: args.setDefault ? true : undefined,
 			},
 			explicitProjectDir,
@@ -4424,7 +4442,13 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 		const implementationContext = yield* IssueTrackerClient.pipe(
 			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
 			Effect.map((registry) => ({
-				implementations: registry.implementations.map((implementation) => implementation.name),
+				implementations: registry.implementations.map((implementation) => ({
+					name: implementation.name,
+					description: implementation.description,
+					directory: implementation.directory,
+					is_default: implementation.is_default,
+					is_builtin: implementation.is_builtin,
+				})),
 			})),
 			Effect.catchAll(() => Effect.succeed(undefined)),
 		)
@@ -5636,6 +5660,10 @@ const implAddCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Optional implementation description"),
 		),
+		directory: Options.text("dir").pipe(
+			Options.optional,
+			Options.withDescription("Optional implementation directory metadata"),
+		),
 		setDefault: Options.boolean("default").pipe(
 			Options.withDescription("Set the new implementation as the registry default"),
 		),
@@ -5661,6 +5689,12 @@ const implUpdateCommand = Command.make(
 			Options.withAlias("d"),
 			Options.optional,
 			Options.withDescription("Update the implementation description (pass empty string to clear)"),
+		),
+		directory: Options.text("dir").pipe(
+			Options.optional,
+			Options.withDescription(
+				"Update implementation directory metadata (pass empty string to clear)",
+			),
 		),
 		setDefault: Options.boolean("default").pipe(
 			Options.withDescription("Set this implementation as the registry default"),

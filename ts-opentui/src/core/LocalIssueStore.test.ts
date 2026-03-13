@@ -717,6 +717,7 @@ describe("implementation registry", () => {
 				{
 					name: "default",
 					description: undefined,
+					directory: undefined,
 					created_at: "1970-01-01T00:00:00.000Z",
 					updated_at: "1970-01-01T00:00:00.000Z",
 					is_default: true,
@@ -741,6 +742,7 @@ describe("implementation registry", () => {
 						{
 							name: "ts-opentui",
 							description: "TypeScript UI",
+							directory: "ts-opentui/",
 						},
 						projectPath,
 					)
@@ -749,6 +751,7 @@ describe("implementation registry", () => {
 						{
 							name: "go-bubbletea",
 							description: "Go UI",
+							directory: "go-bubbletea/",
 							setDefault: true,
 						},
 						projectPath,
@@ -769,9 +772,11 @@ describe("implementation registry", () => {
 
 			expect(result.added.name).toBe("ts-opentui")
 			expect(result.added.is_default).toBe(false)
+			expect(result.added.directory).toBe("ts-opentui/")
 
 			expect(result.updated.name).toBe("go-bubbletea")
 			expect(result.updated.description).toBe("Go UI")
+			expect(result.updated.directory).toBe("go-bubbletea/")
 			expect(result.updated.is_default).toBe(true)
 
 			expect(result.afterUpdate.default_implementation).toBe("go-bubbletea")
