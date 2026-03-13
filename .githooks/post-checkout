@@ -1,13 +1,5 @@
 #!/usr/bin/env sh
 set -eu
-
-if [ "${RULESYNC_SKIP:-0}" = "1" ]; then
-  printf '%s\n' "rulesync: skipped (RULESYNC_SKIP=1)"
-  exit 0
-fi
-
-repo_root="$(git rev-parse --show-toplevel)"
-(
-  cd "$repo_root" && \
-  rulesync generate -c rulesync.jsonc --silent
-) >/dev/null
+# Auto-generation was removed after migration to native Codex context files.
+# Keep this hook as a no-op placeholder for compatibility.
+exit 0

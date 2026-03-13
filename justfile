@@ -45,13 +45,6 @@ run-sfe-ts: install-sfe-ts
 # Backward-compatible alias
 ts-build-link-run: run-sfe-ts
 
-# RuleSync helpers
-rulesync-sync:
-    rulesync generate -c rulesync.jsonc --silent
-
-rulesync-check:
-    rulesync generate -c rulesync.jsonc --check --silent
-
 # OpenCode plugin installer helper
 install-opencode-az-plugin *repos:
     ./bin/install-opencode-az-plugin {{ repos }}

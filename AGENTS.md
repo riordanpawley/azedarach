@@ -1,26 +1,38 @@
+Please also reference the following rules as needed. The list below is provided in TOON format, and `@` stands for the project root directory.
+
+rules[2]{path,description}:
+  @go-bubbletea/AGENTS.md,go-bubbletea scoped context
+  @ts-opentui/AGENTS.md,ts-opentui scoped context
+
+# Additional Conventions Beyond the Built-in Functions
+
+As this project's AI coding tool, you must follow the additional conventions below, in addition to the built-in functions.
+
 <!--
 File: CONTEXT.md
 Version: 2.0.1
 Updated: 2026-03-07
-Purpose: Canonical root AI context source synced to AGENTS.md and CLAUDE.md
+Purpose: Canonical root AI context source synced to AGENTS.md entrypoints
 -->
 
 <ai_context version="1.0" tool="shared">
 
 # Azedarach Project Context
 
-> TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
+> TUI Kanban board for orchestrating parallel AI sessions with issue tracking
 
 ## Entrypoint Generation
 
-This file is maintained directly as a Claude entrypoint.
+This file is the canonical root context source for Codex-native configuration.
+
+Nested `AGENTS.md` overlays are maintained directly in-repo for path-scoped guidance.
 
 ## Instructions Reference
 
 **This repository has multiple implementations:**
 
-- **ts-opentui/** -> [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
-- **go-bubbletea/** -> [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
+- **ts-opentui/** -> [AGENTS.md](./ts-opentui/AGENTS.md) (TypeScript, Bun, OpenTUI, Effect)
+- **go-bubbletea/** -> [AGENTS.md](./go-bubbletea/AGENTS.md) (Go, Bubbletea)
 
 Select the implementation based on user request or current working directory.
 
@@ -30,10 +42,10 @@ Select the implementation based on user request or current working directory.
 2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed), and `bat` (not cat).
 3. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
-5. **Codex/Claude Canonical Source**: Edit live instruction assets directly in this repository.
+5. **Codex Canonical Source**: Edit live instruction assets directly (`AGENTS.md`, nested `AGENTS.md`, `.codex/skills/*`, `.codex/subagents/*`).
 6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
 7. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-8. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
+8. **Spec Sync Discipline (ts-opentui)**: Keep `az spec` requirements/links aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
 9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
 
@@ -58,24 +70,32 @@ fd "filename" -t f                # Find files (NOT find)
 
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide
+az impl list                      # Show project implementations/default
+az issue create "Title" --impl ts-opentui
+az issue create "Shared task" --impl ts-opentui --impl go-bubbletea
 
-# Context
-# (No generation step; maintain context files directly)
+# Codex Context
+fd . .codex/skills -td            # List installed local skills
+fd . .codex/subagents -tf         # List local subagent prompts
 ```
 
-## Context Workflow
+## Codex Native Context Workflow
 
-Active context paths:
-- `.claude/agents/`
-- `.claude/commands/`
-- `.claude/hooks/`
-- `.claude/session-templates/`
-- `.claude/skills/`
-- `AGENTS.md`, `CLAUDE.md`, `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md`
+Canonical live paths:
+- `AGENTS.md`, `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md` (directly maintained overlays)
+- `.codex/skills/*` (Codex skills)
+- `.codex/subagents/*` (Codex subagent prompts)
+- `.codex/rules/*` and `.codex/config.toml` (Codex configuration)
 
-Behavior:
-- No automatic generation step is required.
-- OpenCode plugin files are intentionally not managed by this context workflow.
+Legacy migration snapshot (read-only reference):
+- `.codex/context/rules/*`
+- `.codex/context/docs/*`
+- `.codex/context/README-migrated-context.md`
+
+Sync behavior:
+- There is no generation step in the active workflow.
+- Edit Codex-native files directly and keep root + nested AGENTS aligned in the same change.
+- OpenCode plugin files remain intentionally unmanaged by Codex context files.
 
 ## Architecture Quick Reference
 
@@ -113,6 +133,13 @@ When user requests work, use this matrix to decide which implementation to work 
 | "Gleam", "Erlang", "BEAM" | gleam/ | Experimental match |
 | Explicit app folder mentioned | That folder | User-specified |
 
+## Implementation Registry
+
+- This project registers `ts-opentui` and `go-bubbletea` in `az impl`.
+- Treat `ts-opentui` as the project default implementation when a single default is needed.
+- Once multiple implementations are configured, new `az issue` and `az spec link` writes MUST include one or more explicit `--impl <impl>` selections.
+- Repeat `--impl` flags only for intentionally shared work spanning both implementations.
+
 ## Task Management
 
 **Track all non-trivial work through issue tracking** (preserves context across sessions).
@@ -137,7 +164,7 @@ When user requests work, use this matrix to decide which implementation to work 
 - ✅ Subagents must create, maintain, and close child issues linked to the active parent issue
 - ✅ Keep issue status updated as work progresses
 - ✅ Keep the issue tracker as the single source of truth for issue state
-- ✅ For `ts-opentui` behavior changes, update `docs/spec/` or document `Spec impact: none` with concrete file-based rationale
+- ✅ For `ts-opentui` behavior changes, update `az spec` requirement/link records or document `Spec impact: none` with concrete file-based rationale
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
 
 ## Landing the Plane (Session Completion)
@@ -165,13 +192,14 @@ When user requests work, use this matrix to decide which implementation to work 
 
 ## Shared Skills
 
-This repository has shared skills in `.claude/skills/` that apply to all implementations:
+This repository has shared skills in `.codex/skills/` that apply to all implementations:
 
+- **Skill Loading Policy**: Skills are task-scoped references, not mandatory bootstrap. Only load a skill when the current task explicitly needs it.
 - **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
 - **Effect Skills** (`effect/`): Effect patterns (ts-opentui only)
 - **Gleam Skills** (`gleam/`): Gleam patterns (gleam only)
 
-See `.claude/skills/README.md` for skill documentation.
+See `.codex/skills/` for available skill docs.
 
 ## OpenCode Plugins
 
