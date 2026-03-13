@@ -1258,10 +1258,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			})
 
 		/**
-		 * Resolve which repository context owns the effective base branch operation state.
+		 * Resolve which repository context owns effective base branch operation state.
 		 *
-		 * Standalone tasks use the project base-branch context.
-		 * Epic children use the parent epic worktree when available.
+		 * We intentionally use the project repository context for both standalone tasks
+		 * and epic children. Git operation pseudo-refs are worktree-scoped, so checking
+		 * a parent epic worktree can produce false positives from stale/parallel work.
 		 */
 		const getBaseOperationContext = (
 			projectPath: string,
@@ -1271,28 +1272,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			GitError | NotAGitRepoError,
 			CommandExecutor.CommandExecutor
 		> =>
-			Effect.gen(function* () {
-				if (!parentEpic) {
-					return { cwd: projectPath, contextLabel: "project base branch" }
-				}
-
-				const epicWorktree = yield* worktreeManager.get({
-					issueId: parentEpic.id,
-					projectPath,
-				})
-
-				if (epicWorktree) {
-					return {
-						cwd: epicWorktree.path,
-						contextLabel: `epic ${parentEpic.id} worktree`,
-					}
-				}
-
-				return {
-					cwd: projectPath,
-					contextLabel: `epic ${parentEpic.id} branch context`,
-				}
-			})
+			Effect.succeed(
+				parentEpic
+					? {
+							cwd: projectPath,
+							contextLabel: `epic ${parentEpic.id} branch context`,
+						}
+					: { cwd: projectPath, contextLabel: "project base branch" },
+			)
 
 		return {
 			createPR: (options: CreatePROptions) =>
