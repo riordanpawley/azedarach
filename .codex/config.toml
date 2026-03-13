@@ -1,0 +1,3 @@
+[mcp_servers.floop]
+command = "floop"
+args = ["mcp-server"]
