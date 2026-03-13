@@ -25,6 +25,7 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { BackendDaemonService } from "../core/BackendDaemonService.js"
 import { BackendSyncRouter } from "../core/BackendSyncRouter.js"
 import {
 	type Issue,
@@ -668,6 +669,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	dependencies: [
 		SessionManager.Default,
 		IssueTrackerClient.Default,
+		BackendDaemonService.Default,
 		BackendSyncRouter.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -684,6 +686,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* SessionManager
+		const backendDaemon = yield* BackendDaemonService
 		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
@@ -730,6 +733,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
 		const autoRecoveryQueue = yield* Queue.unbounded<string>()
 		const autoRecoveryTrackedIssueIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set())
+		const daemonFrontendClientId = `board-ui:${process.pid}`
+
+		const signalDaemonAttach = () =>
+			backendDaemon.registerClientAttach({
+				clientId: daemonFrontendClientId,
+				requestedAtMs: Date.now(),
+			})
+
+		const signalDaemonHeartbeat = () =>
+			backendDaemon.registerClientHeartbeat(daemonFrontendClientId, Date.now())
+
+		const signalDaemonReconnect = () =>
+			backendDaemon.markClientReconnect({
+				clientId: daemonFrontendClientId,
+				requestedAtMs: Date.now(),
+			})
 
 		// ====================================================================
 		// Per-Project State Management
@@ -1814,6 +1833,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
 			Effect.gen(function* () {
+				yield* signalDaemonReconnect()
 				yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
 				const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
 				const now = Date.now()
@@ -1989,6 +2009,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							? refreshLocalSessionOnly(preferredProjectPath)
 							: refreshLocalSessionAndGitState(preferredProjectPath)
 				yield* refreshSemaphore.withPermits(1)(refreshEffect)
+				yield* signalDaemonHeartbeat()
 			})
 
 		const syncLinearProjectBeforeRefresh = (projectPath: string) =>
@@ -2746,6 +2767,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
 		yield* startAutoRecoveryWorkerFiber()
+		yield* signalDaemonAttach()
 
 		const initialProjectPath = yield* projectService.getCurrentPath()
 		if (initialProjectPath) {
@@ -2914,6 +2936,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Update the current project path
 				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
+				yield* signalDaemonHeartbeat()
 
 				const cacheHit = yield* loadFromCache(newProjectPath)
 				if (!cacheHit) {

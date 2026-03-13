@@ -11,6 +11,7 @@ import { Layer, Logger } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { BackendDaemonService } from "../../core/BackendDaemonService.js"
+import { BackendSyncDaemonService } from "../../core/BackendSyncDaemonService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
@@ -51,6 +52,7 @@ const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { fl
 export const appLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	BackendDaemonService.Default,
+	BackendSyncDaemonService.Default,
 	SessionService.Default,
 	AttachmentService.Default,
 	OverlayService.Default,
