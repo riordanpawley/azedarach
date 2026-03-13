@@ -151,6 +151,7 @@ export interface IssueReadSyncOptions {
 export interface ImplementationRecord {
 	readonly name: string
 	readonly description?: string
+	readonly directory?: string
 	readonly created_at: string
 	readonly updated_at: string
 	readonly is_default: boolean
@@ -936,6 +937,7 @@ export interface IssueTrackerClientService {
 	readonly createImplementation: (params: {
 		name: string
 		description?: string
+		directory?: string
 		setDefault?: boolean
 		cwd?: string
 	}) => Effect.Effect<
@@ -949,6 +951,7 @@ export interface IssueTrackerClientService {
 		fields: {
 			name?: string
 			description?: string | null
+			directory?: string | null
 			setDefault?: boolean
 		},
 		cwd?: string,
@@ -3493,6 +3496,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			createImplementation: (params: {
 				name: string
 				description?: string
+				directory?: string
 				setDefault?: boolean
 				cwd?: string
 			}) =>
@@ -3504,6 +3508,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							{
 								name: params.name,
 								description: params.description,
+								directory: params.directory,
 								setDefault: params.setDefault,
 							},
 							effectiveCwd,
@@ -3516,6 +3521,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				fields: {
 					name?: string
 					description?: string | null
+					directory?: string | null
 					setDefault?: boolean
 				},
 				cwd?: string,

@@ -13,7 +13,13 @@ type DependencyCountLabel =
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
 
 export interface PrimeImplementationContext {
-	readonly implementations: readonly string[]
+	readonly implementations: ReadonlyArray<{
+		readonly name: string
+		readonly description?: string
+		readonly directory?: string
+		readonly is_default: boolean
+		readonly is_builtin: boolean
+	}>
 }
 
 export interface PrimeIssueContext {
@@ -241,7 +247,7 @@ const normalizePrimeImplementations = (
 	const seen = new Set<string>()
 	const implementations: string[] = []
 	for (const implementation of implementationContext.implementations) {
-		const normalized = implementation.trim()
+		const normalized = implementation.name.trim()
 		if (normalized.length === 0 || seen.has(normalized)) {
 			continue
 		}
@@ -249,6 +255,34 @@ const normalizePrimeImplementations = (
 		implementations.push(normalized)
 	}
 	return implementations
+}
+
+const formatPrimeImplementationMetadata = (
+	implementationContext: PrimeImplementationContext | undefined,
+): string | undefined => {
+	if (implementationContext === undefined || implementationContext.implementations.length === 0) {
+		return undefined
+	}
+
+	const items = implementationContext.implementations.map((implementation) => {
+		const metadata = [
+			implementation.directory === undefined ? undefined : `dir=${implementation.directory}`,
+			implementation.is_default ? "default" : undefined,
+			implementation.is_builtin ? "builtin" : undefined,
+		].filter((value): value is string => value !== undefined)
+		const description =
+			implementation.description === undefined
+				? undefined
+				: compactSingleLineText(implementation.description)
+		const suffix = [metadata.length === 0 ? undefined : metadata.join(", "), description].filter(
+			(value): value is string => value !== undefined,
+		)
+		return suffix.length === 0
+			? implementation.name
+			: `${implementation.name} (${suffix.join("; ")})`
+	})
+
+	return items.length === 0 ? undefined : items.join(", ")
 }
 
 const formatPrimeImplementationGuardrails = (
@@ -263,6 +297,10 @@ const formatPrimeImplementationGuardrails = (
 	return [
 		"- Implementation guardrails:",
 		`  - This project has multiple implementations configured: ${implementations.join(", ")}.`,
+		...(() => {
+			const metadata = formatPrimeImplementationMetadata(implementationContext)
+			return metadata === undefined ? [] : [`  - Implementation metadata: ${metadata}.`]
+		})(),
 		specEnabled
 			? "  - New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections."
 			: "  - New `az issue` writes must include one or more `--impl <impl>` selections.",
@@ -336,7 +374,9 @@ export const buildPrimeOutput = (
     - Example: Vercel -> Vultr with unchanged behavior => issue only, no spec link.
   - After implementing behavior changes, run an \`az spec\` compliance pass: verify behavior vs linked \`az spec\` requirements and update requirement/link records if scope changed.
   - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
-  - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).
+  - For \`az\` commands, keep canonical CLI ordering: options/flags before positional refs, and prefer named flags over positional refs when either form is supported.
+  - For \`az spec link add\`, use either explicit refs (\`az spec link add --issue <issue-id> --req <requirement-ref> --type relates --fulfillment-status planned --impl <impl>\`) or place flags before positional refs (\`az spec link add --type relates --fulfillment-status planned --impl <impl> <issue-id> <requirement-ref>\`).
+  - Avoid positional-first ordering like \`az spec link add <issue-id> <requirement-ref> -t relates -f planned\`; Effect CLI parsing can reject late flags as unknown arguments.
   - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
 		: undefined
 

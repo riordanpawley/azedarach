@@ -821,7 +821,7 @@ const runGit = (
  */
 type GitOperationInProgress = {
 	readonly kind: "merge" | "rebase" | "cherry-pick" | "revert"
-	readonly pseudoRef: "MERGE_HEAD" | "REBASE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
+	readonly pseudoRef?: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
 	readonly continueArgs: readonly [string, "--continue"]
 	readonly abortArgs: readonly [string, "--abort"]
 }
@@ -835,7 +835,6 @@ const GIT_OPERATION_IN_PROGRESS_CHECKS: readonly GitOperationInProgress[] = [
 	},
 	{
 		kind: "rebase",
-		pseudoRef: "REBASE_HEAD",
 		continueArgs: ["rebase", "--continue"],
 		abortArgs: ["rebase", "--abort"],
 	},
@@ -858,7 +857,7 @@ const GIT_OPERATION_IN_PROGRESS_CHECKS: readonly GitOperationInProgress[] = [
  */
 const hasPseudoRef = (
 	cwd: string,
-	refName: GitOperationInProgress["pseudoRef"],
+	refName: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD",
 ): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
 		const command = Command.make("git", "rev-parse", "-q", "--verify", refName).pipe(
@@ -872,6 +871,33 @@ const hasPseudoRef = (
 			),
 		)
 		return exitCode === 0
+	})
+
+const hasRebaseInProgress = (
+	cwd: string,
+): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const resolveGitPath = (name: "rebase-merge" | "rebase-apply") =>
+			Command.string(
+				Command.make("git", "rev-parse", "--git-path", name).pipe(Command.workingDirectory(cwd)),
+			).pipe(
+				Effect.map((output) => output.trim()),
+				Effect.catchAll(() => Effect.succeed("")),
+			)
+
+		const hasGitPath = (path: string) =>
+			path.length === 0
+				? Effect.succeed(false)
+				: Command.exitCode(Command.make("test", "-e", path)).pipe(
+						Effect.map((code) => code === 0),
+						Effect.catchAll(() => Effect.succeed(false)),
+					)
+
+		const rebaseMergePath = yield* resolveGitPath("rebase-merge")
+		if (yield* hasGitPath(rebaseMergePath)) return true
+
+		const rebaseApplyPath = yield* resolveGitPath("rebase-apply")
+		return yield* hasGitPath(rebaseApplyPath)
 	})
 
 const hasRemoteBranchHead = (options: {
@@ -907,7 +933,12 @@ const getGitOperationInProgress = (
 ): Effect.Effect<GitOperationInProgress | undefined, never, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
 		for (const operation of GIT_OPERATION_IN_PROGRESS_CHECKS) {
-			const present = yield* hasPseudoRef(cwd, operation.pseudoRef)
+			const present =
+				operation.kind === "rebase"
+					? yield* hasRebaseInProgress(cwd)
+					: operation.pseudoRef
+						? yield* hasPseudoRef(cwd, operation.pseudoRef)
+						: false
 			if (present) return operation
 		}
 		return undefined

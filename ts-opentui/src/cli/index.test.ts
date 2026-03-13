@@ -84,7 +84,10 @@ describe("buildPrimeOutput", () => {
 			"After implementing behavior changes, run an `az spec` compliance pass",
 		)
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
-		expect(output).toContain("For `az spec` commands, keep canonical Effect CLI ordering")
+		expect(output).toContain("For `az` commands, keep canonical CLI ordering")
+		expect(output).toContain("prefer named flags over positional refs")
+		expect(output).toContain("For `az spec link add`, use either explicit refs")
+		expect(output).toContain("Avoid positional-first ordering like `az spec link add <issue-id>")
 		expect(output).toContain("az config set spec.enabled false")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
 		expect(output).toContain(
@@ -129,7 +132,14 @@ describe("buildPrimeOutput", () => {
 				}),
 			},
 			{
-				implementations: ["default"],
+				implementations: [
+					{
+						name: "default",
+						directory: ".",
+						is_default: true,
+						is_builtin: true,
+					},
+				],
 			},
 			true,
 		)
@@ -149,7 +159,28 @@ describe("buildPrimeOutput", () => {
 				showImplementations: true,
 			},
 			{
-				implementations: ["default", "ts-opentui", "go-bubbletea"],
+				implementations: [
+					{
+						name: "default",
+						directory: ".",
+						is_default: false,
+						is_builtin: true,
+					},
+					{
+						name: "ts-opentui",
+						description: "Primary TypeScript/OpenTUI implementation",
+						directory: "ts-opentui/",
+						is_default: true,
+						is_builtin: false,
+					},
+					{
+						name: "go-bubbletea",
+						description: "Go/Bubbletea implementation",
+						directory: "go-bubbletea/",
+						is_default: false,
+						is_builtin: false,
+					},
+				],
 			},
 			true,
 		)
@@ -157,6 +188,9 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("Implementation guardrails:")
 		expect(output).toContain(
 			"This project has multiple implementations configured: default, ts-opentui, go-bubbletea.",
+		)
+		expect(output).toContain(
+			"Implementation metadata: default (dir=., builtin), ts-opentui (dir=ts-opentui/, default; Primary TypeScript/OpenTUI implementation), go-bubbletea (dir=go-bubbletea/; Go/Bubbletea implementation).",
 		)
 		expect(output).toContain(
 			"New `az issue` and `az spec link` writes must include one or more `--impl <impl>` selections.",
@@ -180,7 +214,21 @@ describe("buildPrimeOutput", () => {
 				showImplementations: true,
 			},
 			{
-				implementations: ["default", "ts-opentui"],
+				implementations: [
+					{
+						name: "default",
+						directory: ".",
+						is_default: false,
+						is_builtin: true,
+					},
+					{
+						name: "ts-opentui",
+						description: "Primary TypeScript/OpenTUI implementation",
+						directory: "ts-opentui/",
+						is_default: true,
+						is_builtin: false,
+					},
+				],
 			},
 			false,
 		)
