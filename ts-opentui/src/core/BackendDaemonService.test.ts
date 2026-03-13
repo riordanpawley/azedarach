@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { Effect } from "effect"
-import { BackendDaemonService } from "./BackendDaemonService.js"
+import { Cause, Effect, Exit, Option } from "effect"
+import { BACKEND_DAEMON_PROTOCOL_VERSION, BackendDaemonService } from "./BackendDaemonService.js"
 
 const run = <A, E>(effect: Effect.Effect<A, E, BackendDaemonService>) =>
 	Effect.runPromise(effect.pipe(Effect.provide(BackendDaemonService.Default)))
@@ -15,9 +15,11 @@ describe("BackendDaemonService", () => {
 		)
 
 		expect(state.authoritativeRuntime).toBe(true)
-		expect(state.protocolVersion).toBe(1)
+		expect(state.protocolVersion).toBe(BACKEND_DAEMON_PROTOCOL_VERSION)
 		expect(state.revision).toBe(0)
 		expect(state.runtimePhase).toBe("starting")
+		expect(state.lifecycleGeneration).toBe(0)
+		expect(state.recoveryGeneration).toBe(0)
 		expect(Object.keys(state.clients)).toHaveLength(0)
 	})
 
@@ -27,20 +29,25 @@ describe("BackendDaemonService", () => {
 				const daemon = yield* BackendDaemonService
 				const attach = yield* daemon.registerClientAttach({
 					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 					requestedAtMs: 1000,
 				})
 				const heartbeat = yield* daemon.registerClientHeartbeat("client-a", 1100)
 				const reconnect = yield* daemon.markClientReconnect({
 					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 					lastSeenRevision: attach.snapshot.revision,
+					lastSeenLifecycleGeneration: attach.snapshot.lifecycleGeneration,
 					requestedAtMs: 1200,
 				})
+				const restart = yield* daemon.markRuntimeRestart(1300)
 				const state = yield* daemon.getState()
 				const snapshot = yield* daemon.snapshot()
 				return {
 					attach,
 					heartbeat,
 					reconnect,
+					restart,
 					state,
 					snapshot,
 				}
@@ -51,9 +58,115 @@ describe("BackendDaemonService", () => {
 		expect(result.heartbeat.lastHeartbeatAtMs).toBe(1100)
 		expect(result.reconnect.snapshot.revision).toBe(3)
 		expect(result.reconnect.snapshot.runtimePhase).toBe("running")
-		expect(result.state.revision).toBe(3)
+		expect(result.reconnect.snapshot.recoveryGeneration).toBe(1)
+		expect(result.restart.revision).toBe(4)
+		expect(result.restart.lifecycleGeneration).toBe(1)
+		expect(result.state.revision).toBe(4)
+		expect(result.state.lifecycleGeneration).toBe(1)
+		expect(result.state.recoveryGeneration).toBe(1)
 		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(1200)
 		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
-		expect(result.snapshot.revision).toBe(3)
+		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(0)
+		expect(result.state.clients["client-a"]?.lastRecoveryGeneration).toBe(1)
+		expect(result.snapshot.revision).toBe(4)
+	})
+
+	it("keeps multiple clients coherent against shared backend revision state", async () => {
+		const result = await run(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				const attachA = yield* daemon.registerClientAttach({
+					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 1_000,
+				})
+				const attachB = yield* daemon.registerClientAttach({
+					clientId: "client-b",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					requestedAtMs: 1_010,
+				})
+				const reconnectA = yield* daemon.markClientReconnect({
+					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+					lastSeenRevision: attachA.snapshot.revision,
+					lastSeenLifecycleGeneration: attachA.snapshot.lifecycleGeneration,
+					requestedAtMs: 1_020,
+				})
+				const heartbeatB = yield* daemon.registerClientHeartbeat("client-b", 1_030)
+				const state = yield* daemon.getState()
+				return {
+					attachA,
+					attachB,
+					reconnectA,
+					heartbeatB,
+					state,
+				}
+			}),
+		)
+
+		expect(result.attachA.snapshot.revision).toBe(1)
+		expect(result.attachB.snapshot.revision).toBe(2)
+		expect(result.reconnectA.snapshot.revision).toBe(3)
+		expect(result.heartbeatB.lastHeartbeatAtMs).toBe(1_030)
+		expect(result.state.revision).toBe(4)
+		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
+		expect(result.state.clients["client-b"]?.lastHeartbeatAtMs).toBe(1_030)
+		expect(Object.keys(result.state.clients).sort()).toEqual(["client-a", "client-b"])
+	})
+
+	it("rejects attach/reconnect when protocolVersion mismatches", async () => {
+		const attachExit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				yield* daemon.registerClientAttach({
+					clientId: "client-a",
+					protocolVersion: 99,
+				})
+			}).pipe(Effect.provide(BackendDaemonService.Default)),
+		)
+		expect(Exit.isFailure(attachExit)).toBe(true)
+		if (!Exit.isFailure(attachExit)) {
+			throw new Error("Expected attachExit to fail")
+		}
+		const attachDefect = Cause.dieOption(attachExit.cause)
+		expect(Option.isSome(attachDefect)).toBe(true)
+		if (!Option.isSome(attachDefect)) {
+			throw new Error("Expected attach defect")
+		}
+		expect(attachDefect.value).toMatchObject({
+			_tag: "BackendDaemonProtocolVersionMismatchError",
+			operation: "attach",
+			expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			receivedProtocolVersion: 99,
+		})
+
+		const reconnectExit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const daemon = yield* BackendDaemonService
+				yield* daemon.registerClientAttach({
+					clientId: "client-a",
+					protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+				})
+				yield* daemon.markClientReconnect({
+					clientId: "client-a",
+					protocolVersion: 77,
+				})
+			}).pipe(Effect.provide(BackendDaemonService.Default)),
+		)
+		expect(Exit.isFailure(reconnectExit)).toBe(true)
+		if (!Exit.isFailure(reconnectExit)) {
+			throw new Error("Expected reconnectExit to fail")
+		}
+		const reconnectDefect = Cause.dieOption(reconnectExit.cause)
+		expect(Option.isSome(reconnectDefect)).toBe(true)
+		if (!Option.isSome(reconnectDefect)) {
+			throw new Error("Expected reconnect defect")
+		}
+		expect(reconnectDefect.value).toMatchObject({
+			_tag: "BackendDaemonProtocolVersionMismatchError",
+			operation: "reconnect",
+			expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			receivedProtocolVersion: 77,
+		})
 	})
 })

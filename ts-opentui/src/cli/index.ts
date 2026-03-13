@@ -41,6 +41,7 @@ import {
 	AzedarachConfigSchema,
 } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
+import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -156,6 +157,7 @@ const buildAppConfigLayer = (configPath: string | null) => {
  */
 const createFullCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		BackendSyncDaemonService.Default,
 		MutationQueue.Default,
 		SessionService.Default,
 		AttachmentService.Default,
@@ -203,6 +205,7 @@ const createFullCliLayer = (configPath: string | null) =>
  */
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		BackendSyncDaemonService.Default,
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
 		IssueTrackerClient.Default,
@@ -877,6 +880,57 @@ const syncHandler = (args: {
 				),
 			)
 		}
+	})
+
+const awaitDaemonShutdownSignal = (): Effect.Effect<"SIGINT" | "SIGTERM", never> =>
+	Effect.async<"SIGINT" | "SIGTERM">((resume) => {
+		let settled = false
+		const cleanup = () => {
+			process.off("SIGINT", onSigint)
+			process.off("SIGTERM", onSigterm)
+		}
+		const settle = (signal: "SIGINT" | "SIGTERM") => {
+			if (settled) return
+			settled = true
+			cleanup()
+			resume(Effect.succeed(signal))
+		}
+		const onSigint = () => settle("SIGINT")
+		const onSigterm = () => settle("SIGTERM")
+		process.on("SIGINT", onSigint)
+		process.on("SIGTERM", onSigterm)
+		return Effect.sync(cleanup)
+	})
+
+const daemonSyncHandler = (args: {
+	readonly intervalMs: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const intervalMs = Option.getOrUndefined(args.intervalMs)
+		const daemon = yield* BackendSyncDaemonService
+
+		yield* validateIssueTrackerStore(cwd)
+		yield* daemon.start({
+			projectPath: cwd,
+			...(intervalMs === undefined ? {} : { intervalMs }),
+		})
+
+		yield* Console.log(
+			`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
+		)
+		yield* Console.log("Press Ctrl+C to stop.")
+		if (args.verbose) {
+			const status = yield* daemon.getStatus()
+			yield* Console.log(`status=${status.state} projectPath=${status.projectPath ?? "<none>"}`)
+		}
+
+		const signal = yield* awaitDaemonShutdownSignal()
+		yield* Console.log(`Received ${signal}, stopping daemon...`)
+		yield* daemon.stop().pipe(Effect.catchAllCause(() => Effect.void))
+		yield* Console.log("Headless backend sync daemon stopped.")
 	})
 
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
@@ -5069,6 +5123,27 @@ const syncCommand = Command.make(
 	syncHandler,
 ).pipe(Command.withDescription("Sync issue tracker state in worktrees"))
 
+const daemonSyncCommand = Command.make(
+	"sync",
+	{
+		intervalMs: Options.integer("interval-ms").pipe(
+			Options.withAlias("i"),
+			Options.optional,
+			Options.withDescription("Sync loop interval in milliseconds"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	daemonSyncHandler,
+).pipe(Command.withDescription("Run headless backend sync daemon loop"))
+
+const daemonCommand = Command.make("daemon", {}, () =>
+	Console.log("Usage: az daemon sync [--interval-ms <ms>] [--project-dir <path>]"),
+).pipe(
+	Command.withDescription("Headless backend daemon commands"),
+	Command.withSubcommands([daemonSyncCommand]),
+)
+
 /**
  * az gate <issue-id> - Run quality gates for a task
  */
@@ -6781,6 +6856,7 @@ const cli = az.pipe(
 		killCommand,
 		statusCommand,
 		syncCommand,
+		daemonCommand,
 		issueCommand,
 		implCommand,
 		specCommand,
@@ -6815,6 +6891,7 @@ const commandCli = az.pipe(
 		killCommand,
 		statusCommand,
 		syncCommand,
+		daemonCommand,
 		issueCommand,
 		implCommand,
 		specCommand,

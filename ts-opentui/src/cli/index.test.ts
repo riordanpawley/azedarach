@@ -566,6 +566,8 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "daemon", "sync"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "dm", "sync"])).toBe("command")
 	})
 
 	it("treats `az i` as `az issue` for mode resolution", () => {

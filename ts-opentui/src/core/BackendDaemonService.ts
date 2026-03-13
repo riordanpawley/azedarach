@@ -1,4 +1,4 @@
-import { Effect, Ref } from "effect"
+import { Data, Effect, Ref } from "effect"
 
 export type BackendDaemonRuntimePhase = "starting" | "running" | "recovering"
 
@@ -8,6 +8,8 @@ export interface BackendDaemonClientState {
 	readonly lastHeartbeatAtMs: number
 	readonly lastReconnectAtMs: number | null
 	readonly lastSeenRevision: number | null
+	readonly lastSeenLifecycleGeneration: number | null
+	readonly lastRecoveryGeneration: number | null
 }
 
 export interface BackendDaemonState {
@@ -17,6 +19,8 @@ export interface BackendDaemonState {
 	readonly startedAtMs: number
 	readonly updatedAtMs: number
 	readonly revision: number
+	readonly lifecycleGeneration: number
+	readonly recoveryGeneration: number
 	readonly clients: Readonly<Record<string, BackendDaemonClientState>>
 }
 
@@ -25,18 +29,23 @@ export interface BackendDaemonSnapshot {
 	readonly runtimePhase: BackendDaemonRuntimePhase
 	readonly authoritativeRuntime: true
 	readonly revision: number
+	readonly lifecycleGeneration: number
+	readonly recoveryGeneration: number
 	readonly capturedAtMs: number
 	readonly clients: Readonly<Record<string, BackendDaemonClientState>>
 }
 
 export interface BackendDaemonAttachRequest {
 	readonly clientId: string
+	readonly protocolVersion?: number
 	readonly requestedAtMs?: number
 }
 
 export interface BackendDaemonReconnectRequest {
 	readonly clientId: string
+	readonly protocolVersion?: number
 	readonly lastSeenRevision?: number
+	readonly lastSeenLifecycleGeneration?: number
 	readonly requestedAtMs?: number
 }
 
@@ -60,6 +69,7 @@ export interface BackendDaemonServiceApi {
 	readonly markClientReconnect: (
 		request: BackendDaemonReconnectRequest,
 	) => Effect.Effect<BackendDaemonAttachResponse>
+	readonly markRuntimeRestart: (observedAtMs?: number) => Effect.Effect<BackendDaemonSnapshot>
 }
 
 interface BackendDaemonMutableState {
@@ -69,10 +79,20 @@ interface BackendDaemonMutableState {
 	readonly startedAtMs: number
 	readonly updatedAtMs: number
 	readonly revision: number
+	readonly lifecycleGeneration: number
+	readonly recoveryGeneration: number
 	readonly clients: Map<string, BackendDaemonClientState>
 }
 
-const PROTOCOL_VERSION = 1
+export const BACKEND_DAEMON_PROTOCOL_VERSION = 1
+
+export class BackendDaemonProtocolVersionMismatchError extends Data.TaggedError(
+	"BackendDaemonProtocolVersionMismatchError",
+)<{
+	readonly operation: "attach" | "reconnect"
+	readonly expectedProtocolVersion: number
+	readonly receivedProtocolVersion: number
+}> {}
 
 const toClientsRecord = (
 	clients: ReadonlyMap<string, BackendDaemonClientState>,
@@ -88,6 +108,8 @@ const toState = (state: BackendDaemonMutableState): BackendDaemonState => ({
 	startedAtMs: state.startedAtMs,
 	updatedAtMs: state.updatedAtMs,
 	revision: state.revision,
+	lifecycleGeneration: state.lifecycleGeneration,
+	recoveryGeneration: state.recoveryGeneration,
 	clients: toClientsRecord(state.clients),
 })
 
@@ -96,6 +118,8 @@ const toSnapshot = (state: BackendDaemonMutableState): BackendDaemonSnapshot => 
 	runtimePhase: state.runtimePhase,
 	authoritativeRuntime: state.authoritativeRuntime,
 	revision: state.revision,
+	lifecycleGeneration: state.lifecycleGeneration,
+	recoveryGeneration: state.recoveryGeneration,
 	capturedAtMs: state.updatedAtMs,
 	clients: toClientsRecord(state.clients),
 })
@@ -109,6 +133,7 @@ const upsertClient = (params: {
 	readonly observedAtMs: number
 	readonly reconnect: boolean
 	readonly lastSeenRevision: number | null
+	readonly lastSeenLifecycleGeneration: number | null
 }): BackendDaemonClientState => {
 	const existing = params.state.clients.get(params.clientId)
 	const baseConnectedAtMs = existing?.connectedAtMs ?? params.observedAtMs
@@ -124,6 +149,14 @@ const upsertClient = (params: {
 			(params.reconnect
 				? (existing?.lastSeenRevision ?? null)
 				: (existing?.lastSeenRevision ?? null)),
+		lastSeenLifecycleGeneration:
+			params.lastSeenLifecycleGeneration ??
+			(params.reconnect
+				? (existing?.lastSeenLifecycleGeneration ?? null)
+				: (existing?.lastSeenLifecycleGeneration ?? null)),
+		lastRecoveryGeneration: params.reconnect
+			? params.state.recoveryGeneration
+			: (existing?.lastRecoveryGeneration ?? null),
 	}
 	params.state.clients.set(params.clientId, clientState)
 	return clientState
@@ -136,6 +169,7 @@ const withClientMutation = (
 		readonly observedAtMs: number
 		readonly reconnect: boolean
 		readonly lastSeenRevision: number | null
+		readonly lastSeenLifecycleGeneration: number | null
 	},
 ): Effect.Effect<{
 	readonly state: BackendDaemonMutableState
@@ -149,6 +183,9 @@ const withClientMutation = (
 			runtimePhase: updatedPhase,
 			updatedAtMs: params.observedAtMs,
 			revision: state.revision + 1,
+			recoveryGeneration: params.reconnect
+				? state.recoveryGeneration + 1
+				: state.recoveryGeneration,
 			clients: updatedClients,
 		}
 		const clientState = upsertClient({
@@ -157,6 +194,7 @@ const withClientMutation = (
 			observedAtMs: params.observedAtMs,
 			reconnect: params.reconnect,
 			lastSeenRevision: params.lastSeenRevision,
+			lastSeenLifecycleGeneration: params.lastSeenLifecycleGeneration,
 		})
 		const finalizedState: BackendDaemonMutableState = {
 			...updatedState,
@@ -165,18 +203,36 @@ const withClientMutation = (
 		return [{ state: finalizedState, clientState }, finalizedState] as const
 	})
 
+const validateProtocolVersion = (
+	operation: "attach" | "reconnect",
+	protocolVersion: number | undefined,
+): Effect.Effect<void> => {
+	if (protocolVersion === undefined || protocolVersion === BACKEND_DAEMON_PROTOCOL_VERSION) {
+		return Effect.void
+	}
+	return Effect.die(
+		new BackendDaemonProtocolVersionMismatchError({
+			operation,
+			expectedProtocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
+			receivedProtocolVersion: protocolVersion,
+		}),
+	)
+}
+
 export class BackendDaemonService extends Effect.Service<BackendDaemonService>()(
 	"BackendDaemonService",
 	{
 		effect: Effect.gen(function* () {
 			const startedAtMs = Date.now()
 			const stateRef = yield* Ref.make<BackendDaemonMutableState>({
-				protocolVersion: PROTOCOL_VERSION,
+				protocolVersion: BACKEND_DAEMON_PROTOCOL_VERSION,
 				runtimePhase: "starting",
 				authoritativeRuntime: true,
 				startedAtMs,
 				updatedAtMs: startedAtMs,
 				revision: 0,
+				lifecycleGeneration: 0,
+				recoveryGeneration: 0,
 				clients: new Map(),
 			})
 
@@ -185,12 +241,14 @@ export class BackendDaemonService extends Effect.Service<BackendDaemonService>()
 				snapshot: () => Ref.get(stateRef).pipe(Effect.map(toSnapshot)),
 				registerClientAttach: (request: BackendDaemonAttachRequest) =>
 					Effect.gen(function* () {
+						yield* validateProtocolVersion("attach", request.protocolVersion)
 						const observedAtMs = request.requestedAtMs ?? Date.now()
 						const { state } = yield* withClientMutation(stateRef, {
 							clientId: request.clientId,
 							observedAtMs,
 							reconnect: false,
 							lastSeenRevision: null,
+							lastSeenLifecycleGeneration: null,
 						})
 						return {
 							clientId: request.clientId,
@@ -207,17 +265,20 @@ export class BackendDaemonService extends Effect.Service<BackendDaemonService>()
 							observedAtMs: timestamp,
 							reconnect: false,
 							lastSeenRevision: null,
+							lastSeenLifecycleGeneration: null,
 						})
 						return clientState
 					}),
 				markClientReconnect: (request: BackendDaemonReconnectRequest) =>
 					Effect.gen(function* () {
+						yield* validateProtocolVersion("reconnect", request.protocolVersion)
 						const observedAtMs = request.requestedAtMs ?? Date.now()
 						const { state } = yield* withClientMutation(stateRef, {
 							clientId: request.clientId,
 							observedAtMs,
 							reconnect: true,
 							lastSeenRevision: request.lastSeenRevision ?? null,
+							lastSeenLifecycleGeneration: request.lastSeenLifecycleGeneration ?? null,
 						})
 						return {
 							clientId: request.clientId,
@@ -225,6 +286,18 @@ export class BackendDaemonService extends Effect.Service<BackendDaemonService>()
 							resumeToken: nextResumeToken(request.clientId, state.revision),
 							snapshot: toSnapshot(state),
 						}
+					}),
+				markRuntimeRestart: (observedAtMs?: number) =>
+					Ref.modify(stateRef, (state) => {
+						const restartAtMs = observedAtMs ?? Date.now()
+						const nextState: BackendDaemonMutableState = {
+							...state,
+							runtimePhase: "running",
+							updatedAtMs: restartAtMs,
+							revision: state.revision + 1,
+							lifecycleGeneration: state.lifecycleGeneration + 1,
+						}
+						return [toSnapshot(nextState), nextState] as const
 					}),
 			} satisfies BackendDaemonServiceApi
 		}),

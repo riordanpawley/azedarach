@@ -17,9 +17,14 @@ export interface BackendSyncDaemonRunStatus {
 
 export interface BackendSyncDaemonStatus {
 	readonly state: "stopped" | "running"
+	readonly generation: number
 	readonly projectPath: string | null
 	readonly intervalMs: number | null
 	readonly startedAtMs: number | null
+	readonly runCount: number
+	readonly successCount: number
+	readonly failureCount: number
+	readonly lastSuccessfulRunAtMs: number | null
 	readonly lastRun: BackendSyncDaemonRunStatus | null
 	readonly lastError: string | null
 }
@@ -48,9 +53,14 @@ const normalizeIntervalMs = (value: number | undefined): number => {
 
 const emptyStatus = (): BackendSyncDaemonStatus => ({
 	state: "stopped",
+	generation: 0,
 	projectPath: null,
 	intervalMs: null,
 	startedAtMs: null,
+	runCount: 0,
+	successCount: 0,
+	failureCount: 0,
+	lastSuccessfulRunAtMs: null,
 	lastRun: null,
 	lastError: null,
 })
@@ -108,11 +118,27 @@ const pollingLoop = (
 		runOnce(router, projectPath).pipe(
 			Effect.flatMap((run) =>
 				Ref.update(runtimeRef, (runtime) => {
-					const nextError = run.result === "failed" ? run.message : null
+					const isSuccess = run.result === "flushed"
+					const isFailure = run.result === "failed"
+					const nextRunCount = runtime.status.runCount + 1
+					const nextSuccessCount = isSuccess
+						? runtime.status.successCount + 1
+						: runtime.status.successCount
+					const nextFailureCount = isFailure
+						? runtime.status.failureCount + 1
+						: runtime.status.failureCount
+					const nextLastSuccessfulRunAtMs = isSuccess
+						? run.runAtMs
+						: runtime.status.lastSuccessfulRunAtMs
+					const nextError = isFailure ? run.message : null
 					return {
 						...runtime,
 						status: {
 							...runtime.status,
+							runCount: nextRunCount,
+							successCount: nextSuccessCount,
+							failureCount: nextFailureCount,
+							lastSuccessfulRunAtMs: nextLastSuccessfulRunAtMs,
 							lastRun: run,
 							lastError: nextError,
 						},
@@ -148,14 +174,26 @@ export const makeBackendSyncDaemonService = (router: {
 					const intervalMs = normalizeIntervalMs(options.intervalMs)
 					const startedAtMs = Date.now()
 					const previous = yield* Ref.get(runtimeRef)
+					const shouldReuseExistingRuntime =
+						previous.status.state === "running" &&
+						previous.status.projectPath === options.projectPath &&
+						previous.status.intervalMs === intervalMs
+					if (shouldReuseExistingRuntime) {
+						return previous.status
+					}
 					yield* stopFiber(previous.fiber)
 
 					yield* Ref.update(runtimeRef, (runtime) => {
 						const runningStatus: BackendSyncDaemonStatus = {
 							state: "running",
+							generation: runtime.status.generation + 1,
 							projectPath: options.projectPath,
 							intervalMs,
 							startedAtMs,
+							runCount: runtime.status.runCount,
+							successCount: runtime.status.successCount,
+							failureCount: runtime.status.failureCount,
+							lastSuccessfulRunAtMs: runtime.status.lastSuccessfulRunAtMs,
 							lastRun: runtime.status.lastRun,
 							lastError: runtime.status.lastError,
 						}
@@ -185,9 +223,14 @@ export const makeBackendSyncDaemonService = (router: {
 					yield* Ref.update(runtimeRef, (runtime) => {
 						const stoppedStatus: BackendSyncDaemonStatus = {
 							state: "stopped",
+							generation: runtime.status.generation,
 							projectPath: null,
 							intervalMs: null,
 							startedAtMs: null,
+							runCount: runtime.status.runCount,
+							successCount: runtime.status.successCount,
+							failureCount: runtime.status.failureCount,
+							lastSuccessfulRunAtMs: runtime.status.lastSuccessfulRunAtMs,
 							lastRun: runtime.status.lastRun,
 							lastError: runtime.status.lastError,
 						}
