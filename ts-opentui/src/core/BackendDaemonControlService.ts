@@ -9,6 +9,15 @@ import {
 	type BackendSyncDaemonServiceApi,
 	type BackendSyncDaemonStatus,
 } from "./BackendSyncDaemonService.js"
+import {
+	type DevServerDaemonListRequest,
+	type DevServerDaemonListResult,
+	type DevServerDaemonMutationResult,
+	DevServerDaemonService,
+	type DevServerDaemonServiceApi,
+	type DevServerDaemonStatusRequest,
+	type DevServerDaemonStatusResult,
+} from "./DevServerDaemonService.js"
 
 export interface BackendDaemonControlStatus {
 	readonly checkedAtMs: number
@@ -109,6 +118,18 @@ export interface BackendDaemonControlServiceApi {
 	readonly queueCancel: (
 		request?: BackendDaemonControlQueueCancelRequest,
 	) => Effect.Effect<BackendDaemonControlQueueCancelResult>
+	readonly devServerStatus: (
+		request: DevServerDaemonStatusRequest,
+	) => Effect.Effect<DevServerDaemonStatusResult>
+	readonly devServerList: (
+		request?: DevServerDaemonListRequest,
+	) => Effect.Effect<DevServerDaemonListResult>
+	readonly devServerStart: (
+		request: Parameters<DevServerDaemonServiceApi["start"]>[0],
+	) => Effect.Effect<DevServerDaemonMutationResult>
+	readonly devServerStop: (
+		request: Parameters<DevServerDaemonServiceApi["stop"]>[0],
+	) => Effect.Effect<DevServerDaemonMutationResult>
 }
 
 export class BackendDaemonControlRestartConfigurationError extends Data.TaggedError(
@@ -167,6 +188,7 @@ const deriveHealth = (status: BackendDaemonControlStatus): BackendDaemonControlH
 export const makeBackendDaemonControlService = (params: {
 	readonly runtime: BackendDaemonServiceApi
 	readonly sync: BackendSyncDaemonServiceApi
+	readonly devServer: DevServerDaemonServiceApi
 }): BackendDaemonControlServiceApi => {
 	const queueItems = new Map<string, BackendDaemonControlQueueItem>()
 
@@ -272,19 +294,29 @@ export const makeBackendDaemonControlService = (params: {
 					cancelledOperationIds,
 				} satisfies BackendDaemonControlQueueCancelResult
 			}),
+		devServerStatus: (request) => params.devServer.status(request),
+		devServerList: (request) => params.devServer.list(request),
+		devServerStart: (request) => params.devServer.start(request),
+		devServerStop: (request) => params.devServer.stop(request),
 	}
 }
 
 export class BackendDaemonControlService extends Effect.Service<BackendDaemonControlService>()(
 	"BackendDaemonControlService",
 	{
-		dependencies: [BackendDaemonService.Default, BackendSyncDaemonService.Default],
+		dependencies: [
+			BackendDaemonService.Default,
+			BackendSyncDaemonService.Default,
+			DevServerDaemonService.Default,
+		],
 		effect: Effect.gen(function* () {
 			const runtime = yield* BackendDaemonService
 			const sync = yield* BackendSyncDaemonService
+			const devServer = yield* DevServerDaemonService
 			return makeBackendDaemonControlService({
 				runtime,
 				sync,
+				devServer,
 			})
 		}),
 	},

@@ -6,6 +6,7 @@ import type {
 	BackendSyncDaemonServiceApi,
 	BackendSyncDaemonStatus,
 } from "./BackendSyncDaemonService.js"
+import { makeDevServerDaemonService } from "./DevServerDaemonService.js"
 
 const makeRuntimeSnapshot = (
 	overrides: Partial<BackendDaemonSnapshot> = {},
@@ -126,9 +127,14 @@ describe("BackendDaemonControlService", () => {
 					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
 				>([])
 				const stopCountRef = yield* Ref.make(0)
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
 				const service = makeBackendDaemonControlService({
 					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
 					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
 				})
 				const status = yield* service.status()
 				const health = yield* service.health()
@@ -152,9 +158,14 @@ describe("BackendDaemonControlService", () => {
 					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
 				>([])
 				const stopCountRef = yield* Ref.make(0)
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
 				const service = makeBackendDaemonControlService({
 					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
 					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
 				})
 				return yield* service.health()
 			}),
@@ -181,9 +192,14 @@ describe("BackendDaemonControlService", () => {
 					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
 				>([])
 				const stopCountRef = yield* Ref.make(0)
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
 				const service = makeBackendDaemonControlService({
 					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
 					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
 				})
 				yield* service.restart({})
 			}),
@@ -215,9 +231,14 @@ describe("BackendDaemonControlService", () => {
 					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
 				>([])
 				const stopCountRef = yield* Ref.make(0)
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
 				const service = makeBackendDaemonControlService({
 					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
 					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
 				})
 				const status = yield* service.restart({})
 				const startedWith = yield* Ref.get(startedWithRef)
@@ -244,9 +265,14 @@ describe("BackendDaemonControlService", () => {
 					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
 				>([])
 				const stopCountRef = yield* Ref.make(0)
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
 				const service = makeBackendDaemonControlService({
 					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
 					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
 				})
 				const stopped = yield* service.stop()
 				const stopCount = yield* Ref.get(stopCountRef)
@@ -269,9 +295,14 @@ describe("BackendDaemonControlService", () => {
 					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
 				>([])
 				const stopCountRef = yield* Ref.make(0)
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
 				const service = makeBackendDaemonControlService({
 					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
 					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
 				})
 
 				const first = yield* service.queueEnqueue({
@@ -306,5 +337,48 @@ describe("BackendDaemonControlService", () => {
 		expect(result.cancelled.cancelledOperationIds).toEqual([result.first.item.operationId])
 		expect(result.afterCancel.items[0]?.state).toBe("cancelled")
 		expect(result.limited.items).toHaveLength(1)
+	})
+
+	it("routes devserver authority hooks through daemon control service", async () => {
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const snapshotRef = yield* Ref.make(makeRuntimeSnapshot())
+				const restartCountRef = yield* Ref.make(0)
+				const statusRef = yield* Ref.make(makeSyncStatus())
+				const startedWithRef = yield* Ref.make<
+					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
+				>([])
+				const stopCountRef = yield* Ref.make(0)
+				const nowValues = [3_000, 3_100, 3_200, 3_300, 3_400]
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => nowValues.shift() ?? 3_400,
+					portBase: 3_600,
+				})
+				const service = makeBackendDaemonControlService({
+					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
+					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
+				})
+
+				const initial = yield* service.devServerStatus({ issueId: "qp" })
+				const started = yield* service.devServerStart({
+					issueId: "qp",
+					projectPath: "/tmp/project-a",
+				})
+				const listed = yield* service.devServerList({ issueId: "qp" })
+				const stopped = yield* service.devServerStop({ issueId: "qp" })
+				const afterStop = yield* service.devServerStatus({ issueId: "qp" })
+				return { initial, started, listed, stopped, afterStop }
+			}),
+		)
+
+		expect(result.initial.server.status).toBe("idle")
+		expect(result.started.server.status).toBe("running")
+		expect(result.started.server.port).toBe(3_600)
+		expect(result.listed.servers).toHaveLength(1)
+		expect(result.listed.servers[0]?.tmuxSession).toBe("az-qp")
+		expect(result.stopped.server.status).toBe("stopped")
+		expect(result.afterStop.server.status).toBe("stopped")
+		expect(result.afterStop.server.projectPath).toBe("/tmp/project-a")
 	})
 })
