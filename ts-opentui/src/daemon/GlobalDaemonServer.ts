@@ -24,6 +24,10 @@ export interface GlobalDaemonRuntimeObservation {
 	readonly nextIdleSweepInMs: number
 }
 
+interface GlobalDaemonRuntimePolicy {
+	readonly recordIdleEvictionEvents: boolean
+}
+
 export type GlobalDaemonLifecycleEvent =
 	| "runtime_touched"
 	| "runtime_evicted_idle"
@@ -54,6 +58,7 @@ interface GlobalDaemonMutableState {
 	readonly startedAtMs: number
 	readonly lastActivityAtMs: number
 	readonly idleTimeoutMs: number
+	readonly policy: GlobalDaemonRuntimePolicy
 	readonly shuttingDown: boolean
 	readonly shutdownReason: string | null
 	readonly runtimes: Map<string, GlobalProjectRuntime>
@@ -92,6 +97,29 @@ export class GlobalDaemonServerError extends Data.TaggedError("GlobalDaemonServe
 }> {}
 
 const MAX_EVENTS = 256
+const DEFAULT_RUNTIME_POLICY: GlobalDaemonRuntimePolicy = {
+	recordIdleEvictionEvents: true,
+}
+
+const RUNTIME_CREATED_REASON = "runtime created (cold)"
+const RUNTIME_REUSED_REASON = "runtime reused (hot)"
+const IDLE_EVICTION_REASON = "idle timeout exceeded"
+
+const compareRuntimeEvictionOrder = (
+	left: GlobalProjectRuntime,
+	right: GlobalProjectRuntime,
+): number => {
+	if (left.lastTouchedAtMs !== right.lastTouchedAtMs) {
+		return left.lastTouchedAtMs - right.lastTouchedAtMs
+	}
+	return left.projectPath.localeCompare(right.projectPath)
+}
+
+const shouldEvictRuntimeForIdleTimeout = (
+	runtime: GlobalProjectRuntime,
+	nowMs: number,
+	idleTimeoutMs: number,
+): boolean => nowMs - runtime.lastTouchedAtMs >= idleTimeoutMs
 
 const toRuntimeRecord = (
 	runtimes: ReadonlyMap<string, GlobalProjectRuntime>,
@@ -137,14 +165,21 @@ export const makeGlobalDaemonServerRuntime = (params: {
 	readonly socketPath: string
 	readonly idleTimeoutMs: number
 	readonly nowMs?: number
+	readonly recordIdleEvictionEvents?: boolean
 }): Effect.Effect<GlobalDaemonServerRuntime> =>
 	Effect.gen(function* () {
 		const startedAtMs = params.nowMs ?? Date.now()
+		const policy: GlobalDaemonRuntimePolicy = {
+			...DEFAULT_RUNTIME_POLICY,
+			recordIdleEvictionEvents:
+				params.recordIdleEvictionEvents ?? DEFAULT_RUNTIME_POLICY.recordIdleEvictionEvents,
+		}
 		const stateRef = yield* Ref.make<GlobalDaemonMutableState>({
 			socketPath: params.socketPath,
 			startedAtMs,
 			lastActivityAtMs: startedAtMs,
 			idleTimeoutMs: params.idleTimeoutMs,
+			policy,
 			shuttingDown: false,
 			shutdownReason: null,
 			runtimes: new Map(),
@@ -188,7 +223,7 @@ export const makeGlobalDaemonServerRuntime = (params: {
 						event: "runtime_touched",
 						observedAtMs: nowMs,
 						projectPath,
-						reason: existing ? "runtime request observed" : "runtime created",
+						reason: existing ? RUNTIME_REUSED_REASON : RUNTIME_CREATED_REASON,
 					})
 					const nextState: GlobalDaemonMutableState = {
 						...eventState,
@@ -201,22 +236,27 @@ export const makeGlobalDaemonServerRuntime = (params: {
 				Ref.modify(stateRef, (state) => {
 					const nowMs = observedAtMs ?? Date.now()
 					const runtimes = new Map(state.runtimes)
-					const evicted: string[] = []
-					for (const [projectPath, runtime] of runtimes.entries()) {
-						if (nowMs - runtime.lastTouchedAtMs >= state.idleTimeoutMs) {
-							evicted.push(projectPath)
-							runtimes.delete(projectPath)
-						}
+					const evictedRuntimes = [...runtimes.values()]
+						.filter((runtime) =>
+							shouldEvictRuntimeForIdleTimeout(runtime, nowMs, state.idleTimeoutMs),
+						)
+						.sort(compareRuntimeEvictionOrder)
+
+					for (const runtime of evictedRuntimes) {
+						runtimes.delete(runtime.projectPath)
 					}
+					const evicted = evictedRuntimes.map((runtime) => runtime.projectPath)
 
 					let eventState = state
-					for (const projectPath of evicted) {
-						eventState = appendEvent(eventState, {
-							event: "runtime_evicted_idle",
-							observedAtMs: nowMs,
-							projectPath,
-							reason: "idle timeout exceeded",
-						})
+					if (state.policy.recordIdleEvictionEvents) {
+						for (const projectPath of evicted) {
+							eventState = appendEvent(eventState, {
+								event: "runtime_evicted_idle",
+								observedAtMs: nowMs,
+								projectPath,
+								reason: IDLE_EVICTION_REASON,
+							})
+						}
 					}
 					const nextState: GlobalDaemonMutableState = {
 						...eventState,

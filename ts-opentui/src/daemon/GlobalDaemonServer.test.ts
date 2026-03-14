@@ -31,7 +31,7 @@ describe("GlobalDaemonServer", () => {
 
 		await runWithBunContext(runtime.touchProjectRuntime("/tmp/project-a", 1_030))
 		const evicted = await runWithBunContext(runtime.sweepIdleRuntimes(1_140))
-		expect([...evicted].sort()).toEqual(["/tmp/project-a", "/tmp/project-b"])
+		expect(evicted).toEqual(["/tmp/project-b", "/tmp/project-a"])
 
 		const observation = await runWithBunContext(runtime.observeIdleState(1_150))
 		expect(observation.runtimeCount).toBe(0)
@@ -41,6 +41,8 @@ describe("GlobalDaemonServer", () => {
 		expect(shutdown.shuttingDown).toBe(true)
 		expect(shutdown.shutdownReason).toBe("test_shutdown")
 		expect((shutdown.events.at(-1) ?? null)?.event).toBe("shutdown_requested")
+		expect(shutdown.events[0]?.reason).toBe("runtime created (cold)")
+		expect(shutdown.events[2]?.reason).toBe("runtime reused (hot)")
 	})
 
 	it("starts global daemon server with lease and shuts down cleanly", async () => {
