@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { FileSystem, Path } from "@effect/platform"
@@ -83,6 +83,33 @@ describe("GlobalDaemonRegistry", () => {
 			const lease = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
 			const discovery = await runWithBunContext(readGlobalDaemonDiscovery({ homeDirectory }))
 			expect(Option.isSome(discovery)).toBe(true)
+			if (Option.isSome(discovery)) {
+				expect(discovery.value.lockId).toBe(lease.lockId)
+				expect(discovery.value.pid).toBe(process.pid)
+			}
+			await runWithBunContext(releaseGlobalDaemonLease(lease))
+		} finally {
+			rmSync(homeDirectory, { recursive: true, force: true })
+		}
+	})
+
+	it("recovers stale lock without discovery and clears stale socket path", async () => {
+		const homeDirectory = mkdtempSync(join(tmpdir(), "az-global-daemon-missing-discovery-"))
+		try {
+			const paths = await runWithBunContext(
+				resolveGlobalDaemonRegistryPaths({
+					homeDirectory,
+					pathOps: { join },
+				}),
+			)
+			mkdirSync(paths.lockDir, { recursive: true })
+			mkdirSync(paths.daemonDir, { recursive: true })
+			writeFileSync(paths.socketPath, "stale-socket-file", "utf8")
+
+			const lease = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			const discovery = await runWithBunContext(readGlobalDaemonDiscovery({ homeDirectory }))
+			expect(Option.isSome(discovery)).toBe(true)
+			expect(existsSync(paths.socketPath)).toBe(false)
 			if (Option.isSome(discovery)) {
 				expect(discovery.value.lockId).toBe(lease.lockId)
 				expect(discovery.value.pid).toBe(process.pid)

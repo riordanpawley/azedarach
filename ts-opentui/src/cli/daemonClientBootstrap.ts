@@ -1,6 +1,7 @@
 import type { FileSystem, Path } from "@effect/platform"
 import { Effect, Option } from "effect"
 import {
+	clearGlobalDaemonArtifacts,
 	type GlobalDaemonDiscovery,
 	probeGlobalDaemonOwnerLiveness,
 	readGlobalDaemonDiscovery,
@@ -43,6 +44,7 @@ const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
 
 		const liveness = yield* probeGlobalDaemonOwnerLiveness(discovery.value)
 		if (liveness === "dead") {
+			yield* clearGlobalDaemonArtifacts().pipe(Effect.mapError((error) => new Error(error.message)))
 			return Option.none<GlobalDaemonDiscovery>()
 		}
 		return Option.some(discovery.value)

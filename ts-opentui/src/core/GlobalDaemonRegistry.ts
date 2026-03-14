@@ -224,6 +224,22 @@ const clearLockDir = (
 		)
 	})
 
+const clearSocketPath = (
+	socketPath: string,
+): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		yield* fs.remove(socketPath, { force: true }).pipe(
+			Effect.mapError(
+				(cause) =>
+					new GlobalDaemonRegistryError({
+						message: `Failed to clear socket path '${socketPath}'`,
+						cause,
+					}),
+			),
+		)
+	})
+
 export const probeGlobalDaemonOwnerLiveness = (
 	discovery: GlobalDaemonDiscovery,
 ): Effect.Effect<GlobalDaemonOwnerLiveness> =>
@@ -258,6 +274,19 @@ export const readGlobalDaemonDiscovery = (params?: {
 		return yield* readDiscoveryAtPath(paths.discoveryPath)
 	})
 
+export const clearGlobalDaemonArtifacts = (params?: {
+	readonly homeDirectory?: string
+}): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem | Path.Path> =>
+	Effect.gen(function* () {
+		const pathService = yield* Path.Path
+		const paths = yield* resolveGlobalDaemonRegistryPaths({
+			homeDirectory: params?.homeDirectory,
+			pathOps: pathService,
+		})
+		yield* clearLockDir(paths.lockDir)
+		yield* clearSocketPath(paths.socketPath)
+	})
+
 export const acquireGlobalDaemonLease = (params?: {
 	readonly homeDirectory?: string
 	readonly nowMs?: number
@@ -279,36 +308,50 @@ export const acquireGlobalDaemonLease = (params?: {
 
 		const acquired = yield* tryAcquireLockDir(paths)
 		if (!acquired) {
-			const existing = yield* readDiscoveryAtPath(paths.discoveryPath)
+			const existing = yield* readDiscoveryAtPath(paths.discoveryPath).pipe(
+				Effect.flatMap((discovery) =>
+					Option.isSome(discovery)
+						? Effect.succeed(discovery)
+						: Effect.sleep("50 millis").pipe(
+								Effect.zipRight(readDiscoveryAtPath(paths.discoveryPath)),
+							),
+				),
+			)
 			if (Option.isNone(existing)) {
-				return yield* Effect.fail(
-					new GlobalDaemonRegistryError({
-						message: `Lock dir exists but discovery file is missing (${paths.discoveryPath})`,
-						cause: "missing_discovery",
-					}),
-				)
-			}
+				yield* clearLockDir(paths.lockDir)
+				yield* clearSocketPath(paths.socketPath)
+				const reacquired = yield* tryAcquireLockDir(paths)
+				if (!reacquired) {
+					return yield* Effect.fail(
+						new GlobalDaemonRegistryError({
+							message: `Failed to reacquire lock dir '${paths.lockDir}' after stale missing-discovery cleanup`,
+							cause: "reacquire_failed",
+						}),
+					)
+				}
+			} else {
+				const liveness = yield* probeGlobalDaemonOwnerLiveness(existing.value)
+				if (liveness !== "dead") {
+					return yield* Effect.fail(
+						new GlobalDaemonAlreadyRunningError({
+							paths,
+							discovery: existing.value,
+							liveness,
+						}),
+					)
+				}
 
-			const liveness = yield* probeGlobalDaemonOwnerLiveness(existing.value)
-			if (liveness !== "dead") {
-				return yield* Effect.fail(
-					new GlobalDaemonAlreadyRunningError({
-						paths,
-						discovery: existing.value,
-						liveness,
-					}),
-				)
-			}
-
-			yield* clearLockDir(paths.lockDir)
-			const reacquired = yield* tryAcquireLockDir(paths)
-			if (!reacquired) {
-				return yield* Effect.fail(
-					new GlobalDaemonRegistryError({
-						message: `Failed to reacquire lock dir '${paths.lockDir}' after stale cleanup`,
-						cause: "reacquire_failed",
-					}),
-				)
+				yield* clearLockDir(paths.lockDir)
+				yield* clearSocketPath(paths.socketPath)
+				const reacquired = yield* tryAcquireLockDir(paths)
+				if (!reacquired) {
+					return yield* Effect.fail(
+						new GlobalDaemonRegistryError({
+							message: `Failed to reacquire lock dir '${paths.lockDir}' after stale cleanup`,
+							cause: "reacquire_failed",
+						}),
+					)
+				}
 			}
 		}
 
