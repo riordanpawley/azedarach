@@ -286,6 +286,89 @@ export type DaemonSessionMutationResult = Schema.Schema.Type<
 	typeof DaemonSessionMutationResultSchema
 >
 
+export const DaemonDevServerStatusSchema = Schema.Literal(
+	"idle",
+	"starting",
+	"running",
+	"stopped",
+	"error",
+)
+export type DaemonDevServerStatus = Schema.Schema.Type<typeof DaemonDevServerStatusSchema>
+
+export const DaemonDevServerStateSchema = Schema.Struct({
+	issueId: Schema.String,
+	serverName: Schema.String,
+	status: DaemonDevServerStatusSchema,
+	port: Schema.NullOr(Schema.Number),
+	windowName: Schema.NullOr(Schema.String),
+	tmuxSession: Schema.NullOr(Schema.String),
+	worktreePath: Schema.NullOr(Schema.String),
+	projectPath: Schema.NullOr(Schema.String),
+	startedAt: Schema.NullOr(Schema.String),
+	error: Schema.NullOr(Schema.String),
+})
+export type DaemonDevServerState = Schema.Schema.Type<typeof DaemonDevServerStateSchema>
+
+export const DaemonDevServerStatusRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	serverName: Schema.optional(Schema.String),
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonDevServerStatusRequest = Schema.Schema.Type<
+	typeof DaemonDevServerStatusRequestSchema
+>
+
+export const DaemonDevServerStatusResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	capturedAtMs: Schema.Number,
+	server: DaemonDevServerStateSchema,
+})
+export type DaemonDevServerStatusResult = Schema.Schema.Type<
+	typeof DaemonDevServerStatusResultSchema
+>
+
+export const DaemonDevServerListRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.optional(Schema.String),
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonDevServerListRequest = Schema.Schema.Type<typeof DaemonDevServerListRequestSchema>
+
+export const DaemonDevServerListResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	capturedAtMs: Schema.Number,
+	servers: Schema.Array(DaemonDevServerStateSchema),
+})
+export type DaemonDevServerListResult = Schema.Schema.Type<typeof DaemonDevServerListResultSchema>
+
+export const DaemonDevServerStartRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+	serverName: Schema.optional(Schema.String),
+})
+export type DaemonDevServerStartRequest = Schema.Schema.Type<
+	typeof DaemonDevServerStartRequestSchema
+>
+
+export const DaemonDevServerStopRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	serverName: Schema.optional(Schema.String),
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonDevServerStopRequest = Schema.Schema.Type<typeof DaemonDevServerStopRequestSchema>
+
+export const DaemonDevServerMutationResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	capturedAtMs: Schema.Number,
+	server: DaemonDevServerStateSchema,
+})
+export type DaemonDevServerMutationResult = Schema.Schema.Type<
+	typeof DaemonDevServerMutationResultSchema
+>
+
 export const DaemonQueueDomainSchema = Schema.Literal("command", "mutation")
 export type DaemonQueueDomain = Schema.Schema.Type<typeof DaemonQueueDomainSchema>
 

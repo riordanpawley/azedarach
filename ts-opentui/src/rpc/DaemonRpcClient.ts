@@ -8,6 +8,13 @@ import {
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
 	type DaemonControlStatusResult,
+	type DaemonDevServerListRequest,
+	type DaemonDevServerListResult,
+	type DaemonDevServerMutationResult,
+	type DaemonDevServerStartRequest,
+	type DaemonDevServerStatusRequest,
+	type DaemonDevServerStatusResult,
+	type DaemonDevServerStopRequest,
 	type DaemonEventStreamRequest,
 	type DaemonEventStreamResult,
 	type DaemonHealthRequest,
@@ -56,6 +63,10 @@ export type DaemonRpcOperation =
 	| "sessionResume"
 	| "sessionRecover"
 	| "sessionUpdateState"
+	| "devServerStatus"
+	| "devServerList"
+	| "devServerStart"
+	| "devServerStop"
 	| "queueEnqueue"
 	| "queueQuery"
 	| "queueCancel"
@@ -136,6 +147,18 @@ export interface DaemonRpcClientApi {
 	readonly sessionUpdateState?: (
 		request: Omit<DaemonSessionUpdateStateRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly devServerStatus?: (
+		request: Omit<DaemonDevServerStatusRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonDevServerStatusResult, DaemonRpcClientError>
+	readonly devServerList?: (
+		request?: Omit<DaemonDevServerListRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonDevServerListResult, DaemonRpcClientError>
+	readonly devServerStart?: (
+		request: Omit<DaemonDevServerStartRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonDevServerMutationResult, DaemonRpcClientError>
+	readonly devServerStop?: (
+		request: Omit<DaemonDevServerStopRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonDevServerMutationResult, DaemonRpcClientError>
 	readonly queueEnqueue?: (
 		request: Omit<DaemonQueueEnqueueRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonQueueEnqueueResult, DaemonRpcClientError>
@@ -196,6 +219,18 @@ export interface DaemonRpcWireClient {
 	readonly daemonSessionUpdateState: (
 		input: DaemonSessionUpdateStateRequest,
 	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonDevServerStatus: (
+		input: DaemonDevServerStatusRequest,
+	) => Effect.Effect<DaemonDevServerStatusResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonDevServerList: (
+		input: DaemonDevServerListRequest,
+	) => Effect.Effect<DaemonDevServerListResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonDevServerStart: (
+		input: DaemonDevServerStartRequest,
+	) => Effect.Effect<DaemonDevServerMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonDevServerStop: (
+		input: DaemonDevServerStopRequest,
+	) => Effect.Effect<DaemonDevServerMutationResult, RpcClientError | DaemonRpcActionError>
 	readonly daemonQueueEnqueue: (
 		input: DaemonQueueEnqueueRequest,
 	) => Effect.Effect<DaemonQueueEnqueueResult, RpcClientError | DaemonRpcActionError>
@@ -428,6 +463,47 @@ export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRp
 				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionUpdateState", response)),
 				Effect.mapError((error) => mapWireError("sessionUpdateState", error)),
 			),
+	devServerStatus: (request) =>
+		wire
+			.daemonDevServerStatus({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("devServerStatus", response)),
+				Effect.mapError((error) => mapWireError("devServerStatus", error)),
+			),
+	devServerList: (request) =>
+		wire
+			.daemonDevServerList(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("devServerList", response)),
+				Effect.mapError((error) => mapWireError("devServerList", error)),
+			),
+	devServerStart: (request) =>
+		wire
+			.daemonDevServerStart({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("devServerStart", response)),
+				Effect.mapError((error) => mapWireError("devServerStart", error)),
+			),
+	devServerStop: (request) =>
+		wire
+			.daemonDevServerStop({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("devServerStop", response)),
+				Effect.mapError((error) => mapWireError("devServerStop", error)),
+			),
 	queueEnqueue: (request) =>
 		wire
 			.daemonQueueEnqueue({
@@ -481,6 +557,10 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 		daemonSessionResume: (input) => raw.daemonSessionResume(input),
 		daemonSessionRecover: (input) => raw.daemonSessionRecover(input),
 		daemonSessionUpdateState: (input) => raw.daemonSessionUpdateState(input),
+		daemonDevServerStatus: (input) => raw.daemonDevServerStatus(input),
+		daemonDevServerList: (input) => raw.daemonDevServerList(input),
+		daemonDevServerStart: (input) => raw.daemonDevServerStart(input),
+		daemonDevServerStop: (input) => raw.daemonDevServerStop(input),
 		daemonQueueEnqueue: (input) => raw.daemonQueueEnqueue(input),
 		daemonQueueQuery: (input) => raw.daemonQueueQuery(input),
 		daemonQueueCancel: (input) => raw.daemonQueueCancel(input),

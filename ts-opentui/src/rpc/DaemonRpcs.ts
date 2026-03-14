@@ -4,6 +4,13 @@ import {
 	DaemonAttachReconnectResultSchema,
 	DaemonAttachRequestSchema,
 	DaemonControlStatusResultSchema,
+	DaemonDevServerListRequestSchema,
+	DaemonDevServerListResultSchema,
+	DaemonDevServerMutationResultSchema,
+	DaemonDevServerStartRequestSchema,
+	DaemonDevServerStatusRequestSchema,
+	DaemonDevServerStatusResultSchema,
+	DaemonDevServerStopRequestSchema,
 	DaemonEventStreamRequestSchema,
 	DaemonEventStreamResultSchema,
 	DaemonHealthRequestSchema,
@@ -124,6 +131,30 @@ export const DaemonSessionUpdateStateRpc = Rpc.make("daemonSessionUpdateState", 
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonDevServerStatusRpc = Rpc.make("daemonDevServerStatus", {
+	payload: DaemonDevServerStatusRequestSchema,
+	success: DaemonDevServerStatusResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonDevServerListRpc = Rpc.make("daemonDevServerList", {
+	payload: DaemonDevServerListRequestSchema,
+	success: DaemonDevServerListResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonDevServerStartRpc = Rpc.make("daemonDevServerStart", {
+	payload: DaemonDevServerStartRequestSchema,
+	success: DaemonDevServerMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonDevServerStopRpc = Rpc.make("daemonDevServerStop", {
+	payload: DaemonDevServerStopRequestSchema,
+	success: DaemonDevServerMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonQueueEnqueueRpc = Rpc.make("daemonQueueEnqueue", {
 	payload: DaemonQueueEnqueueRequestSchema,
 	success: DaemonQueueEnqueueResultSchema,
@@ -164,6 +195,10 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonSessionResumeRpc,
 	DaemonSessionRecoverRpc,
 	DaemonSessionUpdateStateRpc,
+	DaemonDevServerStatusRpc,
+	DaemonDevServerListRpc,
+	DaemonDevServerStartRpc,
+	DaemonDevServerStopRpc,
 	DaemonQueueEnqueueRpc,
 	DaemonQueueQueryRpc,
 	DaemonQueueCancelRpc,

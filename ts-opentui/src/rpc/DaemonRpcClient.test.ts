@@ -11,6 +11,10 @@ import {
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonControlStatusResult,
+	type DaemonDevServerListResult,
+	type DaemonDevServerMutationResult,
+	type DaemonDevServerState,
+	type DaemonDevServerStatusResult,
 	type DaemonEventStreamResult,
 	type DaemonHealthResult,
 	type DaemonHeartbeatResult,
@@ -170,6 +174,37 @@ const makeQueueCancelResult = (): DaemonQueueCancelResult => ({
 	cancelledOperationIds: ["queue-op-1"],
 })
 
+const makeDevServerState = (): DaemonDevServerState => ({
+	issueId: "qp",
+	serverName: "default",
+	status: "running",
+	port: 3001,
+	windowName: "dev-default",
+	tmuxSession: "az-qp",
+	worktreePath: "/tmp/project/.worktrees/qp",
+	projectPath: "/tmp/project",
+	startedAt: "2026-03-14T06:00:00.000Z",
+	error: null,
+})
+
+const makeDevServerStatusResult = (): DaemonDevServerStatusResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	capturedAtMs: 130,
+	server: makeDevServerState(),
+})
+
+const makeDevServerListResult = (): DaemonDevServerListResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	capturedAtMs: 131,
+	servers: [makeDevServerState()],
+})
+
+const makeDevServerMutationResult = (): DaemonDevServerMutationResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	capturedAtMs: 132,
+	server: makeDevServerState(),
+})
+
 const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient => ({
 	daemonStatus: () => Effect.succeed(makeStatus()),
 	daemonHealth: () => Effect.succeed(makeHealth()),
@@ -231,6 +266,10 @@ const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient 
 	daemonSessionResume: () => Effect.succeed(makeSessionMutation()),
 	daemonSessionRecover: () => Effect.succeed(makeSessionMutation()),
 	daemonSessionUpdateState: () => Effect.succeed(makeSessionMutation()),
+	daemonDevServerStatus: () => Effect.succeed(makeDevServerStatusResult()),
+	daemonDevServerList: () => Effect.succeed(makeDevServerListResult()),
+	daemonDevServerStart: () => Effect.succeed(makeDevServerMutationResult()),
+	daemonDevServerStop: () => Effect.succeed(makeDevServerMutationResult()),
 	daemonQueueEnqueue: () => Effect.succeed(makeQueueEnqueueResult()),
 	daemonQueueQuery: () => Effect.succeed(makeQueueQueryResult()),
 	daemonQueueCancel: () => Effect.succeed(makeQueueCancelResult()),
@@ -578,6 +617,126 @@ describe("DaemonRpcClient", () => {
 		})
 	})
 
+	it("maps daemon devserver operations through the shared client", async () => {
+		const statusPayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly issueId: string
+				readonly serverName?: string
+				readonly projectPath?: string
+			} | null>(null),
+		)
+		const listPayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly issueId?: string
+				readonly projectPath?: string
+			} | null>(null),
+		)
+		const startPayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly issueId: string
+				readonly projectPath: string
+				readonly serverName?: string
+			} | null>(null),
+		)
+		const stopPayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly issueId: string
+				readonly serverName?: string
+				readonly projectPath?: string
+			} | null>(null),
+		)
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonDevServerStatus: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(statusPayloadRef, payload)
+						return makeDevServerStatusResult()
+					}),
+				daemonDevServerList: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(listPayloadRef, payload)
+						return makeDevServerListResult()
+					}),
+				daemonDevServerStart: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(startPayloadRef, payload)
+						return makeDevServerMutationResult()
+					}),
+				daemonDevServerStop: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(stopPayloadRef, payload)
+						return makeDevServerMutationResult()
+					}),
+			}),
+		)
+		if (client.devServerStatus === undefined) {
+			throw new Error("Expected devServerStatus method to be available")
+		}
+		if (client.devServerList === undefined) {
+			throw new Error("Expected devServerList method to be available")
+		}
+		if (client.devServerStart === undefined) {
+			throw new Error("Expected devServerStart method to be available")
+		}
+		if (client.devServerStop === undefined) {
+			throw new Error("Expected devServerStop method to be available")
+		}
+
+		const status = await Effect.runPromise(
+			client.devServerStatus({
+				issueId: "qp",
+				serverName: "default",
+			}),
+		)
+		const list = await Effect.runPromise(client.devServerList({ issueId: "qp" }))
+		const start = await Effect.runPromise(
+			client.devServerStart({
+				issueId: "qp",
+				projectPath: "/tmp/project",
+				serverName: "default",
+			}),
+		)
+		const stop = await Effect.runPromise(
+			client.devServerStop({
+				issueId: "qp",
+				serverName: "default",
+			}),
+		)
+		const statusPayload = await Effect.runPromise(Ref.get(statusPayloadRef))
+		const listPayload = await Effect.runPromise(Ref.get(listPayloadRef))
+		const startPayload = await Effect.runPromise(Ref.get(startPayloadRef))
+		const stopPayload = await Effect.runPromise(Ref.get(stopPayloadRef))
+
+		expect(status.server.status).toBe("running")
+		expect(list.servers).toHaveLength(1)
+		expect(start.server.issueId).toBe("qp")
+		expect(stop.server.serverName).toBe("default")
+		expect(statusPayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			issueId: "qp",
+			serverName: "default",
+		})
+		expect(listPayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			issueId: "qp",
+		})
+		expect(startPayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			issueId: "qp",
+			projectPath: "/tmp/project",
+			serverName: "default",
+		})
+		expect(stopPayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			issueId: "qp",
+			serverName: "default",
+		})
+	})
+
 	it("maps queue remote action errors to queue operation tags", async () => {
 		const client = makeDaemonRpcClientFromWire(
 			makeWire({
@@ -610,5 +769,44 @@ describe("DaemonRpcClient", () => {
 		}
 		expect(failure.value.operation).toBe("queueCancel")
 		expect(failure.value.code).toBe("QUEUE_CANCEL_REJECTED")
+	})
+
+	it("maps devserver remote action errors to devserver operation tags", async () => {
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonDevServerStart: () =>
+					Effect.fail({
+						_tag: "DaemonRpcActionError",
+						code: "DEVSERVER_CONFIG_MISSING",
+						message: "server config not found",
+						action: "define devServer.servers.default",
+					}),
+			}),
+		)
+		if (client.devServerStart === undefined) {
+			throw new Error("Expected devServerStart method to be available")
+		}
+
+		const exit = await Effect.runPromiseExit(
+			client.devServerStart({
+				issueId: "qp",
+				projectPath: "/tmp/project",
+			}),
+		)
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected devserver start remote action failure")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected devserver start failure cause")
+		}
+		expect(failure.value).toBeInstanceOf(DaemonRpcRemoteActionError)
+		if (!(failure.value instanceof DaemonRpcRemoteActionError)) {
+			throw new Error("Expected DaemonRpcRemoteActionError")
+		}
+		expect(failure.value.operation).toBe("devServerStart")
+		expect(failure.value.code).toBe("DEVSERVER_CONFIG_MISSING")
 	})
 })

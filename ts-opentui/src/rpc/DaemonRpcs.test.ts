@@ -3,6 +3,9 @@ import { Effect, Schema } from "effect"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
+	DaemonDevServerListResultSchema,
+	DaemonDevServerStartRequestSchema,
+	DaemonDevServerStatusRequestSchema,
 	DaemonEventStreamResultSchema,
 	DaemonHealthResultSchema,
 	DaemonQueueCancelResultSchema,
@@ -20,6 +23,10 @@ describe("DaemonRpcs", () => {
 		const keys = [...DaemonRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
 			"daemonAttach",
+			"daemonDevServerList",
+			"daemonDevServerStart",
+			"daemonDevServerStatus",
+			"daemonDevServerStop",
 			"daemonEventStream",
 			"daemonHealth",
 			"daemonHeartbeat",
@@ -84,6 +91,51 @@ describe("DaemonRpcs", () => {
 		expect(start.issueId).toBe("qc")
 		expect(start.projectPath).toBe("/tmp/project")
 		expect(update.state).toBe("waiting")
+	})
+
+	it("validates devserver request and result schemas", async () => {
+		const decodeStatusRequest = Schema.decodeUnknown(DaemonDevServerStatusRequestSchema)
+		const decodeStartRequest = Schema.decodeUnknown(DaemonDevServerStartRequestSchema)
+		const decodeListResult = Schema.decodeUnknown(DaemonDevServerListResultSchema)
+
+		const statusRequest = await Effect.runPromise(
+			decodeStatusRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "qp",
+				serverName: "default",
+			}),
+		)
+		const startRequest = await Effect.runPromise(
+			decodeStartRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "qp",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const listResult = await Effect.runPromise(
+			decodeListResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				capturedAtMs: 500,
+				servers: [
+					{
+						issueId: "qp",
+						serverName: "default",
+						status: "running",
+						port: 3001,
+						windowName: "dev-default",
+						tmuxSession: "az-qp",
+						worktreePath: "/tmp/project/.worktrees/qp",
+						projectPath: "/tmp/project",
+						startedAt: "2026-03-14T06:00:00.000Z",
+						error: null,
+					},
+				],
+			}),
+		)
+
+		expect(statusRequest.serverName).toBe("default")
+		expect(startRequest.projectPath).toBe("/tmp/project")
+		expect(listResult.servers[0]?.status).toBe("running")
 	})
 
 	it("validates daemon health response shape", async () => {
