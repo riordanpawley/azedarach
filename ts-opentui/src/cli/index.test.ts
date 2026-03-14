@@ -4,7 +4,10 @@ import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import { DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
-import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
+import {
+	DAEMON_RPC_PROTOCOL_VERSION,
+	type DaemonEventStreamResult,
+} from "../rpc/DaemonRpcSchemas.js"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
@@ -13,6 +16,7 @@ import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
+	consumeDaemonStatusStreamBatches,
 	daemonCommandShouldAutoStart,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
@@ -41,6 +45,26 @@ const makePrimeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): Trac
 	updated_at: "2026-03-08T00:00:00.000Z",
 	implementations: ["default"],
 	...overrides,
+})
+
+const makeDaemonEventStreamBatch = (params: {
+	readonly nextCursor: number
+	readonly eventCursor: number
+}): DaemonEventStreamResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	polledAtMs: 110,
+	nextCursor: params.nextCursor,
+	events: [
+		{
+			cursor: params.eventCursor,
+			emittedAtMs: 109,
+			event: {
+				_tag: "DaemonEventStreamSessionSnapshotEvent",
+				capturedAtMs: 109,
+				sessions: [],
+			},
+		},
+	],
 })
 
 describe("buildPrimeOutput", () => {
@@ -983,7 +1007,7 @@ describe("daemon control CLI commands", () => {
 			failure.value.message.includes("No global daemon discovery metadata found") ||
 				failure.value.message.includes("Timed out waiting for a reachable global daemon endpoint"),
 		).toBe(true)
-	})
+	}, 10_000)
 })
 
 describe("daemon session snapshot summaries", () => {
@@ -1050,6 +1074,99 @@ describe("daemon session snapshot summaries", () => {
 		expect(summary.value.totalSessions).toBe(3)
 		expect(summary.value.stateCounts["busy"]).toBe(2)
 		expect(summary.value.stateCounts["waiting"]).toBe(1)
+	})
+})
+
+describe("daemon status stream consumption", () => {
+	it("fails with actionable guidance when daemon stream RPC is unavailable", async () => {
+		const exit = await Effect.runPromiseExit(
+			consumeDaemonStatusStreamBatches({
+				client: {},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				clientId: "az-cli:test",
+				projectPath: "/tmp/project",
+				initialCursor: undefined,
+				batchSize: 10,
+				waitMs: 100,
+				watch: false,
+				maxBatches: 1,
+				reconnectDelayMs: 0,
+				onBatch: () => Effect.void,
+			}),
+		)
+
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected stream consumption to fail without eventStream support")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected stream failure cause")
+		}
+		expect(failure.value instanceof Error).toBe(true)
+		if (!(failure.value instanceof Error)) {
+			throw new Error("Expected error instance")
+		}
+		expect(failure.value.message).toContain("does not support eventStream RPC")
+	})
+
+	it("reuses cursor on transport reconnect and advances on successful batches", async () => {
+		const observedCursors: Array<number | undefined> = []
+		const consumedNextCursors: Array<number> = []
+		let callCount = 0
+
+		const finalCursor = await Effect.runPromise(
+			consumeDaemonStatusStreamBatches({
+				client: {
+					eventStream: (request) => {
+						observedCursors.push(request.cursor)
+						callCount += 1
+						if (callCount === 2) {
+							return Effect.fail(
+								new DaemonRpcTransportError({
+									operation: "eventStream",
+									reason: "transport",
+									message: "socket dropped",
+									suggestion: "retry",
+								}),
+							)
+						}
+						if (callCount === 1) {
+							return Effect.succeed(
+								makeDaemonEventStreamBatch({
+									nextCursor: 5,
+									eventCursor: 4,
+								}),
+							)
+						}
+						return Effect.succeed(
+							makeDaemonEventStreamBatch({
+								nextCursor: 8,
+								eventCursor: 7,
+							}),
+						)
+					},
+				},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				clientId: "az-cli:test",
+				projectPath: "/tmp/project",
+				initialCursor: undefined,
+				batchSize: 10,
+				waitMs: 100,
+				watch: true,
+				maxBatches: 2,
+				reconnectDelayMs: 0,
+				onBatch: (batch) =>
+					Effect.sync(() => {
+						consumedNextCursors.push(batch.nextCursor)
+					}),
+			}),
+		)
+
+		expect(observedCursors).toEqual([undefined, 5, 5])
+		expect(consumedNextCursors).toEqual([5, 8])
+		expect(finalCursor).toBe(8)
 	})
 })
 

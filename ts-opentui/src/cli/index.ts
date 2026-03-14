@@ -75,8 +75,10 @@ import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
-import type { DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
+import { type DaemonRpcClientApi, DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
 import type {
+	DaemonEventStreamEntry,
+	DaemonEventStreamResult,
 	DaemonSessionMutationResult,
 	DaemonSessionSnapshotResult,
 } from "../rpc/DaemonRpcSchemas.js"
@@ -1171,7 +1173,91 @@ export const daemonCommandShouldAutoStart = (
 	command: "sync" | "status" | "health" | "stop" | "restart" | "logs",
 ): boolean => command !== "stop"
 
-const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
+const formatDaemonEventStreamEntryLine = (entry: DaemonEventStreamEntry): string => {
+	switch (entry.event._tag) {
+		case "DaemonEventStreamSessionSnapshotEvent":
+			return `cursor=${entry.cursor} session_snapshot sessions=${entry.event.sessions.length} capturedAtMs=${entry.event.capturedAtMs}`
+		case "DaemonEventStreamRuntimeSnapshotEvent":
+			return `cursor=${entry.cursor} runtime_snapshot phase=${entry.event.runtime.runtimePhase} revision=${entry.event.runtime.revision}`
+	}
+}
+
+const formatDaemonEventStreamBatchSummaryLine = (batch: DaemonEventStreamResult): string =>
+	`daemon stream batch: events=${batch.events.length} nextCursor=${batch.nextCursor} polledAtMs=${batch.polledAtMs}`
+
+export const consumeDaemonStatusStreamBatches = (params: {
+	readonly client: Pick<DaemonRpcClientApi, "eventStream">
+	readonly socketUrl: string
+	readonly clientId: string
+	readonly projectPath: string | undefined
+	readonly initialCursor: number | undefined
+	readonly batchSize: number
+	readonly waitMs: number
+	readonly watch: boolean
+	readonly maxBatches: number | undefined
+	readonly reconnectDelayMs: number
+	readonly onBatch: (batch: DaemonEventStreamResult) => Effect.Effect<void>
+}): Effect.Effect<number | undefined, Error> =>
+	Effect.gen(function* () {
+		if (params.client.eventStream === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					"Connected daemon does not support eventStream RPC yet. Update daemon/runtime and rerun `az daemon status --watch`.",
+				),
+			)
+		}
+
+		let cursor = params.initialCursor
+		let processedBatches = 0
+
+		while (params.maxBatches === undefined || processedBatches < params.maxBatches) {
+			const attempt = yield* params.client
+				.eventStream({
+					clientId: params.clientId,
+					projectPath: params.projectPath,
+					cursor,
+					batchSize: params.batchSize,
+					waitMs: params.waitMs,
+				})
+				.pipe(Effect.either)
+
+			if (attempt._tag === "Left") {
+				if (params.watch && attempt.left instanceof DaemonRpcTransportError) {
+					yield* Console.log(
+						`daemon stream reconnecting from cursor=${cursor ?? "<start>"} in ${params.reconnectDelayMs}ms (${attempt.left.message})`,
+					)
+					yield* Effect.sleep(Duration.millis(params.reconnectDelayMs))
+					continue
+				}
+				return yield* Effect.fail(
+					formatDaemonRpcClientFailure({
+						operation: "eventStream",
+						socketUrl: params.socketUrl,
+						error: attempt.left,
+					}),
+				)
+			}
+
+			cursor = attempt.right.nextCursor
+			processedBatches += 1
+			yield* params.onBatch(attempt.right)
+
+			if (!params.watch) {
+				break
+			}
+		}
+
+		return cursor
+	})
+
+const daemonStatusHandler = (args: {
+	readonly verbose: boolean
+	readonly watch: boolean
+	readonly cursor: Option.Option<number>
+	readonly streamBatchSize: Option.Option<number>
+	readonly streamWaitMs: Option.Option<number>
+	readonly streamBatches: Option.Option<number>
+}) =>
 	Effect.gen(function* () {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("status"),
@@ -1205,6 +1291,40 @@ const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
 		if (Option.isSome(snapshotSummary)) {
 			yield* Console.log(formatDaemonSessionSnapshotSummaryLine(snapshotSummary.value))
 		}
+
+		if (args.watch) {
+			const batchSize = Option.getOrElse(args.streamBatchSize, () => 32)
+			const waitMs = Option.getOrElse(args.streamWaitMs, () => 2500)
+			const maxBatches = Option.getOrUndefined(args.streamBatches)
+			const startCursorLabel = Option.match(args.cursor, {
+				onNone: () => "<start>",
+				onSome: (cursor) => String(cursor),
+			})
+			yield* Console.log(
+				`daemon status watch: streaming event batches from cursor=${startCursorLabel} batchSize=${batchSize} waitMs=${waitMs}`,
+			)
+			const finalCursor = yield* consumeDaemonStatusStreamBatches({
+				client: bootstrap.client,
+				socketUrl: bootstrap.socketUrl,
+				clientId: `az-cli:daemon-status:${process.pid}`,
+				projectPath: status.sync.projectPath ?? undefined,
+				initialCursor: Option.getOrUndefined(args.cursor),
+				batchSize,
+				waitMs,
+				watch: true,
+				maxBatches,
+				reconnectDelayMs: 1000,
+				onBatch: (batch) =>
+					Effect.gen(function* () {
+						yield* Console.log(formatDaemonEventStreamBatchSummaryLine(batch))
+						for (const entry of batch.events) {
+							yield* Console.log(`  ${formatDaemonEventStreamEntryLine(entry)}`)
+						}
+					}),
+			})
+			yield* Console.log(`daemon status watch ended at cursor=${finalCursor ?? "<start>"}`)
+		}
+
 		if (args.verbose) {
 			yield* Console.log(JSON.stringify(status, null, 2))
 		}
@@ -5580,6 +5700,26 @@ const daemonSyncCommand = Command.make(
 const daemonStatusCommand = Command.make(
 	"status",
 	{
+		watch: Options.boolean("watch").pipe(
+			Options.withAlias("w"),
+			Options.withDescription("Continuously consume daemon event stream updates"),
+		),
+		cursor: Options.integer("cursor").pipe(
+			Options.optional,
+			Options.withDescription("Start stream consumption from this cursor"),
+		),
+		streamBatchSize: Options.integer("stream-batch-size").pipe(
+			Options.optional,
+			Options.withDescription("Maximum daemon event stream entries per poll"),
+		),
+		streamWaitMs: Options.integer("stream-wait-ms").pipe(
+			Options.optional,
+			Options.withDescription("Long-poll wait duration for stream requests (milliseconds)"),
+		),
+		streamBatches: Options.integer("stream-batches").pipe(
+			Options.optional,
+			Options.withDescription("Stop watch mode after consuming N successful stream batches"),
+		),
 		verbose: verboseOption,
 	},
 	daemonStatusHandler,
