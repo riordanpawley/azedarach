@@ -16,6 +16,12 @@ import {
 	type DaemonHeartbeatResult,
 	type DaemonLogsRequest,
 	type DaemonLogsResult,
+	type DaemonQueueCancelRequest,
+	type DaemonQueueCancelResult,
+	type DaemonQueueEnqueueRequest,
+	type DaemonQueueEnqueueResult,
+	type DaemonQueueQueryRequest,
+	type DaemonQueueQueryResult,
 	type DaemonReconnectRequest,
 	type DaemonRestartRequest,
 	type DaemonRpcActionError,
@@ -50,6 +56,9 @@ export type DaemonRpcOperation =
 	| "sessionResume"
 	| "sessionRecover"
 	| "sessionUpdateState"
+	| "queueEnqueue"
+	| "queueQuery"
+	| "queueCancel"
 
 export class DaemonRpcProtocolVersionMismatchError extends Data.TaggedError(
 	"DaemonRpcProtocolVersionMismatchError",
@@ -127,6 +136,15 @@ export interface DaemonRpcClientApi {
 	readonly sessionUpdateState?: (
 		request: Omit<DaemonSessionUpdateStateRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly queueEnqueue?: (
+		request: Omit<DaemonQueueEnqueueRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonQueueEnqueueResult, DaemonRpcClientError>
+	readonly queueQuery?: (
+		request?: Omit<DaemonQueueQueryRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonQueueQueryResult, DaemonRpcClientError>
+	readonly queueCancel?: (
+		request?: Omit<DaemonQueueCancelRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonQueueCancelResult, DaemonRpcClientError>
 }
 
 export interface DaemonRpcWireClient {
@@ -178,6 +196,15 @@ export interface DaemonRpcWireClient {
 	readonly daemonSessionUpdateState: (
 		input: DaemonSessionUpdateStateRequest,
 	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonQueueEnqueue: (
+		input: DaemonQueueEnqueueRequest,
+	) => Effect.Effect<DaemonQueueEnqueueResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonQueueQuery: (
+		input: DaemonQueueQueryRequest,
+	) => Effect.Effect<DaemonQueueQueryResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonQueueCancel: (
+		input: DaemonQueueCancelRequest,
+	) => Effect.Effect<DaemonQueueCancelResult, RpcClientError | DaemonRpcActionError>
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -401,6 +428,38 @@ export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRp
 				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionUpdateState", response)),
 				Effect.mapError((error) => mapWireError("sessionUpdateState", error)),
 			),
+	queueEnqueue: (request) =>
+		wire
+			.daemonQueueEnqueue({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("queueEnqueue", response)),
+				Effect.mapError((error) => mapWireError("queueEnqueue", error)),
+			),
+	queueQuery: (request) =>
+		wire
+			.daemonQueueQuery(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("queueQuery", response)),
+				Effect.mapError((error) => mapWireError("queueQuery", error)),
+			),
+	queueCancel: (request) =>
+		wire
+			.daemonQueueCancel(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("queueCancel", response)),
+				Effect.mapError((error) => mapWireError("queueCancel", error)),
+			),
 })
 
 const makeDaemonRpcClient = Effect.gen(function* () {
@@ -422,6 +481,9 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 		daemonSessionResume: (input) => raw.daemonSessionResume(input),
 		daemonSessionRecover: (input) => raw.daemonSessionRecover(input),
 		daemonSessionUpdateState: (input) => raw.daemonSessionUpdateState(input),
+		daemonQueueEnqueue: (input) => raw.daemonQueueEnqueue(input),
+		daemonQueueQuery: (input) => raw.daemonQueueQuery(input),
+		daemonQueueCancel: (input) => raw.daemonQueueCancel(input),
 	}
 	return makeDaemonRpcClientFromWire(wire)
 })

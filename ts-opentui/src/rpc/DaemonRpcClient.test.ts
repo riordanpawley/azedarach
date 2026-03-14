@@ -15,6 +15,10 @@ import {
 	type DaemonHealthResult,
 	type DaemonHeartbeatResult,
 	type DaemonLogsResult,
+	type DaemonQueueCancelResult,
+	type DaemonQueueEnqueueResult,
+	type DaemonQueueItem,
+	type DaemonQueueQueryResult,
 	type DaemonSessionMutationResult,
 	type DaemonSessionSnapshotResult,
 } from "./DaemonRpcSchemas.js"
@@ -133,6 +137,39 @@ const makeEventStreamResult = (): DaemonEventStreamResult => ({
 	],
 })
 
+const makeQueueItem = (): DaemonQueueItem => ({
+	domain: "command",
+	operationId: "queue-op-1",
+	operation: "sessionStart",
+	projectPath: "/tmp/project",
+	issueId: "qm",
+	dedupeKey: "qm:sessionStart",
+	payloadJson: '{"issueId":"qm"}',
+	state: "queued",
+	enqueuedAtMs: 120,
+	startedAtMs: null,
+	finishedAtMs: null,
+	error: null,
+})
+
+const makeQueueEnqueueResult = (): DaemonQueueEnqueueResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	acceptedAtMs: 121,
+	item: makeQueueItem(),
+})
+
+const makeQueueQueryResult = (): DaemonQueueQueryResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	queriedAtMs: 122,
+	items: [makeQueueItem()],
+})
+
+const makeQueueCancelResult = (): DaemonQueueCancelResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	cancelledAtMs: 123,
+	cancelledOperationIds: ["queue-op-1"],
+})
+
 const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient => ({
 	daemonStatus: () => Effect.succeed(makeStatus()),
 	daemonHealth: () => Effect.succeed(makeHealth()),
@@ -194,6 +231,9 @@ const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient 
 	daemonSessionResume: () => Effect.succeed(makeSessionMutation()),
 	daemonSessionRecover: () => Effect.succeed(makeSessionMutation()),
 	daemonSessionUpdateState: () => Effect.succeed(makeSessionMutation()),
+	daemonQueueEnqueue: () => Effect.succeed(makeQueueEnqueueResult()),
+	daemonQueueQuery: () => Effect.succeed(makeQueueQueryResult()),
+	daemonQueueCancel: () => Effect.succeed(makeQueueCancelResult()),
 	...overrides,
 })
 
@@ -437,5 +477,138 @@ describe("DaemonRpcClient", () => {
 		}
 		expect(failure.value.operation).toBe("sessionUpdateState")
 		expect(failure.value.code).toBe("INVALID_STATE_TRANSITION")
+	})
+
+	it("maps daemon queue operations through the shared client", async () => {
+		const enqueuePayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly domain: "command" | "mutation"
+				readonly operation: string
+				readonly projectPath?: string
+				readonly issueId?: string
+				readonly dedupeKey?: string
+				readonly payloadJson?: string
+			} | null>(null),
+		)
+		const queryPayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly domain?: "command" | "mutation"
+				readonly projectPath?: string
+				readonly limit?: number
+			} | null>(null),
+		)
+		const cancelPayloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly operationId?: string
+			} | null>(null),
+		)
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonQueueEnqueue: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(enqueuePayloadRef, payload)
+						return makeQueueEnqueueResult()
+					}),
+				daemonQueueQuery: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(queryPayloadRef, payload)
+						return makeQueueQueryResult()
+					}),
+				daemonQueueCancel: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(cancelPayloadRef, payload)
+						return makeQueueCancelResult()
+					}),
+			}),
+		)
+		if (client.queueEnqueue === undefined) {
+			throw new Error("Expected queueEnqueue method to be available")
+		}
+		if (client.queueQuery === undefined) {
+			throw new Error("Expected queueQuery method to be available")
+		}
+		if (client.queueCancel === undefined) {
+			throw new Error("Expected queueCancel method to be available")
+		}
+
+		const enqueue = await Effect.runPromise(
+			client.queueEnqueue({
+				domain: "command",
+				operation: "sessionStart",
+				projectPath: "/tmp/project",
+				issueId: "qm",
+				dedupeKey: "qm:sessionStart",
+			}),
+		)
+		const query = await Effect.runPromise(
+			client.queueQuery({
+				domain: "command",
+				projectPath: "/tmp/project",
+				limit: 20,
+			}),
+		)
+		const cancel = await Effect.runPromise(client.queueCancel({ operationId: "queue-op-1" }))
+		const enqueuePayload = await Effect.runPromise(Ref.get(enqueuePayloadRef))
+		const queryPayload = await Effect.runPromise(Ref.get(queryPayloadRef))
+		const cancelPayload = await Effect.runPromise(Ref.get(cancelPayloadRef))
+
+		expect(enqueue.item.operationId).toBe("queue-op-1")
+		expect(query.items).toHaveLength(1)
+		expect(cancel.cancelledOperationIds).toEqual(["queue-op-1"])
+		expect(enqueuePayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			domain: "command",
+			operation: "sessionStart",
+			projectPath: "/tmp/project",
+			issueId: "qm",
+			dedupeKey: "qm:sessionStart",
+		})
+		expect(queryPayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			domain: "command",
+			projectPath: "/tmp/project",
+			limit: 20,
+		})
+		expect(cancelPayload).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			operationId: "queue-op-1",
+		})
+	})
+
+	it("maps queue remote action errors to queue operation tags", async () => {
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonQueueCancel: () =>
+					Effect.fail({
+						_tag: "DaemonRpcActionError",
+						code: "QUEUE_CANCEL_REJECTED",
+						message: "cannot cancel running operation",
+						action: "retry with operation id",
+					}),
+			}),
+		)
+		if (client.queueCancel === undefined) {
+			throw new Error("Expected queueCancel method to be available")
+		}
+
+		const exit = await Effect.runPromiseExit(client.queueCancel({}))
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected queue cancel remote action failure")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected queue cancel failure cause")
+		}
+		expect(failure.value).toBeInstanceOf(DaemonRpcRemoteActionError)
+		if (!(failure.value instanceof DaemonRpcRemoteActionError)) {
+			throw new Error("Expected DaemonRpcRemoteActionError")
+		}
+		expect(failure.value.operation).toBe("queueCancel")
+		expect(failure.value.code).toBe("QUEUE_CANCEL_REJECTED")
 	})
 })

@@ -12,6 +12,12 @@ import {
 	DaemonHeartbeatResultSchema,
 	DaemonLogsRequestSchema,
 	DaemonLogsResultSchema,
+	DaemonQueueCancelRequestSchema,
+	DaemonQueueCancelResultSchema,
+	DaemonQueueEnqueueRequestSchema,
+	DaemonQueueEnqueueResultSchema,
+	DaemonQueueQueryRequestSchema,
+	DaemonQueueQueryResultSchema,
 	DaemonReconnectRequestSchema,
 	DaemonRestartRequestSchema,
 	DaemonRpcActionErrorSchema,
@@ -118,6 +124,24 @@ export const DaemonSessionUpdateStateRpc = Rpc.make("daemonSessionUpdateState", 
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonQueueEnqueueRpc = Rpc.make("daemonQueueEnqueue", {
+	payload: DaemonQueueEnqueueRequestSchema,
+	success: DaemonQueueEnqueueResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonQueueQueryRpc = Rpc.make("daemonQueueQuery", {
+	payload: DaemonQueueQueryRequestSchema,
+	success: DaemonQueueQueryResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonQueueCancelRpc = Rpc.make("daemonQueueCancel", {
+	payload: DaemonQueueCancelRequestSchema,
+	success: DaemonQueueCancelResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonEventStreamRpc = Rpc.make("daemonEventStream", {
 	payload: DaemonEventStreamRequestSchema,
 	success: DaemonEventStreamResultSchema,
@@ -140,6 +164,9 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonSessionResumeRpc,
 	DaemonSessionRecoverRpc,
 	DaemonSessionUpdateStateRpc,
+	DaemonQueueEnqueueRpc,
+	DaemonQueueQueryRpc,
+	DaemonQueueCancelRpc,
 	DaemonEventStreamRpc,
 )
 

@@ -5,6 +5,9 @@ import {
 	DaemonAttachRequestSchema,
 	DaemonEventStreamResultSchema,
 	DaemonHealthResultSchema,
+	DaemonQueueCancelResultSchema,
+	DaemonQueueEnqueueRequestSchema,
+	DaemonQueueQueryResultSchema,
 	DaemonSessionSnapshotResultSchema,
 	DaemonSessionStartRequestSchema,
 	DaemonSessionUpdateStateRequestSchema,
@@ -21,6 +24,9 @@ describe("DaemonRpcs", () => {
 			"daemonHealth",
 			"daemonHeartbeat",
 			"daemonLogs",
+			"daemonQueueCancel",
+			"daemonQueueEnqueue",
+			"daemonQueueQuery",
 			"daemonReconnect",
 			"daemonRestart",
 			"daemonSessionPause",
@@ -179,5 +185,55 @@ describe("DaemonRpcs", () => {
 
 		expect(decoded.nextCursor).toBe(22)
 		expect(decoded.events[0]?.event._tag).toBe("DaemonEventStreamSessionSnapshotEvent")
+	})
+
+	it("validates daemon queue request and result schemas", async () => {
+		const decodeEnqueue = Schema.decodeUnknown(DaemonQueueEnqueueRequestSchema)
+		const decodeQueryResult = Schema.decodeUnknown(DaemonQueueQueryResultSchema)
+		const decodeCancelResult = Schema.decodeUnknown(DaemonQueueCancelResultSchema)
+
+		const enqueue = await Effect.runPromise(
+			decodeEnqueue({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				domain: "command",
+				operation: "sessionStart",
+				projectPath: "/tmp/project",
+				issueId: "qm",
+				payloadJson: '{"issueId":"qm"}',
+			}),
+		)
+		const query = await Effect.runPromise(
+			decodeQueryResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				queriedAtMs: 777,
+				items: [
+					{
+						domain: "mutation",
+						operationId: "queue-op-1",
+						operation: "applyTaskMutation",
+						projectPath: "/tmp/project",
+						issueId: "qm",
+						dedupeKey: "qm:apply",
+						payloadJson: '{"state":"busy"}',
+						state: "queued",
+						enqueuedAtMs: 770,
+						startedAtMs: null,
+						finishedAtMs: null,
+						error: null,
+					},
+				],
+			}),
+		)
+		const cancel = await Effect.runPromise(
+			decodeCancelResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				cancelledAtMs: 778,
+				cancelledOperationIds: ["queue-op-1"],
+			}),
+		)
+
+		expect(enqueue.operation).toBe("sessionStart")
+		expect(query.items[0]?.operationId).toBe("queue-op-1")
+		expect(cancel.cancelledOperationIds).toEqual(["queue-op-1"])
 	})
 })

@@ -286,6 +286,85 @@ export type DaemonSessionMutationResult = Schema.Schema.Type<
 	typeof DaemonSessionMutationResultSchema
 >
 
+export const DaemonQueueDomainSchema = Schema.Literal("command", "mutation")
+export type DaemonQueueDomain = Schema.Schema.Type<typeof DaemonQueueDomainSchema>
+
+export const DaemonQueueItemStateSchema = Schema.Literal(
+	"queued",
+	"running",
+	"done",
+	"failed",
+	"cancelled",
+)
+export type DaemonQueueItemState = Schema.Schema.Type<typeof DaemonQueueItemStateSchema>
+
+export const DaemonQueueItemSchema = Schema.Struct({
+	domain: DaemonQueueDomainSchema,
+	operationId: Schema.String,
+	operation: Schema.String,
+	projectPath: Schema.NullOr(Schema.String),
+	issueId: Schema.NullOr(Schema.String),
+	dedupeKey: Schema.NullOr(Schema.String),
+	payloadJson: Schema.NullOr(Schema.String),
+	state: DaemonQueueItemStateSchema,
+	enqueuedAtMs: Schema.Number,
+	startedAtMs: Schema.NullOr(Schema.Number),
+	finishedAtMs: Schema.NullOr(Schema.Number),
+	error: Schema.NullOr(Schema.String),
+})
+export type DaemonQueueItem = Schema.Schema.Type<typeof DaemonQueueItemSchema>
+
+export const DaemonQueueEnqueueRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	domain: DaemonQueueDomainSchema,
+	operation: Schema.String,
+	projectPath: Schema.optional(Schema.String),
+	issueId: Schema.optional(Schema.String),
+	dedupeKey: Schema.optional(Schema.String),
+	payloadJson: Schema.optional(Schema.String),
+})
+export type DaemonQueueEnqueueRequest = Schema.Schema.Type<typeof DaemonQueueEnqueueRequestSchema>
+
+export const DaemonQueueEnqueueResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	acceptedAtMs: Schema.Number,
+	item: DaemonQueueItemSchema,
+})
+export type DaemonQueueEnqueueResult = Schema.Schema.Type<typeof DaemonQueueEnqueueResultSchema>
+
+export const DaemonQueueQueryRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	domain: Schema.optional(DaemonQueueDomainSchema),
+	operationId: Schema.optional(Schema.String),
+	projectPath: Schema.optional(Schema.String),
+	issueId: Schema.optional(Schema.String),
+	limit: Schema.optional(Schema.Number),
+})
+export type DaemonQueueQueryRequest = Schema.Schema.Type<typeof DaemonQueueQueryRequestSchema>
+
+export const DaemonQueueQueryResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	queriedAtMs: Schema.Number,
+	items: Schema.Array(DaemonQueueItemSchema),
+})
+export type DaemonQueueQueryResult = Schema.Schema.Type<typeof DaemonQueueQueryResultSchema>
+
+export const DaemonQueueCancelRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	domain: Schema.optional(DaemonQueueDomainSchema),
+	operationId: Schema.optional(Schema.String),
+	projectPath: Schema.optional(Schema.String),
+	issueId: Schema.optional(Schema.String),
+})
+export type DaemonQueueCancelRequest = Schema.Schema.Type<typeof DaemonQueueCancelRequestSchema>
+
+export const DaemonQueueCancelResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	cancelledAtMs: Schema.Number,
+	cancelledOperationIds: Schema.Array(Schema.String),
+})
+export type DaemonQueueCancelResult = Schema.Schema.Type<typeof DaemonQueueCancelResultSchema>
+
 export const DaemonEventStreamSessionSnapshotEventSchema = Schema.TaggedStruct(
 	"DaemonEventStreamSessionSnapshotEvent",
 	{

@@ -258,4 +258,53 @@ describe("BackendDaemonControlService", () => {
 		expect(result.stopped.sync.state).toBe("stopped")
 		expect(result.stopped.sync.projectPath).toBeNull()
 	})
+
+	it("provides queue scaffold enqueue/query/cancel behavior", async () => {
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const snapshotRef = yield* Ref.make(makeRuntimeSnapshot())
+				const restartCountRef = yield* Ref.make(0)
+				const statusRef = yield* Ref.make(makeSyncStatus())
+				const startedWithRef = yield* Ref.make<
+					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
+				>([])
+				const stopCountRef = yield* Ref.make(0)
+				const service = makeBackendDaemonControlService({
+					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
+					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+				})
+
+				const first = yield* service.queueEnqueue({
+					domain: "command",
+					operation: "sessionStart",
+					projectPath: "/tmp/project-a",
+					issueId: "qm-a",
+					dedupeKey: "qm-a:start",
+				})
+				const second = yield* service.queueEnqueue({
+					domain: "mutation",
+					operation: "taskUpdate",
+					projectPath: "/tmp/project-a",
+					issueId: "qm-b",
+				})
+				const all = yield* service.queueQuery()
+				const commandOnly = yield* service.queueQuery({ domain: "command" })
+				const cancelled = yield* service.queueCancel({
+					operationId: first.item.operationId,
+				})
+				const afterCancel = yield* service.queueQuery({ operationId: first.item.operationId })
+				const limited = yield* service.queueQuery({ limit: 1 })
+
+				return { first, second, all, commandOnly, cancelled, afterCancel, limited }
+			}),
+		)
+
+		expect(result.first.item.state).toBe("queued")
+		expect(result.second.item.domain).toBe("mutation")
+		expect(result.all.items).toHaveLength(2)
+		expect(result.commandOnly.items.map((item) => item.domain)).toEqual(["command"])
+		expect(result.cancelled.cancelledOperationIds).toEqual([result.first.item.operationId])
+		expect(result.afterCancel.items[0]?.state).toBe("cancelled")
+		expect(result.limited.items).toHaveLength(1)
+	})
 })
