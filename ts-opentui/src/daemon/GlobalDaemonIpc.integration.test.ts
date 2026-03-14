@@ -169,6 +169,8 @@ describe("GlobalDaemonIpc integration", () => {
 				expect(discovery.pid).toBe(process.pid)
 				expect(cliAttach.startedDaemon).toBe(false)
 				expect(tuiAttach.startedDaemon).toBe(false)
+				expect(cliAttach.attachAttemptCount).toBeGreaterThanOrEqual(1)
+				expect(tuiAttach.attachAttemptCount).toBeGreaterThanOrEqual(1)
 				expect(cliAttach.discovery.pid).toBe(tuiAttach.discovery.pid)
 				expect(cliAttach.discovery.lockId).toBe(tuiAttach.discovery.lockId)
 				expect(cliAttach.socketUrl).toBe(tuiAttach.socketUrl)
@@ -197,6 +199,7 @@ describe("GlobalDaemonIpc integration", () => {
 			)
 			try {
 				expect(firstAttach.startedDaemon).toBe(false)
+				expect(firstAttach.attachAttemptCount).toBeGreaterThanOrEqual(1)
 				await runWithBunContext(releaseGlobalDaemonLease(leaseA))
 				leaseA = null
 				await waitForNoDiscovery(homeDirectory, 8_000)
@@ -218,6 +221,8 @@ describe("GlobalDaemonIpc integration", () => {
 
 				expect(restartedAttach.startedDaemon).toBe(false)
 				expect(reconnectAttach.startedDaemon).toBe(false)
+				expect(restartedAttach.attachAttemptCount).toBeGreaterThanOrEqual(1)
+				expect(reconnectAttach.attachAttemptCount).toBeGreaterThanOrEqual(1)
 				expect(restartedDiscovery.lockId).not.toBe(firstDiscovery.lockId)
 				expect(restartedDiscovery.socketPath).toBe(firstDiscovery.socketPath)
 				expect(restartedAttach.discovery.pid).toBe(restartedDiscovery.pid)
@@ -225,6 +230,78 @@ describe("GlobalDaemonIpc integration", () => {
 				expect(reconnectAttach.discovery.pid).toBe(restartedDiscovery.pid)
 				expect(reconnectAttach.discovery.lockId).toBe(restartedDiscovery.lockId)
 				expect(reconnectAttach.socketUrl).toBe(restartedAttach.socketUrl)
+			} finally {
+				if (leaseA !== null) {
+					await runWithBunContext(releaseGlobalDaemonLease(leaseA).pipe(Effect.ignore))
+				}
+				if (leaseB !== null) {
+					await runWithBunContext(releaseGlobalDaemonLease(leaseB).pipe(Effect.ignore))
+				}
+				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
+			}
+		})
+	}, 30_000)
+
+	it("retries reconnect attach deterministically after interruption until daemon is back", async () => {
+		await withIsolatedHome(async (homeDirectory) => {
+			let leaseA: GlobalDaemonLease | null = null
+			let leaseB: GlobalDaemonLease | null = null
+			leaseA = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			await waitForDiscovery(homeDirectory, 8_000)
+			try {
+				await runWithBunContext(
+					bootstrapDaemonRpcClient({
+						autoStart: false,
+						timeoutMs: 8_000,
+					}),
+				)
+
+				await runWithBunContext(releaseGlobalDaemonLease(leaseA))
+				leaseA = null
+				await waitForNoDiscovery(homeDirectory, 8_000)
+
+				const attempts: Array<{
+					readonly attempt: number
+					readonly delayMs: number
+					readonly timeoutRemainingMs: number
+					readonly socketPath: string | null
+				}> = []
+
+				const reconnectPromise = runWithBunContext(
+					bootstrapDaemonRpcClient({
+						autoStart: false,
+						timeoutMs: 3_000,
+						attachRetryBackoffMs: [15, 25, 40],
+						onAttachAttempt: (observation) => {
+							attempts.push({
+								attempt: observation.attempt,
+								delayMs: observation.delayMs,
+								timeoutRemainingMs: observation.timeoutRemainingMs,
+								socketPath: observation.socketPath,
+							})
+						},
+					}),
+				)
+
+				await sleep(90)
+				leaseB = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+				const restartedDiscovery = await waitForDiscovery(homeDirectory, 8_000)
+
+				const reconnectAttach = await reconnectPromise
+				expect(reconnectAttach.startedDaemon).toBe(false)
+				expect(reconnectAttach.discovery.lockId).toBe(restartedDiscovery.lockId)
+				expect(reconnectAttach.discovery.pid).toBe(restartedDiscovery.pid)
+				expect(reconnectAttach.attachAttemptCount).toBe(attempts.length)
+				expect(reconnectAttach.attachAttemptCount).toBeGreaterThan(1)
+				expect(attempts[0]?.delayMs).toBe(0)
+				expect(attempts.some((attempt) => attempt.socketPath === null)).toBe(true)
+				expect(
+					attempts.every((attempt, index) =>
+						index === 0
+							? attempt.attempt === 1
+							: attempt.attempt === attempts[index - 1]!.attempt + 1,
+					),
+				).toBe(true)
 			} finally {
 				if (leaseA !== null) {
 					await runWithBunContext(releaseGlobalDaemonLease(leaseA).pipe(Effect.ignore))

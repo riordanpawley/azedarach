@@ -18,6 +18,7 @@ import {
 
 const GLOBAL_DAEMON_BOOTSTRAP_TIMEOUT_MS = 5_000
 const GLOBAL_DAEMON_POLL_INTERVAL_MS = 50
+const GLOBAL_DAEMON_ATTACH_RETRY_BACKOFF_MS: ReadonlyArray<number> = [25, 50, 100]
 const GLOBAL_DAEMON_MAIN_ENTRY_PATH = decodeURIComponent(
 	new URL("../daemon/GlobalDaemonMain.ts", import.meta.url).pathname,
 )
@@ -113,53 +114,158 @@ export const formatDaemonRpcClientFailure = (params: {
 	return new Error(`Daemon RPC '${params.operation}' failed: ${String(exhaustive)}`)
 }
 
+export interface GlobalDaemonAttachAttemptObservation {
+	readonly attempt: number
+	readonly delayMs: number
+	readonly timeoutRemainingMs: number
+	readonly socketPath: string | null
+	readonly socketUrl: string | null
+}
+
+const retryDelayForAttempt = (attempt: number, retryBackoffMs: ReadonlyArray<number>): number => {
+	if (attempt <= 1 || retryBackoffMs.length === 0) {
+		return 0
+	}
+	const index = Math.min(attempt - 2, retryBackoffMs.length - 1)
+	return retryBackoffMs[index] ?? 0
+}
+
+const normalizeRetryBackoffMs = (
+	retryBackoffMs: ReadonlyArray<number> | undefined,
+): ReadonlyArray<number> => {
+	const source = retryBackoffMs ?? GLOBAL_DAEMON_ATTACH_RETRY_BACKOFF_MS
+	const normalized = source
+		.map((value) => (Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0))
+		.filter((value) => value > 0)
+	return normalized.length > 0 ? normalized : [0]
+}
+
 export const bootstrapDaemonRpcClient = (params?: {
 	readonly autoStart: boolean
 	readonly timeoutMs?: number
+	readonly attachRetryBackoffMs?: ReadonlyArray<number>
+	readonly onAttachAttempt?: (observation: GlobalDaemonAttachAttemptObservation) => void
+	readonly verifyReachable?: boolean
 }): Effect.Effect<
 	{
 		readonly client: DaemonRpcClientApi
 		readonly discovery: GlobalDaemonDiscovery
 		readonly socketUrl: string
 		readonly startedDaemon: boolean
+		readonly attachAttemptCount: number
 	},
 	Error,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
 		const timeoutMs = params?.timeoutMs ?? GLOBAL_DAEMON_BOOTSTRAP_TIMEOUT_MS
-		const existingDiscovery = yield* readLiveGlobalDaemonDiscovery()
+		const retryBackoffMs = normalizeRetryBackoffMs(params?.attachRetryBackoffMs)
+		const startedAtMs = Date.now()
+		const deadlineMs = startedAtMs + timeoutMs
 
 		let discovery: GlobalDaemonDiscovery
 		let startedDaemon = false
+		let attachAttemptCount = 0
+		let lastSocketUrl: string | null = null
+		let lastTransportError: DaemonRpcTransportError | null = null
 
-		if (Option.isSome(existingDiscovery)) {
-			discovery = existingDiscovery.value
-		} else {
-			if (!params?.autoStart) {
-				return yield* Effect.fail(
-					new Error(
-						"No global daemon discovery metadata found. Start the daemon first with `bun run src/daemon/GlobalDaemonMain.ts`.",
-					),
-				)
+		while (Date.now() <= deadlineMs) {
+			const attempt = attachAttemptCount + 1
+			const delayMs = retryDelayForAttempt(attempt, retryBackoffMs)
+			if (delayMs > 0) {
+				const remainingBeforeDelay = deadlineMs - Date.now()
+				if (remainingBeforeDelay <= 0 || delayMs > remainingBeforeDelay) {
+					break
+				}
+				yield* sleep(delayMs)
 			}
-			yield* spawnGlobalDaemonMain()
-			discovery = yield* waitForGlobalDaemonDiscovery({ timeoutMs })
-			startedDaemon = true
+
+			const liveDiscovery = yield* readLiveGlobalDaemonDiscovery()
+			if (Option.isSome(liveDiscovery)) {
+				discovery = liveDiscovery.value
+			} else if (params?.autoStart && !startedDaemon) {
+				const remainingTimeoutMs = Math.max(0, deadlineMs - Date.now())
+				yield* spawnGlobalDaemonMain()
+				discovery = yield* waitForGlobalDaemonDiscovery({ timeoutMs: remainingTimeoutMs })
+				startedDaemon = true
+			} else {
+				attachAttemptCount = attempt
+				params?.onAttachAttempt?.({
+					attempt,
+					delayMs,
+					timeoutRemainingMs: Math.max(0, deadlineMs - Date.now()),
+					socketPath: null,
+					socketUrl: null,
+				})
+				continue
+			}
+
+			const socketUrl = buildGlobalDaemonSocketUrl(discovery.socketPath)
+			lastSocketUrl = socketUrl
+			attachAttemptCount = attempt
+			params?.onAttachAttempt?.({
+				attempt,
+				delayMs,
+				timeoutRemainingMs: Math.max(0, deadlineMs - Date.now()),
+				socketPath: discovery.socketPath,
+				socketUrl,
+			})
+
+			const client = yield* withGlobalDaemonClient(
+				socketUrl,
+				Effect.gen(function* () {
+					return yield* DaemonRpcClient
+				}),
+			)
+
+			if (!params?.verifyReachable) {
+				return {
+					client,
+					discovery,
+					socketUrl,
+					startedDaemon,
+					attachAttemptCount,
+				}
+			}
+
+			const connectivity = yield* client.status().pipe(Effect.either)
+			if (connectivity._tag === "Right") {
+				return {
+					client,
+					discovery,
+					socketUrl,
+					startedDaemon,
+					attachAttemptCount,
+				}
+			}
+
+			const error = connectivity.left
+			if (error instanceof DaemonRpcTransportError) {
+				lastTransportError = error
+				continue
+			}
+			return yield* Effect.fail(
+				formatDaemonRpcClientFailure({
+					operation: "status",
+					socketUrl,
+					error,
+				}),
+			)
 		}
 
-		const socketUrl = buildGlobalDaemonSocketUrl(discovery.socketPath)
-		const client = yield* withGlobalDaemonClient(
-			socketUrl,
-			Effect.gen(function* () {
-				return yield* DaemonRpcClient
-			}),
+		if (lastTransportError !== null) {
+			return yield* Effect.fail(
+				formatDaemonRpcClientFailure({
+					operation: "status",
+					socketUrl: lastSocketUrl ?? "<unknown>",
+					error: lastTransportError,
+				}),
+			)
+		}
+
+		return yield* Effect.fail(
+			new Error(
+				"Timed out waiting for a reachable global daemon endpoint. Restart the daemon and retry.",
+			),
 		)
-
-		return {
-			client,
-			discovery,
-			socketUrl,
-			startedDaemon,
-		}
 	})
