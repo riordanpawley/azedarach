@@ -25,7 +25,6 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { BackendDaemonService } from "../core/BackendDaemonService.js"
 import { BackendSyncRouter } from "../core/BackendSyncRouter.js"
 import {
 	type Issue,
@@ -51,6 +50,7 @@ import type {
 import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
+import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
@@ -156,6 +156,75 @@ export const classifySessionRecoveryError = (
 
 const isTransientSessionRecoveryError = (error: SessionRecoveryError): boolean =>
 	classifySessionRecoveryError(error) === "transient"
+
+export const makeBoardDaemonIpcSignals = (params: {
+	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
+	readonly daemonFrontendClientId: string
+	readonly nowMs: () => number
+}) => {
+	const signalAttach = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		return params.daemonRpcClient.value
+			.attach({
+				clientId: params.daemonFrontendClientId,
+				requestedAtMs: params.nowMs(),
+			})
+			.pipe(
+				Effect.asVoid,
+				Effect.catchAll(() => Effect.void),
+			)
+	}
+
+	const signalReconnect = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		return params.daemonRpcClient.value
+			.reconnect({
+				clientId: params.daemonFrontendClientId,
+				requestedAtMs: params.nowMs(),
+			})
+			.pipe(
+				Effect.asVoid,
+				Effect.catchAll(() => Effect.void),
+			)
+	}
+
+	const signalHeartbeat = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		const daemonRpcClient = params.daemonRpcClient.value
+		return daemonRpcClient
+			.heartbeat({
+				clientId: params.daemonFrontendClientId,
+				observedAtMs: params.nowMs(),
+			})
+			.pipe(
+				Effect.catchAll((heartbeatError) =>
+					signalReconnect().pipe(
+						Effect.zipRight(
+							daemonRpcClient.heartbeat({
+								clientId: params.daemonFrontendClientId,
+								observedAtMs: params.nowMs(),
+							}),
+						),
+						Effect.mapError(() => heartbeatError),
+					),
+				),
+				Effect.asVoid,
+				Effect.catchAll(() => Effect.void),
+			)
+	}
+
+	return {
+		signalAttach,
+		signalReconnect,
+		signalHeartbeat,
+	}
+}
 
 const formatSessionRecoveryError = (error: SessionRecoveryError): string => {
 	switch (error._tag) {
@@ -669,7 +738,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	dependencies: [
 		SessionManager.Default,
 		IssueTrackerClient.Default,
-		BackendDaemonService.Default,
 		BackendSyncRouter.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -686,7 +754,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* SessionManager
-		const backendDaemon = yield* BackendDaemonService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
@@ -734,21 +802,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const autoRecoveryQueue = yield* Queue.unbounded<string>()
 		const autoRecoveryTrackedIssueIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 		const daemonFrontendClientId = `board-ui:${process.pid}`
-
-		const signalDaemonAttach = () =>
-			backendDaemon.registerClientAttach({
-				clientId: daemonFrontendClientId,
-				requestedAtMs: Date.now(),
-			})
-
-		const signalDaemonHeartbeat = () =>
-			backendDaemon.registerClientHeartbeat(daemonFrontendClientId, Date.now())
-
-		const signalDaemonReconnect = () =>
-			backendDaemon.markClientReconnect({
-				clientId: daemonFrontendClientId,
-				requestedAtMs: Date.now(),
-			})
+		const {
+			signalAttach: signalDaemonAttach,
+			signalHeartbeat: signalDaemonHeartbeat,
+			signalReconnect: signalDaemonReconnect,
+		} = makeBoardDaemonIpcSignals({
+			daemonRpcClient,
+			daemonFrontendClientId,
+			nowMs: Date.now,
+		})
 
 		// ====================================================================
 		// Per-Project State Management

@@ -44,11 +44,6 @@ import { AttachmentService } from "../core/AttachmentService.js"
 import { BackendDaemonControlService } from "../core/BackendDaemonControlService.js"
 import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
 import {
-	acquireDaemonSyncInstanceLease,
-	formatDaemonInstanceAlreadyRunningMessage,
-	releaseDaemonSyncInstanceLease,
-} from "../core/DaemonInstanceRegistry.js"
-import {
 	resolveDaemonIntervalMsFromEnv,
 	resolveDaemonOperationsPolicy,
 } from "../core/DaemonOperationsPolicy.js"
@@ -108,6 +103,7 @@ import {
 	parseConfigPathFromArgv,
 	resolveCliExecutionMode,
 } from "./argv-normalization.js"
+import { bootstrapDaemonRpcClient, formatDaemonRpcClientFailure } from "./daemonClientBootstrap.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
@@ -817,8 +813,18 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 			yield* Console.error(`Warning: ${warning}`)
 		}
 
-		const daemonControl = yield* BackendDaemonControlService
-		const currentStatus = yield* daemonControl.status()
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const currentStatus = yield* bootstrap.client.status().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "status",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
 		const alreadyRunningForPath =
 			currentStatus.sync.state === "running" &&
 			currentStatus.sync.projectPath === params.projectPath
@@ -831,25 +837,18 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 			return
 		}
 
-		yield* daemonControl
+		yield* bootstrap.client
 			.restart({
 				projectPath: params.projectPath,
 				...(intervalMs === undefined ? {} : { intervalMs }),
 			})
 			.pipe(
-				Effect.catchTag("BackendDaemonControlRestartConfigurationError", (error) =>
-					Effect.fail(
-						new Error(
-							`Auto-daemonize failed (${error.reason}). Provide --no-daemon to skip startup, or inspect daemon state with \`az daemon status\`.`,
-						),
-					),
-				),
-				Effect.catchAll((error) =>
-					Effect.fail(
-						new Error(
-							`Auto-daemonize failed for ${params.projectPath}: ${error instanceof Error ? error.message : String(error)}. Use \`az daemon health\` and \`az daemon logs\` for diagnostics.`,
-						),
-					),
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "restart",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
 				),
 			)
 		if (params.verbose) {
@@ -976,26 +975,6 @@ const syncHandler = (args: {
 		}
 	})
 
-const awaitDaemonShutdownSignal = (): Effect.Effect<"SIGINT" | "SIGTERM", never> =>
-	Effect.async<"SIGINT" | "SIGTERM">((resume) => {
-		let settled = false
-		const cleanup = () => {
-			process.off("SIGINT", onSigint)
-			process.off("SIGTERM", onSigterm)
-		}
-		const settle = (signal: "SIGINT" | "SIGTERM") => {
-			if (settled) return
-			settled = true
-			cleanup()
-			resume(Effect.succeed(signal))
-		}
-		const onSigint = () => settle("SIGINT")
-		const onSigterm = () => settle("SIGTERM")
-		process.on("SIGINT", onSigint)
-		process.on("SIGTERM", onSigterm)
-		return Effect.sync(cleanup)
-	})
-
 const daemonSyncHandler = (args: {
 	readonly intervalMs: Option.Option<number>
 	readonly projectDir: Option.Option<string>
@@ -1004,58 +983,38 @@ const daemonSyncHandler = (args: {
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const intervalMs = Option.getOrUndefined(args.intervalMs)
-		const daemon = yield* BackendSyncDaemonService
 
 		yield* validateIssueTrackerStore(cwd)
-		const lease = yield* acquireDaemonSyncInstanceLease({
-			projectPath: cwd,
-			endpoint: {
-				protocol: "local-sync",
-				address: cwd,
-			},
-		}).pipe(
-			Effect.catchTag("DaemonInstanceAlreadyRunningError", (error) =>
-				Effect.fail(new Error(formatDaemonInstanceAlreadyRunningMessage(error))),
-			),
-			Effect.catchTag("DaemonInstanceRegistryError", (error) =>
-				Effect.fail(new Error(error.message)),
-			),
-		)
-
-		yield* Effect.acquireUseRelease(
-			Effect.succeed(lease),
-			() =>
-				Effect.gen(function* () {
-					yield* daemon.start({
-						projectPath: cwd,
-						...(intervalMs === undefined ? {} : { intervalMs }),
-					})
-
-					yield* Console.log(
-						`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
-					)
-					yield* Console.log("Press Ctrl+C to stop.")
-					if (args.verbose) {
-						const status = yield* daemon.getStatus()
-						yield* Console.log(
-							`status=${status.state} projectPath=${status.projectPath ?? "<none>"}`,
-						)
-					}
-
-					const signal = yield* awaitDaemonShutdownSignal()
-					yield* Console.log(`Received ${signal}, stopping daemon...`)
-					yield* daemon.stop().pipe(Effect.catchAllCause(() => Effect.void))
-					yield* Console.log("Headless backend sync daemon stopped.")
-				}).pipe(Effect.ensuring(daemon.stop().pipe(Effect.catchAllCause(() => Effect.void)))),
-			(acquiredLease) =>
-				releaseDaemonSyncInstanceLease(acquiredLease).pipe(
-					Effect.catchAll((error) =>
-						Console.error(
-							`Warning: failed to release daemon sync lock (${acquiredLease.paths.lockDirectory}): ${error.message}`,
-						),
-					),
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const status = yield* bootstrap.client
+			.restart({
+				projectPath: cwd,
+				...(intervalMs === undefined ? {} : { intervalMs }),
+			})
+			.pipe(
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "restart",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
 				),
+			)
+
+		yield* Console.log(
+			`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
 		)
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "restart",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
 	})
 
 const formatDaemonControlStatusLine = (params: {
@@ -1078,8 +1037,18 @@ const formatDaemonControlStatusLine = (params: {
 
 const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
-		const daemonControl = yield* BackendDaemonControlService
-		const status = yield* daemonControl.status()
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const status = yield* bootstrap.client.status().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "status",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
 				mode: "status",
@@ -1093,8 +1062,18 @@ const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
 
 const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
-		const daemonControl = yield* BackendDaemonControlService
-		const health = yield* daemonControl.health()
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const health = yield* bootstrap.client.health().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "health",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
 		yield* Console.log(`daemon health: ${health.state} (${health.reason})`)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -1115,8 +1094,18 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 
 const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
-		const daemonControl = yield* BackendDaemonControlService
-		const status = yield* daemonControl.stop()
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: false,
+		})
+		const status = yield* bootstrap.client.stop().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "stop",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
 		yield* Console.log("Headless backend sync daemon stopped.")
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -1135,21 +1124,21 @@ const daemonRestartHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const daemonControl = yield* BackendDaemonControlService
-		const status = yield* daemonControl
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const status = yield* bootstrap.client
 			.restart({
 				projectPath: Option.getOrUndefined(args.projectDir),
 				intervalMs: Option.getOrUndefined(args.intervalMs),
 			})
 			.pipe(
-				Effect.catchTag("BackendDaemonControlRestartConfigurationError", (error) =>
-					Effect.fail(
-						new Error(
-							error.reason === "missing-project-path"
-								? "Cannot restart daemon: no project path available. Provide --project-dir <path> or run `az daemon sync --project-dir <path>` first."
-								: `Cannot restart daemon: ${error.message}`,
-						),
-					),
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "restart",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
 				),
 			)
 		yield* Console.log("Headless backend sync daemon restarted.")
@@ -1170,48 +1159,41 @@ const daemonLogsHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const fs = yield* FileSystem.FileSystem
-		const pathService = yield* Path.Path
-		const logPath = pathService.join(cwd, "az-cli.log")
+		const cwd = Option.getOrUndefined(args.projectDir)
 		const lineLimit = Option.getOrElse(args.lines, () => 100)
-		const exists = yield* fs.exists(logPath)
-		if (!exists) {
-			return yield* Effect.fail(
-				new Error(
-					`No daemon log file found at ${logPath}. Start daemon-aware commands first (for example: \`az sync\` or \`az daemon sync --project-dir ${cwd}\`).`,
-				),
-			)
-		}
-
-		const rawLog = yield* fs
-			.readFileString(logPath)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const logResult = yield* bootstrap.client
+			.logs({
+				projectPath: cwd,
+				lines: lineLimit,
+			})
 			.pipe(
-				Effect.mapError(
-					(error) => new Error(`Failed to read daemon logs at ${logPath}: ${String(error)}`),
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "logs",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
 				),
 			)
-		const lines = rawLog
-			.split("\n")
-			.map((line) => line.trimEnd())
-			.filter((line) => line.length > 0)
-		const tail = lines.slice(Math.max(0, lines.length - lineLimit))
-		if (tail.length === 0) {
-			yield* Console.log(`No daemon log lines available in ${logPath}.`)
+		if (logResult.lines.length === 0) {
+			yield* Console.log(`No daemon log lines available in ${logResult.logPath}.`)
 			return
 		}
 
 		yield* Console.log(
-			`Showing ${tail.length} of ${lines.length} daemon log line(s) from ${logPath} (tail=${lineLimit})`,
+			`Showing ${logResult.lines.length} of ${logResult.totalLines} daemon log line(s) from ${logResult.logPath} (tail=${lineLimit})`,
 		)
-		for (const line of tail) {
+		for (const line of logResult.lines) {
 			yield* Console.log(line)
 		}
 		if (args.verbose) {
 			yield* Console.log("Diagnostics:")
 			yield* Console.log("- az daemon status")
 			yield* Console.log("- az daemon health")
-			yield* Console.log(`- az daemon logs --project-dir ${cwd} --lines 200`)
+			yield* Console.log("- az daemon logs --lines 200")
 		}
 	})
 

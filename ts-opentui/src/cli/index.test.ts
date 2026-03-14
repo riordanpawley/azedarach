@@ -3,6 +3,11 @@ import { BunContext } from "@effect/platform-bun"
 import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+import { DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
+import {
+	buildGlobalDaemonSocketUrl,
+	formatDaemonRpcClientFailure,
+} from "./daemonClientBootstrap.js"
 import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
@@ -906,54 +911,54 @@ describe("normalizeCliAliases", () => {
 })
 
 describe("daemon control CLI commands", () => {
-	it("executes `az daemon health` on the command layer", async () => {
-		await Effect.runPromise(
-			cliRunner(["bun", "az", "daemon", "health"]).pipe(Effect.provide(BunContext.layer)),
-		)
-	})
-
-	it("surfaces actionable error for `az daemon restart` without project context", async () => {
+	it("surfaces actionable error when daemon stop runs without discovery metadata", async () => {
+		const isolatedHome = `${process.env.TMPDIR ?? "/tmp"}/az-daemon-home-${crypto.randomUUID()}`
+		const originalHome = process.env.HOME
+		process.env.HOME = isolatedHome
 		const exit = await Effect.runPromiseExit(
-			cliRunner(["bun", "az", "daemon", "restart"]).pipe(Effect.provide(BunContext.layer)),
+			cliRunner(["bun", "az", "daemon", "stop"]).pipe(Effect.provide(BunContext.layer)),
 		)
+		process.env.HOME = originalHome
 		expect(Exit.isFailure(exit)).toBe(true)
 		if (!Exit.isFailure(exit)) {
-			throw new Error("Expected restart command to fail")
+			throw new Error("Expected stop command to fail")
 		}
 		const failure = Cause.failureOption(exit.cause)
 		expect(Option.isSome(failure)).toBe(true)
 		if (!Option.isSome(failure)) {
-			throw new Error("Expected restart command failure message")
+			throw new Error("Expected stop command failure message")
 		}
 		expect(failure.value instanceof Error).toBe(true)
 		if (!(failure.value instanceof Error)) {
 			throw new Error("Expected failure to be Error")
 		}
-		expect(failure.value.message).toContain("Cannot restart daemon: no project path available.")
-		expect(failure.value.message).toContain("az daemon sync --project-dir <path>")
+		expect(failure.value.message).toContain("No global daemon discovery metadata found")
+	})
+})
+
+describe("daemon RPC bootstrap helpers", () => {
+	it("builds ws+unix socket URL from discovery socket path", () => {
+		expect(buildGlobalDaemonSocketUrl("/tmp/az-global.sock")).toBe(
+			"ws+unix:///tmp/az-global.sock:/",
+		)
 	})
 
-	it("surfaces actionable error when daemon logs are unavailable for a project", async () => {
-		const projectDir = `${process.env.TMPDIR ?? "/tmp"}/az-daemon-logs-${crypto.randomUUID()}`
+	it("formats transport failures with endpoint and suggestion context", () => {
+		const error = new DaemonRpcTransportError({
+			operation: "health",
+			reason: "transport",
+			message: "connection refused",
+			suggestion: "Check daemon status",
+		})
+		const formatted = formatDaemonRpcClientFailure({
+			operation: "health",
+			socketUrl: "ws+unix:///tmp/az-global.sock:/",
+			error,
+		})
 
-		const exit = await Effect.runPromiseExit(
-			cliRunner(["bun", "az", "daemon", "logs", projectDir]).pipe(Effect.provide(BunContext.layer)),
-		)
-		expect(Exit.isFailure(exit)).toBe(true)
-		if (!Exit.isFailure(exit)) {
-			throw new Error("Expected daemon logs command to fail")
-		}
-		const failure = Cause.failureOption(exit.cause)
-		expect(Option.isSome(failure)).toBe(true)
-		if (!Option.isSome(failure)) {
-			throw new Error("Expected logs command failure message")
-		}
-		expect(failure.value instanceof Error).toBe(true)
-		if (!(failure.value instanceof Error)) {
-			throw new Error("Expected logs failure to be Error")
-		}
-		expect(failure.value.message).toContain("No daemon log file found")
-		expect(failure.value.message).toContain("az daemon sync --project-dir")
+		expect(formatted.message).toContain("Unable to connect to daemon RPC endpoint")
+		expect(formatted.message).toContain("ws+unix:///tmp/az-global.sock:/")
+		expect(formatted.message).toContain("Check daemon status")
 	})
 })
 
