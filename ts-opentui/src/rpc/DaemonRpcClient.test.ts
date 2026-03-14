@@ -11,6 +11,7 @@ import {
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonControlStatusResult,
+	type DaemonEventStreamResult,
 	type DaemonHealthResult,
 	type DaemonHeartbeatResult,
 	type DaemonLogsResult,
@@ -115,6 +116,23 @@ const makeSessionMutation = (): DaemonSessionMutationResult => ({
 	},
 })
 
+const makeEventStreamResult = (): DaemonEventStreamResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	polledAtMs: 110,
+	nextCursor: 14,
+	events: [
+		{
+			cursor: 13,
+			emittedAtMs: 109,
+			event: {
+				_tag: "DaemonEventStreamSessionSnapshotEvent",
+				capturedAtMs: 109,
+				sessions: [],
+			},
+		},
+	],
+})
+
 const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient => ({
 	daemonStatus: () => Effect.succeed(makeStatus()),
 	daemonHealth: () => Effect.succeed(makeHealth()),
@@ -168,6 +186,7 @@ const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient 
 			snapshot: makeStatus().runtime,
 		}),
 	daemonHeartbeat: () => Effect.succeed(makeHeartbeat()),
+	daemonEventStream: () => Effect.succeed(makeEventStreamResult()),
 	daemonSessionSnapshot: () => Effect.succeed(makeSessionSnapshot()),
 	daemonSessionStart: () => Effect.succeed(makeSessionMutation()),
 	daemonSessionStop: () => Effect.succeed(makeSessionMutation()),
@@ -339,6 +358,45 @@ describe("DaemonRpcClient", () => {
 			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			issueId: "qc",
 			projectPath: "/tmp/project",
+		})
+	})
+
+	it("maps daemon event stream requests through the shared client", async () => {
+		const payloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly clientId: string
+				readonly cursor?: number
+				readonly batchSize?: number
+			} | null>(null),
+		)
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonEventStream: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(payloadRef, payload)
+						return makeEventStreamResult()
+					}),
+			}),
+		)
+		if (client.eventStream === undefined) {
+			throw new Error("Expected eventStream method to be available")
+		}
+
+		const result = await Effect.runPromise(
+			client.eventStream({
+				clientId: "board-ui:test",
+				cursor: 12,
+				batchSize: 20,
+			}),
+		)
+		const captured = await Effect.runPromise(Ref.get(payloadRef))
+		expect(result.nextCursor).toBe(14)
+		expect(captured).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			clientId: "board-ui:test",
+			cursor: 12,
+			batchSize: 20,
 		})
 	})
 

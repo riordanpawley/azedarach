@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
+	DaemonEventStreamResultSchema,
 	DaemonHealthResultSchema,
 	DaemonSessionSnapshotResultSchema,
 	DaemonSessionStartRequestSchema,
@@ -16,6 +17,7 @@ describe("DaemonRpcs", () => {
 		const keys = [...DaemonRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
 			"daemonAttach",
+			"daemonEventStream",
 			"daemonHealth",
 			"daemonHeartbeat",
 			"daemonLogs",
@@ -152,5 +154,30 @@ describe("DaemonRpcs", () => {
 		expect(decoded.sessions).toHaveLength(1)
 		expect(decoded.sessions[0]?.issueId).toBe("qc")
 		expect(decoded.sessions[0]?.state).toBe("busy")
+	})
+
+	it("validates daemon event stream response shape", async () => {
+		const decode = Schema.decodeUnknown(DaemonEventStreamResultSchema)
+		const decoded = await Effect.runPromise(
+			decode({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				polledAtMs: 456,
+				nextCursor: 22,
+				events: [
+					{
+						cursor: 21,
+						emittedAtMs: 455,
+						event: {
+							_tag: "DaemonEventStreamSessionSnapshotEvent",
+							capturedAtMs: 455,
+							sessions: [],
+						},
+					},
+				],
+			}),
+		)
+
+		expect(decoded.nextCursor).toBe(22)
+		expect(decoded.events[0]?.event._tag).toBe("DaemonEventStreamSessionSnapshotEvent")
 	})
 })

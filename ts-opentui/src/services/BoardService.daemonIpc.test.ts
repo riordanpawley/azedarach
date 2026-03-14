@@ -13,6 +13,7 @@ const makeDaemonRpcClientStub = (params: {
 	readonly onReconnect?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onHeartbeat?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onSessionSnapshot?: () => Effect.Effect<void, DaemonRpcClientError>
+	readonly onEventStream?: () => Effect.Effect<void, DaemonRpcClientError>
 }): DaemonRpcClientApi => ({
 	status: () =>
 		Effect.succeed({
@@ -246,6 +247,27 @@ const makeDaemonRpcClientStub = (params: {
 				}),
 			),
 		),
+	eventStream: () =>
+		(params.onEventStream ?? (() => Effect.void))().pipe(
+			Effect.zipRight(
+				Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					polledAtMs: 5,
+					nextCursor: 42,
+					events: [
+						{
+							cursor: 41,
+							emittedAtMs: 4,
+							event: {
+								_tag: "DaemonEventStreamSessionSnapshotEvent",
+								capturedAtMs: 4,
+								sessions: [],
+							},
+						},
+					],
+				}),
+			),
+		),
 	sessionSnapshot: () =>
 		(params.onSessionSnapshot ?? (() => Effect.void))().pipe(
 			Effect.zipRight(
@@ -278,6 +300,8 @@ describe("BoardService daemon IPC signaling", () => {
 		await Effect.runPromise(signals.signalAttach())
 		await Effect.runPromise(signals.signalHeartbeat())
 		await Effect.runPromise(signals.signalReconnect())
+		const cursor = await Effect.runPromise(signals.consumeStreamBatch(undefined))
+		expect(cursor).toBeUndefined()
 	})
 
 	it("signals attach through daemon rpc client", async () => {
@@ -348,5 +372,27 @@ describe("BoardService daemon IPC signaling", () => {
 		await Effect.runPromise(signals.signalHeartbeat())
 		const snapshotCalls = await Effect.runPromise(Ref.get(snapshotCallsRef))
 		expect(snapshotCalls).toBe(2)
+	})
+
+	it("consumes daemon event stream batches and advances cursor", async () => {
+		const streamCallsRef = await Effect.runPromise(Ref.make(0))
+		const observedBatchCursorRef = await Effect.runPromise(Ref.make<number | null>(null))
+		const signals = makeBoardDaemonIpcSignals({
+			daemonRpcClient: Option.some(
+				makeDaemonRpcClientStub({
+					onEventStream: () => Ref.update(streamCallsRef, (count) => count + 1),
+				}),
+			),
+			daemonFrontendClientId: "board-ui:test",
+			nowMs: () => 1000,
+			onDaemonStreamBatch: (batch) => Ref.set(observedBatchCursorRef, batch.nextCursor),
+		})
+
+		const nextCursor = await Effect.runPromise(signals.consumeStreamBatch(40))
+		const streamCalls = await Effect.runPromise(Ref.get(streamCallsRef))
+		const observedBatchCursor = await Effect.runPromise(Ref.get(observedBatchCursorRef))
+		expect(nextCursor).toBe(42)
+		expect(streamCalls).toBe(1)
+		expect(observedBatchCursor).toBe(42)
 	})
 })

@@ -4,6 +4,8 @@ import {
 	DaemonAttachReconnectResultSchema,
 	DaemonAttachRequestSchema,
 	DaemonControlStatusResultSchema,
+	DaemonEventStreamRequestSchema,
+	DaemonEventStreamResultSchema,
 	DaemonHealthRequestSchema,
 	DaemonHealthResultSchema,
 	DaemonHeartbeatRequestSchema,
@@ -116,6 +118,12 @@ export const DaemonSessionUpdateStateRpc = Rpc.make("daemonSessionUpdateState", 
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonEventStreamRpc = Rpc.make("daemonEventStream", {
+	payload: DaemonEventStreamRequestSchema,
+	success: DaemonEventStreamResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonRpcGroup = RpcGroup.make(
 	DaemonStatusRpc,
 	DaemonHealthRpc,
@@ -132,6 +140,7 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonSessionResumeRpc,
 	DaemonSessionRecoverRpc,
 	DaemonSessionUpdateStateRpc,
+	DaemonEventStreamRpc,
 )
 
 export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonRpcGroup>

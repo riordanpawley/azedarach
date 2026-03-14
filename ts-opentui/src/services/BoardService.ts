@@ -51,6 +51,7 @@ import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
 import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
+import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
 import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
@@ -161,6 +162,7 @@ export const makeBoardDaemonIpcSignals = (params: {
 	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
 	readonly daemonFrontendClientId: string
 	readonly nowMs: () => number
+	readonly onDaemonStreamBatch?: (batch: DaemonEventStreamResult) => Effect.Effect<void>
 }) => {
 	const observeSessionSnapshot = (): Effect.Effect<void> => {
 		if (Option.isNone(params.daemonRpcClient)) {
@@ -239,10 +241,54 @@ export const makeBoardDaemonIpcSignals = (params: {
 			)
 	}
 
+	const processDaemonStreamBatch = (batch: DaemonEventStreamResult): Effect.Effect<void> =>
+		Effect.forEach(
+			batch.events,
+			(entry) => {
+				switch (entry.event._tag) {
+					case "DaemonEventStreamSessionSnapshotEvent":
+						return Effect.logDebug(
+							`BoardService daemon stream session snapshot: cursor=${entry.cursor} sessions=${entry.event.sessions.length} capturedAtMs=${entry.event.capturedAtMs}`,
+						)
+					case "DaemonEventStreamRuntimeSnapshotEvent":
+						return Effect.logDebug(
+							`BoardService daemon stream runtime snapshot: cursor=${entry.cursor} revision=${entry.event.runtime.revision} phase=${entry.event.runtime.runtimePhase}`,
+						)
+				}
+			},
+			{ discard: true },
+		).pipe(
+			Effect.zipRight(
+				params.onDaemonStreamBatch === undefined ? Effect.void : params.onDaemonStreamBatch(batch),
+			),
+		)
+
+	const consumeStreamBatch = (cursor: number | undefined): Effect.Effect<number | undefined> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.succeed(cursor)
+		}
+		if (params.daemonRpcClient.value.eventStream === undefined) {
+			return Effect.succeed(cursor)
+		}
+		return params.daemonRpcClient.value
+			.eventStream({
+				clientId: params.daemonFrontendClientId,
+				cursor,
+				batchSize: 32,
+				waitMs: 2500,
+			})
+			.pipe(
+				Effect.tap(processDaemonStreamBatch),
+				Effect.map((batch) => batch.nextCursor),
+				Effect.catchAll(() => Effect.succeed(cursor)),
+			)
+	}
+
 	return {
 		signalAttach,
 		signalReconnect,
 		signalHeartbeat,
+		consumeStreamBatch,
 	}
 }
 
@@ -826,11 +872,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			signalAttach: signalDaemonAttach,
 			signalHeartbeat: signalDaemonHeartbeat,
 			signalReconnect: signalDaemonReconnect,
+			consumeStreamBatch: consumeDaemonStreamBatch,
 		} = makeBoardDaemonIpcSignals({
 			daemonRpcClient,
 			daemonFrontendClientId,
 			nowMs: Date.now,
 		})
+		const daemonStreamCursorRef = yield* Ref.make<number | undefined>(undefined)
 
 		// ====================================================================
 		// Per-Project State Management
@@ -2850,6 +2898,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		yield* startAutoRecoveryWorkerFiber()
 		yield* signalDaemonAttach()
+		yield* Effect.forkScoped(
+			Effect.gen(function* () {
+				const cursor = yield* Ref.get(daemonStreamCursorRef)
+				const nextCursor = yield* consumeDaemonStreamBatch(cursor)
+				yield* Ref.set(daemonStreamCursorRef, nextCursor)
+			}).pipe(Effect.repeat(Schedule.spaced(Duration.seconds(2)))),
+		)
 
 		const initialProjectPath = yield* projectService.getCurrentPath()
 		if (initialProjectPath) {

@@ -285,3 +285,55 @@ export const DaemonSessionMutationResultSchema = Schema.Struct({
 export type DaemonSessionMutationResult = Schema.Schema.Type<
 	typeof DaemonSessionMutationResultSchema
 >
+
+export const DaemonEventStreamSessionSnapshotEventSchema = Schema.TaggedStruct(
+	"DaemonEventStreamSessionSnapshotEvent",
+	{
+		capturedAtMs: Schema.Number,
+		sessions: Schema.Array(DaemonSessionSnapshotEntrySchema),
+	},
+)
+export type DaemonEventStreamSessionSnapshotEvent = Schema.Schema.Type<
+	typeof DaemonEventStreamSessionSnapshotEventSchema
+>
+
+export const DaemonEventStreamRuntimeSnapshotEventSchema = Schema.TaggedStruct(
+	"DaemonEventStreamRuntimeSnapshotEvent",
+	{
+		runtime: DaemonRuntimeSnapshotSchema,
+	},
+)
+export type DaemonEventStreamRuntimeSnapshotEvent = Schema.Schema.Type<
+	typeof DaemonEventStreamRuntimeSnapshotEventSchema
+>
+
+export const DaemonEventStreamEventSchema = Schema.Union(
+	DaemonEventStreamSessionSnapshotEventSchema,
+	DaemonEventStreamRuntimeSnapshotEventSchema,
+)
+export type DaemonEventStreamEvent = Schema.Schema.Type<typeof DaemonEventStreamEventSchema>
+
+export const DaemonEventStreamEntrySchema = Schema.Struct({
+	cursor: Schema.Number,
+	emittedAtMs: Schema.Number,
+	event: DaemonEventStreamEventSchema,
+})
+export type DaemonEventStreamEntry = Schema.Schema.Type<typeof DaemonEventStreamEntrySchema>
+
+export const DaemonEventStreamRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	clientId: Schema.String,
+	cursor: Schema.optional(Schema.Number),
+	batchSize: Schema.optional(Schema.Number),
+	waitMs: Schema.optional(Schema.Number),
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonEventStreamRequest = Schema.Schema.Type<typeof DaemonEventStreamRequestSchema>
+
+export const DaemonEventStreamResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	polledAtMs: Schema.Number,
+	nextCursor: Schema.Number,
+	events: Schema.Array(DaemonEventStreamEntrySchema),
+})
+export type DaemonEventStreamResult = Schema.Schema.Type<typeof DaemonEventStreamResultSchema>

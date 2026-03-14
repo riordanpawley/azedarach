@@ -8,6 +8,8 @@ import {
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
 	type DaemonControlStatusResult,
+	type DaemonEventStreamRequest,
+	type DaemonEventStreamResult,
 	type DaemonHealthRequest,
 	type DaemonHealthResult,
 	type DaemonHeartbeatRequest,
@@ -40,6 +42,7 @@ export type DaemonRpcOperation =
 	| "attach"
 	| "reconnect"
 	| "heartbeat"
+	| "eventStream"
 	| "sessionSnapshot"
 	| "sessionStart"
 	| "sessionStop"
@@ -100,6 +103,9 @@ export interface DaemonRpcClientApi {
 	readonly heartbeat: (
 		request: Omit<DaemonHeartbeatRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonHeartbeatResult, DaemonRpcClientError>
+	readonly eventStream?: (
+		request: Omit<DaemonEventStreamRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonEventStreamResult, DaemonRpcClientError>
 	readonly sessionSnapshot?: (
 		request?: Omit<DaemonSessionSnapshotRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionSnapshotResult, DaemonRpcClientError>
@@ -148,6 +154,9 @@ export interface DaemonRpcWireClient {
 	readonly daemonHeartbeat: (
 		input: DaemonHeartbeatRequest,
 	) => Effect.Effect<DaemonHeartbeatResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonEventStream: (
+		input: DaemonEventStreamRequest,
+	) => Effect.Effect<DaemonEventStreamResult, RpcClientError | DaemonRpcActionError>
 	readonly daemonSessionSnapshot: (
 		input: DaemonSessionSnapshotRequest,
 	) => Effect.Effect<DaemonSessionSnapshotResult, RpcClientError | DaemonRpcActionError>
@@ -311,6 +320,16 @@ export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRp
 				Effect.flatMap((response) => ensureCompatibleRpcVersion("heartbeat", response)),
 				Effect.mapError((error) => mapWireError("heartbeat", error)),
 			),
+	eventStream: (request) =>
+		wire
+			.daemonEventStream({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("eventStream", response)),
+				Effect.mapError((error) => mapWireError("eventStream", error)),
+			),
 	sessionSnapshot: (request) =>
 		wire
 			.daemonSessionSnapshot(
@@ -395,6 +414,7 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 		daemonAttach: (input) => raw.daemonAttach(input),
 		daemonReconnect: (input) => raw.daemonReconnect(input),
 		daemonHeartbeat: (input) => raw.daemonHeartbeat(input),
+		daemonEventStream: (input) => raw.daemonEventStream(input),
 		daemonSessionSnapshot: (input) => raw.daemonSessionSnapshot(input),
 		daemonSessionStart: (input) => raw.daemonSessionStart(input),
 		daemonSessionStop: (input) => raw.daemonSessionStop(input),
