@@ -12,6 +12,7 @@ const makeDaemonRpcClientStub = (params: {
 	readonly onAttach?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onReconnect?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onHeartbeat?: () => Effect.Effect<void, DaemonRpcClientError>
+	readonly onSessionSnapshot?: () => Effect.Effect<void, DaemonRpcClientError>
 }): DaemonRpcClientApi => ({
 	status: () =>
 		Effect.succeed({
@@ -245,6 +246,25 @@ const makeDaemonRpcClientStub = (params: {
 				}),
 			),
 		),
+	sessionSnapshot: () =>
+		(params.onSessionSnapshot ?? (() => Effect.void))().pipe(
+			Effect.zipRight(
+				Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					capturedAtMs: 4,
+					sessions: [
+						{
+							issueId: "AZE-1",
+							worktreePath: "/tmp/project/.worktrees/AZE-1",
+							tmuxSessionName: "az-AZE-1",
+							state: "busy",
+							startedAt: "2026-03-14T00:00:00.000Z",
+							projectPath: "/tmp/project",
+						},
+					],
+				}),
+			),
+		),
 })
 
 describe("BoardService daemon IPC signaling", () => {
@@ -310,5 +330,23 @@ describe("BoardService daemon IPC signaling", () => {
 		const heartbeatCalls = await Effect.runPromise(Ref.get(heartbeatCallsRef))
 		expect(reconnectCalls).toBe(1)
 		expect(heartbeatCalls).toBe(2)
+	})
+
+	it("observes daemon session snapshots on attach and heartbeat", async () => {
+		const snapshotCallsRef = await Effect.runPromise(Ref.make(0))
+		const signals = makeBoardDaemonIpcSignals({
+			daemonRpcClient: Option.some(
+				makeDaemonRpcClientStub({
+					onSessionSnapshot: () => Ref.update(snapshotCallsRef, (count) => count + 1),
+				}),
+			),
+			daemonFrontendClientId: "board-ui:test",
+			nowMs: () => 1000,
+		})
+
+		await Effect.runPromise(signals.signalAttach())
+		await Effect.runPromise(signals.signalHeartbeat())
+		const snapshotCalls = await Effect.runPromise(Ref.get(snapshotCallsRef))
+		expect(snapshotCalls).toBe(2)
 	})
 })

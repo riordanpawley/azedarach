@@ -75,6 +75,8 @@ import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
+import type { DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
+import type { DaemonSessionSnapshotResult } from "../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "../services/BoardService.js"
 import { ClockService } from "../services/ClockService.js"
 import { CommandQueueService } from "../services/CommandQueueService.js"
@@ -1035,6 +1037,58 @@ const formatDaemonControlStatusLine = (params: {
 }): string =>
 	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} projectPath=${params.status.sync.projectPath ?? "<none>"} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
 
+export type DaemonSessionSnapshotSummary = {
+	readonly capturedAtMs: number
+	readonly totalSessions: number
+	readonly stateCounts: Readonly<Record<string, number>>
+}
+
+const summarizeDaemonSessionSnapshot = (
+	snapshot: DaemonSessionSnapshotResult,
+): DaemonSessionSnapshotSummary => {
+	const stateCounts = snapshot.sessions.reduce<Record<string, number>>((counts, session) => {
+		counts[session.state] = (counts[session.state] ?? 0) + 1
+		return counts
+	}, {})
+	return {
+		capturedAtMs: snapshot.capturedAtMs,
+		totalSessions: snapshot.sessions.length,
+		stateCounts,
+	}
+}
+
+const formatDaemonSessionSnapshotSummaryLine = (summary: DaemonSessionSnapshotSummary): string => {
+	const counts = Object.entries(summary.stateCounts)
+		.sort((left, right) => left[0].localeCompare(right[0]))
+		.map(([state, count]) => `${state}=${count}`)
+		.join(" ")
+	return `daemon sessions: total=${summary.totalSessions} capturedAtMs=${summary.capturedAtMs}${counts.length === 0 ? "" : ` ${counts}`}`
+}
+
+export const getDaemonSessionSnapshotSummary = (params: {
+	readonly client: Pick<DaemonRpcClientApi, "sessionSnapshot">
+	readonly socketUrl: string
+	readonly projectPath: string | undefined
+}): Effect.Effect<Option.Option<DaemonSessionSnapshotSummary>, Error> => {
+	if (params.client.sessionSnapshot === undefined) {
+		return Effect.succeed(Option.none())
+	}
+	return params.client
+		.sessionSnapshot(
+			params.projectPath === undefined ? undefined : { projectPath: params.projectPath },
+		)
+		.pipe(
+			Effect.map((snapshot) => Option.some(summarizeDaemonSessionSnapshot(snapshot))),
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "sessionSnapshot",
+					socketUrl: params.socketUrl,
+					error,
+				}),
+			),
+		)
+}
+
 export const daemonCommandShouldAutoStart = (
 	command: "sync" | "status" | "health" | "stop" | "restart" | "logs",
 ): boolean => command !== "stop"
@@ -1059,6 +1113,20 @@ const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
 				status,
 			}),
 		)
+		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
+			client: bootstrap.client,
+			socketUrl: bootstrap.socketUrl,
+			projectPath: status.sync.projectPath ?? undefined,
+		}).pipe(
+			Effect.catchAll((error) =>
+				Console.log(`daemon session snapshot unavailable: ${error.message}`).pipe(
+					Effect.as(Option.none<DaemonSessionSnapshotSummary>()),
+				),
+			),
+		)
+		if (Option.isSome(snapshotSummary)) {
+			yield* Console.log(formatDaemonSessionSnapshotSummaryLine(snapshotSummary.value))
+		}
 		if (args.verbose) {
 			yield* Console.log(JSON.stringify(status, null, 2))
 		}

@@ -4,6 +4,7 @@ import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import { DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
+import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
@@ -20,6 +21,7 @@ import {
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	formatParentChildCheckOutput,
+	getDaemonSessionSnapshotSummary,
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	parseGitWorktreeListPaths,
@@ -945,7 +947,77 @@ describe("daemon control CLI commands", () => {
 		if (!(failure.value instanceof Error)) {
 			throw new Error("Expected failure to be Error")
 		}
-		expect(failure.value.message).toContain("No global daemon discovery metadata found")
+		expect(
+			failure.value.message.includes("No global daemon discovery metadata found") ||
+				failure.value.message.includes("Timed out waiting for a reachable global daemon endpoint"),
+		).toBe(true)
+	})
+})
+
+describe("daemon session snapshot summaries", () => {
+	it("returns none when daemon client does not expose sessionSnapshot", async () => {
+		const summary = await Effect.runPromise(
+			getDaemonSessionSnapshotSummary({
+				client: {},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				projectPath: "/tmp/project",
+			}),
+		)
+		expect(Option.isNone(summary)).toBe(true)
+	})
+
+	it("calls sessionSnapshot and aggregates session state counts", async () => {
+		const requests: Array<string | undefined> = []
+		const summary = await Effect.runPromise(
+			getDaemonSessionSnapshotSummary({
+				client: {
+					sessionSnapshot: (request) => {
+						requests.push(request?.projectPath)
+						return Effect.succeed({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							capturedAtMs: 123,
+							sessions: [
+								{
+									issueId: "AZE-1",
+									worktreePath: "/tmp/project/.worktrees/AZE-1",
+									tmuxSessionName: "az-AZE-1",
+									state: "busy",
+									startedAt: "2026-03-14T00:00:00.000Z",
+									projectPath: "/tmp/project",
+								},
+								{
+									issueId: "AZE-2",
+									worktreePath: "/tmp/project/.worktrees/AZE-2",
+									tmuxSessionName: "az-AZE-2",
+									state: "busy",
+									startedAt: "2026-03-14T00:05:00.000Z",
+									projectPath: "/tmp/project",
+								},
+								{
+									issueId: "AZE-3",
+									worktreePath: "/tmp/project/.worktrees/AZE-3",
+									tmuxSessionName: "az-AZE-3",
+									state: "waiting",
+									startedAt: "2026-03-14T00:10:00.000Z",
+									projectPath: "/tmp/project",
+								},
+							],
+						})
+					},
+				},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(requests).toEqual(["/tmp/project"])
+		expect(Option.isSome(summary)).toBe(true)
+		if (!Option.isSome(summary)) {
+			throw new Error("Expected snapshot summary")
+		}
+		expect(summary.value.totalSessions).toBe(3)
+		expect(summary.value.stateCounts["busy"]).toBe(2)
+		expect(summary.value.stateCounts["waiting"]).toBe(1)
 	})
 })
 

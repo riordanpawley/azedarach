@@ -162,6 +162,24 @@ export const makeBoardDaemonIpcSignals = (params: {
 	readonly daemonFrontendClientId: string
 	readonly nowMs: () => number
 }) => {
+	const observeSessionSnapshot = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		if (params.daemonRpcClient.value.sessionSnapshot === undefined) {
+			return Effect.void
+		}
+		return params.daemonRpcClient.value.sessionSnapshot().pipe(
+			Effect.flatMap((snapshot) =>
+				Effect.logDebug(
+					`BoardService daemon snapshot observed: total=${snapshot.sessions.length} capturedAtMs=${snapshot.capturedAtMs}`,
+				),
+			),
+			Effect.asVoid,
+			Effect.catchAll(() => Effect.void),
+		)
+	}
+
 	const signalAttach = (): Effect.Effect<void> => {
 		if (Option.isNone(params.daemonRpcClient)) {
 			return Effect.void
@@ -172,6 +190,7 @@ export const makeBoardDaemonIpcSignals = (params: {
 				requestedAtMs: params.nowMs(),
 			})
 			.pipe(
+				Effect.zipRight(observeSessionSnapshot()),
 				Effect.asVoid,
 				Effect.catchAll(() => Effect.void),
 			)
@@ -214,6 +233,7 @@ export const makeBoardDaemonIpcSignals = (params: {
 						Effect.mapError(() => heartbeatError),
 					),
 				),
+				Effect.zipRight(observeSessionSnapshot()),
 				Effect.asVoid,
 				Effect.catchAll(() => Effect.void),
 			)
