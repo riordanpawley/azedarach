@@ -14,6 +14,7 @@ import {
 	type DaemonHealthResult,
 	type DaemonHeartbeatResult,
 	type DaemonLogsResult,
+	type DaemonSessionSnapshotResult,
 } from "./DaemonRpcSchemas.js"
 
 const makeStatus = (
@@ -85,6 +86,21 @@ const makeHeartbeat = (): DaemonHeartbeatResult => ({
 	},
 })
 
+const makeSessionSnapshot = (): DaemonSessionSnapshotResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	capturedAtMs: 100,
+	sessions: [
+		{
+			issueId: "qc",
+			worktreePath: "/tmp/project/.worktrees/qc",
+			tmuxSessionName: "az-qc",
+			state: "busy",
+			startedAt: "2026-03-14T06:00:00.000Z",
+			projectPath: "/tmp/project",
+		},
+	],
+})
+
 const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient => ({
 	daemonStatus: () => Effect.succeed(makeStatus()),
 	daemonHealth: () => Effect.succeed(makeHealth()),
@@ -138,6 +154,7 @@ const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient 
 			snapshot: makeStatus().runtime,
 		}),
 	daemonHeartbeat: () => Effect.succeed(makeHeartbeat()),
+	daemonSessionSnapshot: () => Effect.succeed(makeSessionSnapshot()),
 	...overrides,
 })
 
@@ -244,5 +261,28 @@ describe("DaemonRpcClient", () => {
 		}
 		expect(failure.value.code).toBe("MISSING_PROJECT")
 		expect(failure.value.operation).toBe("restart")
+	})
+
+	it("maps session snapshot requests and responses through the shared client", async () => {
+		const payloadRef = await Effect.runPromise(
+			Ref.make<{ readonly rpcProtocolVersion: number; readonly projectPath?: string } | null>(null),
+		)
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonSessionSnapshot: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(payloadRef, payload)
+						return makeSessionSnapshot()
+					}),
+			}),
+		)
+
+		const result = await Effect.runPromise(client.sessionSnapshot!({ projectPath: "/tmp/project" }))
+		const captured = await Effect.runPromise(Ref.get(payloadRef))
+		expect(result.sessions[0]?.issueId).toBe("qc")
+		expect(captured).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			projectPath: "/tmp/project",
+		})
 	})
 })

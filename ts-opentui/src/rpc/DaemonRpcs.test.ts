@@ -4,6 +4,7 @@ import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
 	DaemonHealthResultSchema,
+	DaemonSessionSnapshotResultSchema,
 	DaemonStatusRequestSchema,
 } from "./DaemonRpcSchemas.js"
 import { DaemonRpcGroup } from "./DaemonRpcs.js"
@@ -18,6 +19,7 @@ describe("DaemonRpcs", () => {
 			"daemonLogs",
 			"daemonReconnect",
 			"daemonRestart",
+			"daemonSessionSnapshot",
 			"daemonStatus",
 			"daemonStop",
 		])
@@ -93,5 +95,29 @@ describe("DaemonRpcs", () => {
 
 		expect(decoded.state).toBe("healthy")
 		expect(decoded.status.runtime.runtimePhase).toBe("ready")
+	})
+
+	it("validates daemon session snapshot response shape", async () => {
+		const decode = Schema.decodeUnknown(DaemonSessionSnapshotResultSchema)
+		const decoded = await Effect.runPromise(
+			decode({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				capturedAtMs: 123,
+				sessions: [
+					{
+						issueId: "qc",
+						worktreePath: "/tmp/project/.worktrees/qc",
+						tmuxSessionName: "az-qc",
+						state: "busy",
+						startedAt: "2026-03-14T06:00:00.000Z",
+						projectPath: "/tmp/project",
+					},
+				],
+			}),
+		)
+
+		expect(decoded.sessions).toHaveLength(1)
+		expect(decoded.sessions[0]?.issueId).toBe("qc")
+		expect(decoded.sessions[0]?.state).toBe("busy")
 	})
 })

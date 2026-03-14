@@ -17,6 +17,8 @@ import {
 	type DaemonReconnectRequest,
 	type DaemonRestartRequest,
 	type DaemonRpcActionError,
+	type DaemonSessionSnapshotRequest,
+	type DaemonSessionSnapshotResult,
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
 } from "./DaemonRpcSchemas.js"
@@ -31,6 +33,7 @@ export type DaemonRpcOperation =
 	| "attach"
 	| "reconnect"
 	| "heartbeat"
+	| "sessionSnapshot"
 
 export class DaemonRpcProtocolVersionMismatchError extends Data.TaggedError(
 	"DaemonRpcProtocolVersionMismatchError",
@@ -84,6 +87,9 @@ export interface DaemonRpcClientApi {
 	readonly heartbeat: (
 		request: Omit<DaemonHeartbeatRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonHeartbeatResult, DaemonRpcClientError>
+	readonly sessionSnapshot?: (
+		request?: Omit<DaemonSessionSnapshotRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionSnapshotResult, DaemonRpcClientError>
 }
 
 export interface DaemonRpcWireClient {
@@ -111,6 +117,9 @@ export interface DaemonRpcWireClient {
 	readonly daemonHeartbeat: (
 		input: DaemonHeartbeatRequest,
 	) => Effect.Effect<DaemonHeartbeatResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionSnapshot: (
+		input: DaemonSessionSnapshotRequest,
+	) => Effect.Effect<DaemonSessionSnapshotResult, RpcClientError | DaemonRpcActionError>
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -253,6 +262,17 @@ export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRp
 				Effect.flatMap((response) => ensureCompatibleRpcVersion("heartbeat", response)),
 				Effect.mapError((error) => mapWireError("heartbeat", error)),
 			),
+	sessionSnapshot: (request) =>
+		wire
+			.daemonSessionSnapshot(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionSnapshot", response)),
+				Effect.mapError((error) => mapWireError("sessionSnapshot", error)),
+			),
 })
 
 const makeDaemonRpcClient = Effect.gen(function* () {
@@ -266,6 +286,7 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 		daemonAttach: (input) => raw.daemonAttach(input),
 		daemonReconnect: (input) => raw.daemonReconnect(input),
 		daemonHeartbeat: (input) => raw.daemonHeartbeat(input),
+		daemonSessionSnapshot: (input) => raw.daemonSessionSnapshot(input),
 	}
 	return makeDaemonRpcClientFromWire(wire)
 })

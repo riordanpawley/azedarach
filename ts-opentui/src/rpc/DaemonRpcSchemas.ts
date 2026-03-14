@@ -139,6 +139,37 @@ export const DaemonHeartbeatResultSchema = Schema.Struct({
 })
 export type DaemonHeartbeatResult = Schema.Schema.Type<typeof DaemonHeartbeatResultSchema>
 
+export const DaemonSessionStateSchema = Schema.Literal(
+	"idle",
+	"initializing",
+	"busy",
+	"waiting",
+	"done",
+	"error",
+	"paused",
+	"warning",
+	"crashed",
+)
+
+export const DaemonSessionSnapshotEntrySchema = Schema.Struct({
+	issueId: Schema.String,
+	worktreePath: Schema.String,
+	tmuxSessionName: Schema.String,
+	state: DaemonSessionStateSchema,
+	startedAt: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonSessionSnapshotEntry = Schema.Schema.Type<typeof DaemonSessionSnapshotEntrySchema>
+
+export const DaemonSessionSnapshotResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	capturedAtMs: Schema.Number,
+	sessions: Schema.Array(DaemonSessionSnapshotEntrySchema),
+})
+export type DaemonSessionSnapshotResult = Schema.Schema.Type<
+	typeof DaemonSessionSnapshotResultSchema
+>
+
 export const DaemonStatusRequestSchema = Schema.Struct({
 	rpcProtocolVersion: Schema.Number,
 })
@@ -190,3 +221,11 @@ export const DaemonHeartbeatRequestSchema = Schema.Struct({
 	observedAtMs: Schema.optional(Schema.Number),
 })
 export type DaemonHeartbeatRequest = Schema.Schema.Type<typeof DaemonHeartbeatRequestSchema>
+
+export const DaemonSessionSnapshotRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonSessionSnapshotRequest = Schema.Schema.Type<
+	typeof DaemonSessionSnapshotRequestSchema
+>

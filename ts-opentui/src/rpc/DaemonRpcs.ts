@@ -13,6 +13,8 @@ import {
 	DaemonReconnectRequestSchema,
 	DaemonRestartRequestSchema,
 	DaemonRpcActionErrorSchema,
+	DaemonSessionSnapshotRequestSchema,
+	DaemonSessionSnapshotResultSchema,
 	DaemonStatusRequestSchema,
 	DaemonStopRequestSchema,
 } from "./DaemonRpcSchemas.js"
@@ -65,6 +67,12 @@ export const DaemonHeartbeatRpc = Rpc.make("daemonHeartbeat", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonSessionSnapshotRpc = Rpc.make("daemonSessionSnapshot", {
+	payload: DaemonSessionSnapshotRequestSchema,
+	success: DaemonSessionSnapshotResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonRpcGroup = RpcGroup.make(
 	DaemonStatusRpc,
 	DaemonHealthRpc,
@@ -74,6 +82,7 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonAttachRpc,
 	DaemonReconnectRpc,
 	DaemonHeartbeatRpc,
+	DaemonSessionSnapshotRpc,
 )
 
 export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonRpcGroup>
