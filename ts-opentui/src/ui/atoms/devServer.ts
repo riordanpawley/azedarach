@@ -185,7 +185,9 @@ export const attachDevServerAtom = appRuntime.fn((args: { issueId: string; serve
 export const stopDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
 	Effect.gen(function* () {
 		const svc = yield* DevServerService
-		return yield* svc.stop(args.issueId, args.serverName)
+		const projectService = yield* ProjectService
+		const project = yield* projectService.requireCurrentProject()
+		return yield* svc.stop(args.issueId, args.serverName, project.path)
 	}),
 )
 
