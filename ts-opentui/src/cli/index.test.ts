@@ -12,6 +12,7 @@ import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
+	daemonCommandShouldAutoStart,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
@@ -911,6 +912,18 @@ describe("normalizeCliAliases", () => {
 })
 
 describe("daemon control CLI commands", () => {
+	it("enables autostart for daemon commands that require connectivity", () => {
+		expect(daemonCommandShouldAutoStart("sync")).toBe(true)
+		expect(daemonCommandShouldAutoStart("status")).toBe(true)
+		expect(daemonCommandShouldAutoStart("health")).toBe(true)
+		expect(daemonCommandShouldAutoStart("restart")).toBe(true)
+		expect(daemonCommandShouldAutoStart("logs")).toBe(true)
+	})
+
+	it("keeps daemon stop non-autostart", () => {
+		expect(daemonCommandShouldAutoStart("stop")).toBe(false)
+	})
+
 	it("surfaces actionable error when daemon stop runs without discovery metadata", async () => {
 		const isolatedHome = `${process.env.TMPDIR ?? "/tmp"}/az-daemon-home-${crypto.randomUUID()}`
 		const originalHome = process.env.HOME

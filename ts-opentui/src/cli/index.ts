@@ -986,7 +986,7 @@ const daemonSyncHandler = (args: {
 
 		yield* validateIssueTrackerStore(cwd)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
+			autoStart: daemonCommandShouldAutoStart("sync"),
 		})
 		const status = yield* bootstrap.client
 			.restart({
@@ -1035,10 +1035,14 @@ const formatDaemonControlStatusLine = (params: {
 }): string =>
 	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} projectPath=${params.status.sync.projectPath ?? "<none>"} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
 
+export const daemonCommandShouldAutoStart = (
+	command: "sync" | "status" | "health" | "stop" | "restart" | "logs",
+): boolean => command !== "stop"
+
 const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
+			autoStart: daemonCommandShouldAutoStart("status"),
 		})
 		const status = yield* bootstrap.client.status().pipe(
 			Effect.mapError((error) =>
@@ -1063,7 +1067,7 @@ const daemonStatusHandler = (args: { readonly verbose: boolean }) =>
 const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
+			autoStart: daemonCommandShouldAutoStart("health"),
 		})
 		const health = yield* bootstrap.client.health().pipe(
 			Effect.mapError((error) =>
@@ -1095,7 +1099,7 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: false,
+			autoStart: daemonCommandShouldAutoStart("stop"),
 		})
 		const status = yield* bootstrap.client.stop().pipe(
 			Effect.mapError((error) =>
@@ -1125,7 +1129,7 @@ const daemonRestartHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
+			autoStart: daemonCommandShouldAutoStart("restart"),
 		})
 		const status = yield* bootstrap.client
 			.restart({
@@ -1162,7 +1166,7 @@ const daemonLogsHandler = (args: {
 		const cwd = Option.getOrUndefined(args.projectDir)
 		const lineLimit = Option.getOrElse(args.lines, () => 100)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
+			autoStart: daemonCommandShouldAutoStart("logs"),
 		})
 		const logResult = yield* bootstrap.client
 			.logs({
