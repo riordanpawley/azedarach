@@ -12,6 +12,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
@@ -1222,8 +1223,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const offlineService = yield* OfflineService
 		const imageAttachmentService = yield* ImageAttachmentService
 		const diagnostics = yield* DiagnosticsService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const getMergeConfig = () => appConfig.getMergeConfig()
 		const getGitConfig = () => appConfig.getGitConfig()
+
+		const stopSessionWithPreferredRuntime = (
+			issueId: string,
+			projectPath?: string,
+		): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
+					if (projectPath === undefined) {
+						yield* daemonRpcClient.value.sessionStop({ issueId })
+						return
+					}
+					yield* daemonRpcClient.value.sessionStop({ issueId, projectPath })
+					return
+				}
+				yield* sessionManager.stop(issueId)
+			}).pipe(Effect.asVoid)
 
 		const getIssueBranchName = (
 			issueId: string,
@@ -1614,16 +1632,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const issueBranch = yield* getIssueBranchName(issueId, projectPath)
 
 						// 1. Stop any running session (ignore errors)
-						// First try SessionManager.stop (handles tracker sync from worktree)
-						yield* sessionManager
-							.stop(issueId)
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.void),
-									),
+						yield* stopSessionWithPreferredRuntime(issueId, projectPath).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
 								),
-							)
+							),
+						)
 						// Also directly kill tmux session in case it wasn't tracked in memory
 						yield* tmuxService
 							.killSession(issueId)
