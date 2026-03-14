@@ -10,11 +10,13 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import type { CommandExecutor } from "@effect/platform"
 import { Effect, SubscriptionRef } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { SessionManager } from "../../core/SessionManager.js"
+import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { COLUMNS } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
@@ -54,6 +56,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const prWorkflow = yield* PRWorkflow
 			const sessionManager = yield* SessionManager
 			const mutationQueue = yield* MutationQueue
+			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 			const getActiveProjectPath = (): Effect.Effect<string | undefined> =>
 				SubscriptionRef.get(board.currentProjectPath).pipe(
@@ -78,6 +81,22 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					),
 					Effect.asVoid,
 				)
+
+			const stopSessionWithPreferredRuntime = (
+				issueId: string,
+				projectPath?: string,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
+						if (projectPath === undefined) {
+							yield* daemonRpcClient.value.sessionStop({ issueId })
+							return
+						}
+						yield* daemonRpcClient.value.sessionStop({ issueId, projectPath })
+						return
+					}
+					yield* sessionManager.stop(issueId)
+				}).pipe(Effect.asVoid)
 
 			const isColumnStatus = (status: string): status is (typeof COLUMNS)[number]["status"] =>
 				COLUMNS.some((column) => column.status === status)
@@ -232,13 +251,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						const projectPath = yield* getActiveProjectPath()
 						if (hasSession) {
 							yield* toast.show("info", `Stopping session for ${task.id} before tombstoning...`)
-							yield* sessionManager
-								.stop(task.id)
-								.pipe(
-									Effect.catchAll((error) =>
-										Effect.logWarning(`Failed to stop session for ${task.id}: ${error}`),
-									),
-								)
+							yield* stopSessionWithPreferredRuntime(task.id, projectPath).pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Failed to stop session for ${task.id}: ${error}`),
+								),
+							)
 						}
 
 						const updateMutation: Mutation = {

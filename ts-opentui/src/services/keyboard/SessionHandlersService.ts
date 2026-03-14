@@ -12,7 +12,7 @@
  */
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
@@ -28,6 +28,7 @@ import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { WorktreeManager, type WorktreeNameClashError } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
+import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -70,7 +71,101 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
 			const boardService = yield* BoardService
+			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 			const gitConfig = yield* appConfig.getGitConfig()
+
+			const startSessionWithPreferredRuntime = (options: {
+				readonly issueId: string
+				readonly projectPath: string
+				readonly initialPrompt?: string
+				readonly imagePaths?: ReadonlyArray<string>
+				readonly dangerouslySkipPermissions?: boolean
+			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStart !== undefined) {
+						// Current daemon RPC start does not support prompt/image/skip-permissions arguments yet.
+						if (
+							options.initialPrompt === undefined &&
+							options.imagePaths === undefined &&
+							options.dangerouslySkipPermissions !== true
+						) {
+							yield* daemonRpcClient.value.sessionStart({
+								issueId: options.issueId,
+								projectPath: options.projectPath,
+							})
+							return
+						}
+					}
+
+					yield* sessionManager.start(options)
+				}).pipe(Effect.asVoid)
+
+			const stopSessionWithPreferredRuntime = (
+				issueId: string,
+				projectPath?: string,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
+						if (projectPath === undefined) {
+							yield* daemonRpcClient.value.sessionStop({ issueId })
+							return
+						}
+						yield* daemonRpcClient.value.sessionStop({ issueId, projectPath })
+						return
+					}
+					yield* sessionManager.stop(issueId)
+				}).pipe(Effect.asVoid)
+
+			const pauseSessionWithPreferredRuntime = (
+				issueId: string,
+				projectPath?: string,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionPause !== undefined) {
+						if (projectPath === undefined) {
+							yield* daemonRpcClient.value.sessionPause({ issueId })
+							return
+						}
+						yield* daemonRpcClient.value.sessionPause({ issueId, projectPath })
+						return
+					}
+					yield* sessionManager.pause(issueId)
+				}).pipe(Effect.asVoid)
+
+			const resumeSessionWithPreferredRuntime = (
+				issueId: string,
+				projectPath?: string,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionResume !== undefined) {
+						if (projectPath === undefined) {
+							yield* daemonRpcClient.value.sessionResume({ issueId })
+							return
+						}
+						yield* daemonRpcClient.value.sessionResume({ issueId, projectPath })
+						return
+					}
+					yield* sessionManager.resume(issueId)
+				}).pipe(Effect.asVoid)
+
+			const recoverSessionWithPreferredRuntime = (
+				issueId: string,
+				projectPath?: string,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (
+						Option.isSome(daemonRpcClient) &&
+						daemonRpcClient.value.sessionRecover !== undefined
+					) {
+						if (projectPath === undefined) {
+							yield* daemonRpcClient.value.sessionRecover({ issueId })
+							return
+						}
+						yield* daemonRpcClient.value.sessionRecover({ issueId, projectPath })
+						return
+					}
+					yield* sessionManager.recoverSession(issueId)
+				}).pipe(Effect.asVoid)
 
 			const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
 				const aheadRisk =
@@ -327,7 +422,7 @@ Delete the duplicate worktree and retry?`
 						issueId: task.id,
 						projectPath,
 						successMessage: `Started session for ${task.id}`,
-						startEffect: sessionManager.start({ issueId: task.id, projectPath }),
+						startEffect: startSessionWithPreferredRuntime({ issueId: task.id, projectPath }),
 					})
 				})
 
@@ -378,7 +473,7 @@ Delete the duplicate worktree and retry?`
 						successMessage: task.hasWorktree
 							? `Resumed session for ${task.id} on existing worktree`
 							: `Started session for ${task.id} with prompt`,
-						startEffect: sessionManager.start({
+						startEffect: startSessionWithPreferredRuntime({
 							issueId: task.id,
 							projectPath,
 							initialPrompt,
@@ -430,7 +525,7 @@ Delete the duplicate worktree and retry?`
 						successMessage: task.hasWorktree
 							? `Resumed session for ${task.id} (skip-permissions)`
 							: `Started session for ${task.id} (skip-permissions)`,
-						startEffect: sessionManager.start({
+						startEffect: startSessionWithPreferredRuntime({
 							issueId: task.id,
 							projectPath,
 							initialPrompt,
@@ -616,7 +711,9 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					yield* sessionManager.pause(task.id).pipe(
+					const projectPath = yield* helpers.getProjectPath()
+
+					yield* pauseSessionWithPreferredRuntime(task.id, projectPath).pipe(
 						Effect.tap(() => toast.show("success", `Paused session for ${task.id}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to pause")),
 					)
@@ -637,7 +734,9 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					yield* sessionManager.resume(task.id).pipe(
+					const projectPath = yield* helpers.getProjectPath()
+
+					yield* resumeSessionWithPreferredRuntime(task.id, projectPath).pipe(
 						Effect.tap(() => toast.show("success", `Resumed session for ${task.id}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to resume")),
 					)
@@ -677,7 +776,7 @@ Delete the duplicate worktree and retry?`
 								yield* helpers.withQueue(
 									task.id,
 									"stop",
-									sessionManager.stop(task.id).pipe(
+									stopSessionWithPreferredRuntime(task.id, projectPath).pipe(
 										Effect.tap(() =>
 											tasksWithSessions.length === 1
 												? toast.show("success", `Stopped session for ${task.id}`)
@@ -805,8 +904,9 @@ Delete the duplicate worktree and retry?`
 					}
 
 					yield* toast.show("info", `Recovering session for ${task.id}...`)
+					const projectPath = yield* helpers.getProjectPath()
 
-					yield* sessionManager.recoverSession(task.id).pipe(
+					yield* recoverSessionWithPreferredRuntime(task.id, projectPath).pipe(
 						Effect.tap(() => toast.show("success", `Recovered session for ${task.id}`)),
 						Effect.tap(() => boardService.refresh()),
 						Effect.catchAll(helpers.showErrorToast("Failed to recover")),
@@ -831,12 +931,15 @@ Delete the duplicate worktree and retry?`
 					yield* toast.show("info", `Recovering ${crashedTasks.length} crashed session(s)...`)
 
 					let recovered = 0
+					const projectPath = yield* helpers.getProjectPath()
 					for (const task of crashedTasks) {
-						yield* sessionManager.recoverSession(task.id).pipe(
+						yield* recoverSessionWithPreferredRuntime(task.id, projectPath).pipe(
 							Effect.tap(() => {
 								recovered++
 							}),
-							Effect.catchAll((error) => Effect.log(`Failed to recover ${task.id}: ${error._tag}`)),
+							Effect.catchAll((error) =>
+								Effect.log(`Failed to recover ${task.id}: ${String(error)}`),
+							),
 						)
 					}
 
