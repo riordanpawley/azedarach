@@ -271,8 +271,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* helpers.getProjectPath()
+
 				// Check if task has an operation in progress
-				const isBusy = yield* helpers.checkBusy(task.id)
+				const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
@@ -292,14 +295,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					Effect.gen(function* () {
 						yield* toast.show("info", `Updating from ${effectiveBaseBranch}...`)
 
-						// Get current project path (from ProjectService or cwd fallback)
-						const projectPath = yield* helpers.getProjectPath()
-
 						yield* prWorkflow.updateFromBase({ issueId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", `Updated from ${effectiveBaseBranch}`)),
 							Effect.catchAll(helpers.showErrorToast("Update from base failed")),
 						)
 					}),
+					projectPath,
 				)
 			})
 
@@ -326,8 +327,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* helpers.getProjectPath()
+
 				// Check if task has an operation in progress
-				const isBusy = yield* helpers.checkBusy(task.id)
+				const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
@@ -340,9 +344,6 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const gitConfig = yield* appConfig.getGitConfig()
 				// Use parent epic branch for children, otherwise config baseBranch
 				const effectiveBaseBranch = task.parentEpicId ?? gitConfig.baseBranch
-
-				// Get current project path (from ProjectService or cwd fallback)
-				const projectPath = yield* helpers.getProjectPath()
 
 				// Update from base first to resolve any conflicts
 				yield* toast.show("info", `Syncing with ${effectiveBaseBranch} before PR...`)

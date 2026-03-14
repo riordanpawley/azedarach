@@ -105,8 +105,7 @@ export const getQueueInfoAtom = appRuntime.fn((taskId: string) =>
 		const queue = yield* CommandQueueService
 		const projectService = yield* ProjectService
 		const projectPath = yield* projectService.getCurrentPath()
-		const queueKey = buildTaskQueueKey(taskId, projectPath)
-		return yield* queue.getQueueInfo(taskId, queueKey)
+		return yield* queue.getTaskQueueInfo(taskId, projectPath)
 	}),
 )
 
@@ -120,7 +119,6 @@ export const checkTaskBusyAtom = appRuntime.fn((taskId: string) =>
 		const queue = yield* CommandQueueService
 		const projectService = yield* ProjectService
 		const projectPath = yield* projectService.getCurrentPath()
-		const queueKey = buildTaskQueueKey(taskId, projectPath)
-		return yield* queue.isBusy(taskId, queueKey)
+		return yield* queue.isTaskBusy(taskId, projectPath)
 	}),
 )

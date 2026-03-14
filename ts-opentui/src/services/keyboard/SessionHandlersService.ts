@@ -312,17 +312,16 @@ Delete the duplicate worktree and retry?`
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
+					const projectPath = yield* helpers.getProjectPath()
+
 					// Check if task has an operation in progress
-					const isBusy = yield* helpers.checkBusy(task.id)
+					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
 					if (task.sessionState !== "idle") {
 						yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
 						return
 					}
-
-					// Get current project path (from ProjectService or cwd fallback)
-					const projectPath = yield* helpers.getProjectPath()
 
 					yield* runStartWithClashRecovery({
 						issueId: task.id,
@@ -349,8 +348,11 @@ Delete the duplicate worktree and retry?`
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
+					// Get current project path (from ProjectService or cwd fallback)
+					const projectPath = yield* helpers.getProjectPath()
+
 					// Check if task has an operation in progress
-					const isBusy = yield* helpers.checkBusy(task.id)
+					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
 					if (task.sessionState !== "idle") {
@@ -358,8 +360,6 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					// Get current project path (from ProjectService or cwd fallback)
-					const projectPath = yield* helpers.getProjectPath()
 					const cliTool = yield* appConfig.getCliTool()
 					// Space+S uses a short task prompt that tells the agent to run
 					// `az prime` first; only Codex still needs native image arguments
@@ -403,8 +403,11 @@ Delete the duplicate worktree and retry?`
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
+					// Get current project path
+					const projectPath = yield* helpers.getProjectPath()
+
 					// Check if task has an operation in progress
-					const isBusy = yield* helpers.checkBusy(task.id)
+					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
 					if (task.sessionState !== "idle") {
@@ -412,8 +415,6 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					// Get current project path
-					const projectPath = yield* helpers.getProjectPath()
 					const cliTool = yield* appConfig.getCliTool()
 					const imagePaths =
 						cliTool === "codex" ? yield* resolveSessionImagePaths(task.id, projectPath) : undefined
@@ -667,8 +668,10 @@ Delete the duplicate worktree and retry?`
 					yield* Effect.all(
 						tasksWithSessions.map((task) =>
 							Effect.gen(function* () {
+								const projectPath = yield* helpers.getProjectPath()
+
 								// Check if task has an operation in progress
-								const isBusy = yield* helpers.checkBusy(task.id)
+								const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 								if (isBusy) return
 
 								yield* helpers.withQueue(
@@ -682,6 +685,7 @@ Delete the duplicate worktree and retry?`
 										),
 										Effect.catchAll(helpers.showErrorToast(`Failed to stop ${task.id}`)),
 									),
+									projectPath,
 								)
 							}),
 						),

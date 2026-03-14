@@ -221,8 +221,7 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 			const checkBusy = (taskId: string, projectPathOverride?: string): Effect.Effect<boolean> =>
 				Effect.gen(function* () {
 					const projectPath = projectPathOverride ?? (yield* getProjectPath())
-					const queueKey = buildTaskQueueKey(taskId, projectPath)
-					const queueInfo = yield* commandQueue.getQueueInfo(taskId, queueKey)
+					const queueInfo = yield* commandQueue.getTaskQueueInfo(taskId, projectPath)
 
 					if (queueInfo.runningLabel !== null) {
 						const recovered = yield* commandQueue.recoverStaleRunning(taskId)
@@ -234,7 +233,7 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 							return false
 						}
 
-						const refreshedQueueInfo = yield* commandQueue.getQueueInfo(taskId)
+						const refreshedQueueInfo = yield* commandQueue.getTaskQueueInfo(taskId, projectPath)
 						if (refreshedQueueInfo.runningLabel === null) {
 							return false
 						}
