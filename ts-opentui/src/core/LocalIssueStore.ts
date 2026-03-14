@@ -1955,13 +1955,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		): Effect.Effect<void, LocalIssueStoreError> =>
 			Effect.gen(function* () {
 				const entries = yield* fs.readDirectory(backupDir).pipe(
-					Effect.catchAll((cause) =>
-						Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 							Effect.zipRight(
 								Effect.fail(
 									new LocalIssueStoreError({
-										message: `Failed to read backup directory: ${Cause.pretty(Cause.fail(cause))}`,
-										cause,
+										message: `Failed to read backup directory: ${Cause.pretty(Cause.fail(error))}`,
+										cause: error,
 									}),
 								),
 							),
@@ -1972,13 +1972,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				for (const filename of toRemove) {
 					const targetPath = pathService.join(backupDir, filename)
 					yield* fs.remove(targetPath, { force: true }).pipe(
-						Effect.catchAll((cause) =>
-							Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 								Effect.zipRight(
 									Effect.fail(
 										new LocalIssueStoreError({
-											message: `Failed to prune backup '${filename}': ${Cause.pretty(Cause.fail(cause))}`,
-											cause,
+											message: `Failed to prune backup '${filename}': ${Cause.pretty(Cause.fail(error))}`,
+											cause: error,
 										}),
 									),
 								),
@@ -1992,7 +1992,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			dbPath: string,
 			backupConfig: LocalIssueBackupConfig,
 			message: string,
-			cause: unknown,
+			error: unknown,
 		): Effect.Effect<void> =>
 			Effect.gen(function* () {
 				const nowMs = Date.now()
@@ -2002,12 +2002,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					return
 				}
 				backupWarningAtByDbPath.set(dbPath, nowMs)
-				yield* Effect.logWarning(`${message}: ${Cause.pretty(Cause.fail(cause))}`)
+				yield* Effect.logWarning(`${message}: ${Cause.pretty(Cause.fail(error))}`)
 				yield* diagnostics.logEvent({
 					severity: "warning",
 					source: "LocalIssueStore",
 					message,
-					details: Cause.pretty(Cause.fail(cause)),
+					details: Cause.pretty(Cause.fail(error)),
 				})
 			})
 
@@ -2020,10 +2020,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				const backupDir = resolveBackupDirectory(storageRoot, backupConfig)
 				yield* fs.makeDirectory(backupDir, { recursive: true }).pipe(
 					Effect.mapError(
-						(cause) =>
+						(error) =>
 							new LocalIssueStoreError({
-								message: `Failed to create backup directory: ${Cause.pretty(Cause.fail(cause))}`,
-								cause,
+								message: `Failed to create backup directory: ${Cause.pretty(Cause.fail(error))}`,
+								cause: error,
 							}),
 					),
 				)
@@ -2032,23 +2032,23 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				const cleanupTemp = fs.remove(paths.tempPath, { force: true }).pipe(Effect.ignore)
 
 				yield* sql`VACUUM INTO ${paths.tempPath}`.pipe(
-					Effect.catchAll((cause) =>
-						Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
-							Effect.zipRight(cleanupTemp.pipe(Effect.zipRight(Effect.fail(cause)))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
+							Effect.zipRight(cleanupTemp.pipe(Effect.zipRight(Effect.fail(error)))),
 						),
 					),
 				)
 
 				yield* fs.rename(paths.tempPath, paths.backupPath).pipe(
-					Effect.catchAll((cause) =>
-						Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 							Effect.zipRight(
 								cleanupTemp.pipe(
 									Effect.zipRight(
 										Effect.fail(
 											new LocalIssueStoreError({
-												message: `Failed to finalize sqlite backup: ${Cause.pretty(Cause.fail(cause))}`,
-												cause,
+												message: `Failed to finalize sqlite backup: ${Cause.pretty(Cause.fail(error))}`,
+												cause: error,
 											}),
 										),
 									),
@@ -2073,14 +2073,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					return
 				}
 				const lastBackupAtMs = yield* getLastBackupTimestampMs(sql).pipe(
-					Effect.catchAll((cause) => {
-						return Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+					Effect.catchAll((error) => {
+						return Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 							Effect.zipRight(
 								reportBackupFailure(
 									dbPath,
 									backupConfig,
 									"Failed to read sqlite backup metadata",
-									cause,
+									error,
 								).pipe(Effect.as(undefined)),
 							),
 						)
@@ -2093,10 +2093,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					return
 				}
 				yield* runBackup(sql, storageRoot, backupConfig).pipe(
-					Effect.catchAll((cause) =>
-						Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 							Effect.zipRight(
-								reportBackupFailure(dbPath, backupConfig, "Automatic sqlite backup failed", cause),
+								reportBackupFailure(dbPath, backupConfig, "Automatic sqlite backup failed", error),
 							),
 						),
 					),
@@ -2114,14 +2114,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					return
 				}
 				const lastBackupAtMs = yield* getLastBackupTimestampMs(sql).pipe(
-					Effect.catchAll((cause) => {
-						return Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+					Effect.catchAll((error) => {
+						return Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 							Effect.zipRight(
 								reportBackupFailure(
 									dbPath,
 									backupConfig,
 									"Failed to read sqlite backup metadata",
-									cause,
+									error,
 								).pipe(Effect.as(undefined)),
 							),
 						)
@@ -2134,14 +2134,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					return
 				}
 				yield* runBackup(sql, storageRoot, backupConfig).pipe(
-					Effect.catchAll((cause) =>
-						Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 							Effect.zipRight(
 								reportBackupFailure(
 									dbPath,
 									backupConfig,
 									"Write-triggered sqlite backup failed",
-									cause,
+									error,
 								),
 							),
 						),
@@ -2213,14 +2213,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					}
 
 					yield* fs.makeDirectory(storagePaths.storageDirectory, { recursive: true }).pipe(
-						Effect.catchAll((cause) =>
-							Effect.logWarning(Cause.pretty(Cause.fail(cause))).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(Cause.pretty(Cause.fail(error))).pipe(
 								Effect.zipRight(
 									Effect.fail(
 										new LocalIssueStoreError({
 											message:
 												"Failed to prepare local issue database directory. Check filesystem permissions and available disk space, then retry.",
-											cause,
+											cause: error,
 										}),
 									),
 								),
@@ -2244,23 +2244,23 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							return result
 						}),
 					).pipe(
-						Effect.catchAll((cause) =>
+						Effect.catchAll((error) =>
 							Effect.gen(function* () {
-								if (containsSqlError(cause)) {
+								if (containsSqlError(error)) {
 									yield* Effect.logError("LocalIssueStore SQL failure")
-									yield* Effect.logError(Cause.pretty(Cause.fail(cause)))
+									yield* Effect.logError(Cause.pretty(Cause.fail(error)))
 								}
 
-								if (isLocalIssueStoreError(cause)) {
-									return yield* Effect.fail(cause)
+								if (isLocalIssueStoreError(error)) {
+									return yield* Effect.fail(error)
 								}
 
-								yield* Effect.logWarning(Cause.pretty(Cause.fail(cause)))
+								yield* Effect.logWarning(Cause.pretty(Cause.fail(error)))
 								return yield* Effect.fail(
 									new LocalIssueStoreError({
 										message:
 											"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
-										cause,
+										cause: error,
 									}),
 								)
 							}),
