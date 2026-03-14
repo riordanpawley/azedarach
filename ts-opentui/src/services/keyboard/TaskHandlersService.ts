@@ -133,11 +133,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						rollback: syncTaskFromBackend(taskId),
 					}
 					yield* board.removeTaskFromMutation(taskId)
-					yield* mutationQueue.add(deleteMutation)
+					yield* mutationQueue.enqueue(deleteMutation)
 					yield* toast.show("success", `Deleted ${taskId}`)
-					// Await mutation processing - tracker commands are fast (~50ms)
-					// MutationQueue handles rollback and error toasts on failure
-					yield* mutationQueue.process(taskId)
 					yield* nav.initialize()
 				})
 
@@ -266,9 +263,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 							rollback: syncTaskFromBackend(task.id),
 						}
 						yield* board.removeTaskFromMutation(task.id)
-						yield* mutationQueue.add(updateMutation)
+						yield* mutationQueue.enqueue(updateMutation)
 						yield* toast.show("success", `Tombstoned ${task.id}`)
-						yield* mutationQueue.process(task.id)
 						yield* nav.initialize()
 					})
 
@@ -334,8 +330,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								cwd: projectPath,
 								rollback: board.applyOptimisticMove(id, previousStatus),
 							}
-							yield* mutationQueue.add(moveMutation)
-							yield* mutationQueue.process(id)
+							yield* mutationQueue.enqueue(moveMutation)
 						}
 					}
 				})

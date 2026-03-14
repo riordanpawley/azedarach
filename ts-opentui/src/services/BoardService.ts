@@ -1463,8 +1463,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
-				// Get optimistic mutations
-				const pendingMutations = yield* mutationQueue.getMutations()
+				// Get optimistic mutations through queue adapter (daemon or local fallback)
+				const pendingMutations = yield* mutationQueue.getOptimisticMutations()
 
 				// Get parent epic map (cached for 30s to avoid expensive tracker show calls)
 				// This enables filtering epic children and using correct base branch for git diff
