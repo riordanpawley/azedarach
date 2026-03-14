@@ -29,7 +29,7 @@ export type BackendDaemonRuntimePhase = DaemonLifecycleState
 
 export interface BackendDaemonClientState {
 	readonly clientId: string
-	readonly auth: BackendClientAuthContext
+	readonly auth?: BackendClientAuthContext
 	readonly connectedAtMs: number
 	readonly lastHeartbeatAtMs: number
 	readonly lastReconnectAtMs: number | null
@@ -198,7 +198,7 @@ const upsertClient = (params: {
 	const existing = params.state.clients.get(params.clientId)
 	const baseConnectedAtMs = existing?.connectedAtMs ?? params.observedAtMs
 	const mergedCapabilities = Array.from(
-		new Set([...(existing?.auth.capabilities ?? []), ...params.auth.capabilities]),
+		new Set([...(existing?.auth?.capabilities ?? []), ...params.auth.capabilities]),
 	).sort((left, right) => left.localeCompare(right))
 	const mergedAuth: BackendClientAuthContext = {
 		actorId: params.auth.actorId,

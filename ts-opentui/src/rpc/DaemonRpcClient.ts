@@ -1,0 +1,286 @@
+import * as BunSocket from "@effect/platform-bun/BunSocket"
+import * as RpcClient from "@effect/rpc/RpcClient"
+import { RpcClientError } from "@effect/rpc/RpcClientError"
+import * as RpcSerialization from "@effect/rpc/RpcSerialization"
+import { Context, Data, Effect, Layer } from "effect"
+import {
+	DAEMON_RPC_PROTOCOL_VERSION,
+	type DaemonAttachReconnectResult,
+	type DaemonAttachRequest,
+	type DaemonControlStatusResult,
+	type DaemonHealthRequest,
+	type DaemonHealthResult,
+	type DaemonHeartbeatRequest,
+	type DaemonHeartbeatResult,
+	type DaemonLogsRequest,
+	type DaemonLogsResult,
+	type DaemonReconnectRequest,
+	type DaemonRestartRequest,
+	type DaemonRpcActionError,
+	type DaemonStatusRequest,
+	type DaemonStopRequest,
+} from "./DaemonRpcSchemas.js"
+import { DaemonRpcGroup } from "./DaemonRpcs.js"
+
+export type DaemonRpcOperation =
+	| "status"
+	| "health"
+	| "logs"
+	| "stop"
+	| "restart"
+	| "attach"
+	| "reconnect"
+	| "heartbeat"
+
+export class DaemonRpcProtocolVersionMismatchError extends Data.TaggedError(
+	"DaemonRpcProtocolVersionMismatchError",
+)<{
+	readonly operation: DaemonRpcOperation
+	readonly expectedProtocolVersion: number
+	readonly receivedProtocolVersion: number
+}> {}
+
+export class DaemonRpcTransportError extends Data.TaggedError("DaemonRpcTransportError")<{
+	readonly operation: DaemonRpcOperation
+	readonly reason: "transport" | "unknown"
+	readonly message: string
+	readonly suggestion: string
+}> {}
+
+export class DaemonRpcRemoteActionError extends Data.TaggedError("DaemonRpcRemoteActionError")<{
+	readonly operation: DaemonRpcOperation
+	readonly code: string
+	readonly message: string
+	readonly action: string | undefined
+}> {}
+
+export type DaemonRpcClientError =
+	| DaemonRpcProtocolVersionMismatchError
+	| DaemonRpcTransportError
+	| DaemonRpcRemoteActionError
+
+export interface DaemonRpcClientApi {
+	readonly status: (
+		request?: Omit<DaemonStatusRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonControlStatusResult, DaemonRpcClientError>
+	readonly health: (
+		request?: Omit<DaemonHealthRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonHealthResult, DaemonRpcClientError>
+	readonly logs: (
+		request?: Omit<DaemonLogsRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonLogsResult, DaemonRpcClientError>
+	readonly stop: (
+		request?: Omit<DaemonStopRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonControlStatusResult, DaemonRpcClientError>
+	readonly restart: (
+		request?: Omit<DaemonRestartRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonControlStatusResult, DaemonRpcClientError>
+	readonly attach: (
+		request: Omit<DaemonAttachRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachReconnectResult, DaemonRpcClientError>
+	readonly reconnect: (
+		request: Omit<DaemonReconnectRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachReconnectResult, DaemonRpcClientError>
+	readonly heartbeat: (
+		request: Omit<DaemonHeartbeatRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonHeartbeatResult, DaemonRpcClientError>
+}
+
+export interface DaemonRpcWireClient {
+	readonly daemonStatus: (
+		input: DaemonStatusRequest,
+	) => Effect.Effect<DaemonControlStatusResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonHealth: (
+		input: DaemonHealthRequest,
+	) => Effect.Effect<DaemonHealthResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonLogs: (
+		input: DaemonLogsRequest,
+	) => Effect.Effect<DaemonLogsResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonStop: (
+		input: DaemonStopRequest,
+	) => Effect.Effect<DaemonControlStatusResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonRestart: (
+		input: DaemonRestartRequest,
+	) => Effect.Effect<DaemonControlStatusResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonAttach: (
+		input: DaemonAttachRequest,
+	) => Effect.Effect<DaemonAttachReconnectResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonReconnect: (
+		input: DaemonReconnectRequest,
+	) => Effect.Effect<DaemonAttachReconnectResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonHeartbeat: (
+		input: DaemonHeartbeatRequest,
+	) => Effect.Effect<DaemonHeartbeatResult, RpcClientError | DaemonRpcActionError>
+}
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+	typeof value === "object" && value !== null
+
+const hasTaggedActionError = (error: unknown): error is DaemonRpcActionError =>
+	isRecord(error) &&
+	error["_tag"] === "DaemonRpcActionError" &&
+	typeof error["code"] === "string" &&
+	typeof error["message"] === "string" &&
+	(error["action"] === undefined || typeof error["action"] === "string")
+
+const mapWireError = (operation: DaemonRpcOperation, error: unknown): DaemonRpcClientError => {
+	if (error instanceof DaemonRpcProtocolVersionMismatchError) {
+		return error
+	}
+	if (error instanceof RpcClientError) {
+		return new DaemonRpcTransportError({
+			operation,
+			reason: "transport",
+			message: error.message,
+			suggestion:
+				"Verify daemon socket availability, then run `az daemon health` and `az daemon logs`.",
+		})
+	}
+	if (hasTaggedActionError(error)) {
+		return new DaemonRpcRemoteActionError({
+			operation,
+			code: error.code,
+			message: error.message,
+			action: error.action,
+		})
+	}
+	return new DaemonRpcTransportError({
+		operation,
+		reason: "unknown",
+		message: error instanceof Error ? error.message : String(error),
+		suggestion: "Retry the command and inspect daemon diagnostics with `az daemon status`.",
+	})
+}
+
+const ensureCompatibleRpcVersion = <T extends { readonly rpcProtocolVersion: number }>(
+	operation: DaemonRpcOperation,
+	response: T,
+): Effect.Effect<T, DaemonRpcProtocolVersionMismatchError> => {
+	if (response.rpcProtocolVersion !== DAEMON_RPC_PROTOCOL_VERSION) {
+		return Effect.fail(
+			new DaemonRpcProtocolVersionMismatchError({
+				operation,
+				expectedProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				receivedProtocolVersion: response.rpcProtocolVersion,
+			}),
+		)
+	}
+	return Effect.succeed(response)
+}
+
+export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRpcClientApi => ({
+	status: (request) =>
+		wire
+			.daemonStatus(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("status", response)),
+				Effect.mapError((error) => mapWireError("status", error)),
+			),
+	health: (request) =>
+		wire
+			.daemonHealth(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("health", response)),
+				Effect.mapError((error) => mapWireError("health", error)),
+			),
+	logs: (request) =>
+		wire
+			.daemonLogs(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("logs", response)),
+				Effect.mapError((error) => mapWireError("logs", error)),
+			),
+	stop: (request) =>
+		wire
+			.daemonStop(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			)
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("stop", response)),
+				Effect.mapError((error) => mapWireError("stop", error)),
+			),
+	restart: (request) =>
+		wire
+			.daemonRestart({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("restart", response)),
+				Effect.mapError((error) => mapWireError("restart", error)),
+			),
+	attach: (request) =>
+		wire
+			.daemonAttach({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("attach", response)),
+				Effect.mapError((error) => mapWireError("attach", error)),
+			),
+	reconnect: (request) =>
+		wire
+			.daemonReconnect({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("reconnect", response)),
+				Effect.mapError((error) => mapWireError("reconnect", error)),
+			),
+	heartbeat: (request) =>
+		wire
+			.daemonHeartbeat({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("heartbeat", response)),
+				Effect.mapError((error) => mapWireError("heartbeat", error)),
+			),
+})
+
+const makeDaemonRpcClient = Effect.gen(function* () {
+	const raw = yield* RpcClient.make(DaemonRpcGroup)
+	const wire: DaemonRpcWireClient = {
+		daemonStatus: (input) => raw.daemonStatus(input),
+		daemonHealth: (input) => raw.daemonHealth(input),
+		daemonLogs: (input) => raw.daemonLogs(input),
+		daemonStop: (input) => raw.daemonStop(input),
+		daemonRestart: (input) => raw.daemonRestart(input),
+		daemonAttach: (input) => raw.daemonAttach(input),
+		daemonReconnect: (input) => raw.daemonReconnect(input),
+		daemonHeartbeat: (input) => raw.daemonHeartbeat(input),
+	}
+	return makeDaemonRpcClientFromWire(wire)
+})
+
+export class DaemonRpcClient extends Context.Tag("DaemonRpcClient")<
+	DaemonRpcClient,
+	DaemonRpcClientApi
+>() {}
+
+export const layerSocket = (url: string) =>
+	Layer.scoped(DaemonRpcClient, makeDaemonRpcClient).pipe(
+		Layer.provide(
+			RpcClient.layerProtocolSocket().pipe(
+				Layer.provideMerge(BunSocket.layerWebSocket(url)),
+				Layer.provideMerge(RpcSerialization.layerMsgPack),
+			),
+		),
+	)

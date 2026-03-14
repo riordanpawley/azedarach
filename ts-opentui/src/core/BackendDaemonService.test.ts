@@ -70,10 +70,19 @@ describe("BackendDaemonService", () => {
 		expect(result.reconnect.snapshot.runtimePhase).toBe("ready")
 		expect(result.restart.revision).toBe(4)
 		expect(result.state.revision).toBe(4)
-		expect(result.state.clients["client-a"]?.lastReconnectAtMs).toBe(1_200)
-		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
-		expect(result.state.clients["client-a"]?.lastSeenLifecycleGeneration).toBe(1)
-		expect(result.state.clients["client-a"]?.auth.actorId).toBe("local-client")
+		const clientA = result.state.clients["client-a"]
+		expect(clientA).toBeDefined()
+		if (clientA === undefined) {
+			throw new Error("Expected client-a in daemon state")
+		}
+		expect(clientA.lastReconnectAtMs).toBe(1_200)
+		expect(clientA.lastSeenRevision).toBe(1)
+		expect(clientA.lastSeenLifecycleGeneration).toBe(1)
+		expect(clientA.auth).toBeDefined()
+		if (clientA.auth === undefined) {
+			throw new Error("Expected client-a auth context")
+		}
+		expect(clientA.auth.actorId).toBe("local-client")
 		expect(result.snapshot.revision).toBe(4)
 		const snapshotAuditEvents = result.snapshot.auditEvents ?? []
 		expect(snapshotAuditEvents.length).toBeGreaterThanOrEqual(4)
@@ -117,9 +126,18 @@ describe("BackendDaemonService", () => {
 		expect(result.heartbeatB.lastHeartbeatAtMs).toBe(1_030)
 		expect(result.state.revision).toBe(4)
 		expect(result.state.runtimePhase).toBe("ready")
-		expect(result.state.clients["client-a"]?.lastSeenRevision).toBe(1)
+		const clientA = result.state.clients["client-a"]
+		expect(clientA).toBeDefined()
+		if (clientA === undefined) {
+			throw new Error("Expected client-a in daemon state")
+		}
+		expect(clientA.lastSeenRevision).toBe(1)
 		expect(result.state.clients["client-b"]?.lastHeartbeatAtMs).toBe(1_030)
-		expect(result.state.clients["client-a"]?.auth.capabilities).toEqual([
+		expect(clientA.auth).toBeDefined()
+		if (clientA.auth === undefined) {
+			throw new Error("Expected client-a auth context")
+		}
+		expect(clientA.auth.capabilities).toEqual([
 			"session:attach",
 			"session:heartbeat",
 			"session:reconnect",

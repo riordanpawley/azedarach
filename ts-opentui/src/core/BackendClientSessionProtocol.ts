@@ -31,7 +31,7 @@ export interface BackendClientSessionNegotiatedCapabilities {
 	readonly lifecycleGenerationTracking: true
 	readonly recoveryGenerationTracking: true
 	readonly resumeToken: true
-	readonly clientCapabilities: ReadonlyArray<BackendClientCapability>
+	readonly clientCapabilities?: ReadonlyArray<BackendClientCapability>
 }
 
 export interface BackendClientProtocolHandshakeMetadata {
