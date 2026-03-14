@@ -229,3 +229,59 @@ export const DaemonSessionSnapshotRequestSchema = Schema.Struct({
 export type DaemonSessionSnapshotRequest = Schema.Schema.Type<
 	typeof DaemonSessionSnapshotRequestSchema
 >
+
+export const DaemonSessionStartRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonSessionStartRequest = Schema.Schema.Type<typeof DaemonSessionStartRequestSchema>
+
+export const DaemonSessionStopRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonSessionStopRequest = Schema.Schema.Type<typeof DaemonSessionStopRequestSchema>
+
+export const DaemonSessionPauseRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonSessionPauseRequest = Schema.Schema.Type<typeof DaemonSessionPauseRequestSchema>
+
+export const DaemonSessionResumeRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonSessionResumeRequest = Schema.Schema.Type<typeof DaemonSessionResumeRequestSchema>
+
+export const DaemonSessionRecoverRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonSessionRecoverRequest = Schema.Schema.Type<
+	typeof DaemonSessionRecoverRequestSchema
+>
+
+export const DaemonSessionUpdateStateRequestSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	issueId: Schema.String,
+	state: DaemonSessionStateSchema,
+	projectPath: Schema.optional(Schema.String),
+})
+export type DaemonSessionUpdateStateRequest = Schema.Schema.Type<
+	typeof DaemonSessionUpdateStateRequestSchema
+>
+
+export const DaemonSessionMutationResultSchema = Schema.Struct({
+	rpcProtocolVersion: Schema.Number,
+	capturedAtMs: Schema.Number,
+	session: DaemonSessionSnapshotEntrySchema,
+})
+export type DaemonSessionMutationResult = Schema.Schema.Type<
+	typeof DaemonSessionMutationResultSchema
+>

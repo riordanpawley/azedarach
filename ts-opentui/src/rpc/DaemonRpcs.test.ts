@@ -5,6 +5,8 @@ import {
 	DaemonAttachRequestSchema,
 	DaemonHealthResultSchema,
 	DaemonSessionSnapshotResultSchema,
+	DaemonSessionStartRequestSchema,
+	DaemonSessionUpdateStateRequestSchema,
 	DaemonStatusRequestSchema,
 } from "./DaemonRpcSchemas.js"
 import { DaemonRpcGroup } from "./DaemonRpcs.js"
@@ -19,7 +21,13 @@ describe("DaemonRpcs", () => {
 			"daemonLogs",
 			"daemonReconnect",
 			"daemonRestart",
+			"daemonSessionPause",
+			"daemonSessionRecover",
+			"daemonSessionResume",
 			"daemonSessionSnapshot",
+			"daemonSessionStart",
+			"daemonSessionStop",
+			"daemonSessionUpdateState",
 			"daemonStatus",
 			"daemonStop",
 		])
@@ -43,6 +51,31 @@ describe("DaemonRpcs", () => {
 
 		expect(status.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
 		expect(attach.clientId).toBe("client-a")
+	})
+
+	it("validates session mutation request schemas", async () => {
+		const decodeStart = Schema.decodeUnknown(DaemonSessionStartRequestSchema)
+		const decodeUpdate = Schema.decodeUnknown(DaemonSessionUpdateStateRequestSchema)
+
+		const start = await Effect.runPromise(
+			decodeStart({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "qc",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const update = await Effect.runPromise(
+			decodeUpdate({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "qc",
+				state: "waiting",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(start.issueId).toBe("qc")
+		expect(start.projectPath).toBe("/tmp/project")
+		expect(update.state).toBe("waiting")
 	})
 
 	it("validates daemon health response shape", async () => {

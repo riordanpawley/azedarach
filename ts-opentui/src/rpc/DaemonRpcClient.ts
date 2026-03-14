@@ -17,8 +17,15 @@ import {
 	type DaemonReconnectRequest,
 	type DaemonRestartRequest,
 	type DaemonRpcActionError,
+	type DaemonSessionMutationResult,
+	type DaemonSessionPauseRequest,
+	type DaemonSessionRecoverRequest,
+	type DaemonSessionResumeRequest,
 	type DaemonSessionSnapshotRequest,
 	type DaemonSessionSnapshotResult,
+	type DaemonSessionStartRequest,
+	type DaemonSessionStopRequest,
+	type DaemonSessionUpdateStateRequest,
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
 } from "./DaemonRpcSchemas.js"
@@ -34,6 +41,12 @@ export type DaemonRpcOperation =
 	| "reconnect"
 	| "heartbeat"
 	| "sessionSnapshot"
+	| "sessionStart"
+	| "sessionStop"
+	| "sessionPause"
+	| "sessionResume"
+	| "sessionRecover"
+	| "sessionUpdateState"
 
 export class DaemonRpcProtocolVersionMismatchError extends Data.TaggedError(
 	"DaemonRpcProtocolVersionMismatchError",
@@ -90,6 +103,24 @@ export interface DaemonRpcClientApi {
 	readonly sessionSnapshot?: (
 		request?: Omit<DaemonSessionSnapshotRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionSnapshotResult, DaemonRpcClientError>
+	readonly sessionStart?: (
+		request: Omit<DaemonSessionStartRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly sessionStop?: (
+		request: Omit<DaemonSessionStopRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly sessionPause?: (
+		request: Omit<DaemonSessionPauseRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly sessionResume?: (
+		request: Omit<DaemonSessionResumeRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly sessionRecover?: (
+		request: Omit<DaemonSessionRecoverRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
+	readonly sessionUpdateState?: (
+		request: Omit<DaemonSessionUpdateStateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
 }
 
 export interface DaemonRpcWireClient {
@@ -120,6 +151,24 @@ export interface DaemonRpcWireClient {
 	readonly daemonSessionSnapshot: (
 		input: DaemonSessionSnapshotRequest,
 	) => Effect.Effect<DaemonSessionSnapshotResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionStart: (
+		input: DaemonSessionStartRequest,
+	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionStop: (
+		input: DaemonSessionStopRequest,
+	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionPause: (
+		input: DaemonSessionPauseRequest,
+	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionResume: (
+		input: DaemonSessionResumeRequest,
+	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionRecover: (
+		input: DaemonSessionRecoverRequest,
+	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	readonly daemonSessionUpdateState: (
+		input: DaemonSessionUpdateStateRequest,
+	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -273,6 +322,66 @@ export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRp
 				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionSnapshot", response)),
 				Effect.mapError((error) => mapWireError("sessionSnapshot", error)),
 			),
+	sessionStart: (request) =>
+		wire
+			.daemonSessionStart({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionStart", response)),
+				Effect.mapError((error) => mapWireError("sessionStart", error)),
+			),
+	sessionStop: (request) =>
+		wire
+			.daemonSessionStop({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionStop", response)),
+				Effect.mapError((error) => mapWireError("sessionStop", error)),
+			),
+	sessionPause: (request) =>
+		wire
+			.daemonSessionPause({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionPause", response)),
+				Effect.mapError((error) => mapWireError("sessionPause", error)),
+			),
+	sessionResume: (request) =>
+		wire
+			.daemonSessionResume({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionResume", response)),
+				Effect.mapError((error) => mapWireError("sessionResume", error)),
+			),
+	sessionRecover: (request) =>
+		wire
+			.daemonSessionRecover({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionRecover", response)),
+				Effect.mapError((error) => mapWireError("sessionRecover", error)),
+			),
+	sessionUpdateState: (request) =>
+		wire
+			.daemonSessionUpdateState({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			})
+			.pipe(
+				Effect.flatMap((response) => ensureCompatibleRpcVersion("sessionUpdateState", response)),
+				Effect.mapError((error) => mapWireError("sessionUpdateState", error)),
+			),
 })
 
 const makeDaemonRpcClient = Effect.gen(function* () {
@@ -287,6 +396,12 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 		daemonReconnect: (input) => raw.daemonReconnect(input),
 		daemonHeartbeat: (input) => raw.daemonHeartbeat(input),
 		daemonSessionSnapshot: (input) => raw.daemonSessionSnapshot(input),
+		daemonSessionStart: (input) => raw.daemonSessionStart(input),
+		daemonSessionStop: (input) => raw.daemonSessionStop(input),
+		daemonSessionPause: (input) => raw.daemonSessionPause(input),
+		daemonSessionResume: (input) => raw.daemonSessionResume(input),
+		daemonSessionRecover: (input) => raw.daemonSessionRecover(input),
+		daemonSessionUpdateState: (input) => raw.daemonSessionUpdateState(input),
 	}
 	return makeDaemonRpcClientFromWire(wire)
 })

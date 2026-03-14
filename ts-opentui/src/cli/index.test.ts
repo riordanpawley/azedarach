@@ -26,6 +26,7 @@ import {
 	normalizeIssueJsonFlagOrder,
 	parseGitWorktreeListPaths,
 	resolveCliExecutionMode,
+	resolveStartSessionRuntimeMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 } from "./index.js"
@@ -659,6 +660,37 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "d", "stp", "AZE-1"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "ls"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "s", "AZE-1"])).toBe("dev-command")
+	})
+})
+
+describe("resolveStartSessionRuntimeMode", () => {
+	it("defaults to daemon-rpc mode", () => {
+		const resolved = resolveStartSessionRuntimeMode({
+			noDaemonFlag: false,
+			env: {},
+		})
+		expect(resolved.mode).toBe("daemon-rpc")
+		expect(resolved.decision).toBe("enabled-by-default")
+	})
+
+	it("uses fallback mode when --no-daemon is set", () => {
+		const resolved = resolveStartSessionRuntimeMode({
+			noDaemonFlag: true,
+			env: {},
+		})
+		expect(resolved.mode).toBe("session-manager-fallback")
+		expect(resolved.decision).toBe("disabled-by-cli-flag")
+	})
+
+	it("uses fallback mode when daemon is disabled by env policy", () => {
+		const resolved = resolveStartSessionRuntimeMode({
+			noDaemonFlag: false,
+			env: {
+				AZEDARACH_DAEMON_MODE: "off",
+			},
+		})
+		expect(resolved.mode).toBe("session-manager-fallback")
+		expect(resolved.decision).toBe("disabled-by-env")
 	})
 })
 

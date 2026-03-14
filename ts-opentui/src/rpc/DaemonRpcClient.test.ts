@@ -14,6 +14,7 @@ import {
 	type DaemonHealthResult,
 	type DaemonHeartbeatResult,
 	type DaemonLogsResult,
+	type DaemonSessionMutationResult,
 	type DaemonSessionSnapshotResult,
 } from "./DaemonRpcSchemas.js"
 
@@ -101,6 +102,19 @@ const makeSessionSnapshot = (): DaemonSessionSnapshotResult => ({
 	],
 })
 
+const makeSessionMutation = (): DaemonSessionMutationResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	capturedAtMs: 105,
+	session: {
+		issueId: "qc",
+		worktreePath: "/tmp/project/.worktrees/qc",
+		tmuxSessionName: "az-qc",
+		state: "busy",
+		startedAt: "2026-03-14T06:00:00.000Z",
+		projectPath: "/tmp/project",
+	},
+})
+
 const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient => ({
 	daemonStatus: () => Effect.succeed(makeStatus()),
 	daemonHealth: () => Effect.succeed(makeHealth()),
@@ -155,6 +169,12 @@ const makeWire = (overrides: Partial<DaemonRpcWireClient>): DaemonRpcWireClient 
 		}),
 	daemonHeartbeat: () => Effect.succeed(makeHeartbeat()),
 	daemonSessionSnapshot: () => Effect.succeed(makeSessionSnapshot()),
+	daemonSessionStart: () => Effect.succeed(makeSessionMutation()),
+	daemonSessionStop: () => Effect.succeed(makeSessionMutation()),
+	daemonSessionPause: () => Effect.succeed(makeSessionMutation()),
+	daemonSessionResume: () => Effect.succeed(makeSessionMutation()),
+	daemonSessionRecover: () => Effect.succeed(makeSessionMutation()),
+	daemonSessionUpdateState: () => Effect.succeed(makeSessionMutation()),
 	...overrides,
 })
 
@@ -284,5 +304,80 @@ describe("DaemonRpcClient", () => {
 			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			projectPath: "/tmp/project",
 		})
+	})
+
+	it("injects protocol version and payload for session lifecycle mutations", async () => {
+		const payloadRef = await Effect.runPromise(
+			Ref.make<{
+				readonly rpcProtocolVersion: number
+				readonly issueId: string
+				readonly projectPath: string
+			} | null>(null),
+		)
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonSessionStart: (payload) =>
+					Effect.gen(function* () {
+						yield* Ref.set(payloadRef, payload)
+						return makeSessionMutation()
+					}),
+			}),
+		)
+		if (client.sessionStart === undefined) {
+			throw new Error("Expected sessionStart method to be available")
+		}
+
+		const result = await Effect.runPromise(
+			client.sessionStart({
+				issueId: "qc",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const captured = await Effect.runPromise(Ref.get(payloadRef))
+		expect(result.session.issueId).toBe("qc")
+		expect(captured).toEqual({
+			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			issueId: "qc",
+			projectPath: "/tmp/project",
+		})
+	})
+
+	it("maps remote action errors for session mutation operations", async () => {
+		const client = makeDaemonRpcClientFromWire(
+			makeWire({
+				daemonSessionUpdateState: () =>
+					Effect.fail({
+						_tag: "DaemonRpcActionError",
+						code: "INVALID_STATE_TRANSITION",
+						message: "cannot transition from done to busy",
+						action: "resume from paused instead",
+					}),
+			}),
+		)
+		if (client.sessionUpdateState === undefined) {
+			throw new Error("Expected sessionUpdateState method to be available")
+		}
+
+		const exit = await Effect.runPromiseExit(
+			client.sessionUpdateState({
+				issueId: "qc",
+				state: "busy",
+			}),
+		)
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected remote action failure for sessionUpdateState")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected sessionUpdateState failure cause")
+		}
+		expect(failure.value).toBeInstanceOf(DaemonRpcRemoteActionError)
+		if (!(failure.value instanceof DaemonRpcRemoteActionError)) {
+			throw new Error("Expected DaemonRpcRemoteActionError")
+		}
+		expect(failure.value.operation).toBe("sessionUpdateState")
+		expect(failure.value.code).toBe("INVALID_STATE_TRANSITION")
 	})
 })

@@ -76,7 +76,10 @@ import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
 import type { DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
-import type { DaemonSessionSnapshotResult } from "../rpc/DaemonRpcSchemas.js"
+import type {
+	DaemonSessionMutationResult,
+	DaemonSessionSnapshotResult,
+} from "../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "../services/BoardService.js"
 import { ClockService } from "../services/ClockService.js"
 import { CommandQueueService } from "../services/CommandQueueService.js"
@@ -507,15 +510,55 @@ const defaultHandler = (args: {
 /**
  * Start a new Claude session for an issue
  */
+type StartSessionRuntimeMode = "daemon-rpc" | "session-manager-fallback"
+
+const mapDaemonSessionMutationToCliSession = (
+	result: DaemonSessionMutationResult,
+): {
+	readonly worktreePath: string
+	readonly tmuxSessionName: string
+} => ({
+	worktreePath: result.session.worktreePath,
+	tmuxSessionName: result.session.tmuxSessionName,
+})
+
+export const resolveStartSessionRuntimeMode = (params: {
+	readonly noDaemonFlag: boolean
+	readonly env: Readonly<Record<string, string | undefined>>
+}): {
+	readonly mode: StartSessionRuntimeMode
+	readonly decision:
+		| "enabled-by-default"
+		| "disabled-by-cli-flag"
+		| "disabled-by-env"
+		| "enabled-by-env"
+		| "ignored-invalid-env"
+} => {
+	const policy = resolveDaemonOperationsPolicy({
+		command: "tui-default",
+		noDaemonFlag: params.noDaemonFlag,
+		env: params.env,
+	})
+	return {
+		mode: policy.autoDaemonize ? "daemon-rpc" : "session-manager-fallback",
+		decision: policy.decision,
+	}
+}
+
 const startHandler = (args: {
 	readonly issueId: string
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly noDaemon: boolean
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const sessionRuntime = resolveStartSessionRuntimeMode({
+			noDaemonFlag: args.noDaemon,
+			env: process.env,
+		})
 
 		yield* Console.log(`Starting Claude session for issue: ${issueId}`)
 		yield* Console.log(`Project: ${cwd}`)
@@ -530,12 +573,47 @@ const startHandler = (args: {
 		// Validate issue tracker store
 		yield* validateIssueTrackerStore(cwd)
 
-		// Start the session using SessionManager (provided by cliLayer)
-		const sessionManager = yield* SessionManager
-		const session = yield* sessionManager.start({
-			issueId,
-			projectPath: cwd,
-		})
+		const session =
+			sessionRuntime.mode === "daemon-rpc"
+				? yield* Effect.gen(function* () {
+						const bootstrap = yield* bootstrapDaemonRpcClient({
+							autoStart: true,
+						})
+						if (bootstrap.client.sessionStart === undefined) {
+							return yield* Effect.fail(
+								new Error(
+									"Connected daemon does not support sessionStart RPC yet. Update daemon/runtime or rerun with --no-daemon.",
+								),
+							)
+						}
+						const mutation = yield* bootstrap.client
+							.sessionStart({
+								issueId,
+								projectPath: cwd,
+							})
+							.pipe(
+								Effect.mapError((error) =>
+									formatDaemonRpcClientFailure({
+										operation: "sessionStart",
+										socketUrl: bootstrap.socketUrl,
+										error,
+									}),
+								),
+							)
+						return mapDaemonSessionMutationToCliSession(mutation)
+					})
+				: yield* Effect.gen(function* () {
+						if (args.verbose) {
+							yield* Console.log(
+								`Session start daemon RPC disabled (${sessionRuntime.decision}); using direct runtime fallback.`,
+							)
+						}
+						const sessionManager = yield* SessionManager
+						return yield* sessionManager.start({
+							issueId,
+							projectPath: cwd,
+						})
+					})
 
 		// Claim the issue with session assignee
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -5411,6 +5489,7 @@ const startCommand = Command.make(
 		issueId: issueIdArg,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
+		noDaemon: noDaemonOption,
 		config: configOption,
 	},
 	startHandler,

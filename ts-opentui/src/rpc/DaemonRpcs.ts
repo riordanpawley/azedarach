@@ -13,8 +13,15 @@ import {
 	DaemonReconnectRequestSchema,
 	DaemonRestartRequestSchema,
 	DaemonRpcActionErrorSchema,
+	DaemonSessionMutationResultSchema,
+	DaemonSessionPauseRequestSchema,
+	DaemonSessionRecoverRequestSchema,
+	DaemonSessionResumeRequestSchema,
 	DaemonSessionSnapshotRequestSchema,
 	DaemonSessionSnapshotResultSchema,
+	DaemonSessionStartRequestSchema,
+	DaemonSessionStopRequestSchema,
+	DaemonSessionUpdateStateRequestSchema,
 	DaemonStatusRequestSchema,
 	DaemonStopRequestSchema,
 } from "./DaemonRpcSchemas.js"
@@ -73,6 +80,42 @@ export const DaemonSessionSnapshotRpc = Rpc.make("daemonSessionSnapshot", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonSessionStartRpc = Rpc.make("daemonSessionStart", {
+	payload: DaemonSessionStartRequestSchema,
+	success: DaemonSessionMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSessionStopRpc = Rpc.make("daemonSessionStop", {
+	payload: DaemonSessionStopRequestSchema,
+	success: DaemonSessionMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSessionPauseRpc = Rpc.make("daemonSessionPause", {
+	payload: DaemonSessionPauseRequestSchema,
+	success: DaemonSessionMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSessionResumeRpc = Rpc.make("daemonSessionResume", {
+	payload: DaemonSessionResumeRequestSchema,
+	success: DaemonSessionMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSessionRecoverRpc = Rpc.make("daemonSessionRecover", {
+	payload: DaemonSessionRecoverRequestSchema,
+	success: DaemonSessionMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSessionUpdateStateRpc = Rpc.make("daemonSessionUpdateState", {
+	payload: DaemonSessionUpdateStateRequestSchema,
+	success: DaemonSessionMutationResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonRpcGroup = RpcGroup.make(
 	DaemonStatusRpc,
 	DaemonHealthRpc,
@@ -83,6 +126,12 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonReconnectRpc,
 	DaemonHeartbeatRpc,
 	DaemonSessionSnapshotRpc,
+	DaemonSessionStartRpc,
+	DaemonSessionStopRpc,
+	DaemonSessionPauseRpc,
+	DaemonSessionResumeRpc,
+	DaemonSessionRecoverRpc,
+	DaemonSessionUpdateStateRpc,
 )
 
 export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonRpcGroup>
