@@ -370,6 +370,7 @@ const SQLITE_TRANSIENT_ERROR_NUMBERS = new Set([5, 6])
 const SQLITE_OPERATION_RETRY_MAX_ATTEMPTS = 4
 const SQLITE_OPERATION_RETRY_BASE_DELAY_MS = 80
 const SQLITE_OPERATION_RETRY_MAX_DELAY_MS = 600
+const SQLITE_BUSY_TIMEOUT_MS = 3000
 
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null
@@ -1430,6 +1431,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
 		const backupWarningAtByDbPath = new Map<string, number>()
+		const initializedDbPaths = new Set<string>()
+		const loggedDbPaths = new Set<string>()
+		const dbInitSemaphore = yield* Effect.makeSemaphore(1)
 
 		const resolveStorageRoot = (cwd?: string): Effect.Effect<LocalIssueStorageResolution> =>
 			projectService.getCurrentPath().pipe(
@@ -2145,6 +2149,37 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				)
 			})
 
+		const applyConnectionPragmas = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
+			Effect.gen(function* () {
+				yield* sql.unsafe("PRAGMA journal_mode = WAL")
+				yield* sql.unsafe("PRAGMA synchronous = NORMAL")
+				yield* sql.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`)
+			})
+
+		const ensureDatabaseInitialized = (
+			sql: SqlClient.SqlClient,
+			dbPath: string,
+			storageRoot: string,
+			backupConfig: LocalIssueBackupConfig,
+		): Effect.Effect<void, SqlError | LocalIssueStoreError> =>
+			dbInitSemaphore.withPermits(1)(
+				Effect.gen(function* () {
+					if (initializedDbPaths.has(dbPath)) {
+						return
+					}
+
+					for (const statement of schemaStatements) {
+						yield* sql.unsafe(statement)
+					}
+					yield* ensureIssueColumns(sql)
+					yield* ensureSyncQueueColumns(sql)
+					yield* ensureSpecRequirementColumns(sql)
+					yield* ensureSpecIssueLinkColumns(sql)
+					yield* maybeRunStaleOpenBackup(sql, dbPath, storageRoot, backupConfig)
+					initializedDbPaths.add(dbPath)
+				}),
+			)
+
 		const withSql = <A>(
 			cwd: string | undefined,
 			effect: (sql: SqlClient.SqlClient) => Effect.Effect<A, SqlError | LocalIssueStoreError>,
@@ -2170,9 +2205,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							? storagePaths.legacyDbPath
 							: storagePaths.canonicalDbPath
 					const backupConfig = yield* getBackupConfig()
-					yield* Effect.log(
-						`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
-					)
+					if (!loggedDbPaths.has(dbPath)) {
+						loggedDbPaths.add(dbPath)
+						yield* Effect.log(
+							`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
+						)
+					}
 
 					yield* fs.makeDirectory(storagePaths.storageDirectory, { recursive: true }).pipe(
 						Effect.catchAll((cause) =>
@@ -2196,14 +2234,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								Effect.provide(Reactivity.layer),
 							)
 
-							for (const statement of schemaStatements) {
-								yield* sql.unsafe(statement)
-							}
-							yield* ensureIssueColumns(sql)
-							yield* ensureSyncQueueColumns(sql)
-							yield* ensureSpecRequirementColumns(sql)
-							yield* ensureSpecIssueLinkColumns(sql)
-							yield* maybeRunStaleOpenBackup(sql, dbPath, storageRoot, backupConfig)
+							yield* applyConnectionPragmas(sql)
+							yield* ensureDatabaseInitialized(sql, dbPath, storageRoot, backupConfig)
 
 							const result = yield* effect(sql)
 							if (options?.triggerWriteBackup === true) {
