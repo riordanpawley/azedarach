@@ -109,6 +109,12 @@ import {
 	formatSpecRequirementReference,
 } from "./output-formatting.js"
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
+import {
+	applyNotifyStatusToTmux,
+	isValidHookEvent,
+	mapHookEventToTmuxStatus,
+	VALID_HOOK_EVENTS,
+} from "./tmux-notify.js"
 
 // ============================================================================
 // CLI Layers
@@ -4484,159 +4490,6 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 		)
 	})
 
-/**
- * Valid hook event types from Claude Code
- */
-const VALID_HOOK_EVENTS = [
-	"user_prompt",
-	"idle_prompt",
-	"permission_request",
-	"pretooluse",
-	"stop",
-	"session_end",
-] as const
-type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
-
-const AZ_STATUS_OPTION = "@az_status"
-const AZ_WAITING_ALERTED_OPTION = "@az_waiting_alerted"
-const BELL_CHAR = "\u0007"
-const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
-const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
-
-/**
- * Type guard to check if a string is a valid hook event
- */
-const isValidHookEvent = (event: string): event is HookEvent =>
-	(VALID_HOOK_EVENTS as readonly string[]).includes(event)
-
-/**
- * Map hook event to session status for tmux
- *
- * Converts detailed hook events to simple status values:
- * - busy: Claude is actively working
- * - waiting: Claude is waiting for user input
- * - idle: Session is inactive/ended
- */
-const mapEventToStatus = (event: HookEvent): TmuxStatus => {
-	switch (event) {
-		case "user_prompt":
-		case "pretooluse":
-			return "busy"
-		case "idle_prompt":
-		case "permission_request":
-		case "stop":
-			return "waiting"
-		case "session_end":
-			return "idle"
-	}
-}
-
-const setTmuxSessionOption = (
-	sessionName: string,
-	optionName: string,
-	value: string,
-	verbose: boolean,
-) =>
-	PlatformCommand.exitCode(
-		PlatformCommand.make("tmux", "set-option", "-t", sessionName, optionName, value),
-	).pipe(
-		Effect.catchAll((error) =>
-			Effect.logWarning(error).pipe(
-				Effect.zipRight(
-					verbose
-						? Console.log(`Could not set tmux option ${optionName}: ${error}`).pipe(Effect.as(1))
-						: Effect.succeed(1),
-				),
-			),
-		),
-	)
-
-const getTmuxSessionOption = (sessionName: string, optionName: string) =>
-	PlatformCommand.string(
-		PlatformCommand.make("tmux", "show-option", "-t", sessionName, "-v", optionName),
-	).pipe(
-		Effect.map((value) => value.trim()),
-		Effect.catchAll((error) =>
-			Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-				Effect.zipRight(Effect.succeed("")),
-			),
-		),
-	)
-
-const ringSessionPaneBell = (sessionName: string) =>
-	Effect.gen(function* () {
-		const paneTty = yield* PlatformCommand.string(
-			PlatformCommand.make("tmux", "display-message", "-p", "-t", sessionName, "#{pane_tty}"),
-		).pipe(
-			Effect.map((value) => value.trim()),
-			Effect.catchAll((error) =>
-				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-					Effect.zipRight(Effect.succeed("")),
-				),
-			),
-		)
-		if (paneTty.length === 0) {
-			return false
-		}
-
-		const fs = yield* FileSystem.FileSystem
-		return yield* fs.writeFileString(paneTty, BELL_CHAR).pipe(
-			Effect.as(true),
-			Effect.catchAll((error) =>
-				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-					Effect.zipRight(Effect.succeed(false)),
-				),
-			),
-		)
-	})
-
-const applyTmuxAttentionStyles = (sessionName: string, verbose: boolean) =>
-	Effect.gen(function* () {
-		// Keep bell monitoring + alert styles session-local so Az sessions stay readable
-		// in native tmux pickers without changing the user's global theme.
-		yield* setTmuxSessionOption(sessionName, "monitor-bell", "on", verbose)
-		yield* setTmuxSessionOption(sessionName, "monitor-activity", "on", verbose)
-		yield* setTmuxSessionOption(sessionName, "bell-action", "any", verbose)
-		yield* setTmuxSessionOption(sessionName, "activity-action", "any", verbose)
-		yield* setTmuxSessionOption(
-			sessionName,
-			"window-status-bell-style",
-			WAITING_WINDOW_BELL_STYLE,
-			verbose,
-		)
-		yield* setTmuxSessionOption(
-			sessionName,
-			"window-status-activity-style",
-			WAITING_WINDOW_ACTIVITY_STYLE,
-			verbose,
-		)
-	})
-
-const applyTmuxWaitingAttentionSignal = (
-	sessionName: string,
-	status: TmuxStatus,
-	verbose: boolean,
-) =>
-	Effect.gen(function* () {
-		yield* applyTmuxAttentionStyles(sessionName, verbose)
-
-		const currentFlag = yield* getTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION)
-		const plan = deriveWaitingAttentionPlan(status, currentFlag.length > 0 ? currentFlag : null)
-
-		let nextFlag: "0" | "1" = plan.nextFlag
-		if (plan.ringBell) {
-			const bellSent = yield* ringSessionPaneBell(sessionName)
-			if (!bellSent) {
-				nextFlag = "0"
-				if (verbose) {
-					yield* Console.log(`Could not ring tmux bell for session ${sessionName}`)
-				}
-			}
-		}
-
-		yield* setTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION, nextFlag, verbose)
-	})
-
 const listTmuxSessionNames = Effect.gen(function* () {
 	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
 	const output = yield* PlatformCommand.string(listCommand).pipe(
@@ -4721,7 +4574,7 @@ const notifyHandler = (args: {
 			return yield* Effect.fail(new Error(`Invalid event: ${args.event}`))
 		}
 
-		const status = mapEventToStatus(args.event)
+		const status = mapHookEventToTmuxStatus(args.event)
 
 		// Find the session by issue ID (handles both new and legacy naming formats)
 		const sessionName = yield* findAiSessionByIssueId(issueId)
@@ -4736,10 +4589,7 @@ const notifyHandler = (args: {
 			yield* Console.log(`Hook: ${args.event} for ${issueId} → status: ${status}`)
 		}
 
-		// Update tmux session option for the Claude session
-		// The TUI can poll this with: tmux show-option -t <session> -v @az_status
-		yield* setTmuxSessionOption(sessionName, AZ_STATUS_OPTION, status, args.verbose)
-		yield* applyTmuxWaitingAttentionSignal(sessionName, status, args.verbose)
+		yield* applyNotifyStatusToTmux(sessionName, status, args.verbose)
 
 		if (args.verbose) {
 			yield* Console.log(`Set @az_status=${status} on session ${sessionName}`)
