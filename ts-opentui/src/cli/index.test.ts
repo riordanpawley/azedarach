@@ -421,6 +421,27 @@ describe("normalizeIssueJsonFlagOrder", () => {
 			"AZE-123",
 		])
 	})
+
+	it("moves spec req update options ahead of requirement ref when ref is first", () => {
+		const argv = ["bun", "az", "spec", "req", "update", "fr4309", "--title", "Updated title"]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual([
+			"bun",
+			"az",
+			"spec",
+			"req",
+			"update",
+			"--title",
+			"Updated title",
+			"fr4309",
+		])
+	})
+
+	it("keeps spec req update argument order when options are already first", () => {
+		const argv = ["bun", "az", "spec", "req", "update", "--title", "Updated title", "fr4309"]
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
+	})
 })
 
 describe("decodeIssueBulkCreatePayload", () => {

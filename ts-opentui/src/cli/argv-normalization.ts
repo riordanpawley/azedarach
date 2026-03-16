@@ -230,6 +230,42 @@ export const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): Readonly
 		return reordered
 	}
 
+	const specCommandIndex = argv.indexOf("spec")
+	if (specCommandIndex !== -1) {
+		const specSubcommand = argv[specCommandIndex + 1]
+		if (specSubcommand !== "req") {
+			return argv
+		}
+
+		const reqSubcommand = argv[specCommandIndex + 2]
+		if (
+			reqSubcommand !== "get" &&
+			reqSubcommand !== "create" &&
+			reqSubcommand !== "update" &&
+			reqSubcommand !== "delete"
+		) {
+			return argv
+		}
+
+		const positionalArgIndex = specCommandIndex + 3
+		if (positionalArgIndex >= argv.length) return argv
+
+		const positionalArg = argv[positionalArgIndex]
+		if (positionalArg === undefined || positionalArg.startsWith("-")) {
+			return argv
+		}
+
+		const hasOptionAfterPositional = argv
+			.slice(positionalArgIndex + 1)
+			.some((token) => token.startsWith("-"))
+		if (!hasOptionAfterPositional) return argv
+
+		const reordered = [...argv]
+		reordered.splice(positionalArgIndex, 1)
+		reordered.push(positionalArg)
+		return reordered
+	}
+
 	return argv
 }
 
