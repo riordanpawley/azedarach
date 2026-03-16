@@ -7424,10 +7424,7 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 const cliRunner = (argv: ReadonlyArray<string>) => {
 	const normalizedArgv = normalizeIssueOptionOrder(normalizeCliAliases(argv))
 	const mode = resolveCliExecutionMode(normalizedArgv)
-	// Keep TUI launches quiet even when --verbose is passed so the renderer can own the terminal.
-	// Verbose logs remain available for command/dev-command execution.
-	const minimumLogLevel =
-		mode !== "tui" && hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
+	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect =
 		mode === "command"
 			? Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
