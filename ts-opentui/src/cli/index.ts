@@ -22,6 +22,7 @@ import {
 import { BunContext } from "@effect/platform-bun"
 import {
 	Console,
+	Data,
 	DateTime,
 	Duration,
 	Effect,
@@ -1179,6 +1180,29 @@ export const daemonCommandShouldAutoStart = (
 	command: "sync" | "status" | "health" | "stop" | "restart" | "logs",
 ): boolean => command !== "stop"
 
+const DAEMON_CONTROL_RPC_TIMEOUT = Duration.seconds(5)
+const DAEMON_CONTROL_RPC_TIMEOUT_MS = 5000
+
+class DaemonControlTimeoutError extends Data.TaggedError("DaemonControlTimeoutError")<{
+	readonly operation: "stop" | "restart"
+	readonly timeoutMs: number
+}> {}
+
+const withDaemonControlTimeout = <A, E, R>(
+	operation: "stop" | "restart",
+	effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | DaemonControlTimeoutError, R> =>
+	effect.pipe(
+		Effect.timeoutFail({
+			duration: DAEMON_CONTROL_RPC_TIMEOUT,
+			onTimeout: () =>
+				new DaemonControlTimeoutError({
+					operation,
+					timeoutMs: DAEMON_CONTROL_RPC_TIMEOUT_MS,
+				}),
+		}),
+	)
+
 const formatDaemonEventStreamEntryLine = (entry: DaemonEventStreamEntry): string => {
 	switch (entry.event._tag) {
 		case "DaemonEventStreamSessionSnapshotEvent":
@@ -1381,6 +1405,7 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 					error,
 				}),
 			),
+			(effect) => withDaemonControlTimeout("stop", effect),
 		)
 		yield* Console.log("Headless backend sync daemon stopped.")
 		yield* Console.log(
@@ -1416,6 +1441,7 @@ const daemonRestartHandler = (args: {
 						error,
 					}),
 				),
+				(effect) => withDaemonControlTimeout("restart", effect),
 			)
 		yield* Console.log("Headless backend sync daemon restarted.")
 		yield* Console.log(
