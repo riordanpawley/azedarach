@@ -1,4 +1,4 @@
-import { FileSystem, Path } from "@effect/platform"
+import { CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Effect, Fiber, Option, Ref, type Scope } from "effect"
 import type { BackendSyncInterface } from "./BackendSyncInterface.js"
 import { BackendSyncRouter } from "./BackendSyncRouter.js"
@@ -7,6 +7,7 @@ import {
 	makeDaemonStateStore,
 	toDaemonStatus,
 } from "./DaemonStateStore.js"
+import { SessionManager } from "./SessionManager.js"
 
 const DEFAULT_INTERVAL_MS = 5_000
 const MIN_INTERVAL_MS = 50
@@ -55,6 +56,13 @@ export interface BackendSyncDaemonServiceApi {
 interface RuntimeState {
 	readonly status: BackendSyncDaemonStatus
 	readonly fiber: Fiber.RuntimeFiber<void, never> | null
+}
+
+interface SessionRecoveryRuntime {
+	readonly listActive: (
+		projectPath: string,
+	) => Effect.Effect<ReadonlyArray<{ issueId: string; state: string }>, never, never>
+	readonly recover: (issueId: string) => Effect.Effect<void, never, never>
 }
 
 const normalizeIntervalMs = (value: number | undefined): number => {
@@ -129,10 +137,38 @@ const runOnce = (
 		),
 	)
 
+const recoverCrashedSessions = (
+	sessionRecoveryRuntime: SessionRecoveryRuntime | null,
+	projectPath: string,
+): Effect.Effect<void, never> => {
+	if (sessionRecoveryRuntime === null) {
+		return Effect.void
+	}
+
+	return sessionRecoveryRuntime.listActive(projectPath).pipe(
+		Effect.catchAll(() => Effect.succeed([])),
+		Effect.flatMap((sessions) =>
+			Effect.forEach(
+				sessions,
+				(session) =>
+					session.state === "crashed"
+						? sessionRecoveryRuntime
+								.recover(session.issueId)
+								.pipe(Effect.catchAll(() => Effect.void))
+						: Effect.void,
+				{
+					discard: true,
+				},
+			),
+		),
+	)
+}
+
 const pollingLoop = (
 	runtimeRef: Ref.Ref<RuntimeState>,
 	router: { readonly resolve: () => Effect.Effect<BackendSyncInterface | undefined> },
 	stateStore: DaemonStateStoreApi,
+	sessionRecoveryRuntime: SessionRecoveryRuntime | null,
 	projectPath: string,
 	intervalMs: number,
 ): Effect.Effect<void, never> =>
@@ -193,6 +229,7 @@ const pollingLoop = (
 			Effect.tap(({ status }) =>
 				stateStore.persist(projectPath, status).pipe(Effect.catchAll(() => Effect.void)),
 			),
+			Effect.tap(() => recoverCrashedSessions(sessionRecoveryRuntime, projectPath)),
 			Effect.map(({ nextDelayMs }) => nextDelayMs),
 			Effect.flatMap((delayMs) => Effect.sleep(`${delayMs} millis`)),
 			Effect.zipRight(Effect.suspend(() => loop)),
@@ -208,6 +245,7 @@ export const makeBackendSyncDaemonService = (
 		load: () => Effect.succeed(Option.none()),
 		persist: () => Effect.void,
 	},
+	sessionRecoveryRuntime: SessionRecoveryRuntime | null = null,
 ): Effect.Effect<BackendSyncDaemonServiceApi, never, Scope.Scope> =>
 	Effect.gen(function* () {
 		const serviceScope = yield* Effect.scope
@@ -279,7 +317,14 @@ export const makeBackendSyncDaemonService = (
 					)
 
 					const fiber = yield* Effect.forkIn(
-						pollingLoop(runtimeRef, router, stateStore, options.projectPath, intervalMs),
+						pollingLoop(
+							runtimeRef,
+							router,
+							stateStore,
+							sessionRecoveryRuntime,
+							options.projectPath,
+							intervalMs,
+						),
 						serviceScope,
 					)
 
@@ -336,6 +381,8 @@ export class BackendSyncDaemonService extends Effect.Service<BackendSyncDaemonSe
 		dependencies: [BackendSyncRouter.Default],
 		scoped: Effect.gen(function* () {
 			const backendSyncRouter = yield* BackendSyncRouter
+			const maybeSessionManager = yield* Effect.serviceOption(SessionManager)
+			const commandExecutor = yield* CommandExecutor.CommandExecutor
 			const maybeFileSystem = yield* Effect.serviceOption(FileSystem.FileSystem)
 			const maybePath = yield* Effect.serviceOption(Path.Path)
 			const daemonStateStore =
@@ -348,7 +395,34 @@ export class BackendSyncDaemonService extends Effect.Service<BackendSyncDaemonSe
 							load: () => Effect.succeed(Option.none()),
 							persist: () => Effect.void,
 						}
-			return yield* makeBackendSyncDaemonService(backendSyncRouter, daemonStateStore)
+			const sessionRecoveryRuntime: SessionRecoveryRuntime | null = Option.isSome(
+				maybeSessionManager,
+			)
+				? {
+						listActive: (projectPath) =>
+							maybeSessionManager.value.listActive(projectPath).pipe(
+								Effect.map((sessions) =>
+									sessions.map((session) => ({
+										issueId: session.issueId,
+										state: session.state,
+									})),
+								),
+								Effect.catchAll(() => Effect.succeed([])),
+								Effect.provideService(CommandExecutor.CommandExecutor, commandExecutor),
+							),
+						recover: (issueId) =>
+							maybeSessionManager.value.recoverSession(issueId).pipe(
+								Effect.asVoid,
+								Effect.catchAll(() => Effect.void),
+								Effect.provideService(CommandExecutor.CommandExecutor, commandExecutor),
+							),
+					}
+				: null
+			return yield* makeBackendSyncDaemonService(
+				backendSyncRouter,
+				daemonStateStore,
+				sessionRecoveryRuntime,
+			)
 		}),
 	},
 ) {}
