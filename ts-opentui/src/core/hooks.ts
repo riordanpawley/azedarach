@@ -121,6 +121,32 @@ export interface HookConfigOptions {
 }
 
 /**
+ * Build codex `-c` override arguments for session lifecycle hooks.
+ *
+ * Codex hooks (SessionStart/Stop) are used to set tmux status via az-notify,
+ * matching the existing status pipeline used by Claude hooks.
+ */
+export const generateCodexSessionHookCliArgs = (
+	issueId: string,
+	options: {
+		readonly projectPath?: string
+		readonly azNotifyPath?: string
+	} = {},
+): readonly string[] => {
+	const { projectPath, azNotifyPath } = options
+	const sessionStartCommand = buildNotifyCommand("user_prompt", issueId, projectPath, azNotifyPath)
+	const stopCommand = buildNotifyCommand("session_end", issueId, projectPath, azNotifyPath)
+
+	const tomlEscape = (value: string): string =>
+		value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+
+	const sessionStartConfig = `hooks.SessionStart=[{hooks=[{command="${tomlEscape(sessionStartCommand)}"}]}]`
+	const stopConfig = `hooks.Stop=[{hooks=[{command="${tomlEscape(stopCommand)}"}]}]`
+
+	return ["--enable codex_hooks", `-c "${sessionStartConfig}"`, `-c "${stopConfig}"`]
+}
+
+/**
  * Permissions to auto-grant in spawned worktree sessions
  *
  * These permissions are injected into settings.local.json so Claude sessions

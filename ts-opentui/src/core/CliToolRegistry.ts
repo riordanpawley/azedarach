@@ -53,6 +53,8 @@ export interface BuildCommandOptions {
 	 * the conversation left off before the tmux session died.
 	 */
 	readonly continueConversation?: boolean
+	/** Extra shell arguments appended after tool-specific flags (already escaped/quoted) */
+	readonly extraArguments?: readonly string[]
 }
 
 /**
@@ -138,6 +140,10 @@ const claudeToolDefinition: CliToolDefinition = {
 			parts.push(`--settings '${JSON.stringify(options.sessionSettings)}'`)
 		}
 
+		if (options.extraArguments && options.extraArguments.length > 0) {
+			parts.push(...options.extraArguments)
+		}
+
 		if (options.initialPrompt) {
 			parts.push(`"${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
 		}
@@ -183,6 +189,10 @@ const openCodeToolDefinition: CliToolDefinition = {
 
 		// OpenCode doesn't have --settings equivalent
 		// Configuration is done via opencode.json
+
+		if (options.extraArguments && options.extraArguments.length > 0) {
+			parts.push(...options.extraArguments)
+		}
 
 		if (options.initialPrompt) {
 			parts.push(`--prompt "${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
@@ -233,6 +243,10 @@ const codexToolDefinition: CliToolDefinition = {
 
 		if (options.dangerouslySkipPermissions) {
 			parts.push("--dangerously-bypass-approvals-and-sandbox")
+		}
+
+		if (options.extraArguments && options.extraArguments.length > 0) {
+			parts.push(...options.extraArguments)
 		}
 
 		if (options.continueConversation) {

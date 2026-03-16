@@ -25,6 +25,7 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
+import { generateCodexSessionHookCliArgs } from "./hooks.js"
 import {
 	IssueTrackerClient,
 	type IssueTrackerError,
@@ -1006,6 +1007,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 										const effectiveModel = model ?? toolModelConfig.default ?? modelConfig.default
 
 										// Build command using the CLI tool registry
+										const extraArguments =
+											cliTool === "codex"
+												? generateCodexSessionHookCliArgs(issueId, {
+														projectPath,
+													})
+												: undefined
+
 										const commandWithOptions = toolDef.buildCommand({
 											initialPrompt,
 											imagePaths,
@@ -1013,6 +1021,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 											model: effectiveModel,
 											dangerouslySkipPermissions,
 											sessionSettings,
+											extraArguments,
 										})
 
 										// Get initCommands: merge worktree config + tool-specific init commands
