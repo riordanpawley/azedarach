@@ -117,8 +117,9 @@ describe("buildPrimeOutput", () => {
 			"After implementing behavior changes, run an `az spec` compliance pass",
 		)
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
-		expect(output).toContain("For `az` commands, keep canonical CLI ordering")
-		expect(output).toContain("prefer named flags over positional refs")
+		expect(output).toContain("For `az` commands, always place options/flags before positional refs")
+		expect(output).toContain("Prefer named flag references over positional refs whenever available")
+		expect(output).toContain("For `az spec req update`, prefer `az spec req update --req")
 		expect(output).toContain("For `az spec link add`, use either explicit refs")
 		expect(output).toContain("Avoid positional-first ordering like `az spec link add <issue-id>")
 		expect(output).toContain("az config set spec.enabled false")
