@@ -195,7 +195,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				const childIds = yield* SubscriptionRef.get(drillDownChildIds)
 				if (childIds.size === 0) {
 					// Main board: filter OUT epic children (same as board.ts drillDownFilteredTasksAtom)
-					// Epic children are hidden on main board, only visible in drill-down
+					// Tasks with a parent are hidden on main board, only visible in drill-down
 					return tasksByColumn.map((column) =>
 						column.filter((task) => task.parentEpicId === undefined),
 					)
