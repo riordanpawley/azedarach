@@ -27,22 +27,13 @@ Thumbs.db
 .beads/last-touched
 .beads/.br_history
 
-# RuleSync-generated artifacts
-**/AGENTS.md
+# AI local artifacts
 **/.codex/memories/
-**/.codex/rules/
-**/.codex/skills/
-**/.codex/agents/
 **/.opencode/memories/
 **/.opencode/plugins/
 **/.opencode/command/
 **/.opencode/agent/
 **/.opencode/skill/
-.rulesync/skills/.curated/
-.rulesync/rules/*.local.md
-rulesync.local.jsonc
-!.rulesync/.aiignore
-
 # Legacy Claude local artifacts
 .claude/
 **/CLAUDE.md
