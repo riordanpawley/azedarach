@@ -95,6 +95,12 @@ describe("paths session naming", () => {
 		expect(parseIssueSessionName("")).toBeUndefined()
 	})
 
+	it("rejects reserved runtime session IDs", () => {
+		expect(parseIssueSessionName("az")).toBeUndefined()
+		expect(parseIssueSessionName("codex-az")).toBeUndefined()
+		expect(parseIssueSessionName("az-az", "/Users/user/prog/azedarach")).toBeUndefined()
+	})
+
 	it("parses plain local issue IDs", () => {
 		expect(parseIssueSessionName("a")).toEqual({
 			type: "issue",

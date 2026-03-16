@@ -92,6 +92,8 @@ const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
 const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
 const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
+const TUI_AUTO_RECOVERY_ENABLED =
+	process.env.AZ_TUI_SESSION_RECOVERY === "1" || process.env.NODE_ENV === "test"
 
 const withTransientRetry = <A, E, R>(
 	context: string,
@@ -1315,6 +1317,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			activeSessions: ReadonlyArray<{ readonly issueId: string; readonly state: string }>,
 		): Effect.Effect<void> =>
 			Effect.gen(function* () {
+				if (!TUI_AUTO_RECOVERY_ENABLED) {
+					return
+				}
+
 				const crashedIssueIds = Array.from(
 					new Set(
 						activeSessions
@@ -2896,7 +2902,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* replaceTasks(updatedTasks)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
-		yield* startAutoRecoveryWorkerFiber()
+		if (TUI_AUTO_RECOVERY_ENABLED) {
+			yield* startAutoRecoveryWorkerFiber()
+		}
 		yield* signalDaemonAttach()
 		yield* Effect.forkScoped(
 			Effect.gen(function* () {
