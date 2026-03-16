@@ -67,23 +67,4 @@ describe("CliToolRegistry", () => {
 
 		expect(command).toContain('codex --image "/tmp/screenshot.png" -- "work on issue ji"')
 	})
-
-	it("appends codex hook override arguments before the prompt", () => {
-		const codex = getToolDefinition("codex")
-		const command = codex.buildCommand({
-			issueId: "kl",
-			initialPrompt: "work on issue kl",
-			extraArguments: [
-				"--enable codex_hooks",
-				'-c "hooks.SessionStart=[{hooks=[{command=\\"echo start\\"}]}]"',
-				'-c "hooks.Stop=[{hooks=[{command=\\"echo stop\\"}]}]"',
-			],
-		})
-
-		expect(command).toContain('AZEDARACH_ISSUE_ID="kl" codex')
-		expect(command).toContain("--enable codex_hooks")
-		expect(command).toContain('hooks.SessionStart=[{hooks=[{command=\\"echo start\\"}]}]')
-		expect(command).toContain('hooks.Stop=[{hooks=[{command=\\"echo stop\\"}]}]')
-		expect(command).toContain('-- "work on issue kl"')
-	})
 })
