@@ -1425,9 +1425,25 @@ const daemonRestartHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
+		if (args.verbose) {
+			yield* Console.log("daemon_restart: bootstrap begin")
+		}
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("restart"),
+			onAttachAttempt: args.verbose
+				? (observation) => {
+						console.error(
+							`daemon_restart: attach attempt=${observation.attempt} delayMs=${observation.delayMs} remainingMs=${observation.timeoutRemainingMs} socket=${observation.socketUrl ?? "<none>"}`,
+						)
+					}
+				: undefined,
 		})
+		if (args.verbose) {
+			yield* Console.log(
+				`daemon_restart: bootstrap ready startedDaemon=${bootstrap.startedDaemon} attempts=${bootstrap.attachAttemptCount} socket=${bootstrap.socketUrl}`,
+			)
+			yield* Console.log("daemon_restart: dispatch restart RPC")
+		}
 		const status = yield* bootstrap.client
 			.restart({
 				projectPath: Option.getOrUndefined(args.projectDir),
@@ -1443,6 +1459,9 @@ const daemonRestartHandler = (args: {
 				),
 				(effect) => withDaemonControlTimeout("restart", effect),
 			)
+		if (args.verbose) {
+			yield* Console.log("daemon_restart: restart RPC response received")
+		}
 		yield* Console.log("Headless backend sync daemon restarted.")
 		yield* Console.log(
 			formatDaemonControlStatusLine({

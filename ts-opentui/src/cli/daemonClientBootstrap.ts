@@ -1,5 +1,5 @@
 import type { FileSystem, Path } from "@effect/platform"
-import { Effect, Option } from "effect"
+import { Data, Effect, Option } from "effect"
 import {
 	clearGlobalDaemonArtifacts,
 	type GlobalDaemonDiscovery,
@@ -23,6 +23,20 @@ const GLOBAL_DAEMON_MAIN_ENTRY_PATH = decodeURIComponent(
 	new URL("../daemon/GlobalDaemonMain.ts", import.meta.url).pathname,
 )
 
+export class GlobalDaemonBootstrapError extends Data.TaggedError("GlobalDaemonBootstrapError")<{
+	readonly message: string
+	readonly reason:
+		| "registry-read"
+		| "registry-clear"
+		| "discovery-timeout"
+		| "spawn-failed"
+		| "rpc-protocol-mismatch"
+		| "rpc-remote-action"
+		| "rpc-transport"
+		| "rpc-unknown"
+		| "endpoint-timeout"
+}> {}
+
 const sleep = (ms: number): Effect.Effect<void> => Effect.sleep(`${ms} millis`)
 
 const withGlobalDaemonClient = <A, E>(
@@ -32,12 +46,18 @@ const withGlobalDaemonClient = <A, E>(
 
 const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
 	Option.Option<GlobalDaemonDiscovery>,
-	Error,
+	GlobalDaemonBootstrapError,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
 		const discovery = yield* readGlobalDaemonDiscovery().pipe(
-			Effect.mapError((error) => new Error(error.message)),
+			Effect.mapError(
+				(error) =>
+					new GlobalDaemonBootstrapError({
+						message: error.message,
+						reason: "registry-read",
+					}),
+			),
 		)
 		if (Option.isNone(discovery)) {
 			return Option.none<GlobalDaemonDiscovery>()
@@ -45,7 +65,15 @@ const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
 
 		const liveness = yield* probeGlobalDaemonOwnerLiveness(discovery.value)
 		if (liveness === "dead") {
-			yield* clearGlobalDaemonArtifacts().pipe(Effect.mapError((error) => new Error(error.message)))
+			yield* clearGlobalDaemonArtifacts().pipe(
+				Effect.mapError(
+					(error) =>
+						new GlobalDaemonBootstrapError({
+							message: error.message,
+							reason: "registry-clear",
+						}),
+				),
+			)
 			return Option.none<GlobalDaemonDiscovery>()
 		}
 		return Option.some(discovery.value)
@@ -53,7 +81,11 @@ const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
 
 const waitForGlobalDaemonDiscovery = (params: {
 	readonly timeoutMs: number
-}): Effect.Effect<GlobalDaemonDiscovery, Error, FileSystem.FileSystem | Path.Path> =>
+}): Effect.Effect<
+	GlobalDaemonDiscovery,
+	GlobalDaemonBootstrapError,
+	FileSystem.FileSystem | Path.Path
+> =>
 	Effect.gen(function* () {
 		const deadline = Date.now() + params.timeoutMs
 		while (Date.now() <= deadline) {
@@ -64,13 +96,15 @@ const waitForGlobalDaemonDiscovery = (params: {
 			yield* sleep(GLOBAL_DAEMON_POLL_INTERVAL_MS)
 		}
 		return yield* Effect.fail(
-			new Error(
-				"Timed out waiting for global daemon discovery metadata. Run `bun run src/daemon/GlobalDaemonMain.ts` and retry.",
-			),
+			new GlobalDaemonBootstrapError({
+				message:
+					"Timed out waiting for global daemon discovery metadata. Run `bun run src/daemon/GlobalDaemonMain.ts` and retry.",
+				reason: "discovery-timeout",
+			}),
 		)
 	})
 
-const spawnGlobalDaemonMain = (): Effect.Effect<void, Error> =>
+const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError> =>
 	Effect.try({
 		try: () => {
 			const child = Bun.spawn([process.execPath, "run", GLOBAL_DAEMON_MAIN_ENTRY_PATH], {
@@ -81,9 +115,10 @@ const spawnGlobalDaemonMain = (): Effect.Effect<void, Error> =>
 			child.unref()
 		},
 		catch: (error) =>
-			new Error(
-				`Failed to spawn global daemon runtime: ${error instanceof Error ? error.message : String(error)}`,
-			),
+			new GlobalDaemonBootstrapError({
+				message: `Failed to spawn global daemon runtime: ${error instanceof Error ? error.message : String(error)}`,
+				reason: "spawn-failed",
+			}),
 	})
 
 export const buildGlobalDaemonSocketUrl = (socketPath: string): string =>
@@ -93,25 +128,31 @@ export const formatDaemonRpcClientFailure = (params: {
 	readonly operation: string
 	readonly socketUrl: string
 	readonly error: DaemonRpcClientError
-}): Error => {
+}): GlobalDaemonBootstrapError => {
 	if (params.error instanceof DaemonRpcProtocolVersionMismatchError) {
-		return new Error(
-			`Daemon RPC protocol mismatch for '${params.operation}' (expected=${params.error.expectedProtocolVersion}, received=${params.error.receivedProtocolVersion}). Update CLI/daemon binaries so protocol versions match.`,
-		)
+		return new GlobalDaemonBootstrapError({
+			message: `Daemon RPC protocol mismatch for '${params.operation}' (expected=${params.error.expectedProtocolVersion}, received=${params.error.receivedProtocolVersion}). Update CLI/daemon binaries so protocol versions match.`,
+			reason: "rpc-protocol-mismatch",
+		})
 	}
 	if (params.error instanceof DaemonRpcRemoteActionError) {
 		const actionHint = params.error.action === undefined ? "" : ` Action: ${params.error.action}.`
-		return new Error(
-			`Daemon RPC '${params.operation}' rejected by daemon (code=${params.error.code}): ${params.error.message}.${actionHint}`,
-		)
+		return new GlobalDaemonBootstrapError({
+			message: `Daemon RPC '${params.operation}' rejected by daemon (code=${params.error.code}): ${params.error.message}.${actionHint}`,
+			reason: "rpc-remote-action",
+		})
 	}
 	if (params.error instanceof DaemonRpcTransportError) {
-		return new Error(
-			`Unable to connect to daemon RPC endpoint (${params.socketUrl}) for '${params.operation}': ${params.error.message}. ${params.error.suggestion}`,
-		)
+		return new GlobalDaemonBootstrapError({
+			message: `Unable to connect to daemon RPC endpoint (${params.socketUrl}) for '${params.operation}': ${params.error.message}. ${params.error.suggestion}`,
+			reason: "rpc-transport",
+		})
 	}
 	const exhaustive: never = params.error
-	return new Error(`Daemon RPC '${params.operation}' failed: ${String(exhaustive)}`)
+	return new GlobalDaemonBootstrapError({
+		message: `Daemon RPC '${params.operation}' failed: ${String(exhaustive)}`,
+		reason: "rpc-unknown",
+	})
 }
 
 export interface GlobalDaemonAttachAttemptObservation {
@@ -154,7 +195,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 		readonly startedDaemon: boolean
 		readonly attachAttemptCount: number
 	},
-	Error,
+	GlobalDaemonBootstrapError,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
@@ -162,6 +203,9 @@ export const bootstrapDaemonRpcClient = (params?: {
 		const retryBackoffMs = normalizeRetryBackoffMs(params?.attachRetryBackoffMs)
 		const startedAtMs = Date.now()
 		const deadlineMs = startedAtMs + timeoutMs
+		yield* Effect.log(
+			`daemon_bootstrap: start autoStart=${String(params?.autoStart ?? false)} timeoutMs=${timeoutMs} verifyReachable=${String(params?.verifyReachable ?? false)}`,
+		)
 
 		let discovery: GlobalDaemonDiscovery
 		let startedDaemon = false
@@ -182,12 +226,21 @@ export const bootstrapDaemonRpcClient = (params?: {
 
 			const liveDiscovery = yield* readLiveGlobalDaemonDiscovery()
 			if (Option.isSome(liveDiscovery)) {
+				yield* Effect.log(
+					`daemon_bootstrap: discovered live daemon socket=${liveDiscovery.value.socketPath} pid=${liveDiscovery.value.pid} attempt=${attempt}`,
+				)
 				discovery = liveDiscovery.value
 			} else if (params?.autoStart && !startedDaemon) {
 				const remainingTimeoutMs = Math.max(0, deadlineMs - Date.now())
+				yield* Effect.log(
+					`daemon_bootstrap: no discovery found; spawning daemon (remainingTimeoutMs=${remainingTimeoutMs})`,
+				)
 				yield* spawnGlobalDaemonMain()
 				discovery = yield* waitForGlobalDaemonDiscovery({ timeoutMs: remainingTimeoutMs })
 				startedDaemon = true
+				yield* Effect.log(
+					`daemon_bootstrap: spawned daemon discovered socket=${discovery.socketPath} pid=${discovery.pid}`,
+				)
 			} else {
 				attachAttemptCount = attempt
 				params?.onAttachAttempt?.({
@@ -203,6 +256,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 			const socketUrl = buildGlobalDaemonSocketUrl(discovery.socketPath)
 			lastSocketUrl = socketUrl
 			attachAttemptCount = attempt
+			yield* Effect.log(`daemon_bootstrap: attach attempt=${attempt} socketUrl=${socketUrl}`)
 			params?.onAttachAttempt?.({
 				attempt,
 				delayMs,
@@ -219,6 +273,9 @@ export const bootstrapDaemonRpcClient = (params?: {
 			)
 
 			if (!params?.verifyReachable) {
+				yield* Effect.log(
+					`daemon_bootstrap: attach success socketUrl=${socketUrl} startedDaemon=${String(startedDaemon)} attempts=${attachAttemptCount}`,
+				)
 				return {
 					client,
 					discovery,
@@ -230,6 +287,9 @@ export const bootstrapDaemonRpcClient = (params?: {
 
 			const connectivity = yield* client.status().pipe(Effect.either)
 			if (connectivity._tag === "Right") {
+				yield* Effect.log(
+					`daemon_bootstrap: verifyReachable status succeeded socketUrl=${socketUrl} attempts=${attachAttemptCount}`,
+				)
 				return {
 					client,
 					discovery,
@@ -242,6 +302,9 @@ export const bootstrapDaemonRpcClient = (params?: {
 			const error = connectivity.left
 			if (error instanceof DaemonRpcTransportError) {
 				lastTransportError = error
+				yield* Effect.logWarning(
+					`daemon_bootstrap: verifyReachable transport failure socketUrl=${socketUrl} attempt=${attempt} error=${error.message}`,
+				)
 				continue
 			}
 			return yield* Effect.fail(
@@ -264,8 +327,10 @@ export const bootstrapDaemonRpcClient = (params?: {
 		}
 
 		return yield* Effect.fail(
-			new Error(
-				"Timed out waiting for a reachable global daemon endpoint. Restart the daemon and retry.",
-			),
+			new GlobalDaemonBootstrapError({
+				message:
+					"Timed out waiting for a reachable global daemon endpoint. Restart the daemon and retry.",
+				reason: "endpoint-timeout",
+			}),
 		)
 	})
