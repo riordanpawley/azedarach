@@ -207,7 +207,7 @@ export const drillDownFilteredTasksAtom = Atom.readable((get) => {
 	console.log("[drillDownFilteredTasksAtom] Got", flatTasks.length, "tasks")
 
 	// If no drill-down active (empty childIds), show main board view
-	// Epic children are hidden on main board - only visible in drill-down
+	// Tasks with a parent are hidden on main board - only visible in drill-down
 	if (childIds.size === 0) {
 		const tasksWithEpic = flatTasks.filter((task) => task.parentEpicId !== undefined)
 		if (tasksWithEpic.length > 0) {
