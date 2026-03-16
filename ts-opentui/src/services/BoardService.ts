@@ -52,7 +52,13 @@ import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
 import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
-import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
+import type {
+	ColumnStatus,
+	GitStatus,
+	PRState,
+	SessionState,
+	TaskWithSession,
+} from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
@@ -785,6 +791,13 @@ interface MutationTaskUpsertOptions {
 	readonly parentEpicId?: string | null
 }
 
+interface AuthoritativeSessionView {
+	readonly issueId: string
+	readonly state: SessionState
+	readonly tmuxSessionName: string
+	readonly startedAt: DateTime.Utc
+}
+
 /**
  * Per-project board state
  *
@@ -881,6 +894,82 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			nowMs: Date.now,
 		})
 		const daemonStreamCursorRef = yield* Ref.make<number | undefined>(undefined)
+
+		const parseDaemonSessionState = (state: string): SessionState | undefined => {
+			switch (state) {
+				case "idle":
+				case "initializing":
+				case "busy":
+				case "waiting":
+				case "done":
+				case "error":
+				case "paused":
+				case "warning":
+				case "crashed":
+					return state
+				default:
+					return undefined
+			}
+		}
+
+		const parseDaemonStartedAt = (value: string): DateTime.Utc | undefined => {
+			const timestampMs = Date.parse(value)
+			if (Number.isNaN(timestampMs)) {
+				return undefined
+			}
+			return DateTime.unsafeFromDate(new Date(timestampMs))
+		}
+
+		const toAuthoritativeSessionView = (entry: {
+			readonly issueId: string
+			readonly state: string
+			readonly tmuxSessionName: string
+			readonly startedAt: string
+		}): AuthoritativeSessionView | undefined => {
+			const state = parseDaemonSessionState(entry.state)
+			if (state === undefined) {
+				return undefined
+			}
+			const startedAt = parseDaemonStartedAt(entry.startedAt)
+			if (startedAt === undefined) {
+				return undefined
+			}
+			return {
+				issueId: entry.issueId,
+				state,
+				tmuxSessionName: entry.tmuxSessionName,
+				startedAt,
+			}
+		}
+
+		const loadAuthoritativeSessions = (projectPath: string | null) => {
+			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
+				return daemonRpcClient.value
+					.sessionSnapshot({ projectPath: projectPath ?? undefined })
+					.pipe(
+						Effect.map((result) =>
+							result.sessions
+								.map((entry) => toAuthoritativeSessionView(entry))
+								.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+						),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([])),
+							),
+						),
+					)
+			}
+
+			return sessionManager
+				.listActive(projectPath ?? undefined)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					),
+				)
+		}
 
 		// ====================================================================
 		// Per-Project State Management
@@ -1429,9 +1518,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								thresholdMs: 150,
 								details: projectPath ?? "default",
 							},
-							sessionManager
-								.listActive(projectPath ?? undefined)
-								.pipe(Effect.withSpan("sessions.listActive")),
+							loadAuthoritativeSessions(projectPath).pipe(Effect.withSpan("sessions.listActive")),
 						),
 					},
 					{ concurrency: "unbounded" },
@@ -2038,15 +2125,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		}) =>
 			Effect.gen(function* () {
 				const projectPath = yield* resolveProjectPath(params.preferredProjectPath)
-				const activeSessions = yield* sessionManager
-					.listActive(projectPath ?? undefined)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
-							),
-						),
-					)
+				const activeSessions = yield* loadAuthoritativeSessions(projectPath)
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 				const currentTasks = yield* SubscriptionRef.get(tasks)
