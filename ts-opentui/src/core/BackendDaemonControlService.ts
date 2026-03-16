@@ -165,6 +165,11 @@ const isTransientSessionRecoveryError = (error: unknown): boolean => {
 	}
 }
 
+const isSessionWorktreeMissingError = (error: unknown): boolean =>
+	typeof error === "object" &&
+	error !== null &&
+	Reflect.get(error, "_tag") === "SessionWorktreeMissingError"
+
 const makeDaemonSessionRecoverySchedule = (params: {
 	readonly retryBaseDelayMs: number
 	readonly retryMaxDelayMs: number
@@ -399,9 +404,21 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 							),
 						),
 						Effect.catchAll((error) =>
-							Effect.logWarning(
-								`Daemon session recovery failed for ${issueId} (projectPath=${projectPath}): ${String(error)}`,
-							),
+							Effect.gen(function* () {
+								if (isSessionWorktreeMissingError(error)) {
+									yield* Effect.logWarning(
+										`Daemon session recovery terminal failure for ${issueId} (projectPath=${projectPath}): worktree missing; resetting session state to idle`,
+									)
+									yield* sessionManager
+										.updateState(issueId, "idle")
+										.pipe(Effect.catchAll(() => Effect.void))
+									return
+								}
+
+								yield* Effect.logWarning(
+									`Daemon session recovery failed for ${issueId} (projectPath=${projectPath}): ${String(error)}`,
+								)
+							}),
 						),
 						Effect.ensuring(clearRecoveryInFlight(issueId)),
 					)

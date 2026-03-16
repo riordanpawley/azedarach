@@ -41,6 +41,7 @@ import {
 	type SessionLimitError,
 	SessionManager,
 	type SessionNotFoundError,
+	type SessionWorktreeMissingError,
 } from "../core/SessionManager.js"
 import type {
 	TmuxError,
@@ -124,6 +125,7 @@ type SessionRecoveryError =
 	| TmuxError
 	| ShellNotReadyError
 	| SessionError
+	| SessionWorktreeMissingError
 	| SessionLimitError
 
 export type SessionRecoveryRetryability = "transient" | "terminal"
@@ -142,6 +144,8 @@ export const classifySessionRecoveryError = (
 			return "transient"
 		case "SessionError":
 			return isTransientOperationalErrorMessage(error.message) ? "transient" : "terminal"
+		case "SessionWorktreeMissingError":
+			return "terminal"
 		case "InvalidStateError":
 			return "terminal"
 	}
