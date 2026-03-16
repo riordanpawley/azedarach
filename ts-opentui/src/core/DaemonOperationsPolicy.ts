@@ -16,13 +16,6 @@ export interface ResolvedDaemonOperationsPolicy {
 		| "ignored-invalid-env"
 }
 
-const parseBooleanLike = (value: string): boolean | undefined => {
-	const normalized = value.trim().toLowerCase()
-	if (["1", "true", "yes", "on"].includes(normalized)) return true
-	if (["0", "false", "no", "off"].includes(normalized)) return false
-	return undefined
-}
-
 export const resolveDaemonOperationsPolicy = (
 	input: ResolveDaemonOperationsPolicyInput,
 ): ResolvedDaemonOperationsPolicy => {
@@ -43,23 +36,6 @@ export const resolveDaemonOperationsPolicy = (
 			}
 		}
 		if (mode === "on" || mode === "enabled" || mode === "auto") {
-			return {
-				autoDaemonize: true,
-				decision: "enabled-by-env",
-			}
-		}
-	}
-
-	const explicitDisable = input.env.AZEDARACH_NO_DAEMON
-	if (explicitDisable !== undefined && explicitDisable.trim().length > 0) {
-		const parsed = parseBooleanLike(explicitDisable)
-		if (parsed === true) {
-			return {
-				autoDaemonize: false,
-				decision: "disabled-by-env",
-			}
-		}
-		if (parsed === false) {
 			return {
 				autoDaemonize: true,
 				decision: "enabled-by-env",

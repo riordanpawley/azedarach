@@ -39,16 +39,16 @@ describe("DaemonOperationsPolicy", () => {
 		expect(policy.decision).toBe("disabled-by-env")
 	})
 
-	it("enables auto-daemonize via AZEDARACH_NO_DAEMON=false", () => {
+	it("marks invalid AZEDARACH_DAEMON_MODE as ignored and keeps daemon enabled", () => {
 		const policy = resolveDaemonOperationsPolicy({
 			command: "sync",
 			noDaemonFlag: false,
 			env: {
-				AZEDARACH_NO_DAEMON: "false",
+				AZEDARACH_DAEMON_MODE: "banana",
 			},
 		})
 		expect(policy.autoDaemonize).toBe(true)
-		expect(policy.decision).toBe("enabled-by-env")
+		expect(policy.decision).toBe("ignored-invalid-env")
 	})
 
 	it("parses valid AZEDARACH_DAEMON_INTERVAL_MS", () => {

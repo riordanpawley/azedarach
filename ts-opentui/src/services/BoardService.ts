@@ -94,8 +94,6 @@ const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
 const TRANSIENT_RETRY_ATTEMPTS = 4
 const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
-const TUI_LOCAL_SESSION_FALLBACK_ENABLED =
-	process.env.AZ_TUI_ALLOW_LOCAL_SESSION_FALLBACK === "1" || process.env.NODE_ENV === "test"
 
 const withTransientRetry = <A, E, R>(
 	context: string,
@@ -905,6 +903,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		}
 
 		const loadAuthoritativeSessions = (projectPath: string | null) => {
+			const loadLocalSessionViews = () =>
+				sessionManager
+					.listActive(projectPath ?? undefined)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([])),
+							),
+						),
+					)
+
 			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
 				return daemonRpcClient.value
 					.sessionSnapshot({ projectPath: projectPath ?? undefined })
@@ -916,27 +925,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						),
 						Effect.catchAll((error) =>
 							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
+								Effect.zipRight(loadLocalSessionViews()),
 							),
 						),
 					)
 			}
 
-			if (!TUI_LOCAL_SESSION_FALLBACK_ENABLED) {
+			if (Option.isSome(daemonRpcClient)) {
 				return Effect.logDebug(
-					"BoardService skipping local SessionManager session authority fallback",
-				).pipe(Effect.zipRight(Effect.succeed([])))
+					"BoardService falling back to local SessionManager authority because daemon client lacks sessionSnapshot RPC capability",
+				).pipe(Effect.zipRight(loadLocalSessionViews()))
 			}
 
-			return sessionManager
-				.listActive(projectPath ?? undefined)
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-							Effect.zipRight(Effect.succeed([])),
-						),
-					),
-				)
+			return loadLocalSessionViews()
 		}
 
 		// ====================================================================
