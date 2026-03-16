@@ -17,7 +17,6 @@ import {
 	HashMap,
 	Option,
 	Order,
-	Queue,
 	Record,
 	Ref,
 	Schedule,
@@ -98,8 +97,8 @@ const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
 const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
 const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
-const TUI_AUTO_RECOVERY_ENABLED =
-	process.env.AZ_TUI_SESSION_RECOVERY === "1" || process.env.NODE_ENV === "test"
+const TUI_LOCAL_SESSION_FALLBACK_ENABLED =
+	process.env.AZ_TUI_ALLOW_LOCAL_SESSION_FALLBACK === "1" || process.env.NODE_ENV === "test"
 
 const withTransientRetry = <A, E, R>(
 	context: string,
@@ -880,8 +879,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			readonly timestamp: number
 		} | null>(null)
 		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
-		const autoRecoveryQueue = yield* Queue.unbounded<string>()
-		const autoRecoveryTrackedIssueIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 		const daemonFrontendClientId = `board-ui:${process.pid}`
 		const {
 			signalAttach: signalDaemonAttach,
@@ -958,6 +955,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							),
 						),
 					)
+			}
+
+			if (!TUI_LOCAL_SESSION_FALLBACK_ENABLED) {
+				return Effect.logDebug(
+					"BoardService skipping local SessionManager session authority fallback",
+				).pipe(Effect.zipRight(Effect.succeed([])))
 			}
 
 			return sessionManager
@@ -1330,146 +1333,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			)
 
-		const markAutoRecoveryTracked = (issueId: string): Effect.Effect<boolean> =>
-			Ref.modify(autoRecoveryTrackedIssueIdsRef, (current): [boolean, ReadonlySet<string>] => {
-				if (current.has(issueId)) {
-					return [false, current]
-				}
-				const next = new Set(current)
-				next.add(issueId)
-				return [true, next]
-			})
-
-		const unmarkAutoRecoveryTracked = (issueId: string): Effect.Effect<void> =>
-			Ref.update(autoRecoveryTrackedIssueIdsRef, (current) => {
-				if (!current.has(issueId)) {
-					return current
-				}
-				const next = new Set(current)
-				next.delete(issueId)
-				return next
-			})
-
-		const enqueueAutoRecovery = (issueId: string): Effect.Effect<boolean> =>
-			Effect.gen(function* () {
-				const shouldEnqueue = yield* markAutoRecoveryTracked(issueId)
-				if (!shouldEnqueue) {
-					return false
-				}
-				const offered = yield* Queue.offer(autoRecoveryQueue, issueId)
-				if (!offered) {
-					yield* unmarkAutoRecoveryTracked(issueId)
-					yield* Effect.logWarning(`Auto-recovery queue is unavailable for ${issueId}`)
-					return false
-				}
-				return true
-			})
-
-		const runAutoRecoveryForIssue = (issueId: string) =>
-			Effect.gen(function* () {
-				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
-				const initialDelayMs = Math.max(0, Math.trunc(recoveryConfig.autoRecoveryDelayMs))
-				const retryBaseDelayMs = normalizeRecoveryRetryBaseDelayMs(recoveryConfig.retryBaseDelayMs)
-				const retryMaxDelayMs = normalizeRecoveryRetryMaxDelayMs(
-					recoveryConfig.retryMaxDelayMs,
-					retryBaseDelayMs,
-				)
-				let attempt = 0
-
-				if (initialDelayMs > 0) {
-					yield* Effect.sleep(Duration.millis(initialDelayMs))
-				}
-
-				yield* sessionManager.recoverSession(issueId).pipe(
-					Effect.tap(() => Effect.log(`Auto-recovered session for ${issueId}`)),
-					Effect.tapError((error) => {
-						attempt += 1
-						const retryability = classifySessionRecoveryError(error)
-						return Effect.logError(
-							`Auto-recovery attempt ${attempt} failed for ${issueId} [${error._tag}, ${retryability}] ${formatSessionRecoveryError(error)}`,
-						)
-					}),
-					Effect.retry({
-						schedule: makeSessionRecoveryRetrySchedule(retryBaseDelayMs, retryMaxDelayMs),
-						while: isTransientSessionRecoveryError,
-					}),
-					Effect.catchAll((error) =>
-						Effect.logWarning(
-							`Stopped auto-recovery for ${issueId} [${error._tag}] ${formatSessionRecoveryError(error)}`,
-						),
-					),
-					Effect.ensuring(unmarkAutoRecoveryTracked(issueId)),
-				)
-			})
-
-		const queueAutoRecoveryForCrashedSessions = (
-			activeSessions: ReadonlyArray<{ readonly issueId: string; readonly state: string }>,
-		): Effect.Effect<void> =>
-			Effect.gen(function* () {
-				if (!TUI_AUTO_RECOVERY_ENABLED) {
-					return
-				}
-
-				const crashedIssueIds = Array.from(
-					new Set(
-						activeSessions
-							.filter((session) => session.state === "crashed")
-							.map((session) => session.issueId),
-					),
-				)
-				if (crashedIssueIds.length === 0) {
-					return
-				}
-
-				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
-				if (recoveryConfig.mode !== "auto") {
-					yield* Effect.log(
-						`${crashedIssueIds.length} crashed session(s) detected. Manual recovery mode - use R to recover.`,
-					)
-					return
-				}
-
-				let enqueuedCount = 0
-				for (const issueId of crashedIssueIds) {
-					const wasEnqueued = yield* enqueueAutoRecovery(issueId)
-					if (wasEnqueued) {
-						enqueuedCount += 1
-					}
-				}
-
-				if (enqueuedCount > 0) {
-					yield* Effect.log(
-						`Queued ${enqueuedCount}/${crashedIssueIds.length} crashed session(s) for auto-recovery`,
-					)
-				}
-			})
-
-		const startAutoRecoveryWorkerFiber = () =>
-			Effect.gen(function* () {
-				const autoRecoveryFiber = yield* Effect.forever(
-					Queue.take(autoRecoveryQueue).pipe(
-						Effect.flatMap((issueId) => runAutoRecoveryForIssue(issueId)),
-						Effect.catchAllCause((cause) =>
-							Cause.isInterruptedOnly(cause)
-								? Effect.void
-								: Effect.logError(
-										`Auto-recovery worker iteration failed: ${Cause.pretty(cause)}`,
-									).pipe(Effect.asVoid),
-						),
-					),
-				).pipe(Effect.forkIn(serviceScope))
-
-				yield* diagnostics.registerFiber({
-					id: "board-auto-recovery-worker",
-					name: "Board Auto Recovery Worker",
-					description:
-						"Recovers crashed sessions from a deduplicated queue with transient-error retries",
-					fiber: autoRecoveryFiber,
-				})
-
-				return autoRecoveryFiber
-			})
-
 		const resolveProjectPath = (
 			preferredProjectPath?: string | null,
 		): Effect.Effect<string | null> =>
@@ -1552,8 +1415,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					),
 					Effect.forkIn(serviceScope),
 				)
-				yield* queueAutoRecoveryForCrashedSessions(activeSessions)
-
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
 				// Get optimistic mutations through queue adapter (daemon or local fallback)
@@ -2981,9 +2842,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* replaceTasks(updatedTasks)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
-		if (TUI_AUTO_RECOVERY_ENABLED) {
-			yield* startAutoRecoveryWorkerFiber()
-		}
 		yield* signalDaemonAttach()
 		yield* Effect.forkScoped(
 			Effect.gen(function* () {
