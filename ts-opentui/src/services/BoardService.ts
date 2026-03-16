@@ -71,7 +71,6 @@ import {
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
-import { makeSessionRecoveryRetrySchedule } from "./sessionRecoveryRetrySchedule.js"
 import { ToastService } from "./ToastService.js"
 import {
 	isTransientOperationalError,
@@ -95,8 +94,6 @@ const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
 const TRANSIENT_RETRY_ATTEMPTS = 4
 const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
-const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
-const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
 const TUI_LOCAL_SESSION_FALLBACK_ENABLED =
 	process.env.AZ_TUI_ALLOW_LOCAL_SESSION_FALLBACK === "1" || process.env.NODE_ENV === "test"
 
@@ -133,16 +130,6 @@ type SessionRecoveryError =
 
 export type SessionRecoveryRetryability = "transient" | "terminal"
 
-const normalizeRecoveryRetryBaseDelayMs = (value: number): number =>
-	Number.isFinite(value)
-		? Math.max(Math.trunc(value), SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN)
-		: 1000
-
-const normalizeRecoveryRetryMaxDelayMs = (value: number, baseDelayMs: number): number =>
-	Number.isFinite(value)
-		? Math.max(Math.trunc(value), Math.max(baseDelayMs, SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN))
-		: 60000
-
 export const classifySessionRecoveryError = (
 	error: SessionRecoveryError,
 ): SessionRecoveryRetryability => {
@@ -161,9 +148,6 @@ export const classifySessionRecoveryError = (
 			return "terminal"
 	}
 }
-
-const isTransientSessionRecoveryError = (error: SessionRecoveryError): boolean =>
-	classifySessionRecoveryError(error) === "transient"
 
 export const makeBoardDaemonIpcSignals = (params: {
 	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
@@ -296,25 +280,6 @@ export const makeBoardDaemonIpcSignals = (params: {
 		signalReconnect,
 		signalHeartbeat,
 		consumeStreamBatch,
-	}
-}
-
-const formatSessionRecoveryError = (error: SessionRecoveryError): string => {
-	switch (error._tag) {
-		case "SessionNotFoundError":
-			return "session" in error
-				? `tmux session ${error.session} not found`
-				: `session ${error.issueId} not found`
-		case "InvalidStateError":
-			return `state=${error.currentState} expected=${error.expectedState ?? "unknown"}`
-		case "TmuxError":
-			return error.message
-		case "ShellNotReadyError":
-			return `${error.message} target=${error.target}`
-		case "SessionError":
-			return error.message
-		case "SessionLimitError":
-			return `${error.message} current=${error.current} limit=${error.limit}`
 	}
 }
 
