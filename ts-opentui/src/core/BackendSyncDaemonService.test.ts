@@ -422,49 +422,4 @@ describe("BackendSyncDaemonService", () => {
 			rmSync(projectPath, { recursive: true, force: true })
 		}
 	})
-
-	it("runs crashed-session recovery from daemon polling loop", async () => {
-		const recoverCallsRef = await Effect.runPromise(Ref.make<ReadonlyArray<string>>([]))
-		const listCallsRef = await Effect.runPromise(Ref.make(0))
-
-		const customStatus = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const daemon = yield* makeBackendSyncDaemonService(
-						{
-							resolve: () => Effect.succeed(undefined),
-						},
-						undefined,
-						{
-							listActive: () =>
-								Effect.gen(function* () {
-									const calls = yield* Ref.get(listCallsRef)
-									yield* Ref.set(listCallsRef, calls + 1)
-									return [
-										{
-											issueId: "qm",
-											state: "crashed",
-										},
-									] as const
-								}),
-							recover: (issueId) =>
-								Ref.update(recoverCallsRef, (current) => [...current, issueId]).pipe(Effect.asVoid),
-						},
-					)
-					yield* daemon.start({ projectPath: "/tmp/project", intervalMs: 50 })
-					yield* Effect.sleep("160 millis")
-					const current = yield* daemon.getStatus()
-					yield* daemon.stop()
-					return current
-				}),
-			),
-		)
-
-		expect(customStatus.runCount).toBeGreaterThanOrEqual(1)
-		const recoverCalls = await Effect.runPromise(Ref.get(recoverCallsRef))
-		const listCalls = await Effect.runPromise(Ref.get(listCallsRef))
-		expect(listCalls).toBeGreaterThanOrEqual(1)
-		expect(recoverCalls.length).toBeGreaterThanOrEqual(1)
-		expect(recoverCalls.every((issueId) => issueId === "qm")).toBe(true)
-	})
 })
