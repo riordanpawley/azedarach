@@ -131,7 +131,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 						}
 
 						yield* toast.show("info", `Restarting dev server '${serverName}'...`)
-						yield* devServer.stop(task.id, serverName)
+						yield* devServer.stop(task.id, serverName, project.path)
 						yield* devServer.start(task.id, project.path, serverName).pipe(
 							Effect.tap((s) =>
 								toast.show(

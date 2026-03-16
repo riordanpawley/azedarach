@@ -25,7 +25,7 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { BackendSyncLinear } from "../core/BackendSyncLinear.js"
+import { BackendSyncRouter } from "../core/BackendSyncRouter.js"
 import {
 	type Issue,
 	IssueTrackerClient,
@@ -50,6 +50,8 @@ import type {
 import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
+import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
+import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
 import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
@@ -155,6 +157,140 @@ export const classifySessionRecoveryError = (
 
 const isTransientSessionRecoveryError = (error: SessionRecoveryError): boolean =>
 	classifySessionRecoveryError(error) === "transient"
+
+export const makeBoardDaemonIpcSignals = (params: {
+	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
+	readonly daemonFrontendClientId: string
+	readonly nowMs: () => number
+	readonly onDaemonStreamBatch?: (batch: DaemonEventStreamResult) => Effect.Effect<void>
+}) => {
+	const observeSessionSnapshot = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		if (params.daemonRpcClient.value.sessionSnapshot === undefined) {
+			return Effect.void
+		}
+		return params.daemonRpcClient.value.sessionSnapshot().pipe(
+			Effect.flatMap((snapshot) =>
+				Effect.logDebug(
+					`BoardService daemon snapshot observed: total=${snapshot.sessions.length} capturedAtMs=${snapshot.capturedAtMs}`,
+				),
+			),
+			Effect.asVoid,
+			Effect.catchAll(() => Effect.void),
+		)
+	}
+
+	const signalAttach = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		return params.daemonRpcClient.value
+			.attach({
+				clientId: params.daemonFrontendClientId,
+				requestedAtMs: params.nowMs(),
+			})
+			.pipe(
+				Effect.zipRight(observeSessionSnapshot()),
+				Effect.asVoid,
+				Effect.catchAll(() => Effect.void),
+			)
+	}
+
+	const signalReconnect = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		return params.daemonRpcClient.value
+			.reconnect({
+				clientId: params.daemonFrontendClientId,
+				requestedAtMs: params.nowMs(),
+			})
+			.pipe(
+				Effect.asVoid,
+				Effect.catchAll(() => Effect.void),
+			)
+	}
+
+	const signalHeartbeat = (): Effect.Effect<void> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.void
+		}
+		const daemonRpcClient = params.daemonRpcClient.value
+		return daemonRpcClient
+			.heartbeat({
+				clientId: params.daemonFrontendClientId,
+				observedAtMs: params.nowMs(),
+			})
+			.pipe(
+				Effect.catchAll((heartbeatError) =>
+					signalReconnect().pipe(
+						Effect.zipRight(
+							daemonRpcClient.heartbeat({
+								clientId: params.daemonFrontendClientId,
+								observedAtMs: params.nowMs(),
+							}),
+						),
+						Effect.mapError(() => heartbeatError),
+					),
+				),
+				Effect.zipRight(observeSessionSnapshot()),
+				Effect.asVoid,
+				Effect.catchAll(() => Effect.void),
+			)
+	}
+
+	const processDaemonStreamBatch = (batch: DaemonEventStreamResult): Effect.Effect<void> =>
+		Effect.forEach(
+			batch.events,
+			(entry) => {
+				switch (entry.event._tag) {
+					case "DaemonEventStreamSessionSnapshotEvent":
+						return Effect.logDebug(
+							`BoardService daemon stream session snapshot: cursor=${entry.cursor} sessions=${entry.event.sessions.length} capturedAtMs=${entry.event.capturedAtMs}`,
+						)
+					case "DaemonEventStreamRuntimeSnapshotEvent":
+						return Effect.logDebug(
+							`BoardService daemon stream runtime snapshot: cursor=${entry.cursor} revision=${entry.event.runtime.revision} phase=${entry.event.runtime.runtimePhase}`,
+						)
+				}
+			},
+			{ discard: true },
+		).pipe(
+			Effect.zipRight(
+				params.onDaemonStreamBatch === undefined ? Effect.void : params.onDaemonStreamBatch(batch),
+			),
+		)
+
+	const consumeStreamBatch = (cursor: number | undefined): Effect.Effect<number | undefined> => {
+		if (Option.isNone(params.daemonRpcClient)) {
+			return Effect.succeed(cursor)
+		}
+		if (params.daemonRpcClient.value.eventStream === undefined) {
+			return Effect.succeed(cursor)
+		}
+		return params.daemonRpcClient.value
+			.eventStream({
+				clientId: params.daemonFrontendClientId,
+				cursor,
+				batchSize: 32,
+				waitMs: 2500,
+			})
+			.pipe(
+				Effect.tap(processDaemonStreamBatch),
+				Effect.map((batch) => batch.nextCursor),
+				Effect.catchAll(() => Effect.succeed(cursor)),
+			)
+	}
+
+	return {
+		signalAttach,
+		signalReconnect,
+		signalHeartbeat,
+		consumeStreamBatch,
+	}
+}
 
 const formatSessionRecoveryError = (error: SessionRecoveryError): string => {
 	switch (error._tag) {
@@ -668,7 +804,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	dependencies: [
 		SessionManager.Default,
 		IssueTrackerClient.Default,
-		BackendSyncLinear.Default,
+		BackendSyncRouter.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
 		ProjectService.Default,
@@ -684,7 +820,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* SessionManager
-		const backendSyncLinear = yield* BackendSyncLinear
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
@@ -730,6 +867,18 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
 		const autoRecoveryQueue = yield* Queue.unbounded<string>()
 		const autoRecoveryTrackedIssueIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set())
+		const daemonFrontendClientId = `board-ui:${process.pid}`
+		const {
+			signalAttach: signalDaemonAttach,
+			signalHeartbeat: signalDaemonHeartbeat,
+			signalReconnect: signalDaemonReconnect,
+			consumeStreamBatch: consumeDaemonStreamBatch,
+		} = makeBoardDaemonIpcSignals({
+			daemonRpcClient,
+			daemonFrontendClientId,
+			nowMs: Date.now,
+		})
+		const daemonStreamCursorRef = yield* Ref.make<number | undefined>(undefined)
 
 		// ====================================================================
 		// Per-Project State Management
@@ -1314,8 +1463,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
-				// Get optimistic mutations
-				const pendingMutations = yield* mutationQueue.getMutations()
+				// Get optimistic mutations through queue adapter (daemon or local fallback)
+				const pendingMutations = yield* mutationQueue.getOptimisticMutations()
 
 				// Get parent epic map (cached for 30s to avoid expensive tracker show calls)
 				// This enables filtering epic children and using correct base branch for git diff
@@ -1814,6 +1963,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
 			Effect.gen(function* () {
+				yield* signalDaemonReconnect()
 				yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
 				const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
 				const now = Date.now()
@@ -1989,6 +2139,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							? refreshLocalSessionOnly(preferredProjectPath)
 							: refreshLocalSessionAndGitState(preferredProjectPath)
 				yield* refreshSemaphore.withPermits(1)(refreshEffect)
+				yield* signalDaemonHeartbeat()
 			})
 
 		const syncLinearProjectBeforeRefresh = (projectPath: string) =>
@@ -2012,7 +2163,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return
 				}
 
-				yield* backendSyncLinear.flushQueue(projectPath).pipe(
+				const backendSync = yield* backendSyncRouter.resolve()
+				if (backendSync === undefined) {
+					yield* Effect.logWarning(
+						`Project switch Linear sync skipped for ${projectPath}: no backend sync runtime available`,
+					)
+					return
+				}
+
+				yield* backendSync.flushQueue(projectPath).pipe(
 					Effect.tap((syncResult) =>
 						Effect.log(
 							`Project switch Linear sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
@@ -2738,6 +2897,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
 		yield* startAutoRecoveryWorkerFiber()
+		yield* signalDaemonAttach()
+		yield* Effect.forkScoped(
+			Effect.gen(function* () {
+				const cursor = yield* Ref.get(daemonStreamCursorRef)
+				const nextCursor = yield* consumeDaemonStreamBatch(cursor)
+				yield* Ref.set(daemonStreamCursorRef, nextCursor)
+			}).pipe(Effect.repeat(Schedule.spaced(Duration.seconds(2)))),
+		)
 
 		const initialProjectPath = yield* projectService.getCurrentPath()
 		if (initialProjectPath) {
@@ -2906,6 +3073,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Update the current project path
 				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
+				yield* signalDaemonHeartbeat()
 
 				const cacheHit = yield* loadFromCache(newProjectPath)
 				if (!cacheHit) {

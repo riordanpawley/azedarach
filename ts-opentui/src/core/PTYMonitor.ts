@@ -21,6 +21,7 @@
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
+import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
 import {
@@ -330,6 +331,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		const stateDetector = yield* StateDetector
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 		// Register with diagnostics - will mark unhealthy when scope closes
 		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 1s")
@@ -390,6 +392,19 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				}
 				return monitor
 			})
+
+		const updateSessionStateWithPreferredRuntime = (issueId: string, state: SessionState) => {
+			if (
+				daemonRpcClient._tag === "Some" &&
+				daemonRpcClient.value.sessionUpdateState !== undefined
+			) {
+				return daemonRpcClient.value.sessionUpdateState({
+					issueId,
+					state,
+				})
+			}
+			return sessionManager.updateState(issueId, state)
+		}
 
 		// ========================================================================
 		// Session Registration
@@ -589,7 +604,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					})
 
 					if (shellForegroundState !== null) {
-						yield* sessionManager.updateState(issueId, shellForegroundState)
+						yield* updateSessionStateWithPreferredRuntime(issueId, shellForegroundState)
 						yield* Effect.log(
 							`PTYMonitor: ${issueId} state ${currentState} → ${shellForegroundState} (shell foreground${alertState.bell && !monitor.lastBellFlag ? ", fresh bell" : ""})`,
 						)
@@ -606,7 +621,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 							newPendingCount = 1
 						}
 						if (newPendingCount >= PENDING_STATE_THRESHOLD) {
-							yield* sessionManager.updateState(issueId, "busy")
+							yield* updateSessionStateWithPreferredRuntime(issueId, "busy")
 							yield* Effect.log(
 								`PTYMonitor: ${issueId} state idle → busy (subprocess '${foregroundCmd}' is foreground)`,
 							)
@@ -630,7 +645,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 							})
 
 							if (canTransition && currentState !== detectedState) {
-								yield* sessionManager.updateState(issueId, detectedState)
+								yield* updateSessionStateWithPreferredRuntime(issueId, detectedState)
 								yield* Effect.log(
 									`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY high-priority)`,
 								)
@@ -656,7 +671,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 								}
 
 								if (newPendingCount >= PENDING_STATE_THRESHOLD) {
-									yield* sessionManager.updateState(issueId, detectedState)
+									yield* updateSessionStateWithPreferredRuntime(issueId, detectedState)
 									yield* Effect.log(
 										`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY, confirmed after ${newPendingCount} polls)`,
 									)

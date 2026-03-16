@@ -17,6 +17,7 @@ const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	o: "opencode",
 	cfg: "config",
 	d: "dev",
+	dm: "daemon",
 	s: "status",
 	st: "start",
 }
@@ -121,6 +122,7 @@ const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"kill",
 	"status",
 	"sync",
+	"daemon",
 	"issue",
 	"spec",
 	"gate",

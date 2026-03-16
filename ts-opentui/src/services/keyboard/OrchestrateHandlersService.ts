@@ -9,10 +9,12 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import type { CommandExecutor } from "@effect/platform"
 import { Effect, Option } from "effect"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { TemplateService } from "../../core/TemplateService.js"
+import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import type { OrchestrationTask } from "../EditorService.js"
 import { EditorService } from "../EditorService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -45,6 +47,42 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const issueTrackerClient = yield* IssueTrackerClient
 			const sessionManager = yield* SessionManager
 			const templateService = yield* TemplateService
+			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+
+			const listActiveSessionsWithPreferredRuntime = (): Effect.Effect<
+				readonly { readonly issueId: string }[],
+				unknown,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.gen(function* () {
+					if (
+						Option.isSome(daemonRpcClient) &&
+						daemonRpcClient.value.sessionSnapshot !== undefined
+					) {
+						const snapshot = yield* daemonRpcClient.value.sessionSnapshot()
+						return snapshot.sessions.map((session) => ({ issueId: session.issueId }))
+					}
+					return yield* sessionManager.listActive()
+				})
+
+			const startSessionWithPreferredRuntime = (options: {
+				readonly issueId: string
+				readonly projectPath: string
+				readonly initialPrompt?: string
+			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStart !== undefined) {
+						// Current daemon RPC start does not support initial prompt yet.
+						if (options.initialPrompt === undefined) {
+							yield* daemonRpcClient.value.sessionStart({
+								issueId: options.issueId,
+								projectPath: options.projectPath,
+							})
+							return
+						}
+					}
+					yield* sessionManager.start(options)
+				}).pipe(Effect.asVoid)
 
 			// ================================================================
 			// Orchestrate Handler Methods
@@ -105,15 +143,13 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					)
 
 					// Get all active sessions to determine hasSession state
-					const activeSessions = yield* sessionManager
-						.listActive()
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed([] as const)),
-								),
+					const activeSessions = yield* listActiveSessionsWithPreferredRuntime().pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([] as const)),
 							),
-						)
+						),
+					)
 					const activeSessionIds = new Set(activeSessions.map((s) => s.issueId))
 
 					// Map children to OrchestrationTask format (filter out tombstones)
@@ -210,28 +246,26 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 									)
 
 								// Start session with rendered template as initial prompt
-								return yield* sessionManager
-									.start({
-										issueId: taskId,
-										projectPath,
-										initialPrompt,
-									})
-									.pipe(
-										Effect.tap(() => Effect.logInfo(`Spawned session for ${taskId}`)),
-										// Catch individual spawn failures so one failure doesn't block others
-										Effect.catchAll((error) => {
-											const msg =
-												error && typeof error === "object" && "message" in error
-													? String(error.message)
-													: String(error)
-											return Effect.gen(function* () {
-												yield* Effect.logError(`Failed to spawn ${taskId}: ${msg}`, {
-													error,
-												})
-												return yield* Effect.succeed(undefined)
+								return yield* startSessionWithPreferredRuntime({
+									issueId: taskId,
+									projectPath,
+									initialPrompt,
+								}).pipe(
+									Effect.tap(() => Effect.logInfo(`Spawned session for ${taskId}`)),
+									// Catch individual spawn failures so one failure doesn't block others
+									Effect.catchAll((error) => {
+										const msg =
+											error && typeof error === "object" && "message" in error
+												? String(error.message)
+												: String(error)
+										return Effect.gen(function* () {
+											yield* Effect.logError(`Failed to spawn ${taskId}: ${msg}`, {
+												error,
 											})
-										}),
-									)
+											return yield* Effect.succeed(undefined)
+										})
+									}),
+								)
 							}),
 						),
 					)

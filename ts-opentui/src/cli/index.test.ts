@@ -1,12 +1,23 @@
 import { describe, expect, it } from "bun:test"
 import { BunContext } from "@effect/platform-bun"
-import { Effect } from "effect"
+import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+import { DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
+import {
+	DAEMON_RPC_PROTOCOL_VERSION,
+	type DaemonEventStreamResult,
+} from "../rpc/DaemonRpcSchemas.js"
+import {
+	buildGlobalDaemonSocketUrl,
+	formatDaemonRpcClientFailure,
+} from "./daemonClientBootstrap.js"
 import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
+	consumeDaemonStatusStreamBatches,
+	daemonCommandShouldAutoStart,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
@@ -14,10 +25,12 @@ import {
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	formatParentChildCheckOutput,
+	getDaemonSessionSnapshotSummary,
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	parseGitWorktreeListPaths,
 	resolveCliExecutionMode,
+	resolveStartSessionRuntimeMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 } from "./index.js"
@@ -32,6 +45,26 @@ const makePrimeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): Trac
 	updated_at: "2026-03-08T00:00:00.000Z",
 	implementations: ["default"],
 	...overrides,
+})
+
+const makeDaemonEventStreamBatch = (params: {
+	readonly nextCursor: number
+	readonly eventCursor: number
+}): DaemonEventStreamResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	polledAtMs: 110,
+	nextCursor: params.nextCursor,
+	events: [
+		{
+			cursor: params.eventCursor,
+			emittedAtMs: 109,
+			event: {
+				_tag: "DaemonEventStreamSessionSnapshotEvent",
+				capturedAtMs: 109,
+				sessions: [],
+			},
+		},
+	],
 })
 
 describe("buildPrimeOutput", () => {
@@ -614,6 +647,9 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "daemon", "sync"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "daemon", "logs"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "dm", "sync"])).toBe("command")
 	})
 
 	it("treats `az i` as `az issue` for mode resolution", () => {
@@ -648,6 +684,37 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "d", "stp", "AZE-1"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "ls"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "s", "AZE-1"])).toBe("dev-command")
+	})
+})
+
+describe("resolveStartSessionRuntimeMode", () => {
+	it("defaults to daemon-rpc mode", () => {
+		const resolved = resolveStartSessionRuntimeMode({
+			noDaemonFlag: false,
+			env: {},
+		})
+		expect(resolved.mode).toBe("daemon-rpc")
+		expect(resolved.decision).toBe("enabled-by-default")
+	})
+
+	it("uses fallback mode when --no-daemon is set", () => {
+		const resolved = resolveStartSessionRuntimeMode({
+			noDaemonFlag: true,
+			env: {},
+		})
+		expect(resolved.mode).toBe("session-manager-fallback")
+		expect(resolved.decision).toBe("disabled-by-cli-flag")
+	})
+
+	it("uses fallback mode when daemon is disabled by env policy", () => {
+		const resolved = resolveStartSessionRuntimeMode({
+			noDaemonFlag: false,
+			env: {
+				AZEDARACH_DAEMON_MODE: "off",
+			},
+		})
+		expect(resolved.mode).toBe("session-manager-fallback")
+		expect(resolved.decision).toBe("disabled-by-env")
 	})
 })
 
@@ -899,6 +966,233 @@ describe("normalizeCliAliases", () => {
 			"AZE-1",
 		])
 		expect(normalizeCliAliases(["bun", "az", "d", "ls"])).toEqual(["bun", "az", "dev", "list"])
+	})
+})
+
+describe("daemon control CLI commands", () => {
+	it("enables autostart for daemon commands that require connectivity", () => {
+		expect(daemonCommandShouldAutoStart("sync")).toBe(true)
+		expect(daemonCommandShouldAutoStart("status")).toBe(true)
+		expect(daemonCommandShouldAutoStart("health")).toBe(true)
+		expect(daemonCommandShouldAutoStart("restart")).toBe(true)
+		expect(daemonCommandShouldAutoStart("logs")).toBe(true)
+	})
+
+	it("keeps daemon stop non-autostart", () => {
+		expect(daemonCommandShouldAutoStart("stop")).toBe(false)
+	})
+
+	it("surfaces actionable error when daemon stop runs without discovery metadata", async () => {
+		const isolatedHome = `${process.env.TMPDIR ?? "/tmp"}/az-daemon-home-${crypto.randomUUID()}`
+		const originalHome = process.env.HOME
+		process.env.HOME = isolatedHome
+		const exit = await Effect.runPromiseExit(
+			cliRunner(["bun", "az", "daemon", "stop"]).pipe(Effect.provide(BunContext.layer)),
+		)
+		process.env.HOME = originalHome
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected stop command to fail")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected stop command failure message")
+		}
+		expect(failure.value instanceof Error).toBe(true)
+		if (!(failure.value instanceof Error)) {
+			throw new Error("Expected failure to be Error")
+		}
+		expect(
+			failure.value.message.includes("No global daemon discovery metadata found") ||
+				failure.value.message.includes("Timed out waiting for a reachable global daemon endpoint"),
+		).toBe(true)
+	}, 10_000)
+})
+
+describe("daemon session snapshot summaries", () => {
+	it("returns none when daemon client does not expose sessionSnapshot", async () => {
+		const summary = await Effect.runPromise(
+			getDaemonSessionSnapshotSummary({
+				client: {},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				projectPath: "/tmp/project",
+			}),
+		)
+		expect(Option.isNone(summary)).toBe(true)
+	})
+
+	it("calls sessionSnapshot and aggregates session state counts", async () => {
+		const requests: Array<string | undefined> = []
+		const summary = await Effect.runPromise(
+			getDaemonSessionSnapshotSummary({
+				client: {
+					sessionSnapshot: (request) => {
+						requests.push(request?.projectPath)
+						return Effect.succeed({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							capturedAtMs: 123,
+							sessions: [
+								{
+									issueId: "AZE-1",
+									worktreePath: "/tmp/project/.worktrees/AZE-1",
+									tmuxSessionName: "az-AZE-1",
+									state: "busy",
+									startedAt: "2026-03-14T00:00:00.000Z",
+									projectPath: "/tmp/project",
+								},
+								{
+									issueId: "AZE-2",
+									worktreePath: "/tmp/project/.worktrees/AZE-2",
+									tmuxSessionName: "az-AZE-2",
+									state: "busy",
+									startedAt: "2026-03-14T00:05:00.000Z",
+									projectPath: "/tmp/project",
+								},
+								{
+									issueId: "AZE-3",
+									worktreePath: "/tmp/project/.worktrees/AZE-3",
+									tmuxSessionName: "az-AZE-3",
+									state: "waiting",
+									startedAt: "2026-03-14T00:10:00.000Z",
+									projectPath: "/tmp/project",
+								},
+							],
+						})
+					},
+				},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(requests).toEqual(["/tmp/project"])
+		expect(Option.isSome(summary)).toBe(true)
+		if (!Option.isSome(summary)) {
+			throw new Error("Expected snapshot summary")
+		}
+		expect(summary.value.totalSessions).toBe(3)
+		expect(summary.value.stateCounts["busy"]).toBe(2)
+		expect(summary.value.stateCounts["waiting"]).toBe(1)
+	})
+})
+
+describe("daemon status stream consumption", () => {
+	it("fails with actionable guidance when daemon stream RPC is unavailable", async () => {
+		const exit = await Effect.runPromiseExit(
+			consumeDaemonStatusStreamBatches({
+				client: {},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				clientId: "az-cli:test",
+				projectPath: "/tmp/project",
+				initialCursor: undefined,
+				batchSize: 10,
+				waitMs: 100,
+				watch: false,
+				maxBatches: 1,
+				reconnectDelayMs: 0,
+				onBatch: () => Effect.void,
+			}),
+		)
+
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected stream consumption to fail without eventStream support")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected stream failure cause")
+		}
+		expect(failure.value instanceof Error).toBe(true)
+		if (!(failure.value instanceof Error)) {
+			throw new Error("Expected error instance")
+		}
+		expect(failure.value.message).toContain("does not support eventStream RPC")
+	})
+
+	it("reuses cursor on transport reconnect and advances on successful batches", async () => {
+		const observedCursors: Array<number | undefined> = []
+		const consumedNextCursors: Array<number> = []
+		let callCount = 0
+
+		const finalCursor = await Effect.runPromise(
+			consumeDaemonStatusStreamBatches({
+				client: {
+					eventStream: (request) => {
+						observedCursors.push(request.cursor)
+						callCount += 1
+						if (callCount === 2) {
+							return Effect.fail(
+								new DaemonRpcTransportError({
+									operation: "eventStream",
+									reason: "transport",
+									message: "socket dropped",
+									suggestion: "retry",
+								}),
+							)
+						}
+						if (callCount === 1) {
+							return Effect.succeed(
+								makeDaemonEventStreamBatch({
+									nextCursor: 5,
+									eventCursor: 4,
+								}),
+							)
+						}
+						return Effect.succeed(
+							makeDaemonEventStreamBatch({
+								nextCursor: 8,
+								eventCursor: 7,
+							}),
+						)
+					},
+				},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				clientId: "az-cli:test",
+				projectPath: "/tmp/project",
+				initialCursor: undefined,
+				batchSize: 10,
+				waitMs: 100,
+				watch: true,
+				maxBatches: 2,
+				reconnectDelayMs: 0,
+				onBatch: (batch) =>
+					Effect.sync(() => {
+						consumedNextCursors.push(batch.nextCursor)
+					}),
+			}),
+		)
+
+		expect(observedCursors).toEqual([undefined, 5, 5])
+		expect(consumedNextCursors).toEqual([5, 8])
+		expect(finalCursor).toBe(8)
+	})
+})
+
+describe("daemon RPC bootstrap helpers", () => {
+	it("builds ws+unix socket URL from discovery socket path", () => {
+		expect(buildGlobalDaemonSocketUrl("/tmp/az-global.sock")).toBe(
+			"ws+unix:///tmp/az-global.sock:/",
+		)
+	})
+
+	it("formats transport failures with endpoint and suggestion context", () => {
+		const error = new DaemonRpcTransportError({
+			operation: "health",
+			reason: "transport",
+			message: "connection refused",
+			suggestion: "Check daemon status",
+		})
+		const formatted = formatDaemonRpcClientFailure({
+			operation: "health",
+			socketUrl: "ws+unix:///tmp/az-global.sock:/",
+			error,
+		})
+
+		expect(formatted.message).toContain("Unable to connect to daemon RPC endpoint")
+		expect(formatted.message).toContain("ws+unix:///tmp/az-global.sock:/")
+		expect(formatted.message).toContain("Check daemon status")
 	})
 })
 

@@ -10,19 +10,21 @@ import { Atom } from "@effect-atom/atom"
 import { Layer, Logger } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
+import { BackendDaemonService } from "../../core/BackendDaemonService.js"
+import { BackendSyncDaemonService } from "../../core/BackendSyncDaemonService.js"
+import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
-import { SessionManager } from "../../core/SessionManager.js"
-import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PlanningService } from "../../core/PlanningService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
+import { SessionManager } from "../../core/SessionManager.js"
+import { SpecService } from "../../core/SpecService.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { VCService } from "../../core/VCService.js"
-import { SpecService } from "../../core/SpecService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { ClockService } from "../../services/ClockService.js"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
@@ -49,6 +51,8 @@ const platformLayer = BunContext.layer
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
 export const appLayer = Layer.mergeAll(
 	MutationQueue.Default,
+	BackendDaemonService.Default,
+	BackendSyncDaemonService.Default,
 	SessionService.Default,
 	AttachmentService.Default,
 	OverlayService.Default,
@@ -80,9 +84,9 @@ export const appLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
-    PlanningService.Default,
-    GitSyncService.Default,
-    SpecService.Default,
+	PlanningService.Default,
+	GitSyncService.Default,
+	SpecService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),

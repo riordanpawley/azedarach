@@ -41,6 +41,12 @@ import {
 	AzedarachConfigSchema,
 } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
+import { BackendDaemonControlService } from "../core/BackendDaemonControlService.js"
+import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
+import {
+	resolveDaemonIntervalMsFromEnv,
+	resolveDaemonOperationsPolicy,
+} from "../core/DaemonOperationsPolicy.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -69,6 +75,13 @@ import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
+import { type DaemonRpcClientApi, DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
+import type {
+	DaemonEventStreamEntry,
+	DaemonEventStreamResult,
+	DaemonSessionMutationResult,
+	DaemonSessionSnapshotResult,
+} from "../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "../services/BoardService.js"
 import { ClockService } from "../services/ClockService.js"
 import { CommandQueueService } from "../services/CommandQueueService.js"
@@ -97,6 +110,7 @@ import {
 	parseConfigPathFromArgv,
 	resolveCliExecutionMode,
 } from "./argv-normalization.js"
+import { bootstrapDaemonRpcClient, formatDaemonRpcClientFailure } from "./daemonClientBootstrap.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
@@ -162,6 +176,8 @@ const buildAppConfigLayer = (configPath: string | null) => {
  */
 const createFullCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		BackendDaemonControlService.Default,
+		BackendSyncDaemonService.Default,
 		MutationQueue.Default,
 		SessionService.Default,
 		AttachmentService.Default,
@@ -209,6 +225,8 @@ const createFullCliLayer = (configPath: string | null) =>
  */
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		BackendDaemonControlService.Default,
+		BackendSyncDaemonService.Default,
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
 		IssueTrackerClient.Default,
@@ -233,6 +251,10 @@ const commandCliLayer = createCommandCliLayer(null)
 const verboseOption = Options.boolean("verbose").pipe(
 	Options.withAlias("v"),
 	Options.withDescription("Enable verbose logging"),
+)
+
+const noDaemonOption = Options.boolean("no-daemon").pipe(
+	Options.withDescription("Disable automatic daemon startup for this command"),
 )
 
 /**
@@ -464,10 +486,17 @@ const setConfigValue = (
 const defaultHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly noDaemon: boolean
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureDaemonAutoStartForCliCommand({
+			command: "tui-default",
+			projectPath: cwd,
+			noDaemonFlag: args.noDaemon,
+			verbose: args.verbose,
+		})
 
 		if (args.verbose) {
 			yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
@@ -489,15 +518,55 @@ const defaultHandler = (args: {
 /**
  * Start a new Claude session for an issue
  */
+type StartSessionRuntimeMode = "daemon-rpc" | "session-manager-fallback"
+
+const mapDaemonSessionMutationToCliSession = (
+	result: DaemonSessionMutationResult,
+): {
+	readonly worktreePath: string
+	readonly tmuxSessionName: string
+} => ({
+	worktreePath: result.session.worktreePath,
+	tmuxSessionName: result.session.tmuxSessionName,
+})
+
+export const resolveStartSessionRuntimeMode = (params: {
+	readonly noDaemonFlag: boolean
+	readonly env: Readonly<Record<string, string | undefined>>
+}): {
+	readonly mode: StartSessionRuntimeMode
+	readonly decision:
+		| "enabled-by-default"
+		| "disabled-by-cli-flag"
+		| "disabled-by-env"
+		| "enabled-by-env"
+		| "ignored-invalid-env"
+} => {
+	const policy = resolveDaemonOperationsPolicy({
+		command: "tui-default",
+		noDaemonFlag: params.noDaemonFlag,
+		env: params.env,
+	})
+	return {
+		mode: policy.autoDaemonize ? "daemon-rpc" : "session-manager-fallback",
+		decision: policy.decision,
+	}
+}
+
 const startHandler = (args: {
 	readonly issueId: string
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly noDaemon: boolean
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const sessionRuntime = resolveStartSessionRuntimeMode({
+			noDaemonFlag: args.noDaemon,
+			env: process.env,
+		})
 
 		yield* Console.log(`Starting Claude session for issue: ${issueId}`)
 		yield* Console.log(`Project: ${cwd}`)
@@ -512,12 +581,47 @@ const startHandler = (args: {
 		// Validate issue tracker store
 		yield* validateIssueTrackerStore(cwd)
 
-		// Start the session using SessionManager (provided by cliLayer)
-		const sessionManager = yield* SessionManager
-		const session = yield* sessionManager.start({
-			issueId,
-			projectPath: cwd,
-		})
+		const session =
+			sessionRuntime.mode === "daemon-rpc"
+				? yield* Effect.gen(function* () {
+						const bootstrap = yield* bootstrapDaemonRpcClient({
+							autoStart: true,
+						})
+						if (bootstrap.client.sessionStart === undefined) {
+							return yield* Effect.fail(
+								new Error(
+									"Connected daemon does not support sessionStart RPC yet. Update daemon/runtime or rerun with --no-daemon.",
+								),
+							)
+						}
+						const mutation = yield* bootstrap.client
+							.sessionStart({
+								issueId,
+								projectPath: cwd,
+							})
+							.pipe(
+								Effect.mapError((error) =>
+									formatDaemonRpcClientFailure({
+										operation: "sessionStart",
+										socketUrl: bootstrap.socketUrl,
+										error,
+									}),
+								),
+							)
+						return mapDaemonSessionMutationToCliSession(mutation)
+					})
+				: yield* Effect.gen(function* () {
+						if (args.verbose) {
+							yield* Console.log(
+								`Session start daemon RPC disabled (${sessionRuntime.decision}); using direct runtime fallback.`,
+							)
+						}
+						const sessionManager = yield* SessionManager
+						return yield* sessionManager.start({
+							issueId,
+							projectPath: cwd,
+						})
+					})
 
 		// Claim the issue with session assignee
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -773,6 +877,73 @@ const getSyncFailureMessage = (error: unknown): string => {
 	return String(error)
 }
 
+const ensureDaemonAutoStartForCliCommand = (params: {
+	readonly command: "tui-default" | "sync"
+	readonly projectPath: string
+	readonly noDaemonFlag: boolean
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const policy = resolveDaemonOperationsPolicy({
+			command: params.command,
+			noDaemonFlag: params.noDaemonFlag,
+			env: process.env,
+		})
+		if (!policy.autoDaemonize) {
+			if (params.verbose) {
+				yield* Console.log(`Auto-daemonize disabled (${policy.decision}).`)
+			}
+			return
+		}
+
+		const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
+		if (warning !== undefined) {
+			yield* Console.error(`Warning: ${warning}`)
+		}
+
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const currentStatus = yield* bootstrap.client.status().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "status",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
+		const alreadyRunningForPath =
+			currentStatus.sync.state === "running" &&
+			currentStatus.sync.projectPath === params.projectPath
+		if (alreadyRunningForPath) {
+			if (params.verbose) {
+				yield* Console.log(
+					`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
+				)
+			}
+			return
+		}
+
+		yield* bootstrap.client
+			.restart({
+				projectPath: params.projectPath,
+				...(intervalMs === undefined ? {} : { intervalMs }),
+			})
+			.pipe(
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "restart",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
+				),
+			)
+		if (params.verbose) {
+			yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+		}
+	})
+
 const syncLinearAfterIssueMutation = (params: {
 	readonly issueTrackerClient: IssueTrackerClient
 	readonly explicitProjectDir: string | undefined
@@ -824,10 +995,17 @@ const syncHandler = (args: {
 	readonly all: boolean
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly noDaemon: boolean
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const issueTrackerClient = yield* IssueTrackerClient
+		yield* ensureDaemonAutoStartForCliCommand({
+			command: "sync",
+			projectPath: cwd,
+			noDaemonFlag: args.noDaemon,
+			verbose: args.verbose,
+		})
 
 		yield* Console.log("Syncing issue tracker state...")
 		yield* Console.log(`Project: ${cwd}`)
@@ -882,6 +1060,416 @@ const syncHandler = (args: {
 					`Sync failed for ${failures.length} target(s). Successful targets: ${syncedCount}/${targetPaths.length}.`,
 				),
 			)
+		}
+	})
+
+const daemonSyncHandler = (args: {
+	readonly intervalMs: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const intervalMs = Option.getOrUndefined(args.intervalMs)
+
+		yield* validateIssueTrackerStore(cwd)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: daemonCommandShouldAutoStart("sync"),
+		})
+		const status = yield* bootstrap.client
+			.restart({
+				projectPath: cwd,
+				...(intervalMs === undefined ? {} : { intervalMs }),
+			})
+			.pipe(
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "restart",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
+				),
+			)
+
+		yield* Console.log(
+			`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
+		)
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "restart",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const formatDaemonControlStatusLine = (params: {
+	readonly mode: "status" | "stop" | "restart" | "health"
+	readonly status: {
+		readonly runtime: {
+			readonly runtimePhase: string
+			readonly lifecycleGeneration: number
+			readonly revision: number
+		}
+		readonly sync: {
+			readonly state: string
+			readonly generation: number
+			readonly projectPath: string | null
+			readonly intervalMs: number | null
+		}
+	}
+}): string =>
+	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} projectPath=${params.status.sync.projectPath ?? "<none>"} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
+
+export type DaemonSessionSnapshotSummary = {
+	readonly capturedAtMs: number
+	readonly totalSessions: number
+	readonly stateCounts: Readonly<Record<string, number>>
+}
+
+const summarizeDaemonSessionSnapshot = (
+	snapshot: DaemonSessionSnapshotResult,
+): DaemonSessionSnapshotSummary => {
+	const stateCounts = snapshot.sessions.reduce<Record<string, number>>((counts, session) => {
+		counts[session.state] = (counts[session.state] ?? 0) + 1
+		return counts
+	}, {})
+	return {
+		capturedAtMs: snapshot.capturedAtMs,
+		totalSessions: snapshot.sessions.length,
+		stateCounts,
+	}
+}
+
+const formatDaemonSessionSnapshotSummaryLine = (summary: DaemonSessionSnapshotSummary): string => {
+	const counts = Object.entries(summary.stateCounts)
+		.sort((left, right) => left[0].localeCompare(right[0]))
+		.map(([state, count]) => `${state}=${count}`)
+		.join(" ")
+	return `daemon sessions: total=${summary.totalSessions} capturedAtMs=${summary.capturedAtMs}${counts.length === 0 ? "" : ` ${counts}`}`
+}
+
+export const getDaemonSessionSnapshotSummary = (params: {
+	readonly client: Pick<DaemonRpcClientApi, "sessionSnapshot">
+	readonly socketUrl: string
+	readonly projectPath: string | undefined
+}): Effect.Effect<Option.Option<DaemonSessionSnapshotSummary>, Error> => {
+	if (params.client.sessionSnapshot === undefined) {
+		return Effect.succeed(Option.none())
+	}
+	return params.client
+		.sessionSnapshot(
+			params.projectPath === undefined ? undefined : { projectPath: params.projectPath },
+		)
+		.pipe(
+			Effect.map((snapshot) => Option.some(summarizeDaemonSessionSnapshot(snapshot))),
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "sessionSnapshot",
+					socketUrl: params.socketUrl,
+					error,
+				}),
+			),
+		)
+}
+
+export const daemonCommandShouldAutoStart = (
+	command: "sync" | "status" | "health" | "stop" | "restart" | "logs",
+): boolean => command !== "stop"
+
+const formatDaemonEventStreamEntryLine = (entry: DaemonEventStreamEntry): string => {
+	switch (entry.event._tag) {
+		case "DaemonEventStreamSessionSnapshotEvent":
+			return `cursor=${entry.cursor} session_snapshot sessions=${entry.event.sessions.length} capturedAtMs=${entry.event.capturedAtMs}`
+		case "DaemonEventStreamRuntimeSnapshotEvent":
+			return `cursor=${entry.cursor} runtime_snapshot phase=${entry.event.runtime.runtimePhase} revision=${entry.event.runtime.revision}`
+	}
+}
+
+const formatDaemonEventStreamBatchSummaryLine = (batch: DaemonEventStreamResult): string =>
+	`daemon stream batch: events=${batch.events.length} nextCursor=${batch.nextCursor} polledAtMs=${batch.polledAtMs}`
+
+export const consumeDaemonStatusStreamBatches = (params: {
+	readonly client: Pick<DaemonRpcClientApi, "eventStream">
+	readonly socketUrl: string
+	readonly clientId: string
+	readonly projectPath: string | undefined
+	readonly initialCursor: number | undefined
+	readonly batchSize: number
+	readonly waitMs: number
+	readonly watch: boolean
+	readonly maxBatches: number | undefined
+	readonly reconnectDelayMs: number
+	readonly onBatch: (batch: DaemonEventStreamResult) => Effect.Effect<void>
+}): Effect.Effect<number | undefined, Error> =>
+	Effect.gen(function* () {
+		if (params.client.eventStream === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					"Connected daemon does not support eventStream RPC yet. Update daemon/runtime and rerun `az daemon status --watch`.",
+				),
+			)
+		}
+
+		let cursor = params.initialCursor
+		let processedBatches = 0
+
+		while (params.maxBatches === undefined || processedBatches < params.maxBatches) {
+			const attempt = yield* params.client
+				.eventStream({
+					clientId: params.clientId,
+					projectPath: params.projectPath,
+					cursor,
+					batchSize: params.batchSize,
+					waitMs: params.waitMs,
+				})
+				.pipe(Effect.either)
+
+			if (attempt._tag === "Left") {
+				if (params.watch && attempt.left instanceof DaemonRpcTransportError) {
+					yield* Console.log(
+						`daemon stream reconnecting from cursor=${cursor ?? "<start>"} in ${params.reconnectDelayMs}ms (${attempt.left.message})`,
+					)
+					yield* Effect.sleep(Duration.millis(params.reconnectDelayMs))
+					continue
+				}
+				return yield* Effect.fail(
+					formatDaemonRpcClientFailure({
+						operation: "eventStream",
+						socketUrl: params.socketUrl,
+						error: attempt.left,
+					}),
+				)
+			}
+
+			cursor = attempt.right.nextCursor
+			processedBatches += 1
+			yield* params.onBatch(attempt.right)
+
+			if (!params.watch) {
+				break
+			}
+		}
+
+		return cursor
+	})
+
+const daemonStatusHandler = (args: {
+	readonly verbose: boolean
+	readonly watch: boolean
+	readonly cursor: Option.Option<number>
+	readonly streamBatchSize: Option.Option<number>
+	readonly streamWaitMs: Option.Option<number>
+	readonly streamBatches: Option.Option<number>
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: daemonCommandShouldAutoStart("status"),
+		})
+		const status = yield* bootstrap.client.status().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "status",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "status",
+				status,
+			}),
+		)
+		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
+			client: bootstrap.client,
+			socketUrl: bootstrap.socketUrl,
+			projectPath: status.sync.projectPath ?? undefined,
+		}).pipe(
+			Effect.catchAll((error) =>
+				Console.log(`daemon session snapshot unavailable: ${error.message}`).pipe(
+					Effect.as(Option.none<DaemonSessionSnapshotSummary>()),
+				),
+			),
+		)
+		if (Option.isSome(snapshotSummary)) {
+			yield* Console.log(formatDaemonSessionSnapshotSummaryLine(snapshotSummary.value))
+		}
+
+		if (args.watch) {
+			const batchSize = Option.getOrElse(args.streamBatchSize, () => 32)
+			const waitMs = Option.getOrElse(args.streamWaitMs, () => 2500)
+			const maxBatches = Option.getOrUndefined(args.streamBatches)
+			const startCursorLabel = Option.match(args.cursor, {
+				onNone: () => "<start>",
+				onSome: (cursor) => String(cursor),
+			})
+			yield* Console.log(
+				`daemon status watch: streaming event batches from cursor=${startCursorLabel} batchSize=${batchSize} waitMs=${waitMs}`,
+			)
+			const finalCursor = yield* consumeDaemonStatusStreamBatches({
+				client: bootstrap.client,
+				socketUrl: bootstrap.socketUrl,
+				clientId: `az-cli:daemon-status:${process.pid}`,
+				projectPath: status.sync.projectPath ?? undefined,
+				initialCursor: Option.getOrUndefined(args.cursor),
+				batchSize,
+				waitMs,
+				watch: true,
+				maxBatches,
+				reconnectDelayMs: 1000,
+				onBatch: (batch) =>
+					Effect.gen(function* () {
+						yield* Console.log(formatDaemonEventStreamBatchSummaryLine(batch))
+						for (const entry of batch.events) {
+							yield* Console.log(`  ${formatDaemonEventStreamEntryLine(entry)}`)
+						}
+					}),
+			})
+			yield* Console.log(`daemon status watch ended at cursor=${finalCursor ?? "<start>"}`)
+		}
+
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: daemonCommandShouldAutoStart("health"),
+		})
+		const health = yield* bootstrap.client.health().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "health",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
+		yield* Console.log(`daemon health: ${health.state} (${health.reason})`)
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "health",
+				status: health.status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(health, null, 2))
+		}
+		if (health.state !== "healthy") {
+			yield* Console.log("Suggested diagnostics:")
+			yield* Console.log("- az daemon status")
+			yield* Console.log("- az daemon logs --lines 100")
+			yield* Console.log("- az daemon restart --project-dir <path>")
+		}
+	})
+
+const daemonStopHandler = (args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: daemonCommandShouldAutoStart("stop"),
+		})
+		const status = yield* bootstrap.client.stop().pipe(
+			Effect.mapError((error) =>
+				formatDaemonRpcClientFailure({
+					operation: "stop",
+					socketUrl: bootstrap.socketUrl,
+					error,
+				}),
+			),
+		)
+		yield* Console.log("Headless backend sync daemon stopped.")
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "stop",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const daemonRestartHandler = (args: {
+	readonly intervalMs: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: daemonCommandShouldAutoStart("restart"),
+		})
+		const status = yield* bootstrap.client
+			.restart({
+				projectPath: Option.getOrUndefined(args.projectDir),
+				intervalMs: Option.getOrUndefined(args.intervalMs),
+			})
+			.pipe(
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "restart",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
+				),
+			)
+		yield* Console.log("Headless backend sync daemon restarted.")
+		yield* Console.log(
+			formatDaemonControlStatusLine({
+				mode: "restart",
+				status,
+			}),
+		)
+		if (args.verbose) {
+			yield* Console.log(JSON.stringify(status, null, 2))
+		}
+	})
+
+const daemonLogsHandler = (args: {
+	readonly lines: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrUndefined(args.projectDir)
+		const lineLimit = Option.getOrElse(args.lines, () => 100)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: daemonCommandShouldAutoStart("logs"),
+		})
+		const logResult = yield* bootstrap.client
+			.logs({
+				projectPath: cwd,
+				lines: lineLimit,
+			})
+			.pipe(
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "logs",
+						socketUrl: bootstrap.socketUrl,
+						error,
+					}),
+				),
+			)
+		if (logResult.lines.length === 0) {
+			yield* Console.log(`No daemon log lines available in ${logResult.logPath}.`)
+			return
+		}
+
+		yield* Console.log(
+			`Showing ${logResult.lines.length} of ${logResult.totalLines} daemon log line(s) from ${logResult.logPath} (tail=${lineLimit})`,
+		)
+		for (const line of logResult.lines) {
+			yield* Console.log(line)
+		}
+		if (args.verbose) {
+			yield* Console.log("Diagnostics:")
+			yield* Console.log("- az daemon status")
+			yield* Console.log("- az daemon health")
+			yield* Console.log("- az daemon logs --lines 200")
 		}
 	})
 
@@ -4871,6 +5459,7 @@ const startCommand = Command.make(
 		issueId: issueIdArg,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
+		noDaemon: noDaemonOption,
 		config: configOption,
 	},
 	startHandler,
@@ -4939,9 +5528,111 @@ const syncCommand = Command.make(
 		),
 		projectDir: projectDirArg,
 		verbose: verboseOption,
+		noDaemon: noDaemonOption,
 	},
 	syncHandler,
 ).pipe(Command.withDescription("Sync issue tracker state in worktrees"))
+
+const daemonSyncCommand = Command.make(
+	"sync",
+	{
+		intervalMs: Options.integer("interval-ms").pipe(
+			Options.withAlias("i"),
+			Options.optional,
+			Options.withDescription("Sync loop interval in milliseconds"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	daemonSyncHandler,
+).pipe(Command.withDescription("Run headless backend sync daemon loop"))
+
+const daemonStatusCommand = Command.make(
+	"status",
+	{
+		watch: Options.boolean("watch").pipe(
+			Options.withAlias("w"),
+			Options.withDescription("Continuously consume daemon event stream updates"),
+		),
+		cursor: Options.integer("cursor").pipe(
+			Options.optional,
+			Options.withDescription("Start stream consumption from this cursor"),
+		),
+		streamBatchSize: Options.integer("stream-batch-size").pipe(
+			Options.optional,
+			Options.withDescription("Maximum daemon event stream entries per poll"),
+		),
+		streamWaitMs: Options.integer("stream-wait-ms").pipe(
+			Options.optional,
+			Options.withDescription("Long-poll wait duration for stream requests (milliseconds)"),
+		),
+		streamBatches: Options.integer("stream-batches").pipe(
+			Options.optional,
+			Options.withDescription("Stop watch mode after consuming N successful stream batches"),
+		),
+		verbose: verboseOption,
+	},
+	daemonStatusHandler,
+).pipe(Command.withDescription("Show daemon runtime and sync status"))
+
+const daemonHealthCommand = Command.make(
+	"health",
+	{
+		verbose: verboseOption,
+	},
+	daemonHealthHandler,
+).pipe(Command.withDescription("Show aggregated daemon health"))
+
+const daemonStopCommand = Command.make(
+	"stop",
+	{
+		verbose: verboseOption,
+	},
+	daemonStopHandler,
+).pipe(Command.withDescription("Stop headless backend sync daemon runtime"))
+
+const daemonRestartCommand = Command.make(
+	"restart",
+	{
+		intervalMs: Options.integer("interval-ms").pipe(
+			Options.withAlias("i"),
+			Options.optional,
+			Options.withDescription("Sync loop interval in milliseconds"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	daemonRestartHandler,
+).pipe(Command.withDescription("Restart headless backend sync daemon runtime"))
+
+const daemonLogsCommand = Command.make(
+	"logs",
+	{
+		lines: Options.integer("lines").pipe(
+			Options.optional,
+			Options.withDescription("Number of trailing log lines to show (default: 100)"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	daemonLogsHandler,
+).pipe(Command.withDescription("Show daemon operation logs"))
+
+const daemonCommand = Command.make("daemon", {}, () =>
+	Console.log(
+		"Usage: az daemon <sync|status|health|stop|restart|logs> [--interval-ms <ms>] [--project-dir <path>]",
+	),
+).pipe(
+	Command.withDescription("Headless backend daemon commands"),
+	Command.withSubcommands([
+		daemonSyncCommand,
+		daemonStatusCommand,
+		daemonHealthCommand,
+		daemonStopCommand,
+		daemonRestartCommand,
+		daemonLogsCommand,
+	]),
+)
 
 /**
  * az gate <issue-id> - Run quality gates for a task
@@ -6639,6 +7330,7 @@ const az = Command.make(
 	{
 		projectDir: projectDirArg,
 		verbose: verboseOption,
+		noDaemon: noDaemonOption,
 		config: configOption,
 	},
 	defaultHandler,
@@ -6665,6 +7357,7 @@ const cli = az.pipe(
 		killCommand,
 		statusCommand,
 		syncCommand,
+		daemonCommand,
 		issueCommand,
 		implCommand,
 		specCommand,
@@ -6699,6 +7392,7 @@ const commandCli = az.pipe(
 		killCommand,
 		statusCommand,
 		syncCommand,
+		daemonCommand,
 		issueCommand,
 		implCommand,
 		specCommand,

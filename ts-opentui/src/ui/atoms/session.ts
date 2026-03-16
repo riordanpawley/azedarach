@@ -10,6 +10,7 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
+import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
 
@@ -110,14 +111,23 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
-		const session = yield* manager.start({
-			issueId,
-			projectPath,
-		})
+		const session =
+			daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStart !== undefined
+				? yield* daemonRpcClient.value
+						.sessionStart({
+							issueId,
+							projectPath,
+						})
+						.pipe(Effect.map((result) => result.session))
+				: yield* manager.start({
+						issueId,
+						projectPath,
+					})
 
 		// Register with PTYMonitor for state detection
 		yield* ptyMonitor.registerSession(issueId, session.tmuxSessionName)
@@ -130,6 +140,18 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
+		const projectService = yield* ProjectService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
+		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionPause !== undefined) {
+			yield* daemonRpcClient.value.sessionPause({
+				issueId,
+				projectPath,
+			})
+			return
+		}
+
 		yield* manager.pause(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -140,6 +162,18 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
+		const projectService = yield* ProjectService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
+		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionResume !== undefined) {
+			yield* daemonRpcClient.value.sessionResume({
+				issueId,
+				projectPath,
+			})
+			return
+		}
+
 		yield* manager.resume(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -153,9 +187,20 @@ export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
+		const projectService = yield* ProjectService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		// Unregister from PTYMonitor first (before session is stopped)
 		yield* ptyMonitor.unregisterSession(issueId)
+
+		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
+			yield* daemonRpcClient.value.sessionStop({
+				issueId,
+				projectPath,
+			})
+			return
+		}
 
 		yield* manager.stop(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
