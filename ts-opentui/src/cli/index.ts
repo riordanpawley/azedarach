@@ -81,7 +81,7 @@ import type {
 	DaemonSessionSnapshotResult,
 } from "../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "../services/BoardService.js"
-import { ClockService } from "../services/ClockService.js"
+import { ClockService, formatElapsedMs } from "../services/ClockService.js"
 import { CommandQueueService } from "../services/CommandQueueService.js"
 import { DevServerService } from "../services/DevServerService.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
@@ -1059,6 +1059,10 @@ const daemonSyncHandler = (args: {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("sync"),
 		})
+		const uptimeBeforeControl = yield* getDaemonUptimeBeforeControlOperation({
+			client: bootstrap.client,
+			socketUrl: bootstrap.socketUrl,
+		})
 		const status = yield* bootstrap.client
 			.restart({
 				projectPath: cwd,
@@ -1074,8 +1078,14 @@ const daemonSyncHandler = (args: {
 				),
 			)
 
+		const daemonAction = Option.isSome(uptimeBeforeControl) ? "restarted" : "started"
 		yield* Console.log(
-			`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
+			formatDaemonControlFeedbackLine({
+				action: daemonAction,
+				uptimeBeforeControl,
+				projectPath: cwd,
+				intervalMs,
+			}),
 		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -1105,6 +1115,43 @@ const formatDaemonControlStatusLine = (params: {
 	}
 }): string =>
 	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} projectPath=${params.status.sync.projectPath ?? "<none>"} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
+
+const getDaemonUptimeBeforeControlOperation = (params: {
+	readonly client: Pick<DaemonRpcClientApi, "status">
+	readonly socketUrl: string
+}): Effect.Effect<Option.Option<number>, never> =>
+	params.client.status().pipe(
+		Effect.map((status) => Option.fromNullable(status.sync.startedAtMs)),
+		Effect.mapError((error) =>
+			formatDaemonRpcClientFailure({
+				operation: "status",
+				socketUrl: params.socketUrl,
+				error,
+			}),
+		),
+		Effect.catchAll(() => Effect.succeed(Option.none<number>())),
+	)
+
+export const formatDaemonControlFeedbackLine = (params: {
+	readonly action: "started" | "stopped" | "restarted"
+	readonly uptimeBeforeControl: Option.Option<number>
+	readonly projectPath?: string
+	readonly intervalMs?: number
+	readonly nowMs?: number
+}): string => {
+	const pathSuffix = params.projectPath === undefined ? "" : ` for ${params.projectPath}`
+	const intervalSuffix = params.intervalMs === undefined ? "" : ` (interval=${params.intervalMs}ms)`
+	const uptimeSuffix = Option.match(params.uptimeBeforeControl, {
+		onNone: () => "",
+		onSome: (startedAtMs) => {
+			const nowMs = params.nowMs ?? Date.now()
+			const elapsedMs = Math.max(0, nowMs - startedAtMs)
+			return ` after running for ${formatElapsedMs(elapsedMs)}`
+		},
+	})
+
+	return `Headless backend sync daemon ${params.action} successfully${pathSuffix}${intervalSuffix}${uptimeSuffix}.`
+}
 
 export type DaemonSessionSnapshotSummary = {
 	readonly capturedAtMs: number
@@ -1378,6 +1425,10 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("stop"),
 		})
+		const uptimeBeforeControl = yield* getDaemonUptimeBeforeControlOperation({
+			client: bootstrap.client,
+			socketUrl: bootstrap.socketUrl,
+		})
 		const status = yield* bootstrap.client.stop().pipe(
 			Effect.mapError((error) =>
 				formatDaemonRpcClientFailure({
@@ -1388,7 +1439,12 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 			),
 			(effect) => withDaemonControlTimeout("stop", effect),
 		)
-		yield* Console.log("Headless backend sync daemon stopped.")
+		yield* Console.log(
+			formatDaemonControlFeedbackLine({
+				action: "stopped",
+				uptimeBeforeControl,
+			}),
+		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
 				mode: "stop",
@@ -1419,6 +1475,10 @@ const daemonRestartHandler = (args: {
 					}
 				: undefined,
 		})
+		const uptimeBeforeControl = yield* getDaemonUptimeBeforeControlOperation({
+			client: bootstrap.client,
+			socketUrl: bootstrap.socketUrl,
+		})
 		if (args.verbose) {
 			yield* Console.log(
 				`daemon_restart: bootstrap ready startedDaemon=${bootstrap.startedDaemon} attempts=${bootstrap.attachAttemptCount} socket=${bootstrap.socketUrl}`,
@@ -1443,7 +1503,12 @@ const daemonRestartHandler = (args: {
 		if (args.verbose) {
 			yield* Console.log("daemon_restart: restart RPC response received")
 		}
-		yield* Console.log("Headless backend sync daemon restarted.")
+		yield* Console.log(
+			formatDaemonControlFeedbackLine({
+				action: "restarted",
+				uptimeBeforeControl,
+			}),
+		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
 				mode: "restart",
