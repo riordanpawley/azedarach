@@ -1,3 +1,4 @@
+import * as CommandExecutor from "@effect/platform/CommandExecutor"
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { TaskWithSession } from "../ui/types.js"
@@ -20,6 +21,13 @@ import {
 	type DevServerDaemonStatusRequest,
 	type DevServerDaemonStatusResult,
 } from "./DevServerDaemonService.js"
+import {
+	type DependencyRef,
+	type ImplementationRegistry,
+	type Issue,
+	IssueTrackerClient,
+	type IssueType,
+} from "./IssueTrackerClient.js"
 import { LocalIssueStore } from "./LocalIssueStore.js"
 import { SessionManager } from "./SessionManager.js"
 
@@ -116,6 +124,62 @@ export interface BackendDaemonControlBoardReadModelResult {
 	readonly tasks: ReadonlyArray<TaskWithSession>
 }
 
+export interface BackendDaemonControlIssueCreateRequest {
+	readonly title: string
+	readonly type?: IssueType
+	readonly priority?: number
+	readonly description?: string
+	readonly labels?: readonly string[]
+	readonly estimate?: number
+	readonly design?: string
+	readonly notes?: string
+	readonly acceptance?: string
+	readonly implementations?: readonly string[]
+	readonly cwd?: string
+}
+
+export interface BackendDaemonControlIssueUpdateFields {
+	readonly title?: string
+	readonly description?: string
+	readonly status?: Issue["status"]
+	readonly priority?: number
+	readonly assignee?: string
+	readonly design?: string
+	readonly notes?: string
+	readonly acceptance?: string
+	readonly estimate?: number
+	readonly parent?: string
+	readonly addDependency?: string
+	readonly removeDependency?: string
+	readonly dependencyType?: string
+}
+
+export interface BackendDaemonControlIssueUpdateRequest {
+	readonly issueId: string
+	readonly fields: BackendDaemonControlIssueUpdateFields
+	readonly cwd?: string
+}
+
+export interface BackendDaemonControlIssueDeleteRequest {
+	readonly issueId: string
+	readonly cwd?: string
+}
+
+export interface BackendDaemonControlIssueShowRequest {
+	readonly issueId: string
+	readonly cwd?: string
+}
+
+export interface BackendDaemonControlIssueEpicChildrenRequest {
+	readonly epicId: string
+	readonly cwd?: string
+}
+
+export interface BackendDaemonControlIssueParentEpicRequest {
+	readonly issueId: string
+	readonly cwd?: string
+}
+
 export interface BackendDaemonControlServiceApi {
 	readonly status: () => Effect.Effect<BackendDaemonControlStatus>
 	readonly health: () => Effect.Effect<BackendDaemonControlHealth>
@@ -135,6 +199,22 @@ export interface BackendDaemonControlServiceApi {
 	readonly boardReadModel: (
 		request: BackendDaemonControlBoardReadModelRequest,
 	) => Effect.Effect<BackendDaemonControlBoardReadModelResult>
+	readonly issueCreate: (request: BackendDaemonControlIssueCreateRequest) => Effect.Effect<Issue>
+	readonly issueUpdate: (request: BackendDaemonControlIssueUpdateRequest) => Effect.Effect<Issue>
+	readonly issueDelete: (
+		request: BackendDaemonControlIssueDeleteRequest,
+	) => Effect.Effect<{ readonly deletedAtMs: number }>
+	readonly issueShow: (request: BackendDaemonControlIssueShowRequest) => Effect.Effect<Issue>
+	readonly issueEpicChildren: (
+		request: BackendDaemonControlIssueEpicChildrenRequest,
+	) => Effect.Effect<ReadonlyArray<DependencyRef>>
+	readonly issueEpicWithChildren: (
+		request: BackendDaemonControlIssueEpicChildrenRequest,
+	) => Effect.Effect<{ readonly epic: Issue; readonly children: ReadonlyArray<DependencyRef> }>
+	readonly issueParentEpic: (
+		request: BackendDaemonControlIssueParentEpicRequest,
+	) => Effect.Effect<Issue | null>
+	readonly issueImplementationRegistry: () => Effect.Effect<ImplementationRegistry>
 	readonly devServerStatus: (
 		request: DevServerDaemonStatusRequest,
 	) => Effect.Effect<DevServerDaemonStatusResult>
@@ -248,11 +328,27 @@ export const makeBackendDaemonControlService = (params: {
 	readonly runtime: BackendDaemonServiceApi
 	readonly sync: BackendSyncDaemonServiceApi
 	readonly devServer: DevServerDaemonServiceApi
+	readonly issueTrackerClient?: IssueTrackerClient
+	readonly commandExecutor?: CommandExecutor.CommandExecutor
 	readonly readBoardTasks?: (
 		projectPath: string,
 	) => Effect.Effect<ReadonlyArray<TaskWithSession>, unknown>
 }): BackendDaemonControlServiceApi => {
 	const queueItems = new Map<string, BackendDaemonControlQueueItem>()
+	const requireIssueTrackerClient = (): Effect.Effect<IssueTrackerClient> =>
+		params.issueTrackerClient === undefined
+			? Effect.die(new Error("BackendDaemonControlService missing IssueTrackerClient"))
+			: Effect.succeed(params.issueTrackerClient)
+
+	const withDaemonCommandExecutor = <A, E>(
+		effect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>,
+	): Effect.Effect<A, never> =>
+		params.commandExecutor === undefined
+			? Effect.die(new Error("BackendDaemonControlService missing CommandExecutor"))
+			: effect.pipe(
+					Effect.provideService(CommandExecutor.CommandExecutor, params.commandExecutor),
+					Effect.orDie,
+				)
 
 	const sortBoardTasksForReadModel = (
 		tasks: ReadonlyArray<TaskWithSession>,
@@ -383,6 +479,75 @@ export const makeBackendDaemonControlService = (params: {
 					),
 				),
 			),
+		issueCreate: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(
+						client.create({
+							title: request.title,
+							type: request.type,
+							priority: request.priority,
+							description: request.description,
+							labels: request.labels === undefined ? undefined : [...request.labels],
+							estimate: request.estimate,
+							design: request.design,
+							acceptance: request.acceptance,
+							implementations: request.implementations,
+							cwd: request.cwd,
+						}),
+					),
+				),
+			),
+		issueUpdate: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(
+						client
+							.update(request.issueId, request.fields, request.cwd)
+							.pipe(Effect.zipRight(client.show(request.issueId, request.cwd))),
+					),
+				),
+			),
+		issueDelete: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(client.delete(request.issueId, request.cwd)).pipe(
+						Effect.as({
+							deletedAtMs: Date.now(),
+						}),
+					),
+				),
+			),
+		issueShow: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(client.show(request.issueId, request.cwd)),
+				),
+			),
+		issueEpicChildren: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(client.getEpicChildren(request.epicId, request.cwd)),
+				),
+			),
+		issueEpicWithChildren: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(client.getEpicWithChildren(request.epicId, request.cwd)),
+				),
+				Effect.map((result) => ({ epic: result.epic, children: result.children })),
+			),
+		issueParentEpic: (request) =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) =>
+					withDaemonCommandExecutor(client.getParentEpic(request.issueId, request.cwd)),
+				),
+				Effect.map((epic) => epic ?? null),
+			),
+		issueImplementationRegistry: () =>
+			requireIssueTrackerClient().pipe(
+				Effect.flatMap((client) => withDaemonCommandExecutor(client.getImplementationRegistry())),
+			),
 		devServerStatus: (request) => params.devServer.status(request),
 		devServerList: (request) => params.devServer.list(request),
 		devServerStart: (request) => params.devServer.start(request),
@@ -400,6 +565,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			SessionManager.Default,
 			AppConfig.Default,
 			LocalIssueStore.Default,
+			IssueTrackerClient.Default,
 		],
 		effect: Effect.gen(function* () {
 			const runtime = yield* BackendDaemonService
@@ -408,6 +574,8 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			const localIssueStore = yield* LocalIssueStore
 			const sessionManager = yield* SessionManager
 			const appConfig = yield* AppConfig
+			const issueTrackerClient = yield* IssueTrackerClient
+			const commandExecutor = yield* CommandExecutor.CommandExecutor
 			const recoveryInFlightRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 
 			const markRecoveryInFlight = (issueId: string): Effect.Effect<boolean> =>
@@ -512,6 +680,8 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 				sync,
 				devServer,
 				readBoardTasks: (projectPath) => localIssueStore.listBoardTasks(projectPath),
+				issueTrackerClient,
+				commandExecutor,
 			})
 		}),
 	},

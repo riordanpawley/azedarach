@@ -23,6 +23,20 @@ import {
 	type DaemonHealthResult,
 	type DaemonHeartbeatRequest,
 	type DaemonHeartbeatResult,
+	type DaemonImplementationRegistryResult,
+	type DaemonIssueCreateRequest,
+	type DaemonIssueCreateResult,
+	type DaemonIssueDeleteRequest,
+	type DaemonIssueDeleteResult,
+	type DaemonIssueEpicChildrenRequest,
+	type DaemonIssueEpicChildrenResult,
+	type DaemonIssueEpicWithChildrenResult,
+	type DaemonIssueParentEpicRequest,
+	type DaemonIssueParentEpicResult,
+	type DaemonIssueShowRequest,
+	type DaemonIssueShowResult,
+	type DaemonIssueUpdateRequest,
+	type DaemonIssueUpdateResult,
 	type DaemonLogsRequest,
 	type DaemonLogsResult,
 	type DaemonQueueCancelRequest,
@@ -143,6 +157,31 @@ export interface DaemonRpcClientApi {
 	readonly queueCancel?: (
 		request: DaemonQueueCancelRequest,
 	) => Effect.Effect<DaemonQueueCancelResult, DaemonRpcClientError>
+	readonly issueCreate?: (
+		request: DaemonIssueCreateRequest,
+	) => Effect.Effect<DaemonIssueCreateResult, DaemonRpcClientError>
+	readonly issueUpdate?: (
+		request: DaemonIssueUpdateRequest,
+	) => Effect.Effect<DaemonIssueUpdateResult, DaemonRpcClientError>
+	readonly issueDelete?: (
+		request: DaemonIssueDeleteRequest,
+	) => Effect.Effect<DaemonIssueDeleteResult, DaemonRpcClientError>
+	readonly issueShow?: (
+		request: DaemonIssueShowRequest,
+	) => Effect.Effect<DaemonIssueShowResult, DaemonRpcClientError>
+	readonly issueEpicChildren?: (
+		request: DaemonIssueEpicChildrenRequest,
+	) => Effect.Effect<DaemonIssueEpicChildrenResult, DaemonRpcClientError>
+	readonly issueEpicWithChildren?: (
+		request: DaemonIssueEpicChildrenRequest,
+	) => Effect.Effect<DaemonIssueEpicWithChildrenResult, DaemonRpcClientError>
+	readonly issueParentEpic?: (
+		request: DaemonIssueParentEpicRequest,
+	) => Effect.Effect<DaemonIssueParentEpicResult, DaemonRpcClientError>
+	readonly issueImplementationRegistry?: () => Effect.Effect<
+		DaemonImplementationRegistryResult,
+		DaemonRpcClientError
+	>
 }
 
 const makeDaemonRpcClient = Effect.gen(function* () {
@@ -180,6 +219,14 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 		queueEnqueue: (request) => raw.daemonQueueEnqueue(request),
 		queueQuery: (request) => raw.daemonQueueQuery(request),
 		queueCancel: (request) => raw.daemonQueueCancel(request),
+		issueCreate: (request) => raw.daemonIssueCreate(request),
+		issueUpdate: (request) => raw.daemonIssueUpdate(request),
+		issueDelete: (request) => raw.daemonIssueDelete(request),
+		issueShow: (request) => raw.daemonIssueShow(request),
+		issueEpicChildren: (request) => raw.daemonIssueEpicChildren(request),
+		issueEpicWithChildren: (request) => raw.daemonIssueEpicWithChildren(request),
+		issueParentEpic: (request) => raw.daemonIssueParentEpic(request),
+		issueImplementationRegistry: () => raw.daemonIssueImplementationRegistry({}),
 	} satisfies DaemonRpcClientApi
 })
 

@@ -28,6 +28,14 @@ const buildRpcClientStub = (): DaemonRpcClientApi => ({
 	queueEnqueue: () => Effect.dieMessage("stub"),
 	queueQuery: () => Effect.dieMessage("stub"),
 	queueCancel: () => Effect.dieMessage("stub"),
+	issueCreate: () => Effect.dieMessage("stub"),
+	issueUpdate: () => Effect.dieMessage("stub"),
+	issueDelete: () => Effect.dieMessage("stub"),
+	issueShow: () => Effect.dieMessage("stub"),
+	issueEpicChildren: () => Effect.dieMessage("stub"),
+	issueEpicWithChildren: () => Effect.dieMessage("stub"),
+	issueParentEpic: () => Effect.dieMessage("stub"),
+	issueImplementationRegistry: () => Effect.dieMessage("stub"),
 })
 
 describe("composeDaemonDomainRpcClients", () => {
@@ -43,5 +51,7 @@ describe("composeDaemonDomainRpcClients", () => {
 		expect(domains.taskSession.sessionUpdateState).toBe(client.sessionUpdateState)
 		expect(domains.devServer.devServerList).toBe(client.devServerList)
 		expect(domains.queue.queueCancel).toBe(client.queueCancel)
+		expect(domains.issueTask.issueCreate).toBe(client.issueCreate)
+		expect(domains.issueTask.issueEpicWithChildren).toBe(client.issueEpicWithChildren)
 	})
 })

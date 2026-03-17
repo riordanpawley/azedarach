@@ -2,6 +2,7 @@ import type { DaemonRpcClientApi } from "../DaemonRpcClient.js"
 import type { DaemonBoardReadModelRpcClient } from "./DaemonBoardReadModelRpcClient.js"
 import type { DaemonControlRpcClient } from "./DaemonControlRpcClient.js"
 import type { DaemonDevServerRpcClient } from "./DaemonDevServerRpcClient.js"
+import type { DaemonIssueTaskRpcClient } from "./DaemonIssueTaskRpcClient.js"
 import type { DaemonQueueRpcClient } from "./DaemonQueueRpcClient.js"
 import type { DaemonTaskSessionRpcClient } from "./DaemonTaskSessionRpcClient.js"
 
@@ -11,6 +12,7 @@ export interface DaemonDomainRpcClients {
 	readonly taskSession: DaemonTaskSessionRpcClient
 	readonly devServer: DaemonDevServerRpcClient
 	readonly queue: DaemonQueueRpcClient
+	readonly issueTask: DaemonIssueTaskRpcClient
 }
 
 export const composeDaemonDomainRpcClients = (
@@ -49,5 +51,15 @@ export const composeDaemonDomainRpcClients = (
 		queueEnqueue: client.queueEnqueue,
 		queueQuery: client.queueQuery,
 		queueCancel: client.queueCancel,
+	},
+	issueTask: {
+		issueCreate: client.issueCreate,
+		issueUpdate: client.issueUpdate,
+		issueDelete: client.issueDelete,
+		issueShow: client.issueShow,
+		issueEpicChildren: client.issueEpicChildren,
+		issueEpicWithChildren: client.issueEpicWithChildren,
+		issueParentEpic: client.issueParentEpic,
+		issueImplementationRegistry: client.issueImplementationRegistry,
 	},
 })

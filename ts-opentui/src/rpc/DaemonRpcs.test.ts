@@ -10,6 +10,8 @@ import {
 	DaemonDevServerStatusRequestSchema,
 	DaemonEventStreamResultSchema,
 	DaemonHealthResultSchema,
+	DaemonIssueCreateRequestSchema,
+	DaemonIssueCreateResultSchema,
 	DaemonQueueCancelResultSchema,
 	DaemonQueueEnqueueRequestSchema,
 	DaemonQueueQueryResultSchema,
@@ -33,6 +35,14 @@ describe("DaemonRpcs", () => {
 			"daemonEventStream",
 			"daemonHealth",
 			"daemonHeartbeat",
+			"daemonIssueCreate",
+			"daemonIssueDelete",
+			"daemonIssueEpicChildren",
+			"daemonIssueEpicWithChildren",
+			"daemonIssueImplementationRegistry",
+			"daemonIssueParentEpic",
+			"daemonIssueShow",
+			"daemonIssueUpdate",
 			"daemonLogs",
 			"daemonQueueCancel",
 			"daemonQueueEnqueue",
@@ -323,5 +333,37 @@ describe("DaemonRpcs", () => {
 		expect(enqueue.operation).toBe("sessionStart")
 		expect(query.items[0]?.operationId).toBe("queue-op-1")
 		expect(cancel.cancelledOperationIds).toEqual(["queue-op-1"])
+	})
+
+	it("validates daemon issue-domain request and result schemas", async () => {
+		const decodeCreateRequest = Schema.decodeUnknown(DaemonIssueCreateRequestSchema)
+		const decodeCreateResult = Schema.decodeUnknown(DaemonIssueCreateResultSchema)
+		const request = await Effect.runPromise(
+			decodeCreateRequest({
+				title: "Implement daemon issue RPC",
+				type: "task",
+				priority: 1,
+				implementations: ["ts-opentui"],
+				cwd: "/tmp/project",
+			}),
+		)
+		const result = await Effect.runPromise(
+			decodeCreateResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issue: {
+					id: "tp",
+					title: "Implement daemon issue RPC",
+					status: "in_progress",
+					priority: 1,
+					issue_type: "task",
+					created_at: "2026-03-18T00:00:00.000Z",
+					updated_at: "2026-03-18T00:00:00.000Z",
+					implementations: ["ts-opentui"],
+				},
+			}),
+		)
+
+		expect(request.cwd).toBe("/tmp/project")
+		expect(result.issue.id).toBe("tp")
 	})
 })

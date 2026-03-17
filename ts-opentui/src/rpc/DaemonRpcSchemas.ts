@@ -327,6 +327,190 @@ export const DaemonBoardReadModelResultSchema = Schema.Struct({
 })
 export type DaemonBoardReadModelResult = Schema.Schema.Type<typeof DaemonBoardReadModelResultSchema>
 
+export const DaemonIssueTypeSchema = Schema.Literal("bug", "feature", "task", "epic", "chore")
+export type DaemonIssueType = Schema.Schema.Type<typeof DaemonIssueTypeSchema>
+
+export const DaemonIssueStatusSchema = Schema.Literal(
+	"open",
+	"in_progress",
+	"blocked",
+	"closed",
+	"tombstone",
+)
+export type DaemonIssueStatus = Schema.Schema.Type<typeof DaemonIssueStatusSchema>
+
+export const DaemonIssueDependencyRefSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	status: DaemonIssueStatusSchema,
+	dependency_type: Schema.String,
+	issue_type: DaemonIssueTypeSchema,
+})
+export type DaemonIssueDependencyRef = Schema.Schema.Type<typeof DaemonIssueDependencyRefSchema>
+
+export const DaemonIssueSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	description: Schema.optional(Schema.String),
+	status: DaemonIssueStatusSchema,
+	priority: Schema.Number,
+	issue_type: DaemonIssueTypeSchema,
+	created_at: Schema.String,
+	updated_at: Schema.String,
+	closed_at: Schema.optional(Schema.NullOr(Schema.String)),
+	assignee: Schema.optional(Schema.NullOr(Schema.String)),
+	labels: Schema.optional(Schema.Array(Schema.String)),
+	design: Schema.optional(Schema.String),
+	notes: Schema.optional(Schema.String),
+	acceptance: Schema.optional(Schema.String),
+	estimate: Schema.optional(Schema.Number),
+	implementations: Schema.Array(Schema.String),
+	dependent_count: Schema.optional(Schema.Number),
+	dependency_count: Schema.optional(Schema.Number),
+	dependents: Schema.optional(Schema.Array(DaemonIssueDependencyRefSchema)),
+	dependencies: Schema.optional(Schema.Array(DaemonIssueDependencyRefSchema)),
+})
+export type DaemonIssue = Schema.Schema.Type<typeof DaemonIssueSchema>
+
+export const DaemonIssueUpdateFieldsSchema = Schema.Struct({
+	title: Schema.optional(Schema.String),
+	description: Schema.optional(Schema.String),
+	status: Schema.optional(DaemonIssueStatusSchema),
+	priority: Schema.optional(Schema.Number),
+	assignee: Schema.optional(Schema.String),
+	design: Schema.optional(Schema.String),
+	notes: Schema.optional(Schema.String),
+	acceptance: Schema.optional(Schema.String),
+	estimate: Schema.optional(Schema.Number),
+	parent: Schema.optional(Schema.String),
+	addDependency: Schema.optional(Schema.String),
+	removeDependency: Schema.optional(Schema.String),
+	dependencyType: Schema.optional(Schema.String),
+})
+export type DaemonIssueUpdateFields = Schema.Schema.Type<typeof DaemonIssueUpdateFieldsSchema>
+
+export const DaemonIssueCreateRequestSchema = Schema.Struct({
+	title: Schema.String,
+	type: Schema.optional(DaemonIssueTypeSchema),
+	priority: Schema.optional(Schema.Number),
+	description: Schema.optional(Schema.String),
+	labels: Schema.optional(Schema.Array(Schema.String)),
+	estimate: Schema.optional(Schema.Number),
+	design: Schema.optional(Schema.String),
+	notes: Schema.optional(Schema.String),
+	acceptance: Schema.optional(Schema.String),
+	implementations: Schema.optional(Schema.Array(Schema.String)),
+	cwd: Schema.optional(Schema.String),
+})
+export type DaemonIssueCreateRequest = Schema.Schema.Type<typeof DaemonIssueCreateRequestSchema>
+
+export const DaemonIssueCreateResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	issue: DaemonIssueSchema,
+})
+export type DaemonIssueCreateResult = Schema.Schema.Type<typeof DaemonIssueCreateResultSchema>
+
+export const DaemonIssueUpdateRequestSchema = Schema.Struct({
+	issueId: Schema.String,
+	fields: DaemonIssueUpdateFieldsSchema,
+	cwd: Schema.optional(Schema.String),
+})
+export type DaemonIssueUpdateRequest = Schema.Schema.Type<typeof DaemonIssueUpdateRequestSchema>
+
+export const DaemonIssueUpdateResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	issue: DaemonIssueSchema,
+})
+export type DaemonIssueUpdateResult = Schema.Schema.Type<typeof DaemonIssueUpdateResultSchema>
+
+export const DaemonIssueDeleteRequestSchema = Schema.Struct({
+	issueId: Schema.String,
+	cwd: Schema.optional(Schema.String),
+})
+export type DaemonIssueDeleteRequest = Schema.Schema.Type<typeof DaemonIssueDeleteRequestSchema>
+
+export const DaemonIssueDeleteResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	deletedAtMs: Schema.Number,
+})
+export type DaemonIssueDeleteResult = Schema.Schema.Type<typeof DaemonIssueDeleteResultSchema>
+
+export const DaemonIssueShowRequestSchema = Schema.Struct({
+	issueId: Schema.String,
+	cwd: Schema.optional(Schema.String),
+})
+export type DaemonIssueShowRequest = Schema.Schema.Type<typeof DaemonIssueShowRequestSchema>
+
+export const DaemonIssueShowResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	issue: DaemonIssueSchema,
+})
+export type DaemonIssueShowResult = Schema.Schema.Type<typeof DaemonIssueShowResultSchema>
+
+export const DaemonIssueEpicChildrenRequestSchema = Schema.Struct({
+	epicId: Schema.String,
+	cwd: Schema.optional(Schema.String),
+})
+export type DaemonIssueEpicChildrenRequest = Schema.Schema.Type<
+	typeof DaemonIssueEpicChildrenRequestSchema
+>
+
+export const DaemonIssueEpicChildrenResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	children: Schema.Array(DaemonIssueDependencyRefSchema),
+})
+export type DaemonIssueEpicChildrenResult = Schema.Schema.Type<
+	typeof DaemonIssueEpicChildrenResultSchema
+>
+
+export const DaemonIssueEpicWithChildrenResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	epic: DaemonIssueSchema,
+	children: Schema.Array(DaemonIssueDependencyRefSchema),
+})
+export type DaemonIssueEpicWithChildrenResult = Schema.Schema.Type<
+	typeof DaemonIssueEpicWithChildrenResultSchema
+>
+
+export const DaemonIssueParentEpicRequestSchema = Schema.Struct({
+	issueId: Schema.String,
+	cwd: Schema.optional(Schema.String),
+})
+export type DaemonIssueParentEpicRequest = Schema.Schema.Type<
+	typeof DaemonIssueParentEpicRequestSchema
+>
+
+export const DaemonIssueParentEpicResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	parentEpic: Schema.NullOr(DaemonIssueSchema),
+})
+export type DaemonIssueParentEpicResult = Schema.Schema.Type<
+	typeof DaemonIssueParentEpicResultSchema
+>
+
+export const DaemonImplementationRecordSchema = Schema.Struct({
+	name: Schema.String,
+	description: Schema.optional(Schema.String),
+	directory: Schema.optional(Schema.String),
+	created_at: Schema.String,
+	updated_at: Schema.String,
+	is_default: Schema.Boolean,
+	is_builtin: Schema.Boolean,
+})
+export type DaemonImplementationRecord = Schema.Schema.Type<typeof DaemonImplementationRecordSchema>
+
+export const DaemonImplementationRegistryResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	registry: Schema.Struct({
+		default_implementation: Schema.String,
+		implicit_default_allowed: Schema.Boolean,
+		implementations: Schema.Array(DaemonImplementationRecordSchema),
+	}),
+})
+export type DaemonImplementationRegistryResult = Schema.Schema.Type<
+	typeof DaemonImplementationRegistryResultSchema
+>
+
 export const DaemonDevServerStatusSchema = Schema.Literal(
 	"idle",
 	"starting",
