@@ -7,8 +7,20 @@ import { killActivePopup } from "../core/IssueEditorService.js"
 import { AZ_SESSION_NAME } from "../lib/tmux-wrap.js"
 import { App } from "./App.js"
 import { truncateAzLogOnStartup } from "./logMaintenance.js"
+import { clearShutdownHandler, registerShutdownHandler, requestShutdown } from "./runtimeControl.js"
 
 const AZ_RETURN_KEY = process.env.AZ_RETURN_KEY?.trim() || "g"
+const RESET_TERMINAL_MODES_SEQUENCE =
+	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?25h"
+
+function resetTerminalModesOnExit(): void {
+	if (!process.stdout.isTTY) return
+	try {
+		process.stdout.write(RESET_TERMINAL_MODES_SEQUENCE)
+	} catch {
+		// Best-effort cleanup only.
+	}
+}
 
 /**
  * Register a global tmux keybinding to return to the az session.
@@ -55,6 +67,7 @@ export async function launchTUI(): Promise<void> {
 	// renderer lifecycle can trigger OpenTUI/React teardown failures.
 	process.on("SIGINT", () => {
 		killActivePopup()
+		requestShutdown()
 	})
 
 	// Register return-to-board tmux keybinding (fire-and-forget)
@@ -63,5 +76,27 @@ export async function launchTUI(): Promise<void> {
 	const renderer = await createCliRenderer({
 		useMouse: true,
 	})
-	createRoot(renderer).render(<App />)
+	const root = createRoot(renderer)
+
+	const shutdown = () => {
+		resetTerminalModesOnExit()
+		try {
+			root.unmount()
+		} catch {
+			// Unmount is best-effort during teardown.
+		}
+		try {
+			renderer.destroy()
+		} catch {
+			// Renderer may already be destroyed.
+		}
+	}
+
+	registerShutdownHandler(shutdown)
+	renderer.once("destroy", () => {
+		resetTerminalModesOnExit()
+		clearShutdownHandler()
+	})
+
+	root.render(<App />)
 }
