@@ -437,6 +437,20 @@ export const resolveBoardRefreshExecutionMode = (params: {
 	}
 }
 
+export const resolveDaemonBoardReadModelRpc = (params: {
+	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
+	readonly projectPath: string | null
+}): Option.Option<NonNullable<DaemonRpcClientApi["boardReadModel"]>> => {
+	if (params.projectPath === null) {
+		return Option.none()
+	}
+	if (Option.isNone(params.daemonRpcClient)) {
+		return Option.none()
+	}
+	const boardReadModel = params.daemonRpcClient.value.boardReadModel
+	return boardReadModel === undefined ? Option.none() : Option.some(boardReadModel)
+}
+
 export const applySessionRefreshPatch = (params: {
 	readonly task: TaskWithSession
 	readonly sessionState: TaskWithSession["sessionState"]
@@ -1360,6 +1374,56 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* Effect.log(
 					`loadTasks: resolved projectPath=${projectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"} boardCurrentProjectPath=${boardProjectPath ?? "null"} projectServiceCurrentPath=${serviceProjectPath ?? "null"}`,
 				)
+				const daemonBoardReadModelRpc = resolveDaemonBoardReadModelRpc({
+					daemonRpcClient,
+					projectPath,
+				})
+				if (Option.isSome(daemonBoardReadModelRpc) && projectPath !== null) {
+					const pendingMutations = yield* mutationQueue.getOptimisticMutations()
+					const daemonTasks = yield* diagnostics.measure(
+						{
+							source: "BoardService",
+							name: "daemon.boardReadModel",
+							thresholdMs: 150,
+							details: projectPath,
+						},
+						daemonBoardReadModelRpc
+							.value({
+								projectPath,
+							})
+							.pipe(
+								Effect.map((result) => result.tasks),
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`loadTasks: daemon boardReadModel failed for projectPath=${projectPath}: ${error.message}`,
+									).pipe(Effect.zipRight(Effect.succeed([]))),
+								),
+							),
+					)
+					const daemonTasksWithMutations = daemonTasks
+						.map((task) => {
+							const queuedMutation = pendingMutations.get(task.id)
+							if (queuedMutation === undefined) {
+								return task
+							}
+							const mutation = queuedMutation.mutation
+							switch (mutation._tag) {
+								case "Move":
+									return { ...task, status: mutation.status }
+								case "Update":
+									return { ...task, ...mutation.fields }
+								case "Delete":
+									return null
+								default:
+									return task
+							}
+						})
+						.filter((task): task is TaskWithSession => task !== null)
+					yield* Effect.log(
+						`loadTasks: daemon read-model ${daemonTasksWithMutations.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
+					)
+					return daemonTasksWithMutations
+				}
 				const startupBatch = yield* Effect.all(
 					{
 						gitConfig: getGitConfigForResolvedProject(projectPath),
