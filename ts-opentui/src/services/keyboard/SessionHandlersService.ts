@@ -397,6 +397,12 @@ Delete the duplicate worktree and retry?`
 				return helpers.withQueue(options.issueId, "start", attemptStart())
 			}
 
+			const getCliToolForProjectPath = (projectPath: string) =>
+				Effect.gen(function* () {
+					const projectConfig = yield* appConfig.getResolvedConfigForProjectPath(projectPath)
+					return projectConfig.cliTool
+				})
+
 			// ================================================================
 			// Session Handler Methods
 			// ================================================================
@@ -473,7 +479,7 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					const cliTool = yield* appConfig.getCliTool()
+					const cliTool = yield* getCliToolForProjectPath(projectPath)
 					// Space+S uses a short task prompt that tells the agent to run
 					// `az prime` first; only Codex still needs native image arguments
 					// because they are out-of-band from primer text.
@@ -527,7 +533,7 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					const cliTool = yield* appConfig.getCliTool()
+					const cliTool = yield* getCliToolForProjectPath(projectPath)
 					const imagePaths =
 						cliTool === "codex" ? yield* resolveSessionImagePaths(task.id, projectPath) : undefined
 					const initialPrompt = buildStartWorkPrompt({
@@ -588,7 +594,7 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-					const cliTool = yield* appConfig.getCliTool()
+					const cliTool = yield* getCliToolForProjectPath(projectPath)
 					const imagePaths =
 						cliTool === "codex" ? yield* resolveSessionImagePaths(task.id, projectPath) : undefined
 					const initialPrompt = buildStartWorkPrompt({
@@ -891,9 +897,10 @@ Delete the duplicate worktree and retry?`
 						if (!task) return
 
 						const projectPath = yield* helpers.getProjectPath()
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const worktreeConfig = yield* appConfig.getWorktreeConfig()
-						const gitConfig = yield* appConfig.getGitConfig()
+						const projectConfig = yield* appConfig.getResolvedConfigForProjectPath(projectPath)
+						const sessionConfig = projectConfig.session
+						const worktreeConfig = projectConfig.worktree
+						const gitConfig = projectConfig.git
 						const shell = sessionConfig.shell
 						const existingSessionName = yield* findAiSession(task.id, projectPath)
 						const sessionName = existingSessionName ?? getIssueSessionName(task.id, projectPath)
