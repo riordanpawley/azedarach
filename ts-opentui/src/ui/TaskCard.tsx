@@ -7,16 +7,18 @@ import type { MouseEvent } from "@opentui/core"
 import { taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { isSmallScreen } from "./responsive.js"
+import {
+	getGitBehindToken,
+	getGitConflictToken,
+	getGitDirtyToken,
+	getPhaseToken,
+	getPrStateToken,
+	getSessionStateToken,
+	getWorktreeToken,
+} from "./statusTokens.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
-import {
-	CONFLICT_INDICATOR,
-	DEV_SERVER_INDICATOR,
-	PHASE_INDICATORS,
-	PR_INDICATORS,
-	SESSION_INDICATORS,
-	WORKTREE_INDICATOR,
-} from "./types.js"
+import { DEV_SERVER_INDICATOR } from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task
@@ -89,7 +91,7 @@ export interface TaskCardProps {
  * Simple two-line card: ID line + title line
  */
 export const TaskCard = (props: TaskCardProps) => {
-	const indicator = SESSION_INDICATORS[props.task.sessionState]
+	const indicator = getSessionStateToken(props.task.sessionState)
 	const isWaiting = props.task.sessionState === "waiting"
 	const maxTitleWidth = getTitleMaxWidth()
 	const canShowGitStatus = props.task.sessionState !== "idle" || props.task.hasWorktree === true
@@ -149,7 +151,7 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Get phase indicator (only show when session is active and phase is detected)
 	const phaseIndicator =
 		props.task.sessionState !== "idle" && props.task.agentPhase
-			? PHASE_INDICATORS[props.task.agentPhase]
+			? getPhaseToken(props.task.agentPhase)
 			: ""
 
 	// Show elapsed timer when session is active (initializing, busy or waiting) and we have a start time
@@ -175,12 +177,12 @@ export const TaskCard = (props: TaskCardProps) => {
 
 		// Behind count (↓N)
 		if (gitBehindCount !== undefined && gitBehindCount > 0) {
-			statusParts.push(`↓${gitBehindCount}`)
+			statusParts.push(getGitBehindToken(gitBehindCount))
 		}
 
-		// Dirty indicator (✎)
+		// Dirty indicator
 		if (hasUncommittedChanges) {
-			statusParts.push("✎")
+			statusParts.push(getGitDirtyToken())
 		}
 
 		const statusString = statusParts.join(" ")
@@ -215,19 +217,17 @@ export const TaskCard = (props: TaskCardProps) => {
 		// Show worktree indicator when worktree exists but no session running
 		// This indicates there's existing work that can be resumed or cleaned up
 		if (props.task.hasWorktree && props.task.sessionState === "idle") {
-			line += ` ${WORKTREE_INDICATOR}`
+			line += ` ${getWorktreeToken()}`
 		}
 		// Show PR indicator when task has an associated PR
 		// State-specific icons: 🔗 open, 📝 draft, ✅ merged, 🚫 closed
 		if (props.task.hasPR) {
-			const prIndicator = props.task.prState
-				? PR_INDICATORS[props.task.prState]
-				: PR_INDICATORS.unknown
+			const prIndicator = getPrStateToken(props.task.prState ?? "unknown")
 			line += ` ${prIndicator}`
 		}
 		// Show conflict indicator when worktree has active merge conflict (e.g., "🔵 ⚔️")
 		if (props.task.hasMergeConflict) {
-			line += ` ${CONFLICT_INDICATOR}`
+			line += ` ${getGitConflictToken()}`
 		}
 		// Show phase indicator after session indicator (e.g., "🔵 📋" = busy + planning)
 		if (phaseIndicator) {
@@ -251,7 +251,7 @@ export const TaskCard = (props: TaskCardProps) => {
 		return line
 	}
 
-	// Color for status indicators (↓N behind, ✎ dirty)
+	// Color for status indicators (behind/dirty)
 	// Behind: yellow (needs attention), Dirty: red (uncommitted work), Both: red
 	const getStatusColor = (): string => {
 		if (!canShowGitStatus) return theme.overlay0

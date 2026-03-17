@@ -9,9 +9,10 @@ import { useAtomValue } from "@effect-atom/atom-react"
 import type { ReadonlyRecord } from "effect/Record"
 import { useMemo } from "react"
 import { taskRunningOperationAtom } from "./atoms.js"
+import { getSessionStateToken, getWorktreeToken } from "./statusTokens.js"
 import { columnColors, getPriorityColor, theme } from "./theme.js"
 import type { JumpTarget, TaskWithSession } from "./types.js"
-import { COLUMNS, SESSION_INDICATORS, WORKTREE_INDICATOR } from "./types.js"
+import { COLUMNS } from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task
@@ -124,8 +125,8 @@ const CompactRow = (props: CompactRowProps) => {
 	// Show worktree indicator for idle tasks with worktrees, otherwise session indicator
 	const indicator =
 		props.task.hasWorktree && props.task.sessionState === "idle"
-			? WORKTREE_INDICATOR
-			: SESSION_INDICATORS[props.task.sessionState]
+			? getWorktreeToken()
+			: getSessionStateToken(props.task.sessionState)
 	const priorityLabel = `P${props.task.priority}`
 	const statusLabel = getStatusLabel(props.task.status)
 	const statusColor = getStatusColor(props.task.status)

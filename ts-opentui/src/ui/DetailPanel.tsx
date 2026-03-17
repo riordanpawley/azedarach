@@ -19,15 +19,16 @@ import {
 	taskPhaseInfoAtom,
 } from "./atoms.js"
 import { isSmallScreen } from "./responsive.js"
+import {
+	getGitDirtyToken,
+	getIssueStatusToken,
+	getPhaseToken,
+	getSessionStateToken,
+	getWorktreeToken,
+} from "./statusTokens.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
-import {
-	ISSUE_STATUS_INDICATORS,
-	PHASE_INDICATORS,
-	PHASE_LABELS,
-	SESSION_INDICATORS,
-	WORKTREE_INDICATOR,
-} from "./types.js"
+import { PHASE_LABELS } from "./types.js"
 
 // Panel chrome heights for maxHeight calculation
 const PANEL_CHROME_HEIGHT = 8 // borders (2) + padding (2) + header (3) + footer (1)
@@ -51,7 +52,7 @@ const resolveDependencyStatus = (status?: DependencyStatus): DependencyStatus =>
 const getChildStatusIndicator = (child: { status?: DependencyStatus }): string => {
 	const status = resolveDependencyStatus(child.status)
 	if (status === "tombstone") return "[~]"
-	return ISSUE_STATUS_INDICATORS[status]
+	return getIssueStatusToken(status)
 }
 
 /**
@@ -85,7 +86,7 @@ const getChildStatusColor = (status?: DependencyStatus): string => {
  * - Available actions based on state (future enhancement)
  */
 export const DetailPanel = (props: DetailPanelProps) => {
-	const indicator = SESSION_INDICATORS[props.task.sessionState]
+	const indicator = getSessionStateToken(props.task.sessionState)
 	const scrollboxRef = useRef<ScrollBoxRenderable>(null)
 	const terminalRows = process.stdout.rows || 24
 	const terminalColumns = process.stdout.columns || 80
@@ -296,7 +297,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 	// Show worktree indicator for idle tasks with worktrees
 	const worktreeIndicator =
-		props.task.hasWorktree && props.task.sessionState === "idle" ? WORKTREE_INDICATOR : ""
+		props.task.hasWorktree && props.task.sessionState === "idle" ? getWorktreeToken() : ""
 
 	// Build header line
 	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? ` ${indicator}` : ""}${worktreeIndicator ? ` ${worktreeIndicator}` : ""}`
@@ -464,7 +465,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							<box flexDirection={metadataDirection} gap={2}>
 								<text fg={theme.text}>{"📁 Exists"}</text>
 								{props.task.hasUncommittedChanges && (
-									<text fg={theme.red}>{"✎ Uncommitted changes"}</text>
+									<text fg={theme.red}>{`${getGitDirtyToken()} Uncommitted changes`}</text>
 								)}
 								{props.task.gitBehindCount !== undefined && props.task.gitBehindCount > 0 && (
 									<text fg={theme.yellow}>{`↓${props.task.gitBehindCount} behind`}</text>
@@ -503,7 +504,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							{/* Agent Phase row - displayed prominently when available */}
 							{props.task.agentPhase && props.task.agentPhase !== "idle" && (
 								<text fg={theme.mauve}>
-									{`Phase: ${PHASE_INDICATORS[props.task.agentPhase]} ${PHASE_LABELS[props.task.agentPhase]}`}
+									{`Phase: ${getPhaseToken(props.task.agentPhase)} ${PHASE_LABELS[props.task.agentPhase]}`}
 								</text>
 							)}
 							<box flexDirection={metadataDirection} gap={2}>

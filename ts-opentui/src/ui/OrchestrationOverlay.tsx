@@ -9,8 +9,8 @@
  */
 
 import type { OrchestrationTask } from "../services/EditorService.js"
+import { getIssueStatusToken } from "./statusTokens.js"
 import { theme } from "./theme.js"
-import { ISSUE_STATUS_INDICATORS } from "./types.js"
 
 const ATTR_BOLD = 1
 
@@ -24,19 +24,19 @@ export interface OrchestrationOverlayProps {
 
 /** Get status indicator for a task (separate from spawnability state). */
 const getStatusIndicator = (task: OrchestrationTask): string => {
-	return ISSUE_STATUS_INDICATORS[task.status]
+	return getIssueStatusToken(task.status)
 }
 
 /**
  * Get selection indicator for a task
- * [•] = selected
+ * [x] = selected
  * [ ] = not selected but selectable
  * [-] = not selectable
  */
 const getSelectionIndicator = (task: OrchestrationTask, isSelected: boolean): string => {
 	const isSpawnable = task.status === "open" && !task.hasSession
 	if (!isSpawnable) return "[-]"
-	return isSelected ? "[•]" : "[ ]"
+	return isSelected ? "[x]" : "[ ]"
 }
 
 /**
