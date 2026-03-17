@@ -24,7 +24,6 @@ import {
 	parseIssueSessionName,
 	WINDOW_NAMES,
 } from "../../core/paths.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { WorktreeManager, type WorktreeNameClashError } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
@@ -49,7 +48,6 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		dependencies: [
 			KeyboardHelpersService.Default,
 			ToastService.Default,
-			SessionManager.Default,
 			AttachmentService.Default,
 			ImageAttachmentService.Default,
 			TmuxService.Default,
@@ -64,7 +62,6 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		effect: Effect.gen(function* () {
 			const helpers = yield* KeyboardHelpersService
 			const toast = yield* ToastService
-			const sessionManager = yield* SessionManager
 			const attachment = yield* AttachmentService
 			const imageAttachment = yield* ImageAttachmentService
 			const fs = yield* FileSystem.FileSystem
@@ -75,7 +72,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
 			const boardService = yield* BoardService
-			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+			const daemonRpcClient = yield* DaemonRpcClient
 			const gitConfig = yield* appConfig.getGitConfig()
 
 			const startSessionWithPreferredRuntime = (options: {
@@ -87,23 +84,23 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				readonly dangerouslySkipPermissions?: boolean
 			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStart !== undefined) {
-						// Current daemon RPC start does not support prompt/image/skip-permissions arguments yet.
-						if (
-							options.initialPrompt === undefined &&
-							options.imagePaths === undefined &&
-							options.sessionEnv === undefined &&
-							options.dangerouslySkipPermissions !== true
-						) {
-							yield* daemonRpcClient.value.sessionStart({
-								issueId: options.issueId,
-								projectPath: options.projectPath,
-							})
-							return
-						}
+					if (daemonRpcClient.sessionStart === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
 					}
-
-					yield* sessionManager.start(options)
+					if (
+						options.initialPrompt !== undefined ||
+						options.imagePaths !== undefined ||
+						options.sessionEnv !== undefined ||
+						options.dangerouslySkipPermissions === true
+					) {
+						yield* Effect.logWarning(
+							"Daemon-rpc mode ignores local session start options (prompt/images/sessionEnv/skipPermissions)",
+						)
+					}
+					yield* daemonRpcClient.sessionStart({
+						issueId: options.issueId,
+						projectPath: options.projectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const stopSessionWithPreferredRuntime = (
@@ -111,15 +108,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionStop({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionStop === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionStop RPC is unavailable"))
 					}
-					yield* sessionManager.stop(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionStop({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const pauseSessionWithPreferredRuntime = (
@@ -127,15 +123,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionPause !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionPause({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionPause === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionPause RPC is unavailable"))
 					}
-					yield* sessionManager.pause(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionPause({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const resumeSessionWithPreferredRuntime = (
@@ -143,15 +138,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionResume !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionResume({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionResume === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionResume RPC is unavailable"))
 					}
-					yield* sessionManager.resume(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionResume({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const recoverSessionWithPreferredRuntime = (
@@ -159,18 +153,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (
-						Option.isSome(daemonRpcClient) &&
-						daemonRpcClient.value.sessionRecover !== undefined
-					) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionRecover({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionRecover === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionRecover RPC is unavailable"))
 					}
-					yield* sessionManager.recoverSession(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionRecover({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {

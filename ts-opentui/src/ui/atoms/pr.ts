@@ -9,6 +9,9 @@ import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
 
+const logWorkflowError = (action: string) => (error: unknown) =>
+	Effect.logError(`PR workflow ${action} failed: ${String(error)}`)
+
 // ============================================================================
 // PR Workflow Atoms
 // ============================================================================
@@ -31,7 +34,7 @@ export const createPRAtom = appRuntime.fn((issueId: string) =>
 			issueId,
 			projectPath,
 		})
-	}).pipe(Effect.tapError(Effect.logError)),
+	}).pipe(Effect.tapError(logWorkflowError("create"))),
 )
 
 /**
@@ -49,7 +52,7 @@ export const cleanupAtom = appRuntime.fn((issueId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		yield* prWorkflow.cleanup({ issueId, projectPath, closeIssue: true })
-	}).pipe(Effect.catchAll(Effect.logError)),
+	}).pipe(Effect.catchAll((error) => logWorkflowError("cleanup")(error).pipe(Effect.asVoid))),
 )
 
 /**
@@ -73,7 +76,7 @@ export const mergeToMainAtom = appRuntime.fn((issueId: string) =>
 			issueId,
 			projectPath,
 		})
-	}).pipe(Effect.tapError(Effect.logError)),
+	}).pipe(Effect.tapError(logWorkflowError("merge"))),
 )
 
 /**

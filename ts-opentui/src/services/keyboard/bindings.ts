@@ -541,15 +541,7 @@ done
 			guardTmuxAction(
 				bc,
 				"Dev server toggle",
-				bc.editor.exitToNormal().pipe(
-					Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
-					Effect.catchAll((e) =>
-						Effect.gen(function* () {
-							yield* Effect.logError("Dev server toggle failed", e)
-							yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
-						}),
-					),
-				),
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.toggleDevServer())),
 			),
 		),
 	},
@@ -561,15 +553,7 @@ done
 			guardTmuxAction(
 				bc,
 				"Dev server restart",
-				bc.editor.exitToNormal().pipe(
-					Effect.tap(() => bc.devServerHandlers.restartDevServer()),
-					Effect.catchAll((e) =>
-						Effect.gen(function* () {
-							yield* Effect.logError("Dev server restart failed", e)
-							yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
-						}),
-					),
-				),
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.restartDevServer())),
 			),
 		),
 	},

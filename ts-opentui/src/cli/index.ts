@@ -74,6 +74,7 @@ import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
 import type { DaemonBoardReadModelRpcClient } from "../rpc/clients/DaemonBoardReadModelRpcClient.js"
+import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -154,6 +155,14 @@ const telemetryLayer =
 
 const CLI_VERSION = packageJson.version
 
+const daemonRpcClientLayer = Layer.effect(
+	DaemonRpcClient,
+	bootstrapDaemonRpcClient({
+		autoStart: false,
+		verifyReachable: true,
+	}).pipe(Effect.map((bootstrap) => bootstrap.client)),
+)
+
 const buildAppConfigLayer = (configPath: string | null) => {
 	if (configPath === null) {
 		return AppConfig.Default
@@ -178,6 +187,7 @@ const buildAppConfigLayer = (configPath: string | null) => {
  */
 const createFullCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
+		daemonRpcClientLayer,
 		BackendDaemonControlService.Default,
 		BackendSyncDaemonService.Default,
 		MutationQueue.Default,
@@ -230,7 +240,6 @@ const createCommandCliLayer = (configPath: string | null) =>
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
 		IssueTrackerClient.Default,
-		SessionManager.Default,
 		SpecService.Default,
 	).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
@@ -7611,6 +7620,7 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 		}
 	})()
 	return runEffect.pipe(
+		Effect.provide(daemonRpcClientLayer),
 		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Effect.provide(Logger.minimumLogLevel(minimumLogLevel)),
 	)

@@ -15,7 +15,6 @@ import { Effect, SubscriptionRef } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { COLUMNS, hasTaskSessionPresence } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
@@ -40,7 +39,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			IssueTrackerClient.Default,
 			IssueEditorService.Default,
 			PRWorkflow.Default,
-			SessionManager.Default,
 			MutationQueue.Default,
 		],
 
@@ -54,9 +52,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const issueTrackerClient = yield* IssueTrackerClient
 			const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
-			const sessionManager = yield* SessionManager
 			const mutationQueue = yield* MutationQueue
-			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+			const daemonRpcClient = yield* DaemonRpcClient
 
 			const getActiveProjectPath = (): Effect.Effect<string | undefined> =>
 				SubscriptionRef.get(board.currentProjectPath).pipe(
@@ -87,16 +84,15 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
-						const effectiveProjectPath =
-							projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
-						yield* daemonRpcClient.value.sessionStop({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionStop === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionStop RPC is unavailable"))
 					}
-					yield* sessionManager.stop(issueId)
+					const effectiveProjectPath =
+						projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
+					yield* daemonRpcClient.sessionStop({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const isColumnStatus = (status: string): status is (typeof COLUMNS)[number]["status"] =>
@@ -108,6 +104,22 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* Effect.logError(`Fork failed: ${formatted}`, { error })
 					yield* toast.show("error", `Fork failed: ${formatted}`)
 				})
+
+			const formatIssueEditorError = (action: "edit" | "create", error: unknown): string => {
+				if (typeof error === "object" && error !== null && "_tag" in error) {
+					const tag = error._tag
+					if (
+						(tag === "ParseMarkdownError" || tag === "EditorError") &&
+						"message" in error &&
+						typeof error.message === "string"
+					) {
+						return tag === "ParseMarkdownError"
+							? `Invalid format: ${error.message}`
+							: `Editor error: ${error.message}`
+					}
+				}
+				return `Failed to ${action}: ${String(error)}`
+			}
 
 			const deleteIssueAndCleanup = (taskId: string, hasSession: boolean) =>
 				Effect.gen(function* () {
@@ -137,7 +149,15 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* mutationQueue.enqueue(deleteMutation)
 					yield* toast.show("success", `Deleted ${taskId}`)
 					yield* nav.initialize()
-				})
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.gen(function* () {
+							const message = `Failed to delete ${taskId}: ${formatForToast(error)}`
+							yield* Effect.logError(message, { error })
+							yield* toast.show("error", message)
+						}),
+					),
+				)
 
 			const editIssue = () =>
 				Effect.gen(function* () {
@@ -148,14 +168,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
 						Effect.tap(() => syncTaskFromBackend(task.id)),
 						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "ParseMarkdownError"
-										? `Invalid format: ${(error as { message: string }).message}`
-										: error._tag === "EditorError"
-											? `Editor error: ${(error as { message: string }).message}`
-											: `Failed to edit: ${error}`
-									: `Failed to edit: ${error}`
+							const msg = formatIssueEditorError("edit", error)
 							return Effect.gen(function* () {
 								yield* Effect.logError(`Edit issue: ${msg}`, { error })
 								yield* toast.show("error", msg)
@@ -202,14 +215,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 							}),
 						),
 						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "ParseMarkdownError"
-										? `Invalid format: ${(error as { message: string }).message}`
-										: error._tag === "EditorError"
-											? `Editor error: ${(error as { message: string }).message}`
-											: `Failed to create: ${error}`
-									: `Failed to create: ${error}`
+							const msg = formatIssueEditorError("create", error)
 							return Effect.gen(function* () {
 								yield* Effect.logError(`Create issue: ${msg}`, { error })
 								yield* toast.show("error", msg)
@@ -267,7 +273,15 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						yield* mutationQueue.enqueue(updateMutation)
 						yield* toast.show("success", `Tombstoned ${task.id}`)
 						yield* nav.initialize()
-					})
+					}).pipe(
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								const message = `Failed to tombstone ${task.id}: ${formatForToast(error)}`
+								yield* Effect.logError(message, { error })
+								yield* toast.show("error", message)
+							}),
+						),
+					)
 
 					yield* overlay.push({
 						_tag: "confirm",

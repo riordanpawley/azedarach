@@ -28,7 +28,7 @@ import {
 	type SyncRequiredError,
 } from "./IssueTrackerClient.js"
 import { getIssueSessionName, WINDOW_NAMES } from "./paths.js"
-import { type SessionError, SessionManager } from "./SessionManager.js"
+import type { SessionError } from "./SessionManager.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 import { WorktreeSessionService } from "./WorktreeSessionService.js"
@@ -1202,7 +1202,6 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	dependencies: [
 		WorktreeManager.Default,
 		IssueTrackerClient.Default,
-		SessionManager.Default,
 		TmuxService.Default,
 		WorktreeSessionService.Default,
 		FileLockManager.Default,
@@ -1215,7 +1214,6 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const serviceScope = yield* Effect.scope
 		const worktreeManager = yield* WorktreeManager
 		const issueTrackerClient = yield* IssueTrackerClient
-		const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
 		const fileLockManager = yield* FileLockManager
@@ -1223,7 +1221,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const offlineService = yield* OfflineService
 		const imageAttachmentService = yield* ImageAttachmentService
 		const diagnostics = yield* DiagnosticsService
-		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const daemonRpcClient = yield* DaemonRpcClient
 		const getMergeConfig = () => appConfig.getMergeConfig()
 		const getGitConfig = () => appConfig.getGitConfig()
 
@@ -1232,15 +1230,45 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			projectPath?: string,
 		): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
-					const effectiveProjectPath = projectPath ?? process.cwd()
-					yield* daemonRpcClient.value.sessionStop({
-						issueId,
-						projectPath: effectiveProjectPath,
-					})
+				if (daemonRpcClient.sessionStop === undefined) {
+					return yield* Effect.fail(new Error("Daemon sessionStop RPC is unavailable"))
+				}
+				const effectiveProjectPath = projectPath ?? process.cwd()
+				yield* daemonRpcClient.sessionStop({
+					issueId,
+					projectPath: effectiveProjectPath,
+				})
+			}).pipe(Effect.asVoid)
+
+		const startSessionWithPreferredRuntime = (options: {
+			readonly issueId: string
+			readonly projectPath: string
+			readonly initialPrompt?: string
+			readonly model?: string
+		}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				if (daemonRpcClient.sessionStart === undefined) {
+					return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
+				}
+
+				const startResult = yield* daemonRpcClient.sessionStart({
+					issueId: options.issueId,
+					projectPath: options.projectPath,
+				})
+
+				if (options.model !== undefined) {
+					yield* Effect.logWarning(
+						`Daemon sessionStart currently ignores requested model '${options.model}'`,
+					)
+				}
+
+				const initialPrompt = options.initialPrompt?.trim()
+				if (initialPrompt === undefined || initialPrompt.length === 0) {
 					return
 				}
-				yield* sessionManager.stop(issueId)
+
+				const codeWindowTarget = `${startResult.session.tmuxSessionName}:${WINDOW_NAMES.CODE}`
+				yield* tmuxService.sendLiteralCommand(codeWindowTarget, initialPrompt)
 			}).pipe(Effect.asVoid)
 
 		const getIssueBranchName = (
@@ -1436,14 +1464,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								return
 							}
 
-							yield* sessionManager
-								.start({
-									issueId,
-									projectPath,
-									initialPrompt: prPrompt,
-									model: prAgentModel,
-								})
-								.pipe(Effect.asVoid)
+							yield* startSessionWithPreferredRuntime({
+								issueId,
+								projectPath,
+								initialPrompt: prPrompt,
+								model: prAgentModel,
+							})
 
 							yield* Effect.log(
 								`Started session for PR-create AI prompt (${issueId})${prAgentModel ? ` with model=${prAgentModel}` : ""}`,
@@ -1824,9 +1850,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// 1. Stop any running session first (only if doing full cleanup)
 						// When keepWorktree=true, we want to keep iterating in the same session
 						if (!keepWorktree) {
-							yield* sessionManager
-								.stop(issueId)
-								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
+							yield* stopSessionWithPreferredRuntime(issueId, projectPath).pipe(
+								Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)),
+							)
 							yield* tmuxService
 								.killSession(issueId)
 								.pipe(
@@ -2097,17 +2123,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
 									const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
 
-									yield* sessionManager
-										.start({
-											issueId,
-											projectPath,
-											initialPrompt: fixPrompt,
-										})
-										.pipe(
-											Effect.catchAll((e) =>
-												Effect.logWarning(`Failed to start AI session for fixes: ${e}`),
-											),
-										)
+									yield* startSessionWithPreferredRuntime({
+										issueId,
+										projectPath,
+										initialPrompt: fixPrompt,
+									}).pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to start AI session for fixes: ${e}`),
+										),
+									)
 								}
 
 								return yield* Effect.fail(

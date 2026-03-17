@@ -334,7 +334,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
 		const projectService = yield* ProjectService
-		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const daemonRpcClient = yield* DaemonRpcClient
 
 		// Register with diagnostics - will mark unhealthy when scope closes
 		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 1s")
@@ -397,22 +397,19 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 			})
 
 		const updateSessionStateWithPreferredRuntime = (issueId: string, state: SessionState) => {
-			if (
-				daemonRpcClient._tag === "Some" &&
-				daemonRpcClient.value.sessionUpdateState !== undefined
-			) {
-				const sessionUpdateState = daemonRpcClient.value.sessionUpdateState
-				return projectService.getCurrentPath().pipe(
-					Effect.flatMap((projectPath) =>
-						sessionUpdateState({
-							issueId,
-							state,
-							projectPath: projectPath ?? process.cwd(),
-						}),
-					),
-				)
+			if (daemonRpcClient.sessionUpdateState === undefined) {
+				return Effect.fail(new Error("Daemon sessionUpdateState RPC is unavailable"))
 			}
-			return sessionManager.updateState(issueId, state)
+			const sessionUpdateState = daemonRpcClient.sessionUpdateState
+			return projectService.getCurrentPath().pipe(
+				Effect.flatMap((projectPath) =>
+					sessionUpdateState({
+						issueId,
+						state,
+						projectPath: projectPath ?? process.cwd(),
+					}),
+				),
+			)
 		}
 
 		// ========================================================================

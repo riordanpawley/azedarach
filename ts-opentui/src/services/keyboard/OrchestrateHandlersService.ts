@@ -12,7 +12,6 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, Option } from "effect"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import type { OrchestrationTask } from "../EditorService.js"
@@ -34,7 +33,6 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			EditorService.Default,
 			OverlayService.Default,
 			IssueTrackerClient.Default,
-			SessionManager.Default,
 			TemplateService.Default,
 		],
 
@@ -45,9 +43,8 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
 			const issueTrackerClient = yield* IssueTrackerClient
-			const sessionManager = yield* SessionManager
 			const templateService = yield* TemplateService
-			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+			const daemonRpcClient = yield* DaemonRpcClient
 
 			const listActiveSessionsWithPreferredRuntime = (): Effect.Effect<
 				readonly { readonly issueId: string }[],
@@ -55,15 +52,12 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
-					if (
-						Option.isSome(daemonRpcClient) &&
-						daemonRpcClient.value.sessionSnapshot !== undefined
-					) {
-						const projectPath = yield* helpers.getProjectPath()
-						const snapshot = yield* daemonRpcClient.value.sessionSnapshot({ projectPath })
-						return snapshot.sessions.map((session) => ({ issueId: session.issueId }))
+					if (daemonRpcClient.sessionSnapshot === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionSnapshot RPC is unavailable"))
 					}
-					return yield* sessionManager.listActive()
+					const projectPath = yield* helpers.getProjectPath()
+					const snapshot = yield* daemonRpcClient.sessionSnapshot({ projectPath })
+					return snapshot.sessions.map((session) => ({ issueId: session.issueId }))
 				})
 
 			const startSessionWithPreferredRuntime = (options: {
@@ -72,17 +66,18 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 				readonly initialPrompt?: string
 			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStart !== undefined) {
-						// Current daemon RPC start does not support initial prompt yet.
-						if (options.initialPrompt === undefined) {
-							yield* daemonRpcClient.value.sessionStart({
-								issueId: options.issueId,
-								projectPath: options.projectPath,
-							})
-							return
-						}
+					if (daemonRpcClient.sessionStart === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
 					}
-					yield* sessionManager.start(options)
+					if (options.initialPrompt !== undefined) {
+						yield* Effect.logWarning(
+							"Daemon-rpc mode ignores orchestrate initial prompts for session start",
+						)
+					}
+					yield* daemonRpcClient.sessionStart({
+						issueId: options.issueId,
+						projectPath: options.projectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			// ================================================================

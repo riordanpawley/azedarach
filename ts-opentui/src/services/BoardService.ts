@@ -1415,11 +1415,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					daemonRpcClient,
 				})
 				if (Option.isNone(daemonBoardReadModelRpc)) {
-					if (!daemonAuthorityRequired) {
+					if (daemonAuthorityRequired) {
 						yield* Effect.logWarning(
-							"loadTasks: daemon boardReadModel RPC unavailable; using legacy local fallback because daemon authority is explicitly disabled",
+							"loadTasks: daemon boardReadModel RPC unavailable while daemon authority is required; returning empty board snapshot",
 						)
+						return [] as ReadonlyArray<TaskWithSession>
 					}
+					yield* Effect.logWarning(
+						"loadTasks: daemon boardReadModel RPC unavailable; using legacy local fallback because daemon authority is explicitly disabled",
+					)
 				}
 				if (Option.isSome(daemonBoardReadModelRpc)) {
 					const daemonPendingMutations = yield* mutationQueue.getOptimisticMutations()
@@ -1476,11 +1480,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						`loadTasks: daemon read-model ${daemonTasksWithMutations.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
 					)
 					return daemonTasksWithMutations
-				}
-				if (daemonAuthorityRequired) {
-					yield* Effect.logWarning(
-						"loadTasks: daemon boardReadModel RPC unavailable; using legacy load path to avoid empty board while daemon capabilities converge",
-					)
 				}
 				const startupBatch = yield* Effect.all(
 					{

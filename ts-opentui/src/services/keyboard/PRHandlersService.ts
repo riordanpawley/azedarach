@@ -93,9 +93,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 								return `Starting background push to ${targetBranch}...`
 						}
 					}
-					const deferredPushMessage = (
-						status: MergeToMainDeferredPushStatus,
-					): Effect.Effect<void, never, never> => {
+					const deferredPushMessage = (status: MergeToMainDeferredPushStatus) => {
 						switch (status._tag) {
 							case "started":
 								return toast.show(

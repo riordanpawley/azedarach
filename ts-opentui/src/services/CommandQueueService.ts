@@ -88,6 +88,11 @@ export class CommandCancelledError extends Data.TaggedError("CommandCancelledErr
 	readonly reason: string
 }> {}
 
+export class DaemonQueueUnavailableError extends Data.TaggedError("DaemonQueueUnavailableError")<{
+	readonly operation: "queue-enqueue" | "queue-query" | "queue-cancel"
+	readonly message: string
+}> {}
+
 // ============================================================================
 // Internal Types
 // ============================================================================
@@ -195,31 +200,33 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 		scoped: Effect.gen(function* () {
 			// Capture the service's scope for use in forkScoped
 			const serviceScope = yield* Effect.scope
-			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+			const daemonRpcClient = yield* DaemonRpcClient
 
 			// Main state: HashMap of taskId -> queue state
 			const stateRef = yield* SubscriptionRef.make<HashMap.HashMap<string, InternalTaskQueueState>>(
 				HashMap.empty(),
 			)
 
-			const getDaemonQueueRpc = (): Option.Option<DaemonQueueRpc> => {
-				if (Option.isNone(daemonRpcClient)) {
-					return Option.none()
-				}
-
-				const queueEnqueue = daemonRpcClient.value.queueEnqueue
-				const queueQuery = daemonRpcClient.value.queueQuery
-				const queueCancel = daemonRpcClient.value.queueCancel
+			const daemonQueueRpc = yield* Effect.gen(function* () {
+				const queueEnqueue = daemonRpcClient.queueEnqueue
+				const queueQuery = daemonRpcClient.queueQuery
+				const queueCancel = daemonRpcClient.queueCancel
 				if (queueEnqueue === undefined || queueQuery === undefined || queueCancel === undefined) {
-					return Option.none()
+					return yield* Effect.fail(
+						new DaemonQueueUnavailableError({
+							operation: "queue-query",
+							message:
+								"Daemon queue RPC is unavailable (queueEnqueue/queueQuery/queueCancel required).",
+						}),
+					)
 				}
 
-				return Option.some({
+				return {
 					queueEnqueue,
 					queueQuery,
 					queueCancel,
-				})
-			}
+				}
+			})
 
 			const buildDaemonQueryRequest = (
 				scope: QueueScope,
@@ -307,25 +314,17 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 				Effect.gen(function* () {
 					const scope = resolveQueueScope(taskId, queueKey)
 					const daemonProjectPath = yield* resolveDaemonProjectPath(scope.projectPath)
-					const daemonQueueRpc = getDaemonQueueRpc()
-					if (Option.isSome(daemonQueueRpc)) {
-						return yield* daemonQueueRpc.value
-							.queueQuery(buildDaemonQueryRequest(scope, daemonProjectPath))
-							.pipe(
-								Effect.map((result) => toTaskQueueInfoFromDaemonItems(result.items)),
-								Effect.catchAll((error) =>
-									Effect.logWarning(
-										"Daemon queue query failed; falling back to local queue state",
-										{
-											taskId,
-											error,
-										},
-									).pipe(Effect.zipRight(getQueueInfoFromLocal(taskId, scope.queueKey))),
-								),
-							)
-					}
-
-					return yield* getQueueInfoFromLocal(taskId, scope.queueKey)
+					return yield* daemonQueueRpc
+						.queueQuery(buildDaemonQueryRequest(scope, daemonProjectPath))
+						.pipe(
+							Effect.map((result) => toTaskQueueInfoFromDaemonItems(result.items)),
+							Effect.catchAll((error) =>
+								Effect.logWarning("Daemon queue query failed; falling back to local queue state", {
+									taskId,
+									error,
+								}).pipe(Effect.zipRight(getQueueInfoFromLocal(taskId, scope.queueKey))),
+							),
+						)
 				})
 
 			/**
@@ -459,7 +458,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					queueKey?: string
 				}): Effect.Effect<
 					void,
-					CommandTimeoutError | CommandCancelledError,
+					CommandTimeoutError | CommandCancelledError | DaemonQueueUnavailableError,
 					CommandExecutor.CommandExecutor
 				> =>
 					Effect.gen(function* () {
@@ -467,82 +466,22 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 						const scope = resolveQueueScope(taskId, options.queueKey)
 						const queueKey = scope.queueKey
 						const daemonProjectPath = yield* resolveDaemonProjectPath(scope.projectPath)
+						void effect
+						void timeout
+						void queueKey
 
-						const daemonQueueRpc = getDaemonQueueRpc()
-						const delegatedToDaemon = yield* Option.match(daemonQueueRpc, {
-							onNone: () => Effect.succeed(false),
-							onSome: (rpc) =>
-								rpc.queueEnqueue(buildDaemonEnqueueRequest(scope, label, daemonProjectPath)).pipe(
-									Effect.as(true),
-									Effect.catchAll((error) =>
-										Effect.logWarning("Daemon queue enqueue failed; falling back to local queue", {
-											taskId,
-											label,
-											error,
-										}).pipe(Effect.zipRight(Effect.succeed(false))),
-									),
+						yield* daemonQueueRpc
+							.queueEnqueue(buildDaemonEnqueueRequest(scope, label, daemonProjectPath))
+							.pipe(
+								Effect.asVoid,
+								Effect.mapError(
+									(error) =>
+										new DaemonQueueUnavailableError({
+											operation: "queue-enqueue",
+											message: String(error),
+										}),
 								),
-						})
-						if (delegatedToDaemon) {
-							return
-						}
-
-						const id = yield* generateCommandId
-						const queuedAt = yield* DateTime.now
-						const deferred = yield* Deferred.make<
-							void,
-							CommandTimeoutError | CommandCancelledError
-						>()
-
-						const command: InternalQueuedCommand = {
-							id,
-							taskId,
-							label,
-							queuedAt,
-							effect,
-							deferred,
-							timeout,
-							startedAt: null,
-						}
-
-						// Add to queue
-						yield* SubscriptionRef.update(stateRef, (state) => {
-							const existing = HashMap.get(state, queueKey)
-							const taskState = existing._tag === "Some" ? existing.value : createEmptyState()
-
-							return HashMap.set(state, queueKey, {
-								...taskState,
-								queue: [...taskState.queue, command],
-							})
-						})
-
-						// Trigger processing (will start immediately if nothing running)
-						yield* processNext(queueKey)
-
-						// Wait for completion with timeout
-						yield* Deferred.await(deferred).pipe(
-							Effect.timeoutFail({
-								duration: timeout,
-								onTimeout: () =>
-									new CommandTimeoutError({
-										taskId,
-										label,
-										timeout,
-									}),
-							}),
-							// On timeout, remove from queue
-							Effect.onError(() =>
-								SubscriptionRef.update(stateRef, (state) => {
-									const existing = HashMap.get(state, queueKey)
-									if (existing._tag === "None") return state
-
-									return HashMap.set(state, queueKey, {
-										...existing.value,
-										queue: existing.value.queue.filter((c) => c.id !== id),
-									})
-								}),
-							),
-						)
+							)
 					}),
 
 				/**
@@ -616,53 +555,24 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					taskId: string,
 					reason: string,
 					queueKey?: string,
-				): Effect.Effect<void, never, never> =>
+				): Effect.Effect<void, DaemonQueueUnavailableError, never> =>
 					Effect.gen(function* () {
 						const scope = resolveQueueScope(taskId, queueKey)
 						const daemonProjectPath = yield* resolveDaemonProjectPath(scope.projectPath)
-						const daemonQueueRpc = getDaemonQueueRpc()
-						const cancelledViaDaemon = yield* Option.match(daemonQueueRpc, {
-							onNone: () => Effect.succeed(false),
-							onSome: (rpc) =>
-								rpc.queueCancel(buildDaemonQueryRequest(scope, daemonProjectPath)).pipe(
-									Effect.as(true),
-									Effect.catchAll((error) =>
-										Effect.logWarning("Daemon queue cancel failed; falling back to local queue", {
-											taskId,
-											reason,
-											error,
-										}).pipe(Effect.zipRight(Effect.succeed(false))),
-									),
+						void reason
+
+						yield* daemonQueueRpc
+							.queueCancel(buildDaemonQueryRequest(scope, daemonProjectPath))
+							.pipe(
+								Effect.asVoid,
+								Effect.mapError(
+									(error) =>
+										new DaemonQueueUnavailableError({
+											operation: "queue-cancel",
+											message: String(error),
+										}),
 								),
-						})
-						if (cancelledViaDaemon) {
-							return
-						}
-
-						const state = yield* SubscriptionRef.get(stateRef)
-						const taskState = HashMap.get(state, scope.queueKey)
-
-						if (taskState._tag === "None") return
-
-						// Fail all queued command deferreds
-						for (const cmd of taskState.value.queue) {
-							yield* Deferred.fail(
-								cmd.deferred,
-								new CommandCancelledError({
-									taskId,
-									label: cmd.label,
-									reason,
-								}),
 							)
-						}
-
-						// Clear the queue (running command will complete naturally)
-						yield* SubscriptionRef.update(stateRef, (s) =>
-							HashMap.set(s, scope.queueKey, {
-								running: taskState.value.running,
-								queue: [],
-							}),
-						)
 					}),
 
 				/**
@@ -690,31 +600,23 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 										acc || taskState.running !== null || taskState.queue.length > 0,
 								)
 							})
-
-						const daemonQueueRpc = getDaemonQueueRpc()
-						if (Option.isSome(daemonQueueRpc)) {
-							const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
-							return yield* daemonQueueRpc.value
-								.queueQuery({
-									domain: "command",
-									limit: 1,
-									projectPath: daemonProjectPath,
-								})
-								.pipe(
-									Effect.map((result) =>
-										result.items.some(
-											(item) => item.state === "queued" || item.state === "running",
-										),
-									),
-									Effect.catchAll((error) =>
-										Effect.logWarning("Daemon queue query failed; using local queue busy state", {
-											error,
-										}).pipe(Effect.zipRight(getLocalBusyState())),
-									),
-								)
-						}
-
-						return yield* getLocalBusyState()
+						const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
+						return yield* daemonQueueRpc
+							.queueQuery({
+								domain: "command",
+								limit: 1,
+								projectPath: daemonProjectPath,
+							})
+							.pipe(
+								Effect.map((result) =>
+									result.items.some((item) => item.state === "queued" || item.state === "running"),
+								),
+								Effect.catchAll((error) =>
+									Effect.logWarning("Daemon queue query failed; using local queue busy state", {
+										error,
+									}).pipe(Effect.zipRight(getLocalBusyState())),
+								),
+							)
 					}),
 
 				/**
@@ -730,31 +632,25 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 									taskState.running !== null ? [...acc, taskState.running.label] : acc,
 								)
 							})
-
-						const daemonQueueRpc = getDaemonQueueRpc()
-						if (Option.isSome(daemonQueueRpc)) {
-							const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
-							return yield* daemonQueueRpc.value
-								.queueQuery({
-									domain: "command",
-									projectPath: daemonProjectPath,
-								})
-								.pipe(
-									Effect.map((result) => {
-										const runningLabels = result.items
-											.filter((item) => item.state === "running")
-											.map((item) => item.operation)
-										return [...new Set(runningLabels)]
-									}),
-									Effect.catchAll((error) =>
-										Effect.logWarning("Daemon queue query failed; using local running labels", {
-											error,
-										}).pipe(Effect.zipRight(getLocalRunningLabels())),
-									),
-								)
-						}
-
-						return yield* getLocalRunningLabels()
+						const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
+						return yield* daemonQueueRpc
+							.queueQuery({
+								domain: "command",
+								projectPath: daemonProjectPath,
+							})
+							.pipe(
+								Effect.map((result) => {
+									const runningLabels = result.items
+										.filter((item) => item.state === "running")
+										.map((item) => item.operation)
+									return [...new Set(runningLabels)]
+								}),
+								Effect.catchAll((error) =>
+									Effect.logWarning("Daemon queue query failed; using local running labels", {
+										error,
+									}).pipe(Effect.zipRight(getLocalRunningLabels())),
+								),
+							)
 					}),
 
 				getTaskQueueInfo: (
@@ -792,7 +688,7 @@ export const enqueueCommand = (options: {
 	queueKey?: string
 }): Effect.Effect<
 	void,
-	CommandTimeoutError | CommandCancelledError,
+	CommandTimeoutError | CommandCancelledError | DaemonQueueUnavailableError,
 	CommandQueueService | CommandExecutor.CommandExecutor
 > => Effect.flatMap(CommandQueueService, (queue) => queue.enqueue(options))
 

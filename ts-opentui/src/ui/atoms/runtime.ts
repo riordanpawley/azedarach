@@ -7,7 +7,8 @@
 import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
-import { Layer, Logger } from "effect"
+import { Effect, Layer, Logger } from "effect"
+import { bootstrapDaemonRpcClient } from "../../cli/daemonClientBootstrap.js"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { BackendDaemonService } from "../../core/BackendDaemonService.js"
@@ -25,6 +26,7 @@ import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { VCService } from "../../core/VCService.js"
+import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { BoardService } from "../../services/BoardService.js"
 import { ClockService } from "../../services/ClockService.js"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
@@ -50,6 +52,13 @@ const platformLayer = BunContext.layer
 
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
 const loggerLayer = Logger.replaceScoped(Logger.defaultLogger, fileLogger)
+const daemonRpcClientLayer = Layer.effect(
+	DaemonRpcClient,
+	bootstrapDaemonRpcClient({
+		autoStart: false,
+		verifyReachable: true,
+	}).pipe(Effect.map((bootstrap) => bootstrap.client)),
+)
 export type TuiRuntimeMode = "daemon-rpc"
 export const AZEDARACH_TUI_RUNTIME_MODE_ENV = "AZEDARACH_TUI_RUNTIME_MODE"
 
@@ -106,6 +115,7 @@ const deferredServicesLayer = Layer.mergeAll(
  * consumed by atoms that should be available before deferred hydration.
  */
 export const appCoreLayer = coreServicesLayer.pipe(
+	Layer.provide(daemonRpcClientLayer),
 	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )
@@ -117,6 +127,7 @@ export const appCoreLayer = coreServicesLayer.pipe(
 const appFullServicesLayer = Layer.mergeAll(coreServicesLayer, deferredServicesLayer)
 
 export const appDeferredLayer = appFullServicesLayer.pipe(
+	Layer.provide(daemonRpcClientLayer),
 	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )
