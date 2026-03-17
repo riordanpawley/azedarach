@@ -7,7 +7,7 @@ import type { WorkflowMode } from "../config/schema.js"
 import type { TmuxCapabilities } from "../core/TmuxCapabilities.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
-import type { TaskWithSession } from "./types.js"
+import { hasTaskSessionPresence, type TaskWithSession } from "./types.js"
 
 export interface ActionPaletteProps {
 	task?: TaskWithSession
@@ -91,6 +91,7 @@ interface ActionLineSpec {
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
 	const hasWorktree = props.task?.hasWorktree ?? false
+	const hasSessionPresence = props.task ? hasTaskSessionPresence(props.task) : false
 	const runningOperation = props.runningOperation ?? null
 	const isOnline = props.isOnline ?? true
 	const devServerStatus = props.devServerStatus ?? "idle"
@@ -105,7 +106,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const [showAllCompactActions, setShowAllCompactActions] = useState(false)
 
 	// Check if this is an orphaned worktree (worktree exists but no session)
-	const isOrphanedWorktree = hasWorktree && sessionState === "idle"
+	const isOrphanedWorktree = hasWorktree && !hasSessionPresence
 
 	// Helper to check if an action is available based on session state
 	const isAvailableByState = (action: string): boolean => {
@@ -114,17 +115,17 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "S": // Start+work - only if idle
 			case "Q": // Start+work (question-first) - only if idle
 			case "!": // Start+work (skip permissions) - only if idle
-				return sessionState === "idle"
-			case "a": // Attach - only if not idle
-				return sessionState !== "idle"
+				return !hasSessionPresence
+			case "a": // Attach - if task has an active/recoverable session
+				return hasSessionPresence
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
 			case "r": // Dev server toggle - only if worktree exists (session not idle)
 				return sessionState !== "idle"
 			case "R": // Resume - only if paused
 				return sessionState === "paused"
-			case "x": // Stop - only if not idle
-				return sessionState !== "idle"
+			case "x": // Stop - if task has an active/recoverable session
+				return hasSessionPresence
 			case "P": // Create PR - only if session has worktree (not idle) OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
 			case "m": // Merge - only if session has worktree (not idle) OR orphaned worktree
@@ -200,7 +201,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			{ keyName: "l", description: "→ move" },
 		]
 
-		if (sessionState === "idle") {
+		if (!hasSessionPresence) {
 			actions.push({ keyName: "s", description: "start" })
 			actions.push({ keyName: "S", description: "start+work" })
 			actions.push({ keyName: "Q", description: "start+question-first" })
@@ -222,7 +223,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		return actions.filter((action) =>
 			shouldShowActionForTmuxMode(action.keyName, tmuxActionsEnabled),
 		)
-	}, [sessionState, tmuxActionsEnabled])
+	}, [hasSessionPresence, sessionState, tmuxActionsEnabled])
 
 	// Action line component
 	const ActionLine = ({ keyName, description }: { keyName: string; description: string }) => {

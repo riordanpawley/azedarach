@@ -29,6 +29,7 @@ import { TmuxService } from "../../core/TmuxService.js"
 import { WorktreeManager, type WorktreeNameClashError } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
+import { hasTaskSessionPresence } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -808,8 +809,8 @@ Delete the duplicate worktree and retry?`
 					const tasks = yield* helpers.getActionTargetTasks()
 					if (tasks.length === 0) return
 
-					// Filter to tasks with active sessions
-					const tasksWithSessions = tasks.filter((t) => t.sessionState !== "idle")
+					// Filter to tasks with active or recoverable tmux sessions.
+					const tasksWithSessions = tasks.filter((task) => hasTaskSessionPresence(task))
 
 					if (tasksWithSessions.length === 0) {
 						yield* toast.show("error", "No sessions to stop")
