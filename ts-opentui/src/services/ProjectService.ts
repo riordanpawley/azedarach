@@ -11,8 +11,13 @@
  * - Auto-select project based on cwd on startup
  */
 
+import { Reactivity } from "@effect/experimental"
 import { FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Schema, SubscriptionRef } from "effect"
+import type * as SqlClient from "@effect/sql/SqlClient"
+import type { SqlError } from "@effect/sql/SqlError"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { Data, Effect, Schema, Scope, SubscriptionRef } from "effect"
+import { getProjectStoragePaths } from "../core/storagePaths.js"
 
 // ============================================================================
 // Types
@@ -58,6 +63,17 @@ export class ProjectError extends Data.TaggedError("ProjectError")<{
 export class NoProjectsError extends Data.TaggedError("NoProjectsError")<{
 	readonly message: string
 }> {}
+
+export class ProjectSqliteError extends Data.TaggedError("ProjectSqliteError")<{
+	readonly message: string
+	readonly cause?: unknown
+}> {}
+
+interface ProjectSqliteContext {
+	readonly dbPath: string
+	readonly storageDirectory: string
+	readonly sql: SqlClient.SqlClient
+}
 
 // ============================================================================
 // Path Helpers
@@ -267,6 +283,130 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 		const defaultProjectName = yield* SubscriptionRef.make<string | undefined>(
 			initialConfig.defaultProject,
 		)
+		const sqliteScope = yield* Scope.make()
+		const sqliteClientByDbPath = new Map<string, SqlClient.SqlClient>()
+		const sqliteOperationSemaphoreByDbPath = new Map<string, Effect.Semaphore>()
+		const sqliteClientInitSemaphore = yield* Effect.makeSemaphore(1)
+		const sqliteSemaphoreInitSemaphore = yield* Effect.makeSemaphore(1)
+
+		const mapSqliteError = (message: string, cause: unknown): ProjectSqliteError =>
+			new ProjectSqliteError({ message, cause })
+
+		const applySqlitePragmas = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
+			Effect.gen(function* () {
+				yield* sql.unsafe("PRAGMA journal_mode = WAL")
+				yield* sql.unsafe("PRAGMA synchronous = NORMAL")
+			})
+
+		const resolveProjectSqliteLocation = (
+			projectPath: string,
+		): Effect.Effect<
+			{
+				readonly dbPath: string
+				readonly storageDirectory: string
+			},
+			ProjectSqliteError
+		> =>
+			Effect.gen(function* () {
+				const storagePaths = getProjectStoragePaths(projectPath, pathService)
+				const canonicalDbExists = yield* fs.exists(storagePaths.canonicalDbPath).pipe(
+					Effect.orElseSucceed(() => false),
+					Effect.mapError((cause) =>
+						mapSqliteError(
+							`Failed to check sqlite path existence for ${storagePaths.canonicalDbPath}`,
+							cause,
+						),
+					),
+				)
+				const legacyDbExists = canonicalDbExists
+					? false
+					: yield* fs.exists(storagePaths.legacyDbPath).pipe(
+							Effect.orElseSucceed(() => false),
+							Effect.mapError((cause) =>
+								mapSqliteError(
+									`Failed to check sqlite path existence for ${storagePaths.legacyDbPath}`,
+									cause,
+								),
+							),
+						)
+				const dbPath = canonicalDbExists
+					? storagePaths.canonicalDbPath
+					: legacyDbExists
+						? storagePaths.legacyDbPath
+						: storagePaths.canonicalDbPath
+				return {
+					dbPath,
+					storageDirectory: storagePaths.storageDirectory,
+				}
+			})
+
+		const getOrCreateSqliteOperationSemaphore = (
+			dbPath: string,
+		): Effect.Effect<Effect.Semaphore, ProjectSqliteError> =>
+			sqliteSemaphoreInitSemaphore.withPermits(1)(
+				Effect.gen(function* () {
+					const existing = sqliteOperationSemaphoreByDbPath.get(dbPath)
+					if (existing !== undefined) {
+						return existing
+					}
+					const semaphore = yield* Effect.makeSemaphore(1)
+					sqliteOperationSemaphoreByDbPath.set(dbPath, semaphore)
+					return semaphore
+				}),
+			)
+
+		const getOrCreateSqliteClient = (
+			dbPath: string,
+		): Effect.Effect<SqlClient.SqlClient, ProjectSqliteError> =>
+			sqliteClientInitSemaphore.withPermits(1)(
+				Effect.gen(function* () {
+					const existing = sqliteClientByDbPath.get(dbPath)
+					if (existing !== undefined) {
+						return existing
+					}
+					const sql = yield* Scope.extend(sqliteScope)(
+						SqliteClient.make({ filename: dbPath }).pipe(Effect.provide(Reactivity.layer)),
+					).pipe(
+						Effect.mapError((cause) =>
+							mapSqliteError(`Failed to create sqlite client for ${dbPath}`, cause),
+						),
+					)
+					yield* applySqlitePragmas(sql).pipe(
+						Effect.mapError((cause) =>
+							mapSqliteError(`Failed to apply sqlite pragmas for ${dbPath}`, cause),
+						),
+					)
+					sqliteClientByDbPath.set(dbPath, sql)
+					return sql
+				}),
+			)
+
+		const withProjectSqlite = <A, E, R>(
+			projectPath: string,
+			operation: (context: ProjectSqliteContext) => Effect.Effect<A, E, R>,
+		): Effect.Effect<A, E | ProjectSqliteError, R> =>
+			Effect.gen(function* () {
+				const location = yield* resolveProjectSqliteLocation(projectPath)
+				yield* fs
+					.makeDirectory(location.storageDirectory, { recursive: true })
+					.pipe(
+						Effect.mapError((cause) =>
+							mapSqliteError(
+								`Failed to create sqlite storage directory ${location.storageDirectory}`,
+								cause,
+							),
+						),
+					)
+				const sql = yield* getOrCreateSqliteClient(location.dbPath)
+				const semaphore = yield* getOrCreateSqliteOperationSemaphore(location.dbPath)
+				return yield* semaphore.withPermits(1)(
+					operation({
+						dbPath: location.dbPath,
+						storageDirectory: location.storageDirectory,
+						sql,
+					}),
+				)
+			})
 
 		const isTrackedGitWorktreeOf = (cwdPath: string, projectPath: string): Effect.Effect<boolean> =>
 			Effect.gen(function* () {
@@ -421,6 +561,7 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 					const project = yield* SubscriptionRef.get(currentProject)
 					return project?.path
 				}),
+			withProjectSqlite,
 
 			/**
 			 * Get current project, failing if none selected

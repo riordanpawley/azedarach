@@ -1,9 +1,8 @@
-import { Reactivity } from "@effect/experimental"
 import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Data, DateTime, Effect, HashMap, Schema, Scope } from "effect"
+import { Cause, Data, DateTime, Effect, HashMap, Schema } from "effect"
+import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { getProjectStoragePaths } from "./storagePaths.js"
 
@@ -137,37 +136,27 @@ const mapSqlError = (message: string, cause: unknown): SessionStateStoreError =>
 	new SessionStateStoreError({ message: `${message}: ${String(cause)}`, cause })
 
 export class SessionStateStore extends Effect.Service<SessionStateStore>()("SessionStateStore", {
+	dependencies: [ProjectService.Default],
 	effect: Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
-		const serviceScope = yield* Scope.make()
-		const sqlByDbPath = new Map<string, SqlClient.SqlClient>()
-		const sqlClientInitSemaphore = yield* Effect.makeSemaphore(1)
-		const sqlOperationSemaphore = yield* Effect.makeSemaphore(1)
+		const projectService = yield* ProjectService
+		const initializedDbPaths = new Set<string>()
+		const dbInitSemaphore = yield* Effect.makeSemaphore(1)
 
-		const applyConnectionPragmas = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
-			Effect.gen(function* () {
-				yield* sql.unsafe("PRAGMA journal_mode = WAL")
-				yield* sql.unsafe("PRAGMA synchronous = NORMAL")
-			})
-
-		const getOrCreateSqlClient = (dbPath: string): Effect.Effect<SqlClient.SqlClient, SqlError> =>
-			sqlClientInitSemaphore.withPermits(1)(
+		const ensureSessionSchemaInitialized = (
+			sql: SqlClient.SqlClient,
+			dbPath: string,
+		): Effect.Effect<void, SqlError> =>
+			dbInitSemaphore.withPermits(1)(
 				Effect.gen(function* () {
-					const existing = sqlByDbPath.get(dbPath)
-					if (existing !== undefined) {
-						return existing
+					if (initializedDbPaths.has(dbPath)) {
+						return
 					}
-
-					const sql = yield* Scope.extend(serviceScope)(
-						SqliteClient.make({ filename: dbPath }).pipe(Effect.provide(Reactivity.layer)),
-					)
-					yield* applyConnectionPragmas(sql)
 					for (const statement of sessionSchemaStatements) {
 						yield* sql.unsafe(statement)
 					}
-					sqlByDbPath.set(dbPath, sql)
-					return sql
+					initializedDbPaths.add(dbPath)
 				}),
 			)
 
@@ -196,9 +185,12 @@ export class SessionStateStore extends Effect.Service<SessionStateStore>()("Sess
 				yield* fs
 					.makeDirectory(storagePaths.storageDirectory, { recursive: true })
 					.pipe(Effect.mapError((cause) => mapSqlError("Failed to create sqlite directory", cause)))
-
-				const sql = yield* getOrCreateSqlClient(dbPath)
-				return yield* sqlOperationSemaphore.withPermits(1)(operation(sql, normalizedProjectPath))
+				return yield* projectService.withProjectSqlite(normalizedProjectPath, ({ sql, dbPath }) =>
+					Effect.gen(function* () {
+						yield* ensureSessionSchemaInitialized(sql, dbPath)
+						return yield* operation(sql, normalizedProjectPath)
+					}),
+				)
 			}).pipe(
 				Effect.catchAllCause((cause) =>
 					Effect.fail(mapSqlError("SQLite operation failed", Cause.squash(cause))),
