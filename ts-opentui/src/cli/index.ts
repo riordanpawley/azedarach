@@ -7506,12 +7506,12 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 	const mode = resolveCliExecutionMode(normalizedArgv)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect =
-		mode === "command"
-			? Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
+		mode === "dev-command"
+			? Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)
-			: Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
+			: Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)
