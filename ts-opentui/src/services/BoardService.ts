@@ -30,7 +30,6 @@ import {
 	IssueTrackerClient,
 	inferLinearIssueType,
 	resolveConfiguredIssueBackend,
-	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
 import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
@@ -54,7 +53,7 @@ import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
 import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
-import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
+import type { DaemonEventStreamResult, DaemonIssue } from "../rpc/DaemonRpcSchemas.js"
 import type {
 	ColumnStatus,
 	GitStatus,
@@ -454,6 +453,16 @@ export const resolveDaemonBoardReadModelRpc = (params: {
 	return boardReadModel === undefined ? Option.none() : Option.some(boardReadModel)
 }
 
+const resolveDaemonIssueShowRpc = (params: {
+	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
+}): Option.Option<NonNullable<DaemonRpcClientApi["issueShow"]>> => {
+	if (Option.isNone(params.daemonRpcClient)) {
+		return Option.none()
+	}
+	const issueShow = params.daemonRpcClient.value.issueShow
+	return issueShow === undefined ? Option.none() : Option.some(issueShow)
+}
+
 export const mergeDaemonTasksWithTmuxSessionPresence = (params: {
 	readonly daemonTasks: ReadonlyArray<TaskWithSession>
 	readonly tmuxSessionIssueIds: ReadonlySet<string>
@@ -837,7 +846,6 @@ export interface PerProjectBoardState {
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
-		IssueTrackerClient.Default,
 		BackendSyncRouter.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -852,7 +860,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		LocalIssueStore.Default,
 	],
 	scoped: Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
+		const issueTrackerClientOption = yield* Effect.serviceOption(IssueTrackerClient)
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
@@ -1469,6 +1477,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					)
 					return daemonTasksWithMutations
 				}
+				if (Option.isNone(issueTrackerClientOption)) {
+					yield* Effect.logWarning(
+						"loadTasks: tracker fallback path unavailable without IssueTrackerClient; returning empty board snapshot",
+					)
+					return [] as ReadonlyArray<TaskWithSession>
+				}
+				const issueTrackerClient = issueTrackerClientOption.value
 				const startupBatch = yield* Effect.all(
 					{
 						gitConfig: getGitConfigForResolvedProject(projectPath),
@@ -2069,10 +2084,36 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 			})
 
+		const toMutationIssueFromDaemon = (issue: DaemonIssue): Issue => ({
+			id: issue.id,
+			title: issue.title,
+			description: issue.description,
+			status: issue.status,
+			priority: issue.priority,
+			issue_type: issue.issue_type,
+			created_at: issue.created_at,
+			updated_at: issue.updated_at,
+			closed_at: issue.closed_at ?? null,
+			assignee: issue.assignee,
+			labels: issue.labels,
+			design: issue.design,
+			notes: issue.notes,
+			acceptance: issue.acceptance,
+			estimate: issue.estimate,
+			implementations: issue.implementations,
+			dependent_count: issue.dependent_count,
+			dependency_count: issue.dependency_count,
+		})
+
 		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
-			issueTrackerClient
-				.show(taskId)
-				.pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
+			Effect.gen(function* () {
+				const issueShowRpc = resolveDaemonIssueShowRpc({ daemonRpcClient })
+				if (Option.isNone(issueShowRpc)) {
+					return yield* Effect.fail(new Error("Daemon issueShow RPC unavailable"))
+				}
+				const issueResult = yield* issueShowRpc.value({ issueId: taskId })
+				yield* upsertIssueFromMutation(toMutationIssueFromDaemon(issueResult.issue), options)
+			})
 
 		const refresh = (preferredProjectPath?: string | null) =>
 			diagnostics
@@ -2168,37 +2209,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 			}).pipe(Effect.asVoid)
 
-		/**
-		 * Refresh with auto-recovery for database sync errors.
-		 *
-		 * If the tracker database is out of sync with JSONL (common after git pull
-		 * or when another worktree modifies issues), this will:
-		 * 1. Detect the SyncRequiredError
-		 * 2. Auto-run import-only sync to re-import JSONL
-		 * 3. Retry the refresh
-		 */
 		const refreshWithRecovery = (preferredProjectPath?: string | null) =>
-			refresh(preferredProjectPath).pipe(
-				Effect.catchIf(
-					(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
-					() =>
-						Effect.gen(function* () {
-							yield* Effect.log(
-								"IssueTracker database out of sync, auto-recovering with import-only sync...",
-							)
-							const projectPath = yield* resolveProjectPath(preferredProjectPath)
-							yield* issueTrackerClient
-								.syncImportOnly(projectPath ?? undefined)
-								.pipe(
-									Effect.catchAll((syncError) =>
-										Effect.logError("Auto-sync recovery failed", String(syncError)),
-									),
-								)
-							yield* Effect.log("Auto-sync complete, retrying refresh...")
-							yield* refresh(preferredProjectPath)
-						}),
-				),
-			)
+			refresh(preferredProjectPath)
 
 		const refreshLocalSessionState = (params: {
 			readonly preferredProjectPath?: string | null
