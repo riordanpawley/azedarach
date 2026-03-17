@@ -1266,7 +1266,7 @@ export const consumeDaemonStatusStreamBatches = (params: {
 				.pipe(Effect.either)
 
 			if (attempt._tag === "Left") {
-				if (params.watch && attempt.left instanceof DaemonRpcTransportError) {
+				if (params.watch && attempt.left._tag === "DaemonRpcTransportError") {
 					yield* Console.log(
 						`daemon stream reconnecting from cursor=${cursor ?? "<start>"} in ${params.reconnectDelayMs}ms (${attempt.left.message})`,
 					)

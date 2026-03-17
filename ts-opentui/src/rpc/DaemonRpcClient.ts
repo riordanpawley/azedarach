@@ -1,6 +1,6 @@
 import * as BunSocket from "@effect/platform-bun/BunSocket"
 import * as RpcClient from "@effect/rpc/RpcClient"
-import { RpcClientError } from "@effect/rpc/RpcClientError"
+import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import * as RpcSerialization from "@effect/rpc/RpcSerialization"
 import { Context, Data, Effect, Layer } from "effect"
 import {
@@ -250,46 +250,31 @@ export interface DaemonRpcWireClient {
 	) => Effect.Effect<DaemonQueueCancelResult, WireRpcError>
 }
 
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-	typeof value === "object" && value !== null
+type MapWireError = WireRpcError | DaemonRpcProtocolVersionMismatchError
 
-const hasTaggedActionError = (error: unknown): error is DaemonRpcActionError =>
-	isRecord(error) &&
-	error["_tag"] === "DaemonRpcActionError" &&
-	typeof error["code"] === "string" &&
-	typeof error["message"] === "string" &&
-	(error["action"] === undefined || typeof error["action"] === "string")
-
-const mapWireError = (operation: DaemonRpcOperation, error: unknown): DaemonRpcClientError => {
-	if (error instanceof DaemonRpcTimeoutError) {
-		return error
+const mapWireError = (operation: DaemonRpcOperation, error: MapWireError): DaemonRpcClientError => {
+	switch (error._tag) {
+		case "DaemonRpcTimeoutError":
+		case "DaemonRpcProtocolVersionMismatchError":
+			return error
+		case "DaemonRpcActionError":
+			return new DaemonRpcRemoteActionError({
+				operation,
+				code: error.code,
+				message: error.message,
+				action: error.action,
+			})
+		case "RpcClientError":
+			return new DaemonRpcTransportError({
+				operation,
+				reason: "transport",
+				message: error.message,
+				suggestion:
+					"Verify daemon socket availability, then run `az daemon health` and `az daemon logs`.",
+			})
 	}
-	if (error instanceof DaemonRpcProtocolVersionMismatchError) {
-		return error
-	}
-	if (error instanceof RpcClientError) {
-		return new DaemonRpcTransportError({
-			operation,
-			reason: "transport",
-			message: error.message,
-			suggestion:
-				"Verify daemon socket availability, then run `az daemon health` and `az daemon logs`.",
-		})
-	}
-	if (hasTaggedActionError(error)) {
-		return new DaemonRpcRemoteActionError({
-			operation,
-			code: error.code,
-			message: error.message,
-			action: error.action,
-		})
-	}
-	return new DaemonRpcTransportError({
-		operation,
-		reason: "unknown",
-		message: error instanceof Error ? error.message : String(error),
-		suggestion: "Retry the command and inspect daemon diagnostics with `az daemon status`.",
-	})
+	const exhaustive: never = error
+	return exhaustive
 }
 
 const ensureCompatibleRpcVersion = <T extends { readonly rpcProtocolVersion: number }>(
