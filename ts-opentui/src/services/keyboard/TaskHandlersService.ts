@@ -11,9 +11,8 @@
  */
 
 import type { CommandExecutor } from "@effect/platform"
-import { Effect, SubscriptionRef } from "effect"
+import { Data, Effect, SubscriptionRef } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { COLUMNS, hasTaskSessionPresence } from "../../ui/types.js"
@@ -26,6 +25,10 @@ import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
+class MissingDaemonIssueRpcError extends Data.TaggedError("MissingDaemonIssueRpcError")<{
+	readonly method: "issueUpdate"
+}> {}
+
 export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 	"TaskHandlersService",
 	{
@@ -36,7 +39,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			NavigationService.Default,
 			EditorService.Default,
 			OverlayService.Default,
-			IssueTrackerClient.Default,
 			IssueEditorService.Default,
 			PRWorkflow.Default,
 			MutationQueue.Default,
@@ -49,7 +51,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const nav = yield* NavigationService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-			const issueTrackerClient = yield* IssueTrackerClient
 			const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
@@ -94,6 +95,39 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						projectPath: effectiveProjectPath,
 					})
 				}).pipe(Effect.asVoid)
+
+			const issueUpdateWithPreferredRuntime = (params: {
+				readonly issueId: string
+				readonly fields: {
+					readonly title?: string
+					readonly description?: string
+					readonly status?: "open" | "in_progress" | "blocked" | "closed" | "tombstone"
+					readonly priority?: number
+					readonly assignee?: string
+					readonly design?: string
+					readonly notes?: string
+					readonly acceptance?: string
+					readonly estimate?: number
+					readonly parent?: string
+					readonly addDependency?: string
+					readonly removeDependency?: string
+					readonly dependencyType?: string
+				}
+				readonly cwd?: string
+			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const issueUpdate = daemonRpcClient.issueUpdate
+					if (issueUpdate === undefined) {
+						return yield* Effect.fail(new MissingDaemonIssueRpcError({ method: "issueUpdate" }))
+					}
+					yield* issueUpdate(params)
+				}).pipe(Effect.asVoid)
+
+			const isMissingDaemonIssueRpcError = (error: unknown): error is MissingDaemonIssueRpcError =>
+				typeof error === "object" &&
+				error !== null &&
+				"_tag" in error &&
+				error._tag === "MissingDaemonIssueRpcError"
 
 			const isColumnStatus = (status: string): status is (typeof COLUMNS)[number]["status"] =>
 				COLUMNS.some((column) => column.status === status)
@@ -187,25 +221,29 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								let parentEpicId: string | null | undefined
 
 								if (epicId) {
-									yield* issueTrackerClient
-										.addDependency(result.id, epicId, "parent-child", projectPath)
-										.pipe(
-											Effect.tap(() => {
-												parentEpicId = epicId
-												return toast.show("success", `Created ${result.id} (added to epic)`)
-											}),
-											Effect.catchAll((error) =>
-												Effect.gen(function* () {
-													yield* Effect.logWarning(
-														`Failed to link ${result.id} to epic ${epicId}: ${error}`,
-													)
-													yield* toast.show(
-														"warning",
-														`Created ${result.id} (failed to link to epic)`,
-													)
-												}),
-											),
-										)
+									yield* issueUpdateWithPreferredRuntime({
+										issueId: result.id,
+										fields: { parent: epicId },
+										cwd: projectPath,
+									}).pipe(
+										Effect.tap(() => {
+											parentEpicId = epicId
+											return toast.show("success", `Created ${result.id} (added to epic)`)
+										}),
+										Effect.catchAll((error) =>
+											isMissingDaemonIssueRpcError(error)
+												? Effect.fail(error)
+												: Effect.gen(function* () {
+														yield* Effect.logWarning(
+															`Failed to link ${result.id} to epic ${epicId}: ${error}`,
+														)
+														yield* toast.show(
+															"warning",
+															`Created ${result.id} (failed to link to epic)`,
+														)
+													}),
+										),
+									)
 								} else {
 									yield* toast.show("success", `Created ${result.id}`)
 								}
@@ -372,13 +410,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}
 
 					if (task.issue_type !== "epic") {
-						yield* toast.show("info", `Converting ${task.id} to epic...`)
-						const projectPath = yield* getActiveProjectPath()
-						yield* issueTrackerClient.update(task.id, { type: "epic" }, projectPath)
-						yield* board.patchTaskFromMutation(task.id, {
-							issue_type: "epic",
-							updated_at: new Date().toISOString(),
-						})
+						yield* toast.show(
+							"error",
+							`Fork failed: ${task.id} must already be an epic (daemon RPC does not support type conversion here)`,
+						)
+						return
 					}
 
 					yield* overlay.push({

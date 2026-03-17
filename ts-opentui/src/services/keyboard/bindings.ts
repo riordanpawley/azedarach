@@ -6,12 +6,15 @@
  */
 
 import { Effect } from "effect"
-import type { Issue, IssueTrackerClient } from "../../core/IssueTrackerClient.js"
+import type { DependencyType, Issue } from "../../core/IssueTrackerClient.js"
 import type { TmuxCapabilities } from "../../core/TmuxCapabilities.js"
 import type { TmuxService } from "../../core/TmuxService.js"
+import type { DaemonIssueTaskRpcClient } from "../../rpc/clients/DaemonIssueTaskRpcClient.js"
+import type { DaemonIssue } from "../../rpc/DaemonRpcSchemas.js"
 import { requestShutdown } from "../../ui/runtimeControl.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
+import { formatForToast } from "../ErrorFormatter.js"
 import type { GitSyncService } from "../GitSyncService.js"
 import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
@@ -56,7 +59,8 @@ export interface BindingContext {
 	viewService: ViewService
 	tmux: TmuxService
 	tmuxCapabilities: TmuxCapabilities
-	issueTrackerClient: IssueTrackerClient
+	issueEpicChildren: NonNullable<DaemonIssueTaskRpcClient["issueEpicChildren"]>
+	issueShow: NonNullable<DaemonIssueTaskRpcClient["issueShow"]>
 	board: BoardService
 	gitSync: GitSyncService
 }
@@ -101,6 +105,53 @@ const guardTmuxAction = <E, R>(
 		}
 		yield* action
 	})
+
+const parseDependencyType = (value: string): DependencyType => {
+	switch (value) {
+		case "blocks":
+		case "related":
+		case "parent-child":
+		case "discovered-from":
+			return value
+		default:
+			return "related"
+	}
+}
+
+const toIssueFromDaemon = (issue: DaemonIssue): Issue => ({
+	id: issue.id,
+	title: issue.title,
+	description: issue.description,
+	status: issue.status,
+	priority: issue.priority,
+	issue_type: issue.issue_type,
+	created_at: issue.created_at,
+	updated_at: issue.updated_at,
+	closed_at: issue.closed_at ?? null,
+	assignee: issue.assignee,
+	labels: issue.labels,
+	design: issue.design,
+	notes: issue.notes,
+	acceptance: issue.acceptance,
+	estimate: issue.estimate,
+	implementations: issue.implementations,
+	dependent_count: issue.dependent_count,
+	dependency_count: issue.dependency_count,
+	dependents: issue.dependents?.map((dependency) => ({
+		id: dependency.id,
+		title: dependency.title,
+		status: dependency.status,
+		issue_type: dependency.issue_type,
+		dependency_type: parseDependencyType(dependency.dependency_type),
+	})),
+	dependencies: issue.dependencies?.map((dependency) => ({
+		id: dependency.id,
+		title: dependency.title,
+		status: dependency.status,
+		issue_type: dependency.issue_type,
+		dependency_type: parseDependencyType(dependency.dependency_type),
+	})),
+})
 
 export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybinding> => [
 	// ========================================================================
@@ -271,46 +322,40 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			// Get selected task to check if it's an epic
 			const task = yield* bc.helpers.getSelectedTask()
 			if (task && task.issue_type === "epic") {
-				// Fetch epic children (DependencyRef array)
-				const children = yield* bc.issueTrackerClient
-					.getEpicChildren(task.id)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
-							),
-						),
-					)
-				const childIds = new Set(children.map((c: { id: string }) => c.id))
+				yield* Effect.gen(function* () {
+					const epicChildrenResult = yield* bc.issueEpicChildren({ epicId: task.id })
+					const children = epicChildrenResult.children
+					const childIds = new Set(children.map((child) => child.id))
 
-				// Fetch full Issue objects for each child (needed for phase computation)
-				// Parallel fetch with error tolerance
-				const childDetailResults = yield* Effect.all(
-					children.map((child: { id: string }) =>
-						bc.issueTrackerClient
-							.show(child.id)
-							.pipe(Effect.map((issue) => [child.id, issue] as const))
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed(null)),
-									),
+					const childDetailEntries = yield* Effect.all(
+						children.map((child) =>
+							bc
+								.issueShow({ issueId: child.id })
+								.pipe(
+									Effect.map((issueResult): readonly [string, Issue] => [
+										child.id,
+										toIssueFromDaemon(issueResult.issue),
+									]),
 								),
-							),
+						),
+						{ concurrency: "unbounded" },
+					)
+
+					const childDetails = new Map<string, Issue>(childDetailEntries)
+					yield* bc.nav.enterDrillDown(task.id, childIds, childDetails)
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.gen(function* () {
+							yield* Effect.logWarning(
+								`Epic drill-down failed for ${task.id}: ${formatForToast(error)}`,
+							)
+							yield* bc.toast.show(
+								"error",
+								`Failed to load epic children for ${task.id}: ${formatForToast(error)}`,
+							)
+						}),
 					),
-					{ concurrency: "unbounded" },
 				)
-
-				// Build map from successful fetches
-				const childDetails = new Map<string, Issue>()
-				for (const result of childDetailResults) {
-					if (result !== null) {
-						childDetails.set(result[0], result[1])
-					}
-				}
-
-				// Enter drill-down mode for the epic with children and details
-				yield* bc.nav.enterDrillDown(task.id, childIds, childDetails)
 			} else {
 				// Normal detail view for non-epics
 				yield* bc.helpers.openCurrentDetail()

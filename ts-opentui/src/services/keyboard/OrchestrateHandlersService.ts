@@ -11,11 +11,11 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, Option } from "effect"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import type { OrchestrationTask } from "../EditorService.js"
 import { EditorService } from "../EditorService.js"
+import { formatForToast } from "../ErrorFormatter.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
@@ -32,7 +32,6 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			ToastService.Default,
 			EditorService.Default,
 			OverlayService.Default,
-			IssueTrackerClient.Default,
 			TemplateService.Default,
 		],
 
@@ -42,9 +41,38 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const toast = yield* ToastService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-			const issueTrackerClient = yield* IssueTrackerClient
 			const templateService = yield* TemplateService
 			const daemonRpcClient = yield* DaemonRpcClient
+
+			const requireIssueShowRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.issueShow>,
+				Error
+			> =>
+				Effect.fromNullable(daemonRpcClient.issueShow).pipe(
+					Effect.orElseFail(() => new Error("Daemon issueShow RPC is unavailable")),
+				)
+
+			const requireIssueEpicWithChildrenRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.issueEpicWithChildren>,
+				Error
+			> =>
+				Effect.fromNullable(daemonRpcClient.issueEpicWithChildren).pipe(
+					Effect.orElseFail(() => new Error("Daemon issueEpicWithChildren RPC is unavailable")),
+				)
+
+			const parseOrchestrationStatus = (
+				status: string,
+			): OrchestrationTask["status"] | undefined => {
+				switch (status) {
+					case "open":
+					case "in_progress":
+					case "blocked":
+					case "closed":
+						return status
+					default:
+						return undefined
+				}
+			}
 
 			const listActiveSessionsWithPreferredRuntime = (): Effect.Effect<
 				readonly { readonly issueId: string }[],
@@ -100,15 +128,33 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 						return
 					}
 
+					const projectPath = yield* helpers.getProjectPath()
+					const issueShow = yield* requireIssueShowRpc().pipe(
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								const message = `Orchestrate unavailable: ${formatForToast(error)}`
+								yield* Effect.logError(message, { error })
+								yield* toast.show("error", message)
+								return yield* Effect.fail(error)
+							}),
+						),
+					)
+					const issueEpicWithChildren = yield* requireIssueEpicWithChildrenRpc().pipe(
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								const message = `Orchestrate unavailable: ${formatForToast(error)}`
+								yield* Effect.logError(message, { error })
+								yield* toast.show("error", message)
+								return yield* Effect.fail(error)
+							}),
+						),
+					)
+
 					// Get the task details
-					const task = yield* issueTrackerClient.show(current.taskId).pipe(
+					const task = yield* issueShow({ issueId: current.taskId, cwd: projectPath }).pipe(
+						Effect.map((result) => result.issue),
 						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "NotFoundError"
-										? `Task ${current.taskId} not found`
-										: `Failed to load task: ${error}`
-									: `Failed to load task: ${error}`
+							const msg = `Failed to load task ${current.taskId}: ${formatForToast(error)}`
 							return Effect.gen(function* () {
 								yield* Effect.logError(`Enter orchestrate: ${msg}`, { error })
 								yield* toast.show("error", msg)
@@ -124,13 +170,13 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					}
 
 					// Fetch the epic with its children
-					const epicWithChildren = yield* issueTrackerClient.getEpicWithChildren(task.id).pipe(
+					const epicWithChildren = yield* issueEpicWithChildren({
+						epicId: task.id,
+						cwd: projectPath,
+					}).pipe(
 						Effect.catchAll((error) =>
 							Effect.gen(function* () {
-								const msg =
-									error && typeof error === "object" && "_tag" in error
-										? `Failed to load epic children: ${error._tag}`
-										: `Failed to load epic children: ${error}`
+								const msg = `Failed to load epic children: ${formatForToast(error)}`
 								yield* Effect.logError(msg, { error })
 								yield* toast.show("error", msg)
 								return yield* Effect.fail(error)
@@ -142,21 +188,28 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					const activeSessions = yield* listActiveSessionsWithPreferredRuntime().pipe(
 						Effect.catchAll((error) =>
 							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([] as const)),
+								Effect.zipRight(Effect.succeed<readonly { readonly issueId: string }[]>([])),
 							),
 						),
 					)
 					const activeSessionIds = new Set(activeSessions.map((s) => s.issueId))
 
 					// Map children to OrchestrationTask format (filter out tombstones)
-					const orchestrationTasks: ReadonlyArray<OrchestrationTask> = epicWithChildren.children
-						.filter((child) => child.status !== "tombstone")
-						.map((child) => ({
-							id: child.id,
-							title: child.title ?? "(untitled)",
-							status: (child.status ?? "open") as "open" | "in_progress" | "blocked" | "closed",
-							hasSession: activeSessionIds.has(child.id),
-						}))
+					const orchestrationTasks: ReadonlyArray<OrchestrationTask> =
+						epicWithChildren.children.flatMap((child) => {
+							const parsedStatus = parseOrchestrationStatus(child.status)
+							if (parsedStatus === undefined) {
+								return []
+							}
+							return [
+								{
+									id: child.id,
+									title: child.title,
+									status: parsedStatus,
+									hasSession: activeSessionIds.has(child.id),
+								},
+							]
+						})
 
 					// Enter orchestrate mode
 					yield* editor.enterOrchestrate(task.id, task.title, orchestrationTasks)
@@ -190,17 +243,26 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 
 					// Get project path for spawning sessions
 					const projectPath = yield* helpers.getProjectPath()
+					const issueShow = yield* requireIssueShowRpc().pipe(
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								const message = `Orchestrate unavailable: ${formatForToast(error)}`
+								yield* Effect.logError(message, { error })
+								yield* toast.show("error", message)
+								return yield* Effect.fail(error)
+							}),
+						),
+					)
 
 					// Load epic details for context injection
-					const epic = yield* issueTrackerClient
-						.show(mode.epicId)
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed(null)),
-								),
+					const epic = yield* issueShow({ issueId: mode.epicId, cwd: projectPath }).pipe(
+						Effect.map((result) => result.issue),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(null)),
 							),
-						)
+						),
+					)
 
 					// Exit orchestrate mode first (so UI updates)
 					yield* editor.exitOrchestrate()
@@ -211,15 +273,14 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 						mode.selectedIds.map((taskId) =>
 							Effect.gen(function* () {
 								// Load task details for template
-								const task = yield* issueTrackerClient
-									.show(taskId)
-									.pipe(
-										Effect.catchAll((error) =>
-											Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-												Effect.zipRight(Effect.succeed(null)),
-											),
+								const task = yield* issueShow({ issueId: taskId, cwd: projectPath }).pipe(
+									Effect.map((result) => result.issue),
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.succeed(null)),
 										),
-									)
+									),
+								)
 
 								// Try to render worker template with context
 								const initialPrompt = yield* templateService
