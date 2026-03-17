@@ -1332,6 +1332,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				? Effect.succeed(preferredProjectPath)
 				: getCurrentBoardProjectPath()
 
+		const getGitConfigForResolvedProject = (
+			projectPath: string | null,
+		): Effect.Effect<{
+			readonly baseBranch: string
+			readonly showLineChanges: boolean
+			readonly workflowMode: "local" | "origin"
+		}> =>
+			projectPath === null
+				? appConfig.getGitConfig()
+				: appConfig
+						.getGitConfigForProjectPath(projectPath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`BoardService: failed to load git config for projectPath=${projectPath}; using reactive fallback config (${error.message})`,
+								).pipe(Effect.zipRight(appConfig.getGitConfig())),
+							),
+						)
+
 		const loadTasks = (preferredProjectPath?: string | null) =>
 			Effect.gen(function* () {
 				const loadStartTime = Date.now()
@@ -1343,7 +1362,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 				const startupBatch = yield* Effect.all(
 					{
-						gitConfig: appConfig.getGitConfig(),
+						gitConfig: getGitConfigForResolvedProject(projectPath),
 						startupConfig: SubscriptionRef.get(appConfig.config),
 						currentVisibleTaskIds: SubscriptionRef.get(visibleTaskIds),
 						persistedBoardTasks: loadBoardProjection(projectPath ?? process.cwd()),
@@ -1999,7 +2018,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const currentVisibleTaskIds = params.includeGitStatus
 					? yield* SubscriptionRef.get(visibleTaskIds)
 					: undefined
-				const gitConfig = params.includeGitStatus ? yield* appConfig.getGitConfig() : undefined
+				const gitConfig = params.includeGitStatus
+					? yield* getGitConfigForResolvedProject(projectPath)
+					: undefined
 
 				const nextTasks = yield* Effect.all(
 					currentTasks.map((task) =>
@@ -2816,7 +2837,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return
 				}
 
-				const gitConfig = yield* appConfig.getGitConfig()
+				const gitConfig = yield* getGitConfigForResolvedProject(projectPath)
 				const { baseBranch, showLineChanges } = gitConfig
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
