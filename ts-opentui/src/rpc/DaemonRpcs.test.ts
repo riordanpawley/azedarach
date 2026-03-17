@@ -51,24 +51,21 @@ describe("DaemonRpcs", () => {
 		])
 	})
 
-	it("validates request schemas for protocol versioned operations", async () => {
+	it("validates handshake-only protocol version request behavior", async () => {
 		const decodeStatus = Schema.decodeUnknown(DaemonStatusRequestSchema)
 		const decodeAttach = Schema.decodeUnknown(DaemonAttachRequestSchema)
 
-		const status = await Effect.runPromise(
-			decodeStatus({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-			}),
-		)
+		const status = await Effect.runPromise(decodeStatus({}))
 		const attach = await Effect.runPromise(
 			decodeAttach({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				clientId: "client-a",
+				protocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
 		)
 
-		expect(status.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(Object.hasOwn(status, "rpcProtocolVersion")).toBe(false)
 		expect(attach.clientId).toBe("client-a")
+		expect(attach.protocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
 	})
 
 	it("validates session mutation request schemas", async () => {
@@ -77,14 +74,12 @@ describe("DaemonRpcs", () => {
 
 		const start = await Effect.runPromise(
 			decodeStart({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "qc",
 				projectPath: "/tmp/project",
 			}),
 		)
 		const update = await Effect.runPromise(
 			decodeUpdate({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "qc",
 				state: "waiting",
 				projectPath: "/tmp/project",
@@ -103,7 +98,6 @@ describe("DaemonRpcs", () => {
 
 		const statusRequest = await Effect.runPromise(
 			decodeStatusRequest({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "qp",
 				serverName: "default",
 				projectPath: "/tmp/project",
@@ -111,7 +105,6 @@ describe("DaemonRpcs", () => {
 		)
 		const startRequest = await Effect.runPromise(
 			decodeStartRequest({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "qp",
 				projectPath: "/tmp/project",
 			}),
@@ -223,7 +216,6 @@ describe("DaemonRpcs", () => {
 		const decodeResult = Schema.decodeUnknown(DaemonBoardReadModelResultSchema)
 		const request = await Effect.runPromise(
 			decodeRequest({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				projectPath: "/tmp/project",
 			}),
 		)
@@ -291,7 +283,6 @@ describe("DaemonRpcs", () => {
 
 		const enqueue = await Effect.runPromise(
 			decodeEnqueue({
-				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				domain: "command",
 				operation: "sessionStart",
 				projectPath: "/tmp/project",
