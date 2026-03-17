@@ -704,33 +704,10 @@ describe("resolveCliLayerMode", () => {
 })
 
 describe("resolveStartSessionRuntimeMode", () => {
-	it("defaults to daemon-rpc mode", () => {
-		const resolved = resolveStartSessionRuntimeMode({
-			noDaemonFlag: false,
-			env: {},
-		})
+	it("always requires daemon-rpc mode", () => {
+		const resolved = resolveStartSessionRuntimeMode()
 		expect(resolved.mode).toBe("daemon-rpc")
-		expect(resolved.decision).toBe("enabled-by-default")
-	})
-
-	it("uses fallback mode when --no-daemon is set", () => {
-		const resolved = resolveStartSessionRuntimeMode({
-			noDaemonFlag: true,
-			env: {},
-		})
-		expect(resolved.mode).toBe("session-manager-fallback")
-		expect(resolved.decision).toBe("disabled-by-cli-flag")
-	})
-
-	it("uses fallback mode when daemon is disabled by env policy", () => {
-		const resolved = resolveStartSessionRuntimeMode({
-			noDaemonFlag: false,
-			env: {
-				AZEDARACH_DAEMON_MODE: "off",
-			},
-		})
-		expect(resolved.mode).toBe("session-manager-fallback")
-		expect(resolved.decision).toBe("disabled-by-env")
+		expect(resolved.decision).toBe("required-daemon-bootstrap")
 	})
 })
 
