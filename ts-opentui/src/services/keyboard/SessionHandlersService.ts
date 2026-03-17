@@ -35,6 +35,9 @@ import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import { buildStartWorkPrompt } from "./SessionPrompt.js"
 
+const AZEDARACH_PRIME_MODE_ENV = "AZEDARACH_PRIME_MODE"
+const QUESTION_FIRST_PRIME_MODE = "question-first"
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -79,6 +82,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				readonly projectPath: string
 				readonly initialPrompt?: string
 				readonly imagePaths?: ReadonlyArray<string>
+				readonly sessionEnv?: Readonly<Record<string, string>>
 				readonly dangerouslySkipPermissions?: boolean
 			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
@@ -87,6 +91,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						if (
 							options.initialPrompt === undefined &&
 							options.imagePaths === undefined &&
+							options.sessionEnv === undefined &&
 							options.dangerouslySkipPermissions !== true
 						) {
 							yield* daemonRpcClient.value.sessionStart({
@@ -478,6 +483,54 @@ Delete the duplicate worktree and retry?`
 							projectPath,
 							initialPrompt,
 							imagePaths,
+						}),
+					})
+				})
+
+			/**
+			 * Start session with question-first primer mode (Space+Q)
+			 *
+			 * Starts the agent with the same initial prompt as Space+S and also injects
+			 * `AZEDARACH_PRIME_MODE=question-first` so `az prime` emits question-first
+			 * guidance before implementation.
+			 */
+			const startSessionQuestionFirst = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
+
+					const projectPath = yield* helpers.getProjectPath()
+					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
+					if (isBusy) return
+
+					if (task.sessionState !== "idle") {
+						yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+						return
+					}
+
+					const cliTool = yield* appConfig.getCliTool()
+					const imagePaths =
+						cliTool === "codex" ? yield* resolveSessionImagePaths(task.id, projectPath) : undefined
+					const initialPrompt = buildStartWorkPrompt({
+						taskId: task.id,
+						issueType: task.issue_type,
+						title: task.title,
+					})
+
+					yield* runStartWithClashRecovery({
+						issueId: task.id,
+						projectPath,
+						successMessage: task.hasWorktree
+							? `Resumed session for ${task.id} with question-first primer`
+							: `Started session for ${task.id} with question-first primer`,
+						startEffect: startSessionWithPreferredRuntime({
+							issueId: task.id,
+							projectPath,
+							initialPrompt,
+							imagePaths,
+							sessionEnv: {
+								[AZEDARACH_PRIME_MODE_ENV]: QUESTION_FIRST_PRIME_MODE,
+							},
 						}),
 					})
 				})
@@ -954,6 +1007,7 @@ Delete the duplicate worktree and retry?`
 			return {
 				startSession,
 				startSessionWithPrompt,
+				startSessionQuestionFirst,
 				startSessionDangerous,
 				attachExternal,
 				attachInline,

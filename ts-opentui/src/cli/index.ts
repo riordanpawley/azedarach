@@ -122,6 +122,7 @@ import {
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	formatSpecRequirementReference,
+	type PrimeMode,
 } from "./output-formatting.js"
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 import {
@@ -5065,6 +5066,7 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const primeMode = resolvePrimeModeFromEnv(process.env)
 		const appConfig = yield* AppConfig
 		const specConfig = yield* appConfig.getSpecConfig()
 		const implementationContext = yield* IssueTrackerClient.pipe(
@@ -5108,9 +5110,12 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 					)
 
 		yield* Console.log(
-			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled),
+			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled, primeMode),
 		)
 	})
+
+const resolvePrimeModeFromEnv = (env: NodeJS.ProcessEnv): PrimeMode =>
+	env.AZEDARACH_PRIME_MODE === "question-first" ? "question-first" : "default"
 
 const listTmuxSessionNames = Effect.gen(function* () {
 	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
