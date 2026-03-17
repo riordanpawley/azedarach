@@ -7,12 +7,11 @@ import { killActivePopup } from "../core/IssueEditorService.js"
 import { AZ_SESSION_NAME } from "../lib/tmux-wrap.js"
 import { App } from "./App.js"
 import { truncateAzLogOnStartup } from "./logMaintenance.js"
+import { clearShutdownHandler, registerShutdownHandler, requestShutdown } from "./runtimeControl.js"
 
 const AZ_RETURN_KEY = process.env.AZ_RETURN_KEY?.trim() || "g"
 const RESET_TERMINAL_MODES_SEQUENCE =
 	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?25h"
-
-let exitResetHandlersInstalled = false
 
 function resetTerminalModesOnExit(): void {
 	if (!process.stdout.isTTY) return
@@ -21,12 +20,6 @@ function resetTerminalModesOnExit(): void {
 	} catch {
 		// Best-effort cleanup only.
 	}
-}
-
-function installTerminalExitResetHandlers(): void {
-	if (exitResetHandlersInstalled) return
-	exitResetHandlersInstalled = true
-	process.once("exit", resetTerminalModesOnExit)
 }
 
 /**
@@ -68,14 +61,13 @@ async function registerReturnBinding(): Promise<void> {
  */
 export async function launchTUI(): Promise<void> {
 	await truncateAzLogOnStartup()
-	installTerminalExitResetHandlers()
 
 	// Register SIGINT handler to clean up any active tmux popup.
 	// Avoid forcing process.exit here: hard-exiting from a signal handler during
 	// renderer lifecycle can trigger OpenTUI/React teardown failures.
 	process.on("SIGINT", () => {
-		resetTerminalModesOnExit()
 		killActivePopup()
+		requestShutdown()
 	})
 
 	// Register return-to-board tmux keybinding (fire-and-forget)
@@ -84,5 +76,27 @@ export async function launchTUI(): Promise<void> {
 	const renderer = await createCliRenderer({
 		useMouse: true,
 	})
-	createRoot(renderer).render(<App />)
+	const root = createRoot(renderer)
+
+	const shutdown = () => {
+		resetTerminalModesOnExit()
+		try {
+			root.unmount()
+		} catch {
+			// Unmount is best-effort during teardown.
+		}
+		try {
+			renderer.destroy()
+		} catch {
+			// Renderer may already be destroyed.
+		}
+	}
+
+	registerShutdownHandler(shutdown)
+	renderer.once("destroy", () => {
+		resetTerminalModesOnExit()
+		clearShutdownHandler()
+	})
+
+	root.render(<App />)
 }
