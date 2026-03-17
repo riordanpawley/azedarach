@@ -58,6 +58,7 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 	action: [
 		{ key: "h/l", action: "Move" },
 		{ key: "s", action: "Start" },
+		{ key: "Q", action: "Q-First" },
 		{ key: "a", action: "Attach" },
 		{ key: "A", action: "Inline" },
 		{ key: "p", action: "Pause" },

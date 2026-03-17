@@ -297,6 +297,8 @@ export interface StartSessionOptions {
 	readonly imagePaths?: readonly string[]
 	/** Optional model to use. Uses configured tool default if not specified. */
 	readonly model?: SessionModel
+	/** Extra environment variables to prefix onto the spawned CLI process. */
+	readonly sessionEnv?: Readonly<Record<string, string>>
 	/** Run tool with --dangerously-skip-permissions (if supported) (default: false) */
 	readonly dangerouslySkipPermissions?: boolean
 	/** Enable auto-compact for long-running sessions (default: false, uses user setting) */
@@ -921,6 +923,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						initialPrompt,
 						imagePaths,
 						model,
+						sessionEnv,
 						dangerouslySkipPermissions,
 						autoCompact,
 					} = options
@@ -1066,6 +1069,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 											imagePaths,
 											issueId,
 											model: effectiveModel,
+											sessionEnv,
 											dangerouslySkipPermissions,
 											sessionSettings,
 										})

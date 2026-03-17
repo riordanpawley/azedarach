@@ -278,6 +278,27 @@ describe("buildPrimeOutput", () => {
 		)
 	})
 
+	it("adds question-first guardrails when prime mode is question-first", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Clarify scope before coding",
+				}),
+			},
+			undefined,
+			true,
+			"question-first",
+		)
+
+		expect(output).toContain("Question-first execution rules (Space+Q mode):")
+		expect(output).toContain("MUST ask follow-up questions immediately")
+		expect(output).toContain(
+			"MUST improve the current issue title and description before implementation work begins.",
+		)
+		expect(output).toContain("MUST record unknowns/open questions in the issue description")
+	})
+
 	it("applies --config overrides to command-layer AppConfig reads", async () => {
 		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-${crypto.randomUUID()}.json`
 		await Bun.write(

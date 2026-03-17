@@ -67,4 +67,28 @@ describe("CliToolRegistry", () => {
 
 		expect(command).toContain('codex --image "/tmp/screenshot.png" -- "work on issue ji"')
 	})
+
+	it("prefixes stable session environment variables on the CLI command", () => {
+		const codex = getToolDefinition("codex")
+		const command = codex.buildCommand({
+			issueId: "bk",
+			sessionEnv: {
+				AZEDARACH_PRIME_MODE: "question-first",
+				Z_VAR: "tail",
+				A_VAR: "head",
+			},
+		})
+
+		expect(command).toContain('AZEDARACH_ISSUE_ID="bk"')
+		expect(command).toContain('A_VAR="head"')
+		expect(command).toContain('AZEDARACH_PRIME_MODE="question-first"')
+		expect(command).toContain('Z_VAR="tail"')
+		expect(command).toContain(" codex")
+		expect(command.indexOf('A_VAR="head"')).toBeLessThan(
+			command.indexOf('AZEDARACH_PRIME_MODE="question-first"'),
+		)
+		expect(command.indexOf('AZEDARACH_PRIME_MODE="question-first"')).toBeLessThan(
+			command.indexOf('Z_VAR="tail"'),
+		)
+	})
 })

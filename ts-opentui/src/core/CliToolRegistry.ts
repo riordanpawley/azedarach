@@ -40,6 +40,8 @@ export interface BuildCommandOptions {
 	readonly imagePaths?: readonly string[]
 	/** Active issue ID for issue-scoped sessions */
 	readonly issueId?: string
+	/** Additional environment variables to prefix onto the CLI command. */
+	readonly sessionEnv?: Readonly<Record<string, string>>
 	/** Model to use (tool-specific format) */
 	readonly model?: string
 	/** Skip permission prompts (Claude: --dangerously-skip-permissions) */
@@ -113,11 +115,7 @@ const claudeToolDefinition: CliToolDefinition = {
 	hookStrategy: "hooks+pty",
 
 	buildCommand: (options) => {
-		const parts: string[] = []
-
-		if (options.issueId) {
-			parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
-		}
+		const parts: string[] = buildCommandEnvironmentPrefix(options)
 
 		parts.push("claude")
 
@@ -166,11 +164,7 @@ const openCodeToolDefinition: CliToolDefinition = {
 	hookStrategy: "events",
 
 	buildCommand: (options) => {
-		const parts: string[] = []
-
-		if (options.issueId) {
-			parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
-		}
+		const parts: string[] = buildCommandEnvironmentPrefix(options)
 
 		parts.push("opencode")
 
@@ -212,11 +206,7 @@ const codexToolDefinition: CliToolDefinition = {
 	hookStrategy: "pty",
 
 	buildCommand: (options) => {
-		const parts: string[] = []
-
-		if (options.issueId) {
-			parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
-		}
+		const parts: string[] = buildCommandEnvironmentPrefix(options)
 
 		parts.push("codex")
 
@@ -292,3 +282,22 @@ export const isValidToolName = (name: string): name is CliToolName =>
  * Default CLI tool (for backwards compatibility)
  */
 export const DEFAULT_CLI_TOOL: CliToolName = "claude"
+
+const buildCommandEnvironmentPrefix = (options: BuildCommandOptions): string[] => {
+	const prefixed: string[] = []
+
+	if (options.issueId) {
+		prefixed.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
+	}
+
+	if (options.sessionEnv) {
+		const entries = Object.entries(options.sessionEnv)
+			.filter(([key]) => key !== "AZEDARACH_ISSUE_ID")
+			.sort(([left], [right]) => left.localeCompare(right))
+		for (const [key, value] of entries) {
+			prefixed.push(`${key}="${escapeForShellDoubleQuotes(value)}"`)
+		}
+	}
+
+	return prefixed
+}

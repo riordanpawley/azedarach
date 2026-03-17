@@ -38,7 +38,7 @@ const ATTR_DIM = 2
  * Actions that use the command queue and should be blocked when busy.
  * These are the actions that call ctx.withQueue() in their handlers.
  */
-const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
+const QUEUED_ACTIONS = new Set(["s", "S", "Q", "!", "x", "P", "m", "d", "u"])
 
 /**
  * ActionPalette component
@@ -51,7 +51,7 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
  */
 /** Actions that require network connectivity */
 const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
-const TMUX_REQUIRED_ACTIONS = new Set(["s", "S", "!", "a", "p", "R", "x", "r", "H"])
+const TMUX_REQUIRED_ACTIONS = new Set(["s", "S", "Q", "!", "a", "p", "R", "x", "r", "H"])
 
 export const shouldShowActionForTmuxMode = (
 	actionKey: string,
@@ -63,6 +63,7 @@ const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	l: "l",
 	s: "s",
 	S: "S-s",
+	Q: "S-q",
 	"!": "!",
 	a: "a",
 	p: "p",
@@ -111,6 +112,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		switch (action) {
 			case "s": // Start - only if idle
 			case "S": // Start+work - only if idle
+			case "Q": // Start+work (question-first) - only if idle
 			case "!": // Start+work (skip permissions) - only if idle
 				return sessionState === "idle"
 			case "a": // Attach - only if not idle
@@ -201,6 +203,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		if (sessionState === "idle") {
 			actions.push({ keyName: "s", description: "start" })
 			actions.push({ keyName: "S", description: "start+work" })
+			actions.push({ keyName: "Q", description: "start+question-first" })
 		} else {
 			actions.push({ keyName: "a", description: "attach" })
 			if (sessionState === "busy") {

@@ -28,6 +28,8 @@ export interface PrimeIssueContext {
 	readonly showImplementations?: boolean
 }
 
+export type PrimeMode = "default" | "question-first"
+
 export const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
 
 const shouldShowIssueImplementations = (
@@ -350,6 +352,7 @@ export const buildPrimeOutput = (
 	issueContext: PrimeIssueContext | undefined,
 	implementationContext?: PrimeImplementationContext,
 	specEnabled = false,
+	primeMode: PrimeMode = "default",
 ): string => {
 	const issueSection = issueId === undefined ? "" : formatPrimeIssueSection(issueId, issueContext)
 
@@ -381,6 +384,13 @@ export const buildPrimeOutput = (
   - Avoid positional-first ordering like \`az spec link add <issue-id> <requirement-ref> -t relates -f planned\`; Effect CLI parsing can reject late flags as unknown arguments.
   - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
 		: undefined
+	const questionFirstGuardrails =
+		primeMode === "question-first"
+			? `- Question-first execution rules (Space+Q mode):
+  - MUST ask follow-up questions immediately when the issue is underspecified or ambiguous.
+  - MUST improve the current issue title and description before implementation work begins.
+  - MUST record unknowns/open questions in the issue description so scope is explicit.`
+			: undefined
 
 	return `Azedarach Session Primer
 
@@ -388,6 +398,7 @@ export const buildPrimeOutput = (
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
 ${issueSection}
+${questionFirstGuardrails === undefined ? "" : `${questionFirstGuardrails}\n`}
 - Follow-up and dependency rules:
   - When working under a parent issue, create follow-up work with \`az issue child "Title"\`.
   - When fanning out to subagents, tell each subagent to use \`az issue\` and create/maintain its own child issue under the active parent; reserve \`az prime\` for the orchestrator unless a subagent explicitly needs a fresh primer.

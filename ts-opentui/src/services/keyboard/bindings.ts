@@ -472,6 +472,20 @@ done
 		),
 	},
 	{
+		key: "S-q",
+		mode: "action",
+		description: "Start+work (question-first)",
+		action: Effect.suspend(() =>
+			guardTmuxAction(
+				bc,
+				"Start session with question-first prompt",
+				bc.editor
+					.exitToNormal()
+					.pipe(Effect.tap(() => bc.sessionHandlers.startSessionQuestionFirst())),
+			),
+		),
+	},
+	{
 		key: "!",
 		mode: "action",
 		description: "Start+work (skip permissions)",
