@@ -113,18 +113,10 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
 						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value
-							.sessionStop({
-								issueId,
-								projectPath: effectiveProjectPath,
-							})
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(
-										`Daemon sessionStop failed for ${issueId}; retrying local stop: ${String(error)}`,
-									).pipe(Effect.zipRight(sessionManager.stop(issueId))),
-								),
-							)
+						yield* daemonRpcClient.value.sessionStop({
+							issueId,
+							projectPath: effectiveProjectPath,
+						})
 						return
 					}
 					yield* sessionManager.stop(issueId)
