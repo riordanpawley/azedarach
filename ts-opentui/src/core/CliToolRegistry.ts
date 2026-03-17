@@ -10,6 +10,7 @@
  * - Future extensibility for new tools
  */
 
+import { getAzNotifyPath } from "./hooks.js"
 import { escapeForShellDoubleQuotes } from "./shell.js"
 
 // ============================================================================
@@ -40,6 +41,8 @@ export interface BuildCommandOptions {
 	readonly imagePaths?: readonly string[]
 	/** Active issue ID for issue-scoped sessions */
 	readonly issueId?: string
+	/** tmux session name associated with the issue-scoped run (for hook callbacks). */
+	readonly sessionName?: string
 	/** Additional environment variables to prefix onto the CLI command. */
 	readonly sessionEnv?: Readonly<Record<string, string>>
 	/** Model to use (tool-specific format) */
@@ -210,6 +213,24 @@ const codexToolDefinition: CliToolDefinition = {
 
 		parts.push("codex")
 
+		if (options.issueId && options.sessionName) {
+			const azNotifyPath = getAzNotifyPath()
+			const sessionStartCommand = buildCodexNotifyCommand({
+				event: "user_prompt",
+				issueId: options.issueId,
+				sessionName: options.sessionName,
+				azNotifyPath,
+			})
+			const stopCommand = buildCodexNotifyCommand({
+				event: "session_end",
+				issueId: options.issueId,
+				sessionName: options.sessionName,
+				azNotifyPath,
+			})
+			parts.push(buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand))
+			parts.push(buildCodexConfigOverrideArg("hooks.Stop", stopCommand))
+		}
+
 		if (options.model) {
 			parts.push(`--model ${options.model}`)
 		}
@@ -237,6 +258,19 @@ const codexToolDefinition: CliToolDefinition = {
 	},
 
 	getInitCommands: () => [],
+}
+
+const buildCodexNotifyCommand = (params: {
+	readonly event: "user_prompt" | "session_end"
+	readonly issueId: string
+	readonly sessionName: string
+	readonly azNotifyPath: string
+}): string => `"${params.azNotifyPath}" ${params.event} "${params.issueId}" "${params.sessionName}"`
+
+const buildCodexConfigOverrideArg = (key: string, command: string): string => {
+	const tomlCommand = command.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+	const override = `${key}=[{hooks=[{command="${tomlCommand}"}]}]`
+	return `-c "${escapeForShellDoubleQuotes(override)}"`
 }
 
 // ============================================================================

@@ -25,7 +25,6 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
-import { generateCodexSessionHookTomlBlock, mergeCodexSessionHooksIntoConfig } from "./hooks.js"
 import {
 	IssueTrackerClient,
 	type IssueTrackerError,
@@ -871,35 +870,6 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 				return Option.isSome(initDoneOption) && initDoneOption.value === "0"
 			})
 
-		const installCodexWorktreeHooks = (params: {
-			readonly worktreePath: string
-			readonly issueId: string
-			readonly projectPath: string
-		}) =>
-			Effect.gen(function* () {
-				const fs = yield* FileSystem.FileSystem
-				const codexDir = `${params.worktreePath}/.codex`
-				const configPath = `${codexDir}/config.toml`
-				const existing = yield* fs
-					.exists(configPath)
-					.pipe(
-						Effect.flatMap((exists) =>
-							exists ? fs.readFileString(configPath) : Effect.succeed(""),
-						),
-					)
-				const hookBlock = generateCodexSessionHookTomlBlock(params.issueId, {
-					projectPath: params.projectPath,
-				})
-				const merged = mergeCodexSessionHooksIntoConfig(existing, hookBlock)
-				yield* fs.makeDirectory(codexDir, { recursive: true })
-				yield* fs.writeFileString(configPath, merged)
-			}).pipe(
-				Effect.provide(fsLayer),
-				Effect.catchAll((error) =>
-					Effect.logWarning(`Failed to install Codex hook config in worktree: ${error}`),
-				),
-			)
-
 		const acquireStartLock = (issueId: string) =>
 			Ref.modify(startsInProgressRef, (startsInProgress) => {
 				if (HashMap.has(startsInProgress, issueId)) {
@@ -1037,14 +1007,6 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 										// Get the tool definition for command building
 										const toolDef = getToolDefinition(cliTool)
 
-										if (cliTool === "codex") {
-											yield* installCodexWorktreeHooks({
-												worktreePath: worktree.path,
-												issueId,
-												projectPath,
-											})
-										}
-
 										// Generate tmux session name (just the issueId)
 										const tmuxSessionName = getIssueSessionName(issueId, projectPath)
 
@@ -1068,6 +1030,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 											initialPrompt,
 											imagePaths,
 											issueId,
+											sessionName: tmuxSessionName,
 											model: effectiveModel,
 											sessionEnv,
 											dangerouslySkipPermissions,

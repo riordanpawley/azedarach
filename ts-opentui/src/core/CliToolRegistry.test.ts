@@ -91,4 +91,20 @@ describe("CliToolRegistry", () => {
 			command.indexOf('Z_VAR="tail"'),
 		)
 	})
+
+	it("injects codex hooks via runtime config overrides without writing repo config", () => {
+		const codex = getToolDefinition("codex")
+		const command = codex.buildCommand({
+			issueId: "tb",
+			sessionName: "az-tb",
+			initialPrompt: "work on issue tb",
+		})
+
+		expect(command).toContain('-c "hooks.SessionStart=[{hooks=[{command=\\"')
+		expect(command).toContain("user_prompt")
+		expect(command).toContain('\\\\\\"tb\\\\\\"')
+		expect(command).toContain('\\\\\\"az-tb\\\\\\"')
+		expect(command).toContain('-c "hooks.Stop=[{hooks=[{command=\\"')
+		expect(command).toContain("session_end")
+	})
 })
