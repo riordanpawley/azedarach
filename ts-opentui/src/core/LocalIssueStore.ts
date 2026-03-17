@@ -2244,16 +2244,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						Effect.catchAllCause((cause) =>
 							Effect.gen(function* () {
 								const squashed = Cause.squash(cause)
+								const prettyCause = Cause.pretty(cause)
 								if (containsSqlError(squashed)) {
 									yield* Effect.logError("LocalIssueStore SQL failure")
-									yield* Effect.logError(String(squashed))
+									yield* Effect.logError(prettyCause)
 								}
 
 								if (isLocalIssueStoreError(squashed)) {
 									return yield* Effect.fail(squashed)
 								}
 
-								yield* Effect.logWarning(String(squashed))
+								yield* Effect.logWarning(prettyCause)
 								return yield* Effect.fail(
 									new LocalIssueStoreError({
 										message:
