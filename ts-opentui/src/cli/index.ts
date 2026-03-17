@@ -948,7 +948,7 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 			}
 		})
 
-		yield* Effect.forkDaemon(
+		yield* Effect.fork(
 			daemonizeEffect.pipe(
 				Effect.catchAll((error) =>
 					Console.error(`Warning: auto-daemonize failed (${error.message}); continuing startup.`),
