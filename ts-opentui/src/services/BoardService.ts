@@ -98,12 +98,6 @@ const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
 const TRANSIENT_RETRY_ATTEMPTS = 4
 const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
-const AZEDARACH_REQUIRE_DAEMON_AUTHORITY_ENV = "AZEDARACH_REQUIRE_DAEMON_AUTHORITY"
-
-export const isBoardDaemonAuthorityRequired = (
-	env: Readonly<Record<string, string | undefined>>,
-): boolean => env[AZEDARACH_REQUIRE_DAEMON_AUTHORITY_ENV] !== "0"
-
 const withTransientRetry = <A, E, R>(
 	context: string,
 	effect: Effect.Effect<A, E, R>,
@@ -1404,7 +1398,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const loadTasks = (preferredProjectPath?: string | null) =>
 			Effect.gen(function* () {
 				const loadStartTime = Date.now()
-				const daemonAuthorityRequired = isBoardDaemonAuthorityRequired(process.env)
 				const projectPath = yield* resolveProjectPath(preferredProjectPath)
 				const boardProjectPath = yield* SubscriptionRef.get(currentProjectPath)
 				const serviceProjectPath = (yield* projectService.getCurrentPath()) ?? null
@@ -1415,15 +1408,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					daemonRpcClient,
 				})
 				if (Option.isNone(daemonBoardReadModelRpc)) {
-					if (daemonAuthorityRequired) {
-						yield* Effect.logWarning(
-							"loadTasks: daemon boardReadModel RPC unavailable while daemon authority is required; returning empty board snapshot",
-						)
-						return [] as ReadonlyArray<TaskWithSession>
-					}
 					yield* Effect.logWarning(
-						"loadTasks: daemon boardReadModel RPC unavailable; using legacy local fallback because daemon authority is explicitly disabled",
+						"loadTasks: daemon boardReadModel RPC unavailable; returning empty board snapshot",
 					)
+					return [] as ReadonlyArray<TaskWithSession>
 				}
 				if (Option.isSome(daemonBoardReadModelRpc)) {
 					const daemonPendingMutations = yield* mutationQueue.getOptimisticMutations()
