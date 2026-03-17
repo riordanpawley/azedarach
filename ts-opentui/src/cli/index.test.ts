@@ -23,6 +23,7 @@ import {
 	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
+	formatDaemonControlFeedbackLine,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	formatParentChildCheckOutput,
@@ -1041,6 +1042,43 @@ describe("daemon control CLI commands", () => {
 				failure.value.message.includes("Timed out waiting for a reachable global daemon endpoint"),
 		).toBe(true)
 	}, 10_000)
+})
+
+describe("daemon control feedback formatting", () => {
+	it("includes project and interval context for start feedback", () => {
+		const line = formatDaemonControlFeedbackLine({
+			action: "started",
+			uptimeBeforeControl: Option.none(),
+			projectPath: "/tmp/project",
+			intervalMs: 120000,
+		})
+
+		expect(line).toBe(
+			"Headless backend sync daemon started successfully for /tmp/project (interval=120000ms).",
+		)
+	})
+
+	it("includes runtime duration when uptime is available", () => {
+		const line = formatDaemonControlFeedbackLine({
+			action: "restarted",
+			uptimeBeforeControl: Option.some(1000),
+			nowMs: 5_401_000,
+		})
+
+		expect(line).toBe(
+			"Headless backend sync daemon restarted successfully after running for 1h 30m.",
+		)
+	})
+
+	it("clamps negative uptime to zero seconds", () => {
+		const line = formatDaemonControlFeedbackLine({
+			action: "stopped",
+			uptimeBeforeControl: Option.some(5000),
+			nowMs: 4000,
+		})
+
+		expect(line).toBe("Headless backend sync daemon stopped successfully after running for 0s.")
+	})
 })
 
 describe("daemon session snapshot summaries", () => {
