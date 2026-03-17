@@ -3341,7 +3341,8 @@ const specReqListHandler = (args: {
 	})
 
 const specReqSearchHandler = (args: {
-	readonly query: string
+	readonly query: Option.Option<string>
+	readonly queryOption: Option.Option<string>
 	readonly kind: Option.Option<string>
 	readonly status: Option.Option<string>
 	readonly priority: Option.Option<number>
@@ -3350,15 +3351,23 @@ const specReqSearchHandler = (args: {
 	readonly verbose: boolean
 	readonly json: boolean
 }) =>
-	specReqListHandler({
-		projectDir: args.projectDir,
-		query: Option.some(args.query),
-		kind: args.kind,
-		status: args.status,
-		priority: args.priority,
-		view: args.view,
-		verbose: args.verbose,
-		json: args.json,
+	Effect.gen(function* () {
+		const query = yield* resolveRequiredAliasedTextInput({
+			positional: args.query,
+			optionValue: args.queryOption,
+			positionalName: "query",
+			optionName: "--query",
+		})
+		return yield* specReqListHandler({
+			projectDir: args.projectDir,
+			query: Option.some(query),
+			kind: args.kind,
+			status: args.status,
+			priority: args.priority,
+			view: args.view,
+			verbose: args.verbose,
+			json: args.json,
+		})
 	})
 
 const specReadHandler = (args: {
@@ -6485,6 +6494,11 @@ const specReqListCommand = Command.make(
 const specReqSearchCommand = Command.make(
 	"search",
 	{
+		queryOption: Options.text("query").pipe(
+			Options.withAlias("q"),
+			Options.optional,
+			Options.withDescription("Search query text (preferred over positional input)"),
+		),
 		kind: Options.text("kind").pipe(
 			Options.withAlias("k"),
 			Options.optional,
@@ -6507,7 +6521,10 @@ const specReqSearchCommand = Command.make(
 			Options.withAlias("j"),
 			Options.withDescription("Output JSON"),
 		),
-		query: Args.text({ name: "query" }).pipe(Args.withDescription("Search query text")),
+		query: Args.text({ name: "query" }).pipe(
+			Args.optional,
+			Args.withDescription("Search query text"),
+		),
 	},
 	specReqSearchHandler,
 ).pipe(Command.withDescription("Search spec requirements"))

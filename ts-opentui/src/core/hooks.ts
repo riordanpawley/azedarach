@@ -120,6 +120,67 @@ export interface HookConfigOptions {
 	azPreCompactPath?: string
 }
 
+const CODEX_HOOK_BLOCK_START = "# >>> azedarach-codex-hooks"
+const CODEX_HOOK_BLOCK_END = "# <<< azedarach-codex-hooks"
+
+/**
+ * Generate a managed TOML block for Codex SessionStart/Stop hooks.
+ */
+export const generateCodexSessionHookTomlBlock = (
+	issueId: string,
+	options: {
+		readonly projectPath?: string
+		readonly azNotifyPath?: string
+	} = {},
+): string => {
+	const { projectPath, azNotifyPath } = options
+	const sessionStartCommand = buildNotifyCommand("user_prompt", issueId, projectPath, azNotifyPath)
+	const stopCommand = buildNotifyCommand("session_end", issueId, projectPath, azNotifyPath)
+
+	const tomlEscape = (value: string): string =>
+		value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+
+	const sessionStartEscaped = tomlEscape(sessionStartCommand)
+	const stopEscaped = tomlEscape(stopCommand)
+
+	return `${CODEX_HOOK_BLOCK_START}
+[[hooks.SessionStart]]
+hooks = [{ command = "${sessionStartEscaped}" }]
+
+[[hooks.Stop]]
+hooks = [{ command = "${stopEscaped}" }]
+${CODEX_HOOK_BLOCK_END}
+`
+}
+
+/**
+ * Merge (or replace) the managed Azedarach Codex hook block in a config TOML string.
+ */
+export const mergeCodexSessionHooksIntoConfig = (
+	existingConfig: string,
+	hookBlock: string,
+): string => {
+	const startIndex = existingConfig.indexOf(CODEX_HOOK_BLOCK_START)
+	const endIndex = existingConfig.indexOf(CODEX_HOOK_BLOCK_END)
+
+	if (startIndex >= 0 && endIndex >= startIndex) {
+		const endWithMarker = endIndex + CODEX_HOOK_BLOCK_END.length
+		const before = existingConfig.slice(0, startIndex).replace(/\s*$/, "")
+		const after = existingConfig.slice(endWithMarker).replace(/^\s*/, "")
+		const mergedMiddle = [before, hookBlock.trimEnd(), after]
+			.filter((part) => part.length > 0)
+			.join("\n\n")
+		return `${mergedMiddle}\n`
+	}
+
+	const trimmed = existingConfig.trimEnd()
+	if (trimmed.length === 0) {
+		return `${hookBlock.trimEnd()}\n`
+	}
+
+	return `${trimmed}\n\n${hookBlock.trimEnd()}\n`
+}
+
 /**
  * Permissions to auto-grant in spawned worktree sessions
  *

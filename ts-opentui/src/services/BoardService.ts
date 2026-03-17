@@ -698,6 +698,12 @@ const filterTasks = (
 	return filtered
 }
 
+const hasParentChildDependents = (issue: Issue): boolean =>
+	(issue.dependents ?? []).some((dependency) => dependency.dependency_type === "parent-child")
+
+const toBoardIssueType = (issue: Issue): Issue["issue_type"] =>
+	(issue.dependent_count ?? 0) > 0 || hasParentChildDependents(issue) ? "epic" : issue.issue_type
+
 // ============================================================================
 // Cache Types
 // ============================================================================
@@ -1106,12 +1112,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		// Git status cache to avoid redundant git commands
 		const gitStatusCache = yield* Ref.make<GitStatusCache>(new Map())
 
-		// Parent epic map cache - rarely changes, so cache for longer (30 seconds)
+		// Parent relationship cache - rarely changes, so cache for longer (30 seconds)
 		// This avoids the expensive batch tracker show call on every refresh
 		// Now supports multiple projects for fast project switching
 		const PARENT_EPIC_CACHE_TTL_MS = 30000
 		interface ParentEpicCacheEntry {
-			readonly map: Map<string, string | undefined>
+			readonly parentByIssueId: Map<string, string | undefined>
+			readonly parentEpicByIssueId: Map<string, string | undefined>
 			readonly timestamp: number
 		}
 		// Map from projectPath to cache entry (supports multiple projects)
@@ -1390,10 +1397,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get optimistic mutations through queue adapter (daemon or local fallback)
 				const pendingMutations = yield* mutationQueue.getOptimisticMutations()
 
-				// Get parent epic map (cached for 30s to avoid expensive tracker show calls)
-				// This enables filtering epic children and using correct base branch for git diff
+				// Get parent relationship maps (cached for 30s to avoid expensive tracker show calls)
+				// parentByIssueId is used for main-board filtering; parentEpicByIssueId is used
+				// for epic-branch-specific git behavior.
 				// Cache supports multiple projects for fast project switching
 				const batchStartTime = Date.now()
+				let parentByIssueId: Map<string, string | undefined>
 				let parentEpicMap: Map<string, string | undefined>
 				let cacheStatus = "miss"
 
@@ -1405,10 +1414,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				if (cachedEntry && now - cachedEntry.timestamp < PARENT_EPIC_CACHE_TTL_MS) {
 					// Cache hit - use cached map
-					parentEpicMap = cachedEntry.map
+					parentByIssueId = cachedEntry.parentByIssueId
+					parentEpicMap = cachedEntry.parentEpicByIssueId
 					cacheStatus = "hit"
 				} else {
 					// Cache miss - fetch fresh data
+					parentByIssueId = new Map<string, string | undefined>()
 					parentEpicMap = new Map<string, string | undefined>()
 					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
 					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
@@ -1439,13 +1450,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 										),
 								)
 
-						// Extract parent epic IDs from dependencies
+						// Extract parent IDs from dependencies, plus epic parent IDs for git base behavior
 						for (const issue of issuesWithDepDetails) {
 							const parentChildDep = issue.dependencies?.find(
 								(dep) => dep.dependency_type === "parent-child",
 							)
+							let parentId: string | undefined
 							let parentEpicId: string | undefined
 							if (parentChildDep) {
+								parentId = parentChildDep.id
 								if (parentChildDep.issue_type === "epic") {
 									parentEpicId = parentChildDep.id
 								} else if (parentChildDep.issue_type === undefined) {
@@ -1455,6 +1468,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 									}
 								}
 							}
+							parentByIssueId.set(issue.id, parentId)
 							parentEpicMap.set(issue.id, parentEpicId)
 						}
 					}
@@ -1462,7 +1476,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					// Cache the result (preserves cache for other projects)
 					yield* Ref.update(parentEpicCacheRef, (cache) => {
 						const newCache = new Map(cache)
-						newCache.set(normalizedProjectPath, { map: parentEpicMap, timestamp: now })
+						newCache.set(normalizedProjectPath, {
+							parentByIssueId,
+							parentEpicByIssueId: parentEpicMap,
+							timestamp: now,
+						})
 						return newCache
 					})
 				}
@@ -1512,7 +1530,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
 
-							// Get parent epic ID (if this is an epic child)
+							// Get parent IDs for filtering and epic-branch behavior
+							const parentId = parentByIssueId.get(issue.id)
 							const parentEpicId = parentEpicMap.get(issue.id)
 
 							// Trust fresh worktree inventory when available; only fall back to persisted
@@ -1565,11 +1584,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 							const baseTask: TaskWithSession = {
 								...issue,
+								issue_type: toBoardIssueType(issue),
 								sessionState,
 								hasWorktree,
 								hasMergeConflict,
 								hasDevServer: persistedTask?.hasDevServer === true ? true : undefined,
-								parentEpicId: parentEpicId ?? persistedTask?.parentEpicId,
+								parentEpicId: parentId ?? persistedTask?.parentEpicId,
 								...gitStatus,
 								hasPR: prInfo.hasPR === true ? true : undefined,
 								prUrl: prInfo.prUrl ?? persistedTask?.prUrl,
@@ -1786,6 +1806,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 			return {
 				...issue,
+				issue_type: toBoardIssueType(issue),
 				sessionState: existingTask?.sessionState ?? "idle",
 				hasWorktree: existingTask?.hasWorktree,
 				hasMergeConflict: retainedGitState.hasMergeConflict,
@@ -2205,9 +2226,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					}
 				}
 
+				const hasChildrenInBoard = withRemoved.some((task) => task.parentEpicId === issueId)
 				const inferredType = inferLinearIssueType(
 					labels,
-					existingTask?.issue_type === "epic",
+					hasChildrenInBoard || existingTask?.issue_type === "epic",
 					undefined,
 				)
 
