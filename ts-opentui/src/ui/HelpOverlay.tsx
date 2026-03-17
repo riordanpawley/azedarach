@@ -4,6 +4,16 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
 import { appConfigAtom } from "./atoms/config.js"
+import {
+	getGitConflictToken,
+	getGitDirtyToken,
+	getIssueStatusToken,
+	getNetworkToken,
+	getPhaseToken,
+	getPrStateToken,
+	getSessionStateToken,
+	getWorktreeToken,
+} from "./statusTokens.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -15,6 +25,16 @@ const KeyLine = ({ keys, description }: { keys: string; description: string }) =
 	<box flexDirection="row">
 		<text fg={theme.lavender}>{`  ${keys}`}</text>
 		<text fg={theme.text}>{" ".repeat(Math.max(1, 12 - keys.length)) + description}</text>
+	</box>
+)
+
+/**
+ * Helper component for symbol legend lines
+ */
+const SymbolLine = ({ token, description }: { token: string; description: string }) => (
+	<box flexDirection="row">
+		<text fg={theme.peach}>{`  ${token}`}</text>
+		<text fg={theme.text}>{" ".repeat(Math.max(1, 12 - token.length)) + description}</text>
 	</box>
 )
 
@@ -168,6 +188,29 @@ export const HelpOverlay = () => {
 				<KeyLine keys="?" description="Toggle this help screen" />
 				<KeyLine keys="q" description="Quit (or exit drill-down)" />
 				<KeyLine keys="Esc" description="Back to normal mode / dismiss" />
+				<text> </text>
+
+				{/* Symbol legend section */}
+				<SectionHeader title="Symbol Legend:" />
+				<SymbolLine token={getIssueStatusToken("open")} description="Issue open" />
+				<SymbolLine token={getIssueStatusToken("in_progress")} description="Issue in progress" />
+				<SymbolLine token={getIssueStatusToken("blocked")} description="Issue blocked" />
+				<SymbolLine token={getIssueStatusToken("closed")} description="Issue closed" />
+				<SymbolLine token={getSessionStateToken("busy")} description="Session busy" />
+				<SymbolLine token={getSessionStateToken("waiting")} description="Session waiting input" />
+				<SymbolLine token={getSessionStateToken("done")} description="Session done" />
+				<SymbolLine token={getPrStateToken("open")} description="PR open" />
+				<SymbolLine token={getPrStateToken("draft")} description="PR draft" />
+				<SymbolLine token={getPrStateToken("merged")} description="PR merged" />
+				<SymbolLine token={getGitDirtyToken()} description="Worktree has uncommitted changes" />
+				<SymbolLine token="G:Bn/G:↓n" description="Git behind base by n commits" />
+				<SymbolLine token={getGitConflictToken()} description="Git merge conflict present" />
+				<SymbolLine token={getWorktreeToken()} description="Worktree exists (idle task)" />
+				<SymbolLine token={getPhaseToken("planning")} description="Agent planning phase" />
+				<SymbolLine token={getPhaseToken("action")} description="Agent action phase" />
+				<SymbolLine token={getPhaseToken("verification")} description="Agent verification phase" />
+				<SymbolLine token={getNetworkToken(true)} description="Network connected" />
+				<SymbolLine token={getNetworkToken(false)} description="Network disconnected" />
 				<text> </text>
 
 				{/* Footer */}
