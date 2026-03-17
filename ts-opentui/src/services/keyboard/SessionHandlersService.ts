@@ -113,10 +113,18 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
 						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionStop({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
+						yield* daemonRpcClient.value
+							.sessionStop({
+								issueId,
+								projectPath: effectiveProjectPath,
+							})
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`Daemon sessionStop failed for ${issueId}; retrying local stop: ${String(error)}`,
+									).pipe(Effect.zipRight(sessionManager.stop(issueId))),
+								),
+							)
 						return
 					}
 					yield* sessionManager.stop(issueId)
@@ -419,8 +427,14 @@ Delete the duplicate worktree and retry?`
 					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
-					if (task.sessionState !== "idle") {
-						yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					if (hasTaskSessionPresence(task)) {
+						const stateLabel =
+							task.sessionState !== "idle"
+								? task.sessionState
+								: task.hasTmuxSession
+									? "tmux-present"
+									: "idle"
+						yield* toast.show("error", `Cannot start: task is ${stateLabel}`)
 						return
 					}
 
@@ -456,8 +470,14 @@ Delete the duplicate worktree and retry?`
 					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
-					if (task.sessionState !== "idle") {
-						yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					if (hasTaskSessionPresence(task)) {
+						const stateLabel =
+							task.sessionState !== "idle"
+								? task.sessionState
+								: task.hasTmuxSession
+									? "tmux-present"
+									: "idle"
+						yield* toast.show("error", `Cannot start: task is ${stateLabel}`)
 						return
 					}
 
@@ -504,8 +524,14 @@ Delete the duplicate worktree and retry?`
 					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
-					if (task.sessionState !== "idle") {
-						yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					if (hasTaskSessionPresence(task)) {
+						const stateLabel =
+							task.sessionState !== "idle"
+								? task.sessionState
+								: task.hasTmuxSession
+									? "tmux-present"
+									: "idle"
+						yield* toast.show("error", `Cannot start: task is ${stateLabel}`)
 						return
 					}
 
@@ -559,8 +585,14 @@ Delete the duplicate worktree and retry?`
 					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
-					if (task.sessionState !== "idle") {
-						yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					if (hasTaskSessionPresence(task)) {
+						const stateLabel =
+							task.sessionState !== "idle"
+								? task.sessionState
+								: task.hasTmuxSession
+									? "tmux-present"
+									: "idle"
+						yield* toast.show("error", `Cannot start: task is ${stateLabel}`)
 						return
 					}
 
