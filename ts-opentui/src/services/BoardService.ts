@@ -155,16 +155,23 @@ export const makeBoardDaemonIpcSignals = (params: {
 	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
 	readonly daemonFrontendClientId: string
 	readonly nowMs: () => number
+	readonly getProjectPath?: () => Effect.Effect<string | undefined, never, never>
 	readonly onDaemonStreamBatch?: (batch: DaemonEventStreamResult) => Effect.Effect<void>
 }) => {
 	const observeSessionSnapshot = (): Effect.Effect<void> => {
 		if (Option.isNone(params.daemonRpcClient)) {
 			return Effect.void
 		}
-		if (params.daemonRpcClient.value.sessionSnapshot === undefined) {
+		const daemonRpcClient = params.daemonRpcClient.value
+		if (daemonRpcClient.sessionSnapshot === undefined) {
 			return Effect.void
 		}
-		return params.daemonRpcClient.value.sessionSnapshot().pipe(
+		const sessionSnapshot = daemonRpcClient.sessionSnapshot
+		return Effect.gen(function* () {
+			const projectPath =
+				params.getProjectPath === undefined ? undefined : yield* params.getProjectPath()
+			return yield* sessionSnapshot({ projectPath })
+		}).pipe(
 			Effect.flatMap((snapshot) =>
 				Effect.logDebug(
 					`BoardService daemon snapshot observed: total=${snapshot.sessions.length} capturedAtMs=${snapshot.capturedAtMs}`,
@@ -862,6 +869,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			daemonRpcClient,
 			daemonFrontendClientId,
 			nowMs: Date.now,
+			getProjectPath: projectService.getCurrentPath,
 		})
 		const daemonStreamCursorRef = yield* Ref.make<number | undefined>(undefined)
 
