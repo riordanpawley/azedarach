@@ -1418,9 +1418,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 				if (daemonAuthorityRequired) {
 					yield* Effect.logWarning(
-						"loadTasks: daemon boardReadModel RPC unavailable; returning empty board to preserve daemon authority",
+						"loadTasks: daemon boardReadModel RPC unavailable; using legacy load path to avoid empty board while daemon capabilities converge",
 					)
-					return []
 				}
 				const startupBatch = yield* Effect.all(
 					{
