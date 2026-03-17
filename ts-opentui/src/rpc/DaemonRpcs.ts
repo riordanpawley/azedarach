@@ -3,6 +3,8 @@ import * as RpcGroup from "@effect/rpc/RpcGroup"
 import {
 	DaemonAttachReconnectResultSchema,
 	DaemonAttachRequestSchema,
+	DaemonBoardReadModelRequestSchema,
+	DaemonBoardReadModelResultSchema,
 	DaemonControlStatusResultSchema,
 	DaemonDevServerListRequestSchema,
 	DaemonDevServerListResultSchema,
@@ -92,6 +94,12 @@ export const DaemonHeartbeatRpc = Rpc.make("daemonHeartbeat", {
 export const DaemonSessionSnapshotRpc = Rpc.make("daemonSessionSnapshot", {
 	payload: DaemonSessionSnapshotRequestSchema,
 	success: DaemonSessionSnapshotResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonBoardReadModelRpc = Rpc.make("daemonBoardReadModel", {
+	payload: DaemonBoardReadModelRequestSchema,
+	success: DaemonBoardReadModelResultSchema,
 	error: DaemonRpcActionErrorSchema,
 })
 
@@ -189,6 +197,7 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonReconnectRpc,
 	DaemonHeartbeatRpc,
 	DaemonSessionSnapshotRpc,
+	DaemonBoardReadModelRpc,
 	DaemonSessionStartRpc,
 	DaemonSessionStopRpc,
 	DaemonSessionPauseRpc,

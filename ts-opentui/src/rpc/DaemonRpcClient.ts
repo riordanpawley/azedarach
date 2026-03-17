@@ -7,6 +7,8 @@ import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
+	type DaemonBoardReadModelRequest,
+	type DaemonBoardReadModelResult,
 	type DaemonControlStatusResult,
 	type DaemonDevServerListRequest,
 	type DaemonDevServerListResult,
@@ -79,6 +81,9 @@ export interface DaemonRpcClientApi {
 	readonly sessionSnapshot?: (
 		request: Omit<DaemonSessionSnapshotRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionSnapshotResult, DaemonRpcClientError>
+	readonly boardReadModel?: (
+		request: Omit<DaemonBoardReadModelRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonBoardReadModelResult, DaemonRpcClientError>
 	readonly sessionStart?: (
 		request: Omit<DaemonSessionStartRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
@@ -175,6 +180,11 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 			}),
 		sessionSnapshot: (request) =>
 			raw.daemonSessionSnapshot({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		boardReadModel: (request) =>
+			raw.daemonBoardReadModel({
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),

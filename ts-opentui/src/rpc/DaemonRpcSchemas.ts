@@ -291,6 +291,63 @@ export type DaemonSessionMutationResult = Schema.Schema.Type<
 	typeof DaemonSessionMutationResultSchema
 >
 
+export const DaemonBoardTaskSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	description: Schema.optional(Schema.String),
+	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone"),
+	priority: Schema.Number,
+	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore"),
+	created_at: Schema.String,
+	updated_at: Schema.String,
+	closed_at: Schema.optional(Schema.NullOr(Schema.String)),
+	assignee: Schema.optional(Schema.NullOr(Schema.String)),
+	labels: Schema.optional(Schema.Array(Schema.String)),
+	design: Schema.optional(Schema.String),
+	notes: Schema.optional(Schema.String),
+	acceptance: Schema.optional(Schema.String),
+	estimate: Schema.optional(Schema.Number),
+	implementations: Schema.Array(Schema.String),
+	dependent_count: Schema.optional(Schema.Number),
+	dependency_count: Schema.optional(Schema.Number),
+	sessionState: DaemonSessionStateSchema,
+	sessionStartedAt: Schema.optional(Schema.String),
+	hasWorktree: Schema.optional(Schema.Boolean),
+	hasMergeConflict: Schema.optional(Schema.Boolean),
+	parentEpicId: Schema.optional(Schema.String),
+	estimatedTokens: Schema.optional(Schema.Number),
+	recentOutput: Schema.optional(Schema.String),
+	agentPhase: Schema.optional(
+		Schema.Literal("idle", "planning", "action", "verification", "planMode"),
+	),
+	hasPR: Schema.optional(Schema.Boolean),
+	prUrl: Schema.optional(Schema.String),
+	prNumber: Schema.optional(Schema.Number),
+	prState: Schema.optional(Schema.Literal("open", "draft", "merged", "closed")),
+	gitBehindCount: Schema.optional(Schema.Number),
+	hasUncommittedChanges: Schema.optional(Schema.Boolean),
+	gitAdditions: Schema.optional(Schema.Number),
+	gitDeletions: Schema.optional(Schema.Number),
+	hasDevServer: Schema.optional(Schema.Boolean),
+})
+export type DaemonBoardTask = Schema.Schema.Type<typeof DaemonBoardTaskSchema>
+
+export const DaemonBoardReadModelRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	projectPath: Schema.String,
+})
+export type DaemonBoardReadModelRequest = Schema.Schema.Type<
+	typeof DaemonBoardReadModelRequestSchema
+>
+
+export const DaemonBoardReadModelResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	capturedAtMs: Schema.Number,
+	projectPath: Schema.String,
+	tasks: Schema.Array(DaemonBoardTaskSchema),
+})
+export type DaemonBoardReadModelResult = Schema.Schema.Type<typeof DaemonBoardReadModelResultSchema>
+
 export const DaemonDevServerStatusSchema = Schema.Literal(
 	"idle",
 	"starting",

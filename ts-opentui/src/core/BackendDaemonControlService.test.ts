@@ -391,4 +391,66 @@ describe("BackendDaemonControlService", () => {
 		expect(result.afterStop.server.status).toBe("stopped")
 		expect(result.afterStop.server.projectPath).toBe("/tmp/project-a")
 	})
+
+	it("returns project-scoped daemon board read model tasks", async () => {
+		const result = await Effect.runPromise(
+			Effect.gen(function* () {
+				const snapshotRef = yield* Ref.make(makeRuntimeSnapshot())
+				const restartCountRef = yield* Ref.make(0)
+				const statusRef = yield* Ref.make(makeSyncStatus())
+				const startedWithRef = yield* Ref.make<
+					ReadonlyArray<{ readonly projectPath: string; readonly intervalMs?: number }>
+				>([])
+				const stopCountRef = yield* Ref.make(0)
+				const requestedProjectPathsRef = yield* Ref.make<ReadonlyArray<string>>([])
+				const devServer = yield* makeDevServerDaemonService({
+					nowMs: () => 2_000,
+					portBase: 3_000,
+				})
+				const service = makeBackendDaemonControlService({
+					runtime: makeRuntimeApi(snapshotRef, restartCountRef),
+					sync: makeSyncApi(statusRef, startedWithRef, stopCountRef),
+					devServer,
+					readBoardTasks: (projectPath) =>
+						Effect.gen(function* () {
+							yield* Ref.update(requestedProjectPathsRef, (paths) => [...paths, projectPath])
+							return [
+								{
+									id: "AZ-2",
+									title: "Second",
+									status: "in_progress",
+									priority: 2,
+									issue_type: "task",
+									created_at: "2026-03-12T00:00:00.000Z",
+									updated_at: "2026-03-13T00:00:00.000Z",
+									implementations: ["ts-opentui"],
+									sessionState: "busy",
+								},
+								{
+									id: "AZ-1",
+									title: "First",
+									status: "open",
+									priority: 1,
+									issue_type: "task",
+									created_at: "2026-03-12T00:00:00.000Z",
+									updated_at: "2026-03-14T00:00:00.000Z",
+									implementations: ["ts-opentui"],
+									sessionState: "idle",
+								},
+							]
+						}),
+				})
+
+				const boardReadModel = yield* service.boardReadModel({
+					projectPath: "/tmp/project-b",
+				})
+				const requestedProjectPaths = yield* Ref.get(requestedProjectPathsRef)
+				return { boardReadModel, requestedProjectPaths }
+			}),
+		)
+
+		expect(result.requestedProjectPaths).toEqual(["/tmp/project-b"])
+		expect(result.boardReadModel.projectPath).toBe("/tmp/project-b")
+		expect(result.boardReadModel.tasks.map((task) => task.id)).toEqual(["AZ-1", "AZ-2"])
+	})
 })

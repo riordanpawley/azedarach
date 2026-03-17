@@ -3,6 +3,8 @@ import { Effect, Schema } from "effect"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
+	DaemonBoardReadModelRequestSchema,
+	DaemonBoardReadModelResultSchema,
 	DaemonDevServerListResultSchema,
 	DaemonDevServerStartRequestSchema,
 	DaemonDevServerStatusRequestSchema,
@@ -23,6 +25,7 @@ describe("DaemonRpcs", () => {
 		const keys = [...DaemonRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
 			"daemonAttach",
+			"daemonBoardReadModel",
 			"daemonDevServerList",
 			"daemonDevServerStart",
 			"daemonDevServerStatus",
@@ -213,6 +216,47 @@ describe("DaemonRpcs", () => {
 		expect(decoded.sessions).toHaveLength(1)
 		expect(decoded.sessions[0]?.issueId).toBe("qc")
 		expect(decoded.sessions[0]?.state).toBe("busy")
+	})
+
+	it("validates daemon board read model request and response shape", async () => {
+		const decodeRequest = Schema.decodeUnknown(DaemonBoardReadModelRequestSchema)
+		const decodeResult = Schema.decodeUnknown(DaemonBoardReadModelResultSchema)
+		const request = await Effect.runPromise(
+			decodeRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+			}),
+		)
+		const result = await Effect.runPromise(
+			decodeResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				capturedAtMs: 789,
+				projectPath: "/tmp/project",
+				tasks: [
+					{
+						id: "sm-1",
+						title: "Daemon board projection task",
+						status: "in_progress",
+						priority: 1,
+						issue_type: "task",
+						created_at: "2026-03-14T06:00:00.000Z",
+						updated_at: "2026-03-14T06:01:00.000Z",
+						implementations: ["ts-opentui"],
+						sessionState: "busy",
+						hasWorktree: true,
+						gitBehindCount: 2,
+						hasUncommittedChanges: true,
+						gitAdditions: 12,
+						gitDeletions: 3,
+					},
+				],
+			}),
+		)
+
+		expect(request.projectPath).toBe("/tmp/project")
+		expect(result.tasks).toHaveLength(1)
+		expect(result.tasks[0]?.id).toBe("sm-1")
+		expect(result.tasks[0]?.gitBehindCount).toBe(2)
 	})
 
 	it("validates daemon event stream response shape", async () => {
