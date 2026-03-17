@@ -897,51 +897,64 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 			return
 		}
 
-		const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
-		if (warning !== undefined) {
-			yield* Console.error(`Warning: ${warning}`)
-		}
-
-		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
-		})
-		const currentStatus = yield* bootstrap.client.status().pipe(
-			Effect.mapError((error) =>
-				formatDaemonRpcClientFailure({
-					operation: "status",
-					socketUrl: bootstrap.socketUrl,
-					error,
-				}),
-			),
-		)
-		const alreadyRunningForPath =
-			currentStatus.sync.state === "running" &&
-			currentStatus.sync.projectPath === params.projectPath
-		if (alreadyRunningForPath) {
-			if (params.verbose) {
-				yield* Console.log(
-					`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
-				)
+		const daemonizeEffect = Effect.gen(function* () {
+			const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
+			if (warning !== undefined) {
+				yield* Console.error(`Warning: ${warning}`)
 			}
-			return
-		}
 
-		yield* bootstrap.client
-			.restart({
-				projectPath: params.projectPath,
-				...(intervalMs === undefined ? {} : { intervalMs }),
+			const bootstrap = yield* bootstrapDaemonRpcClient({
+				autoStart: true,
 			})
-			.pipe(
+			const currentStatus = yield* bootstrap.client.status().pipe(
 				Effect.mapError((error) =>
 					formatDaemonRpcClientFailure({
-						operation: "restart",
+						operation: "status",
 						socketUrl: bootstrap.socketUrl,
 						error,
 					}),
 				),
 			)
+			const alreadyRunningForPath =
+				currentStatus.sync.state === "running" &&
+				currentStatus.sync.projectPath === params.projectPath
+			if (alreadyRunningForPath) {
+				if (params.verbose) {
+					yield* Console.log(
+						`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
+					)
+				}
+				return
+			}
+
+			yield* bootstrap.client
+				.restart({
+					projectPath: params.projectPath,
+					...(intervalMs === undefined ? {} : { intervalMs }),
+				})
+				.pipe(
+					Effect.mapError((error) =>
+						formatDaemonRpcClientFailure({
+							operation: "restart",
+							socketUrl: bootstrap.socketUrl,
+							error,
+						}),
+					),
+				)
+			if (params.verbose) {
+				yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+			}
+		})
+
+		yield* Effect.forkDaemon(
+			daemonizeEffect.pipe(
+				Effect.catchAll((error) =>
+					Console.error(`Warning: auto-daemonize failed (${error.message}); continuing startup.`),
+				),
+			),
+		)
 		if (params.verbose) {
-			yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+			yield* Console.log("Auto-daemonize: daemon preparation running in background.")
 		}
 	})
 
@@ -1193,6 +1206,7 @@ const withDaemonControlTimeout = <A, E, R>(
 	effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | DaemonControlTimeoutError, R> =>
 	effect.pipe(
+		Effect.disconnect,
 		Effect.timeoutFail({
 			duration: DAEMON_CONTROL_RPC_TIMEOUT,
 			onTimeout: () =>

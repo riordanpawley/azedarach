@@ -12,6 +12,7 @@ import {
 	type DaemonRpcClientError,
 	DaemonRpcProtocolVersionMismatchError,
 	DaemonRpcRemoteActionError,
+	DaemonRpcTimeoutError,
 	DaemonRpcTransportError,
 	layerSocket,
 } from "../rpc/DaemonRpcClient.js"
@@ -33,6 +34,7 @@ export class GlobalDaemonBootstrapError extends Data.TaggedError("GlobalDaemonBo
 		| "rpc-protocol-mismatch"
 		| "rpc-remote-action"
 		| "rpc-transport"
+		| "rpc-timeout"
 		| "rpc-unknown"
 		| "endpoint-timeout"
 }> {}
@@ -146,6 +148,12 @@ export const formatDaemonRpcClientFailure = (params: {
 		return new GlobalDaemonBootstrapError({
 			message: `Unable to connect to daemon RPC endpoint (${params.socketUrl}) for '${params.operation}': ${params.error.message}. ${params.error.suggestion}`,
 			reason: "rpc-transport",
+		})
+	}
+	if (params.error instanceof DaemonRpcTimeoutError) {
+		return new GlobalDaemonBootstrapError({
+			message: `Daemon RPC '${params.operation}' timed out after ${params.error.timeoutMs}ms.`,
+			reason: "rpc-timeout",
 		})
 	}
 	const exhaustive: never = params.error

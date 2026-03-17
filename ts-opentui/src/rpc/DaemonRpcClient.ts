@@ -93,10 +93,18 @@ export class DaemonRpcRemoteActionError extends Data.TaggedError("DaemonRpcRemot
 	readonly action: string | undefined
 }> {}
 
+const DAEMON_RPC_CALL_TIMEOUT_MS = 5_000
+
+export class DaemonRpcTimeoutError extends Data.TaggedError("DaemonRpcTimeoutError")<{
+	readonly operation: DaemonRpcOperation
+	readonly timeoutMs: number
+}> {}
+
 export type DaemonRpcClientError =
 	| DaemonRpcProtocolVersionMismatchError
 	| DaemonRpcTransportError
 	| DaemonRpcRemoteActionError
+	| DaemonRpcTimeoutError
 
 export interface DaemonRpcClientApi {
 	readonly status: (
@@ -170,76 +178,76 @@ export interface DaemonRpcClientApi {
 	) => Effect.Effect<DaemonQueueCancelResult, DaemonRpcClientError>
 }
 
+type WireRpcError = RpcClientError | DaemonRpcActionError | DaemonRpcTimeoutError
+
 export interface DaemonRpcWireClient {
 	readonly daemonStatus: (
 		input: DaemonStatusRequest,
-	) => Effect.Effect<DaemonControlStatusResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonControlStatusResult, WireRpcError>
 	readonly daemonHealth: (
 		input: DaemonHealthRequest,
-	) => Effect.Effect<DaemonHealthResult, RpcClientError | DaemonRpcActionError>
-	readonly daemonLogs: (
-		input: DaemonLogsRequest,
-	) => Effect.Effect<DaemonLogsResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonHealthResult, WireRpcError>
+	readonly daemonLogs: (input: DaemonLogsRequest) => Effect.Effect<DaemonLogsResult, WireRpcError>
 	readonly daemonStop: (
 		input: DaemonStopRequest,
-	) => Effect.Effect<DaemonControlStatusResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonControlStatusResult, WireRpcError>
 	readonly daemonRestart: (
 		input: DaemonRestartRequest,
-	) => Effect.Effect<DaemonControlStatusResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonControlStatusResult, WireRpcError>
 	readonly daemonAttach: (
 		input: DaemonAttachRequest,
-	) => Effect.Effect<DaemonAttachReconnectResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonAttachReconnectResult, WireRpcError>
 	readonly daemonReconnect: (
 		input: DaemonReconnectRequest,
-	) => Effect.Effect<DaemonAttachReconnectResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonAttachReconnectResult, WireRpcError>
 	readonly daemonHeartbeat: (
 		input: DaemonHeartbeatRequest,
-	) => Effect.Effect<DaemonHeartbeatResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonHeartbeatResult, WireRpcError>
 	readonly daemonEventStream: (
 		input: DaemonEventStreamRequest,
-	) => Effect.Effect<DaemonEventStreamResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonEventStreamResult, WireRpcError>
 	readonly daemonSessionSnapshot: (
 		input: DaemonSessionSnapshotRequest,
-	) => Effect.Effect<DaemonSessionSnapshotResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionSnapshotResult, WireRpcError>
 	readonly daemonSessionStart: (
 		input: DaemonSessionStartRequest,
-	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionMutationResult, WireRpcError>
 	readonly daemonSessionStop: (
 		input: DaemonSessionStopRequest,
-	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionMutationResult, WireRpcError>
 	readonly daemonSessionPause: (
 		input: DaemonSessionPauseRequest,
-	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionMutationResult, WireRpcError>
 	readonly daemonSessionResume: (
 		input: DaemonSessionResumeRequest,
-	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionMutationResult, WireRpcError>
 	readonly daemonSessionRecover: (
 		input: DaemonSessionRecoverRequest,
-	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionMutationResult, WireRpcError>
 	readonly daemonSessionUpdateState: (
 		input: DaemonSessionUpdateStateRequest,
-	) => Effect.Effect<DaemonSessionMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonSessionMutationResult, WireRpcError>
 	readonly daemonDevServerStatus: (
 		input: DaemonDevServerStatusRequest,
-	) => Effect.Effect<DaemonDevServerStatusResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonDevServerStatusResult, WireRpcError>
 	readonly daemonDevServerList: (
 		input: DaemonDevServerListRequest,
-	) => Effect.Effect<DaemonDevServerListResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonDevServerListResult, WireRpcError>
 	readonly daemonDevServerStart: (
 		input: DaemonDevServerStartRequest,
-	) => Effect.Effect<DaemonDevServerMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonDevServerMutationResult, WireRpcError>
 	readonly daemonDevServerStop: (
 		input: DaemonDevServerStopRequest,
-	) => Effect.Effect<DaemonDevServerMutationResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonDevServerMutationResult, WireRpcError>
 	readonly daemonQueueEnqueue: (
 		input: DaemonQueueEnqueueRequest,
-	) => Effect.Effect<DaemonQueueEnqueueResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonQueueEnqueueResult, WireRpcError>
 	readonly daemonQueueQuery: (
 		input: DaemonQueueQueryRequest,
-	) => Effect.Effect<DaemonQueueQueryResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonQueueQueryResult, WireRpcError>
 	readonly daemonQueueCancel: (
 		input: DaemonQueueCancelRequest,
-	) => Effect.Effect<DaemonQueueCancelResult, RpcClientError | DaemonRpcActionError>
+	) => Effect.Effect<DaemonQueueCancelResult, WireRpcError>
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -253,6 +261,9 @@ const hasTaggedActionError = (error: unknown): error is DaemonRpcActionError =>
 	(error["action"] === undefined || typeof error["action"] === "string")
 
 const mapWireError = (operation: DaemonRpcOperation, error: unknown): DaemonRpcClientError => {
+	if (error instanceof DaemonRpcTimeoutError) {
+		return error
+	}
 	if (error instanceof DaemonRpcProtocolVersionMismatchError) {
 		return error
 	}
@@ -540,30 +551,51 @@ export const makeDaemonRpcClientFromWire = (wire: DaemonRpcWireClient): DaemonRp
 
 const makeDaemonRpcClient = Effect.gen(function* () {
 	const raw = yield* RpcClient.make(DaemonRpcGroup)
+	const withRpcTimeout = <A, E>(
+		operation: DaemonRpcOperation,
+		effect: Effect.Effect<A, E>,
+	): Effect.Effect<A, E | DaemonRpcTimeoutError> =>
+		effect.pipe(
+			Effect.disconnect,
+			Effect.timeoutFail({
+				duration: `${DAEMON_RPC_CALL_TIMEOUT_MS} millis`,
+				onTimeout: () =>
+					new DaemonRpcTimeoutError({
+						operation,
+						timeoutMs: DAEMON_RPC_CALL_TIMEOUT_MS,
+					}),
+			}),
+		)
+
 	const wire: DaemonRpcWireClient = {
-		daemonStatus: (input) => raw.daemonStatus(input),
-		daemonHealth: (input) => raw.daemonHealth(input),
-		daemonLogs: (input) => raw.daemonLogs(input),
-		daemonStop: (input) => raw.daemonStop(input),
-		daemonRestart: (input) => raw.daemonRestart(input),
-		daemonAttach: (input) => raw.daemonAttach(input),
-		daemonReconnect: (input) => raw.daemonReconnect(input),
-		daemonHeartbeat: (input) => raw.daemonHeartbeat(input),
-		daemonEventStream: (input) => raw.daemonEventStream(input),
-		daemonSessionSnapshot: (input) => raw.daemonSessionSnapshot(input),
-		daemonSessionStart: (input) => raw.daemonSessionStart(input),
-		daemonSessionStop: (input) => raw.daemonSessionStop(input),
-		daemonSessionPause: (input) => raw.daemonSessionPause(input),
-		daemonSessionResume: (input) => raw.daemonSessionResume(input),
-		daemonSessionRecover: (input) => raw.daemonSessionRecover(input),
-		daemonSessionUpdateState: (input) => raw.daemonSessionUpdateState(input),
-		daemonDevServerStatus: (input) => raw.daemonDevServerStatus(input),
-		daemonDevServerList: (input) => raw.daemonDevServerList(input),
-		daemonDevServerStart: (input) => raw.daemonDevServerStart(input),
-		daemonDevServerStop: (input) => raw.daemonDevServerStop(input),
-		daemonQueueEnqueue: (input) => raw.daemonQueueEnqueue(input),
-		daemonQueueQuery: (input) => raw.daemonQueueQuery(input),
-		daemonQueueCancel: (input) => raw.daemonQueueCancel(input),
+		daemonStatus: (input) => withRpcTimeout("status", raw.daemonStatus(input)),
+		daemonHealth: (input) => withRpcTimeout("health", raw.daemonHealth(input)),
+		daemonLogs: (input) => withRpcTimeout("logs", raw.daemonLogs(input)),
+		daemonStop: (input) => withRpcTimeout("stop", raw.daemonStop(input)),
+		daemonRestart: (input) => withRpcTimeout("restart", raw.daemonRestart(input)),
+		daemonAttach: (input) => withRpcTimeout("attach", raw.daemonAttach(input)),
+		daemonReconnect: (input) => withRpcTimeout("reconnect", raw.daemonReconnect(input)),
+		daemonHeartbeat: (input) => withRpcTimeout("heartbeat", raw.daemonHeartbeat(input)),
+		daemonEventStream: (input) => withRpcTimeout("eventStream", raw.daemonEventStream(input)),
+		daemonSessionSnapshot: (input) =>
+			withRpcTimeout("sessionSnapshot", raw.daemonSessionSnapshot(input)),
+		daemonSessionStart: (input) => withRpcTimeout("sessionStart", raw.daemonSessionStart(input)),
+		daemonSessionStop: (input) => withRpcTimeout("sessionStop", raw.daemonSessionStop(input)),
+		daemonSessionPause: (input) => withRpcTimeout("sessionPause", raw.daemonSessionPause(input)),
+		daemonSessionResume: (input) => withRpcTimeout("sessionResume", raw.daemonSessionResume(input)),
+		daemonSessionRecover: (input) =>
+			withRpcTimeout("sessionRecover", raw.daemonSessionRecover(input)),
+		daemonSessionUpdateState: (input) =>
+			withRpcTimeout("sessionUpdateState", raw.daemonSessionUpdateState(input)),
+		daemonDevServerStatus: (input) =>
+			withRpcTimeout("devServerStatus", raw.daemonDevServerStatus(input)),
+		daemonDevServerList: (input) => withRpcTimeout("devServerList", raw.daemonDevServerList(input)),
+		daemonDevServerStart: (input) =>
+			withRpcTimeout("devServerStart", raw.daemonDevServerStart(input)),
+		daemonDevServerStop: (input) => withRpcTimeout("devServerStop", raw.daemonDevServerStop(input)),
+		daemonQueueEnqueue: (input) => withRpcTimeout("queueEnqueue", raw.daemonQueueEnqueue(input)),
+		daemonQueueQuery: (input) => withRpcTimeout("queueQuery", raw.daemonQueueQuery(input)),
+		daemonQueueCancel: (input) => withRpcTimeout("queueCancel", raw.daemonQueueCancel(input)),
 	}
 	return makeDaemonRpcClientFromWire(wire)
 })
