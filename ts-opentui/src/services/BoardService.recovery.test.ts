@@ -11,6 +11,7 @@ import {
 	applySessionRefreshPatch,
 	classifySessionRecoveryError,
 	isBoardDaemonAuthorityRequired,
+	mergeDaemonTasksWithTmuxSessionPresence,
 	reconcileLoadedTasksWithLocalCreateGrace,
 	resolveBoardRefreshExecutionMode,
 	resolveHasWorktreeFlag,
@@ -291,6 +292,56 @@ describe("applySessionRefreshPatch", () => {
 		expect(updated.hasUncommittedChanges).toBe(false)
 		expect(updated.gitAdditions).toBe(0)
 		expect(updated.gitDeletions).toBe(0)
+	})
+})
+
+describe("mergeDaemonTasksWithTmuxSessionPresence", () => {
+	it("promotes hasTmuxSession when tmux discovery confirms matching issue", () => {
+		const daemonTasks = [
+			{
+				id: "te",
+				title: "Task",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-07T00:00:00.000Z",
+				updated_at: "2026-03-07T00:00:00.000Z",
+				implementations: ["default"],
+				sessionState: "idle" as const,
+				hasTmuxSession: undefined,
+			},
+		] as const
+
+		const merged = mergeDaemonTasksWithTmuxSessionPresence({
+			daemonTasks,
+			tmuxSessionIssueIds: new Set(["te"]),
+		})
+
+		expect(merged[0]?.hasTmuxSession).toBe(true)
+	})
+
+	it("preserves existing hasTmuxSession when already true", () => {
+		const daemonTasks = [
+			{
+				id: "te",
+				title: "Task",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-07T00:00:00.000Z",
+				updated_at: "2026-03-07T00:00:00.000Z",
+				implementations: ["default"],
+				sessionState: "idle" as const,
+				hasTmuxSession: true,
+			},
+		] as const
+
+		const merged = mergeDaemonTasksWithTmuxSessionPresence({
+			daemonTasks,
+			tmuxSessionIssueIds: new Set<string>(),
+		})
+
+		expect(merged[0]?.hasTmuxSession).toBe(true)
 	})
 })
 

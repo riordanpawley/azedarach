@@ -34,7 +34,11 @@ import {
 } from "../core/IssueTrackerClient.js"
 import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
-import { getWorktreePath } from "../core/paths.js"
+import {
+	getWorktreePath,
+	normalizeIssueIdForLookup,
+	resolveIssueIdFromSessionName,
+} from "../core/paths.js"
 import type {
 	InvalidStateError,
 	SessionError,
@@ -455,6 +459,20 @@ export const resolveDaemonBoardReadModelRpc = (params: {
 	const boardReadModel = params.daemonRpcClient.value.boardReadModel
 	return boardReadModel === undefined ? Option.none() : Option.some(boardReadModel)
 }
+
+export const mergeDaemonTasksWithTmuxSessionPresence = (params: {
+	readonly daemonTasks: ReadonlyArray<TaskWithSession>
+	readonly tmuxSessionIssueIds: ReadonlySet<string>
+}): ReadonlyArray<TaskWithSession> =>
+	params.daemonTasks.map((task) => {
+		if (task.hasTmuxSession === true) {
+			return task
+		}
+		const hasDiscoveredTmuxSession = params.tmuxSessionIssueIds.has(
+			normalizeIssueIdForLookup(task.id),
+		)
+		return hasDiscoveredTmuxSession ? { ...task, hasTmuxSession: true } : task
+	})
 
 export const applySessionRefreshPatch = (params: {
 	readonly task: TaskWithSession
@@ -947,6 +965,34 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			}
 		}
 
+		const loadTmuxSessionIssueIds = (projectPath: string | null) =>
+			Effect.sync(() => {
+				const output = Bun.spawnSync(["tmux", "list-sessions", "-F", "#{session_name}"], {
+					stdout: "pipe",
+					stderr: "pipe",
+				})
+				if (output.exitCode !== 0) {
+					return new Set<string>()
+				}
+				const sessions = new TextDecoder().decode(output.stdout).trim().split("\n").filter(Boolean)
+				const scopedProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
+				const issueIds = new Set<string>()
+				for (const sessionName of sessions) {
+					const issueId = resolveIssueIdFromSessionName(sessionName, {
+						projectPath: scopedProjectPath,
+					})
+					if (issueId) {
+						issueIds.add(normalizeIssueIdForLookup(issueId))
+					}
+				}
+				return issueIds
+			}).pipe(
+				Effect.tapError((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`),
+				),
+				Effect.catchAll(() => Effect.succeed(new Set<string>())),
+			)
+
 		const loadAuthoritativeSessions = (projectPath: string | null) => {
 			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
 				const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
@@ -1394,7 +1440,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							),
 						),
 					)
-					const daemonTasksWithMutations = daemonTasks
+					const tmuxSessionIssueIds = yield* diagnostics.measure(
+						{
+							source: "BoardService",
+							name: "tmux.listSessions",
+							thresholdMs: 150,
+							details: daemonProjectPath,
+						},
+						loadTmuxSessionIssueIds(projectPath).pipe(Effect.withSpan("tmux.listSessions")),
+					)
+					const daemonTasksWithTmuxState = mergeDaemonTasksWithTmuxSessionPresence({
+						daemonTasks,
+						tmuxSessionIssueIds,
+					})
+					const daemonTasksWithMutations = daemonTasksWithTmuxState
 						.map((task) => {
 							const queuedMutation = daemonPendingMutations.get(task.id)
 							if (queuedMutation === undefined) {
@@ -1457,6 +1516,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							},
 							loadAuthoritativeSessions(projectPath).pipe(Effect.withSpan("sessions.listActive")),
 						),
+						tmuxSessionIssueIds: diagnostics.measure(
+							{
+								source: "BoardService",
+								name: "tmux.listSessions",
+								thresholdMs: 150,
+								details: projectPath ?? "default",
+							},
+							loadTmuxSessionIssueIds(projectPath).pipe(Effect.withSpan("tmux.listSessions")),
+						),
 					},
 					{ concurrency: "unbounded" },
 				)
@@ -1467,6 +1535,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					persistedBoardTasks,
 					issues,
 					activeSessions,
+					tmuxSessionIssueIds,
 				} = startupBatch
 				const { baseBranch, showLineChanges } = gitConfig
 				const isLinearBackend = "linear" in startupConfig.issueTracker
@@ -1695,7 +1764,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metricsOpt = HashMap.get(allMetrics, issue.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
-							const hasTmuxSession = session === undefined ? undefined : true
+							const hasTmuxSession =
+								session !== undefined ||
+								tmuxSessionIssueIds.has(normalizeIssueIdForLookup(issue.id))
+									? true
+									: undefined
 
 							// Get parent IDs for filtering and epic-branch behavior
 							const parentId = parentByIssueId.get(issue.id)
@@ -2148,6 +2221,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const projectPath = yield* resolveProjectPath(params.preferredProjectPath)
 				const activeSessions = yield* loadAuthoritativeSessions(projectPath)
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
+				const tmuxSessionIssueIds = yield* loadTmuxSessionIssueIds(projectPath)
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				const currentVisibleTaskIds = params.includeGitStatus
@@ -2164,7 +2238,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metricsOpt = HashMap.get(allMetrics, task.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
-							const hasTmuxSession = session === undefined ? undefined : true
+							const hasTmuxSession =
+								session !== undefined || tmuxSessionIssueIds.has(normalizeIssueIdForLookup(task.id))
+									? true
+									: undefined
 							const sessionStartedAt = session?.startedAt
 								? DateTime.formatIso(session.startedAt)
 								: undefined
