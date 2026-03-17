@@ -1,4 +1,5 @@
-import { Data, Effect } from "effect"
+import { Data, Duration, Effect, Ref, Schedule } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import {
 	BackendDaemonService,
 	type BackendDaemonServiceApi,
@@ -18,6 +19,7 @@ import {
 	type DevServerDaemonStatusRequest,
 	type DevServerDaemonStatusResult,
 } from "./DevServerDaemonService.js"
+import { SessionManager } from "./SessionManager.js"
 
 export interface BackendDaemonControlStatus {
 	readonly checkedAtMs: number
@@ -138,6 +140,48 @@ export class BackendDaemonControlRestartConfigurationError extends Data.TaggedEr
 	readonly reason: "missing-project-path"
 	readonly daemonSyncState: BackendSyncDaemonStatus["state"]
 }> {}
+
+const SESSION_RECOVERY_POLL_INTERVAL = "2 seconds"
+
+const isTransientSessionRecoveryError = (error: unknown): boolean => {
+	if (typeof error !== "object" || error === null) {
+		return false
+	}
+
+	const tagged = Reflect.get(error, "_tag")
+	if (typeof tagged !== "string") {
+		return false
+	}
+
+	switch (tagged) {
+		case "TmuxError":
+		case "ShellNotReadyError":
+		case "SessionLimitError":
+			return true
+		case "SessionNotFoundError":
+			return typeof Reflect.get(error, "session") === "string"
+		default:
+			return false
+	}
+}
+
+const isSessionWorktreeMissingError = (error: unknown): boolean =>
+	typeof error === "object" &&
+	error !== null &&
+	Reflect.get(error, "_tag") === "SessionWorktreeMissingError"
+
+const makeDaemonSessionRecoverySchedule = (params: {
+	readonly retryBaseDelayMs: number
+	readonly retryMaxDelayMs: number
+}) =>
+	Schedule.exponential(Duration.millis(Math.max(1, Math.trunc(params.retryBaseDelayMs)))).pipe(
+		Schedule.jittered,
+		Schedule.modifyDelay((_output, duration) =>
+			Duration.min(duration, Duration.millis(Math.max(1, Math.trunc(params.retryMaxDelayMs)))),
+		),
+		Schedule.whileInput(isTransientSessionRecoveryError),
+		Schedule.intersect(Schedule.recurs(5)),
+	)
 
 const readStatus = (
 	runtime: BackendDaemonServiceApi,
@@ -308,11 +352,114 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			BackendDaemonService.Default,
 			BackendSyncDaemonService.Default,
 			DevServerDaemonService.Default,
+			SessionManager.Default,
+			AppConfig.Default,
 		],
 		effect: Effect.gen(function* () {
 			const runtime = yield* BackendDaemonService
 			const sync = yield* BackendSyncDaemonService
 			const devServer = yield* DevServerDaemonService
+			const sessionManager = yield* SessionManager
+			const appConfig = yield* AppConfig
+			const recoveryInFlightRef = yield* Ref.make<ReadonlySet<string>>(new Set())
+
+			const markRecoveryInFlight = (issueId: string): Effect.Effect<boolean> =>
+				Ref.modify(recoveryInFlightRef, (current): [boolean, ReadonlySet<string>] => {
+					if (current.has(issueId)) {
+						return [false, current]
+					}
+					const next = new Set(current)
+					next.add(issueId)
+					return [true, next]
+				})
+
+			const clearRecoveryInFlight = (issueId: string): Effect.Effect<void> =>
+				Ref.update(recoveryInFlightRef, (current) => {
+					if (!current.has(issueId)) {
+						return current
+					}
+					const next = new Set(current)
+					next.delete(issueId)
+					return next
+				})
+
+			const recoverIssueFromDaemonWorker = (issueId: string, projectPath: string) =>
+				Effect.gen(function* () {
+					const shouldRun = yield* markRecoveryInFlight(issueId)
+					if (!shouldRun) {
+						return
+					}
+
+					const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
+					const schedule = makeDaemonSessionRecoverySchedule({
+						retryBaseDelayMs: recoveryConfig.retryBaseDelayMs,
+						retryMaxDelayMs: recoveryConfig.retryMaxDelayMs,
+					})
+					const autoRecoveryDelayMs = Math.max(0, Math.floor(recoveryConfig.autoRecoveryDelayMs))
+
+					yield* Effect.sleep(`${autoRecoveryDelayMs} millis`).pipe(
+						Effect.zipRight(sessionManager.recoverSession(issueId)),
+						Effect.retry({ schedule }),
+						Effect.tap(() =>
+							Effect.log(
+								`Daemon session recovery completed for ${issueId} (projectPath=${projectPath})`,
+							),
+						),
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								if (isSessionWorktreeMissingError(error)) {
+									yield* Effect.logWarning(
+										`Daemon session recovery terminal failure for ${issueId} (projectPath=${projectPath}): worktree missing; resetting session state to idle`,
+									)
+									yield* sessionManager
+										.updateState(issueId, "idle")
+										.pipe(Effect.catchAll(() => Effect.void))
+									return
+								}
+
+								yield* Effect.logWarning(
+									`Daemon session recovery failed for ${issueId} (projectPath=${projectPath}): ${String(error)}`,
+								)
+							}),
+						),
+						Effect.ensuring(clearRecoveryInFlight(issueId)),
+					)
+				})
+
+			const runDaemonRecoverySweep = Effect.gen(function* () {
+				const status = yield* sync.getStatus()
+				const projectPath = status.projectPath
+				if (projectPath === null) {
+					return
+				}
+
+				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
+				if (recoveryConfig.mode !== "auto") {
+					return
+				}
+
+				const sessions = yield* sessionManager.listActive(projectPath)
+				const crashedIssueIds = Array.from(
+					new Set(
+						sessions
+							.filter((session) => session.state === "crashed")
+							.map((session) => session.issueId),
+					),
+				)
+				for (const issueId of crashedIssueIds) {
+					yield* Effect.forkDaemon(recoverIssueFromDaemonWorker(issueId, projectPath))
+				}
+			}).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Daemon session recovery sweep failed: ${String(error)}`),
+				),
+				Effect.asVoid,
+			)
+
+			yield* Effect.forkDaemon(
+				Effect.repeat(runDaemonRecoverySweep, Schedule.spaced(SESSION_RECOVERY_POLL_INTERVAL)),
+			)
+
 			return makeBackendDaemonControlService({
 				runtime,
 				sync,

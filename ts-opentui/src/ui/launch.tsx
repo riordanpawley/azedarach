@@ -60,15 +60,18 @@ async function registerReturnBinding(): Promise<void> {
  * Uses React's createRoot pattern for rendering.
  */
 export async function launchTUI(): Promise<void> {
+	const launchStartedAtMs = Date.now()
 	await truncateAzLogOnStartup()
+
+	const handleSigint = () => {
+		killActivePopup()
+		requestShutdown()
+	}
 
 	// Register SIGINT handler to clean up any active tmux popup.
 	// Avoid forcing process.exit here: hard-exiting from a signal handler during
 	// renderer lifecycle can trigger OpenTUI/React teardown failures.
-	process.on("SIGINT", () => {
-		killActivePopup()
-		requestShutdown()
-	})
+	process.on("SIGINT", handleSigint)
 
 	// Register return-to-board tmux keybinding (fire-and-forget)
 	registerReturnBinding()
@@ -77,8 +80,21 @@ export async function launchTUI(): Promise<void> {
 		useMouse: true,
 	})
 	const root = createRoot(renderer)
+	let shuttingDown = false
+	let resolveShutdown: (() => void) | null = null
+
+	const shutdownComplete = new Promise<void>((resolve) => {
+		resolveShutdown = resolve
+	})
+	const finalizeShutdown = () => {
+		const resolve = resolveShutdown
+		resolveShutdown = null
+		resolve?.()
+	}
 
 	const shutdown = () => {
+		if (shuttingDown) return
+		shuttingDown = true
 		resetTerminalModesOnExit()
 		try {
 			root.unmount()
@@ -90,13 +106,19 @@ export async function launchTUI(): Promise<void> {
 		} catch {
 			// Renderer may already be destroyed.
 		}
+		clearShutdownHandler()
+		process.off("SIGINT", handleSigint)
+		finalizeShutdown()
 	}
 
 	registerShutdownHandler(shutdown)
 	renderer.once("destroy", () => {
 		resetTerminalModesOnExit()
 		clearShutdownHandler()
+		process.off("SIGINT", handleSigint)
+		finalizeShutdown()
 	})
 
-	root.render(<App />)
+	root.render(<App launchStartedAtMs={launchStartedAtMs} />)
+	await shutdownComplete
 }

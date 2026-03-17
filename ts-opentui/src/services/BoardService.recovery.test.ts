@@ -4,6 +4,7 @@ import {
 	SessionError,
 	SessionLimitError,
 	SessionNotFoundError,
+	SessionWorktreeMissingError,
 } from "../core/SessionManager.js"
 import { TmuxError } from "../core/TmuxService.js"
 import {
@@ -55,14 +56,14 @@ describe("BoardService session recovery classification", () => {
 			expectedState: "crashed",
 			operation: "recoverSession",
 		})
-		const terminalSessionError = new SessionError({
-			message: "Worktree no longer exists at /tmp/worktree. Cannot recover session.",
+		const worktreeMissingError = new SessionWorktreeMissingError({
 			issueId: "AZE-102",
+			worktreePath: "/tmp/worktree",
 		})
 
 		expect(classifySessionRecoveryError(notFoundError)).toBe("terminal")
 		expect(classifySessionRecoveryError(invalidStateError)).toBe("terminal")
-		expect(classifySessionRecoveryError(terminalSessionError)).toBe("terminal")
+		expect(classifySessionRecoveryError(worktreeMissingError)).toBe("terminal")
 	})
 })
 

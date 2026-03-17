@@ -5,12 +5,12 @@
  */
 
 import { Atom, Result } from "@effect-atom/atom"
-import { Effect } from "effect"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
+import { Effect, SubscriptionRef } from "effect"
 import {
 	computeDependencyPhases,
 	type PhaseComputationResult,
 } from "../../core/dependencyPhases.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { appRuntime } from "./runtime.js"
 
@@ -110,7 +110,13 @@ export const drillDownEpicAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
 		return nav.drillDownEpic
-	}),
+	}).pipe(
+		Effect.catchAll((error) =>
+			Effect.logWarning(`drillDownEpicAtom fallback: ${String(error)}`).pipe(
+				Effect.zipRight(SubscriptionRef.make<string | null>(null)),
+			),
+		),
+	),
 )
 
 /**
@@ -124,7 +130,13 @@ export const drillDownChildIdsAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
 		return nav.drillDownChildIds
-	}),
+	}).pipe(
+		Effect.catchAll((error) =>
+			Effect.logWarning(`drillDownChildIdsAtom fallback: ${String(error)}`).pipe(
+				Effect.zipRight(SubscriptionRef.make<ReadonlySet<string>>(new Set())),
+			),
+		),
+	),
 )
 
 /**

@@ -19,7 +19,7 @@
 
 import { Command, type CommandExecutor, FileSystem } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
+import { Cause, Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
 import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
@@ -326,6 +326,14 @@ export class SessionError extends Data.TaggedError("SessionError")<{
 }> {}
 
 /**
+ * Error when session recovery cannot proceed because the worktree was removed.
+ */
+export class SessionWorktreeMissingError extends Data.TaggedError("SessionWorktreeMissingError")<{
+	readonly issueId: string
+	readonly worktreePath: string
+}> {}
+
+/**
  * Error when session is not found
  */
 export class SessionNotFoundError extends Data.TaggedError("SessionNotFoundError")<{
@@ -459,7 +467,12 @@ export interface SessionManagerService {
 		issueId: string,
 	) => Effect.Effect<
 		Session,
-		SessionNotFoundError | InvalidStateError | TmuxError | SessionError | SessionLimitError,
+		| SessionNotFoundError
+		| InvalidStateError
+		| TmuxError
+		| SessionError
+		| SessionWorktreeMissingError
+		| SessionLimitError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -602,8 +615,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 				const effectiveProjectPath = projectPath ?? (yield* getEffectiveProjectPath())
 				return yield* sessionStateStore.load(effectiveProjectPath)
 			}).pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(error).pipe(
+				Effect.catchAllCause((cause) =>
+					Effect.logWarning(`Recovering after caught error: ${Cause.pretty(cause)}`).pipe(
 						Effect.zipRight(Effect.succeed(HashMap.empty<string, Session>())),
 					),
 				),
@@ -615,7 +628,11 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 				const effectiveProjectPath = projectPath ?? (yield* getEffectiveProjectPath())
 				yield* sessionStateStore.save(effectiveProjectPath, sessions)
 			}).pipe(
-				Effect.catchAll((error) => Effect.logWarning(error).pipe(Effect.zipRight(Effect.void))),
+				Effect.catchAllCause((cause) =>
+					Effect.logWarning(`Recovering after caught error: ${Cause.pretty(cause)}`).pipe(
+						Effect.zipRight(Effect.void),
+					),
+				),
 			)
 
 		// Helper: Publish state change event
@@ -1431,9 +1448,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					if (!worktreeExists) {
 						return yield* Effect.fail(
-							new SessionError({
-								message: `Worktree no longer exists at ${session.worktreePath}. Cannot recover session.`,
+							new SessionWorktreeMissingError({
 								issueId,
+								worktreePath: session.worktreePath,
 							}),
 						)
 					}

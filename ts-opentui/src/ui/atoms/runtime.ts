@@ -49,7 +49,9 @@ import { ViewService } from "../../services/ViewService.js"
 const platformLayer = BunContext.layer
 
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
-export const appLayer = Layer.mergeAll(
+const loggerLayer = Logger.replaceScoped(Logger.defaultLogger, fileLogger)
+
+const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	BackendDaemonService.Default,
 	BackendSyncDaemonService.Default,
@@ -70,9 +72,7 @@ export const appLayer = Layer.mergeAll(
 	SessionManager.Default,
 	IssueTrackerClient.Default,
 	AppConfig.Default,
-	VCService.Default,
 	ViewService.Default,
-	TmuxSessionMonitor.Default,
 	CommandQueueService.Default,
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
@@ -84,13 +84,41 @@ export const appLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
-	PlanningService.Default,
 	GitSyncService.Default,
+)
+
+const deferredServicesLayer = Layer.mergeAll(
+	PlanningService.Default,
 	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+	TmuxSessionMonitor.Default,
+	VCService.Default,
+)
+
+/**
+ * Core layer for startup-critical services.
+ * This is intentionally narrower than the full application graph and can be
+ * consumed by atoms that should be available before deferred hydration.
+ */
+export const appCoreLayer = coreServicesLayer.pipe(
+	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )
+
+/**
+ * Deferred feature layer for non-critical services.
+ * Atoms can migrate to appDeferredRuntime incrementally.
+ */
+const appFullServicesLayer = Layer.mergeAll(coreServicesLayer, deferredServicesLayer)
+
+export const appDeferredLayer = appFullServicesLayer.pipe(
+	Layer.provide(loggerLayer),
+	Layer.provideMerge(platformLayer),
+)
+
+/**
+ * Full compatibility layer used by the existing appRuntime surface.
+ */
+export const appLayer = appDeferredLayer
 
 /**
  * Runtime atom that provides all services and platform dependencies
@@ -98,4 +126,6 @@ export const appLayer = Layer.mergeAll(
  * This creates a runtime that all other async atoms can use.
  */
 
+export const appCoreRuntime = Atom.runtime(appCoreLayer)
+export const appDeferredRuntime = Atom.runtime(appDeferredLayer)
 export const appRuntime = Atom.runtime(appLayer)

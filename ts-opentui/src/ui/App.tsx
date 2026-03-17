@@ -8,7 +8,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
 import { deriveCurrentProjectWaitingIssueIds } from "../lib/waitingSessions.js"
@@ -19,12 +19,12 @@ import {
 	aiCreateTaskAtom,
 	appConfigAtom,
 	boardIsLoadingAtom,
+	boardRenderStateAtom,
 	boardTasksAtom,
 	createTaskAtom,
 	currentProjectAtom,
 	DEFAULT_SPEC_WORKSPACE_STATE,
 	drillDownEpicAtom,
-	drillDownFilteredTasksAtom,
 	drillDownPhasesAtom,
 	exitToNormalAtom,
 	focusedIssuePrimaryDevServerAtom,
@@ -66,6 +66,7 @@ import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { PlanningOverlay } from "./PlanningOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { isSmallScreen } from "./responsive.js"
+import { requestShutdown } from "./runtimeControl.js"
 import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
@@ -156,7 +157,7 @@ const computeCompactVisibleTaskIds = (
 	return sortedTasks.slice(startIndex, endIndex).map((task) => task.id)
 }
 
-export const App = () => {
+const HydratedApp = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Hooks - Atomic State Management
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -208,7 +209,20 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Use derived atom that handles both normal and drill-down filtering
 	// All computation happens in atoms - React just renders
-	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+	const boardRenderState = useAtomValue(boardRenderStateAtom)
+	const tasksByColumn = useMemo(
+		() => boardRenderState.tasksByColumn.map((column) => [...column]),
+		[boardRenderState],
+	)
+	const [startupCapabilities, setStartupCapabilities] = useState<{
+		readonly boardReady: boolean
+		readonly sessionMonitorReady: boolean
+		readonly specReady: boolean
+	}>({
+		boardReady: false,
+		sessionMonitorReady: false,
+		specReady: false,
+	})
 	const boardTasks = useAtomValue(
 		boardTasksAtom,
 		Result.getOrElse(() => []),
@@ -234,8 +248,9 @@ export const App = () => {
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
+		if (!startupCapabilities.sessionMonitorReady) return
 		startSessionMonitor()
-	}, [startSessionMonitor])
+	}, [startSessionMonitor, startupCapabilities.sessionMonitorReady])
 
 	// Actions for prompts (these bypass keyboard handling)
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
@@ -277,6 +292,17 @@ export const App = () => {
 	const setVisibleTaskIds = useAtomSet(setVisibleTaskIdsAtom, { mode: "promise" })
 	const refreshSpecWorkspace = useAtomSet(refreshSpecWorkspaceAtom, { mode: "promise" })
 
+	useEffect(() => {
+		if (startupCapabilities.boardReady) return
+		if (boardRenderState._tag === "ready" || !isLoading) {
+			setStartupCapabilities({
+				boardReady: true,
+				sessionMonitorReady: true,
+				specReady: true,
+			})
+		}
+	}, [boardRenderState._tag, isLoading, startupCapabilities.boardReady])
+
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
@@ -310,8 +336,9 @@ export const App = () => {
 	}, [viewMode, tasksByColumn, selectedTask?.id, columnIndex, taskIndex, maxVisibleTasks])
 
 	useEffect(() => {
+		if (!startupCapabilities.boardReady) return
 		setVisibleTaskIds(visibleTaskIds)
-	}, [setVisibleTaskIds, visibleTaskIds])
+	}, [setVisibleTaskIds, startupCapabilities.boardReady, visibleTaskIds])
 
 	const specWorkspaceState = useAtomValue(
 		specWorkspaceStateAtom,
@@ -319,6 +346,9 @@ export const App = () => {
 	)
 
 	useEffect(() => {
+		if (!startupCapabilities.specReady) {
+			return
+		}
 		if (mode._tag !== "spec" || !specEnabled) {
 			return
 		}
@@ -331,7 +361,7 @@ export const App = () => {
 		return () => {
 			clearInterval(interval)
 		}
-	}, [mode, refreshSpecWorkspace, specEnabled])
+	}, [mode, refreshSpecWorkspace, specEnabled, startupCapabilities.specReady])
 
 	useEffect(() => {
 		if (mode._tag === "spec" && !specEnabled) {
@@ -378,6 +408,21 @@ export const App = () => {
 		// Ctrl-C: Kill active editor popup (MUST be first - works in any state)
 		if (event.ctrl && event.name === "c") {
 			killActivePopup()
+			return
+		}
+
+		// Direct quit fallback from normal mode.
+		// This bypasses KeyboardService so quit still works if service dependencies
+		// are degraded (for example, during board/runtime errors).
+		if (
+			!event.ctrl &&
+			!event.meta &&
+			!event.shift &&
+			event.name === "q" &&
+			mode._tag === "normal" &&
+			!drillDownEpicId
+		) {
+			requestShutdown()
 			return
 		}
 
@@ -520,14 +565,24 @@ export const App = () => {
 			)
 		}
 
-		// The derived atom returns an empty array if sources are loading/failed
-		// This is handled gracefully - the board just shows empty columns
 		const activeColumn = COLUMNS[columnIndex] ?? COLUMNS[0]
 		const canPageLeft = columnIndex > 0
 		const canPageRight = columnIndex < COLUMNS.length - 1
 
 		return (
 			<box flexGrow={1} flexDirection="column">
+				{boardRenderState._tag === "loading" && (
+					<box paddingLeft={1} paddingBottom={1}>
+						<text fg={theme.overlay1}>{"Loading board data..."}</text>
+					</box>
+				)}
+				{boardRenderState._tag === "error" && (
+					<box paddingLeft={1} paddingBottom={1}>
+						<text fg={theme.red}>
+							{`Board unavailable (${boardRenderState.reason.replaceAll("_", " ")})`}
+						</text>
+					</box>
+				)}
 				{/* Epic header when in drill-down mode */}
 				{/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
 
@@ -753,3 +808,89 @@ export const App = () => {
 }
 
 const ATTR_BOLD = 1
+
+const STARTUP_HYDRATION_DELAY_MS = 0
+const DEFAULT_TTFP_BUDGET_MS = 120
+const STARTUP_METRIC_PREFIX = "[startup-metric]"
+
+const readStartupBudgetMs = (): number => {
+	const raw = process.env.AZ_TUI_TTFP_BUDGET_MS
+	if (raw === undefined) return DEFAULT_TTFP_BUDGET_MS
+	const parsed = Number.parseInt(raw, 10)
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TTFP_BUDGET_MS
+}
+
+const maybeLogStartupMetric = (name: "ttfp_ms" | "hydrated_ms", value: number) => {
+	if (process.env.AZ_STARTUP_METRICS === "1") {
+		console.error(`${STARTUP_METRIC_PREFIX} ${JSON.stringify({ metric: name, value })}`)
+	}
+}
+
+const StartupPlaceholder = () => (
+	<box flexDirection="column" width="100%" height="100%" backgroundColor={theme.base}>
+		<box flexGrow={1} justifyContent="center" alignItems="center">
+			<text fg={theme.overlay1}>{"Bootstrapping board..."}</text>
+		</box>
+		<box
+			border={true}
+			borderColor={theme.surface1}
+			paddingLeft={1}
+			paddingRight={1}
+			paddingTop={0}
+			paddingBottom={0}
+			height={1}
+		>
+			<text fg={theme.subtext0}>{"mode: startup"}</text>
+		</box>
+	</box>
+)
+
+type AppProps = {
+	readonly launchStartedAtMs?: number
+	readonly ttfpBudgetMs?: number
+}
+
+export const App = ({ launchStartedAtMs, ttfpBudgetMs = readStartupBudgetMs() }: AppProps) => {
+	const [hydrated, setHydrated] = useState(false)
+	const firstPaintLoggedRef = useRef(false)
+
+	useEffect(() => {
+		if (firstPaintLoggedRef.current) return
+		firstPaintLoggedRef.current = true
+
+		if (launchStartedAtMs !== undefined) {
+			const ttfpMs = Date.now() - launchStartedAtMs
+			maybeLogStartupMetric("ttfp_ms", ttfpMs)
+			if (ttfpMs > ttfpBudgetMs) {
+				const message = `[startup] ttfp budget exceeded: ${ttfpMs}ms > ${ttfpBudgetMs}ms`
+				console.error(message)
+				if (process.env.AZ_TUI_STRICT_STARTUP_BUDGET === "1") {
+					// CI mode can opt in to a hard startup budget failure signal.
+					queueMicrotask(() => {
+						throw new Error(message)
+					})
+				}
+			}
+		}
+
+		const hydrateTimer = setTimeout(() => {
+			setHydrated(true)
+		}, STARTUP_HYDRATION_DELAY_MS)
+
+		return () => {
+			clearTimeout(hydrateTimer)
+		}
+	}, [launchStartedAtMs, ttfpBudgetMs])
+
+	useEffect(() => {
+		if (!hydrated || launchStartedAtMs === undefined) return
+		const hydratedMs = Date.now() - launchStartedAtMs
+		maybeLogStartupMetric("hydrated_ms", hydratedMs)
+	}, [hydrated, launchStartedAtMs])
+
+	if (!hydrated) {
+		return <StartupPlaceholder />
+	}
+
+	return <HydratedApp />
+}

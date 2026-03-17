@@ -10,10 +10,10 @@
  * Standard window names for issue sessions
  */
 export const WINDOW_NAMES = {
-    CODE: "code",
-    DEV: "dev",
-    HX: "hx",
-    BACKGROUND: "background",
+	CODE: "code",
+	DEV: "dev",
+	HX: "hx",
+	BACKGROUND: "background",
 } as const
 
 /**
@@ -129,6 +129,10 @@ export const AI_SESSION_PREFIXES = ["claude-", "opencode-", "codex-"]
 
 const ISSUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const LINEAR_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9]*-[0-9]+$/
+const RESERVED_RUNTIME_ISSUE_IDS = new Set(["az"])
+
+const isRecoverableIssueId = (issueId: string): boolean =>
+	ISSUE_ID_PATTERN.test(issueId) && !RESERVED_RUNTIME_ISSUE_IDS.has(issueId.toLowerCase())
 
 const decodeLegacyNormalizedIssueId = (sessionName: string): string | undefined => {
 	if (sessionName.includes(".") || !sessionName.includes("_")) {
@@ -164,7 +168,7 @@ export function parseIssueSessionName(
 		const expectedPrefix = `${getProjectSessionPrefix(projectPath)}-`
 		if (withoutPrefix.startsWith(expectedPrefix)) {
 			const prefixedIssueId = decodeIssueSessionName(withoutPrefix.slice(expectedPrefix.length))
-			if (ISSUE_ID_PATTERN.test(prefixedIssueId)) {
+			if (isRecoverableIssueId(prefixedIssueId)) {
 				return { type: "issue", issueId: prefixedIssueId }
 			}
 		}
@@ -180,7 +184,7 @@ export function parseIssueSessionName(
 	if (hasProjectStylePrefix) {
 		const prefixedIssueId = decodeIssueSessionName(withoutPrefix.slice(3))
 		if (
-			ISSUE_ID_PATTERN.test(prefixedIssueId) &&
+			isRecoverableIssueId(prefixedIssueId) &&
 			(prefixedIssueId.length === 1 || prefixedIssueId.includes("-"))
 		) {
 			return { type: "issue", issueId: prefixedIssueId }
@@ -189,11 +193,11 @@ export function parseIssueSessionName(
 
 	const issueId = decodeIssueSessionName(withoutPrefix)
 	const legacyNormalizedIssueId = decodeLegacyNormalizedIssueId(issueId)
-	if (legacyNormalizedIssueId) {
+	if (legacyNormalizedIssueId && isRecoverableIssueId(legacyNormalizedIssueId)) {
 		return { type: "issue", issueId: legacyNormalizedIssueId }
 	}
 
-	if (ISSUE_ID_PATTERN.test(issueId)) {
+	if (isRecoverableIssueId(issueId)) {
 		return { type: "issue", issueId }
 	}
 

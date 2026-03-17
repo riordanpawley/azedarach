@@ -17,7 +17,6 @@ import {
 	HashMap,
 	Option,
 	Order,
-	Queue,
 	Record,
 	Ref,
 	Schedule,
@@ -42,6 +41,7 @@ import {
 	type SessionLimitError,
 	SessionManager,
 	type SessionNotFoundError,
+	type SessionWorktreeMissingError,
 } from "../core/SessionManager.js"
 import type {
 	TmuxError,
@@ -52,7 +52,13 @@ import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
 import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
-import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
+import type {
+	ColumnStatus,
+	GitStatus,
+	PRState,
+	SessionState,
+	TaskWithSession,
+} from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
@@ -66,7 +72,6 @@ import {
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
-import { makeSessionRecoveryRetrySchedule } from "./sessionRecoveryRetrySchedule.js"
 import { ToastService } from "./ToastService.js"
 import {
 	isTransientOperationalError,
@@ -90,8 +95,6 @@ const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
 const TRANSIENT_RETRY_ATTEMPTS = 4
 const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
-const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
-const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
 
 const withTransientRetry = <A, E, R>(
 	context: string,
@@ -122,19 +125,10 @@ type SessionRecoveryError =
 	| TmuxError
 	| ShellNotReadyError
 	| SessionError
+	| SessionWorktreeMissingError
 	| SessionLimitError
 
 export type SessionRecoveryRetryability = "transient" | "terminal"
-
-const normalizeRecoveryRetryBaseDelayMs = (value: number): number =>
-	Number.isFinite(value)
-		? Math.max(Math.trunc(value), SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN)
-		: 1000
-
-const normalizeRecoveryRetryMaxDelayMs = (value: number, baseDelayMs: number): number =>
-	Number.isFinite(value)
-		? Math.max(Math.trunc(value), Math.max(baseDelayMs, SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN))
-		: 60000
 
 export const classifySessionRecoveryError = (
 	error: SessionRecoveryError,
@@ -150,13 +144,12 @@ export const classifySessionRecoveryError = (
 			return "transient"
 		case "SessionError":
 			return isTransientOperationalErrorMessage(error.message) ? "transient" : "terminal"
+		case "SessionWorktreeMissingError":
+			return "terminal"
 		case "InvalidStateError":
 			return "terminal"
 	}
 }
-
-const isTransientSessionRecoveryError = (error: SessionRecoveryError): boolean =>
-	classifySessionRecoveryError(error) === "transient"
 
 export const makeBoardDaemonIpcSignals = (params: {
 	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
@@ -289,25 +282,6 @@ export const makeBoardDaemonIpcSignals = (params: {
 		signalReconnect,
 		signalHeartbeat,
 		consumeStreamBatch,
-	}
-}
-
-const formatSessionRecoveryError = (error: SessionRecoveryError): string => {
-	switch (error._tag) {
-		case "SessionNotFoundError":
-			return "session" in error
-				? `tmux session ${error.session} not found`
-				: `session ${error.issueId} not found`
-		case "InvalidStateError":
-			return `state=${error.currentState} expected=${error.expectedState ?? "unknown"}`
-		case "TmuxError":
-			return error.message
-		case "ShellNotReadyError":
-			return `${error.message} target=${error.target}`
-		case "SessionError":
-			return error.message
-		case "SessionLimitError":
-			return `${error.message} current=${error.current} limit=${error.limit}`
 	}
 }
 
@@ -789,6 +763,13 @@ interface MutationTaskUpsertOptions {
 	readonly parentEpicId?: string | null
 }
 
+interface AuthoritativeSessionView {
+	readonly issueId: string
+	readonly state: SessionState
+	readonly tmuxSessionName: string
+	readonly startedAt: DateTime.Utc
+}
+
 /**
  * Per-project board state
  *
@@ -871,8 +852,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			readonly timestamp: number
 		} | null>(null)
 		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
-		const autoRecoveryQueue = yield* Queue.unbounded<string>()
-		const autoRecoveryTrackedIssueIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 		const daemonFrontendClientId = `board-ui:${process.pid}`
 		const {
 			signalAttach: signalDaemonAttach,
@@ -885,6 +864,91 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			nowMs: Date.now,
 		})
 		const daemonStreamCursorRef = yield* Ref.make<number | undefined>(undefined)
+
+		const parseDaemonSessionState = (state: string): SessionState | undefined => {
+			switch (state) {
+				case "idle":
+				case "initializing":
+				case "busy":
+				case "waiting":
+				case "done":
+				case "error":
+				case "paused":
+				case "warning":
+				case "crashed":
+					return state
+				default:
+					return undefined
+			}
+		}
+
+		const parseDaemonStartedAt = (value: string): DateTime.Utc | undefined => {
+			const timestampMs = Date.parse(value)
+			if (Number.isNaN(timestampMs)) {
+				return undefined
+			}
+			return DateTime.unsafeFromDate(new Date(timestampMs))
+		}
+
+		const toAuthoritativeSessionView = (entry: {
+			readonly issueId: string
+			readonly state: string
+			readonly tmuxSessionName: string
+			readonly startedAt: string
+		}): AuthoritativeSessionView | undefined => {
+			const state = parseDaemonSessionState(entry.state)
+			if (state === undefined) {
+				return undefined
+			}
+			const startedAt = parseDaemonStartedAt(entry.startedAt)
+			if (startedAt === undefined) {
+				return undefined
+			}
+			return {
+				issueId: entry.issueId,
+				state,
+				tmuxSessionName: entry.tmuxSessionName,
+				startedAt,
+			}
+		}
+
+		const loadAuthoritativeSessions = (projectPath: string | null) => {
+			const loadLocalSessionViews = () =>
+				sessionManager
+					.listActive(projectPath ?? undefined)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([])),
+							),
+						),
+					)
+
+			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
+				return daemonRpcClient.value
+					.sessionSnapshot({ projectPath: projectPath ?? undefined })
+					.pipe(
+						Effect.map((result) =>
+							result.sessions
+								.map((entry) => toAuthoritativeSessionView(entry))
+								.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+						),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(loadLocalSessionViews()),
+							),
+						),
+					)
+			}
+
+			if (Option.isSome(daemonRpcClient)) {
+				return Effect.logDebug(
+					"BoardService falling back to local SessionManager authority because daemon client lacks sessionSnapshot RPC capability",
+				).pipe(Effect.zipRight(loadLocalSessionViews()))
+			}
+
+			return loadLocalSessionViews()
+		}
 
 		// ====================================================================
 		// Per-Project State Management
@@ -1246,142 +1310,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			)
 
-		const markAutoRecoveryTracked = (issueId: string): Effect.Effect<boolean> =>
-			Ref.modify(autoRecoveryTrackedIssueIdsRef, (current): [boolean, ReadonlySet<string>] => {
-				if (current.has(issueId)) {
-					return [false, current]
-				}
-				const next = new Set(current)
-				next.add(issueId)
-				return [true, next]
-			})
-
-		const unmarkAutoRecoveryTracked = (issueId: string): Effect.Effect<void> =>
-			Ref.update(autoRecoveryTrackedIssueIdsRef, (current) => {
-				if (!current.has(issueId)) {
-					return current
-				}
-				const next = new Set(current)
-				next.delete(issueId)
-				return next
-			})
-
-		const enqueueAutoRecovery = (issueId: string): Effect.Effect<boolean> =>
-			Effect.gen(function* () {
-				const shouldEnqueue = yield* markAutoRecoveryTracked(issueId)
-				if (!shouldEnqueue) {
-					return false
-				}
-				const offered = yield* Queue.offer(autoRecoveryQueue, issueId)
-				if (!offered) {
-					yield* unmarkAutoRecoveryTracked(issueId)
-					yield* Effect.logWarning(`Auto-recovery queue is unavailable for ${issueId}`)
-					return false
-				}
-				return true
-			})
-
-		const runAutoRecoveryForIssue = (issueId: string) =>
-			Effect.gen(function* () {
-				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
-				const initialDelayMs = Math.max(0, Math.trunc(recoveryConfig.autoRecoveryDelayMs))
-				const retryBaseDelayMs = normalizeRecoveryRetryBaseDelayMs(recoveryConfig.retryBaseDelayMs)
-				const retryMaxDelayMs = normalizeRecoveryRetryMaxDelayMs(
-					recoveryConfig.retryMaxDelayMs,
-					retryBaseDelayMs,
-				)
-				let attempt = 0
-
-				if (initialDelayMs > 0) {
-					yield* Effect.sleep(Duration.millis(initialDelayMs))
-				}
-
-				yield* sessionManager.recoverSession(issueId).pipe(
-					Effect.tap(() => Effect.log(`Auto-recovered session for ${issueId}`)),
-					Effect.tapError((error) => {
-						attempt += 1
-						const retryability = classifySessionRecoveryError(error)
-						return Effect.logError(
-							`Auto-recovery attempt ${attempt} failed for ${issueId} [${error._tag}, ${retryability}] ${formatSessionRecoveryError(error)}`,
-						)
-					}),
-					Effect.retry({
-						schedule: makeSessionRecoveryRetrySchedule(retryBaseDelayMs, retryMaxDelayMs),
-						while: isTransientSessionRecoveryError,
-					}),
-					Effect.catchAll((error) =>
-						Effect.logWarning(
-							`Stopped auto-recovery for ${issueId} [${error._tag}] ${formatSessionRecoveryError(error)}`,
-						),
-					),
-					Effect.ensuring(unmarkAutoRecoveryTracked(issueId)),
-				)
-			})
-
-		const queueAutoRecoveryForCrashedSessions = (
-			activeSessions: ReadonlyArray<{ readonly issueId: string; readonly state: string }>,
-		): Effect.Effect<void> =>
-			Effect.gen(function* () {
-				const crashedIssueIds = Array.from(
-					new Set(
-						activeSessions
-							.filter((session) => session.state === "crashed")
-							.map((session) => session.issueId),
-					),
-				)
-				if (crashedIssueIds.length === 0) {
-					return
-				}
-
-				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
-				if (recoveryConfig.mode !== "auto") {
-					yield* Effect.log(
-						`${crashedIssueIds.length} crashed session(s) detected. Manual recovery mode - use R to recover.`,
-					)
-					return
-				}
-
-				let enqueuedCount = 0
-				for (const issueId of crashedIssueIds) {
-					const wasEnqueued = yield* enqueueAutoRecovery(issueId)
-					if (wasEnqueued) {
-						enqueuedCount += 1
-					}
-				}
-
-				if (enqueuedCount > 0) {
-					yield* Effect.log(
-						`Queued ${enqueuedCount}/${crashedIssueIds.length} crashed session(s) for auto-recovery`,
-					)
-				}
-			})
-
-		const startAutoRecoveryWorkerFiber = () =>
-			Effect.gen(function* () {
-				const autoRecoveryFiber = yield* Effect.forever(
-					Queue.take(autoRecoveryQueue).pipe(
-						Effect.flatMap((issueId) => runAutoRecoveryForIssue(issueId)),
-						Effect.catchAllCause((cause) =>
-							Cause.isInterruptedOnly(cause)
-								? Effect.void
-								: Effect.logError(
-										`Auto-recovery worker iteration failed: ${Cause.pretty(cause)}`,
-									).pipe(Effect.asVoid),
-						),
-					),
-				).pipe(Effect.forkIn(serviceScope))
-
-				yield* diagnostics.registerFiber({
-					id: "board-auto-recovery-worker",
-					name: "Board Auto Recovery Worker",
-					description:
-						"Recovers crashed sessions from a deduplicated queue with transient-error retries",
-					fiber: autoRecoveryFiber,
-				})
-
-				return autoRecoveryFiber
-			})
-
 		const resolveProjectPath = (
 			preferredProjectPath?: string | null,
 		): Effect.Effect<string | null> =>
@@ -1430,9 +1358,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								thresholdMs: 150,
 								details: projectPath ?? "default",
 							},
-							sessionManager
-								.listActive(projectPath ?? undefined)
-								.pipe(Effect.withSpan("sessions.listActive")),
+							loadAuthoritativeSessions(projectPath).pipe(Effect.withSpan("sessions.listActive")),
 						),
 					},
 					{ concurrency: "unbounded" },
@@ -1466,8 +1392,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					),
 					Effect.forkIn(serviceScope),
 				)
-				yield* queueAutoRecoveryForCrashedSessions(activeSessions)
-
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
 				// Get optimistic mutations through queue adapter (daemon or local fallback)
@@ -2053,15 +1977,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		}) =>
 			Effect.gen(function* () {
 				const projectPath = yield* resolveProjectPath(params.preferredProjectPath)
-				const activeSessions = yield* sessionManager
-					.listActive(projectPath ?? undefined)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
-							),
-						),
-					)
+				const activeSessions = yield* loadAuthoritativeSessions(projectPath)
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 				const currentTasks = yield* SubscriptionRef.get(tasks)
@@ -2918,7 +2834,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* replaceTasks(updatedTasks)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
-		yield* startAutoRecoveryWorkerFiber()
 		yield* signalDaemonAttach()
 		yield* Effect.forkScoped(
 			Effect.gen(function* () {

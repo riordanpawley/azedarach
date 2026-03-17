@@ -12,6 +12,11 @@ build-run-ts: build-ts
     @echo "Running ts-opentui from source"
     cd ./ts-opentui && bun run bin/az.ts
 
+# ts-opentui build and run from source with --verbose
+build-run-ts-verbose: build-ts
+    @echo "Running ts-opentui from source with --verbose"
+    cd ./ts-opentui && bun run bin/az.ts --verbose
+
 # ts-opentui build (single-file executable)
 build-sfe-ts:
     @echo "Building ts-opentui single-file executable"

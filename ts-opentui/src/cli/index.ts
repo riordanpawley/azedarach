@@ -22,6 +22,7 @@ import {
 import { BunContext } from "@effect/platform-bun"
 import {
 	Console,
+	Data,
 	DateTime,
 	Duration,
 	Effect,
@@ -75,7 +76,7 @@ import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
-import { type DaemonRpcClientApi, DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
+import type { DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -110,7 +111,11 @@ import {
 	parseConfigPathFromArgv,
 	resolveCliExecutionMode,
 } from "./argv-normalization.js"
-import { bootstrapDaemonRpcClient, formatDaemonRpcClientFailure } from "./daemonClientBootstrap.js"
+import {
+	bootstrapDaemonRpcClient,
+	formatDaemonRpcClientFailure,
+	isRetryableRpcClientError,
+} from "./daemonClientBootstrap.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
@@ -225,8 +230,6 @@ const createFullCliLayer = (configPath: string | null) =>
  */
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
-		BackendDaemonControlService.Default,
-		BackendSyncDaemonService.Default,
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
 		IssueTrackerClient.Default,
@@ -896,51 +899,64 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 			return
 		}
 
-		const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
-		if (warning !== undefined) {
-			yield* Console.error(`Warning: ${warning}`)
-		}
-
-		const bootstrap = yield* bootstrapDaemonRpcClient({
-			autoStart: true,
-		})
-		const currentStatus = yield* bootstrap.client.status().pipe(
-			Effect.mapError((error) =>
-				formatDaemonRpcClientFailure({
-					operation: "status",
-					socketUrl: bootstrap.socketUrl,
-					error,
-				}),
-			),
-		)
-		const alreadyRunningForPath =
-			currentStatus.sync.state === "running" &&
-			currentStatus.sync.projectPath === params.projectPath
-		if (alreadyRunningForPath) {
-			if (params.verbose) {
-				yield* Console.log(
-					`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
-				)
+		const daemonizeEffect = Effect.gen(function* () {
+			const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
+			if (warning !== undefined) {
+				yield* Console.error(`Warning: ${warning}`)
 			}
-			return
-		}
 
-		yield* bootstrap.client
-			.restart({
-				projectPath: params.projectPath,
-				...(intervalMs === undefined ? {} : { intervalMs }),
+			const bootstrap = yield* bootstrapDaemonRpcClient({
+				autoStart: true,
 			})
-			.pipe(
+			const currentStatus = yield* bootstrap.client.status().pipe(
 				Effect.mapError((error) =>
 					formatDaemonRpcClientFailure({
-						operation: "restart",
+						operation: "status",
 						socketUrl: bootstrap.socketUrl,
 						error,
 					}),
 				),
 			)
+			const alreadyRunningForPath =
+				currentStatus.sync.state === "running" &&
+				currentStatus.sync.projectPath === params.projectPath
+			if (alreadyRunningForPath) {
+				if (params.verbose) {
+					yield* Console.log(
+						`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
+					)
+				}
+				return
+			}
+
+			yield* bootstrap.client
+				.restart({
+					projectPath: params.projectPath,
+					...(intervalMs === undefined ? {} : { intervalMs }),
+				})
+				.pipe(
+					Effect.mapError((error) =>
+						formatDaemonRpcClientFailure({
+							operation: "restart",
+							socketUrl: bootstrap.socketUrl,
+							error,
+						}),
+					),
+				)
+			if (params.verbose) {
+				yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+			}
+		})
+
+		yield* Effect.fork(
+			daemonizeEffect.pipe(
+				Effect.catchAll((error) =>
+					Console.error(`Warning: auto-daemonize failed (${error.message}); continuing startup.`),
+				),
+			),
+		)
 		if (params.verbose) {
-			yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+			yield* Console.log("Auto-daemonize: daemon preparation running in background.")
 		}
 	})
 
@@ -1179,6 +1195,30 @@ export const daemonCommandShouldAutoStart = (
 	command: "sync" | "status" | "health" | "stop" | "restart" | "logs",
 ): boolean => command !== "stop"
 
+const DAEMON_CONTROL_RPC_TIMEOUT = Duration.seconds(5)
+const DAEMON_CONTROL_RPC_TIMEOUT_MS = 5000
+
+class DaemonControlTimeoutError extends Data.TaggedError("DaemonControlTimeoutError")<{
+	readonly operation: "status" | "health" | "stop" | "restart"
+	readonly timeoutMs: number
+}> {}
+
+const withDaemonControlTimeout = <A, E, R>(
+	operation: "status" | "health" | "stop" | "restart",
+	effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | DaemonControlTimeoutError, R> =>
+	effect.pipe(
+		Effect.disconnect,
+		Effect.timeoutFail({
+			duration: DAEMON_CONTROL_RPC_TIMEOUT,
+			onTimeout: () =>
+				new DaemonControlTimeoutError({
+					operation,
+					timeoutMs: DAEMON_CONTROL_RPC_TIMEOUT_MS,
+				}),
+		}),
+	)
+
 const formatDaemonEventStreamEntryLine = (entry: DaemonEventStreamEntry): string => {
 	switch (entry.event._tag) {
 		case "DaemonEventStreamSessionSnapshotEvent":
@@ -1228,7 +1268,7 @@ export const consumeDaemonStatusStreamBatches = (params: {
 				.pipe(Effect.either)
 
 			if (attempt._tag === "Left") {
-				if (params.watch && attempt.left instanceof DaemonRpcTransportError) {
+				if (params.watch && isRetryableRpcClientError(attempt.left)) {
 					yield* Console.log(
 						`daemon stream reconnecting from cursor=${cursor ?? "<start>"} in ${params.reconnectDelayMs}ms (${attempt.left.message})`,
 					)
@@ -1276,6 +1316,7 @@ const daemonStatusHandler = (args: {
 					error,
 				}),
 			),
+			(effect) => withDaemonControlTimeout("status", effect),
 		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -1349,6 +1390,7 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 					error,
 				}),
 			),
+			(effect) => withDaemonControlTimeout("health", effect),
 		)
 		yield* Console.log(`daemon health: ${health.state} (${health.reason})`)
 		yield* Console.log(
@@ -1381,6 +1423,7 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 					error,
 				}),
 			),
+			(effect) => withDaemonControlTimeout("stop", effect),
 		)
 		yield* Console.log("Headless backend sync daemon stopped.")
 		yield* Console.log(
@@ -1400,9 +1443,25 @@ const daemonRestartHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
+		if (args.verbose) {
+			yield* Console.log("daemon_restart: bootstrap begin")
+		}
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("restart"),
+			onAttachAttempt: args.verbose
+				? (observation) => {
+						console.error(
+							`daemon_restart: attach attempt=${observation.attempt} delayMs=${observation.delayMs} remainingMs=${observation.timeoutRemainingMs} socket=${observation.socketUrl ?? "<none>"}`,
+						)
+					}
+				: undefined,
 		})
+		if (args.verbose) {
+			yield* Console.log(
+				`daemon_restart: bootstrap ready startedDaemon=${bootstrap.startedDaemon} attempts=${bootstrap.attachAttemptCount} socket=${bootstrap.socketUrl}`,
+			)
+			yield* Console.log("daemon_restart: dispatch restart RPC")
+		}
 		const status = yield* bootstrap.client
 			.restart({
 				projectPath: Option.getOrUndefined(args.projectDir),
@@ -1416,7 +1475,11 @@ const daemonRestartHandler = (args: {
 						error,
 					}),
 				),
+				(effect) => withDaemonControlTimeout("restart", effect),
 			)
+		if (args.verbose) {
+			yield* Console.log("daemon_restart: restart RPC response received")
+		}
 		yield* Console.log("Headless backend sync daemon restarted.")
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -7443,12 +7506,12 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 	const mode = resolveCliExecutionMode(normalizedArgv)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect =
-		mode === "command"
-			? Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
+		mode === "dev-command"
+			? Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)
-			: Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
+			: Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)

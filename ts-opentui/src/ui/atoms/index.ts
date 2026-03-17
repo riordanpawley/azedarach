@@ -9,9 +9,13 @@
 export {
 	activeSessionsCountAtom,
 	allTasksAtom,
+	type BoardRenderState,
 	boardIsLoadingAtom,
+	boardRenderStateAtom,
 	boardTasksAtom,
 	boardTasksByColumnAtom,
+	type DrillDownBoardState,
+	drillDownBoardStateAtom,
 	drillDownFilteredTasksAtom,
 	errorAtom,
 	filteredTasksByColumnAtom,
@@ -194,6 +198,9 @@ export {
 	type SpecWorkspaceState,
 	specWorkspaceStateAtom,
 } from "./spec.js"
+export type { StartupCapabilityState } from "./startup.js"
+// Startup capability atoms
+export { sessionMonitorReadyAtom, startupCapabilityStateAtom } from "./startup.js"
 // Task CRUD atoms
 export {
 	aiCreateTaskAtom,

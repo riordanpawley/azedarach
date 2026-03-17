@@ -48,6 +48,25 @@ The TUI displays a Kanban board with your linear issues organized by status:
 - **Blocked** - Waiting on dependencies
 - **Closed** - Completed tasks
 
+### Startup Metrics and Budget
+
+Use these env vars to capture startup metrics and enforce a local/CI budget:
+
+```bash
+AZ_STARTUP_METRICS=1 AZ_TUI_TTFP_BUDGET_MS=120 bun run bin/az.ts
+```
+
+- `AZ_STARTUP_METRICS=1`: emits parseable metric lines to stderr
+- `AZ_TUI_TTFP_BUDGET_MS=<ms>`: overrides TTFP warning threshold (default `120`)
+- `AZ_TUI_STRICT_STARTUP_BUDGET=1`: throws when budget is exceeded (CI hard-fail mode)
+
+Metric format:
+
+```text
+[startup-metric] {"metric":"ttfp_ms","value":42}
+[startup-metric] {"metric":"hydrated_ms","value":77}
+```
+
 ---
 
 ## Keyboard Navigation

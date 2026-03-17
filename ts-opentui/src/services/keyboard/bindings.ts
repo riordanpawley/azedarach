@@ -239,17 +239,6 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 				return
 			}
 
-			// Check if any operations are running
-			const busy = yield* bc.helpers.isAnyBusy()
-
-			if (busy) {
-				// Get running operation labels for the toast message
-				const labels = yield* bc.helpers.getRunningOperationLabels()
-				const labelStr = labels.length > 0 ? labels.join(", ") : "operation"
-				yield* bc.toast.show("warning", `Cannot quit: ${labelStr} in progress`)
-				return
-			}
-
 			yield* Effect.sync(requestShutdown)
 		}),
 	},

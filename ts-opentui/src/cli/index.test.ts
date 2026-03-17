@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test"
 import { BunContext } from "@effect/platform-bun"
+import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
-import { DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonEventStreamResult,
@@ -1125,11 +1125,9 @@ describe("daemon status stream consumption", () => {
 						callCount += 1
 						if (callCount === 2) {
 							return Effect.fail(
-								new DaemonRpcTransportError({
-									operation: "eventStream",
-									reason: "transport",
+								new RpcClientError({
+									reason: "Protocol",
 									message: "socket dropped",
-									suggestion: "retry",
 								}),
 							)
 						}
@@ -1179,11 +1177,9 @@ describe("daemon RPC bootstrap helpers", () => {
 	})
 
 	it("formats transport failures with endpoint and suggestion context", () => {
-		const error = new DaemonRpcTransportError({
-			operation: "health",
-			reason: "transport",
+		const error = new RpcClientError({
+			reason: "Protocol",
 			message: "connection refused",
-			suggestion: "Check daemon status",
 		})
 		const formatted = formatDaemonRpcClientFailure({
 			operation: "health",
@@ -1191,9 +1187,9 @@ describe("daemon RPC bootstrap helpers", () => {
 			error,
 		})
 
-		expect(formatted.message).toContain("Unable to connect to daemon RPC endpoint")
+		expect(formatted.message).toContain("Unable to communicate with daemon RPC endpoint")
 		expect(formatted.message).toContain("ws+unix:///tmp/az-global.sock:/")
-		expect(formatted.message).toContain("Check daemon status")
+		expect(formatted.message).toContain("az daemon health")
 	})
 })
 
