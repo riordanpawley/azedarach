@@ -4,7 +4,7 @@ import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Data, Duration, Effect, Schema, SubscriptionRef } from "effect"
+import { Cause, Data, Duration, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
@@ -2241,23 +2241,24 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							return result
 						}),
 					).pipe(
-						Effect.catchAll((error) =>
+						Effect.catchAllCause((cause) =>
 							Effect.gen(function* () {
-								if (containsSqlError(error)) {
+								const squashed = Cause.squash(cause)
+								if (containsSqlError(squashed)) {
 									yield* Effect.logError("LocalIssueStore SQL failure")
-									yield* Effect.logError(String(error))
+									yield* Effect.logError(String(squashed))
 								}
 
-								if (isLocalIssueStoreError(error)) {
-									return yield* Effect.fail(error)
+								if (isLocalIssueStoreError(squashed)) {
+									return yield* Effect.fail(squashed)
 								}
 
-								yield* Effect.logWarning(String(error))
+								yield* Effect.logWarning(String(squashed))
 								return yield* Effect.fail(
 									new LocalIssueStoreError({
 										message:
 											"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
-										cause: error,
+										cause: squashed,
 									}),
 								)
 							}),
