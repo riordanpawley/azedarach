@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto"
-import { Reactivity } from "@effect/experimental"
 import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Data, Effect, Schema, Scope, SubscriptionRef } from "effect"
+import { Cause, Data, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
@@ -1353,14 +1351,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const projectService = yield* ProjectService
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
-		const serviceScope = yield* Scope.make()
 		const backupWarningAtByDbPath = new Map<string, number>()
 		const initializedDbPaths = new Set<string>()
 		const loggedDbPaths = new Set<string>()
-		const sqlByDbPath = new Map<string, SqlClient.SqlClient>()
 		const dbInitSemaphore = yield* Effect.makeSemaphore(1)
-		const sqlClientInitSemaphore = yield* Effect.makeSemaphore(1)
-		const sqlOperationSemaphore = yield* Effect.makeSemaphore(1)
 
 		const resolveStorageRoot = (cwd?: string): Effect.Effect<LocalIssueStorageResolution> =>
 			projectService.getCurrentPath().pipe(
@@ -2076,29 +2070,6 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				)
 			})
 
-		const applyConnectionPragmas = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
-			Effect.gen(function* () {
-				yield* sql.unsafe("PRAGMA journal_mode = WAL")
-				yield* sql.unsafe("PRAGMA synchronous = NORMAL")
-			})
-
-		const getOrCreateSqlClient = (dbPath: string): Effect.Effect<SqlClient.SqlClient, SqlError> =>
-			sqlClientInitSemaphore.withPermits(1)(
-				Effect.gen(function* () {
-					const existing = sqlByDbPath.get(dbPath)
-					if (existing !== undefined) {
-						return existing
-					}
-
-					const sql = yield* Scope.extend(serviceScope)(
-						SqliteClient.make({ filename: dbPath }).pipe(Effect.provide(Reactivity.layer)),
-					)
-					yield* applyConnectionPragmas(sql)
-					sqlByDbPath.set(dbPath, sql)
-					return sql
-				}),
-			)
-
 		const ensureDatabaseInitialized = (
 			sql: SqlClient.SqlClient,
 			dbPath: string,
@@ -2169,13 +2140,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				)
 
-				const sql = yield* getOrCreateSqlClient(dbPath)
-				return yield* sqlOperationSemaphore.withPermits(1)(
+				return yield* projectService.withProjectSqlite(storageRoot, ({ sql: client, dbPath }) =>
 					Effect.gen(function* () {
-						yield* ensureDatabaseInitialized(sql, dbPath, storageRoot, backupConfig)
-						const result = yield* effect(sql)
+						yield* ensureDatabaseInitialized(client, dbPath, storageRoot, backupConfig)
+						const result = yield* effect(client)
 						if (options?.triggerWriteBackup === true) {
-							yield* maybeRunWriteCooldownBackup(sql, dbPath, storageRoot, backupConfig)
+							yield* maybeRunWriteCooldownBackup(client, dbPath, storageRoot, backupConfig)
 						}
 						return result
 					}),

@@ -3027,6 +3027,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Fork the refresh into the service's scope - not a daemon fiber
 				yield* Effect.gen(function* () {
+					yield* appConfig
+						.reload()
+						.pipe(
+							Effect.catchAllCause((cause) =>
+								Effect.logWarning(
+									`Project switch config reload failed before refresh: ${formatRefreshFailureMessage(cause)}`,
+								).pipe(Effect.asVoid),
+							),
+						)
 					yield* syncLinearProjectBeforeRefresh(newProjectPath)
 					yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true }, newProjectPath)
 					yield* onRefreshComplete
