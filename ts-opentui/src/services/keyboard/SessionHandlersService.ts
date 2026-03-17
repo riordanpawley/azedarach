@@ -106,11 +106,11 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
-						if (projectPath === undefined) {
-							yield* daemonRpcClient.value.sessionStop({ issueId })
-							return
-						}
-						yield* daemonRpcClient.value.sessionStop({ issueId, projectPath })
+						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+						yield* daemonRpcClient.value.sessionStop({
+							issueId,
+							projectPath: effectiveProjectPath,
+						})
 						return
 					}
 					yield* sessionManager.stop(issueId)
@@ -122,11 +122,11 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionPause !== undefined) {
-						if (projectPath === undefined) {
-							yield* daemonRpcClient.value.sessionPause({ issueId })
-							return
-						}
-						yield* daemonRpcClient.value.sessionPause({ issueId, projectPath })
+						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+						yield* daemonRpcClient.value.sessionPause({
+							issueId,
+							projectPath: effectiveProjectPath,
+						})
 						return
 					}
 					yield* sessionManager.pause(issueId)
@@ -138,11 +138,11 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionResume !== undefined) {
-						if (projectPath === undefined) {
-							yield* daemonRpcClient.value.sessionResume({ issueId })
-							return
-						}
-						yield* daemonRpcClient.value.sessionResume({ issueId, projectPath })
+						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+						yield* daemonRpcClient.value.sessionResume({
+							issueId,
+							projectPath: effectiveProjectPath,
+						})
 						return
 					}
 					yield* sessionManager.resume(issueId)
@@ -157,11 +157,11 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						Option.isSome(daemonRpcClient) &&
 						daemonRpcClient.value.sessionRecover !== undefined
 					) {
-						if (projectPath === undefined) {
-							yield* daemonRpcClient.value.sessionRecover({ issueId })
-							return
-						}
-						yield* daemonRpcClient.value.sessionRecover({ issueId, projectPath })
+						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+						yield* daemonRpcClient.value.sessionRecover({
+							issueId,
+							projectPath: effectiveProjectPath,
+						})
 						return
 					}
 					yield* sessionManager.recoverSession(issueId)

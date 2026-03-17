@@ -23,6 +23,7 @@ import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
 import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import { ProjectService } from "../services/ProjectService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
 import {
 	deriveShellForegroundState,
@@ -324,6 +325,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		StateDetector.Default,
 		DiagnosticsService.Default,
 		AppConfig.Default,
+		ProjectService.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
@@ -331,6 +333,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		const stateDetector = yield* StateDetector
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
+		const projectService = yield* ProjectService
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 		// Register with diagnostics - will mark unhealthy when scope closes
@@ -398,10 +401,16 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				daemonRpcClient._tag === "Some" &&
 				daemonRpcClient.value.sessionUpdateState !== undefined
 			) {
-				return daemonRpcClient.value.sessionUpdateState({
-					issueId,
-					state,
-				})
+				const sessionUpdateState = daemonRpcClient.value.sessionUpdateState
+				return projectService.getCurrentPath().pipe(
+					Effect.flatMap((projectPath) =>
+						sessionUpdateState({
+							issueId,
+							state,
+							projectPath: projectPath ?? process.cwd(),
+						}),
+					),
+				)
 			}
 			return sessionManager.updateState(issueId, state)
 		}
