@@ -43,7 +43,6 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const overlay = yield* OverlayService
 			const templateService = yield* TemplateService
 			const daemonRpcClient = yield* DaemonRpcClient
-
 			const requireIssueShowRpc = (): Effect.Effect<
 				NonNullable<typeof daemonRpcClient.issueShow>,
 				Error
@@ -58,6 +57,22 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			> =>
 				Effect.fromNullable(daemonRpcClient.issueEpicWithChildren).pipe(
 					Effect.orElseFail(() => new Error("Daemon issueEpicWithChildren RPC is unavailable")),
+				)
+
+			const requireSessionSnapshotRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.sessionSnapshot>,
+				Error
+			> =>
+				Effect.fromNullable(daemonRpcClient.sessionSnapshot).pipe(
+					Effect.orElseFail(() => new Error("Daemon sessionSnapshot RPC is unavailable")),
+				)
+
+			const requireSessionStartRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.sessionStart>,
+				Error
+			> =>
+				Effect.fromNullable(daemonRpcClient.sessionStart).pipe(
+					Effect.orElseFail(() => new Error("Daemon sessionStart RPC is unavailable")),
 				)
 
 			const parseOrchestrationStatus = (
@@ -80,11 +95,9 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
-					if (daemonRpcClient.sessionSnapshot === undefined) {
-						return yield* Effect.fail(new Error("Daemon sessionSnapshot RPC is unavailable"))
-					}
+					const sessionSnapshot = yield* requireSessionSnapshotRpc()
 					const projectPath = yield* helpers.getProjectPath()
-					const snapshot = yield* daemonRpcClient.sessionSnapshot({ projectPath })
+					const snapshot = yield* sessionSnapshot({ projectPath })
 					return snapshot.sessions.map((session) => ({ issueId: session.issueId }))
 				})
 
@@ -94,15 +107,13 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 				readonly initialPrompt?: string
 			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (daemonRpcClient.sessionStart === undefined) {
-						return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
-					}
+					const sessionStart = yield* requireSessionStartRpc()
 					if (options.initialPrompt !== undefined) {
 						yield* Effect.logWarning(
 							"Daemon-rpc mode ignores orchestrate initial prompts for session start",
 						)
 					}
-					yield* daemonRpcClient.sessionStart({
+					yield* sessionStart({
 						issueId: options.issueId,
 						projectPath: options.projectPath,
 					})
@@ -129,28 +140,9 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					}
 
 					const projectPath = yield* helpers.getProjectPath()
-					const issueShow = yield* requireIssueShowRpc().pipe(
-						Effect.catchAll((error) =>
-							Effect.gen(function* () {
-								const message = `Orchestrate unavailable: ${formatForToast(error)}`
-								yield* Effect.logError(message, { error })
-								yield* toast.show("error", message)
-								return yield* Effect.fail(error)
-							}),
-						),
-					)
-					const issueEpicWithChildren = yield* requireIssueEpicWithChildrenRpc().pipe(
-						Effect.catchAll((error) =>
-							Effect.gen(function* () {
-								const message = `Orchestrate unavailable: ${formatForToast(error)}`
-								yield* Effect.logError(message, { error })
-								yield* toast.show("error", message)
-								return yield* Effect.fail(error)
-							}),
-						),
-					)
-
 					// Get the task details
+					const issueShow = yield* requireIssueShowRpc()
+					const issueEpicWithChildren = yield* requireIssueEpicWithChildrenRpc()
 					const task = yield* issueShow({ issueId: current.taskId, cwd: projectPath }).pipe(
 						Effect.map((result) => result.issue),
 						Effect.catchAll((error) => {
@@ -243,18 +235,9 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 
 					// Get project path for spawning sessions
 					const projectPath = yield* helpers.getProjectPath()
-					const issueShow = yield* requireIssueShowRpc().pipe(
-						Effect.catchAll((error) =>
-							Effect.gen(function* () {
-								const message = `Orchestrate unavailable: ${formatForToast(error)}`
-								yield* Effect.logError(message, { error })
-								yield* toast.show("error", message)
-								return yield* Effect.fail(error)
-							}),
-						),
-					)
 
 					// Load epic details for context injection
+					const issueShow = yield* requireIssueShowRpc()
 					const epic = yield* issueShow({ issueId: mode.epicId, cwd: projectPath }).pipe(
 						Effect.map((result) => result.issue),
 						Effect.catchAll((error) =>

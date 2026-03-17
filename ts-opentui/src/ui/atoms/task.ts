@@ -66,7 +66,7 @@ const requireDaemonIssueRpcClient = () =>
 const requireDaemonIssueRpc = <TMethod extends DaemonIssueRpcMethod>(
 	daemonRpcClient: DaemonRpcClientApi,
 	method: TMethod,
-) =>
+): Effect.Effect<NonNullable<DaemonRpcClientApi[TMethod]>, MissingDaemonIssueRpcError> =>
 	Effect.fromNullable(daemonRpcClient[method]).pipe(
 		Effect.orElseFail(() => new MissingDaemonIssueRpcError({ method })),
 	)

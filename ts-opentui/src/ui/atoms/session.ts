@@ -121,7 +121,6 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 		if (daemonRpcClient.sessionStart === undefined) {
 			return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
 		}
-
 		const session = yield* daemonRpcClient
 			.sessionStart({
 				issueId,

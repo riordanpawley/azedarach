@@ -55,6 +55,21 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
 			const daemonRpcClient = yield* DaemonRpcClient
+			const requireSessionStopRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.sessionStop>,
+				Error
+			> =>
+				Effect.fromNullable(daemonRpcClient.sessionStop).pipe(
+					Effect.orElseFail(() => new Error("Daemon sessionStop RPC is unavailable")),
+				)
+
+			const requireIssueUpdateRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.issueUpdate>,
+				MissingDaemonIssueRpcError
+			> =>
+				Effect.fromNullable(daemonRpcClient.issueUpdate).pipe(
+					Effect.orElseFail(() => new MissingDaemonIssueRpcError({ method: "issueUpdate" })),
+				)
 
 			const getActiveProjectPath = (): Effect.Effect<string | undefined> =>
 				SubscriptionRef.get(board.currentProjectPath).pipe(
@@ -85,12 +100,10 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (daemonRpcClient.sessionStop === undefined) {
-						return yield* Effect.fail(new Error("Daemon sessionStop RPC is unavailable"))
-					}
+					const sessionStop = yield* requireSessionStopRpc()
 					const effectiveProjectPath =
 						projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
-					yield* daemonRpcClient.sessionStop({
+					yield* sessionStop({
 						issueId,
 						projectPath: effectiveProjectPath,
 					})
@@ -116,10 +129,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				readonly cwd?: string
 			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					const issueUpdate = daemonRpcClient.issueUpdate
-					if (issueUpdate === undefined) {
-						return yield* Effect.fail(new MissingDaemonIssueRpcError({ method: "issueUpdate" }))
-					}
+					const issueUpdate = yield* requireIssueUpdateRpc()
 					yield* issueUpdate(params)
 				}).pipe(Effect.asVoid)
 
