@@ -50,6 +50,15 @@ const platformLayer = BunContext.layer
 
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
 const loggerLayer = Logger.replaceScoped(Logger.defaultLogger, fileLogger)
+export type TuiRuntimeMode = "daemon-rpc" | "session-manager-fallback"
+export const AZEDARACH_TUI_RUNTIME_MODE_ENV = "AZEDARACH_TUI_RUNTIME_MODE"
+
+export const resolveTuiRuntimeModeFromEnv = (
+	env: Readonly<Record<string, string | undefined>>,
+): TuiRuntimeMode =>
+	env[AZEDARACH_TUI_RUNTIME_MODE_ENV] === "session-manager-fallback"
+		? "session-manager-fallback"
+		: "daemon-rpc"
 
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
@@ -114,6 +123,11 @@ export const appDeferredLayer = appFullServicesLayer.pipe(
 	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )
+
+export const resolveAppStartupLayerModeFromEnv = (
+	env: Readonly<Record<string, string | undefined>>,
+): "daemon-core" | "full-deferred" =>
+	resolveTuiRuntimeModeFromEnv(env) === "daemon-rpc" ? "daemon-core" : "full-deferred"
 
 /**
  * Full compatibility layer used by the existing appRuntime surface.

@@ -30,6 +30,7 @@ import {
 	normalizeIssueJsonFlagOrder,
 	parseGitWorktreeListPaths,
 	resolveCliExecutionMode,
+	resolveCliLayerMode,
 	resolveStartSessionRuntimeMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
@@ -685,6 +686,20 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "d", "stp", "AZE-1"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "ls"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "s", "AZE-1"])).toBe("dev-command")
+	})
+})
+
+describe("resolveCliLayerMode", () => {
+	it("uses dedicated tui-bootstrap layer for bare TUI launches", () => {
+		expect(resolveCliLayerMode("tui")).toBe("tui-bootstrap")
+	})
+
+	it("keeps dev-command mode on the full layer", () => {
+		expect(resolveCliLayerMode("dev-command")).toBe("dev-command")
+	})
+
+	it("keeps non-TUI commands on the command layer", () => {
+		expect(resolveCliLayerMode("command")).toBe("command")
 	})
 })
 

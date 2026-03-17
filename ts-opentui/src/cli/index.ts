@@ -102,7 +102,6 @@ import { SessionService } from "../services/SessionService.js"
 import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
-import { launchTUI } from "../ui/launch.js"
 import {
 	hasVerboseFlag,
 	normalizeCliAliases,
@@ -236,6 +235,17 @@ const createCommandCliLayer = (configPath: string | null) =>
 		SessionManager.Default,
 		SpecService.Default,
 	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
+
+/**
+ * Minimal layer for bare TUI startup path.
+ * Keeps CLI/runtime bootstrap lightweight before the UI runtime takes over.
+ */
+const createTuiBootstrapLayer = (configPath: string | null) =>
+	Layer.mergeAll(buildAppConfigLayer(configPath)).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
@@ -494,17 +504,27 @@ const defaultHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const sessionRuntime = resolveStartSessionRuntimeMode({
+			noDaemonFlag: args.noDaemon,
+			env: process.env,
+		})
 		yield* ensureDaemonAutoStartForCliCommand({
 			command: "tui-default",
 			projectPath: cwd,
 			noDaemonFlag: args.noDaemon,
 			verbose: args.verbose,
 		})
+		applyStartSessionRuntimeModeToTuiEnv(sessionRuntime.mode)
 
 		if (args.verbose) {
 			yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
 			yield* Console.log(`Project: ${cwd}`)
 			yield* Console.log("Verbose mode enabled")
+			if (sessionRuntime.mode !== "daemon-rpc") {
+				yield* Console.log(
+					`TUI daemon RPC disabled (${sessionRuntime.decision}); startup will use direct runtime fallback.`,
+				)
+			}
 		}
 
 		if (Option.isSome(args.config)) {
@@ -515,6 +535,7 @@ const defaultHandler = (args: {
 		yield* validateIssueTrackerStore(cwd)
 
 		// Launch TUI
+		const { launchTUI } = yield* Effect.promise(() => import("../ui/launch.js"))
 		yield* Effect.promise(() => launchTUI())
 	})
 
@@ -522,6 +543,7 @@ const defaultHandler = (args: {
  * Start a new Claude session for an issue
  */
 type StartSessionRuntimeMode = "daemon-rpc" | "session-manager-fallback"
+const AZEDARACH_TUI_RUNTIME_MODE_ENV = "AZEDARACH_TUI_RUNTIME_MODE"
 
 const mapDaemonSessionMutationToCliSession = (
 	result: DaemonSessionMutationResult,
@@ -554,6 +576,10 @@ export const resolveStartSessionRuntimeMode = (params: {
 		mode: policy.autoDaemonize ? "daemon-rpc" : "session-manager-fallback",
 		decision: policy.decision,
 	}
+}
+
+const applyStartSessionRuntimeModeToTuiEnv = (mode: StartSessionRuntimeMode): void => {
+	process.env[AZEDARACH_TUI_RUNTIME_MODE_ENV] = mode
 }
 
 const startHandler = (args: {
@@ -7481,6 +7507,8 @@ const commandCli = az.pipe(
 	]),
 )
 
+const tuiCli = az
+
 // ============================================================================
 // CLI Runner
 // ============================================================================
@@ -7494,23 +7522,56 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	return createCommandCliLayer(configPath)
 }
 
+const buildTuiBootstrapLayerForArgv = (argv: ReadonlyArray<string>) => {
+	const configPath = parseConfigPathFromArgv(argv)
+	return createTuiBootstrapLayer(configPath)
+}
+
+type CliLayerMode = "dev-command" | "command" | "tui-bootstrap"
+
+const resolveCliLayerMode = (mode: ReturnType<typeof resolveCliExecutionMode>): CliLayerMode => {
+	if (mode === "dev-command") {
+		return "dev-command"
+	}
+	if (mode === "tui") {
+		return "tui-bootstrap"
+	}
+	return "command"
+}
+
 /**
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) => {
 	const normalizedArgv = normalizeIssueOptionOrder(normalizeCliAliases(argv))
 	const mode = resolveCliExecutionMode(normalizedArgv)
+	const layerMode = resolveCliLayerMode(mode)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
-	const runEffect =
-		mode === "dev-command"
-			? Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
+	const runEffect = (() => {
+		switch (layerMode) {
+			case "dev-command":
+				return Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)
-			: Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
-					name: "Azedarach",
-					version: CLI_VERSION,
-				})(normalizedArgv)
+			case "tui-bootstrap":
+				return Command.run(
+					tuiCli.pipe(Command.provide(buildTuiBootstrapLayerForArgv(normalizedArgv))),
+					{
+						name: "Azedarach",
+						version: CLI_VERSION,
+					},
+				)(normalizedArgv)
+			case "command":
+				return Command.run(
+					commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))),
+					{
+						name: "Azedarach",
+						version: CLI_VERSION,
+					},
+				)(normalizedArgv)
+		}
+	})()
 	return runEffect.pipe(
 		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Effect.provide(Logger.minimumLogLevel(minimumLogLevel)),
@@ -7532,6 +7593,7 @@ export { cliLayer, commandCliLayer }
 export {
 	buildPrimeOutput,
 	buildCommandCliLayerForArgv,
+	buildTuiBootstrapLayerForArgv,
 	cliRunner,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
@@ -7543,6 +7605,7 @@ export {
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
+	resolveCliLayerMode,
 	resolveCliExecutionMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
