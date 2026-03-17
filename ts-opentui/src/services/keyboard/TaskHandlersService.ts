@@ -17,7 +17,7 @@ import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
-import { COLUMNS } from "../../ui/types.js"
+import { COLUMNS, hasTaskSessionPresence } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
@@ -223,7 +223,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
-					const hasSession = task.sessionState !== "idle"
+					const hasSession = hasTaskSessionPresence(task)
 					const sessionWarning = hasSession
 						? "\n\nThis will also remove the worktree and session."
 						: ""
@@ -240,7 +240,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
-					const hasSession = task.sessionState !== "idle"
+					const hasSession = hasTaskSessionPresence(task)
 					const sessionWarning = hasSession
 						? "\n\nThis will stop the active session, but keep the branch and worktree."
 						: "\n\nThis keeps the branch and worktree."

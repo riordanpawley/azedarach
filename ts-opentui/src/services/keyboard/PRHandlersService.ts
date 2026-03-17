@@ -22,6 +22,7 @@ import {
 } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { hasTaskWorktreeContext } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
@@ -279,7 +280,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
+				if (!hasTaskWorktreeContext(task)) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -335,7 +336,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
+				if (!hasTaskWorktreeContext(task)) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -456,7 +457,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
+				if (!hasTaskWorktreeContext(task)) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -604,7 +605,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const projectPath = yield* helpers.getProjectPath()
 
 				// Filter to tasks with worktrees
-				const tasksWithWorktrees = tasks.filter((t) => t.hasWorktree || t.sessionState !== "idle")
+				const tasksWithWorktrees = tasks.filter((task) => hasTaskWorktreeContext(task))
 
 				if (tasksWithWorktrees.length === 0) {
 					yield* toast.show("error", "No worktrees to delete")
@@ -755,7 +756,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
+				if (!hasTaskWorktreeContext(task)) {
 					yield* toast.show("error", `No worktree for ${task.id} - nothing to abort`)
 					return
 				}
@@ -801,7 +802,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (!task) return
 
 				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
+				if (!hasTaskWorktreeContext(task)) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -854,7 +855,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (!task) return
 
 				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
+				if (!hasTaskWorktreeContext(task)) {
 					yield* toast.show("error", `No worktree for ${task.id} - nothing to merge`)
 					return
 				}

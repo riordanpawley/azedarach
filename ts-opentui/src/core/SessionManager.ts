@@ -766,6 +766,28 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 			return scopedSessions
 		}
 
+		const findRecoverableTmuxSessionName = (issueId: string, projectPath: string) =>
+			Effect.gen(function* () {
+				const canonicalSessionName = getIssueSessionName(issueId, projectPath)
+				const hasCanonicalSession = yield* tmuxService.hasSession(canonicalSessionName)
+				if (hasCanonicalSession) {
+					return canonicalSessionName
+				}
+
+				const tmuxSessions = yield* tmuxService.listSessions()
+				for (const tmuxSession of tmuxSessions) {
+					const parsed = parseIssueSessionName(tmuxSession.name, projectPath)
+					if (
+						parsed?.type === "issue" &&
+						normalizeIssueIdForLookup(parsed.issueId) === normalizeIssueIdForLookup(issueId)
+					) {
+						return tmuxSession.name
+					}
+				}
+
+				return null
+			})
+
 		const setTmuxSessionOption = (sessionName: string, optionName: string, value: string) =>
 			Command.exitCode(
 				Command.make("tmux", "set-option", "-t", sessionName, optionName, value),
@@ -1178,6 +1200,26 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					const sessionOpt = HashMap.get(sessions, issueId)
 
 					if (sessionOpt._tag === "None") {
+						const projectPath = yield* getEffectiveProjectPath()
+						const recoverableSessionName = yield* findRecoverableTmuxSessionName(
+							issueId,
+							projectPath,
+						)
+						if (recoverableSessionName !== null) {
+							yield* Effect.logWarning(
+								`Session registry missing ${issueId}; stopping recoverable tmux session ${recoverableSessionName}`,
+							)
+							yield* tmuxService
+								.killSession(recoverableSessionName)
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
+							return
+						}
 						return yield* Effect.fail(
 							new SessionError({
 								message: "Session not found",
