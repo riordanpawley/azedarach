@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test"
 const read = async (path: string): Promise<string> => await Bun.file(path).text()
 
 const MIGRATED_THIN_CLIENT_FILES = [
+	"src/ui/atoms/runtime.ts",
 	"src/ui/atoms/task.ts",
 	"src/ui/atoms/navigation.ts",
 	"src/ui/atoms/spec.ts",
@@ -18,6 +19,7 @@ describe("Thin client boundary (daemon rpc authority)", () => {
 		for (const path of MIGRATED_THIN_CLIENT_FILES) {
 			const source = await read(path)
 			expect(source).not.toMatch(/yield\*\s+IssueTrackerClient/)
+			expect(source).not.toMatch(/IssueTrackerClient\.Default/)
 			expect(source).not.toMatch(
 				/issueTrackerClient\.(create|update|delete|addDependency|removeDependency)\s*\(/,
 			)

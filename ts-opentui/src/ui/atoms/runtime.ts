@@ -15,7 +15,6 @@ import { BackendDaemonService } from "../../core/BackendDaemonService.js"
 import { BackendSyncDaemonService } from "../../core/BackendSyncDaemonService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PlanningService } from "../../core/PlanningService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
@@ -85,7 +84,6 @@ const coreServicesLayer = Layer.mergeAll(
 	ToastService.Default,
 	NavigationService.Default,
 	SessionManager.Default,
-	IssueTrackerClient.Default,
 	AppConfig.Default,
 	ViewService.Default,
 	CommandQueueService.Default,

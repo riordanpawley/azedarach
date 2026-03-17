@@ -53,5 +53,13 @@ describe("composeDaemonDomainRpcClients", () => {
 		expect(domains.queue.queueCancel).toBe(client.queueCancel)
 		expect(domains.issueTask.issueCreate).toBe(client.issueCreate)
 		expect(domains.issueTask.issueEpicWithChildren).toBe(client.issueEpicWithChildren)
+		expect(Object.keys(domains).sort()).toEqual([
+			"board",
+			"control",
+			"devServer",
+			"issueTask",
+			"queue",
+			"taskSession",
+		])
 	})
 })
