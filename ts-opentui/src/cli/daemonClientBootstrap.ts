@@ -300,6 +300,14 @@ export const bootstrapDaemonRpcClient = (params?: {
 			}
 
 			const error = connectivity.left
+			if (isRpcClientError(error) && error.reason === "Protocol") {
+				return yield* Effect.fail(
+					new GlobalDaemonBootstrapError({
+						message: `Daemon RPC protocol check failed during bootstrap at ${socketUrl}: ${error.message}. Verify CLI and daemon protocol compatibility, then retry.`,
+						reason: "rpc-protocol-mismatch",
+					}),
+				)
+			}
 			if (isRetryableRpcClientError(error)) {
 				lastTransportError = error
 				yield* Effect.logWarning(

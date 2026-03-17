@@ -395,8 +395,10 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 						retryBaseDelayMs: recoveryConfig.retryBaseDelayMs,
 						retryMaxDelayMs: recoveryConfig.retryMaxDelayMs,
 					})
+					const autoRecoveryDelayMs = Math.max(0, Math.floor(recoveryConfig.autoRecoveryDelayMs))
 
-					yield* sessionManager.recoverSession(issueId).pipe(
+					yield* Effect.sleep(`${autoRecoveryDelayMs} millis`).pipe(
+						Effect.zipRight(sessionManager.recoverSession(issueId)),
 						Effect.retry({ schedule }),
 						Effect.tap(() =>
 							Effect.log(
