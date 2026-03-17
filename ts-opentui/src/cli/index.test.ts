@@ -13,6 +13,7 @@ import {
 	formatDaemonRpcClientFailure,
 } from "./daemonClientBootstrap.js"
 import {
+	appendIssueNotes,
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
@@ -35,6 +36,24 @@ import {
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 } from "./index.js"
+
+describe("appendIssueNotes", () => {
+	it("returns appended text when existing notes are missing", () => {
+		expect(appendIssueNotes(undefined, "new")).toBe("new")
+	})
+
+	it("returns appended text when existing notes are empty", () => {
+		expect(appendIssueNotes("", "new")).toBe("new")
+	})
+
+	it("inserts a blank-line separator when both notes are non-empty", () => {
+		expect(appendIssueNotes("existing", "new")).toBe("existing\n\nnew")
+	})
+
+	it("keeps existing notes when appended text is empty", () => {
+		expect(appendIssueNotes("existing", "")).toBe("existing")
+	})
+})
 
 const makePrimeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): TrackedIssue => ({
 	id,
