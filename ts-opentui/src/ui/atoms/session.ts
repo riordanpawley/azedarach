@@ -145,18 +145,10 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionPause !== undefined) {
-			yield* daemonRpcClient.value
-				.sessionPause({
-					issueId,
-					projectPath,
-				})
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(
-							`Daemon sessionPause failed for ${issueId}; retrying local pause: ${String(error)}`,
-						).pipe(Effect.zipRight(manager.pause(issueId))),
-					),
-				)
+			yield* daemonRpcClient.value.sessionPause({
+				issueId,
+				projectPath,
+			})
 			return
 		}
 
@@ -175,18 +167,10 @@ export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionResume !== undefined) {
-			yield* daemonRpcClient.value
-				.sessionResume({
-					issueId,
-					projectPath,
-				})
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(
-							`Daemon sessionResume failed for ${issueId}; retrying local resume: ${String(error)}`,
-						).pipe(Effect.zipRight(manager.resume(issueId))),
-					),
-				)
+			yield* daemonRpcClient.value.sessionResume({
+				issueId,
+				projectPath,
+			})
 			return
 		}
 
@@ -211,18 +195,10 @@ export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 		yield* ptyMonitor.unregisterSession(issueId)
 
 		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
-			yield* daemonRpcClient.value
-				.sessionStop({
-					issueId,
-					projectPath,
-				})
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(
-							`Daemon sessionStop failed for ${issueId}; retrying local stop: ${String(error)}`,
-						).pipe(Effect.zipRight(manager.stop(issueId))),
-					),
-				)
+			yield* daemonRpcClient.value.sessionStop({
+				issueId,
+				projectPath,
+			})
 			return
 		}
 
