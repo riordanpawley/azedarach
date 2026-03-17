@@ -21,7 +21,13 @@ import {
 import { isSmallScreen } from "./responsive.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
-import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS, WORKTREE_INDICATOR } from "./types.js"
+import {
+	ISSUE_STATUS_INDICATORS,
+	PHASE_INDICATORS,
+	PHASE_LABELS,
+	SESSION_INDICATORS,
+	WORKTREE_INDICATOR,
+} from "./types.js"
 
 // Panel chrome heights for maxHeight calculation
 const PANEL_CHROME_HEIGHT = 8 // borders (2) + padding (2) + header (3) + footer (1)
@@ -41,17 +47,11 @@ type DependencyStatus = "open" | "in_progress" | "blocked" | "closed" | "tombsto
 
 const resolveDependencyStatus = (status?: DependencyStatus): DependencyStatus => status ?? "open"
 
-/**
- * Get status indicator for a child task
- * ○ = open
- * ● = in_progress or blocked
- * ✓ = closed
- */
+/** Get status indicator for a child task. */
 const getChildStatusIndicator = (child: { status?: DependencyStatus }): string => {
 	const status = resolveDependencyStatus(child.status)
-	if (status === "closed") return "✓"
-	if (status === "open") return "○"
-	return "●"
+	if (status === "tombstone") return "[~]"
+	return ISSUE_STATUS_INDICATORS[status]
 }
 
 /**
@@ -464,7 +464,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							<box flexDirection={metadataDirection} gap={2}>
 								<text fg={theme.text}>{"📁 Exists"}</text>
 								{props.task.hasUncommittedChanges && (
-									<text fg={theme.red}>{"● Uncommitted changes"}</text>
+									<text fg={theme.red}>{"✎ Uncommitted changes"}</text>
 								)}
 								{props.task.gitBehindCount !== undefined && props.task.gitBehindCount > 0 && (
 									<text fg={theme.yellow}>{`↓${props.task.gitBehindCount} behind`}</text>

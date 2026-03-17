@@ -10,6 +10,7 @@
 
 import type { OrchestrationTask } from "../services/EditorService.js"
 import { theme } from "./theme.js"
+import { ISSUE_STATUS_INDICATORS } from "./types.js"
 
 const ATTR_BOLD = 1
 
@@ -21,16 +22,9 @@ export interface OrchestrationOverlayProps {
 	focusIndex: number
 }
 
-/**
- * Get status indicator for a task
- * ○ = open (spawnable)
- * ● = in_progress or blocked or has session (not spawnable)
- * ✓ = closed
- */
+/** Get status indicator for a task (separate from spawnability state). */
 const getStatusIndicator = (task: OrchestrationTask): string => {
-	if (task.status === "closed") return "✓"
-	if (task.status === "open" && !task.hasSession) return "○"
-	return "●"
+	return ISSUE_STATUS_INDICATORS[task.status]
 }
 
 /**

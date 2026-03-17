@@ -178,9 +178,9 @@ export const TaskCard = (props: TaskCardProps) => {
 			statusParts.push(`↓${gitBehindCount}`)
 		}
 
-		// Dirty indicator (●)
+		// Dirty indicator (✎)
 		if (hasUncommittedChanges) {
-			statusParts.push("●")
+			statusParts.push("✎")
 		}
 
 		const statusString = statusParts.join(" ")
@@ -251,7 +251,7 @@ export const TaskCard = (props: TaskCardProps) => {
 		return line
 	}
 
-	// Color for status indicators (↓N behind, ● dirty)
+	// Color for status indicators (↓N behind, ✎ dirty)
 	// Behind: yellow (needs attention), Dirty: red (uncommitted work), Both: red
 	const getStatusColor = (): string => {
 		if (!canShowGitStatus) return theme.overlay0
