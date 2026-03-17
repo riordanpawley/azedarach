@@ -35,13 +35,12 @@ import {
 import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
-import {
-	type InvalidStateError,
-	type SessionError,
-	type SessionLimitError,
-	SessionManager,
-	type SessionNotFoundError,
-	type SessionWorktreeMissingError,
+import type {
+	InvalidStateError,
+	SessionError,
+	SessionLimitError,
+	SessionNotFoundError,
+	SessionWorktreeMissingError,
 } from "../core/SessionManager.js"
 import type {
 	TmuxError,
@@ -95,6 +94,11 @@ const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
 const TRANSIENT_RETRY_ATTEMPTS = 4
 const TRANSIENT_RETRY_BASE_DELAY_MS = 120
 const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
+const AZEDARACH_REQUIRE_DAEMON_AUTHORITY_ENV = "AZEDARACH_REQUIRE_DAEMON_AUTHORITY"
+
+export const isBoardDaemonAuthorityRequired = (
+	env: Readonly<Record<string, string | undefined>>,
+): boolean => env[AZEDARACH_REQUIRE_DAEMON_AUTHORITY_ENV] !== "0"
 
 const withTransientRetry = <A, E, R>(
 	context: string,
@@ -158,6 +162,9 @@ export const makeBoardDaemonIpcSignals = (params: {
 	readonly getProjectPath?: () => Effect.Effect<string | undefined, never, never>
 	readonly onDaemonStreamBatch?: (batch: DaemonEventStreamResult) => Effect.Effect<void>
 }) => {
+	const resolveProjectPath = (projectPath: string | undefined): string =>
+		projectPath ?? process.cwd()
+
 	const observeSessionSnapshot = (): Effect.Effect<void> => {
 		if (Option.isNone(params.daemonRpcClient)) {
 			return Effect.void
@@ -168,8 +175,9 @@ export const makeBoardDaemonIpcSignals = (params: {
 		}
 		const sessionSnapshot = daemonRpcClient.sessionSnapshot
 		return Effect.gen(function* () {
-			const projectPath =
-				params.getProjectPath === undefined ? undefined : yield* params.getProjectPath()
+			const projectPath = resolveProjectPath(
+				params.getProjectPath === undefined ? undefined : yield* params.getProjectPath(),
+			)
 			return yield* sessionSnapshot({ projectPath })
 		}).pipe(
 			Effect.flatMap((snapshot) =>
@@ -267,21 +275,26 @@ export const makeBoardDaemonIpcSignals = (params: {
 		if (Option.isNone(params.daemonRpcClient)) {
 			return Effect.succeed(cursor)
 		}
-		if (params.daemonRpcClient.value.eventStream === undefined) {
+		const daemonEventStream = params.daemonRpcClient.value.eventStream
+		if (daemonEventStream === undefined) {
 			return Effect.succeed(cursor)
 		}
-		return params.daemonRpcClient.value
-			.eventStream({
+		return Effect.gen(function* () {
+			const projectPath = resolveProjectPath(
+				params.getProjectPath === undefined ? undefined : yield* params.getProjectPath(),
+			)
+			return yield* daemonEventStream({
 				clientId: params.daemonFrontendClientId,
+				projectPath,
 				cursor,
 				batchSize: 32,
 				waitMs: 2500,
 			})
-			.pipe(
-				Effect.tap(processDaemonStreamBatch),
-				Effect.map((batch) => batch.nextCursor),
-				Effect.catchAll(() => Effect.succeed(cursor)),
-			)
+		}).pipe(
+			Effect.tap(processDaemonStreamBatch),
+			Effect.map((batch) => batch.nextCursor),
+			Effect.catchAll(() => Effect.succeed(cursor)),
+		)
 	}
 
 	return {
@@ -291,6 +304,10 @@ export const makeBoardDaemonIpcSignals = (params: {
 		consumeStreamBatch,
 	}
 }
+
+export const resolveDaemonAuthoritativeProjectPath = (
+	projectPath: string | null | undefined,
+): string => projectPath ?? process.cwd()
 
 const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
 	if (!stateName) return "open"
@@ -427,6 +444,16 @@ export const resolveBoardRefreshExecutionMode = (params: {
 		default:
 			return "local-session-and-git"
 	}
+}
+
+export const resolveDaemonBoardReadModelRpc = (params: {
+	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
+}): Option.Option<NonNullable<DaemonRpcClientApi["boardReadModel"]>> => {
+	if (Option.isNone(params.daemonRpcClient)) {
+		return Option.none()
+	}
+	const boardReadModel = params.daemonRpcClient.value.boardReadModel
+	return boardReadModel === undefined ? Option.none() : Option.some(boardReadModel)
 }
 
 export const applySessionRefreshPatch = (params: {
@@ -796,7 +823,6 @@ export interface PerProjectBoardState {
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
-		SessionManager.Default,
 		IssueTrackerClient.Default,
 		BackendSyncRouter.Default,
 		EditorService.Default,
@@ -813,7 +839,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	],
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
-		const sessionManager = yield* SessionManager
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
@@ -921,41 +946,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		}
 
 		const loadAuthoritativeSessions = (projectPath: string | null) => {
-			const loadLocalSessionViews = () =>
-				sessionManager
-					.listActive(projectPath ?? undefined)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
-							),
-						),
-					)
-
 			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
-				return daemonRpcClient.value
-					.sessionSnapshot({ projectPath: projectPath ?? undefined })
-					.pipe(
-						Effect.map((result) =>
-							result.sessions
-								.map((entry) => toAuthoritativeSessionView(entry))
-								.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+				const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
+				return daemonRpcClient.value.sessionSnapshot({ projectPath: daemonProjectPath }).pipe(
+					Effect.map((result) =>
+						result.sessions
+							.map((entry) => toAuthoritativeSessionView(entry))
+							.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+					),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
 						),
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(loadLocalSessionViews()),
-							),
-						),
-					)
+					),
+				)
 			}
 
-			if (Option.isSome(daemonRpcClient)) {
-				return Effect.logDebug(
-					"BoardService falling back to local SessionManager authority because daemon client lacks sessionSnapshot RPC capability",
-				).pipe(Effect.zipRight(loadLocalSessionViews()))
-			}
-
-			return loadLocalSessionViews()
+			return Effect.logWarning(
+				"BoardService authoritative daemon session snapshot RPC unavailable; returning empty session snapshot",
+			).pipe(Effect.zipRight(Effect.succeed([])))
 		}
 
 		// ====================================================================
@@ -1325,18 +1334,96 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				? Effect.succeed(preferredProjectPath)
 				: getCurrentBoardProjectPath()
 
+		const getGitConfigForResolvedProject = (
+			projectPath: string | null,
+		): Effect.Effect<{
+			readonly baseBranch: string
+			readonly showLineChanges: boolean
+			readonly workflowMode: "local" | "origin"
+		}> =>
+			projectPath === null
+				? appConfig.getGitConfig()
+				: appConfig
+						.getGitConfigForProjectPath(projectPath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`BoardService: failed to load git config for projectPath=${projectPath}; using reactive fallback config (${error.message})`,
+								).pipe(Effect.zipRight(appConfig.getGitConfig())),
+							),
+						)
+
 		const loadTasks = (preferredProjectPath?: string | null) =>
 			Effect.gen(function* () {
 				const loadStartTime = Date.now()
+				const daemonAuthorityRequired = isBoardDaemonAuthorityRequired(process.env)
 				const projectPath = yield* resolveProjectPath(preferredProjectPath)
 				const boardProjectPath = yield* SubscriptionRef.get(currentProjectPath)
 				const serviceProjectPath = (yield* projectService.getCurrentPath()) ?? null
 				yield* Effect.log(
 					`loadTasks: resolved projectPath=${projectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"} boardCurrentProjectPath=${boardProjectPath ?? "null"} projectServiceCurrentPath=${serviceProjectPath ?? "null"}`,
 				)
+				const daemonBoardReadModelRpc = resolveDaemonBoardReadModelRpc({
+					daemonRpcClient,
+				})
+				if (Option.isNone(daemonBoardReadModelRpc)) {
+					if (!daemonAuthorityRequired) {
+						yield* Effect.logWarning(
+							"loadTasks: daemon boardReadModel RPC unavailable; using legacy local fallback because daemon authority is explicitly disabled",
+						)
+					}
+				}
+				if (Option.isSome(daemonBoardReadModelRpc)) {
+					const daemonPendingMutations = yield* mutationQueue.getOptimisticMutations()
+					const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
+					const daemonTasks = yield* diagnostics.measure(
+						{
+							source: "BoardService",
+							name: "daemon.boardReadModel",
+							thresholdMs: 150,
+							details: daemonProjectPath,
+						},
+						daemonBoardReadModelRpc.value({ projectPath: daemonProjectPath }).pipe(
+							Effect.map((result) => result.tasks),
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`loadTasks: daemon boardReadModel failed for projectPath=${daemonProjectPath}: ${error.message}`,
+								).pipe(Effect.zipRight(Effect.succeed([]))),
+							),
+						),
+					)
+					const daemonTasksWithMutations = daemonTasks
+						.map((task) => {
+							const queuedMutation = daemonPendingMutations.get(task.id)
+							if (queuedMutation === undefined) {
+								return task
+							}
+							const mutation = queuedMutation.mutation
+							switch (mutation._tag) {
+								case "Move":
+									return { ...task, status: mutation.status }
+								case "Update":
+									return { ...task, ...mutation.fields }
+								case "Delete":
+									return null
+								default:
+									return task
+							}
+						})
+						.filter((task): task is TaskWithSession => task !== null)
+					yield* Effect.log(
+						`loadTasks: daemon read-model ${daemonTasksWithMutations.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
+					)
+					return daemonTasksWithMutations
+				}
+				if (daemonAuthorityRequired) {
+					yield* Effect.logWarning(
+						"loadTasks: daemon boardReadModel RPC unavailable; using legacy load path to avoid empty board while daemon capabilities converge",
+					)
+				}
 				const startupBatch = yield* Effect.all(
 					{
-						gitConfig: appConfig.getGitConfig(),
+						gitConfig: getGitConfigForResolvedProject(projectPath),
 						startupConfig: SubscriptionRef.get(appConfig.config),
 						currentVisibleTaskIds: SubscriptionRef.get(visibleTaskIds),
 						persistedBoardTasks: loadBoardProjection(projectPath ?? process.cwd()),
@@ -1420,10 +1507,77 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const normalizedProjectPath = projectPath ?? ""
 				const cachedEntry = allCachedParentEpics.get(normalizedProjectPath)
 
-				if (cachedEntry && now - cachedEntry.timestamp < PARENT_EPIC_CACHE_TTL_MS) {
+				if (cachedEntry === undefined) {
+					// Cache miss - fetch fresh data
+					parentByIssueId = new Map<string, string | undefined>()
+					parentEpicMap = new Map<string, string | undefined>()
+					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
+					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
+
+					if (issuesWithDeps.length > 0) {
+						// Linear list already includes dependency details; avoid an additional fetch.
+						const issuesWithDepDetails = isLinearBackend
+							? issuesWithDeps
+							: yield* diagnostics.measure(
+									{
+										source: "BoardService",
+										name: "tracker.showMultiple",
+										thresholdMs: 200,
+										details: `count=${issuesWithDeps.length}`,
+									},
+									issueTrackerClient
+										.showMultiple(
+											issuesWithDeps.map((i) => i.id),
+											projectPath ?? undefined,
+										)
+										.pipe(
+											Effect.withSpan("tracker.showMultiple"),
+											Effect.catchAll((error) =>
+												Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+													Effect.zipRight(Effect.succeed([])),
+												),
+											),
+										),
+								)
+
+						// Extract parent IDs from dependencies, plus epic parent IDs for git base behavior
+						for (const issue of issuesWithDepDetails) {
+							const parentChildDep = issue.dependencies?.find(
+								(dep) => dep.dependency_type === "parent-child",
+							)
+							let parentId: string | undefined
+							let parentEpicId: string | undefined
+							if (parentChildDep !== undefined) {
+								const parentDependency = parentChildDep!
+								parentId = parentDependency.id
+								if (parentDependency.issue_type === "epic") {
+									parentEpicId = parentDependency.id
+								} else if (parentDependency.issue_type === undefined) {
+									const parentIssue = issuesById.get(parentDependency.id)
+									if (parentIssue?.issue_type === "epic") {
+										parentEpicId = parentDependency.id
+									}
+								}
+							}
+							parentByIssueId.set(issue.id, parentId)
+							parentEpicMap.set(issue.id, parentEpicId)
+						}
+					}
+
+					// Cache the result (preserves cache for other projects)
+					yield* Ref.update(parentEpicCacheRef, (cache) => {
+						const newCache = new Map(cache)
+						newCache.set(normalizedProjectPath, {
+							parentByIssueId,
+							parentEpicByIssueId: parentEpicMap,
+							timestamp: now,
+						})
+						return newCache
+					})
+				} else if (now - cachedEntry!.timestamp < PARENT_EPIC_CACHE_TTL_MS) {
 					// Cache hit - use cached map
-					parentByIssueId = cachedEntry.parentByIssueId
-					parentEpicMap = cachedEntry.parentEpicByIssueId
+					parentByIssueId = cachedEntry!.parentByIssueId
+					parentEpicMap = cachedEntry!.parentEpicByIssueId
 					cacheStatus = "hit"
 				} else {
 					// Cache miss - fetch fresh data
@@ -1465,14 +1619,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							)
 							let parentId: string | undefined
 							let parentEpicId: string | undefined
-							if (parentChildDep) {
-								parentId = parentChildDep.id
-								if (parentChildDep.issue_type === "epic") {
-									parentEpicId = parentChildDep.id
-								} else if (parentChildDep.issue_type === undefined) {
-									const parentIssue = issuesById.get(parentChildDep.id)
+							if (parentChildDep !== undefined) {
+								const parentDependency = parentChildDep!
+								parentId = parentDependency.id
+								if (parentDependency.issue_type === "epic") {
+									parentEpicId = parentDependency.id
+								} else if (parentDependency.issue_type === undefined) {
+									const parentIssue = issuesById.get(parentDependency.id)
 									if (parentIssue?.issue_type === "epic") {
-										parentEpicId = parentChildDep.id
+										parentEpicId = parentDependency.id
 									}
 								}
 							}
@@ -1498,15 +1653,16 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Get all worktrees ONCE upfront instead of per-issue exists() calls
 				// This eliminates 331 Effect operations → 1 operation
+				const worktreeInventoryProjectPath = projectPath ?? process.cwd()
 				const worktreeInventory = projectPath
 					? yield* diagnostics.measure(
 							{
 								source: "BoardService",
 								name: "worktrees.list",
 								thresholdMs: 200,
-								details: projectPath,
+								details: worktreeInventoryProjectPath,
 							},
-							worktreeManager.list(projectPath).pipe(
+							worktreeManager.list(worktreeInventoryProjectPath).pipe(
 								Effect.withSpan("worktrees.list"),
 								Effect.map((worktreeList) => ({
 									loaded: true as const,
@@ -1647,7 +1803,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							thresholdMs: 300,
 							details: `count=${tasksWithPRs.length}`,
 						},
-						prStateService.getPRStates(prInfos, projectPath).pipe(
+						prStateService.getPRStates(prInfos, projectPath ?? process.cwd()).pipe(
 							Effect.withSpan("prStates.get"),
 							Effect.catchAll((error) =>
 								Effect.logWarning(error).pipe(
@@ -1992,7 +2148,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const currentVisibleTaskIds = params.includeGitStatus
 					? yield* SubscriptionRef.get(visibleTaskIds)
 					: undefined
-				const gitConfig = params.includeGitStatus ? yield* appConfig.getGitConfig() : undefined
+				const gitConfig = params.includeGitStatus
+					? yield* getGitConfigForResolvedProject(projectPath)
+					: undefined
 
 				const nextTasks = yield* Effect.all(
 					currentTasks.map((task) =>
@@ -2804,12 +2962,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				yield* SubscriptionRef.set(isRefreshingGitStats, true)
 
-				const projectPath = yield* projectService.getCurrentPath()
+				const projectPath = yield* getCurrentBoardProjectPath()
 				if (!projectPath) {
 					return
 				}
 
-				const gitConfig = yield* appConfig.getGitConfig()
+				const gitConfig = yield* getGitConfigForResolvedProject(projectPath)
 				const { baseBranch, showLineChanges } = gitConfig
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
@@ -3016,6 +3174,26 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Save current project state before switching
 				yield* saveCurrentToMap()
 
+				yield* projectService
+					.switchProjectPath(newProjectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Failed to sync ProjectService before project switch: ${String(error)}`,
+							).pipe(Effect.asVoid),
+						),
+					)
+
+				yield* appConfig
+					.reload()
+					.pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(
+								`Project switch config reload failed before cache/refresh handoff: ${formatRefreshFailureMessage(cause)}`,
+							).pipe(Effect.asVoid),
+						),
+					)
+
 				// Update the current project path
 				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
 				yield* signalDaemonHeartbeat()
@@ -3035,15 +3213,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Fork the refresh into the service's scope - not a daemon fiber
 				yield* Effect.gen(function* () {
-					yield* appConfig
-						.reload()
-						.pipe(
-							Effect.catchAllCause((cause) =>
-								Effect.logWarning(
-									`Project switch config reload failed before refresh: ${formatRefreshFailureMessage(cause)}`,
-								).pipe(Effect.asVoid),
-							),
-						)
 					yield* syncLinearProjectBeforeRefresh(newProjectPath)
 					yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true }, newProjectPath)
 					yield* onRefreshComplete

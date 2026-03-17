@@ -15,16 +15,16 @@ describe("DaemonOperationsPolicy", () => {
 		expect(policy.decision).toBe("enabled-by-default")
 	})
 
-	it("disables auto-daemonize via --no-daemon flag", () => {
+	it("enables auto-daemonize via AZEDARACH_DAEMON_MODE=on", () => {
 		const policy = resolveDaemonOperationsPolicy({
 			command: "tui-default",
-			noDaemonFlag: true,
+			noDaemonFlag: false,
 			env: {
 				AZEDARACH_DAEMON_MODE: "on",
 			},
 		})
-		expect(policy.autoDaemonize).toBe(false)
-		expect(policy.decision).toBe("disabled-by-cli-flag")
+		expect(policy.autoDaemonize).toBe(true)
+		expect(policy.decision).toBe("enabled-by-env")
 	})
 
 	it("disables auto-daemonize via AZEDARACH_DAEMON_MODE=off", () => {

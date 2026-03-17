@@ -16,7 +16,7 @@ import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Data, Effect, Schema, Scope, SubscriptionRef } from "effect"
+import { Data, Effect, Exit, Schema, Scope, SubscriptionRef } from "effect"
 import { getProjectStoragePaths } from "../core/storagePaths.js"
 
 // ============================================================================
@@ -288,6 +288,19 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 		const sqliteOperationSemaphoreByDbPath = new Map<string, Effect.Semaphore>()
 		const sqliteClientInitSemaphore = yield* Effect.makeSemaphore(1)
 		const sqliteSemaphoreInitSemaphore = yield* Effect.makeSemaphore(1)
+		yield* Effect.addFinalizer(() =>
+			Scope.close(sqliteScope, Exit.void).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`ProjectService sqlite scope close failed: ${String(error)}`),
+				),
+				Effect.zipRight(
+					Effect.sync(() => {
+						sqliteClientByDbPath.clear()
+						sqliteOperationSemaphoreByDbPath.clear()
+					}),
+				),
+			),
+		)
 
 		const mapSqliteError = (message: string, cause: unknown): ProjectSqliteError =>
 			new ProjectSqliteError({ message, cause })
@@ -596,6 +609,28 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 						return yield* Effect.fail(
 							new ProjectError({
 								message: `Project not found: ${name}`,
+							}),
+						)
+					}
+
+					yield* SubscriptionRef.set(currentProject, project)
+				}),
+
+			/**
+			 * Switch to a different project by absolute path
+			 */
+			switchProjectPath: (targetPath: string): Effect.Effect<void, ProjectError> =>
+				Effect.gen(function* () {
+					const normalizedTargetPath = pathService.normalize(targetPath)
+					const projectList = yield* SubscriptionRef.get(projects)
+					const project = projectList.find(
+						(candidate) => pathService.normalize(candidate.path) === normalizedTargetPath,
+					)
+
+					if (!project) {
+						return yield* Effect.fail(
+							new ProjectError({
+								message: `Project not found for path: ${targetPath}`,
 							}),
 						)
 					}

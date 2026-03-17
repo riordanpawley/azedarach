@@ -88,7 +88,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* getActiveProjectPath())
+						const effectiveProjectPath =
+							projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
 						yield* daemonRpcClient.value.sessionStop({
 							issueId,
 							projectPath: effectiveProjectPath,

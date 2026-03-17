@@ -1,5 +1,6 @@
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import type { TaskWithSession } from "../ui/types.js"
 import {
 	BackendDaemonService,
 	type BackendDaemonServiceApi,
@@ -19,6 +20,7 @@ import {
 	type DevServerDaemonStatusRequest,
 	type DevServerDaemonStatusResult,
 } from "./DevServerDaemonService.js"
+import { LocalIssueStore } from "./LocalIssueStore.js"
 import { SessionManager } from "./SessionManager.js"
 
 export interface BackendDaemonControlStatus {
@@ -54,7 +56,7 @@ export interface BackendDaemonControlQueueItem {
 	readonly domain: BackendDaemonControlQueueDomain
 	readonly operationId: string
 	readonly operation: string
-	readonly projectPath: string | null
+	readonly projectPath: string
 	readonly issueId: string | null
 	readonly dedupeKey: string | null
 	readonly payloadJson: string | null
@@ -68,7 +70,7 @@ export interface BackendDaemonControlQueueItem {
 export interface BackendDaemonControlQueueEnqueueRequest {
 	readonly domain: BackendDaemonControlQueueDomain
 	readonly operation: string
-	readonly projectPath?: string
+	readonly projectPath: string
 	readonly issueId?: string
 	readonly dedupeKey?: string
 	readonly payloadJson?: string
@@ -80,9 +82,9 @@ export interface BackendDaemonControlQueueEnqueueResult {
 }
 
 export interface BackendDaemonControlQueueQueryRequest {
+	readonly projectPath: string
 	readonly domain?: BackendDaemonControlQueueDomain
 	readonly operationId?: string
-	readonly projectPath?: string
 	readonly issueId?: string
 	readonly limit?: number
 }
@@ -93,15 +95,25 @@ export interface BackendDaemonControlQueueQueryResult {
 }
 
 export interface BackendDaemonControlQueueCancelRequest {
+	readonly projectPath: string
 	readonly domain?: BackendDaemonControlQueueDomain
 	readonly operationId?: string
-	readonly projectPath?: string
 	readonly issueId?: string
 }
 
 export interface BackendDaemonControlQueueCancelResult {
 	readonly cancelledAtMs: number
 	readonly cancelledOperationIds: ReadonlyArray<string>
+}
+
+export interface BackendDaemonControlBoardReadModelRequest {
+	readonly projectPath: string
+}
+
+export interface BackendDaemonControlBoardReadModelResult {
+	readonly capturedAtMs: number
+	readonly projectPath: string
+	readonly tasks: ReadonlyArray<TaskWithSession>
 }
 
 export interface BackendDaemonControlServiceApi {
@@ -120,6 +132,9 @@ export interface BackendDaemonControlServiceApi {
 	readonly queueCancel: (
 		request?: BackendDaemonControlQueueCancelRequest,
 	) => Effect.Effect<BackendDaemonControlQueueCancelResult>
+	readonly boardReadModel: (
+		request: BackendDaemonControlBoardReadModelRequest,
+	) => Effect.Effect<BackendDaemonControlBoardReadModelResult>
 	readonly devServerStatus: (
 		request: DevServerDaemonStatusRequest,
 	) => Effect.Effect<DevServerDaemonStatusResult>
@@ -233,8 +248,16 @@ export const makeBackendDaemonControlService = (params: {
 	readonly runtime: BackendDaemonServiceApi
 	readonly sync: BackendSyncDaemonServiceApi
 	readonly devServer: DevServerDaemonServiceApi
+	readonly readBoardTasks?: (
+		projectPath: string,
+	) => Effect.Effect<ReadonlyArray<TaskWithSession>, unknown>
 }): BackendDaemonControlServiceApi => {
 	const queueItems = new Map<string, BackendDaemonControlQueueItem>()
+
+	const sortBoardTasksForReadModel = (
+		tasks: ReadonlyArray<TaskWithSession>,
+	): ReadonlyArray<TaskWithSession> =>
+		[...tasks].sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
 
 	const queueMatches = (
 		item: BackendDaemonControlQueueItem,
@@ -243,13 +266,13 @@ export const makeBackendDaemonControlService = (params: {
 			| BackendDaemonControlQueueCancelRequest
 			| undefined,
 	): boolean => {
+		if (request?.projectPath !== undefined && item.projectPath !== request.projectPath) {
+			return false
+		}
 		if (request?.domain !== undefined && item.domain !== request.domain) {
 			return false
 		}
 		if (request?.operationId !== undefined && item.operationId !== request.operationId) {
-			return false
-		}
-		if (request?.projectPath !== undefined && item.projectPath !== request.projectPath) {
 			return false
 		}
 		if (request?.issueId !== undefined && item.issueId !== request.issueId) {
@@ -291,7 +314,7 @@ export const makeBackendDaemonControlService = (params: {
 					domain: request.domain,
 					operationId: crypto.randomUUID(),
 					operation: request.operation,
-					projectPath: request.projectPath ?? null,
+					projectPath: request.projectPath,
 					issueId: request.issueId ?? null,
 					dedupeKey: request.dedupeKey ?? null,
 					payloadJson: request.payloadJson ?? null,
@@ -338,6 +361,28 @@ export const makeBackendDaemonControlService = (params: {
 					cancelledOperationIds,
 				} satisfies BackendDaemonControlQueueCancelResult
 			}),
+		boardReadModel: (request) =>
+			(params.readBoardTasks === undefined
+				? Effect.succeed<ReadonlyArray<TaskWithSession>>([])
+				: params.readBoardTasks(request.projectPath)
+			).pipe(
+				Effect.map((tasks) => ({
+					capturedAtMs: Date.now(),
+					projectPath: request.projectPath,
+					tasks: sortBoardTasksForReadModel(tasks),
+				})),
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`Daemon board read model failed for projectPath=${request.projectPath}: ${String(error)}`,
+					).pipe(
+						Effect.as({
+							capturedAtMs: Date.now(),
+							projectPath: request.projectPath,
+							tasks: [],
+						} satisfies BackendDaemonControlBoardReadModelResult),
+					),
+				),
+			),
 		devServerStatus: (request) => params.devServer.status(request),
 		devServerList: (request) => params.devServer.list(request),
 		devServerStart: (request) => params.devServer.start(request),
@@ -354,11 +399,13 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			DevServerDaemonService.Default,
 			SessionManager.Default,
 			AppConfig.Default,
+			LocalIssueStore.Default,
 		],
 		effect: Effect.gen(function* () {
 			const runtime = yield* BackendDaemonService
 			const sync = yield* BackendSyncDaemonService
 			const devServer = yield* DevServerDaemonService
+			const localIssueStore = yield* LocalIssueStore
 			const sessionManager = yield* SessionManager
 			const appConfig = yield* AppConfig
 			const recoveryInFlightRef = yield* Ref.make<ReadonlySet<string>>(new Set())
@@ -464,6 +511,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 				runtime,
 				sync,
 				devServer,
+				readBoardTasks: (projectPath) => localIssueStore.listBoardTasks(projectPath),
 			})
 		}),
 	},

@@ -182,8 +182,12 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 			})
 		}
 
-		const toQueueScope = (taskId: string, projectPath?: string) =>
-			projectPath === undefined ? { issueId: taskId } : { issueId: taskId, projectPath }
+		const resolveDaemonProjectPath = (
+			projectPath: string | undefined,
+		): Effect.Effect<string, never, never> =>
+			projectPath === undefined
+				? Effect.succeed(globalThis.process.cwd())
+				: Effect.succeed(projectPath)
 
 		const clearDaemonMutationQueue = (
 			taskId?: string,
@@ -194,13 +198,15 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 				if (Option.isNone(daemonQueueRpc)) {
 					return
 				}
+				const daemonProjectPath = yield* resolveDaemonProjectPath(projectPath)
 				yield* daemonQueueRpc.value
 					.queueCancel(
 						taskId === undefined
-							? { domain: "mutation" }
+							? { domain: "mutation", projectPath: daemonProjectPath }
 							: {
 									domain: "mutation",
-									...toQueueScope(taskId, projectPath),
+									issueId: taskId,
+									projectPath: daemonProjectPath,
 								},
 					)
 					.pipe(
@@ -279,36 +285,42 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 				if (Option.isNone(daemonQueueRpc)) {
 					return yield* getOptimisticMutationsFromLocal()
 				}
+				const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
 
-				return yield* daemonQueueRpc.value.queueQuery({ domain: "mutation" }).pipe(
-					Effect.map((result) => {
-						const optimisticQueue = new Map<string, OptimisticQueuedMutation>()
-						for (const item of result.items) {
-							if (item.issueId === null) {
-								continue
+				return yield* daemonQueueRpc.value
+					.queueQuery({
+						domain: "mutation",
+						projectPath: daemonProjectPath,
+					})
+					.pipe(
+						Effect.map((result) => {
+							const optimisticQueue = new Map<string, OptimisticQueuedMutation>()
+							for (const item of result.items) {
+								if (item.issueId === null) {
+									continue
+								}
+								const status = toDaemonPendingStatus(item.state)
+								if (Option.isNone(status)) {
+									continue
+								}
+								const mutation = toOptimisticMutationFromDaemon(item.issueId, item.payloadJson)
+								if (Option.isNone(mutation)) {
+									continue
+								}
+								optimisticQueue.set(item.issueId, {
+									mutation: mutation.value,
+									status: status.value,
+									timestamp: item.enqueuedAtMs,
+								})
 							}
-							const status = toDaemonPendingStatus(item.state)
-							if (Option.isNone(status)) {
-								continue
-							}
-							const mutation = toOptimisticMutationFromDaemon(item.issueId, item.payloadJson)
-							if (Option.isNone(mutation)) {
-								continue
-							}
-							optimisticQueue.set(item.issueId, {
-								mutation: mutation.value,
-								status: status.value,
-								timestamp: item.enqueuedAtMs,
-							})
-						}
-						return optimisticQueue
-					}),
-					Effect.catchAll((error) =>
-						Effect.logWarning("Daemon mutation queue query failed; using local mutation state", {
-							error,
-						}).pipe(Effect.zipRight(getOptimisticMutationsFromLocal())),
-					),
-				)
+							return optimisticQueue
+						}),
+						Effect.catchAll((error) =>
+							Effect.logWarning("Daemon mutation queue query failed; using local mutation state", {
+								error,
+							}).pipe(Effect.zipRight(getOptimisticMutationsFromLocal())),
+						),
+					)
 			})
 
 		const add = (mutation: Mutation): Effect.Effect<void> =>
@@ -329,25 +341,16 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 
 				const daemonQueueRpc = getDaemonQueueRpc()
 				if (Option.isSome(daemonQueueRpc)) {
+					const daemonProjectPath = yield* resolveDaemonProjectPath(mutation.cwd)
 					yield* daemonQueueRpc.value
-						.queueEnqueue(
-							mutation.cwd === undefined
-								? {
-										domain: "mutation",
-										operation: mutation._tag,
-										issueId: mutation.id,
-										dedupeKey: `${mutation.id}:${mutation._tag}`,
-										payloadJson: toDaemonPayload(mutation),
-									}
-								: {
-										domain: "mutation",
-										operation: mutation._tag,
-										issueId: mutation.id,
-										projectPath: mutation.cwd,
-										dedupeKey: `${mutation.id}:${mutation._tag}`,
-										payloadJson: toDaemonPayload(mutation),
-									},
-						)
+						.queueEnqueue({
+							domain: "mutation",
+							operation: mutation._tag,
+							issueId: mutation.id,
+							projectPath: daemonProjectPath,
+							dedupeKey: `${mutation.id}:${mutation._tag}`,
+							payloadJson: toDaemonPayload(mutation),
+						})
 						.pipe(
 							Effect.catchAll((error) =>
 								Effect.logWarning(
@@ -507,11 +510,13 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 					if (Option.isNone(daemonQueueRpc)) {
 						return yield* getLocalPending
 					}
+					const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
 
 					return yield* daemonQueueRpc.value
 						.queueQuery({
 							domain: "mutation",
 							issueId: taskId,
+							projectPath: daemonProjectPath,
 						})
 						.pipe(
 							Effect.map((result) =>

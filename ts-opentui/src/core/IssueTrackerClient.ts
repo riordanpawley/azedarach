@@ -1328,9 +1328,6 @@ export const buildLinearIssuesListPageQuery = (
 	...(afterCursor == null ? {} : { after: afterCursor }),
 })
 
-const hasNoDaemonFlag = (args: readonly string[]): boolean =>
-	args.some((arg) => arg === "--no-daemon")
-
 const DEFAULT_ISSUE_LIST_PAGE_SIZE = 200
 const DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS = 250
 const EMPTY_ISSUES: readonly Issue[] = []
@@ -1555,7 +1552,6 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			executable: LegacyIssueExecutable,
 			args: readonly string[],
 			cwd?: string,
-			retryOnEmptyOutput = true,
 		): Effect.Effect<
 			string,
 			IssueTrackerError | SyncRequiredError,
@@ -1606,18 +1602,6 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 					// If not a sync error, fail with descriptive error
 					if (!trimmed) {
-						if (retryOnEmptyOutput && !hasNoDaemonFlag(args)) {
-							yield* Effect.logWarning(
-								`${executable} returned empty output, retrying with --no-daemon: ${executable} ${allArgs.join(" ")}`,
-							)
-							return yield* executeLegacyJsonCommand(
-								executable,
-								["--no-daemon", ...args],
-								cwd,
-								false,
-							)
-						}
-
 						yield* Effect.logWarning(
 							`${executable} command returned empty output: ${executable} ${allArgs.join(" ")}`,
 						)
@@ -1640,8 +1624,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			cwd?: string,
 		): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				// Add --no-daemon to bypass daemon (daemon doesn't support all operations)
-				const allArgs = ["--no-daemon", ...args]
+				const allArgs = [...args]
 
 				const command = cwd
 					? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))

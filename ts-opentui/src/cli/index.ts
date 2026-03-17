@@ -44,10 +44,7 @@ import {
 import { AttachmentService } from "../core/AttachmentService.js"
 import { BackendDaemonControlService } from "../core/BackendDaemonControlService.js"
 import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
-import {
-	resolveDaemonIntervalMsFromEnv,
-	resolveDaemonOperationsPolicy,
-} from "../core/DaemonOperationsPolicy.js"
+import { resolveDaemonIntervalMsFromEnv } from "../core/DaemonOperationsPolicy.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -102,7 +99,6 @@ import { SessionService } from "../services/SessionService.js"
 import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
-import { launchTUI } from "../ui/launch.js"
 import {
 	hasVerboseFlag,
 	normalizeCliAliases,
@@ -241,6 +237,17 @@ const createCommandCliLayer = (configPath: string | null) =>
 		Layer.provideMerge(BunContext.layer),
 	)
 
+/**
+ * Minimal layer for bare TUI startup path.
+ * Keeps CLI/runtime bootstrap lightweight before the UI runtime takes over.
+ */
+const createTuiBootstrapLayer = (configPath: string | null) =>
+	Layer.mergeAll(buildAppConfigLayer(configPath)).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
+
 const fullCliLayer = createFullCliLayer(null)
 const commandCliLayer = createCommandCliLayer(null)
 
@@ -254,10 +261,6 @@ const commandCliLayer = createCommandCliLayer(null)
 const verboseOption = Options.boolean("verbose").pipe(
 	Options.withAlias("v"),
 	Options.withDescription("Enable verbose logging"),
-)
-
-const noDaemonOption = Options.boolean("no-daemon").pipe(
-	Options.withDescription("Disable automatic daemon startup for this command"),
 )
 
 /**
@@ -489,22 +492,23 @@ const setConfigValue = (
 const defaultHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
-	readonly noDaemon: boolean
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const sessionRuntime = resolveStartSessionRuntimeMode()
 		yield* ensureDaemonAutoStartForCliCommand({
 			command: "tui-default",
 			projectPath: cwd,
-			noDaemonFlag: args.noDaemon,
 			verbose: args.verbose,
 		})
+		applyStartSessionRuntimeModeToTuiEnv(sessionRuntime.mode)
 
 		if (args.verbose) {
 			yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
 			yield* Console.log(`Project: ${cwd}`)
 			yield* Console.log("Verbose mode enabled")
+			yield* Console.log(`TUI runtime mode: ${sessionRuntime.mode} (${sessionRuntime.decision})`)
 		}
 
 		if (Option.isSome(args.config)) {
@@ -515,13 +519,16 @@ const defaultHandler = (args: {
 		yield* validateIssueTrackerStore(cwd)
 
 		// Launch TUI
+		const { launchTUI } = yield* Effect.promise(() => import("../ui/launch.js"))
 		yield* Effect.promise(() => launchTUI())
 	})
 
 /**
  * Start a new Claude session for an issue
  */
-type StartSessionRuntimeMode = "daemon-rpc" | "session-manager-fallback"
+type StartSessionRuntimeMode = "daemon-rpc"
+type StartSessionRuntimeDecision = "required-daemon-bootstrap"
+const AZEDARACH_TUI_RUNTIME_MODE_ENV = "AZEDARACH_TUI_RUNTIME_MODE"
 
 const mapDaemonSessionMutationToCliSession = (
 	result: DaemonSessionMutationResult,
@@ -533,43 +540,25 @@ const mapDaemonSessionMutationToCliSession = (
 	tmuxSessionName: result.session.tmuxSessionName,
 })
 
-export const resolveStartSessionRuntimeMode = (params: {
-	readonly noDaemonFlag: boolean
-	readonly env: Readonly<Record<string, string | undefined>>
-}): {
+export const resolveStartSessionRuntimeMode = (): {
 	readonly mode: StartSessionRuntimeMode
-	readonly decision:
-		| "enabled-by-default"
-		| "disabled-by-cli-flag"
-		| "disabled-by-env"
-		| "enabled-by-env"
-		| "ignored-invalid-env"
-} => {
-	const policy = resolveDaemonOperationsPolicy({
-		command: "tui-default",
-		noDaemonFlag: params.noDaemonFlag,
-		env: params.env,
-	})
-	return {
-		mode: policy.autoDaemonize ? "daemon-rpc" : "session-manager-fallback",
-		decision: policy.decision,
-	}
+	readonly decision: StartSessionRuntimeDecision
+} => ({ mode: "daemon-rpc", decision: "required-daemon-bootstrap" })
+
+const applyStartSessionRuntimeModeToTuiEnv = (mode: StartSessionRuntimeMode): void => {
+	process.env[AZEDARACH_TUI_RUNTIME_MODE_ENV] = mode
 }
 
 const startHandler = (args: {
 	readonly issueId: string
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
-	readonly noDaemon: boolean
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		const sessionRuntime = resolveStartSessionRuntimeMode({
-			noDaemonFlag: args.noDaemon,
-			env: process.env,
-		})
+		const sessionRuntime = resolveStartSessionRuntimeMode()
 
 		yield* Console.log(`Starting Claude session for issue: ${issueId}`)
 		yield* Console.log(`Project: ${cwd}`)
@@ -584,47 +573,39 @@ const startHandler = (args: {
 		// Validate issue tracker store
 		yield* validateIssueTrackerStore(cwd)
 
-		const session =
-			sessionRuntime.mode === "daemon-rpc"
-				? yield* Effect.gen(function* () {
-						const bootstrap = yield* bootstrapDaemonRpcClient({
-							autoStart: true,
-						})
-						if (bootstrap.client.sessionStart === undefined) {
-							return yield* Effect.fail(
-								new Error(
-									"Connected daemon does not support sessionStart RPC yet. Update daemon/runtime or rerun with --no-daemon.",
-								),
-							)
-						}
-						const mutation = yield* bootstrap.client
-							.sessionStart({
-								issueId,
-								projectPath: cwd,
-							})
-							.pipe(
-								Effect.mapError((error) =>
-									formatDaemonRpcClientFailure({
-										operation: "sessionStart",
-										socketUrl: bootstrap.socketUrl,
-										error,
-									}),
-								),
-							)
-						return mapDaemonSessionMutationToCliSession(mutation)
-					})
-				: yield* Effect.gen(function* () {
-						if (args.verbose) {
-							yield* Console.log(
-								`Session start daemon RPC disabled (${sessionRuntime.decision}); using direct runtime fallback.`,
-							)
-						}
-						const sessionManager = yield* SessionManager
-						return yield* sessionManager.start({
-							issueId,
-							projectPath: cwd,
-						})
-					})
+		if (args.verbose) {
+			yield* Console.log(
+				`Session start runtime mode: ${sessionRuntime.mode} (${sessionRuntime.decision})`,
+			)
+		}
+
+		const session = yield* Effect.gen(function* () {
+			const bootstrap = yield* bootstrapDaemonRpcClient({
+				autoStart: true,
+			})
+			if (bootstrap.client.sessionStart === undefined) {
+				return yield* Effect.fail(
+					new Error(
+						"Connected daemon does not support sessionStart RPC yet. Update daemon/runtime.",
+					),
+				)
+			}
+			const mutation = yield* bootstrap.client
+				.sessionStart({
+					issueId,
+					projectPath: cwd,
+				})
+				.pipe(
+					Effect.mapError((error) =>
+						formatDaemonRpcClientFailure({
+							operation: "sessionStart",
+							socketUrl: bootstrap.socketUrl,
+							error,
+						}),
+					),
+				)
+			return mapDaemonSessionMutationToCliSession(mutation)
+		})
 
 		// Claim the issue with session assignee
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -883,22 +864,9 @@ const getSyncFailureMessage = (error: unknown): string => {
 const ensureDaemonAutoStartForCliCommand = (params: {
 	readonly command: "tui-default" | "sync"
 	readonly projectPath: string
-	readonly noDaemonFlag: boolean
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const policy = resolveDaemonOperationsPolicy({
-			command: params.command,
-			noDaemonFlag: params.noDaemonFlag,
-			env: process.env,
-		})
-		if (!policy.autoDaemonize) {
-			if (params.verbose) {
-				yield* Console.log(`Auto-daemonize disabled (${policy.decision}).`)
-			}
-			return
-		}
-
 		const daemonizeEffect = Effect.gen(function* () {
 			const { intervalMs, warning } = resolveDaemonIntervalMsFromEnv(process.env)
 			if (warning !== undefined) {
@@ -1011,7 +979,6 @@ const syncHandler = (args: {
 	readonly all: boolean
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
-	readonly noDaemon: boolean
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
@@ -1019,7 +986,6 @@ const syncHandler = (args: {
 		yield* ensureDaemonAutoStartForCliCommand({
 			command: "sync",
 			projectPath: cwd,
-			noDaemonFlag: args.noDaemon,
 			verbose: args.verbose,
 		})
 
@@ -1170,25 +1136,21 @@ const formatDaemonSessionSnapshotSummaryLine = (summary: DaemonSessionSnapshotSu
 export const getDaemonSessionSnapshotSummary = (params: {
 	readonly client: Pick<DaemonRpcClientApi, "sessionSnapshot">
 	readonly socketUrl: string
-	readonly projectPath: string | undefined
+	readonly projectPath: string
 }): Effect.Effect<Option.Option<DaemonSessionSnapshotSummary>, Error> => {
 	if (params.client.sessionSnapshot === undefined) {
 		return Effect.succeed(Option.none())
 	}
-	return params.client
-		.sessionSnapshot(
-			params.projectPath === undefined ? undefined : { projectPath: params.projectPath },
-		)
-		.pipe(
-			Effect.map((snapshot) => Option.some(summarizeDaemonSessionSnapshot(snapshot))),
-			Effect.mapError((error) =>
-				formatDaemonRpcClientFailure({
-					operation: "sessionSnapshot",
-					socketUrl: params.socketUrl,
-					error,
-				}),
-			),
-		)
+	return params.client.sessionSnapshot({ projectPath: params.projectPath }).pipe(
+		Effect.map((snapshot) => Option.some(summarizeDaemonSessionSnapshot(snapshot))),
+		Effect.mapError((error) =>
+			formatDaemonRpcClientFailure({
+				operation: "sessionSnapshot",
+				socketUrl: params.socketUrl,
+				error,
+			}),
+		),
+	)
 }
 
 export const daemonCommandShouldAutoStart = (
@@ -1235,7 +1197,7 @@ export const consumeDaemonStatusStreamBatches = (params: {
 	readonly client: Pick<DaemonRpcClientApi, "eventStream">
 	readonly socketUrl: string
 	readonly clientId: string
-	readonly projectPath: string | undefined
+	readonly projectPath: string
 	readonly initialCursor: number | undefined
 	readonly batchSize: number
 	readonly waitMs: number
@@ -1327,7 +1289,7 @@ const daemonStatusHandler = (args: {
 		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
 			client: bootstrap.client,
 			socketUrl: bootstrap.socketUrl,
-			projectPath: status.sync.projectPath ?? undefined,
+			projectPath: status.sync.projectPath ?? process.cwd(),
 		}).pipe(
 			Effect.catchAll((error) =>
 				Console.log(`daemon session snapshot unavailable: ${error.message}`).pipe(
@@ -1354,7 +1316,7 @@ const daemonStatusHandler = (args: {
 				client: bootstrap.client,
 				socketUrl: bootstrap.socketUrl,
 				clientId: `az-cli:daemon-status:${process.pid}`,
-				projectPath: status.sync.projectPath ?? undefined,
+				projectPath: status.sync.projectPath ?? process.cwd(),
 				initialCursor: Option.getOrUndefined(args.cursor),
 				batchSize,
 				waitMs,
@@ -5531,7 +5493,6 @@ const startCommand = Command.make(
 		issueId: issueIdArg,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		noDaemon: noDaemonOption,
 		config: configOption,
 	},
 	startHandler,
@@ -5600,7 +5561,6 @@ const syncCommand = Command.make(
 		),
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		noDaemon: noDaemonOption,
 	},
 	syncHandler,
 ).pipe(Command.withDescription("Sync issue tracker state in worktrees"))
@@ -7410,7 +7370,6 @@ const az = Command.make(
 	{
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		noDaemon: noDaemonOption,
 		config: configOption,
 	},
 	defaultHandler,
@@ -7485,6 +7444,8 @@ const commandCli = az.pipe(
 	]),
 )
 
+const tuiCli = az
+
 // ============================================================================
 // CLI Runner
 // ============================================================================
@@ -7498,23 +7459,56 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	return createCommandCliLayer(configPath)
 }
 
+const buildTuiBootstrapLayerForArgv = (argv: ReadonlyArray<string>) => {
+	const configPath = parseConfigPathFromArgv(argv)
+	return createTuiBootstrapLayer(configPath)
+}
+
+type CliLayerMode = "dev-command" | "command" | "tui-bootstrap"
+
+const resolveCliLayerMode = (mode: ReturnType<typeof resolveCliExecutionMode>): CliLayerMode => {
+	if (mode === "dev-command") {
+		return "dev-command"
+	}
+	if (mode === "tui") {
+		return "tui-bootstrap"
+	}
+	return "command"
+}
+
 /**
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) => {
 	const normalizedArgv = normalizeIssueOptionOrder(normalizeCliAliases(argv))
 	const mode = resolveCliExecutionMode(normalizedArgv)
+	const layerMode = resolveCliLayerMode(mode)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
-	const runEffect =
-		mode === "dev-command"
-			? Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
+	const runEffect = (() => {
+		switch (layerMode) {
+			case "dev-command":
+				return Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)
-			: Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
-					name: "Azedarach",
-					version: CLI_VERSION,
-				})(normalizedArgv)
+			case "tui-bootstrap":
+				return Command.run(
+					tuiCli.pipe(Command.provide(buildTuiBootstrapLayerForArgv(normalizedArgv))),
+					{
+						name: "Azedarach",
+						version: CLI_VERSION,
+					},
+				)(normalizedArgv)
+			case "command":
+				return Command.run(
+					commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))),
+					{
+						name: "Azedarach",
+						version: CLI_VERSION,
+					},
+				)(normalizedArgv)
+		}
+	})()
 	return runEffect.pipe(
 		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Effect.provide(Logger.minimumLogLevel(minimumLogLevel)),
@@ -7536,6 +7530,7 @@ export { cliLayer, commandCliLayer }
 export {
 	buildPrimeOutput,
 	buildCommandCliLayerForArgv,
+	buildTuiBootstrapLayerForArgv,
 	cliRunner,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
@@ -7547,6 +7542,7 @@ export {
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
+	resolveCliLayerMode,
 	resolveCliExecutionMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,

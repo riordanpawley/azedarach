@@ -85,16 +85,10 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 			yield* board.saveToCache(currentProject.path)
 		}
 
-		yield* projectState.withPersistenceSuspended(
-			Effect.gen(function* () {
-				yield* projectService.switchProject(projectName)
-				yield* projectState.restoreProjectState(project.path)
-			}),
-		)
-
 		// Switch board with a callback to show success toast after refresh
 		const onRefreshComplete = toast.show("success", `Loaded: ${projectName}`)
 		const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
+		yield* projectState.withPersistenceSuspended(projectState.restoreProjectState(project.path))
 		yield* projectState.saveCurrentProjectState(project.path)
 
 		if (cacheHit) {

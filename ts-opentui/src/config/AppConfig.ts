@@ -98,6 +98,11 @@ export interface AppConfigService {
 	/** Get git configuration section */
 	readonly getGitConfig: () => Effect.Effect<ResolvedConfig["git"]>
 
+	/** Get git configuration section for an explicit project path (non-reactive, path-scoped load) */
+	readonly getGitConfigForProjectPath: (
+		projectPath: string,
+	) => Effect.Effect<ResolvedConfig["git"], ConfigParseError>
+
 	/** Get spec configuration section */
 	readonly getSpecConfig: () => Effect.Effect<ResolvedConfig["spec"]>
 
@@ -736,6 +741,8 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getModelConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.model),
 			getWorktreeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.worktree),
 			getGitConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git),
+			getGitConfigForProjectPath: (projectPath: string) =>
+				Effect.map(loadConfigForPath(projectPath), ({ config }) => config.git),
 			getSpecConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.spec),
 			getSessionConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.session),
 			getPatternsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.patterns),

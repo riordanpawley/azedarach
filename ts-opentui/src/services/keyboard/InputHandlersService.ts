@@ -107,20 +107,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						yield* board.saveToCache(currentProject.path)
 					}
 
+					yield* overlay.pop()
+
+					const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
+					const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
 					yield* projectState.withPersistenceSuspended(
 						Effect.gen(function* () {
-							yield* projectService.switchProject(project.name)
 							yield* projectState.restoreProjectState(project.path)
 							if (options?.focusTaskId) {
 								yield* nav.setFocusedTask(options.focusTaskId)
 							}
 						}),
 					)
-
-					yield* overlay.pop()
-
-					const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
-					const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
 					yield* projectState.saveCurrentProjectState(project.path)
 
 					if (cacheHit) {
@@ -757,10 +755,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						Effect.logWarning(error).pipe(
 							Effect.zipRight(
 								Effect.gen(function* () {
-									const msg =
-										error && typeof error === "object" && "message" in error
-											? String(error.message)
-											: String(error)
+									const msg = String(error)
 									yield* toast.show("error", `Project switch failed: ${msg}`)
 									return true
 								}),
@@ -815,10 +810,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						Effect.logWarning(error).pipe(
 							Effect.zipRight(
 								Effect.gen(function* () {
-									const msg =
-										error && typeof error === "object" && "message" in error
-											? String(error.message)
-											: String(error)
+									const msg = String(error)
 									yield* toast.show("error", `Waiting session switch failed: ${msg}`)
 									return true
 								}),

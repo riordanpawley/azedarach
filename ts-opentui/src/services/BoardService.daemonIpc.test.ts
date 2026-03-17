@@ -3,7 +3,11 @@ import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Effect, Option, Ref } from "effect"
 import type { DaemonRpcClientApi, DaemonRpcClientError } from "../rpc/DaemonRpcClient.js"
 import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
-import { makeBoardDaemonIpcSignals } from "./BoardService.js"
+import {
+	makeBoardDaemonIpcSignals,
+	resolveDaemonAuthoritativeProjectPath,
+	resolveDaemonBoardReadModelRpc,
+} from "./BoardService.js"
 
 const makeDaemonRpcClientStub = (params: {
 	readonly onAttach?: () => Effect.Effect<void, DaemonRpcClientError>
@@ -399,5 +403,56 @@ describe("BoardService daemon IPC signaling", () => {
 		expect(nextCursor).toBe(42)
 		expect(streamCalls).toBe(1)
 		expect(observedBatchCursor).toBe(42)
+	})
+})
+
+describe("resolveDaemonBoardReadModelRpc", () => {
+	it("returns none when daemon rpc client is unavailable", () => {
+		const resolved = resolveDaemonBoardReadModelRpc({
+			daemonRpcClient: Option.none(),
+		})
+		expect(Option.isNone(resolved)).toBe(true)
+	})
+
+	it("returns none when daemon rpc client has no boardReadModel operation", () => {
+		const resolved = resolveDaemonBoardReadModelRpc({
+			daemonRpcClient: Option.some(makeDaemonRpcClientStub({})),
+		})
+		expect(Option.isNone(resolved)).toBe(true)
+	})
+
+	it("returns boardReadModel rpc when client and project path are available", async () => {
+		const daemonRpcClient: DaemonRpcClientApi = {
+			...makeDaemonRpcClientStub({}),
+			boardReadModel: () =>
+				Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					capturedAtMs: 9,
+					projectPath: "/tmp/project",
+					tasks: [],
+				}),
+		}
+		const resolved = resolveDaemonBoardReadModelRpc({
+			daemonRpcClient: Option.some(daemonRpcClient),
+		})
+		expect(Option.isSome(resolved)).toBe(true)
+		if (Option.isNone(resolved)) {
+			throw new Error("Expected boardReadModel rpc")
+		}
+		const result = await Effect.runPromise(resolved.value({ projectPath: "/tmp/project" }))
+		expect(result.projectPath).toBe("/tmp/project")
+	})
+})
+
+describe("resolveDaemonAuthoritativeProjectPath", () => {
+	it("uses provided project path for refresh and project switch flows", () => {
+		expect(resolveDaemonAuthoritativeProjectPath("/tmp/project-switched")).toBe(
+			"/tmp/project-switched",
+		)
+	})
+
+	it("falls back to cwd when project path is missing", () => {
+		expect(resolveDaemonAuthoritativeProjectPath(null)).toBe(process.cwd())
+		expect(resolveDaemonAuthoritativeProjectPath(undefined)).toBe(process.cwd())
 	})
 })
