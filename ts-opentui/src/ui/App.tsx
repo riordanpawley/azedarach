@@ -8,7 +8,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
 import { deriveCurrentProjectWaitingIssueIds } from "../lib/waitingSessions.js"
@@ -156,7 +156,7 @@ const computeCompactVisibleTaskIds = (
 	return sortedTasks.slice(startIndex, endIndex).map((task) => task.id)
 }
 
-export const App = () => {
+const HydratedApp = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Hooks - Atomic State Management
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -753,3 +753,74 @@ export const App = () => {
 }
 
 const ATTR_BOLD = 1
+
+const STARTUP_HYDRATION_DELAY_MS = 0
+const DEFAULT_TTFP_BUDGET_MS = 120
+
+const maybeLogStartupMetric = (message: string) => {
+	if (process.env.AZ_STARTUP_METRICS === "1") {
+		console.error(message)
+	}
+}
+
+const StartupPlaceholder = () => (
+	<box flexDirection="column" width="100%" height="100%" backgroundColor={theme.base}>
+		<box flexGrow={1} justifyContent="center" alignItems="center">
+			<text fg={theme.overlay1}>{"Bootstrapping board..."}</text>
+		</box>
+		<box
+			border={true}
+			borderColor={theme.surface1}
+			paddingLeft={1}
+			paddingRight={1}
+			paddingTop={0}
+			paddingBottom={0}
+			height={1}
+		>
+			<text fg={theme.subtext0}>{"mode: startup"}</text>
+		</box>
+	</box>
+)
+
+type AppProps = {
+	readonly launchStartedAtMs?: number
+	readonly ttfpBudgetMs?: number
+}
+
+export const App = ({ launchStartedAtMs, ttfpBudgetMs = DEFAULT_TTFP_BUDGET_MS }: AppProps) => {
+	const [hydrated, setHydrated] = useState(false)
+	const firstPaintLoggedRef = useRef(false)
+
+	useEffect(() => {
+		if (firstPaintLoggedRef.current) return
+		firstPaintLoggedRef.current = true
+
+		if (launchStartedAtMs !== undefined) {
+			const ttfpMs = Date.now() - launchStartedAtMs
+			maybeLogStartupMetric(`[startup] ttfp_ms=${ttfpMs}`)
+			if (ttfpMs > ttfpBudgetMs) {
+				console.error(`[startup] ttfp budget exceeded: ${ttfpMs}ms > ${ttfpBudgetMs}ms`)
+			}
+		}
+
+		const hydrateTimer = setTimeout(() => {
+			setHydrated(true)
+		}, STARTUP_HYDRATION_DELAY_MS)
+
+		return () => {
+			clearTimeout(hydrateTimer)
+		}
+	}, [launchStartedAtMs, ttfpBudgetMs])
+
+	useEffect(() => {
+		if (!hydrated || launchStartedAtMs === undefined) return
+		const hydratedMs = Date.now() - launchStartedAtMs
+		maybeLogStartupMetric(`[startup] hydrated_ms=${hydratedMs}`)
+	}, [hydrated, launchStartedAtMs])
+
+	if (!hydrated) {
+		return <StartupPlaceholder />
+	}
+
+	return <HydratedApp />
+}

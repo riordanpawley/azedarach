@@ -60,6 +60,7 @@ async function registerReturnBinding(): Promise<void> {
  * Uses React's createRoot pattern for rendering.
  */
 export async function launchTUI(): Promise<void> {
+	const launchStartedAtMs = Date.now()
 	await truncateAzLogOnStartup()
 
 	// Register SIGINT handler to clean up any active tmux popup.
@@ -98,5 +99,5 @@ export async function launchTUI(): Promise<void> {
 		clearShutdownHandler()
 	})
 
-	root.render(<App />)
+	root.render(<App launchStartedAtMs={launchStartedAtMs} />)
 }
