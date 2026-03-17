@@ -2294,10 +2294,21 @@ const issueBulkCreateHandler = (args: {
 /**
  * Update issue fields
  */
+const appendIssueNotes = (existingNotes: string | undefined, valueToAppend: string): string => {
+	if (existingNotes === undefined || existingNotes.length === 0) {
+		return valueToAppend
+	}
+	if (valueToAppend.length === 0) {
+		return existingNotes
+	}
+	return `${existingNotes}\n\n${valueToAppend}`
+}
+
 const issueUpdateHandler = (args: {
 	readonly issueId: string
 	readonly status: Option.Option<string>
 	readonly notes: Option.Option<string>
+	readonly appendNotes: Option.Option<string>
 	readonly priority: Option.Option<number>
 	readonly title: Option.Option<string>
 	readonly issueType: Option.Option<string>
@@ -2333,9 +2344,26 @@ const issueUpdateHandler = (args: {
 			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
 		})
 
+		const notes = Option.getOrUndefined(args.notes)
+		const appendNotes = Option.getOrUndefined(args.appendNotes)
+		if (notes !== undefined && appendNotes !== undefined) {
+			return yield* Effect.fail(
+				new Error("Cannot combine --notes with --append-notes; choose one note update mode."),
+			)
+		}
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const resolvedNotes = yield* Option.match(args.appendNotes, {
+			onNone: () => Effect.succeed(notes),
+			onSome: (valueToAppend) =>
+				issueTrackerClient
+					.show(issueId, explicitProjectDir)
+					.pipe(Effect.map((issue) => appendIssueNotes(issue.notes, valueToAppend))),
+		})
+
 		const fields = {
 			status: Option.getOrUndefined(args.status),
-			notes: Option.getOrUndefined(args.notes),
+			notes: resolvedNotes,
 			priority: Option.getOrUndefined(args.priority),
 			title: Option.getOrUndefined(args.title),
 			type: Option.getOrUndefined(args.issueType),
@@ -2353,12 +2381,11 @@ const issueUpdateHandler = (args: {
 		if (!hasChanges) {
 			return yield* Effect.fail(
 				new Error(
-					"No fields provided. Use at least one --status/--design/--description/... option.",
+					"No fields provided. Use at least one --status/--notes/--append-notes/--design/--description/... option.",
 				),
 			)
 		}
 
-		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient.update(issueId, fields, explicitProjectDir)
 		yield* syncLinearAfterIssueMutation({
 			issueTrackerClient,
@@ -5929,6 +5956,10 @@ const issueUpdateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Issue notes"),
 		),
+		appendNotes: Options.text("append-notes").pipe(
+			Options.optional,
+			Options.withDescription("Append text to issue notes (preserves existing notes)"),
+		),
 		priority: Options.integer("priority").pipe(
 			Options.withAlias("p"),
 			Options.optional,
@@ -7544,6 +7575,7 @@ export {
 	formatIssueDetailSections,
 	formatParentChildCheckOutput,
 	formatIssueSummaryLine,
+	appendIssueNotes,
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,

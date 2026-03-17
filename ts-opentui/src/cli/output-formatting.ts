@@ -422,6 +422,7 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
   - \`az issue bulk-update --input updates.json --json\` (for example, \`updates.json\` can contain \`[{"id":"az-123","status":"blocked"}]\`)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
+  - \`az issue update <issue-id> --append-notes "..."\`
   - \`az issue update <issue-id> --status in_progress|blocked|open\`
   - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
   - \`az issue --help\`
