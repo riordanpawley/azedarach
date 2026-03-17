@@ -1233,11 +1233,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
-					if (projectPath === undefined) {
-						yield* daemonRpcClient.value.sessionStop({ issueId })
-						return
-					}
-					yield* daemonRpcClient.value.sessionStop({ issueId, projectPath })
+					const effectiveProjectPath = projectPath ?? process.cwd()
+					yield* daemonRpcClient.value.sessionStop({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 					return
 				}
 				yield* sessionManager.stop(issueId)

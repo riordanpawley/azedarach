@@ -59,7 +59,8 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 						Option.isSome(daemonRpcClient) &&
 						daemonRpcClient.value.sessionSnapshot !== undefined
 					) {
-						const snapshot = yield* daemonRpcClient.value.sessionSnapshot()
+						const projectPath = yield* helpers.getProjectPath()
+						const snapshot = yield* daemonRpcClient.value.sessionSnapshot({ projectPath })
 						return snapshot.sessions.map((session) => ({ issueId: session.issueId }))
 					}
 					return yield* sessionManager.listActive()
