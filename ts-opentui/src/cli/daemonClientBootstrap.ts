@@ -8,9 +8,11 @@ import {
 	readGlobalDaemonDiscovery,
 } from "../core/GlobalDaemonRegistry.js"
 import {
+	classifyDaemonRpcClientError,
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
+	isDaemonRpcClientRetryableTransport,
 	layerSocket,
 } from "../rpc/DaemonRpcClient.js"
 
@@ -123,36 +125,39 @@ const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError
 export const buildGlobalDaemonSocketUrl = (socketPath: string): string =>
 	`ws+unix://${socketPath}:/`
 
-const isRpcClientError = (error: DaemonRpcClientError): error is RpcClientError =>
-	error._tag === "RpcClientError"
-
 export const isRetryableRpcClientError = (error: DaemonRpcClientError): error is RpcClientError =>
-	isRpcClientError(error) && error.reason === "Protocol"
+	isDaemonRpcClientRetryableTransport(error)
 
 export const formatDaemonRpcClientFailure = (params: {
 	readonly operation: string
 	readonly socketUrl: string
 	readonly error: DaemonRpcClientError
 }): GlobalDaemonBootstrapError => {
-	switch (params.error._tag) {
-		case "DaemonRpcActionError": {
+	switch (classifyDaemonRpcClientError(params.error)) {
+		case "remote-action": {
+			if (params.error._tag !== "DaemonRpcActionError") {
+				return new GlobalDaemonBootstrapError({
+					message: `Daemon RPC '${params.operation}' failed due to an unexpected daemon response shape.`,
+					reason: "rpc-unknown",
+				})
+			}
 			const actionHint = params.error.action === undefined ? "" : ` Action: ${params.error.action}.`
 			return new GlobalDaemonBootstrapError({
 				message: `Daemon RPC '${params.operation}' rejected by daemon (code=${params.error.code}): ${params.error.message}.${actionHint}`,
 				reason: "rpc-remote-action",
 			})
 		}
-		case "RpcClientError":
+		case "protocol-mismatch":
+			return new GlobalDaemonBootstrapError({
+				message: `Daemon RPC protocol mismatch for '${params.operation}' at ${params.socketUrl}: ${params.error.message}. Update the CLI/daemon to matching versions, then run \`az daemon restart\`.`,
+				reason: "rpc-protocol-mismatch",
+			})
+		case "transport":
 			return new GlobalDaemonBootstrapError({
 				message: `Unable to communicate with daemon RPC endpoint (${params.socketUrl}) for '${params.operation}': ${params.error.message}. Verify daemon socket availability, then run \`az daemon health\` and \`az daemon logs\`.`,
 				reason: "rpc-transport",
 			})
 	}
-	const exhaustive: never = params.error
-	return new GlobalDaemonBootstrapError({
-		message: `Daemon RPC '${params.operation}' failed: ${String(exhaustive)}`,
-		reason: "rpc-unknown",
-	})
 }
 
 export interface GlobalDaemonAttachAttemptObservation {
@@ -211,7 +216,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 		let startedDaemon = false
 		let attachAttemptCount = 0
 		let lastSocketUrl: string | null = null
-		let lastTransportError: RpcClientError | null = null
+		let lastRetryableTransportError: RpcClientError | null = null
 
 		while (Date.now() <= deadlineMs) {
 			const attempt = attachAttemptCount + 1
@@ -300,16 +305,8 @@ export const bootstrapDaemonRpcClient = (params?: {
 			}
 
 			const error = connectivity.left
-			if (isRpcClientError(error) && error.reason === "Protocol") {
-				return yield* Effect.fail(
-					new GlobalDaemonBootstrapError({
-						message: `Daemon RPC protocol check failed during bootstrap at ${socketUrl}: ${error.message}. Verify CLI and daemon protocol compatibility, then retry.`,
-						reason: "rpc-protocol-mismatch",
-					}),
-				)
-			}
 			if (isRetryableRpcClientError(error)) {
-				lastTransportError = error
+				lastRetryableTransportError = error
 				yield* Effect.logWarning(
 					`daemon_bootstrap: verifyReachable transport failure socketUrl=${socketUrl} attempt=${attempt} error=${error.message}`,
 				)
@@ -324,12 +321,12 @@ export const bootstrapDaemonRpcClient = (params?: {
 			)
 		}
 
-		if (lastTransportError !== null) {
+		if (lastRetryableTransportError !== null) {
 			return yield* Effect.fail(
 				formatDaemonRpcClientFailure({
 					operation: "status",
 					socketUrl: lastSocketUrl ?? "<unknown>",
-					error: lastTransportError,
+					error: lastRetryableTransportError,
 				}),
 			)
 		}

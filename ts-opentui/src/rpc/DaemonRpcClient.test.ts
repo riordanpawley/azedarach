@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test"
+import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { ParseResult, Schema } from "effect"
+import {
+	classifyDaemonRpcClientError,
+	isDaemonRpcClientProtocolMismatch,
+	isDaemonRpcClientRetryableTransport,
+} from "./DaemonRpcClient.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonControlStatusResultSchema,
@@ -52,5 +58,29 @@ describe("DaemonRpc protocol version schemas", () => {
 		expect(ParseResult.TreeFormatter.formatErrorSync(result.left)).toContain(
 			String(DAEMON_RPC_PROTOCOL_VERSION),
 		)
+	})
+})
+
+describe("DaemonRpcClient error classification", () => {
+	it("classifies protocol failures as fail-fast mismatch errors", () => {
+		const error = new RpcClientError({
+			reason: "Protocol",
+			message: "version mismatch",
+		})
+
+		expect(classifyDaemonRpcClientError(error)).toBe("protocol-mismatch")
+		expect(isDaemonRpcClientProtocolMismatch(error)).toBe(true)
+		expect(isDaemonRpcClientRetryableTransport(error)).toBe(false)
+	})
+
+	it("classifies unknown rpc client failures as retryable transport errors", () => {
+		const error = new RpcClientError({
+			reason: "Unknown",
+			message: "socket unavailable",
+		})
+
+		expect(classifyDaemonRpcClientError(error)).toBe("transport")
+		expect(isDaemonRpcClientProtocolMismatch(error)).toBe(false)
+		expect(isDaemonRpcClientRetryableTransport(error)).toBe(true)
 	})
 })

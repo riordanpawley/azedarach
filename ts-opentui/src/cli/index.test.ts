@@ -1104,7 +1104,7 @@ describe("daemon status stream consumption", () => {
 		expect(failure.value.message).toContain("does not support eventStream RPC")
 	})
 
-	it("reuses cursor on transport reconnect and advances on successful batches", async () => {
+	it("reuses cursor on retryable reconnect and advances on successful batches", async () => {
 		const observedCursors: Array<number | undefined> = []
 		const consumedNextCursors: Array<number> = []
 		let callCount = 0
@@ -1118,7 +1118,7 @@ describe("daemon status stream consumption", () => {
 						if (callCount === 2) {
 							return Effect.fail(
 								new RpcClientError({
-									reason: "Protocol",
+									reason: "Unknown",
 									message: "socket dropped",
 								}),
 							)
@@ -1159,6 +1159,59 @@ describe("daemon status stream consumption", () => {
 		expect(consumedNextCursors).toEqual([5, 8])
 		expect(finalCursor).toBe(8)
 	})
+
+	it("fails fast on protocol mismatch without reconnect retry loop", async () => {
+		const observedCursors: Array<number | undefined> = []
+		let callCount = 0
+
+		const exit = await Effect.runPromiseExit(
+			consumeDaemonStatusStreamBatches({
+				client: {
+					eventStream: (request) => {
+						observedCursors.push(request.cursor)
+						callCount += 1
+						if (callCount === 1) {
+							return Effect.succeed(
+								makeDaemonEventStreamBatch({
+									nextCursor: 5,
+									eventCursor: 4,
+								}),
+							)
+						}
+						return Effect.fail(
+							new RpcClientError({
+								reason: "Protocol",
+								message: "protocol mismatch",
+							}),
+						)
+					},
+				},
+				socketUrl: "ws+unix:///tmp/az-global.sock:/",
+				clientId: "az-cli:test",
+				projectPath: "/tmp/project",
+				initialCursor: undefined,
+				batchSize: 10,
+				waitMs: 100,
+				watch: true,
+				maxBatches: 2,
+				reconnectDelayMs: 0,
+				onBatch: () => Effect.void,
+			}),
+		)
+
+		expect(Exit.isFailure(exit)).toBe(true)
+		if (!Exit.isFailure(exit)) {
+			throw new Error("Expected stream consumption to fail on protocol mismatch")
+		}
+		const failure = Cause.failureOption(exit.cause)
+		expect(Option.isSome(failure)).toBe(true)
+		if (!Option.isSome(failure)) {
+			throw new Error("Expected stream failure cause")
+		}
+		expect(observedCursors).toEqual([undefined, 5])
+		expect(callCount).toBe(2)
+		expect(failure.value.message).toContain("protocol mismatch")
+	})
 })
 
 describe("daemon RPC bootstrap helpers", () => {
@@ -1168,9 +1221,25 @@ describe("daemon RPC bootstrap helpers", () => {
 		)
 	})
 
-	it("formats transport failures with endpoint and suggestion context", () => {
+	it("formats protocol mismatch failures with upgrade/restart guidance", () => {
 		const error = new RpcClientError({
 			reason: "Protocol",
+			message: "version mismatch",
+		})
+		const formatted = formatDaemonRpcClientFailure({
+			operation: "health",
+			socketUrl: "ws+unix:///tmp/az-global.sock:/",
+			error,
+		})
+
+		expect(formatted.reason).toBe("rpc-protocol-mismatch")
+		expect(formatted.message).toContain("Daemon RPC protocol mismatch")
+		expect(formatted.message).toContain("az daemon restart")
+	})
+
+	it("formats retryable transport failures with endpoint diagnostics guidance", () => {
+		const error = new RpcClientError({
+			reason: "Unknown",
 			message: "connection refused",
 		})
 		const formatted = formatDaemonRpcClientFailure({
@@ -1179,9 +1248,10 @@ describe("daemon RPC bootstrap helpers", () => {
 			error,
 		})
 
+		expect(formatted.reason).toBe("rpc-transport")
 		expect(formatted.message).toContain("Unable to communicate with daemon RPC endpoint")
-		expect(formatted.message).toContain("ws+unix:///tmp/az-global.sock:/")
 		expect(formatted.message).toContain("az daemon health")
+		expect(formatted.message).toContain("az daemon logs")
 	})
 })
 

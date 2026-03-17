@@ -49,6 +49,26 @@ import {
 import { DaemonRpcGroup } from "./DaemonRpcs.js"
 
 export type DaemonRpcClientError = RpcClientError | DaemonRpcActionError
+export type DaemonRpcClientFailureKind = "protocol-mismatch" | "transport" | "remote-action"
+
+export const classifyDaemonRpcClientError = (
+	error: DaemonRpcClientError,
+): DaemonRpcClientFailureKind => {
+	switch (error._tag) {
+		case "DaemonRpcActionError":
+			return "remote-action"
+		case "RpcClientError":
+			return error.reason === "Protocol" ? "protocol-mismatch" : "transport"
+	}
+}
+
+export const isDaemonRpcClientProtocolMismatch = (
+	error: DaemonRpcClientError,
+): error is RpcClientError => classifyDaemonRpcClientError(error) === "protocol-mismatch"
+
+export const isDaemonRpcClientRetryableTransport = (
+	error: DaemonRpcClientError,
+): error is RpcClientError => classifyDaemonRpcClientError(error) === "transport"
 
 export interface DaemonRpcClientApi {
 	readonly status: (
