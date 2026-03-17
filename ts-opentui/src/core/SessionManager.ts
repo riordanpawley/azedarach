@@ -935,8 +935,12 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 											return existingSession.value
 										}
 
+										// Load explicit project config to avoid watcher race after project switch
+										const projectConfig =
+											yield* appConfig.getResolvedConfigForProjectPath(projectPath)
+
 										// Check session limit
-										const configForLimit = yield* appConfig.getSessionConfig()
+										const configForLimit = projectConfig.session
 										const maxSessions =
 											(configForLimit as { readonly maxSessions?: number }).maxSessions ?? 10
 										const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
@@ -965,9 +969,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 										// 2. If bead has a parent epic, use the epic branch
 										// 3. Otherwise, use the default (WorktreeManager uses current branch)
 										// Get worktree and hooks config early - we need copyPaths and preCompactEnabled for worktree creation
-										const worktreeConfig = yield* appConfig.getWorktreeConfig()
-										const hooksConfig = yield* appConfig.getHooksConfig()
-										const gitConfig = yield* appConfig.getGitConfig()
+										const worktreeConfig = projectConfig.worktree
+										const hooksConfig = projectConfig.hooks
+										const gitConfig = projectConfig.git
 
 										let effectiveBaseBranch = explicitBaseBranch
 										let epicWorktreePath: string | undefined
@@ -1017,11 +1021,11 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 										// WorktreeManager.copyClaudeLocalSettings handles settings.local.json (gitignored).
 										// No additional copying needed here.
 
-										// Get session, CLI tool, and model config from current project
+										// Get session, CLI tool, and model config from the selected project
 										// Note: worktreeConfig was already fetched above for copyPaths
-										const sessionConfig = yield* appConfig.getSessionConfig()
-										const cliTool = yield* appConfig.getCliTool()
-										const modelConfig = yield* appConfig.getModelConfig()
+										const sessionConfig = projectConfig.session
+										const cliTool = projectConfig.cliTool
+										const modelConfig = projectConfig.model
 
 										// DEBUG: Log which CLI tool is being used
 										yield* Effect.log(`[DEBUG] cliTool from config: ${cliTool}`)
@@ -1464,11 +1468,16 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						)
 					}
 
+					// Load explicit project config to avoid watcher race after project switch
+					const projectConfig = yield* appConfig.getResolvedConfigForProjectPath(
+						session.projectPath,
+					)
+
 					// Get config for session setup
-					const sessionConfig = yield* appConfig.getSessionConfig()
-					const worktreeConfig = yield* appConfig.getWorktreeConfig()
-					const cliTool = yield* appConfig.getCliTool()
-					const modelConfig = yield* appConfig.getModelConfig()
+					const sessionConfig = projectConfig.session
+					const worktreeConfig = projectConfig.worktree
+					const cliTool = projectConfig.cliTool
+					const modelConfig = projectConfig.model
 
 					// Check session limit
 					const maxSessions = (sessionConfig as { readonly maxSessions?: number }).maxSessions ?? 10
