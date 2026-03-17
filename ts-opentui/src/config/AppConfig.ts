@@ -164,6 +164,9 @@ export interface AppConfigService {
 
 	/** Get effective base branch for diffs/conflicts (adds origin/ prefix in origin mode) */
 	readonly getEffectiveBaseBranch: () => Effect.Effect<string>
+
+	/** Get resolved config for an explicit project path (non-reactive, path-scoped load with fallback defaults) */
+	readonly getResolvedConfigForProjectPath: (projectPath: string) => Effect.Effect<ResolvedConfig>
 }
 
 export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfigConfig", {
@@ -773,6 +776,26 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getEffectiveBaseBranch: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) =>
 					c.git.workflowMode === "origin" ? `origin/${c.git.baseBranch}` : c.git.baseBranch,
+				),
+			getResolvedConfigForProjectPath: (projectPath: string) =>
+				loadConfigForPath(projectPath).pipe(
+					Effect.map(({ config }) => config),
+					Effect.catchAll((e) => {
+						if (e._tag === "ConfigParseError") {
+							return SubscriptionRef.set(loadWarningRef, e).pipe(
+								Effect.zipRight(showConfigFallbackToast(e)),
+								Effect.zipRight(
+									Effect.log(
+										`[DEBUG] Path-scoped config load failed for projectPath=${projectPath}: ${e}`,
+									),
+								),
+								Effect.map(() => mergeWithDefaults({})),
+							)
+						}
+						return Effect.log(
+							`[DEBUG] Path-scoped config load failed for projectPath=${projectPath}: ${e}`,
+						).pipe(Effect.map(() => mergeWithDefaults({})))
+					}),
 				),
 		}
 	}),
