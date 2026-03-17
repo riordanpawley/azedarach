@@ -7,6 +7,7 @@ import {
 	getPhaseToken,
 	getPrStateToken,
 	getSessionStateToken,
+	getTmuxSessionToken,
 	getWorktreeToken,
 	type SymbolTier,
 } from "./statusTokens.js"
@@ -30,6 +31,7 @@ const collectTokens = (tier: SymbolTier): readonly string[] => [
 	getPrStateToken("closed", tier),
 	getPrStateToken("unknown", tier),
 	getWorktreeToken(),
+	getTmuxSessionToken(),
 	getPhaseToken("planning", tier),
 	getPhaseToken("action", tier),
 	getPhaseToken("verification", tier),

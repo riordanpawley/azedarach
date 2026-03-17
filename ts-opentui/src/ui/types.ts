@@ -134,6 +134,8 @@ export const parsePRInfo = (notes: string | undefined): Partial<PRInfo> => {
  */
 export interface TaskWithSession extends Issue, SessionMetrics, GitStatus, Partial<PRInfo> {
 	sessionState: SessionState
+	/** Whether an issue-scoped tmux session currently exists for this task. */
+	hasTmuxSession?: boolean
 	/** Whether a git worktree exists for this task (even if no session is running) */
 	hasWorktree?: boolean
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */

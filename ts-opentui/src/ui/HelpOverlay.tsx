@@ -12,6 +12,7 @@ import {
 	getPhaseToken,
 	getPrStateToken,
 	getSessionStateToken,
+	getTmuxSessionToken,
 	getWorktreeToken,
 } from "./statusTokens.js"
 import { theme } from "./theme.js"
@@ -205,6 +206,7 @@ export const HelpOverlay = () => {
 				<SymbolLine token={getGitDirtyToken()} description="Worktree has uncommitted changes" />
 				<SymbolLine token="G:Bn/G:↓n" description="Git behind base by n commits" />
 				<SymbolLine token={getGitConflictToken()} description="Git merge conflict present" />
+				<SymbolLine token={getTmuxSessionToken()} description="Issue tmux session exists" />
 				<SymbolLine token={getWorktreeToken()} description="Worktree exists (idle task)" />
 				<SymbolLine token={getPhaseToken("planning")} description="Agent planning phase" />
 				<SymbolLine token={getPhaseToken("action")} description="Agent action phase" />

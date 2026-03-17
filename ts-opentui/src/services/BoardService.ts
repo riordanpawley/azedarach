@@ -459,6 +459,7 @@ export const resolveDaemonBoardReadModelRpc = (params: {
 export const applySessionRefreshPatch = (params: {
 	readonly task: TaskWithSession
 	readonly sessionState: TaskWithSession["sessionState"]
+	readonly hasTmuxSession: boolean | undefined
 	readonly sessionStartedAt: string | undefined
 	readonly estimatedTokens: number | undefined
 	readonly recentOutput: string | undefined
@@ -468,6 +469,7 @@ export const applySessionRefreshPatch = (params: {
 	...params.task,
 	...(params.gitStatusPatch ?? {}),
 	sessionState: params.sessionState,
+	hasTmuxSession: params.hasTmuxSession,
 	sessionStartedAt: params.sessionStartedAt,
 	estimatedTokens: params.estimatedTokens,
 	recentOutput: params.recentOutput,
@@ -1693,6 +1695,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metricsOpt = HashMap.get(allMetrics, issue.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
+							const hasTmuxSession = session === undefined ? undefined : true
 
 							// Get parent IDs for filtering and epic-branch behavior
 							const parentId = parentByIssueId.get(issue.id)
@@ -1750,6 +1753,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								...issue,
 								issue_type: toBoardIssueType(issue),
 								sessionState,
+								hasTmuxSession,
 								hasWorktree,
 								hasMergeConflict,
 								hasDevServer: persistedTask?.hasDevServer === true ? true : undefined,
@@ -1972,6 +1976,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				...issue,
 				issue_type: toBoardIssueType(issue),
 				sessionState: existingTask?.sessionState ?? "idle",
+				hasTmuxSession: existingTask?.hasTmuxSession,
 				hasWorktree: existingTask?.hasWorktree,
 				hasMergeConflict: retainedGitState.hasMergeConflict,
 				hasDevServer: existingTask?.hasDevServer,
@@ -2159,6 +2164,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metricsOpt = HashMap.get(allMetrics, task.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
+							const hasTmuxSession = session === undefined ? undefined : true
 							const sessionStartedAt = session?.startedAt
 								? DateTime.formatIso(session.startedAt)
 								: undefined
@@ -2196,6 +2202,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							return applySessionRefreshPatch({
 								task,
 								sessionState,
+								hasTmuxSession,
 								sessionStartedAt,
 								estimatedTokens: metrics?.estimatedTokens,
 								recentOutput: metrics?.recentOutput,

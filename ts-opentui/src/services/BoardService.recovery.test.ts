@@ -255,6 +255,7 @@ describe("applySessionRefreshPatch", () => {
 		const updated = applySessionRefreshPatch({
 			task: baseTask,
 			sessionState: "waiting",
+			hasTmuxSession: true,
 			sessionStartedAt: "2026-03-07T00:10:00.000Z",
 			estimatedTokens: 1234,
 			recentOutput: "working",
@@ -273,6 +274,7 @@ describe("applySessionRefreshPatch", () => {
 		const updated = applySessionRefreshPatch({
 			task: baseTask,
 			sessionState: "busy",
+			hasTmuxSession: true,
 			sessionStartedAt: "2026-03-07T00:10:00.000Z",
 			estimatedTokens: 1500,
 			recentOutput: "running",

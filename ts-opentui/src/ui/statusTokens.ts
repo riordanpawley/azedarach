@@ -110,6 +110,8 @@ export const getPrStateToken = (state: PRState | "unknown", tier?: SymbolTier): 
 
 export const getWorktreeToken = (): string => "W:Y"
 
+export const getTmuxSessionToken = (): string => "T:Y"
+
 export const getPhaseToken = (phase: AgentPhase, tier?: SymbolTier): string =>
 	PHASE_TOKENS[tokenTier(tier)][phase]
 

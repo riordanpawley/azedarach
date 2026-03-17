@@ -24,6 +24,7 @@ import {
 	getIssueStatusToken,
 	getPhaseToken,
 	getSessionStateToken,
+	getTmuxSessionToken,
 	getWorktreeToken,
 } from "./statusTokens.js"
 import { getPriorityColor, theme } from "./theme.js"
@@ -298,9 +299,10 @@ export const DetailPanel = (props: DetailPanelProps) => {
 	// Show worktree indicator for idle tasks with worktrees
 	const worktreeIndicator =
 		props.task.hasWorktree && props.task.sessionState === "idle" ? getWorktreeToken() : ""
+	const tmuxIndicator = props.task.hasTmuxSession ? getTmuxSessionToken() : ""
 
 	// Build header line
-	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? ` ${indicator}` : ""}${worktreeIndicator ? ` ${worktreeIndicator}` : ""}`
+	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? ` ${indicator}` : ""}${tmuxIndicator ? ` ${tmuxIndicator}` : ""}${worktreeIndicator ? ` ${worktreeIndicator}` : ""}`
 
 	return (
 		<box
@@ -359,6 +361,9 @@ export const DetailPanel = (props: DetailPanelProps) => {
 						<text fg={getPriorityColor(props.task.priority)}>{`Priority: ${priorityLabel}`}</text>
 						<text fg={getStatusColor()}>{`Status: ${props.task.status}`}</text>
 						<text fg={theme.subtext0}>{`Session: ${props.task.sessionState}`}</text>
+						<text fg={theme.subtext0}>
+							{`Tmux: ${props.task.hasTmuxSession ? "present" : "absent"}`}
+						</text>
 					</box>
 					<text> </text>
 
