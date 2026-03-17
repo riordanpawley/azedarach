@@ -2804,7 +2804,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				yield* SubscriptionRef.set(isRefreshingGitStats, true)
 
-				const projectPath = yield* projectService.getCurrentPath()
+				const projectPath = yield* getCurrentBoardProjectPath()
 				if (!projectPath) {
 					return
 				}
@@ -3015,6 +3015,16 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				// Save current project state before switching
 				yield* saveCurrentToMap()
+
+				yield* projectService
+					.switchProjectPath(newProjectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Failed to sync ProjectService before project switch: ${String(error)}`,
+							).pipe(Effect.asVoid),
+						),
+					)
 
 				// Update the current project path
 				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)

@@ -604,6 +604,28 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 				}),
 
 			/**
+			 * Switch to a different project by absolute path
+			 */
+			switchProjectPath: (targetPath: string): Effect.Effect<void, ProjectError> =>
+				Effect.gen(function* () {
+					const normalizedTargetPath = pathService.normalize(targetPath)
+					const projectList = yield* SubscriptionRef.get(projects)
+					const project = projectList.find(
+						(candidate) => pathService.normalize(candidate.path) === normalizedTargetPath,
+					)
+
+					if (!project) {
+						return yield* Effect.fail(
+							new ProjectError({
+								message: `Project not found for path: ${targetPath}`,
+							}),
+						)
+					}
+
+					yield* SubscriptionRef.set(currentProject, project)
+				}),
+
+			/**
 			 * Add a new project to the registry
 			 */
 			addProject: (project: Project): Effect.Effect<void, ProjectError> =>
