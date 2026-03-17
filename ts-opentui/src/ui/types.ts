@@ -151,6 +151,10 @@ export interface TaskWithSession extends Issue, SessionMetrics, GitStatus, Parti
 	parentEpicId?: string
 }
 
+export const hasTaskSessionPresence = (
+	task: Pick<TaskWithSession, "sessionState" | "hasTmuxSession">,
+): boolean => task.sessionState !== "idle" || task.hasTmuxSession === true
+
 /**
  * Kanban columns by status
  */
