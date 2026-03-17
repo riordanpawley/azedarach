@@ -86,6 +86,11 @@ export async function launchTUI(): Promise<void> {
 	const shutdownComplete = new Promise<void>((resolve) => {
 		resolveShutdown = resolve
 	})
+	const finalizeShutdown = () => {
+		const resolve = resolveShutdown
+		resolveShutdown = null
+		resolve?.()
+	}
 
 	const shutdown = () => {
 		if (shuttingDown) return
@@ -101,6 +106,9 @@ export async function launchTUI(): Promise<void> {
 		} catch {
 			// Renderer may already be destroyed.
 		}
+		clearShutdownHandler()
+		process.off("SIGINT", handleSigint)
+		finalizeShutdown()
 	}
 
 	registerShutdownHandler(shutdown)
@@ -108,7 +116,7 @@ export async function launchTUI(): Promise<void> {
 		resetTerminalModesOnExit()
 		clearShutdownHandler()
 		process.off("SIGINT", handleSigint)
-		resolveShutdown?.()
+		finalizeShutdown()
 	})
 
 	root.render(<App launchStartedAtMs={launchStartedAtMs} />)

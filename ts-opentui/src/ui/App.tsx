@@ -66,6 +66,7 @@ import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { PlanningOverlay } from "./PlanningOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { isSmallScreen } from "./responsive.js"
+import { requestShutdown } from "./runtimeControl.js"
 import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
@@ -407,6 +408,21 @@ const HydratedApp = () => {
 		// Ctrl-C: Kill active editor popup (MUST be first - works in any state)
 		if (event.ctrl && event.name === "c") {
 			killActivePopup()
+			return
+		}
+
+		// Direct quit fallback from normal mode.
+		// This bypasses KeyboardService so quit still works if service dependencies
+		// are degraded (for example, during board/runtime errors).
+		if (
+			!event.ctrl &&
+			!event.meta &&
+			!event.shift &&
+			event.name === "q" &&
+			mode._tag === "normal" &&
+			!drillDownEpicId
+		) {
+			requestShutdown()
 			return
 		}
 
