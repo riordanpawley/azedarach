@@ -65,6 +65,7 @@ import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { PlanningOverlay } from "./PlanningOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
+import { shouldRequestShutdownFromDirectQuitFallback } from "./quitFallbackPolicy.js"
 import { isSmallScreen } from "./responsive.js"
 import { requestShutdown } from "./runtimeControl.js"
 import { SearchInput } from "./SearchInput.js"
@@ -415,12 +416,15 @@ const HydratedApp = () => {
 		// This bypasses KeyboardService so quit still works if service dependencies
 		// are degraded (for example, during board/runtime errors).
 		if (
-			!event.ctrl &&
-			!event.meta &&
-			!event.shift &&
-			event.name === "q" &&
-			mode._tag === "normal" &&
-			!drillDownEpicId
+			shouldRequestShutdownFromDirectQuitFallback({
+				key: event.name,
+				ctrl: event.ctrl,
+				meta: event.meta,
+				shift: event.shift,
+				modeTag: mode._tag,
+				hasOverlay: currentOverlay !== undefined,
+				inDrillDown: Boolean(drillDownEpicId),
+			})
 		) {
 			requestShutdown()
 			return
