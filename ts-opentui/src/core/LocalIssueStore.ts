@@ -4,7 +4,7 @@ import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Data, Duration, Effect, Schema, SubscriptionRef } from "effect"
+import { Cause, Data, Effect, Schema, Scope, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
@@ -363,80 +363,6 @@ const containsSqlError = (value: unknown): boolean => {
 		return containsSqlError(value.cause)
 	}
 	return false
-}
-
-const SQLITE_TRANSIENT_ERROR_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED"])
-const SQLITE_TRANSIENT_ERROR_NUMBERS = new Set([5, 6])
-const SQLITE_OPERATION_RETRY_MAX_ATTEMPTS = 4
-const SQLITE_OPERATION_RETRY_BASE_DELAY_MS = 80
-const SQLITE_OPERATION_RETRY_MAX_DELAY_MS = 600
-const SQLITE_BUSY_TIMEOUT_MS = 3000
-
-const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null
-
-const extractStructuredSqliteErrorSignal = (
-	value: unknown,
-): { readonly code?: string; readonly errno?: number } => {
-	let current: unknown = value
-	let depth = 0
-
-	while (isObjectRecord(current) && depth < 10) {
-		const code = Reflect.get(current, "code")
-		if (typeof code === "string" && code.trim().length > 0) {
-			return { code }
-		}
-
-		const errno = Reflect.get(current, "errno")
-		if (typeof errno === "number" && Number.isFinite(errno)) {
-			return { errno: Math.trunc(errno) }
-		}
-
-		current = Reflect.get(current, "cause")
-		depth += 1
-	}
-
-	return {}
-}
-
-const isTransientSqliteFailure = (value: unknown): boolean => {
-	const signal = extractStructuredSqliteErrorSignal(value)
-	if (signal.code !== undefined && SQLITE_TRANSIENT_ERROR_CODES.has(signal.code)) {
-		return true
-	}
-	return signal.errno !== undefined && SQLITE_TRANSIENT_ERROR_NUMBERS.has(signal.errno)
-}
-
-const backoffDelayMs = (attempt: number): number =>
-	Math.min(
-		SQLITE_OPERATION_RETRY_BASE_DELAY_MS * Math.max(1, 2 ** (attempt - 1)),
-		SQLITE_OPERATION_RETRY_MAX_DELAY_MS,
-	)
-
-const withTransientSqliteRetry = <A>(
-	commandName: string,
-	effect: Effect.Effect<A, LocalIssueStoreError>,
-): Effect.Effect<A, LocalIssueStoreError> => {
-	const attemptWithRetry = (attempt: number): Effect.Effect<A, LocalIssueStoreError> =>
-		effect.pipe(
-			Effect.catchAll((error) => {
-				const transient = error.cause !== undefined && isTransientSqliteFailure(error.cause)
-				if (!transient || attempt >= SQLITE_OPERATION_RETRY_MAX_ATTEMPTS) {
-					return Effect.fail(error)
-				}
-
-				const nextAttempt = attempt + 1
-				const delayMs = backoffDelayMs(attempt)
-				return Effect.logWarning(
-					`LocalIssueStore transient sqlite lock detected during ${commandName}; retry ${nextAttempt}/${SQLITE_OPERATION_RETRY_MAX_ATTEMPTS} in ${delayMs}ms`,
-				).pipe(
-					Effect.zipRight(Effect.sleep(Duration.millis(delayMs))),
-					Effect.zipRight(attemptWithRetry(nextAttempt)),
-				)
-			}),
-		)
-
-	return attemptWithRetry(1)
 }
 
 const DEFAULT_PAGE_SIZE = 200
@@ -1427,10 +1353,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const projectService = yield* ProjectService
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
+		const serviceScope = yield* Scope.make()
 		const backupWarningAtByDbPath = new Map<string, number>()
 		const initializedDbPaths = new Set<string>()
 		const loggedDbPaths = new Set<string>()
+		const sqlByDbPath = new Map<string, SqlClient.SqlClient>()
 		const dbInitSemaphore = yield* Effect.makeSemaphore(1)
+		const sqlClientInitSemaphore = yield* Effect.makeSemaphore(1)
+		const sqlOperationSemaphore = yield* Effect.makeSemaphore(1)
 
 		const resolveStorageRoot = (cwd?: string): Effect.Effect<LocalIssueStorageResolution> =>
 			projectService.getCurrentPath().pipe(
@@ -2150,8 +2080,24 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			Effect.gen(function* () {
 				yield* sql.unsafe("PRAGMA journal_mode = WAL")
 				yield* sql.unsafe("PRAGMA synchronous = NORMAL")
-				yield* sql.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`)
 			})
+
+		const getOrCreateSqlClient = (dbPath: string): Effect.Effect<SqlClient.SqlClient, SqlError> =>
+			sqlClientInitSemaphore.withPermits(1)(
+				Effect.gen(function* () {
+					const existing = sqlByDbPath.get(dbPath)
+					if (existing !== undefined) {
+						return existing
+					}
+
+					const sql = yield* Scope.extend(serviceScope)(
+						SqliteClient.make({ filename: dbPath }).pipe(Effect.provide(Reactivity.layer)),
+					)
+					yield* applyConnectionPragmas(sql)
+					sqlByDbPath.set(dbPath, sql)
+					return sql
+				}),
+			)
 
 		const ensureDatabaseInitialized = (
 			sql: SqlClient.SqlClient,
@@ -2184,88 +2130,80 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				readonly triggerWriteBackup?: boolean
 			},
 		): Effect.Effect<A, LocalIssueStoreError> =>
-			withTransientSqliteRetry(
-				options?.triggerWriteBackup === true ? "withSqlMutation" : "withSql",
-				Effect.gen(function* () {
-					const storageResolution = yield* resolveStorageRoot(cwd)
-					const storageRoot = storageResolution.storageRoot
-					const storagePaths = getProjectStoragePaths(storageRoot, pathService)
-					const canonicalDbExists = yield* fs
-						.exists(storagePaths.canonicalDbPath)
-						.pipe(Effect.orElseSucceed(() => false))
-					const legacyDbExists = canonicalDbExists
-						? false
-						: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
-					const dbPath = canonicalDbExists
-						? storagePaths.canonicalDbPath
-						: legacyDbExists
-							? storagePaths.legacyDbPath
-							: storagePaths.canonicalDbPath
-					const backupConfig = yield* getBackupConfig()
-					if (!loggedDbPaths.has(dbPath)) {
-						loggedDbPaths.add(dbPath)
-						yield* Effect.log(
-							`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
-						)
-					}
+			Effect.gen(function* () {
+				const storageResolution = yield* resolveStorageRoot(cwd)
+				const storageRoot = storageResolution.storageRoot
+				const storagePaths = getProjectStoragePaths(storageRoot, pathService)
+				const canonicalDbExists = yield* fs
+					.exists(storagePaths.canonicalDbPath)
+					.pipe(Effect.orElseSucceed(() => false))
+				const legacyDbExists = canonicalDbExists
+					? false
+					: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
+				const dbPath = canonicalDbExists
+					? storagePaths.canonicalDbPath
+					: legacyDbExists
+						? storagePaths.legacyDbPath
+						: storagePaths.canonicalDbPath
+				const backupConfig = yield* getBackupConfig()
+				if (!loggedDbPaths.has(dbPath)) {
+					loggedDbPaths.add(dbPath)
+					yield* Effect.log(
+						`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
+					)
+				}
 
-					yield* fs.makeDirectory(storagePaths.storageDirectory, { recursive: true }).pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(String(error)).pipe(
-								Effect.zipRight(
-									Effect.fail(
-										new LocalIssueStoreError({
-											message:
-												"Failed to prepare local issue database directory. Check filesystem permissions and available disk space, then retry.",
-											cause: error,
-										}),
-									),
+				yield* fs.makeDirectory(storagePaths.storageDirectory, { recursive: true }).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(String(error)).pipe(
+							Effect.zipRight(
+								Effect.fail(
+									new LocalIssueStoreError({
+										message:
+											"Failed to prepare local issue database directory. Check filesystem permissions and available disk space, then retry.",
+										cause: error,
+									}),
 								),
 							),
 						),
-					)
+					),
+				)
 
-					return yield* Effect.scoped(
-						Effect.gen(function* () {
-							const sql = yield* SqliteClient.make({ filename: dbPath }).pipe(
-								Effect.provide(Reactivity.layer),
-							)
+				const sql = yield* getOrCreateSqlClient(dbPath)
+				return yield* sqlOperationSemaphore.withPermits(1)(
+					Effect.gen(function* () {
+						yield* ensureDatabaseInitialized(sql, dbPath, storageRoot, backupConfig)
+						const result = yield* effect(sql)
+						if (options?.triggerWriteBackup === true) {
+							yield* maybeRunWriteCooldownBackup(sql, dbPath, storageRoot, backupConfig)
+						}
+						return result
+					}),
+				)
+			}).pipe(
+				Effect.catchAllCause((cause) =>
+					Effect.gen(function* () {
+						const squashed = Cause.squash(cause)
+						const prettyCause = Cause.pretty(cause)
+						if (containsSqlError(squashed)) {
+							yield* Effect.logError("LocalIssueStore SQL failure")
+							yield* Effect.logError(prettyCause)
+						}
 
-							yield* applyConnectionPragmas(sql)
-							yield* ensureDatabaseInitialized(sql, dbPath, storageRoot, backupConfig)
+						if (isLocalIssueStoreError(squashed)) {
+							return yield* Effect.fail(squashed)
+						}
 
-							const result = yield* effect(sql)
-							if (options?.triggerWriteBackup === true) {
-								yield* maybeRunWriteCooldownBackup(sql, dbPath, storageRoot, backupConfig)
-							}
-							return result
-						}),
-					).pipe(
-						Effect.catchAllCause((cause) =>
-							Effect.gen(function* () {
-								const squashed = Cause.squash(cause)
-								const prettyCause = Cause.pretty(cause)
-								if (containsSqlError(squashed)) {
-									yield* Effect.logError("LocalIssueStore SQL failure")
-									yield* Effect.logError(prettyCause)
-								}
-
-								if (isLocalIssueStoreError(squashed)) {
-									return yield* Effect.fail(squashed)
-								}
-
-								yield* Effect.logWarning(prettyCause)
-								return yield* Effect.fail(
-									new LocalIssueStoreError({
-										message:
-											"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
-										cause: squashed,
-									}),
-								)
+						yield* Effect.logWarning(prettyCause)
+						return yield* Effect.fail(
+							new LocalIssueStoreError({
+								message:
+									"Local issue database operation failed. Retry the command; if it continues, run `az issue backup` and inspect the local database state.",
+								cause: squashed,
 							}),
-						),
-					)
-				}),
+						)
+					}),
+				),
 			)
 
 		const withSqlMutation = <A>(

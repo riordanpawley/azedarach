@@ -3,7 +3,7 @@ import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Data, DateTime, Duration, Effect, HashMap, Schema } from "effect"
+import { Cause, Data, DateTime, Effect, HashMap, Schema, Scope } from "effect"
 import type { SessionState } from "../ui/types.js"
 import { getProjectStoragePaths } from "./storagePaths.js"
 
@@ -136,83 +136,40 @@ const parseStartedAt = (value: string): DateTime.Utc | undefined => {
 const mapSqlError = (message: string, cause: unknown): SessionStateStoreError =>
 	new SessionStateStoreError({ message: `${message}: ${String(cause)}`, cause })
 
-const SQLITE_TRANSIENT_ERROR_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED"])
-const SQLITE_TRANSIENT_ERROR_NUMBERS = new Set([5, 6])
-const SQLITE_OPERATION_RETRY_MAX_ATTEMPTS = 4
-const SQLITE_OPERATION_RETRY_BASE_DELAY_MS = 80
-const SQLITE_OPERATION_RETRY_MAX_DELAY_MS = 600
-const SQLITE_BUSY_TIMEOUT_MS = 3000
-
-const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null
-
-const extractStructuredSqliteErrorSignal = (
-	value: unknown,
-): { readonly code?: string; readonly errno?: number } => {
-	let current: unknown = value
-	let depth = 0
-
-	while (isObjectRecord(current) && depth < 10) {
-		const code = Reflect.get(current, "code")
-		if (typeof code === "string" && code.trim().length > 0) {
-			return { code }
-		}
-
-		const errno = Reflect.get(current, "errno")
-		if (typeof errno === "number" && Number.isFinite(errno)) {
-			return { errno: Math.trunc(errno) }
-		}
-
-		current = Reflect.get(current, "cause")
-		depth += 1
-	}
-
-	return {}
-}
-
-const isTransientSqliteFailure = (value: unknown): boolean => {
-	const signal = extractStructuredSqliteErrorSignal(value)
-	if (signal.code !== undefined && SQLITE_TRANSIENT_ERROR_CODES.has(signal.code)) {
-		return true
-	}
-	return signal.errno !== undefined && SQLITE_TRANSIENT_ERROR_NUMBERS.has(signal.errno)
-}
-
-const backoffDelayMs = (attempt: number): number =>
-	Math.min(
-		SQLITE_OPERATION_RETRY_BASE_DELAY_MS * Math.max(1, 2 ** (attempt - 1)),
-		SQLITE_OPERATION_RETRY_MAX_DELAY_MS,
-	)
-
-const withTransientSqliteRetry = <A>(
-	effect: Effect.Effect<A, SessionStateStoreError>,
-): Effect.Effect<A, SessionStateStoreError> => {
-	const attemptWithRetry = (attempt: number): Effect.Effect<A, SessionStateStoreError> =>
-		effect.pipe(
-			Effect.catchAll((error) => {
-				const transient = error.cause !== undefined && isTransientSqliteFailure(error.cause)
-				if (!transient || attempt >= SQLITE_OPERATION_RETRY_MAX_ATTEMPTS) {
-					return Effect.fail(error)
-				}
-
-				const nextAttempt = attempt + 1
-				const delayMs = backoffDelayMs(attempt)
-				return Effect.logWarning(
-					`SessionStateStore transient sqlite lock detected; retry ${nextAttempt}/${SQLITE_OPERATION_RETRY_MAX_ATTEMPTS} in ${delayMs}ms`,
-				).pipe(
-					Effect.zipRight(Effect.sleep(Duration.millis(delayMs))),
-					Effect.zipRight(attemptWithRetry(nextAttempt)),
-				)
-			}),
-		)
-
-	return attemptWithRetry(1)
-}
-
 export class SessionStateStore extends Effect.Service<SessionStateStore>()("SessionStateStore", {
 	effect: Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
+		const serviceScope = yield* Scope.make()
+		const sqlByDbPath = new Map<string, SqlClient.SqlClient>()
+		const sqlClientInitSemaphore = yield* Effect.makeSemaphore(1)
+		const sqlOperationSemaphore = yield* Effect.makeSemaphore(1)
+
+		const applyConnectionPragmas = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
+			Effect.gen(function* () {
+				yield* sql.unsafe("PRAGMA journal_mode = WAL")
+				yield* sql.unsafe("PRAGMA synchronous = NORMAL")
+			})
+
+		const getOrCreateSqlClient = (dbPath: string): Effect.Effect<SqlClient.SqlClient, SqlError> =>
+			sqlClientInitSemaphore.withPermits(1)(
+				Effect.gen(function* () {
+					const existing = sqlByDbPath.get(dbPath)
+					if (existing !== undefined) {
+						return existing
+					}
+
+					const sql = yield* Scope.extend(serviceScope)(
+						SqliteClient.make({ filename: dbPath }).pipe(Effect.provide(Reactivity.layer)),
+					)
+					yield* applyConnectionPragmas(sql)
+					for (const statement of sessionSchemaStatements) {
+						yield* sql.unsafe(statement)
+					}
+					sqlByDbPath.set(dbPath, sql)
+					return sql
+				}),
+			)
 
 		const withSql = <A>(
 			projectPath: string,
@@ -221,47 +178,31 @@ export class SessionStateStore extends Effect.Service<SessionStateStore>()("Sess
 				normalizedProjectPath: string,
 			) => Effect.Effect<A, SqlError | SessionStateStoreError>,
 		): Effect.Effect<A, SessionStateStoreError> =>
-			withTransientSqliteRetry(
-				Effect.gen(function* () {
-					const normalizedProjectPath = normalizeProjectPath(projectPath)
-					const storagePaths = getProjectStoragePaths(normalizedProjectPath, pathService)
-					const canonicalDbExists = yield* fs
-						.exists(storagePaths.canonicalDbPath)
-						.pipe(Effect.orElseSucceed(() => false))
-					const legacyDbExists = canonicalDbExists
-						? false
-						: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
-					const dbPath = canonicalDbExists
-						? storagePaths.canonicalDbPath
-						: legacyDbExists
-							? storagePaths.legacyDbPath
-							: storagePaths.canonicalDbPath
+			Effect.gen(function* () {
+				const normalizedProjectPath = normalizeProjectPath(projectPath)
+				const storagePaths = getProjectStoragePaths(normalizedProjectPath, pathService)
+				const canonicalDbExists = yield* fs
+					.exists(storagePaths.canonicalDbPath)
+					.pipe(Effect.orElseSucceed(() => false))
+				const legacyDbExists = canonicalDbExists
+					? false
+					: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
+				const dbPath = canonicalDbExists
+					? storagePaths.canonicalDbPath
+					: legacyDbExists
+						? storagePaths.legacyDbPath
+						: storagePaths.canonicalDbPath
 
-					yield* fs
-						.makeDirectory(storagePaths.storageDirectory, { recursive: true })
-						.pipe(
-							Effect.mapError((cause) => mapSqlError("Failed to create sqlite directory", cause)),
-						)
+				yield* fs
+					.makeDirectory(storagePaths.storageDirectory, { recursive: true })
+					.pipe(Effect.mapError((cause) => mapSqlError("Failed to create sqlite directory", cause)))
 
-					return yield* Effect.scoped(
-						Effect.gen(function* () {
-							const sql = yield* SqliteClient.make({ filename: dbPath }).pipe(
-								Effect.provide(Reactivity.layer),
-							)
-							yield* sql.unsafe("PRAGMA journal_mode = WAL")
-							yield* sql.unsafe("PRAGMA synchronous = NORMAL")
-							yield* sql.unsafe(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`)
-							for (const statement of sessionSchemaStatements) {
-								yield* sql.unsafe(statement)
-							}
-							return yield* operation(sql, normalizedProjectPath)
-						}),
-					).pipe(
-						Effect.catchAllCause((cause) =>
-							Effect.fail(mapSqlError("SQLite operation failed", Cause.squash(cause))),
-						),
-					)
-				}),
+				const sql = yield* getOrCreateSqlClient(dbPath)
+				return yield* sqlOperationSemaphore.withPermits(1)(operation(sql, normalizedProjectPath))
+			}).pipe(
+				Effect.catchAllCause((cause) =>
+					Effect.fail(mapSqlError("SQLite operation failed", Cause.squash(cause))),
+				),
 			)
 
 		const loadFromSqlite = (
