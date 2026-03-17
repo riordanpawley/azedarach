@@ -190,7 +190,7 @@ export type DrillDownBoardState =
 	  }
 	| {
 			readonly _tag: "error"
-			readonly reason: "child_ids_unavailable" | "tasks_unavailable"
+			readonly reason: "tasks_unavailable"
 	  }
 	| {
 			readonly _tag: "ready"
@@ -204,7 +204,7 @@ export type BoardRenderState =
 	  }
 	| {
 			readonly _tag: "error"
-			readonly reason: "child_ids_unavailable" | "tasks_unavailable"
+			readonly reason: "tasks_unavailable"
 			readonly tasksByColumn: readonly (readonly TaskWithSession[])[]
 	  }
 	| {
@@ -218,9 +218,20 @@ export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) 
 	// Get the child IDs for filtering
 	const childIdsResult = get(drillDownChildIdsAtom)
 	if (!Result.isSuccess(childIdsResult)) {
-		return childIdsResult._tag === "Failure"
-			? { _tag: "error", reason: "child_ids_unavailable" }
-			: { _tag: "loading" }
+		// Child-id availability should not block base board rendering.
+		// On failure or loading, degrade to "no drill-down" behavior.
+		const tasksResult = get(filteredTasksByColumnAtom)
+		if (!Result.isSuccess(tasksResult)) {
+			return tasksResult._tag === "Failure"
+				? { _tag: "error", reason: "tasks_unavailable" }
+				: { _tag: "loading" }
+		}
+		return {
+			_tag: "ready",
+			tasksByColumn: tasksResult.value.map((column) =>
+				column.filter((task) => task.parentEpicId === undefined),
+			),
+		}
 	}
 
 	const childIds = childIdsResult.value
