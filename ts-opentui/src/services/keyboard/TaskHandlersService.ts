@@ -90,10 +90,18 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
 						const effectiveProjectPath =
 							projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
-						yield* daemonRpcClient.value.sessionStop({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
+						yield* daemonRpcClient.value
+							.sessionStop({
+								issueId,
+								projectPath: effectiveProjectPath,
+							})
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`Daemon sessionStop failed for ${issueId}; retrying local stop: ${String(error)}`,
+									).pipe(Effect.zipRight(sessionManager.stop(issueId))),
+								),
+							)
 						return
 					}
 					yield* sessionManager.stop(issueId)

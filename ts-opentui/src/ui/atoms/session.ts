@@ -195,10 +195,18 @@ export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 		yield* ptyMonitor.unregisterSession(issueId)
 
 		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
-			yield* daemonRpcClient.value.sessionStop({
-				issueId,
-				projectPath,
-			})
+			yield* daemonRpcClient.value
+				.sessionStop({
+					issueId,
+					projectPath,
+				})
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Daemon sessionStop failed for ${issueId}; retrying local stop: ${String(error)}`,
+						).pipe(Effect.zipRight(manager.stop(issueId))),
+					),
+				)
 			return
 		}
 
