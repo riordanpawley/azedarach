@@ -163,6 +163,18 @@ export type ColumnId = (typeof COLUMNS)[number]["id"]
 export type ColumnStatus = (typeof COLUMNS)[number]["status"]
 
 /**
+ * Short issue-status indicators used in overlays/lists.
+ *
+ * Kept distinct from session and git markers to avoid symbol overload.
+ */
+export const ISSUE_STATUS_INDICATORS: Record<ColumnStatus, string> = {
+	open: "[O]",
+	in_progress: "[>]",
+	blocked: "[!]",
+	closed: "[x]",
+}
+
+/**
  * Session state indicators
  */
 export const SESSION_INDICATORS: Record<SessionState, string> = {

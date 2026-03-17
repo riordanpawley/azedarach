@@ -6,6 +6,7 @@ import type { VCStatus } from "../core/VCService.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import type { EditorMode } from "../services/EditorService.js"
 import { formatWaitingSummary } from "./statusBarFormatting.js"
+import { getNetworkToken } from "./statusTokens.js"
 import { theme } from "./theme.js"
 import type { ViewMode } from "./types.js"
 
@@ -206,7 +207,7 @@ export const StatusBar = (props: StatusBarProps) => {
 	// Connection status indicator
 	const getConnectionIndicator = () => {
 		const connected = props.connected ?? true
-		const icon = connected ? "●" : "○"
+		const icon = getNetworkToken(connected)
 		const color = connected ? theme.green : theme.overlay0
 		return { icon, color }
 	}
@@ -239,10 +240,11 @@ export const StatusBar = (props: StatusBarProps) => {
 	const waitingSummary = formatWaitingSummary(props.waitingIssueIds ?? [], terminalWidth)
 
 	// Calculate available width for keybindings
-	// Fixed elements: border(2) + padding(2) + project name(~10) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
+	// Fixed elements: border(2) + padding(2) + project name + gap(2) + conn + gap(2) + mode(5) + gap(2)
 	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12) + waiting summary
 	const projectNameWidth = (props.projectName ?? "azedarach").length
-	const fixedLeftWidth = 16 + projectNameWidth
+	const connectionWidth = connIndicator.icon.length
+	const fixedLeftWidth = 15 + projectNameWidth + connectionWidth
 	const waitingSummaryWidth = waitingSummary ? waitingSummary.length + 2 : 0
 	const fixedRightWidth = 40 + waitingSummaryWidth
 	const modeDisplayWidth =

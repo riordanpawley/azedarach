@@ -9,6 +9,7 @@
  */
 
 import type { OrchestrationTask } from "../services/EditorService.js"
+import { getIssueStatusToken } from "./statusTokens.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -21,28 +22,21 @@ export interface OrchestrationOverlayProps {
 	focusIndex: number
 }
 
-/**
- * Get status indicator for a task
- * ○ = open (spawnable)
- * ● = in_progress or blocked or has session (not spawnable)
- * ✓ = closed
- */
+/** Get status indicator for a task (separate from spawnability state). */
 const getStatusIndicator = (task: OrchestrationTask): string => {
-	if (task.status === "closed") return "✓"
-	if (task.status === "open" && !task.hasSession) return "○"
-	return "●"
+	return getIssueStatusToken(task.status)
 }
 
 /**
  * Get selection indicator for a task
- * [•] = selected
+ * [x] = selected
  * [ ] = not selected but selectable
  * [-] = not selectable
  */
 const getSelectionIndicator = (task: OrchestrationTask, isSelected: boolean): string => {
 	const isSpawnable = task.status === "open" && !task.hasSession
 	if (!isSpawnable) return "[-]"
-	return isSelected ? "[•]" : "[ ]"
+	return isSelected ? "[x]" : "[ ]"
 }
 
 /**
