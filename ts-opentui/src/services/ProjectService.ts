@@ -110,6 +110,17 @@ export const isWorktreePathForProject = (
 	}
 }
 
+export const resolveRegisteredProjectRootForWorktree = (options: {
+	readonly cwdPath: string
+	readonly projectPath: string
+	readonly pathOps: WorktreePathOps
+	readonly isTrackedGitWorktree: boolean
+}): string | undefined =>
+	options.isTrackedGitWorktree ||
+	isWorktreePathForProject(options.cwdPath, options.projectPath, options.pathOps)
+		? options.projectPath
+		: undefined
+
 const parseGitdirPointer = (content: string): string | undefined => {
 	const trimmed = content.trim()
 	if (!trimmed.startsWith("gitdir:")) {
@@ -144,8 +155,14 @@ export const resolveConfigBasePath = (options: {
 	readonly pathOps: WorktreePathOps
 	readonly cwdHasConfig: boolean
 }): string => {
-	if (isWorktreePathForProject(options.cwdPath, options.projectPath, options.pathOps)) {
-		return options.projectPath
+	const registeredProjectRoot = resolveRegisteredProjectRootForWorktree({
+		cwdPath: options.cwdPath,
+		projectPath: options.projectPath,
+		pathOps: options.pathOps,
+		isTrackedGitWorktree: false,
+	})
+	if (registeredProjectRoot !== undefined) {
+		return registeredProjectRoot
 	}
 
 	return options.cwdHasConfig ? options.cwdPath : options.projectPath
@@ -251,14 +268,6 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 			initialConfig.defaultProject,
 		)
 
-		/**
-		 * Check if a path looks like a worktree of a project.
-		 * Worktrees are created as siblings: /path/to/project-branchname
-		 * Returns true if cwdPath is a worktree of projectPath.
-		 */
-		const isWorktreeOf = (cwdPath: string, projectPath: string): boolean =>
-			isWorktreePathForProject(cwdPath, projectPath, pathService)
-
 		const isTrackedGitWorktreeOf = (cwdPath: string, projectPath: string): Effect.Effect<boolean> =>
 			Effect.gen(function* () {
 				let candidate = pathService.normalize(cwdPath)
@@ -344,8 +353,13 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 				// Check if cwd is a tracked git worktree of a registered project.
 				for (const project of projectList) {
 					const isTrackedWorktree = yield* isTrackedGitWorktreeOf(cwd, project.path)
-					const isSiblingWorktree = isWorktreeOf(cwd, project.path)
-					if (isTrackedWorktree || isSiblingWorktree) {
+					const registeredProjectRoot = resolveRegisteredProjectRootForWorktree({
+						cwdPath: cwd,
+						projectPath: project.path,
+						pathOps: pathService,
+						isTrackedGitWorktree: isTrackedWorktree,
+					})
+					if (registeredProjectRoot !== undefined) {
 						return project
 					}
 				}

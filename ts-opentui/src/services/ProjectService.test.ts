@@ -9,6 +9,7 @@ import {
 	isWorktreePathForProject,
 	ProjectService,
 	resolveConfigBasePath,
+	resolveRegisteredProjectRootForWorktree,
 } from "./ProjectService.js"
 
 const canonicalTestPath = (value: string): string => path.normalize(value).replace(/^\/private/, "")
@@ -74,6 +75,30 @@ describe("resolveConfigBasePath", () => {
 				projectPath: "/Users/riordan/prog/azedarach",
 				pathOps: path,
 				cwdHasConfig: false,
+			}),
+		).toBe("/Users/riordan/prog/azedarach")
+	})
+})
+
+describe("resolveRegisteredProjectRootForWorktree", () => {
+	it("returns project root for sibling worktree paths", () => {
+		expect(
+			resolveRegisteredProjectRootForWorktree({
+				cwdPath: "/Users/riordan/prog/azedarach-az-1e6cc1",
+				projectPath: "/Users/riordan/prog/azedarach",
+				pathOps: path,
+				isTrackedGitWorktree: false,
+			}),
+		).toBe("/Users/riordan/prog/azedarach")
+	})
+
+	it("returns project root for tracked git worktrees", () => {
+		expect(
+			resolveRegisteredProjectRootForWorktree({
+				cwdPath: "/any/path",
+				projectPath: "/Users/riordan/prog/azedarach",
+				pathOps: path,
+				isTrackedGitWorktree: true,
 			}),
 		).toBe("/Users/riordan/prog/azedarach")
 	})
