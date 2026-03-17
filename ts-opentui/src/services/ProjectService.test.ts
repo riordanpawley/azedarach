@@ -56,7 +56,7 @@ describe("isWorktreePathForProject", () => {
 })
 
 describe("resolveConfigBasePath", () => {
-	it("uses worktree path when cwd is a worktree and has config", () => {
+	it("uses project path when cwd is a worktree and has config", () => {
 		expect(
 			resolveConfigBasePath({
 				cwdPath: "/Users/riordan/prog/azedarach-az-1e6cc1",
@@ -64,7 +64,7 @@ describe("resolveConfigBasePath", () => {
 				pathOps: path,
 				cwdHasConfig: true,
 			}),
-		).toBe("/Users/riordan/prog/azedarach-az-1e6cc1")
+		).toBe("/Users/riordan/prog/azedarach")
 	})
 
 	it("uses project path when cwd is a worktree but has no config", () => {
@@ -191,7 +191,7 @@ describe("ProjectService initial project selection", () => {
 		}
 	})
 
-	it("prefers local workspace root over tracked worktree inference when both match", async () => {
+	it("prefers registered project root over local workspace root when cwd is a tracked worktree", async () => {
 		const tempRoot = mkdtempSync(path.join(tmpdir(), "az-project-service-precedence-"))
 		const registeredProject = path.join(tempRoot, "azedarach")
 		const workspaceRoot = path.join(tempRoot, "azedarach-mv")
@@ -214,7 +214,7 @@ describe("ProjectService initial project selection", () => {
 					return yield* projectService.getCurrentPath()
 				}),
 			)
-			expect(canonicalTestPath(selectedPath ?? "")).toBe(canonicalTestPath(workspaceRoot))
+			expect(canonicalTestPath(selectedPath ?? "")).toBe(canonicalTestPath(registeredProject))
 		} finally {
 			rmSync(tempRoot, { recursive: true, force: true })
 		}

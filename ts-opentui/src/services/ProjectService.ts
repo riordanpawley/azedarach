@@ -135,8 +135,8 @@ export const isWorktreeGitdirPointerForProject = (
 /**
  * Resolve which base path should be used for loading project config.
  *
- * When running from a sibling worktree, prefer the worktree path if it has its
- * own config file; otherwise keep using the registered project root.
+ * When running from a sibling worktree, always use the registered project root
+ * so config/storage remains shared across all tracked worktrees.
  */
 export const resolveConfigBasePath = (options: {
 	readonly cwdPath: string
@@ -144,14 +144,11 @@ export const resolveConfigBasePath = (options: {
 	readonly pathOps: WorktreePathOps
 	readonly cwdHasConfig: boolean
 }): string => {
-	if (
-		options.cwdHasConfig &&
-		isWorktreePathForProject(options.cwdPath, options.projectPath, options.pathOps)
-	) {
-		return options.cwdPath
+	if (isWorktreePathForProject(options.cwdPath, options.projectPath, options.pathOps)) {
+		return options.projectPath
 	}
 
-	return options.projectPath
+	return options.cwdHasConfig ? options.cwdPath : options.projectPath
 }
 
 // ============================================================================
@@ -264,36 +261,28 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 
 		const isTrackedGitWorktreeOf = (cwdPath: string, projectPath: string): Effect.Effect<boolean> =>
 			Effect.gen(function* () {
-				if (!isWorktreeOf(cwdPath, projectPath)) {
-					return false
-				}
-
-				const projectParent = pathService.dirname(pathService.normalize(projectPath))
 				let candidate = pathService.normalize(cwdPath)
 				while (true) {
-					if (pathService.dirname(candidate) === projectParent) {
-						break
+					const gitPath = pathService.join(candidate, ".git")
+					const gitPointer = yield* fs.readFileString(gitPath).pipe(
+						Effect.map(parseGitdirPointer),
+						Effect.catchAll(() => Effect.succeed(undefined)),
+					)
+					if (gitPointer !== undefined) {
+						const absoluteGitdir = pathService.isAbsolute(gitPointer)
+							? gitPointer
+							: pathService.join(candidate, gitPointer)
+						if (isWorktreeGitdirPointerForProject(absoluteGitdir, projectPath, pathService)) {
+							return true
+						}
 					}
+
 					const parent = pathService.dirname(candidate)
 					if (parent === candidate) {
 						return false
 					}
 					candidate = parent
 				}
-
-				const gitPath = pathService.join(candidate, ".git")
-				const gitPointer = yield* fs.readFileString(gitPath).pipe(
-					Effect.map(parseGitdirPointer),
-					Effect.catchAll(() => Effect.succeed(undefined)),
-				)
-				if (gitPointer === undefined) {
-					return false
-				}
-
-				const absoluteGitdir = pathService.isAbsolute(gitPointer)
-					? gitPointer
-					: pathService.join(candidate, gitPointer)
-				return isWorktreeGitdirPointerForProject(absoluteGitdir, projectPath, pathService)
 			})
 
 		const findNearestAzedarachWorkspaceRoot = (
@@ -327,10 +316,11 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 		 * Determine initial project based on:
 		 * 1. Check if cwd matches a registered project
 		 * 2. Check if cwd is inside a registered project
-		 * 3. Check if cwd is a worktree of a registered project (sibling with project-branch pattern)
-		 * 4. Fall back to default project
-		 * 5. Fall back to first project
-		 * 6. Return undefined if no projects
+		 * 3. Check if cwd is a tracked git worktree of a registered project
+		 * 4. Check if cwd looks like a standalone azedarach workspace
+		 * 5. Fall back to default project
+		 * 6. Fall back to first project
+		 * 7. Return undefined if no projects
 		 */
 		const determineInitialProject = (
 			projectList: ReadonlyArray<Project>,
@@ -351,6 +341,15 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 				)
 				if (parentProject) return parentProject
 
+				// Check if cwd is a tracked git worktree of a registered project.
+				for (const project of projectList) {
+					const isTrackedWorktree = yield* isTrackedGitWorktreeOf(cwd, project.path)
+					const isSiblingWorktree = isWorktreeOf(cwd, project.path)
+					if (isTrackedWorktree || isSiblingWorktree) {
+						return project
+					}
+				}
+
 				// If cwd looks like a standalone Azedarach project clone/workspace,
 				// prefer it over a registry default from another sibling repo.
 				const workspaceRoot = yield* findNearestAzedarachWorkspaceRoot(cwd)
@@ -358,14 +357,6 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 					return {
 						name: pathService.basename(workspaceRoot),
 						path: workspaceRoot,
-					}
-				}
-
-				// Check if cwd is a tracked git worktree of a registered project.
-				for (const project of projectList) {
-					const isTrackedWorktree = yield* isTrackedGitWorktreeOf(cwd, project.path)
-					if (isTrackedWorktree) {
-						return project
 					}
 				}
 
