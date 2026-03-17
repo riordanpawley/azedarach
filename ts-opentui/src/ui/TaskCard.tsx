@@ -14,6 +14,7 @@ import {
 	getPhaseToken,
 	getPrStateToken,
 	getSessionStateToken,
+	getTmuxSessionToken,
 	getWorktreeToken,
 } from "./statusTokens.js"
 import { getPriorityColor, theme } from "./theme.js"
@@ -213,6 +214,9 @@ export const TaskCard = (props: TaskCardProps) => {
 		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
 			line += ` ${indicator}`
+		}
+		if (props.task.hasTmuxSession) {
+			line += ` ${getTmuxSessionToken()}`
 		}
 		// Show worktree indicator when worktree exists but no session running
 		// This indicates there's existing work that can be resumed or cleaned up
