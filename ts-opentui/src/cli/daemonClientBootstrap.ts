@@ -1,4 +1,5 @@
 import type { FileSystem, Path } from "@effect/platform"
+import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Data, Effect, Option } from "effect"
 import {
 	clearGlobalDaemonArtifacts,
@@ -10,10 +11,6 @@ import {
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
-	DaemonRpcProtocolVersionMismatchError,
-	DaemonRpcRemoteActionError,
-	DaemonRpcTimeoutError,
-	type DaemonRpcTransportError,
 	layerSocket,
 } from "../rpc/DaemonRpcClient.js"
 
@@ -126,33 +123,29 @@ const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError
 export const buildGlobalDaemonSocketUrl = (socketPath: string): string =>
 	`ws+unix://${socketPath}:/`
 
+const isRpcClientError = (error: DaemonRpcClientError): error is RpcClientError =>
+	error._tag === "RpcClientError"
+
+export const isRetryableRpcClientError = (error: DaemonRpcClientError): error is RpcClientError =>
+	isRpcClientError(error) && error.reason === "Protocol"
+
 export const formatDaemonRpcClientFailure = (params: {
 	readonly operation: string
 	readonly socketUrl: string
 	readonly error: DaemonRpcClientError
 }): GlobalDaemonBootstrapError => {
 	switch (params.error._tag) {
-		case "DaemonRpcProtocolVersionMismatchError":
-			return new GlobalDaemonBootstrapError({
-				message: `Daemon RPC protocol mismatch for '${params.operation}' (expected=${params.error.expectedProtocolVersion}, received=${params.error.receivedProtocolVersion}). Update CLI/daemon binaries so protocol versions match.`,
-				reason: "rpc-protocol-mismatch",
-			})
-		case "DaemonRpcRemoteActionError": {
+		case "DaemonRpcActionError": {
 			const actionHint = params.error.action === undefined ? "" : ` Action: ${params.error.action}.`
 			return new GlobalDaemonBootstrapError({
 				message: `Daemon RPC '${params.operation}' rejected by daemon (code=${params.error.code}): ${params.error.message}.${actionHint}`,
 				reason: "rpc-remote-action",
 			})
 		}
-		case "DaemonRpcTransportError":
+		case "RpcClientError":
 			return new GlobalDaemonBootstrapError({
-				message: `Unable to connect to daemon RPC endpoint (${params.socketUrl}) for '${params.operation}': ${params.error.message}. ${params.error.suggestion}`,
+				message: `Unable to communicate with daemon RPC endpoint (${params.socketUrl}) for '${params.operation}': ${params.error.message}. Verify daemon socket availability, then run \`az daemon health\` and \`az daemon logs\`.`,
 				reason: "rpc-transport",
-			})
-		case "DaemonRpcTimeoutError":
-			return new GlobalDaemonBootstrapError({
-				message: `Daemon RPC '${params.operation}' timed out after ${params.error.timeoutMs}ms.`,
-				reason: "rpc-timeout",
 			})
 	}
 	const exhaustive: never = params.error
@@ -218,7 +211,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 		let startedDaemon = false
 		let attachAttemptCount = 0
 		let lastSocketUrl: string | null = null
-		let lastTransportError: DaemonRpcTransportError | null = null
+		let lastTransportError: RpcClientError | null = null
 
 		while (Date.now() <= deadlineMs) {
 			const attempt = attachAttemptCount + 1
@@ -307,7 +300,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 			}
 
 			const error = connectivity.left
-			if (error._tag === "DaemonRpcTransportError") {
+			if (isRetryableRpcClientError(error)) {
 				lastTransportError = error
 				yield* Effect.logWarning(
 					`daemon_bootstrap: verifyReachable transport failure socketUrl=${socketUrl} attempt=${attempt} error=${error.message}`,

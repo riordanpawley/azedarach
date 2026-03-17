@@ -1,10 +1,7 @@
 import { describe, expect, it } from "bun:test"
+import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Effect, Option, Ref } from "effect"
-import {
-	type DaemonRpcClientApi,
-	type DaemonRpcClientError,
-	DaemonRpcTransportError,
-} from "../rpc/DaemonRpcClient.js"
+import type { DaemonRpcClientApi, DaemonRpcClientError } from "../rpc/DaemonRpcClient.js"
 import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
 import { makeBoardDaemonIpcSignals } from "./BoardService.js"
 
@@ -334,11 +331,9 @@ describe("BoardService daemon IPC signaling", () => {
 							yield* Ref.set(heartbeatCallsRef, callCount + 1)
 							if (callCount === 0) {
 								return yield* Effect.fail(
-									new DaemonRpcTransportError({
-										operation: "heartbeat",
-										reason: "transport",
+									new RpcClientError({
+										reason: "Protocol",
 										message: "daemon restarted",
-										suggestion: "retry",
 									}),
 								)
 							}

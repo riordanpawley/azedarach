@@ -76,7 +76,7 @@ import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
-import { type DaemonRpcClientApi, DaemonRpcTransportError } from "../rpc/DaemonRpcClient.js"
+import type { DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -111,7 +111,11 @@ import {
 	parseConfigPathFromArgv,
 	resolveCliExecutionMode,
 } from "./argv-normalization.js"
-import { bootstrapDaemonRpcClient, formatDaemonRpcClientFailure } from "./daemonClientBootstrap.js"
+import {
+	bootstrapDaemonRpcClient,
+	formatDaemonRpcClientFailure,
+	isRetryableRpcClientError,
+} from "./daemonClientBootstrap.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
@@ -1266,7 +1270,7 @@ export const consumeDaemonStatusStreamBatches = (params: {
 				.pipe(Effect.either)
 
 			if (attempt._tag === "Left") {
-				if (params.watch && attempt.left._tag === "DaemonRpcTransportError") {
+				if (params.watch && isRetryableRpcClientError(attempt.left)) {
 					yield* Console.log(
 						`daemon stream reconnecting from cursor=${cursor ?? "<start>"} in ${params.reconnectDelayMs}ms (${attempt.left.message})`,
 					)

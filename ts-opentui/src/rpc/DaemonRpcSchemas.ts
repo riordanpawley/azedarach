@@ -1,6 +1,11 @@
 import { Schema } from "effect"
 
 export const DAEMON_RPC_PROTOCOL_VERSION = 1
+const DaemonRpcProtocolVersionLiteralSchema = Schema.Literal(DAEMON_RPC_PROTOCOL_VERSION)
+const DaemonRpcProtocolVersionRequestSchema = Schema.optionalWith(
+	DaemonRpcProtocolVersionLiteralSchema,
+	{ default: () => DAEMON_RPC_PROTOCOL_VERSION },
+)
 
 export const DaemonRpcActionErrorSchema = Schema.TaggedStruct("DaemonRpcActionError", {
 	code: Schema.String,
@@ -71,7 +76,7 @@ export const DaemonSyncStatusSchema = Schema.Struct({
 export type DaemonSyncStatus = Schema.Schema.Type<typeof DaemonSyncStatusSchema>
 
 export const DaemonControlStatusResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	checkedAtMs: Schema.Number,
 	runtime: DaemonRuntimeSnapshotSchema,
 	sync: DaemonSyncStatusSchema,
@@ -79,7 +84,7 @@ export const DaemonControlStatusResultSchema = Schema.Struct({
 export type DaemonControlStatusResult = Schema.Schema.Type<typeof DaemonControlStatusResultSchema>
 
 export const DaemonHealthResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	checkedAtMs: Schema.Number,
 	state: Schema.Literal("healthy", "degraded", "unhealthy"),
 	reason: Schema.String,
@@ -88,7 +93,7 @@ export const DaemonHealthResultSchema = Schema.Struct({
 export type DaemonHealthResult = Schema.Schema.Type<typeof DaemonHealthResultSchema>
 
 export const DaemonLogsResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	logPath: Schema.String,
 	totalLines: Schema.Number,
 	lines: Schema.Array(Schema.String),
@@ -121,7 +126,7 @@ export type DaemonNegotiatedCapabilities = Schema.Schema.Type<
 >
 
 export const DaemonAttachReconnectResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	clientId: Schema.String,
 	acceptedAtMs: Schema.Number,
 	resumeToken: Schema.String,
@@ -134,7 +139,7 @@ export type DaemonAttachReconnectResult = Schema.Schema.Type<
 >
 
 export const DaemonHeartbeatResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	client: DaemonClientStateSchema,
 })
 export type DaemonHeartbeatResult = Schema.Schema.Type<typeof DaemonHeartbeatResultSchema>
@@ -162,7 +167,7 @@ export const DaemonSessionSnapshotEntrySchema = Schema.Struct({
 export type DaemonSessionSnapshotEntry = Schema.Schema.Type<typeof DaemonSessionSnapshotEntrySchema>
 
 export const DaemonSessionSnapshotResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	capturedAtMs: Schema.Number,
 	sessions: Schema.Array(DaemonSessionSnapshotEntrySchema),
 })
@@ -171,7 +176,7 @@ export type DaemonSessionSnapshotResult = Schema.Schema.Type<
 >
 
 export const DaemonStatusRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 })
 export type DaemonStatusRequest = Schema.Schema.Type<typeof DaemonStatusRequestSchema>
 
@@ -179,26 +184,26 @@ export const DaemonHealthRequestSchema = DaemonStatusRequestSchema
 export type DaemonHealthRequest = Schema.Schema.Type<typeof DaemonHealthRequestSchema>
 
 export const DaemonLogsRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	lines: Schema.optional(Schema.Number),
 	projectPath: Schema.optional(Schema.String),
 })
 export type DaemonLogsRequest = Schema.Schema.Type<typeof DaemonLogsRequestSchema>
 
 export const DaemonStopRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 })
 export type DaemonStopRequest = Schema.Schema.Type<typeof DaemonStopRequestSchema>
 
 export const DaemonRestartRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	projectPath: Schema.optional(Schema.String),
 	intervalMs: Schema.optional(Schema.Number),
 })
 export type DaemonRestartRequest = Schema.Schema.Type<typeof DaemonRestartRequestSchema>
 
 export const DaemonAttachRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	clientId: Schema.String,
 	protocolVersion: Schema.optional(Schema.Number),
 	requestedAtMs: Schema.optional(Schema.Number),
@@ -206,7 +211,7 @@ export const DaemonAttachRequestSchema = Schema.Struct({
 export type DaemonAttachRequest = Schema.Schema.Type<typeof DaemonAttachRequestSchema>
 
 export const DaemonReconnectRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	clientId: Schema.String,
 	protocolVersion: Schema.optional(Schema.Number),
 	lastSeenRevision: Schema.optional(Schema.Number),
@@ -216,14 +221,14 @@ export const DaemonReconnectRequestSchema = Schema.Struct({
 export type DaemonReconnectRequest = Schema.Schema.Type<typeof DaemonReconnectRequestSchema>
 
 export const DaemonHeartbeatRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	clientId: Schema.String,
 	observedAtMs: Schema.optional(Schema.Number),
 })
 export type DaemonHeartbeatRequest = Schema.Schema.Type<typeof DaemonHeartbeatRequestSchema>
 
 export const DaemonSessionSnapshotRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	projectPath: Schema.optional(Schema.String),
 })
 export type DaemonSessionSnapshotRequest = Schema.Schema.Type<
@@ -231,35 +236,35 @@ export type DaemonSessionSnapshotRequest = Schema.Schema.Type<
 >
 
 export const DaemonSessionStartRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.String,
 })
 export type DaemonSessionStartRequest = Schema.Schema.Type<typeof DaemonSessionStartRequestSchema>
 
 export const DaemonSessionStopRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.optional(Schema.String),
 })
 export type DaemonSessionStopRequest = Schema.Schema.Type<typeof DaemonSessionStopRequestSchema>
 
 export const DaemonSessionPauseRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.optional(Schema.String),
 })
 export type DaemonSessionPauseRequest = Schema.Schema.Type<typeof DaemonSessionPauseRequestSchema>
 
 export const DaemonSessionResumeRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.optional(Schema.String),
 })
 export type DaemonSessionResumeRequest = Schema.Schema.Type<typeof DaemonSessionResumeRequestSchema>
 
 export const DaemonSessionRecoverRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.optional(Schema.String),
 })
@@ -268,7 +273,7 @@ export type DaemonSessionRecoverRequest = Schema.Schema.Type<
 >
 
 export const DaemonSessionUpdateStateRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	state: DaemonSessionStateSchema,
 	projectPath: Schema.optional(Schema.String),
@@ -278,7 +283,7 @@ export type DaemonSessionUpdateStateRequest = Schema.Schema.Type<
 >
 
 export const DaemonSessionMutationResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	capturedAtMs: Schema.Number,
 	session: DaemonSessionSnapshotEntrySchema,
 })
@@ -310,7 +315,7 @@ export const DaemonDevServerStateSchema = Schema.Struct({
 export type DaemonDevServerState = Schema.Schema.Type<typeof DaemonDevServerStateSchema>
 
 export const DaemonDevServerStatusRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	serverName: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
@@ -320,7 +325,7 @@ export type DaemonDevServerStatusRequest = Schema.Schema.Type<
 >
 
 export const DaemonDevServerStatusResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	capturedAtMs: Schema.Number,
 	server: DaemonDevServerStateSchema,
 })
@@ -329,21 +334,21 @@ export type DaemonDevServerStatusResult = Schema.Schema.Type<
 >
 
 export const DaemonDevServerListRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
 })
 export type DaemonDevServerListRequest = Schema.Schema.Type<typeof DaemonDevServerListRequestSchema>
 
 export const DaemonDevServerListResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	capturedAtMs: Schema.Number,
 	servers: Schema.Array(DaemonDevServerStateSchema),
 })
 export type DaemonDevServerListResult = Schema.Schema.Type<typeof DaemonDevServerListResultSchema>
 
 export const DaemonDevServerStartRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.String,
 	serverName: Schema.optional(Schema.String),
@@ -353,7 +358,7 @@ export type DaemonDevServerStartRequest = Schema.Schema.Type<
 >
 
 export const DaemonDevServerStopRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	serverName: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
@@ -361,7 +366,7 @@ export const DaemonDevServerStopRequestSchema = Schema.Struct({
 export type DaemonDevServerStopRequest = Schema.Schema.Type<typeof DaemonDevServerStopRequestSchema>
 
 export const DaemonDevServerMutationResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	capturedAtMs: Schema.Number,
 	server: DaemonDevServerStateSchema,
 })
@@ -398,7 +403,7 @@ export const DaemonQueueItemSchema = Schema.Struct({
 export type DaemonQueueItem = Schema.Schema.Type<typeof DaemonQueueItemSchema>
 
 export const DaemonQueueEnqueueRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	domain: DaemonQueueDomainSchema,
 	operation: Schema.String,
 	projectPath: Schema.optional(Schema.String),
@@ -409,14 +414,14 @@ export const DaemonQueueEnqueueRequestSchema = Schema.Struct({
 export type DaemonQueueEnqueueRequest = Schema.Schema.Type<typeof DaemonQueueEnqueueRequestSchema>
 
 export const DaemonQueueEnqueueResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	acceptedAtMs: Schema.Number,
 	item: DaemonQueueItemSchema,
 })
 export type DaemonQueueEnqueueResult = Schema.Schema.Type<typeof DaemonQueueEnqueueResultSchema>
 
 export const DaemonQueueQueryRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	domain: Schema.optional(DaemonQueueDomainSchema),
 	operationId: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
@@ -426,14 +431,14 @@ export const DaemonQueueQueryRequestSchema = Schema.Struct({
 export type DaemonQueueQueryRequest = Schema.Schema.Type<typeof DaemonQueueQueryRequestSchema>
 
 export const DaemonQueueQueryResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	queriedAtMs: Schema.Number,
 	items: Schema.Array(DaemonQueueItemSchema),
 })
 export type DaemonQueueQueryResult = Schema.Schema.Type<typeof DaemonQueueQueryResultSchema>
 
 export const DaemonQueueCancelRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	domain: Schema.optional(DaemonQueueDomainSchema),
 	operationId: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
@@ -442,7 +447,7 @@ export const DaemonQueueCancelRequestSchema = Schema.Struct({
 export type DaemonQueueCancelRequest = Schema.Schema.Type<typeof DaemonQueueCancelRequestSchema>
 
 export const DaemonQueueCancelResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	cancelledAtMs: Schema.Number,
 	cancelledOperationIds: Schema.Array(Schema.String),
 })
@@ -483,7 +488,7 @@ export const DaemonEventStreamEntrySchema = Schema.Struct({
 export type DaemonEventStreamEntry = Schema.Schema.Type<typeof DaemonEventStreamEntrySchema>
 
 export const DaemonEventStreamRequestSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	clientId: Schema.String,
 	cursor: Schema.optional(Schema.Number),
 	batchSize: Schema.optional(Schema.Number),
@@ -493,7 +498,7 @@ export const DaemonEventStreamRequestSchema = Schema.Struct({
 export type DaemonEventStreamRequest = Schema.Schema.Type<typeof DaemonEventStreamRequestSchema>
 
 export const DaemonEventStreamResultSchema = Schema.Struct({
-	rpcProtocolVersion: Schema.Number,
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
 	polledAtMs: Schema.Number,
 	nextCursor: Schema.Number,
 	events: Schema.Array(DaemonEventStreamEntrySchema),
