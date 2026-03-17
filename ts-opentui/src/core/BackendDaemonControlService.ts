@@ -54,7 +54,7 @@ export interface BackendDaemonControlQueueItem {
 	readonly domain: BackendDaemonControlQueueDomain
 	readonly operationId: string
 	readonly operation: string
-	readonly projectPath: string | null
+	readonly projectPath: string
 	readonly issueId: string | null
 	readonly dedupeKey: string | null
 	readonly payloadJson: string | null
@@ -68,7 +68,7 @@ export interface BackendDaemonControlQueueItem {
 export interface BackendDaemonControlQueueEnqueueRequest {
 	readonly domain: BackendDaemonControlQueueDomain
 	readonly operation: string
-	readonly projectPath?: string
+	readonly projectPath: string
 	readonly issueId?: string
 	readonly dedupeKey?: string
 	readonly payloadJson?: string
@@ -80,9 +80,9 @@ export interface BackendDaemonControlQueueEnqueueResult {
 }
 
 export interface BackendDaemonControlQueueQueryRequest {
+	readonly projectPath: string
 	readonly domain?: BackendDaemonControlQueueDomain
 	readonly operationId?: string
-	readonly projectPath?: string
 	readonly issueId?: string
 	readonly limit?: number
 }
@@ -93,9 +93,9 @@ export interface BackendDaemonControlQueueQueryResult {
 }
 
 export interface BackendDaemonControlQueueCancelRequest {
+	readonly projectPath: string
 	readonly domain?: BackendDaemonControlQueueDomain
 	readonly operationId?: string
-	readonly projectPath?: string
 	readonly issueId?: string
 }
 
@@ -243,13 +243,13 @@ export const makeBackendDaemonControlService = (params: {
 			| BackendDaemonControlQueueCancelRequest
 			| undefined,
 	): boolean => {
+		if (request?.projectPath !== undefined && item.projectPath !== request.projectPath) {
+			return false
+		}
 		if (request?.domain !== undefined && item.domain !== request.domain) {
 			return false
 		}
 		if (request?.operationId !== undefined && item.operationId !== request.operationId) {
-			return false
-		}
-		if (request?.projectPath !== undefined && item.projectPath !== request.projectPath) {
 			return false
 		}
 		if (request?.issueId !== undefined && item.issueId !== request.issueId) {
@@ -291,7 +291,7 @@ export const makeBackendDaemonControlService = (params: {
 					domain: request.domain,
 					operationId: crypto.randomUUID(),
 					operation: request.operation,
-					projectPath: request.projectPath ?? null,
+					projectPath: request.projectPath,
 					issueId: request.issueId ?? null,
 					dedupeKey: request.dedupeKey ?? null,
 					payloadJson: request.payloadJson ?? null,

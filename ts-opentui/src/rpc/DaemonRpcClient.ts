@@ -77,7 +77,7 @@ export interface DaemonRpcClientApi {
 		request: Omit<DaemonEventStreamRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonEventStreamResult, DaemonRpcClientError>
 	readonly sessionSnapshot?: (
-		request?: Omit<DaemonSessionSnapshotRequest, "rpcProtocolVersion">,
+		request: Omit<DaemonSessionSnapshotRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionSnapshotResult, DaemonRpcClientError>
 	readonly sessionStart?: (
 		request: Omit<DaemonSessionStartRequest, "rpcProtocolVersion">,
@@ -101,7 +101,7 @@ export interface DaemonRpcClientApi {
 		request: Omit<DaemonDevServerStatusRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonDevServerStatusResult, DaemonRpcClientError>
 	readonly devServerList?: (
-		request?: Omit<DaemonDevServerListRequest, "rpcProtocolVersion">,
+		request: Omit<DaemonDevServerListRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonDevServerListResult, DaemonRpcClientError>
 	readonly devServerStart?: (
 		request: Omit<DaemonDevServerStartRequest, "rpcProtocolVersion">,
@@ -113,10 +113,10 @@ export interface DaemonRpcClientApi {
 		request: Omit<DaemonQueueEnqueueRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonQueueEnqueueResult, DaemonRpcClientError>
 	readonly queueQuery?: (
-		request?: Omit<DaemonQueueQueryRequest, "rpcProtocolVersion">,
+		request: Omit<DaemonQueueQueryRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonQueueQueryResult, DaemonRpcClientError>
 	readonly queueCancel?: (
-		request?: Omit<DaemonQueueCancelRequest, "rpcProtocolVersion">,
+		request: Omit<DaemonQueueCancelRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonQueueCancelResult, DaemonRpcClientError>
 }
 
@@ -174,11 +174,10 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
 		sessionSnapshot: (request) =>
-			raw.daemonSessionSnapshot(
-				request === undefined
-					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
-					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
-			),
+			raw.daemonSessionSnapshot({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
 		sessionStart: (request) =>
 			raw.daemonSessionStart({
 				...request,
@@ -215,11 +214,10 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
 		devServerList: (request) =>
-			raw.daemonDevServerList(
-				request === undefined
-					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
-					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
-			),
+			raw.daemonDevServerList({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
 		devServerStart: (request) =>
 			raw.daemonDevServerStart({
 				...request,
@@ -236,17 +234,15 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
 		queueQuery: (request) =>
-			raw.daemonQueueQuery(
-				request === undefined
-					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
-					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
-			),
+			raw.daemonQueueQuery({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
 		queueCancel: (request) =>
-			raw.daemonQueueCancel(
-				request === undefined
-					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
-					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
-			),
+			raw.daemonQueueCancel({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
 	} satisfies DaemonRpcClientApi
 })
 

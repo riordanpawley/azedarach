@@ -169,7 +169,9 @@ export const makeBoardDaemonIpcSignals = (params: {
 		const sessionSnapshot = daemonRpcClient.sessionSnapshot
 		return Effect.gen(function* () {
 			const projectPath =
-				params.getProjectPath === undefined ? undefined : yield* params.getProjectPath()
+				params.getProjectPath === undefined
+					? process.cwd()
+					: ((yield* params.getProjectPath()) ?? process.cwd())
 			return yield* sessionSnapshot({ projectPath })
 		}).pipe(
 			Effect.flatMap((snapshot) =>
@@ -267,21 +269,27 @@ export const makeBoardDaemonIpcSignals = (params: {
 		if (Option.isNone(params.daemonRpcClient)) {
 			return Effect.succeed(cursor)
 		}
-		if (params.daemonRpcClient.value.eventStream === undefined) {
+		const daemonEventStream = params.daemonRpcClient.value.eventStream
+		if (daemonEventStream === undefined) {
 			return Effect.succeed(cursor)
 		}
-		return params.daemonRpcClient.value
-			.eventStream({
+		return Effect.gen(function* () {
+			const projectPath =
+				params.getProjectPath === undefined
+					? process.cwd()
+					: ((yield* params.getProjectPath()) ?? process.cwd())
+			return yield* daemonEventStream({
 				clientId: params.daemonFrontendClientId,
+				projectPath,
 				cursor,
 				batchSize: 32,
 				waitMs: 2500,
 			})
-			.pipe(
-				Effect.tap(processDaemonStreamBatch),
-				Effect.map((batch) => batch.nextCursor),
-				Effect.catchAll(() => Effect.succeed(cursor)),
-			)
+		}).pipe(
+			Effect.tap(processDaemonStreamBatch),
+			Effect.map((batch) => batch.nextCursor),
+			Effect.catchAll(() => Effect.succeed(cursor)),
+		)
 	}
 
 	return {
@@ -933,20 +941,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					)
 
 			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
-				return daemonRpcClient.value
-					.sessionSnapshot({ projectPath: projectPath ?? undefined })
-					.pipe(
-						Effect.map((result) =>
-							result.sessions
-								.map((entry) => toAuthoritativeSessionView(entry))
-								.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+				const daemonProjectPath = projectPath ?? process.cwd()
+				return daemonRpcClient.value.sessionSnapshot({ projectPath: daemonProjectPath }).pipe(
+					Effect.map((result) =>
+						result.sessions
+							.map((entry) => toAuthoritativeSessionView(entry))
+							.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+					),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(loadLocalSessionViews()),
 						),
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(loadLocalSessionViews()),
-							),
-						),
-					)
+					),
+				)
 			}
 
 			if (Option.isSome(daemonRpcClient)) {

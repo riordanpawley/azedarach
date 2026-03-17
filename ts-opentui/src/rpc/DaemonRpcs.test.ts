@@ -103,6 +103,7 @@ describe("DaemonRpcs", () => {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "qp",
 				serverName: "default",
+				projectPath: "/tmp/project",
 			}),
 		)
 		const startRequest = await Effect.runPromise(

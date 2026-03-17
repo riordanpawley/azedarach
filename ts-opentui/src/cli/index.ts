@@ -1170,25 +1170,21 @@ const formatDaemonSessionSnapshotSummaryLine = (summary: DaemonSessionSnapshotSu
 export const getDaemonSessionSnapshotSummary = (params: {
 	readonly client: Pick<DaemonRpcClientApi, "sessionSnapshot">
 	readonly socketUrl: string
-	readonly projectPath: string | undefined
+	readonly projectPath: string
 }): Effect.Effect<Option.Option<DaemonSessionSnapshotSummary>, Error> => {
 	if (params.client.sessionSnapshot === undefined) {
 		return Effect.succeed(Option.none())
 	}
-	return params.client
-		.sessionSnapshot(
-			params.projectPath === undefined ? undefined : { projectPath: params.projectPath },
-		)
-		.pipe(
-			Effect.map((snapshot) => Option.some(summarizeDaemonSessionSnapshot(snapshot))),
-			Effect.mapError((error) =>
-				formatDaemonRpcClientFailure({
-					operation: "sessionSnapshot",
-					socketUrl: params.socketUrl,
-					error,
-				}),
-			),
-		)
+	return params.client.sessionSnapshot({ projectPath: params.projectPath }).pipe(
+		Effect.map((snapshot) => Option.some(summarizeDaemonSessionSnapshot(snapshot))),
+		Effect.mapError((error) =>
+			formatDaemonRpcClientFailure({
+				operation: "sessionSnapshot",
+				socketUrl: params.socketUrl,
+				error,
+			}),
+		),
+	)
 }
 
 export const daemonCommandShouldAutoStart = (
@@ -1235,7 +1231,7 @@ export const consumeDaemonStatusStreamBatches = (params: {
 	readonly client: Pick<DaemonRpcClientApi, "eventStream">
 	readonly socketUrl: string
 	readonly clientId: string
-	readonly projectPath: string | undefined
+	readonly projectPath: string
 	readonly initialCursor: number | undefined
 	readonly batchSize: number
 	readonly waitMs: number
@@ -1327,7 +1323,7 @@ const daemonStatusHandler = (args: {
 		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
 			client: bootstrap.client,
 			socketUrl: bootstrap.socketUrl,
-			projectPath: status.sync.projectPath ?? undefined,
+			projectPath: status.sync.projectPath ?? process.cwd(),
 		}).pipe(
 			Effect.catchAll((error) =>
 				Console.log(`daemon session snapshot unavailable: ${error.message}`).pipe(
@@ -1354,7 +1350,7 @@ const daemonStatusHandler = (args: {
 				client: bootstrap.client,
 				socketUrl: bootstrap.socketUrl,
 				clientId: `az-cli:daemon-status:${process.pid}`,
-				projectPath: status.sync.projectPath ?? undefined,
+				projectPath: status.sync.projectPath ?? process.cwd(),
 				initialCursor: Option.getOrUndefined(args.cursor),
 				batchSize,
 				waitMs,

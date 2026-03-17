@@ -60,7 +60,7 @@ describe("CommandQueueService daemon adapter", () => {
 			readonly domain: "command"
 			readonly operationId: string
 			readonly operation: string
-			readonly projectPath: string | null
+			readonly projectPath: string
 			readonly issueId: string | null
 			readonly dedupeKey: string | null
 			readonly payloadJson: string | null
@@ -81,7 +81,7 @@ describe("CommandQueueService daemon adapter", () => {
 							domain: "command"
 							operationId: string
 							operation: string
-							projectPath: string | null
+							projectPath: string
 							issueId: string | null
 							dedupeKey: string | null
 							payloadJson: string | null
@@ -94,7 +94,7 @@ describe("CommandQueueService daemon adapter", () => {
 							domain: "command",
 							operationId: `op-${enqueueCalls}`,
 							operation: request.operation,
-							projectPath: request.projectPath ?? null,
+							projectPath: request.projectPath,
 							issueId: request.issueId ?? null,
 							dedupeKey: request.dedupeKey ?? null,
 							payloadJson: request.payloadJson ?? null,
@@ -115,16 +115,14 @@ describe("CommandQueueService daemon adapter", () => {
 					Effect.sync(() => {
 						queryCalls += 1
 						const items = queueItems.filter((item) => {
-							if (request?.domain !== undefined && item.domain !== request.domain) return false
-							if (request?.operationId !== undefined && item.operationId !== request.operationId)
+							if (request.domain !== undefined && item.domain !== request.domain) return false
+							if (request.operationId !== undefined && item.operationId !== request.operationId)
 								return false
-							if (request?.projectPath !== undefined && item.projectPath !== request.projectPath)
-								return false
-							if (request?.issueId !== undefined && item.issueId !== request.issueId) return false
+							if (item.projectPath !== request.projectPath) return false
+							if (request.issueId !== undefined && item.issueId !== request.issueId) return false
 							return true
 						})
-						const limited =
-							request?.limit !== undefined ? items.slice(0, request.limit) : [...items]
+						const limited = request.limit !== undefined ? items.slice(0, request.limit) : [...items]
 						return {
 							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 							queriedAtMs: Date.now(),
@@ -136,12 +134,11 @@ describe("CommandQueueService daemon adapter", () => {
 						cancelCalls += 1
 						const cancelledOperationIds: Array<string> = []
 						for (const item of queueItems) {
-							if (request?.domain !== undefined && item.domain !== request.domain) continue
-							if (request?.operationId !== undefined && item.operationId !== request.operationId)
+							if (request.domain !== undefined && item.domain !== request.domain) continue
+							if (request.operationId !== undefined && item.operationId !== request.operationId)
 								continue
-							if (request?.projectPath !== undefined && item.projectPath !== request.projectPath)
-								continue
-							if (request?.issueId !== undefined && item.issueId !== request.issueId) continue
+							if (item.projectPath !== request.projectPath) continue
+							if (request.issueId !== undefined && item.issueId !== request.issueId) continue
 							if (item.state === "queued") {
 								item.state = "cancelled"
 								cancelledOperationIds.push(item.operationId)

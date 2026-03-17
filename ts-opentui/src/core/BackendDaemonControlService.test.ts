@@ -318,13 +318,23 @@ describe("BackendDaemonControlService", () => {
 					projectPath: "/tmp/project-a",
 					issueId: "qm-b",
 				})
-				const all = yield* service.queueQuery()
-				const commandOnly = yield* service.queueQuery({ domain: "command" })
+				const all = yield* service.queueQuery({ projectPath: "/tmp/project-a" })
+				const commandOnly = yield* service.queueQuery({
+					projectPath: "/tmp/project-a",
+					domain: "command",
+				})
 				const cancelled = yield* service.queueCancel({
+					projectPath: "/tmp/project-a",
 					operationId: first.item.operationId,
 				})
-				const afterCancel = yield* service.queueQuery({ operationId: first.item.operationId })
-				const limited = yield* service.queueQuery({ limit: 1 })
+				const afterCancel = yield* service.queueQuery({
+					projectPath: "/tmp/project-a",
+					operationId: first.item.operationId,
+				})
+				const limited = yield* service.queueQuery({
+					projectPath: "/tmp/project-a",
+					limit: 1,
+				})
 
 				return { first, second, all, commandOnly, cancelled, afterCancel, limited }
 			}),
