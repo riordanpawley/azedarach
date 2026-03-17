@@ -22,6 +22,8 @@ export interface DevServerView {
 	readonly error?: string
 }
 
+const EMPTY_DEV_SERVER_VIEWS: readonly DevServerView[] = []
+
 export const devServersAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const svc = yield* DevServerService
@@ -55,7 +57,7 @@ export const issueDevServerViewsAtom = (issueId: string) =>
 		const configResult = get(appConfigAtom)
 
 		if (!Result.isSuccess(serversResult) || !Result.isSuccess(configResult)) {
-			return [] as DevServerView[]
+			return EMPTY_DEV_SERVER_VIEWS
 		}
 
 		const runningServers = HashMap.get(serversResult.value, issueId).pipe(
@@ -112,7 +114,7 @@ export const issueDevServerViewsAtom = (issueId: string) =>
 export const focusedIssueDevServerViewsAtom = Atom.readable((get) => {
 	const focusedIdResult = get(focusedTaskIdAtom)
 	if (!Result.isSuccess(focusedIdResult) || !focusedIdResult.value) {
-		return [] as DevServerView[]
+		return EMPTY_DEV_SERVER_VIEWS
 	}
 	return get(issueDevServerViewsAtom(focusedIdResult.value))
 })

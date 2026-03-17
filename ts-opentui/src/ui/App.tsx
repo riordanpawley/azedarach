@@ -19,12 +19,12 @@ import {
 	aiCreateTaskAtom,
 	appConfigAtom,
 	boardIsLoadingAtom,
+	boardRenderStateAtom,
 	boardTasksAtom,
 	createTaskAtom,
 	currentProjectAtom,
 	DEFAULT_SPEC_WORKSPACE_STATE,
 	drillDownEpicAtom,
-	drillDownFilteredTasksAtom,
 	drillDownPhasesAtom,
 	exitToNormalAtom,
 	focusedIssuePrimaryDevServerAtom,
@@ -208,7 +208,20 @@ const HydratedApp = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Use derived atom that handles both normal and drill-down filtering
 	// All computation happens in atoms - React just renders
-	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+	const boardRenderState = useAtomValue(boardRenderStateAtom)
+	const tasksByColumn = useMemo(
+		() => boardRenderState.tasksByColumn.map((column) => [...column]),
+		[boardRenderState],
+	)
+	const [startupCapabilities, setStartupCapabilities] = useState<{
+		readonly boardReady: boolean
+		readonly sessionMonitorReady: boolean
+		readonly specReady: boolean
+	}>({
+		boardReady: false,
+		sessionMonitorReady: false,
+		specReady: false,
+	})
 	const boardTasks = useAtomValue(
 		boardTasksAtom,
 		Result.getOrElse(() => []),
@@ -234,8 +247,9 @@ const HydratedApp = () => {
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
+		if (!startupCapabilities.sessionMonitorReady) return
 		startSessionMonitor()
-	}, [startSessionMonitor])
+	}, [startSessionMonitor, startupCapabilities.sessionMonitorReady])
 
 	// Actions for prompts (these bypass keyboard handling)
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
@@ -277,6 +291,17 @@ const HydratedApp = () => {
 	const setVisibleTaskIds = useAtomSet(setVisibleTaskIdsAtom, { mode: "promise" })
 	const refreshSpecWorkspace = useAtomSet(refreshSpecWorkspaceAtom, { mode: "promise" })
 
+	useEffect(() => {
+		if (startupCapabilities.boardReady) return
+		if (boardRenderState._tag === "ready" || !isLoading) {
+			setStartupCapabilities({
+				boardReady: true,
+				sessionMonitorReady: true,
+				specReady: true,
+			})
+		}
+	}, [boardRenderState._tag, isLoading, startupCapabilities.boardReady])
+
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
@@ -310,8 +335,9 @@ const HydratedApp = () => {
 	}, [viewMode, tasksByColumn, selectedTask?.id, columnIndex, taskIndex, maxVisibleTasks])
 
 	useEffect(() => {
+		if (!startupCapabilities.boardReady) return
 		setVisibleTaskIds(visibleTaskIds)
-	}, [setVisibleTaskIds, visibleTaskIds])
+	}, [setVisibleTaskIds, startupCapabilities.boardReady, visibleTaskIds])
 
 	const specWorkspaceState = useAtomValue(
 		specWorkspaceStateAtom,
@@ -319,6 +345,9 @@ const HydratedApp = () => {
 	)
 
 	useEffect(() => {
+		if (!startupCapabilities.specReady) {
+			return
+		}
 		if (mode._tag !== "spec" || !specEnabled) {
 			return
 		}
@@ -331,7 +360,7 @@ const HydratedApp = () => {
 		return () => {
 			clearInterval(interval)
 		}
-	}, [mode, refreshSpecWorkspace, specEnabled])
+	}, [mode, refreshSpecWorkspace, specEnabled, startupCapabilities.specReady])
 
 	useEffect(() => {
 		if (mode._tag === "spec" && !specEnabled) {
@@ -520,14 +549,24 @@ const HydratedApp = () => {
 			)
 		}
 
-		// The derived atom returns an empty array if sources are loading/failed
-		// This is handled gracefully - the board just shows empty columns
 		const activeColumn = COLUMNS[columnIndex] ?? COLUMNS[0]
 		const canPageLeft = columnIndex > 0
 		const canPageRight = columnIndex < COLUMNS.length - 1
 
 		return (
 			<box flexGrow={1} flexDirection="column">
+				{boardRenderState._tag === "loading" && (
+					<box paddingLeft={1} paddingBottom={1}>
+						<text fg={theme.overlay1}>{"Loading board data..."}</text>
+					</box>
+				)}
+				{boardRenderState._tag === "error" && (
+					<box paddingLeft={1} paddingBottom={1}>
+						<text fg={theme.red}>
+							{`Board unavailable (${boardRenderState.reason.replaceAll("_", " ")})`}
+						</text>
+					</box>
+				)}
 				{/* Epic header when in drill-down mode */}
 				{/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
 
@@ -756,10 +795,18 @@ const ATTR_BOLD = 1
 
 const STARTUP_HYDRATION_DELAY_MS = 0
 const DEFAULT_TTFP_BUDGET_MS = 120
+const STARTUP_METRIC_PREFIX = "[startup-metric]"
 
-const maybeLogStartupMetric = (message: string) => {
+const readStartupBudgetMs = (): number => {
+	const raw = process.env.AZ_TUI_TTFP_BUDGET_MS
+	if (raw === undefined) return DEFAULT_TTFP_BUDGET_MS
+	const parsed = Number.parseInt(raw, 10)
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TTFP_BUDGET_MS
+}
+
+const maybeLogStartupMetric = (name: "ttfp_ms" | "hydrated_ms", value: number) => {
 	if (process.env.AZ_STARTUP_METRICS === "1") {
-		console.error(message)
+		console.error(`${STARTUP_METRIC_PREFIX} ${JSON.stringify({ metric: name, value })}`)
 	}
 }
 
@@ -787,7 +834,7 @@ type AppProps = {
 	readonly ttfpBudgetMs?: number
 }
 
-export const App = ({ launchStartedAtMs, ttfpBudgetMs = DEFAULT_TTFP_BUDGET_MS }: AppProps) => {
+export const App = ({ launchStartedAtMs, ttfpBudgetMs = readStartupBudgetMs() }: AppProps) => {
 	const [hydrated, setHydrated] = useState(false)
 	const firstPaintLoggedRef = useRef(false)
 
@@ -797,9 +844,16 @@ export const App = ({ launchStartedAtMs, ttfpBudgetMs = DEFAULT_TTFP_BUDGET_MS }
 
 		if (launchStartedAtMs !== undefined) {
 			const ttfpMs = Date.now() - launchStartedAtMs
-			maybeLogStartupMetric(`[startup] ttfp_ms=${ttfpMs}`)
+			maybeLogStartupMetric("ttfp_ms", ttfpMs)
 			if (ttfpMs > ttfpBudgetMs) {
-				console.error(`[startup] ttfp budget exceeded: ${ttfpMs}ms > ${ttfpBudgetMs}ms`)
+				const message = `[startup] ttfp budget exceeded: ${ttfpMs}ms > ${ttfpBudgetMs}ms`
+				console.error(message)
+				if (process.env.AZ_TUI_STRICT_STARTUP_BUDGET === "1") {
+					// CI mode can opt in to a hard startup budget failure signal.
+					queueMicrotask(() => {
+						throw new Error(message)
+					})
+				}
 			}
 		}
 
@@ -815,7 +869,7 @@ export const App = ({ launchStartedAtMs, ttfpBudgetMs = DEFAULT_TTFP_BUDGET_MS }
 	useEffect(() => {
 		if (!hydrated || launchStartedAtMs === undefined) return
 		const hydratedMs = Date.now() - launchStartedAtMs
-		maybeLogStartupMetric(`[startup] hydrated_ms=${hydratedMs}`)
+		maybeLogStartupMetric("hydrated_ms", hydratedMs)
 	}, [hydrated, launchStartedAtMs])
 
 	if (!hydrated) {

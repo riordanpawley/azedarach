@@ -9,6 +9,7 @@ import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
 import { BoardService } from "../../services/BoardService.js"
 import { ViewService } from "../../services/ViewService.js"
 import { TASK_CARD_HEIGHT } from "../TaskCard.js"
+import type { TaskWithSession } from "../types.js"
 import { drillDownChildIdsAtom, drillDownEpicAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 
@@ -183,13 +184,43 @@ export const viewModeAtom = appRuntime.subscriptionRef(
  *
  * Usage: const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
  */
-export const drillDownFilteredTasksAtom = Atom.readable((get) => {
+export type DrillDownBoardState =
+	| {
+			readonly _tag: "loading"
+	  }
+	| {
+			readonly _tag: "error"
+			readonly reason: "child_ids_unavailable" | "tasks_unavailable"
+	  }
+	| {
+			readonly _tag: "ready"
+			readonly tasksByColumn: readonly (readonly TaskWithSession[])[]
+	  }
+
+export type BoardRenderState =
+	| {
+			readonly _tag: "loading"
+			readonly tasksByColumn: readonly (readonly TaskWithSession[])[]
+	  }
+	| {
+			readonly _tag: "error"
+			readonly reason: "child_ids_unavailable" | "tasks_unavailable"
+			readonly tasksByColumn: readonly (readonly TaskWithSession[])[]
+	  }
+	| {
+			readonly _tag: "ready"
+			readonly tasksByColumn: readonly (readonly TaskWithSession[])[]
+	  }
+
+const EMPTY_TASKS_BY_COLUMN: readonly (readonly TaskWithSession[])[] = [[], [], [], []]
+
+export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) => {
 	// Get the child IDs for filtering
 	const childIdsResult = get(drillDownChildIdsAtom)
 	if (!Result.isSuccess(childIdsResult)) {
-		// Debug: log when childIds is not ready
-		console.log("[drillDownFilteredTasksAtom] childIds not ready:", childIdsResult._tag)
-		return []
+		return childIdsResult._tag === "Failure"
+			? { _tag: "error", reason: "child_ids_unavailable" }
+			: { _tag: "loading" }
 	}
 
 	const childIds = childIdsResult.value
@@ -197,35 +228,54 @@ export const drillDownFilteredTasksAtom = Atom.readable((get) => {
 	// Get the filtered tasks
 	const tasksResult = get(filteredTasksByColumnAtom)
 	if (!Result.isSuccess(tasksResult)) {
-		// Debug: log when tasks is not ready
-		console.log("[drillDownFilteredTasksAtom] tasks not ready:", tasksResult._tag)
-		return []
+		return tasksResult._tag === "Failure"
+			? { _tag: "error", reason: "tasks_unavailable" }
+			: { _tag: "loading" }
 	}
 
 	const tasksByColumn = tasksResult.value
-	const flatTasks = tasksByColumn.flat()
-	console.log("[drillDownFilteredTasksAtom] Got", flatTasks.length, "tasks")
 
 	// If no drill-down active (empty childIds), show main board view
 	// Tasks with a parent are hidden on main board - only visible in drill-down
 	if (childIds.size === 0) {
-		const tasksWithEpic = flatTasks.filter((task) => task.parentEpicId !== undefined)
-		if (tasksWithEpic.length > 0) {
-			console.log(
-				"[drillDownFilteredTasksAtom] WARNING: Filtering out",
-				tasksWithEpic.length,
-				"tasks with parentEpicId:",
-			)
-			console.log(
-				"  Sample:",
-				tasksWithEpic.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })),
-			)
+		return {
+			_tag: "ready",
+			tasksByColumn: tasksByColumn.map((column) =>
+				column.filter((task) => task.parentEpicId === undefined),
+			),
 		}
-		return tasksByColumn.map((column) => column.filter((task) => task.parentEpicId === undefined))
 	}
 
 	// In drill-down mode: filter each column to only include the epic's children
-	return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
+	return {
+		_tag: "ready",
+		tasksByColumn: tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id))),
+	}
+})
+
+export const drillDownFilteredTasksAtom = Atom.readable((get) => {
+	const state = get(drillDownBoardStateAtom)
+	return state._tag === "ready"
+		? state.tasksByColumn.map((column) => [...column])
+		: EMPTY_TASKS_BY_COLUMN
+})
+
+export const boardRenderStateAtom = Atom.readable<BoardRenderState>((get) => {
+	const state = get(drillDownBoardStateAtom)
+	if (state._tag === "ready") {
+		return state
+	}
+	if (state._tag === "error") {
+		return {
+			_tag: "error",
+			reason: state.reason,
+			tasksByColumn: EMPTY_TASKS_BY_COLUMN,
+		}
+	}
+	return {
+		_tag: "loading",
+		tasksByColumn: EMPTY_TASKS_BY_COLUMN,
+	}
 })
 
 export const allTasksAtom = Atom.readable((get) => {
