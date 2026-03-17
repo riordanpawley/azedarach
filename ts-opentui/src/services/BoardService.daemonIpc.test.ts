@@ -9,6 +9,7 @@ const makeDaemonRpcClientStub = (params: {
 	readonly onAttach?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onReconnect?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onHeartbeat?: () => Effect.Effect<void, DaemonRpcClientError>
+	readonly onSessionSnapshotRequest?: (projectPath: string | undefined) => Effect.Effect<void>
 	readonly onSessionSnapshot?: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly onEventStream?: () => Effect.Effect<void, DaemonRpcClientError>
 }): DaemonRpcClientApi => ({
@@ -265,8 +266,9 @@ const makeDaemonRpcClientStub = (params: {
 				}),
 			),
 		),
-	sessionSnapshot: () =>
-		(params.onSessionSnapshot ?? (() => Effect.void))().pipe(
+	sessionSnapshot: (request) =>
+		(params.onSessionSnapshotRequest ?? (() => Effect.void))(request?.projectPath).pipe(
+			Effect.zipRight((params.onSessionSnapshot ?? (() => Effect.void))()),
 			Effect.zipRight(
 				Effect.succeed({
 					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
@@ -353,20 +355,28 @@ describe("BoardService daemon IPC signaling", () => {
 
 	it("observes daemon session snapshots on attach and heartbeat", async () => {
 		const snapshotCallsRef = await Effect.runPromise(Ref.make(0))
+		const snapshotProjectPathRef = await Effect.runPromise(
+			Ref.make<ReadonlyArray<string | undefined>>([]),
+		)
 		const signals = makeBoardDaemonIpcSignals({
 			daemonRpcClient: Option.some(
 				makeDaemonRpcClientStub({
+					onSessionSnapshotRequest: (projectPath) =>
+						Ref.update(snapshotProjectPathRef, (paths) => [...paths, projectPath]),
 					onSessionSnapshot: () => Ref.update(snapshotCallsRef, (count) => count + 1),
 				}),
 			),
 			daemonFrontendClientId: "board-ui:test",
 			nowMs: () => 1000,
+			getProjectPath: () => Effect.succeed("/tmp/project-switched"),
 		})
 
 		await Effect.runPromise(signals.signalAttach())
 		await Effect.runPromise(signals.signalHeartbeat())
 		const snapshotCalls = await Effect.runPromise(Ref.get(snapshotCallsRef))
+		const snapshotProjectPaths = await Effect.runPromise(Ref.get(snapshotProjectPathRef))
 		expect(snapshotCalls).toBe(2)
+		expect(snapshotProjectPaths).toEqual(["/tmp/project-switched", "/tmp/project-switched"])
 	})
 
 	it("consumes daemon event stream batches and advances cursor", async () => {
