@@ -230,8 +230,6 @@ const createFullCliLayer = (configPath: string | null) =>
  */
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
-		BackendDaemonControlService.Default,
-		BackendSyncDaemonService.Default,
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
 		IssueTrackerClient.Default,
@@ -1201,12 +1199,12 @@ const DAEMON_CONTROL_RPC_TIMEOUT = Duration.seconds(5)
 const DAEMON_CONTROL_RPC_TIMEOUT_MS = 5000
 
 class DaemonControlTimeoutError extends Data.TaggedError("DaemonControlTimeoutError")<{
-	readonly operation: "stop" | "restart"
+	readonly operation: "status" | "health" | "stop" | "restart"
 	readonly timeoutMs: number
 }> {}
 
 const withDaemonControlTimeout = <A, E, R>(
-	operation: "stop" | "restart",
+	operation: "status" | "health" | "stop" | "restart",
 	effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | DaemonControlTimeoutError, R> =>
 	effect.pipe(
@@ -1318,6 +1316,7 @@ const daemonStatusHandler = (args: {
 					error,
 				}),
 			),
+			(effect) => withDaemonControlTimeout("status", effect),
 		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -1391,6 +1390,7 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 					error,
 				}),
 			),
+			(effect) => withDaemonControlTimeout("health", effect),
 		)
 		yield* Console.log(`daemon health: ${health.state} (${health.reason})`)
 		yield* Console.log(
