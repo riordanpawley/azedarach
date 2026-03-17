@@ -137,10 +137,18 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionPause !== undefined) {
 						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionPause({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
+						yield* daemonRpcClient.value
+							.sessionPause({
+								issueId,
+								projectPath: effectiveProjectPath,
+							})
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`Daemon sessionPause failed for ${issueId}; retrying local pause: ${String(error)}`,
+									).pipe(Effect.zipRight(sessionManager.pause(issueId))),
+								),
+							)
 						return
 					}
 					yield* sessionManager.pause(issueId)
@@ -153,10 +161,18 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				Effect.gen(function* () {
 					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionResume !== undefined) {
 						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionResume({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
+						yield* daemonRpcClient.value
+							.sessionResume({
+								issueId,
+								projectPath: effectiveProjectPath,
+							})
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`Daemon sessionResume failed for ${issueId}; retrying local resume: ${String(error)}`,
+									).pipe(Effect.zipRight(sessionManager.resume(issueId))),
+								),
+							)
 						return
 					}
 					yield* sessionManager.resume(issueId)
@@ -172,10 +188,18 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						daemonRpcClient.value.sessionRecover !== undefined
 					) {
 						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionRecover({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
+						yield* daemonRpcClient.value
+							.sessionRecover({
+								issueId,
+								projectPath: effectiveProjectPath,
+							})
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(
+										`Daemon sessionRecover failed for ${issueId}; retrying local recover: ${String(error)}`,
+									).pipe(Effect.zipRight(sessionManager.recoverSession(issueId))),
+								),
+							)
 						return
 					}
 					yield* sessionManager.recoverSession(issueId)

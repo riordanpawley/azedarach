@@ -145,10 +145,18 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionPause !== undefined) {
-			yield* daemonRpcClient.value.sessionPause({
-				issueId,
-				projectPath,
-			})
+			yield* daemonRpcClient.value
+				.sessionPause({
+					issueId,
+					projectPath,
+				})
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Daemon sessionPause failed for ${issueId}; retrying local pause: ${String(error)}`,
+						).pipe(Effect.zipRight(manager.pause(issueId))),
+					),
+				)
 			return
 		}
 
@@ -167,10 +175,18 @@ export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionResume !== undefined) {
-			yield* daemonRpcClient.value.sessionResume({
-				issueId,
-				projectPath,
-			})
+			yield* daemonRpcClient.value
+				.sessionResume({
+					issueId,
+					projectPath,
+				})
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Daemon sessionResume failed for ${issueId}; retrying local resume: ${String(error)}`,
+						).pipe(Effect.zipRight(manager.resume(issueId))),
+					),
+				)
 			return
 		}
 
