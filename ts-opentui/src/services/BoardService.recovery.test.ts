@@ -10,6 +10,7 @@ import { TmuxError } from "../core/TmuxService.js"
 import {
 	applySessionRefreshPatch,
 	classifySessionRecoveryError,
+	isBoardDaemonAuthorityRequired,
 	reconcileLoadedTasksWithLocalCreateGrace,
 	resolveBoardRefreshExecutionMode,
 	resolveHasWorktreeFlag,
@@ -128,6 +129,20 @@ describe("resolveBoardRefreshExecutionMode", () => {
 				options: undefined,
 			}),
 		).toBe("local-session-and-git")
+	})
+})
+
+describe("isBoardDaemonAuthorityRequired", () => {
+	it("requires daemon authority by default", () => {
+		expect(isBoardDaemonAuthorityRequired({})).toBe(true)
+	})
+
+	it("allows explicit opt-out for legacy fallback", () => {
+		expect(
+			isBoardDaemonAuthorityRequired({
+				AZEDARACH_REQUIRE_DAEMON_AUTHORITY: "0",
+			}),
+		).toBe(false)
 	})
 })
 
