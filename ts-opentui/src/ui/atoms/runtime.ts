@@ -108,8 +108,9 @@ export const appCoreLayer = coreServicesLayer.pipe(
  * Deferred feature layer for non-critical services.
  * Atoms can migrate to appDeferredRuntime incrementally.
  */
-export const appDeferredLayer = deferredServicesLayer.pipe(
-	Layer.provide(appCoreLayer),
+const appFullServicesLayer = Layer.mergeAll(coreServicesLayer, deferredServicesLayer)
+
+export const appDeferredLayer = appFullServicesLayer.pipe(
 	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )
@@ -117,7 +118,7 @@ export const appDeferredLayer = deferredServicesLayer.pipe(
 /**
  * Full compatibility layer used by the existing appRuntime surface.
  */
-export const appLayer = Layer.mergeAll(appCoreLayer, appDeferredLayer)
+export const appLayer = appDeferredLayer
 
 /**
  * Runtime atom that provides all services and platform dependencies

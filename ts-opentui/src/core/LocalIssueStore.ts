@@ -420,10 +420,7 @@ const withTransientSqliteRetry = <A>(
 	const attemptWithRetry = (attempt: number): Effect.Effect<A, LocalIssueStoreError> =>
 		effect.pipe(
 			Effect.catchAll((error) => {
-				const transient =
-					error.cause !== undefined &&
-					containsSqlError(error.cause) &&
-					isTransientSqliteFailure(error.cause)
+				const transient = error.cause !== undefined && isTransientSqliteFailure(error.cause)
 				if (!transient || attempt >= SQLITE_OPERATION_RETRY_MAX_ATTEMPTS) {
 					return Effect.fail(error)
 				}
