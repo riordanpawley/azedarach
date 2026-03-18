@@ -236,17 +236,6 @@ const createCommandCliLayer = (configPath: string | null) =>
 		Layer.provideMerge(BunContext.layer),
 	)
 
-/**
- * Minimal layer for bare TUI startup path.
- * Keeps CLI/runtime bootstrap lightweight before the UI runtime takes over.
- */
-const createTuiBootstrapLayer = (configPath: string | null) =>
-	Layer.mergeAll(buildAppConfigLayer(configPath)).pipe(
-		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-		Layer.provideMerge(telemetryLayer),
-		Layer.provideMerge(BunContext.layer),
-	)
-
 const fullCliLayer = createFullCliLayer(null)
 const commandCliLayer = createCommandCliLayer(null)
 
@@ -486,41 +475,9 @@ const setConfigValue = (
 // ============================================================================
 
 /**
- * Default command - Launch TUI
+ * Default command handler for the command-only CLI tree.
  */
-const defaultHandler = (args: {
-	readonly projectDir: Option.Option<string>
-	readonly verbose: boolean
-	readonly config: Option.Option<string>
-}) =>
-	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const sessionRuntime = resolveStartSessionRuntimeMode()
-		yield* ensureDaemonAutoStartForCliCommand({
-			command: "tui-default",
-			projectPath: cwd,
-			verbose: args.verbose,
-		})
-		applyStartSessionRuntimeModeToTuiEnv(sessionRuntime.mode)
-
-		if (args.verbose) {
-			yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
-			yield* Console.log(`Project: ${cwd}`)
-			yield* Console.log("Verbose mode enabled")
-			yield* Console.log(`TUI runtime mode: ${sessionRuntime.mode} (${sessionRuntime.decision})`)
-		}
-
-		if (Option.isSome(args.config)) {
-			yield* Console.log(`Using config: ${args.config.value}`)
-		}
-
-		// Validate issue tracker store
-		yield* validateIssueTrackerStore(cwd)
-
-		// Launch TUI
-		const { launchTUI } = yield* Effect.promise(() => import("../../../src/ui/launch.js"))
-		yield* Effect.promise(() => launchTUI())
-	})
+const commandRootHandler = () => Console.log("Use `az --help` to see available commands.")
 
 /**
  * Start a new Claude session for an issue
@@ -7394,10 +7351,7 @@ const listCommand = Command.make(
 ).pipe(Command.withDescription("Show all registered projects (shortcut for 'az project list')"))
 
 /**
- * Main CLI - combines all commands
- *
- * The parent command has its own handler that runs when `az` is called
- * without a subcommand. Subcommands (start, attach, etc.) have their own handlers.
+ * Main CLI - combines all commands.
  */
 const az = Command.make(
 	"az",
@@ -7406,7 +7360,7 @@ const az = Command.make(
 		verbose: verboseOption,
 		config: configOption,
 	},
-	defaultHandler,
+	commandRootHandler,
 ).pipe(
 	Command.withDescription(
 		"Azedarach - TUI Kanban board for orchestrating parallel Claude Code sessions",
@@ -7478,8 +7432,6 @@ const commandCli = az.pipe(
 	]),
 )
 
-const tuiCli = az
-
 // ============================================================================
 // CLI Runner
 // ============================================================================
@@ -7493,47 +7445,22 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	return createCommandCliLayer(configPath)
 }
 
-const buildTuiBootstrapLayerForArgv = (argv: ReadonlyArray<string>) => {
-	const configPath = parseConfigPathFromArgv(argv)
-	return createTuiBootstrapLayer(configPath)
-}
-
-type CliLayerMode = "dev-command" | "command" | "tui-bootstrap"
-
-const resolveCliLayerMode = (mode: ReturnType<typeof resolveCliExecutionMode>): CliLayerMode => {
-	if (mode === "dev-command") {
-		return "dev-command"
-	}
-	if (mode === "tui") {
-		return "tui-bootstrap"
-	}
-	return "command"
-}
-
 /**
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) => {
 	const normalizedArgv = normalizeIssueOptionOrder(normalizeCliAliases(argv))
 	const mode = resolveCliExecutionMode(normalizedArgv)
-	const layerMode = resolveCliLayerMode(mode)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect = (() => {
-		switch (layerMode) {
+		switch (mode) {
 			case "dev-command":
 				return Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
 					version: CLI_VERSION,
 				})(normalizedArgv)
-			case "tui-bootstrap":
-				return Command.run(
-					tuiCli.pipe(Command.provide(buildTuiBootstrapLayerForArgv(normalizedArgv))),
-					{
-						name: "Azedarach",
-						version: CLI_VERSION,
-					},
-				)(normalizedArgv)
 			case "command":
+			case "tui":
 				return Command.run(
 					commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))),
 					{
@@ -7564,7 +7491,6 @@ export { cliLayer, commandCliLayer }
 export {
 	buildPrimeOutput,
 	buildCommandCliLayerForArgv,
-	buildTuiBootstrapLayerForArgv,
 	cliRunner,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
@@ -7577,7 +7503,6 @@ export {
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
-	resolveCliLayerMode,
 	resolveCliExecutionMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,

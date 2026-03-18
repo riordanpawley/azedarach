@@ -3,12 +3,10 @@ import { DAEMON_RPC_PROTOCOL_VERSION, type DaemonEventStreamResult } from "@azed
 import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Cause, Effect, Exit, Option } from "effect"
-import { AppConfig } from "../config/AppConfig.js"
-import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
-} from "./daemonClientBootstrap.js"
+} from "../../packages/cli/src/daemonClientBootstrap.js"
 import {
 	appendIssueNotes,
 	buildCommandCliLayerForArgv,
@@ -28,11 +26,12 @@ import {
 	normalizeIssueJsonFlagOrder,
 	parseGitWorktreeListPaths,
 	resolveCliExecutionMode,
-	resolveCliLayerMode,
 	resolveStartSessionRuntimeMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
-} from "./index.js"
+} from "../../packages/cli/src/index.js"
+import { AppConfig } from "../config/AppConfig.js"
+import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 
 describe("appendIssueNotes", () => {
 	it("returns appended text when existing notes are missing", () => {
@@ -723,20 +722,6 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "d", "stp", "AZE-1"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "ls"])).toBe("dev-command")
 		expect(resolveCliExecutionMode(["bun", "az", "d", "s", "AZE-1"])).toBe("dev-command")
-	})
-})
-
-describe("resolveCliLayerMode", () => {
-	it("uses dedicated tui-bootstrap layer for bare TUI launches", () => {
-		expect(resolveCliLayerMode("tui")).toBe("tui-bootstrap")
-	})
-
-	it("keeps dev-command mode on the full layer", () => {
-		expect(resolveCliLayerMode("dev-command")).toBe("dev-command")
-	})
-
-	it("keeps non-TUI commands on the command layer", () => {
-		expect(resolveCliLayerMode("command")).toBe("command")
 	})
 })
 

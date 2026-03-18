@@ -5,5 +5,9 @@
 	"type": "module",
 	"dependencies": {
 		"@azedarach/shared": "workspace:*"
-	}
+	},
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"main": "./src/index.ts"
 }

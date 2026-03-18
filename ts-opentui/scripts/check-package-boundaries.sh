@@ -54,7 +54,7 @@ check_forbidden_imports() {
 				--glob "${scan_globs[3]}" \
 				--glob "${scan_globs[4]}" \
 				--glob "${scan_globs[5]}" \
-				"$pattern" "$package_dir" || true
+				"(import|export).*${pattern}" "$package_dir" || true
 		)
 
 		if ((${#hits[@]} > 0)); then
@@ -75,14 +75,16 @@ check_forbidden_imports "src" "src" \
 	'@azedarach/(daemon|tui):::Import workspace packages through the local source tree or the public facade instead of a package alias.'
 
 check_forbidden_imports "bin" "bin" \
-	'@azedarach/(daemon|tui):::Import workspace packages through the local source tree or the public facade instead of a package alias.'
+	'@azedarach/daemon:::Import workspace packages through the local source tree or the public facade instead of a package alias.'
 
 check_forbidden_imports "packages/tui/src" "packages/tui" \
 	'packages/(cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+	'\.\./\.\./cli/src/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
 	'@azedarach/(cli|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/cli/src" "packages/cli" \
 	'packages/(tui|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+	'\.\./\.\./tui/src/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
 	'@azedarach/(tui|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/daemon/src" "packages/daemon" \
