@@ -1,6 +1,6 @@
+import { DaemonRpcClient, type DaemonRpcClientApi } from "@azedarach/shared/rpc"
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, Option, Ref } from "effect"
-import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type { ColumnStatus } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 

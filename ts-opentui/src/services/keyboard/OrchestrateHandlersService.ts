@@ -9,10 +9,10 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, Option } from "effect"
 import { TemplateService } from "../../core/TemplateService.js"
-import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import type { OrchestrationTask } from "../EditorService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"

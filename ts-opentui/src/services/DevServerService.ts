@@ -1,3 +1,5 @@
+import type { DaemonDevServerState } from "@azedarach/shared/rpc"
+import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import {
 	Data,
@@ -21,8 +23,6 @@ import {
 } from "../core/paths.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { WorktreeSessionService } from "../core/WorktreeSessionService.js"
-import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
-import type { DaemonDevServerState } from "../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { NavigationService } from "./NavigationService.js"

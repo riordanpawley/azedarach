@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test"
+import type { DaemonRpcClientApi, DaemonRpcClientError } from "@azedarach/shared/rpc"
+import { DAEMON_RPC_PROTOCOL_VERSION } from "@azedarach/shared/rpc"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Effect, Ref } from "effect"
-import type { DaemonRpcClientApi, DaemonRpcClientError } from "../rpc/DaemonRpcClient.js"
-import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
 import {
 	makeBoardDaemonIpcSignals,
 	resolveDaemonAuthoritativeProjectPath,

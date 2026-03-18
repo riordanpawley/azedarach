@@ -20,6 +20,7 @@
 		"build-sfe": "bun build bin/az.ts --compile --outfile ./bin/az",
 		"type-check": "tsc --noEmit",
 		"check:boundaries": "bash scripts/check-package-boundaries.sh",
+		"check:ci": "bun run lint && bun run type-check && bun run check:boundaries",
 		"lint": "biome lint src bin packages",
 		"format": "biome format --write src bin packages",
 		"check": "biome check --write src bin packages",
@@ -37,6 +38,7 @@
 	"author": "",
 	"license": "MIT",
 	"dependencies": {
+		"@azedarach/shared": "workspace:*",
 		"@effect-atom/atom": "latest",
 		"@effect-atom/atom-react": "latest",
 		"@effect/cli": "latest",
