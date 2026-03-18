@@ -118,6 +118,9 @@ export const createTempProject = async (): Promise<string> => {
 		)}\n`,
 		"utf8",
 	)
+	run(["git", "init", "-q"], dir)
+	run(["git", "config", "user.email", "e2e@azedarach.local"], dir)
+	run(["git", "config", "user.name", "azedarach-e2e"], dir)
 	return dir
 }
 
@@ -453,7 +456,7 @@ export class TuiHarness {
 		).toBeLessThanOrEqual(maxOccurrences)
 	}
 
-	private paneCurrentCommand(): string {
+	currentCommand(): string {
 		const result = runWithEnv(
 			[
 				...tmuxCmd(
@@ -465,6 +468,14 @@ export class TuiHarness {
 			this.env,
 		)
 		return result.stdout.trim()
+	}
+
+	runAz(args: readonly string[], cwd = this.options.projectDir): string {
+		return runWithEnv(["bun", "run", AZ_BIN_PATH, ...args], cwd, this.env).stdout
+	}
+
+	runAzJson<T>(args: readonly string[], cwd = this.options.projectDir): T {
+		return JSON.parse(this.runAz(args, cwd)) as T
 	}
 
 	private sessionExists(): boolean {
@@ -481,7 +492,7 @@ export class TuiHarness {
 	async quit(): Promise<void> {
 		this.send(["Escape", "q"])
 		await waitForCondition(
-			() => !this.sessionExists() || this.paneCurrentCommand() !== "bun",
+			() => !this.sessionExists() || this.currentCommand() !== "bun",
 			10000,
 			`Timed out waiting for ${this.sessionName} to quit cleanly`,
 		).catch(async () => {
