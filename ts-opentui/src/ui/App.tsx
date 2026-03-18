@@ -8,6 +8,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
+import { Cause } from "effect"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
@@ -250,7 +251,7 @@ const HydratedApp = () => {
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
 		if (!startupCapabilities.sessionMonitorReady) return
-		startSessionMonitor()
+		runAtomAction(startSessionMonitor())
 	}, [startSessionMonitor, startupCapabilities.sessionMonitorReady])
 
 	// Actions for prompts (these bypass keyboard handling)
@@ -338,7 +339,7 @@ const HydratedApp = () => {
 
 	useEffect(() => {
 		if (!startupCapabilities.boardReady) return
-		setVisibleTaskIds(visibleTaskIds)
+		runAtomAction(setVisibleTaskIds(visibleTaskIds))
 	}, [setVisibleTaskIds, startupCapabilities.boardReady, visibleTaskIds])
 
 	const specWorkspaceState = useAtomValue(
@@ -354,9 +355,9 @@ const HydratedApp = () => {
 			return
 		}
 
-		refreshSpecWorkspace(undefined)
+		runAtomAction(refreshSpecWorkspace(undefined))
 		const interval = setInterval(() => {
-			refreshSpecWorkspace(undefined)
+			runAtomAction(refreshSpecWorkspace(undefined))
 		}, 4000)
 
 		return () => {
@@ -366,7 +367,7 @@ const HydratedApp = () => {
 
 	useEffect(() => {
 		if (mode._tag === "spec" && !specEnabled) {
-			exitToNormal(undefined)
+			runAtomAction(exitToNormal(undefined))
 		}
 	}, [exitToNormal, mode, specEnabled])
 
@@ -816,6 +817,21 @@ const ATTR_BOLD = 1
 const STARTUP_HYDRATION_DELAY_MS = 0
 const DEFAULT_TTFP_BUDGET_MS = 120
 const STARTUP_METRIC_PREFIX = "[startup-metric]"
+
+const isInterruptedAtomPromiseError = (error: unknown): boolean => {
+	if (typeof error !== "object" || error === null || !("cause" in error)) {
+		return false
+	}
+	const cause = (error as { readonly cause: unknown }).cause
+	return Cause.isCause(cause) && Cause.isInterruptedOnly(cause)
+}
+
+const runAtomAction = (promise: Promise<unknown>): void => {
+	void promise.catch((error) => {
+		if (isInterruptedAtomPromiseError(error)) return
+		console.error(error)
+	})
+}
 
 const readStartupBudgetMs = (): number => {
 	const raw = process.env.AZ_TUI_TTFP_BUDGET_MS
