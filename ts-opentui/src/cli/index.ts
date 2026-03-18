@@ -42,8 +42,6 @@ import {
 	AzedarachConfigSchema,
 } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { BackendDaemonControlService } from "../core/BackendDaemonControlService.js"
-import { BackendSyncDaemonService } from "../core/BackendSyncDaemonService.js"
 import { resolveDaemonIntervalMsFromEnv } from "../core/DaemonOperationsPolicy.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
@@ -173,13 +171,11 @@ const buildAppConfigLayer = (configPath: string | null) => {
 }
 
 /**
- * Full CLI layer used for TUI launch and commands that still depend on
- * TUI-coupled services (for now, `az dev`).
+ * Full CLI layer used for commands that still need the broader application
+ * service graph (for now, `az dev`).
  */
 const createFullCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
-		BackendDaemonControlService.Default,
-		BackendSyncDaemonService.Default,
 		MutationQueue.Default,
 		SessionService.Default,
 		AttachmentService.Default,
