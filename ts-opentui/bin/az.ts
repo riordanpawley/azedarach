@@ -10,7 +10,7 @@ export {}
 
 const { BunContext, BunRuntime } = await import("@effect/platform-bun")
 const { Effect } = await import("effect")
-const { cliRunner } = await import("../src/cli/index.js")
+const { cliRunner } = await import("@azedarach/cli")
 
 // Two-level layer provision (idiomatic @effect/cli pattern):
 // 1. Command.provide(cliLayer) - our app services (done in cli/index.ts)

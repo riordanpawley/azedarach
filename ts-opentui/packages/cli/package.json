@@ -2,5 +2,12 @@
 	"name": "@azedarach/cli",
 	"version": "0.0.0",
 	"private": true,
-	"type": "module"
+	"type": "module",
+	"dependencies": {
+		"@azedarach/shared": "workspace:*"
+	},
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"main": "./src/index.ts"
 }
