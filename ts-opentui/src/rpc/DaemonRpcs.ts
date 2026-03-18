@@ -1,1 +1,1 @@
-export * from "../../packages/shared/src/rpc/DaemonRpcs.js"
+export * from "@azedarach/shared/rpc"

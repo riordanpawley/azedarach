@@ -9,10 +9,10 @@
  * Uses gh CLI for GitHub operations and git for branch management.
  */
 
+import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { getToolDefinition } from "./CliToolRegistry.js"

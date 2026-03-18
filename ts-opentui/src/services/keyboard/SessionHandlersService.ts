@@ -11,6 +11,7 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Effect, Option } from "effect"
 import { AppConfig } from "../../config/index.js"
@@ -28,7 +29,6 @@ import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { WorktreeManager, type WorktreeNameClashError } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
-import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { hasTaskSessionPresence } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"

@@ -5,6 +5,8 @@
  * Interfaces with IssueTrackerClient for task data and provides methods for task access.
  */
 
+import type { DaemonEventStreamResult } from "@azedarach/shared/rpc"
+import { DaemonRpcClient, type DaemonRpcClientApi } from "@azedarach/shared/rpc"
 import { Command } from "@effect/platform"
 import {
 	Array as Arr,
@@ -53,8 +55,6 @@ import type {
 import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
-import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
-import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
 import type {
 	ColumnStatus,
 	GitStatus,

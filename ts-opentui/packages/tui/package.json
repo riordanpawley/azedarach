@@ -2,5 +2,8 @@
 	"name": "@azedarach/tui",
 	"version": "0.0.0",
 	"private": true,
-	"type": "module"
+	"type": "module",
+	"dependencies": {
+		"@azedarach/shared": "workspace:*"
+	}
 }

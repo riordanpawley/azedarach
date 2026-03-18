@@ -12,6 +12,7 @@
  * - Observable state: UI can show "queued" indicators
  */
 
+import { DaemonRpcClient, type DaemonRpcClientApi } from "@azedarach/shared/rpc"
 import type { CommandExecutor } from "@effect/platform"
 import {
 	Cause,
@@ -25,7 +26,6 @@ import {
 	Option,
 	SubscriptionRef,
 } from "effect"
-import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 
 // ============================================================================
 // Type Definitions

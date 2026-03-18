@@ -1,13 +1,13 @@
 import { describe, expect, it } from "bun:test"
-import type { CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Duration, Effect, Layer } from "effect"
 import {
+	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
-} from "../rpc/DaemonRpcClient.js"
-import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
+} from "@azedarach/shared/rpc"
+import type { CommandExecutor } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Duration, Effect, Layer } from "effect"
 import { buildTaskQueueKey, CommandQueueService } from "./CommandQueueService.js"
 
 const unexpectedDaemonRpcCall = <A>(): Effect.Effect<A, DaemonRpcClientError> =>

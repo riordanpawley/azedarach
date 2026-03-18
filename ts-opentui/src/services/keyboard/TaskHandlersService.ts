@@ -10,13 +10,13 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, SubscriptionRef } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { SessionManager } from "../../core/SessionManager.js"
-import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { COLUMNS, hasTaskSessionPresence } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"

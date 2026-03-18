@@ -18,10 +18,10 @@
  * 4. If hooks haven't fired recently, PTY state updates SessionManager
  */
 
+import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
-import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"

@@ -1,13 +1,10 @@
 import { describe, expect, it } from "bun:test"
+import { DAEMON_RPC_PROTOCOL_VERSION, type DaemonEventStreamResult } from "@azedarach/shared/rpc"
 import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Cause, Effect, Exit, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
-import {
-	DAEMON_RPC_PROTOCOL_VERSION,
-	type DaemonEventStreamResult,
-} from "../rpc/DaemonRpcSchemas.js"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
