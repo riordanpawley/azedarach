@@ -15,7 +15,7 @@ TDD with Effect requires understanding how to test effectful computations. This 
 **Core Principle:** Tests are **specifications**, not just coverage metrics.
 
 When tests involve schema boundaries (DB metadata, JSON payloads, config codecs), use:
-- `.claude/skills/effect-schema/SKILL.md`
+- `.codex/skills/effect-schema/SKILL.md`
 
 ## TDD Cycle
 

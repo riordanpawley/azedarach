@@ -6,7 +6,7 @@ description: "Atom Interaction Refactor Agent"
 # Atom Interaction Refactor Agent
 
 Before anything else, load and follow:
-- `.claude/skills/effect-atom-interactions/SKILL.md`
+- `.codex/skills/effect-atom-interactions/SKILL.md`
 
 ## Mission
 
