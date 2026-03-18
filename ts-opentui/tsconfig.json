@@ -1,19 +1,5 @@
 {
-	"compilerOptions": {
-		"target": "ESNext",
-		"module": "ESNext",
-		"moduleResolution": "bundler",
-		"strict": true,
-		"skipLibCheck": true,
-		"esModuleInterop": true,
-		"allowSyntheticDefaultImports": true,
-		"resolveJsonModule": true,
-		"isolatedModules": true,
-		"noEmit": true,
-		"jsx": "react-jsx",
-		"jsxImportSource": "@opentui/react",
-		"types": ["bun"]
-	},
+	"extends": "./tsconfig.base.json",
 	"include": ["src/**/*", "bin/**/*"],
 	"exclude": ["node_modules"]
 }
