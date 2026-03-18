@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { Command } from "@effect/cli"
 import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Cause, Effect, Exit, Option } from "effect"
@@ -17,6 +18,7 @@ import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
+	commandCli,
 	consumeDaemonStatusStreamBatches,
 	daemonCommandShouldAutoStart,
 	decodeIssueBulkCreatePayload,
@@ -37,6 +39,12 @@ import {
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 } from "./index.js"
+
+const runCommandCli = (argv: ReadonlyArray<string>) =>
+	Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(argv))), {
+		name: "Azedarach",
+		version: "test",
+	})(argv).pipe(Effect.provide(BunContext.layer))
 
 describe("appendIssueNotes", () => {
 	it("returns appended text when existing notes are missing", () => {
@@ -347,7 +355,7 @@ describe("buildPrimeOutput", () => {
 		)
 
 		await Effect.runPromise(
-			cliRunner([
+			runCommandCli([
 				"bun",
 				"az",
 				"--config",
@@ -356,7 +364,7 @@ describe("buildPrimeOutput", () => {
 				"set",
 				"spec.enabled",
 				"false",
-			]).pipe(Effect.provide(BunContext.layer)),
+			]),
 		)
 
 		const updated = JSON.parse(await Bun.file(configPath).text()) as {

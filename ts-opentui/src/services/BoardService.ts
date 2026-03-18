@@ -2,7 +2,7 @@
  * BoardService - Task and board data management
  *
  * Manages board state (columns, tasks) using fine-grained Effect Refs.
- * Interfaces with IssueTrackerClient for task data and provides methods for task access.
+ * Uses daemon RPC read-model data for authoritative board/task state.
  */
 
 import { Command } from "@effect/platform"
@@ -27,10 +27,8 @@ import { AppConfig } from "../config/AppConfig.js"
 import { BackendSyncRouter } from "../core/BackendSyncRouter.js"
 import {
 	type Issue,
-	IssueTrackerClient,
 	inferLinearIssueType,
 	resolveConfiguredIssueBackend,
-	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
 import { LocalIssueStore, type PersistedBoardTaskState } from "../core/LocalIssueStore.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
@@ -54,7 +52,7 @@ import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
 import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
-import type { DaemonEventStreamResult } from "../rpc/DaemonRpcSchemas.js"
+import type { DaemonEventStreamResult, DaemonIssue } from "../rpc/DaemonRpcSchemas.js"
 import type {
 	ColumnStatus,
 	GitStatus,
@@ -76,13 +74,8 @@ import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
-import {
-	isTransientOperationalError,
-	isTransientOperationalErrorMessage,
-} from "./transientError.js"
-import { makeTransientRetrySchedule } from "./transientRetrySchedule.js"
+import { isTransientOperationalErrorMessage } from "./transientError.js"
 
-const BOARD_ISSUE_LIST_PAGE_SIZE = 200
 const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
 const REFRESH_FAILURE_TOAST_DEBOUNCE_MS = 15000
 const WEBHOOK_FALLBACK_TOAST_DEBOUNCE_MS = 30000
@@ -95,36 +88,6 @@ const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
 const LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL = "2 minutes"
 const LOCAL_CREATE_VISIBILITY_GRACE_MS = 15000
 const GIT_STATUS_COMMAND_TIMEOUT_MS = 3000
-const TRANSIENT_RETRY_ATTEMPTS = 4
-const TRANSIENT_RETRY_BASE_DELAY_MS = 120
-const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
-const AZEDARACH_REQUIRE_DAEMON_AUTHORITY_ENV = "AZEDARACH_REQUIRE_DAEMON_AUTHORITY"
-
-export const isBoardDaemonAuthorityRequired = (
-	env: Readonly<Record<string, string | undefined>>,
-): boolean => env[AZEDARACH_REQUIRE_DAEMON_AUTHORITY_ENV] !== "0"
-
-const withTransientRetry = <A, E, R>(
-	context: string,
-	effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-	effect.pipe(
-		Effect.tapError((error) =>
-			isTransientOperationalError(error)
-				? Effect.logWarning(
-						`Transient error detected during ${context}; retrying (max ${TRANSIENT_RETRY_ATTEMPTS} attempts)`,
-					)
-				: Effect.void,
-		),
-		Effect.retry({
-			schedule: makeTransientRetrySchedule({
-				retryBaseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS,
-				retryMaxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS,
-				retryMaxAttempts: TRANSIENT_RETRY_ATTEMPTS,
-				while: isTransientOperationalError,
-			}),
-		}),
-	)
 
 type SessionRecoveryError =
 	| SessionNotFoundError
@@ -160,7 +123,7 @@ export const classifySessionRecoveryError = (
 }
 
 export const makeBoardDaemonIpcSignals = (params: {
-	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
+	readonly daemonRpcClient: DaemonRpcClientApi
 	readonly daemonFrontendClientId: string
 	readonly nowMs: () => number
 	readonly getProjectPath?: () => Effect.Effect<string | undefined, never, never>
@@ -170,14 +133,10 @@ export const makeBoardDaemonIpcSignals = (params: {
 		projectPath ?? process.cwd()
 
 	const observeSessionSnapshot = (): Effect.Effect<void> => {
-		if (Option.isNone(params.daemonRpcClient)) {
+		const sessionSnapshot = params.daemonRpcClient.sessionSnapshot
+		if (sessionSnapshot === undefined) {
 			return Effect.void
 		}
-		const daemonRpcClient = params.daemonRpcClient.value
-		if (daemonRpcClient.sessionSnapshot === undefined) {
-			return Effect.void
-		}
-		const sessionSnapshot = daemonRpcClient.sessionSnapshot
 		return Effect.gen(function* () {
 			const projectPath = resolveProjectPath(
 				params.getProjectPath === undefined ? undefined : yield* params.getProjectPath(),
@@ -195,10 +154,7 @@ export const makeBoardDaemonIpcSignals = (params: {
 	}
 
 	const signalAttach = (): Effect.Effect<void> => {
-		if (Option.isNone(params.daemonRpcClient)) {
-			return Effect.void
-		}
-		return params.daemonRpcClient.value
+		return params.daemonRpcClient
 			.attach({
 				clientId: params.daemonFrontendClientId,
 				requestedAtMs: params.nowMs(),
@@ -211,10 +167,7 @@ export const makeBoardDaemonIpcSignals = (params: {
 	}
 
 	const signalReconnect = (): Effect.Effect<void> => {
-		if (Option.isNone(params.daemonRpcClient)) {
-			return Effect.void
-		}
-		return params.daemonRpcClient.value
+		return params.daemonRpcClient
 			.reconnect({
 				clientId: params.daemonFrontendClientId,
 				requestedAtMs: params.nowMs(),
@@ -226,31 +179,29 @@ export const makeBoardDaemonIpcSignals = (params: {
 	}
 
 	const signalHeartbeat = (): Effect.Effect<void> => {
-		if (Option.isNone(params.daemonRpcClient)) {
+		const heartbeat = params.daemonRpcClient.heartbeat
+		if (heartbeat === undefined) {
 			return Effect.void
 		}
-		const daemonRpcClient = params.daemonRpcClient.value
-		return daemonRpcClient
-			.heartbeat({
-				clientId: params.daemonFrontendClientId,
-				observedAtMs: params.nowMs(),
-			})
-			.pipe(
-				Effect.catchAll((heartbeatError) =>
-					signalReconnect().pipe(
-						Effect.zipRight(
-							daemonRpcClient.heartbeat({
-								clientId: params.daemonFrontendClientId,
-								observedAtMs: params.nowMs(),
-							}),
-						),
-						Effect.mapError(() => heartbeatError),
+		return heartbeat({
+			clientId: params.daemonFrontendClientId,
+			observedAtMs: params.nowMs(),
+		}).pipe(
+			Effect.catchAll((heartbeatError) =>
+				signalReconnect().pipe(
+					Effect.zipRight(
+						heartbeat({
+							clientId: params.daemonFrontendClientId,
+							observedAtMs: params.nowMs(),
+						}),
 					),
+					Effect.mapError(() => heartbeatError),
 				),
-				Effect.zipRight(observeSessionSnapshot()),
-				Effect.asVoid,
-				Effect.catchAll(() => Effect.void),
-			)
+			),
+			Effect.zipRight(observeSessionSnapshot()),
+			Effect.asVoid,
+			Effect.catchAll(() => Effect.void),
+		)
 	}
 
 	const processDaemonStreamBatch = (batch: DaemonEventStreamResult): Effect.Effect<void> =>
@@ -276,10 +227,7 @@ export const makeBoardDaemonIpcSignals = (params: {
 		)
 
 	const consumeStreamBatch = (cursor: number | undefined): Effect.Effect<number | undefined> => {
-		if (Option.isNone(params.daemonRpcClient)) {
-			return Effect.succeed(cursor)
-		}
-		const daemonEventStream = params.daemonRpcClient.value.eventStream
+		const daemonEventStream = params.daemonRpcClient.eventStream
 		if (daemonEventStream === undefined) {
 			return Effect.succeed(cursor)
 		}
@@ -451,13 +399,23 @@ export const resolveBoardRefreshExecutionMode = (params: {
 }
 
 export const resolveDaemonBoardReadModelRpc = (params: {
-	readonly daemonRpcClient: Option.Option<DaemonRpcClientApi>
-}): Option.Option<NonNullable<DaemonRpcClientApi["boardReadModel"]>> => {
-	if (Option.isNone(params.daemonRpcClient)) {
-		return Option.none()
+	readonly daemonRpcClient: DaemonRpcClientApi
+}): NonNullable<DaemonRpcClientApi["boardReadModel"]> => {
+	const boardReadModel = params.daemonRpcClient.boardReadModel
+	if (boardReadModel === undefined) {
+		throw new Error("Daemon boardReadModel RPC is unavailable")
 	}
-	const boardReadModel = params.daemonRpcClient.value.boardReadModel
-	return boardReadModel === undefined ? Option.none() : Option.some(boardReadModel)
+	return boardReadModel
+}
+
+const resolveDaemonIssueShowRpc = (params: {
+	readonly daemonRpcClient: DaemonRpcClientApi
+}): NonNullable<DaemonRpcClientApi["issueShow"]> => {
+	const issueShow = params.daemonRpcClient.issueShow
+	if (issueShow === undefined) {
+		throw new Error("Daemon issueShow RPC is unavailable")
+	}
+	return issueShow
 }
 
 export const mergeDaemonTasksWithTmuxSessionPresence = (params: {
@@ -843,7 +801,6 @@ export interface PerProjectBoardState {
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
-		IssueTrackerClient.Default,
 		BackendSyncRouter.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -858,8 +815,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		LocalIssueStore.Default,
 	],
 	scoped: Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const daemonRpcClient = yield* DaemonRpcClient
 		const backendSyncRouter = yield* BackendSyncRouter
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
@@ -994,25 +950,23 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			)
 
 		const loadAuthoritativeSessions = (projectPath: string | null) => {
-			if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionSnapshot !== undefined) {
-				const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
-				return daemonRpcClient.value.sessionSnapshot({ projectPath: daemonProjectPath }).pipe(
-					Effect.map((result) =>
-						result.sessions
-							.map((entry) => toAuthoritativeSessionView(entry))
-							.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
-					),
-					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-							Effect.zipRight(Effect.succeed([])),
-						),
-					),
-				)
+			const sessionSnapshot = daemonRpcClient.sessionSnapshot
+			if (sessionSnapshot === undefined) {
+				return Effect.succeed([] as ReadonlyArray<AuthoritativeSessionView>)
 			}
-
-			return Effect.logWarning(
-				"BoardService authoritative daemon session snapshot RPC unavailable; returning empty session snapshot",
-			).pipe(Effect.zipRight(Effect.succeed([])))
+			const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
+			return sessionSnapshot({ projectPath: daemonProjectPath }).pipe(
+				Effect.map((result) =>
+					result.sessions
+						.map((entry) => toAuthoritativeSessionView(entry))
+						.filter((entry): entry is AuthoritativeSessionView => entry !== undefined),
+				),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed([])),
+					),
+				),
+			)
 		}
 
 		// ====================================================================
@@ -1404,7 +1358,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const loadTasks = (preferredProjectPath?: string | null) =>
 			Effect.gen(function* () {
 				const loadStartTime = Date.now()
-				const daemonAuthorityRequired = isBoardDaemonAuthorityRequired(process.env)
 				const projectPath = yield* resolveProjectPath(preferredProjectPath)
 				const boardProjectPath = yield* SubscriptionRef.get(currentProjectPath)
 				const serviceProjectPath = (yield* projectService.getCurrentPath()) ?? null
@@ -1414,524 +1367,60 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const daemonBoardReadModelRpc = resolveDaemonBoardReadModelRpc({
 					daemonRpcClient,
 				})
-				if (Option.isNone(daemonBoardReadModelRpc)) {
-					if (!daemonAuthorityRequired) {
-						yield* Effect.logWarning(
-							"loadTasks: daemon boardReadModel RPC unavailable; using legacy local fallback because daemon authority is explicitly disabled",
-						)
-					}
-				}
-				if (Option.isSome(daemonBoardReadModelRpc)) {
-					const daemonPendingMutations = yield* mutationQueue.getOptimisticMutations()
-					const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
-					const daemonTasks = yield* diagnostics.measure(
-						{
-							source: "BoardService",
-							name: "daemon.boardReadModel",
-							thresholdMs: 150,
-							details: daemonProjectPath,
-						},
-						daemonBoardReadModelRpc.value({ projectPath: daemonProjectPath }).pipe(
-							Effect.map((result) => result.tasks),
-							Effect.catchAll((error) =>
-								Effect.logWarning(
-									`loadTasks: daemon boardReadModel failed for projectPath=${daemonProjectPath}: ${error.message}`,
-								).pipe(Effect.zipRight(Effect.succeed([]))),
-							),
-						),
-					)
-					const tmuxSessionIssueIds = yield* diagnostics.measure(
-						{
-							source: "BoardService",
-							name: "tmux.listSessions",
-							thresholdMs: 150,
-							details: daemonProjectPath,
-						},
-						loadTmuxSessionIssueIds(projectPath).pipe(Effect.withSpan("tmux.listSessions")),
-					)
-					const daemonTasksWithTmuxState = mergeDaemonTasksWithTmuxSessionPresence({
-						daemonTasks,
-						tmuxSessionIssueIds,
-					})
-					const daemonTasksWithMutations = daemonTasksWithTmuxState
-						.map((task) => {
-							const queuedMutation = daemonPendingMutations.get(task.id)
-							if (queuedMutation === undefined) {
-								return task
-							}
-							const mutation = queuedMutation.mutation
-							switch (mutation._tag) {
-								case "Move":
-									return { ...task, status: mutation.status }
-								case "Update":
-									return { ...task, ...mutation.fields }
-								case "Delete":
-									return null
-								default:
-									return task
-							}
-						})
-						.filter((task): task is TaskWithSession => task !== null)
-					yield* Effect.log(
-						`loadTasks: daemon read-model ${daemonTasksWithMutations.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
-					)
-					return daemonTasksWithMutations
-				}
-				if (daemonAuthorityRequired) {
-					yield* Effect.logWarning(
-						"loadTasks: daemon boardReadModel RPC unavailable; using legacy load path to avoid empty board while daemon capabilities converge",
-					)
-				}
-				const startupBatch = yield* Effect.all(
+				const daemonPendingMutations = yield* mutationQueue.getOptimisticMutations()
+				const daemonProjectPath = resolveDaemonAuthoritativeProjectPath(projectPath)
+				const daemonTasks = yield* diagnostics.measure(
 					{
-						gitConfig: getGitConfigForResolvedProject(projectPath),
-						startupConfig: SubscriptionRef.get(appConfig.config),
-						currentVisibleTaskIds: SubscriptionRef.get(visibleTaskIds),
-						persistedBoardTasks: loadBoardProjection(projectPath ?? process.cwd()),
-						issues: diagnostics.measure(
-							{
-								source: "BoardService",
-								name: "tracker.list",
-								thresholdMs: 200,
-								details: projectPath ?? "default",
-							},
-							withTransientRetry(
-								"tracker.list",
-								issueTrackerClient
-									.list(undefined, projectPath ?? undefined, {
-										pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
-										sortBy: "updated_at",
-										sortDirection: "desc",
-										includeClosed: true,
-									})
-									.pipe(Effect.withSpan("tracker.list")),
-							),
-						),
-						activeSessions: diagnostics.measure(
-							{
-								source: "BoardService",
-								name: "sessions.listActive",
-								thresholdMs: 150,
-								details: projectPath ?? "default",
-							},
-							loadAuthoritativeSessions(projectPath).pipe(Effect.withSpan("sessions.listActive")),
-						),
-						tmuxSessionIssueIds: diagnostics.measure(
-							{
-								source: "BoardService",
-								name: "tmux.listSessions",
-								thresholdMs: 150,
-								details: projectPath ?? "default",
-							},
-							loadTmuxSessionIssueIds(projectPath).pipe(Effect.withSpan("tmux.listSessions")),
-						),
+						source: "BoardService",
+						name: "daemon.boardReadModel",
+						thresholdMs: 150,
+						details: daemonProjectPath,
 					},
-					{ concurrency: "unbounded" },
+					daemonBoardReadModelRpc({ projectPath: daemonProjectPath }).pipe(
+						Effect.map((result) => result.tasks),
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`loadTasks: daemon boardReadModel failed for projectPath=${daemonProjectPath}: ${error.message}`,
+							).pipe(Effect.zipRight(Effect.succeed([]))),
+						),
+					),
 				)
-				const {
-					gitConfig,
-					startupConfig,
-					currentVisibleTaskIds,
-					persistedBoardTasks,
-					issues,
-					activeSessions,
+				const tmuxSessionIssueIds = yield* diagnostics.measure(
+					{
+						source: "BoardService",
+						name: "tmux.listSessions",
+						thresholdMs: 150,
+						details: daemonProjectPath,
+					},
+					loadTmuxSessionIssueIds(projectPath).pipe(Effect.withSpan("tmux.listSessions")),
+				)
+				const daemonTasksWithTmuxState = mergeDaemonTasksWithTmuxSessionPresence({
+					daemonTasks,
 					tmuxSessionIssueIds,
-				} = startupBatch
-				const { baseBranch, showLineChanges } = gitConfig
-				const isLinearBackend = "linear" in startupConfig.issueTracker
-				yield* Effect.log(
-					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
-				)
-				const persistedTaskMap = new Map(persistedBoardTasks.map((task) => [task.id, task]))
-				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
-				const ptySessionTargets = activeSessions
-					.filter((session) => session.state !== "idle" && session.state !== "crashed")
-					.map((session) => ({
-						issueId: session.issueId,
-						tmuxSessionName: session.tmuxSessionName,
-					}))
-				yield* ptyMonitor.syncSessions(ptySessionTargets).pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(
-							`Failed to sync PTY sessions during board load: ${String(error)}`,
-						).pipe(Effect.asVoid),
-					),
-					Effect.forkIn(serviceScope),
-				)
-				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
-
-				// Get optimistic mutations through queue adapter (daemon or local fallback)
-				const pendingMutations = yield* mutationQueue.getOptimisticMutations()
-
-				// Get parent relationship maps (cached for 30s to avoid expensive tracker show calls)
-				// parentByIssueId is used for main-board filtering; parentEpicByIssueId is used
-				// for epic-branch-specific git behavior.
-				// Cache supports multiple projects for fast project switching
-				const batchStartTime = Date.now()
-				let parentByIssueId: Map<string, string | undefined>
-				let parentEpicMap: Map<string, string | undefined>
-				let cacheStatus = "miss"
-
-				// Check if we have a valid cached parent epic map for this project
-				const allCachedParentEpics = yield* Ref.get(parentEpicCacheRef)
-				const now = Date.now()
-				const normalizedProjectPath = projectPath ?? ""
-				const cachedEntry = allCachedParentEpics.get(normalizedProjectPath)
-
-				if (cachedEntry === undefined) {
-					// Cache miss - fetch fresh data
-					parentByIssueId = new Map<string, string | undefined>()
-					parentEpicMap = new Map<string, string | undefined>()
-					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
-					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
-
-					if (issuesWithDeps.length > 0) {
-						// Linear list already includes dependency details; avoid an additional fetch.
-						const issuesWithDepDetails = isLinearBackend
-							? issuesWithDeps
-							: yield* diagnostics.measure(
-									{
-										source: "BoardService",
-										name: "tracker.showMultiple",
-										thresholdMs: 200,
-										details: `count=${issuesWithDeps.length}`,
-									},
-									issueTrackerClient
-										.showMultiple(
-											issuesWithDeps.map((i) => i.id),
-											projectPath ?? undefined,
-										)
-										.pipe(
-											Effect.withSpan("tracker.showMultiple"),
-											Effect.catchAll((error) =>
-												Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-													Effect.zipRight(Effect.succeed([])),
-												),
-											),
-										),
-								)
-
-						// Extract parent IDs from dependencies, plus epic parent IDs for git base behavior
-						for (const issue of issuesWithDepDetails) {
-							const parentChildDep = issue.dependencies?.find(
-								(dep) => dep.dependency_type === "parent-child",
-							)
-							let parentId: string | undefined
-							let parentEpicId: string | undefined
-							if (parentChildDep !== undefined) {
-								const parentDependency = parentChildDep!
-								parentId = parentDependency.id
-								if (parentDependency.issue_type === "epic") {
-									parentEpicId = parentDependency.id
-								} else if (parentDependency.issue_type === undefined) {
-									const parentIssue = issuesById.get(parentDependency.id)
-									if (parentIssue?.issue_type === "epic") {
-										parentEpicId = parentDependency.id
-									}
-								}
-							}
-							parentByIssueId.set(issue.id, parentId)
-							parentEpicMap.set(issue.id, parentEpicId)
-						}
-					}
-
-					// Cache the result (preserves cache for other projects)
-					yield* Ref.update(parentEpicCacheRef, (cache) => {
-						const newCache = new Map(cache)
-						newCache.set(normalizedProjectPath, {
-							parentByIssueId,
-							parentEpicByIssueId: parentEpicMap,
-							timestamp: now,
-						})
-						return newCache
-					})
-				} else if (now - cachedEntry!.timestamp < PARENT_EPIC_CACHE_TTL_MS) {
-					// Cache hit - use cached map
-					parentByIssueId = cachedEntry!.parentByIssueId
-					parentEpicMap = cachedEntry!.parentEpicByIssueId
-					cacheStatus = "hit"
-				} else {
-					// Cache miss - fetch fresh data
-					parentByIssueId = new Map<string, string | undefined>()
-					parentEpicMap = new Map<string, string | undefined>()
-					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
-					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
-
-					if (issuesWithDeps.length > 0) {
-						// Linear list already includes dependency details; avoid an additional fetch.
-						const issuesWithDepDetails = isLinearBackend
-							? issuesWithDeps
-							: yield* diagnostics.measure(
-									{
-										source: "BoardService",
-										name: "tracker.showMultiple",
-										thresholdMs: 200,
-										details: `count=${issuesWithDeps.length}`,
-									},
-									issueTrackerClient
-										.showMultiple(
-											issuesWithDeps.map((i) => i.id),
-											projectPath ?? undefined,
-										)
-										.pipe(
-											Effect.withSpan("tracker.showMultiple"),
-											Effect.catchAll((error) =>
-												Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-													Effect.zipRight(Effect.succeed([])),
-												),
-											),
-										),
-								)
-
-						// Extract parent IDs from dependencies, plus epic parent IDs for git base behavior
-						for (const issue of issuesWithDepDetails) {
-							const parentChildDep = issue.dependencies?.find(
-								(dep) => dep.dependency_type === "parent-child",
-							)
-							let parentId: string | undefined
-							let parentEpicId: string | undefined
-							if (parentChildDep !== undefined) {
-								const parentDependency = parentChildDep!
-								parentId = parentDependency.id
-								if (parentDependency.issue_type === "epic") {
-									parentEpicId = parentDependency.id
-								} else if (parentDependency.issue_type === undefined) {
-									const parentIssue = issuesById.get(parentDependency.id)
-									if (parentIssue?.issue_type === "epic") {
-										parentEpicId = parentDependency.id
-									}
-								}
-							}
-							parentByIssueId.set(issue.id, parentId)
-							parentEpicMap.set(issue.id, parentEpicId)
-						}
-					}
-
-					// Cache the result (preserves cache for other projects)
-					yield* Ref.update(parentEpicCacheRef, (cache) => {
-						const newCache = new Map(cache)
-						newCache.set(normalizedProjectPath, {
-							parentByIssueId,
-							parentEpicByIssueId: parentEpicMap,
-							timestamp: now,
-						})
-						return newCache
-					})
-				}
-				yield* Effect.log(
-					`loadTasks: deps resolved in ${Date.now() - batchStartTime}ms (cache ${cacheStatus})`,
-				)
-
-				// Get all worktrees ONCE upfront instead of per-issue exists() calls
-				// This eliminates 331 Effect operations → 1 operation
-				const worktreeInventoryProjectPath = projectPath ?? process.cwd()
-				const worktreeInventory = projectPath
-					? yield* diagnostics.measure(
-							{
-								source: "BoardService",
-								name: "worktrees.list",
-								thresholdMs: 200,
-								details: worktreeInventoryProjectPath,
-							},
-							worktreeManager.list(worktreeInventoryProjectPath).pipe(
-								Effect.withSpan("worktrees.list"),
-								Effect.map((worktreeList) => ({
-									loaded: true as const,
-									issueIds: new Set(worktreeList.map((wt) => wt.issueId)),
-								})),
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(
-											Effect.succeed({
-												loaded: false as const,
-												issueIds: new Set<string>(),
-											}),
-										),
-									),
-								),
-							),
-						)
-					: {
-							loaded: false as const,
-							issueIds: new Set<string>(),
-						}
-
-				const tasksWithNullable = yield* Effect.all(
-					issues.map((issue) =>
-						Effect.gen(function* () {
-							const session = sessionMap.get(issue.id)
-							const persistedTask = persistedTaskMap.get(issue.id)
-							const metricsOpt = HashMap.get(allMetrics, issue.id)
-							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
-							const sessionState = session?.state ?? "idle"
-							const hasTmuxSession =
-								session !== undefined ||
-								tmuxSessionIssueIds.has(normalizeIssueIdForLookup(issue.id))
-									? true
-									: undefined
-
-							// Get parent IDs for filtering and epic-branch behavior
-							const parentId = parentByIssueId.get(issue.id)
-							const parentEpicId = parentEpicMap.get(issue.id)
-
-							// Trust fresh worktree inventory when available; only fall back to persisted
-							// state if the inventory could not be loaded.
-							const hasWorktree = resolveHasWorktreeFlag({
-								issueId: issue.id,
-								persistedHasWorktree: persistedTask?.hasWorktree,
-								worktreeIssueIds: worktreeInventory.issueIds,
-								worktreeInventoryLoaded: worktreeInventory.loaded,
-							})
-							const retainedGitState = resolveRetainedTaskGitState({
-								hasWorktree,
-								sessionState,
-								source: persistedTask,
-							})
-
-							let hasMergeConflict = retainedGitState.hasMergeConflict
-							let gitStatus: GitStatus = retainedGitState.gitStatus
-							const isVisible = currentVisibleTaskIds.has(issue.id)
-							// Fetch git status only for visible tasks with active sessions or worktrees
-							if (isVisible && (sessionState !== "idle" || hasWorktree) && projectPath) {
-								const worktreePath = getWorktreePath(projectPath, issue.id)
-								// Use parent epic branch as base for children, otherwise use config baseBranch
-								// This ensures children show line changes relative to epic, not main
-								const effectiveBaseBranch = parentEpicId ?? baseBranch
-								// Use cached git status to avoid redundant git commands
-								const cachedStatus = yield* getCachedGitStatus(
-									worktreePath,
-									effectiveBaseBranch,
-									showLineChanges,
-								)
-								hasMergeConflict = cachedStatus.hasMergeConflict
-								gitStatus = {
-									gitBehindCount: cachedStatus.gitBehindCount,
-									hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
-									gitAdditions: cachedStatus.gitAdditions,
-									gitDeletions: cachedStatus.gitDeletions,
-								}
-							}
-
-							const persistedHasPR = persistedTask?.hasPR === true
-							const hasPRFromNotes = parsePRInfo(issue.notes)
-							const prInfo = persistedHasPR
-								? {
-										hasPR: true,
-										prUrl: persistedTask?.prUrl,
-										prNumber: persistedTask?.prNumber,
-									}
-								: hasPRFromNotes
-
-							const baseTask: TaskWithSession = {
-								...issue,
-								issue_type: toBoardIssueType(issue),
-								sessionState,
-								hasTmuxSession,
-								hasWorktree,
-								hasMergeConflict,
-								hasDevServer: persistedTask?.hasDevServer === true ? true : undefined,
-								parentEpicId: parentId ?? persistedTask?.parentEpicId,
-								...gitStatus,
-								hasPR: prInfo.hasPR === true ? true : undefined,
-								prUrl: prInfo.prUrl ?? persistedTask?.prUrl,
-								prNumber: prInfo.prNumber ?? persistedTask?.prNumber,
-								prState: persistedTask?.prState,
-								sessionStartedAt: session?.startedAt
-									? DateTime.formatIso(session.startedAt)
-									: undefined,
-								estimatedTokens: metrics?.estimatedTokens ?? persistedTask?.estimatedTokens,
-								recentOutput: metrics?.recentOutput ?? persistedTask?.recentOutput,
-								agentPhase: metrics?.agentPhase ?? persistedTask?.agentPhase,
-							}
-
-							// Apply optimistic updates
-							const queuedMutation = pendingMutations.get(issue.id)
-							if (queuedMutation) {
-								const mutation = queuedMutation.mutation
-								switch (mutation._tag) {
-									case "Move":
-										return { ...baseTask, status: mutation.status }
-									case "Update":
-										return { ...baseTask, ...mutation.fields }
-									case "Delete":
-										return null
-								}
-							}
-
-							return baseTask
-						}),
-					),
-					{ concurrency: 4 },
-				)
-
-				const tasksWithSession = tasksWithNullable.filter((t): t is TaskWithSession => t !== null)
-
-				// Enrich tasks with PR state from gh CLI (batch fetch, cached)
-				const tasksWithPRs = tasksWithSession.filter(
-					(t) => t.hasPR && t.prUrl && currentVisibleTaskIds.has(t.id),
-				)
-				let prStateMap = new Map<string, PRState>()
-				if (tasksWithPRs.length > 0 && projectPath) {
-					const prInfos = tasksWithPRs.map((t) => ({ prUrl: t.prUrl!, issueId: t.id }))
-					prStateMap = yield* diagnostics.measure(
-						{
-							source: "BoardService",
-							name: "prStates.get",
-							thresholdMs: 300,
-							details: `count=${tasksWithPRs.length}`,
-						},
-						prStateService.getPRStates(prInfos, projectPath ?? process.cwd()).pipe(
-							Effect.withSpan("prStates.get"),
-							Effect.catchAll((error) =>
-								Effect.logWarning(error).pipe(
-									Effect.zipRight(Effect.succeed(new Map<string, PRState>())),
-								),
-							),
-						),
-					)
-					yield* Effect.log(
-						`loadTasks: Fetched ${prStateMap.size}/${tasksWithPRs.length} PR states from gh CLI`,
-					)
-				}
-
-				// Merge PR states into tasks
-				const tasksWithPRState = tasksWithSession.map((task) => {
-					const prState = prStateMap.get(task.id)
-					return prState ? { ...task, prState } : task
 				})
-
-				const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
-				const currentTasks = yield* SubscriptionRef.get(tasks)
-				const localCreateGraceExpiries = yield* Ref.get(localCreateGraceExpiriesRef)
-				const { mergedTasks, nextLocalCreateGraceExpiries } =
-					reconcileLoadedTasksWithLocalCreateGrace({
-						loadedTasks: tasksWithPRState,
-						currentTasks,
-						localCreateGraceExpiries,
-						nowMs,
+				const daemonTasksWithMutations = daemonTasksWithTmuxState
+					.map((task) => {
+						const queuedMutation = daemonPendingMutations.get(task.id)
+						if (queuedMutation === undefined) {
+							return task
+						}
+						const mutation = queuedMutation.mutation
+						switch (mutation._tag) {
+							case "Move":
+								return { ...task, status: mutation.status }
+							case "Update":
+								return { ...task, ...mutation.fields }
+							case "Delete":
+								return null
+							default:
+								return task
+						}
 					})
-				yield* Ref.set(localCreateGraceExpiriesRef, new Map(nextLocalCreateGraceExpiries))
-
-				// Debug: count tasks with parentEpicId set
-				const tasksWithEpicParent = mergedTasks.filter((t) => t.parentEpicId !== undefined)
-				if (tasksWithEpicParent.length > 0) {
-					yield* Effect.logWarning(
-						`loadTasks: ${tasksWithEpicParent.length} tasks have parentEpicId (will be hidden on main board). Sample: ${JSON.stringify(tasksWithEpicParent.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })))}`,
-					)
-				}
-
-				// Debug: count by status
-				const statusCounts = mergedTasks.reduce(
-					(acc, t) => {
-						acc[t.status] = (acc[t.status] || 0) + 1
-						return acc
-					},
-					{} as Record<string, number>,
-				)
+					.filter((task): task is TaskWithSession => task !== null)
 				yield* Effect.log(
-					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${mergedTasks.length}, by status: ${JSON.stringify(statusCounts)}`,
+					`loadTasks: daemon read-model ${daemonTasksWithMutations.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
 				)
-				return mergedTasks
+				return daemonTasksWithMutations
 			})
 
 		const groupTasksByColumn = (
@@ -2082,10 +1571,33 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 			})
 
+		const toMutationIssueFromDaemon = (issue: DaemonIssue): Issue => ({
+			id: issue.id,
+			title: issue.title,
+			description: issue.description,
+			status: issue.status,
+			priority: issue.priority,
+			issue_type: issue.issue_type,
+			created_at: issue.created_at,
+			updated_at: issue.updated_at,
+			closed_at: issue.closed_at ?? null,
+			assignee: issue.assignee,
+			labels: issue.labels,
+			design: issue.design,
+			notes: issue.notes,
+			acceptance: issue.acceptance,
+			estimate: issue.estimate,
+			implementations: issue.implementations,
+			dependent_count: issue.dependent_count,
+			dependency_count: issue.dependency_count,
+		})
+
 		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
-			issueTrackerClient
-				.show(taskId)
-				.pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
+			Effect.gen(function* () {
+				const issueShowRpc = resolveDaemonIssueShowRpc({ daemonRpcClient })
+				const issueResult = yield* issueShowRpc({ issueId: taskId })
+				yield* upsertIssueFromMutation(toMutationIssueFromDaemon(issueResult.issue), options)
+			})
 
 		const refresh = (preferredProjectPath?: string | null) =>
 			diagnostics
@@ -2181,37 +1693,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 			}).pipe(Effect.asVoid)
 
-		/**
-		 * Refresh with auto-recovery for database sync errors.
-		 *
-		 * If the tracker database is out of sync with JSONL (common after git pull
-		 * or when another worktree modifies issues), this will:
-		 * 1. Detect the SyncRequiredError
-		 * 2. Auto-run import-only sync to re-import JSONL
-		 * 3. Retry the refresh
-		 */
 		const refreshWithRecovery = (preferredProjectPath?: string | null) =>
-			refresh(preferredProjectPath).pipe(
-				Effect.catchIf(
-					(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
-					() =>
-						Effect.gen(function* () {
-							yield* Effect.log(
-								"IssueTracker database out of sync, auto-recovering with import-only sync...",
-							)
-							const projectPath = yield* resolveProjectPath(preferredProjectPath)
-							yield* issueTrackerClient
-								.syncImportOnly(projectPath ?? undefined)
-								.pipe(
-									Effect.catchAll((syncError) =>
-										Effect.logError("Auto-sync recovery failed", String(syncError)),
-									),
-								)
-							yield* Effect.log("Auto-sync complete, retrying refresh...")
-							yield* refresh(preferredProjectPath)
-						}),
-				),
-			)
+			refresh(preferredProjectPath)
 
 		const refreshLocalSessionState = (params: {
 			readonly preferredProjectPath?: string | null
@@ -2681,24 +2164,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const backgroundPollingFiber = yield* Effect.forkScoped(
 					Effect.repeat(Schedule.spaced(BOARD_BACKGROUND_POLL_INTERVAL))(
 						Effect.gen(function* () {
-							const projectPath = yield* projectService.getCurrentPath()
-							if (projectPath !== null) {
-								yield* issueTrackerClient.sync(projectPath).pipe(
-									Effect.tap((syncResult) =>
-										syncResult.pushed > 0 || syncResult.pulled > 0
-											? Effect.log(
-													`Background issue sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
-												)
-											: Effect.void,
-									),
-									Effect.catchAll((error) =>
-										Effect.logWarning(
-											`Background issue sync failed for projectPath=${projectPath}: ${String(error)}`,
-										).pipe(Effect.asVoid),
-									),
-								)
-							}
-
 							yield* refreshWithPolicy({ forceRemote: true })
 						}).pipe(
 							Effect.catchAllCause((cause) =>
@@ -2769,24 +2234,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const runLinearSdkDefensiveReconciliationLoop = (interval: Duration.DurationInput) =>
 			Effect.repeat(Schedule.spaced(interval))(
 				Effect.gen(function* () {
-					const projectPath = yield* projectService.getCurrentPath()
-					if (projectPath !== null) {
-						yield* issueTrackerClient.sync(projectPath).pipe(
-							Effect.tap((syncResult) =>
-								syncResult.pushed > 0 || syncResult.pulled > 0
-									? Effect.log(
-											`Linear SDK defensive reconciliation sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
-										)
-									: Effect.void,
-							),
-							Effect.catchAll((error) =>
-								Effect.logWarning(
-									`Linear SDK defensive reconciliation sync failed for projectPath=${projectPath}: ${String(error)}`,
-								).pipe(Effect.asVoid),
-							),
-						)
-					}
-
 					yield* refreshWithPolicy({ forceRemote: true }).pipe(
 						Effect.catchAllCause((cause) =>
 							Effect.logWarning(

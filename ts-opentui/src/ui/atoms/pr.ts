@@ -1,90 +1,84 @@
 /**
  * PR Workflow Atoms
  *
- * Handles PR creation, merge, and cleanup operations.
+ * PR/worktree authority is hard-cut from TUI runtime.
+ * PR operations must run through daemon RPC and are intentionally disabled here
+ * until daemon PR RPC endpoints are implemented.
  */
 
 import { Effect } from "effect"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { ProjectService } from "../../services/ProjectService.js"
+import type { DaemonIssue } from "../../rpc/DaemonRpcSchemas.js"
+import { ToastService } from "../../services/ToastService.js"
 import { appRuntime } from "./runtime.js"
 
-// ============================================================================
-// PR Workflow Atoms
-// ============================================================================
+const prUnavailableMessage = (action: string) =>
+	`PR action '${action}' is unavailable in daemon-rpc runtime; use daemon RPC PR commands.`
 
-/**
- * Create a PR for a bead's worktree branch
- *
- * Usage: const createPR = useAtomSet(createPRAtom, { mode: "promise" })
- *        const pr = await createPR(issueId)
- */
-export const createPRAtom = appRuntime.fn((issueId: string) =>
+const unavailable = (action: string) =>
 	Effect.gen(function* () {
-		const prWorkflow = yield* PRWorkflow
-		const projectService = yield* ProjectService
+		const toast = yield* ToastService
+		yield* toast.show("warning", prUnavailableMessage(action))
+		return yield* Effect.fail(new Error(prUnavailableMessage(action)))
+	})
 
-		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+export const buildIssuePRTitle = (
+	issue: Pick<DaemonIssue, "id" | "title" | "issue_type">,
+): string => {
+	const typePrefix = issue.issue_type ? `[${issue.issue_type}] ` : ""
+	return `${typePrefix}${issue.title} (${issue.id})`
+}
 
-		return yield* prWorkflow.createPR({
-			issueId,
-			projectPath,
-		})
-	}).pipe(Effect.tapError(Effect.logError)),
+interface PRDraftContext {
+	readonly baseBranch: string
+}
+
+export const buildIssuePRBody = (
+	issue: Pick<DaemonIssue, "id" | "title" | "description" | "design">,
+	draftContext?: PRDraftContext,
+): string => {
+	const lines: string[] = []
+
+	lines.push(`## Summary`)
+	lines.push(``)
+	lines.push(`Resolves ${issue.id}: ${issue.title}`)
+	if (draftContext) {
+		lines.push(`Base branch: \`${draftContext.baseBranch}\``)
+	}
+	lines.push(``)
+
+	if (issue.description) {
+		lines.push(`## Description`)
+		lines.push(``)
+		lines.push(issue.description)
+		lines.push(``)
+	}
+
+	if (issue.design) {
+		lines.push(`## Design Notes`)
+		lines.push(``)
+		lines.push(issue.design)
+		lines.push(``)
+	}
+
+	lines.push(`## Test Plan`)
+	lines.push(``)
+	lines.push(`- [ ] Manual testing`)
+	lines.push(`- [ ] Type check passes`)
+	lines.push(``)
+	lines.push(`---`)
+	lines.push(`🤖 Generated with [Azedarach](https://github.com/riordanpawley/azedarach)`)
+
+	return lines.join("\n")
+}
+
+export const createPRAtom = appRuntime.fn((_issueId: string) => unavailable("create"))
+
+export const cleanupAtom = appRuntime.fn((_issueId: string) =>
+	unavailable("cleanup").pipe(Effect.asVoid),
 )
 
-/**
- * Cleanup worktree and branches after PR merge or abandonment
- *
- * Usage: const cleanup = useAtomSet(cleanupAtom, { mode: "promise" })
- *        await cleanup(issueId)
- */
-export const cleanupAtom = appRuntime.fn((issueId: string) =>
-	Effect.gen(function* () {
-		const prWorkflow = yield* PRWorkflow
-		const projectService = yield* ProjectService
-
-		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-
-		yield* prWorkflow.cleanup({ issueId, projectPath, closeIssue: true })
-	}).pipe(Effect.catchAll(Effect.logError)),
+export const mergeToMainAtom = appRuntime.fn((_issueId: string) =>
+	unavailable("merge-to-main").pipe(Effect.asVoid),
 )
 
-/**
- * Merge worktree branch to main and clean up
- *
- * Merges the worktree branch to main locally without creating a PR.
- * Ideal for completed work that doesn't need review.
- *
- * Usage: const mergeToMain = useAtomSet(mergeToMainAtom, { mode: "promise" })
- *        await mergeToMain(issueId)
- */
-export const mergeToMainAtom = appRuntime.fn((issueId: string) =>
-	Effect.gen(function* () {
-		const prWorkflow = yield* PRWorkflow
-		const projectService = yield* ProjectService
-
-		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-
-		yield* prWorkflow.mergeToMain({
-			issueId,
-			projectPath,
-		})
-	}).pipe(Effect.tapError(Effect.logError)),
-)
-
-/**
- * Check if gh CLI is available and authenticated
- *
- * Usage: const ghAvailable = useAtomValue(ghCLIAvailableAtom)
- */
-export const ghCLIAvailableAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const prWorkflow = yield* PRWorkflow
-		return yield* prWorkflow.checkGHCLI()
-	}),
-	{ initialValue: false },
-)
+export const ghCLIAvailableAtom = appRuntime.atom(Effect.succeed(false), { initialValue: false })

@@ -9,6 +9,7 @@
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { DevServerService } from "../DevServerService.js"
+import { formatForToast } from "../ErrorFormatter.js"
 import { OverlayService } from "../OverlayService.js"
 import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"
@@ -77,15 +78,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 											: `Dev server '${serverName}' stopped`,
 								),
 							),
-							Effect.catchTag("NoWorktreeError", (err) => toast.show("error", err.message)),
-							Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
-							Effect.catchTag("TmuxError", (err) =>
-								toast.show("error", `tmux error: ${err.message}`),
-							),
-							Effect.catchTag("SessionNotFoundError", (err) =>
-								toast.show("error", `Session not found: ${err.session}`),
-							),
-							Effect.catchTag("ShellNotReadyError", (err) => toast.show("error", err.message)),
+							Effect.catchAll((error) => toast.show("error", formatForToast(error))),
 						)
 					}
 				})
@@ -141,15 +134,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 										: `Dev server '${serverName}' restarting...`,
 								),
 							),
-							Effect.catchTag("NoWorktreeError", (err) => toast.show("error", err.message)),
-							Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
-							Effect.catchTag("TmuxError", (err) =>
-								toast.show("error", `tmux error: ${err.message}`),
-							),
-							Effect.catchTag("SessionNotFoundError", (err) =>
-								toast.show("error", `Session not found: ${err.session}`),
-							),
-							Effect.catchTag("ShellNotReadyError", (err) => toast.show("error", err.message)),
+							Effect.catchAll((error) => toast.show("error", formatForToast(error))),
 						)
 					}
 				})

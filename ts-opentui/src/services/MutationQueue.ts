@@ -1,10 +1,8 @@
 import type { CommandExecutor } from "@effect/platform"
-import { Cause, Effect, Option, Ref } from "effect"
-import { IssueTrackerClient } from "../core/IssueTrackerClient.js"
+import { Data, Effect, Option, Ref } from "effect"
 import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type { ColumnStatus } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
-import { ToastService } from "./ToastService.js"
 
 /**
  * Fields that can be updated on a bead - matches IssueTrackerClient.update signature
@@ -64,6 +62,13 @@ interface DaemonQueueRpc {
 	readonly queueQuery: NonNullable<DaemonRpcClientApi["queueQuery"]>
 	readonly queueCancel: NonNullable<DaemonRpcClientApi["queueCancel"]>
 }
+
+export class MutationQueueUnavailableError extends Data.TaggedError(
+	"MutationQueueUnavailableError",
+)<{
+	readonly operation: "queue-enqueue" | "queue-query" | "queue-cancel"
+	readonly message: string
+}> {}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null
@@ -154,33 +159,34 @@ const toDaemonPendingStatus = (
 }
 
 export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueue", {
-	dependencies: [IssueTrackerClient.Default, ToastService.Default, DiagnosticsService.Default],
+	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		const toast = yield* ToastService
 		const diagnostics = yield* DiagnosticsService
-		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const daemonRpcClient = yield* DaemonRpcClient
 
 		yield* diagnostics.trackService("MutationQueue", "Optimistic mutation queue with rollback")
 
 		const mutationsRef = yield* Ref.make<Map<string, QueuedMutation>>(new Map())
 
-		const getDaemonQueueRpc = (): Option.Option<DaemonQueueRpc> => {
-			if (Option.isNone(daemonRpcClient)) {
-				return Option.none()
-			}
-			const queueEnqueue = daemonRpcClient.value.queueEnqueue
-			const queueQuery = daemonRpcClient.value.queueQuery
-			const queueCancel = daemonRpcClient.value.queueCancel
+		const daemonQueueRpc = yield* Effect.gen(function* () {
+			const queueEnqueue = daemonRpcClient.queueEnqueue
+			const queueQuery = daemonRpcClient.queueQuery
+			const queueCancel = daemonRpcClient.queueCancel
 			if (queueEnqueue === undefined || queueQuery === undefined || queueCancel === undefined) {
-				return Option.none()
+				return yield* Effect.fail(
+					new MutationQueueUnavailableError({
+						operation: "queue-query",
+						message:
+							"Daemon mutation queue RPC is unavailable (queueEnqueue/queueQuery/queueCancel required).",
+					}),
+				)
 			}
-			return Option.some({
+			return {
 				queueEnqueue,
 				queueQuery,
 				queueCancel,
-			})
-		}
+			}
+		})
 
 		const resolveDaemonProjectPath = (
 			projectPath: string | undefined,
@@ -194,12 +200,8 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 			projectPath?: string,
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
-				const daemonQueueRpc = getDaemonQueueRpc()
-				if (Option.isNone(daemonQueueRpc)) {
-					return
-				}
 				const daemonProjectPath = yield* resolveDaemonProjectPath(projectPath)
-				yield* daemonQueueRpc.value
+				yield* daemonQueueRpc
 					.queueCancel(
 						taskId === undefined
 							? { domain: "mutation", projectPath: daemonProjectPath }
@@ -212,7 +214,7 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 					.pipe(
 						Effect.catchAll((error) =>
 							Effect.logWarning(
-								"Daemon mutation queue cancel failed; keeping local mutation state",
+								"Daemon mutation queue cancel failed; keeping local optimistic state",
 								{
 									taskId,
 									projectPath,
@@ -281,13 +283,9 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 			never
 		> =>
 			Effect.gen(function* () {
-				const daemonQueueRpc = getDaemonQueueRpc()
-				if (Option.isNone(daemonQueueRpc)) {
-					return yield* getOptimisticMutationsFromLocal()
-				}
 				const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
 
-				return yield* daemonQueueRpc.value
+				return yield* daemonQueueRpc
 					.queueQuery({
 						domain: "mutation",
 						projectPath: daemonProjectPath,
@@ -316,183 +314,49 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 							return optimisticQueue
 						}),
 						Effect.catchAll((error) =>
-							Effect.logWarning("Daemon mutation queue query failed; using local mutation state", {
+							Effect.logWarning("Daemon mutation queue query failed; returning empty state", {
 								error,
-							}).pipe(Effect.zipRight(getOptimisticMutationsFromLocal())),
+							}).pipe(Effect.zipRight(Effect.succeed(new Map<string, OptimisticQueuedMutation>()))),
 						),
 					)
 			})
 
-		const add = (mutation: Mutation): Effect.Effect<void> =>
+		const add = (mutation: Mutation): Effect.Effect<void, MutationQueueUnavailableError> =>
 			Effect.gen(function* () {
-				const timestamp = Date.now()
-
-				yield* Ref.update(mutationsRef, (queue) => {
-					const newQueue = new Map(queue)
-					newQueue.set(mutation.id, {
-						mutation,
-						status: "pending",
-						timestamp,
+				const daemonProjectPath = yield* resolveDaemonProjectPath(mutation.cwd)
+				yield* daemonQueueRpc
+					.queueEnqueue({
+						domain: "mutation",
+						operation: mutation._tag,
+						issueId: mutation.id,
+						projectPath: daemonProjectPath,
+						dedupeKey: `${mutation.id}:${mutation._tag}`,
+						payloadJson: toDaemonPayload(mutation),
 					})
-					return newQueue
-				})
-
-				yield* Effect.log(`Queued ${mutation._tag} mutation for task ${mutation.id}`)
-
-				const daemonQueueRpc = getDaemonQueueRpc()
-				if (Option.isSome(daemonQueueRpc)) {
-					const daemonProjectPath = yield* resolveDaemonProjectPath(mutation.cwd)
-					yield* daemonQueueRpc.value
-						.queueEnqueue({
-							domain: "mutation",
-							operation: mutation._tag,
-							issueId: mutation.id,
-							projectPath: daemonProjectPath,
-							dedupeKey: `${mutation.id}:${mutation._tag}`,
-							payloadJson: toDaemonPayload(mutation),
-						})
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(
-									"Daemon mutation queue enqueue failed; falling back to local queue",
-									{
-										taskId: mutation.id,
-										tag: mutation._tag,
-										error,
-									},
-								),
-							),
-							Effect.asVoid,
-						)
-				}
-			})
-
-		const executeMutation = (mutation: Mutation) => {
-			switch (mutation._tag) {
-				case "Update":
-					// IssueUpdateFields is structurally compatible with IssueTrackerClient.update's fields parameter
-					return issueTrackerClient.update(
-						mutation.id,
-						{
-							status: mutation.fields.status,
-							notes: mutation.fields.notes,
-							priority: mutation.fields.priority,
-							title: mutation.fields.title,
-							description: mutation.fields.description,
-							design: mutation.fields.design,
-							acceptance: mutation.fields.acceptance,
-							assignee: mutation.fields.assignee,
-							estimate: mutation.fields.estimate,
-							labels: mutation.fields.labels ? [...mutation.fields.labels] : undefined,
-						},
-						mutation.cwd,
+					.pipe(
+						Effect.asVoid,
+						Effect.mapError(
+							(error) =>
+								new MutationQueueUnavailableError({
+									operation: "queue-enqueue",
+									message: String(error),
+								}),
+						),
 					)
-				case "Delete":
-					return issueTrackerClient.delete(mutation.id, mutation.cwd)
-				case "Move":
-					return issueTrackerClient.update(mutation.id, { status: mutation.status }, mutation.cwd)
-			}
-		}
-
-		const syncAfterMutation = (taskId: string, cwd?: string) =>
-			issueTrackerClient.sync(cwd).pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(
-						`MutationQueue post-mutation sync failed for task ${taskId} (projectPath=${cwd ?? "<default>"}): ${String(error)}`,
-					).pipe(Effect.asVoid),
-				),
-				Effect.asVoid,
-			)
-
-		const process = (taskId: string) =>
-			Effect.gen(function* () {
-				const queue = yield* Ref.get(mutationsRef)
-				const queued = queue.get(taskId)
-
-				if (!queued) {
-					yield* Effect.log(`No mutation found for task ${taskId}`)
-					return
-				}
-
-				if (queued.status !== "pending") {
-					yield* Effect.log(
-						`Mutation ${queued.mutation._tag} for task ${taskId} is not pending, skipping`,
-					)
-					return
-				}
-				yield* Effect.log(
-					`Processing ${queued.mutation._tag} mutation for task ${taskId} (projectPath=${queued.mutation.cwd ?? "<default>"})`,
-				)
-
-				yield* Ref.update(mutationsRef, (queue) => {
-					const newQueue = new Map(queue)
-					const q = newQueue.get(taskId)
-					if (q) {
-						newQueue.set(taskId, { ...q, status: "processing" })
-					}
-					return newQueue
-				})
-
-				const execution = executeMutation(queued.mutation)
-
-				yield* execution.pipe(
-					Effect.tap(() =>
-						Effect.gen(function* () {
-							yield* Ref.update(mutationsRef, (queue) => {
-								const newQueue = new Map(queue)
-								newQueue.delete(taskId)
-								return newQueue
-							})
-							yield* syncAfterMutation(taskId, queued.mutation.cwd)
-							yield* clearDaemonMutationQueue(taskId, queued.mutation.cwd)
-							yield* Effect.log(
-								`Successfully processed ${queued.mutation._tag} mutation for task ${taskId} (projectPath=${queued.mutation.cwd ?? "<default>"})`,
-							)
-						}),
-					),
-					Effect.catchAllCause((cause) =>
-						Effect.gen(function* () {
-							yield* Ref.update(mutationsRef, (queue) => {
-								const newQueue = new Map(queue)
-								newQueue.delete(taskId)
-								return newQueue
-							})
-
-							yield* queued.mutation.rollback.pipe(
-								Effect.catchAllCause((rollbackCause) =>
-									Effect.logError(
-										`Rollback failed for ${queued.mutation._tag} on task ${taskId}: ${Cause.pretty(rollbackCause)}`,
-									),
-								),
-							)
-							yield* toast.show("error", `Failed to ${queued.mutation._tag} task ${taskId}`)
-							yield* clearDaemonMutationQueue(taskId, queued.mutation.cwd)
-							yield* Effect.logError(
-								`Failed to ${queued.mutation._tag} task ${taskId}: ${Cause.pretty(cause)}`,
-							)
-						}),
-					),
-				)
 			})
 
-		const rollback = (taskId: string) =>
-			Effect.gen(function* () {
-				const queue = yield* Ref.get(mutationsRef)
-				const queued = queue.get(taskId)
-				if (!queued) {
-					yield* Effect.log(`No mutation to rollback for task ${taskId}`)
-					return
-				}
-				yield* queued.mutation.rollback
-				yield* Effect.log(`Rolled back mutation for task ${taskId}`)
-			})
+		const process = (_taskId: string): Effect.Effect<void> => Effect.void
+
+		const rollback = (_taskId: string): Effect.Effect<void> => Effect.void
 
 		const clearAll = (): Effect.Effect<void> => Ref.set(mutationsRef, new Map())
 
 		return {
 			add,
-			enqueue: (mutation: Mutation): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
-				add(mutation).pipe(Effect.zipRight(process(mutation.id))),
+			enqueue: (
+				mutation: Mutation,
+			): Effect.Effect<void, MutationQueueUnavailableError, CommandExecutor.CommandExecutor> =>
+				add(mutation),
 			process,
 			rollback,
 			clearAll: (): Effect.Effect<void> =>
@@ -500,19 +364,9 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 
 			hasPending: (taskId: string): Effect.Effect<boolean> =>
 				Effect.gen(function* () {
-					const getLocalPending = Ref.get(mutationsRef).pipe(
-						Effect.map((queue) => {
-							const queued = queue.get(taskId)
-							return queued ? queued.status === "pending" || queued.status === "processing" : false
-						}),
-					)
-					const daemonQueueRpc = getDaemonQueueRpc()
-					if (Option.isNone(daemonQueueRpc)) {
-						return yield* getLocalPending
-					}
 					const daemonProjectPath = yield* resolveDaemonProjectPath(undefined)
 
-					return yield* daemonQueueRpc.value
+					return yield* daemonQueueRpc
 						.queueQuery({
 							domain: "mutation",
 							issueId: taskId,
@@ -523,10 +377,10 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 								result.items.some((item) => item.state === "queued" || item.state === "running"),
 							),
 							Effect.catchAll((error) =>
-								Effect.logWarning("Daemon mutation queue query failed; using local pending state", {
+								Effect.logWarning("Daemon mutation queue query failed; assuming no pending state", {
 									taskId,
 									error,
-								}).pipe(Effect.zipRight(getLocalPending)),
+								}).pipe(Effect.zipRight(Effect.succeed(false))),
 							),
 						)
 				}),

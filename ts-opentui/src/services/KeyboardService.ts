@@ -10,9 +10,10 @@
  */
 
 import { Effect, Ref } from "effect"
-import { IssueTrackerClient } from "../core/IssueTrackerClient.js"
 import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
 import { TmuxService } from "../core/TmuxService.js"
+import type { DaemonIssueTaskRpcClient } from "../rpc/clients/DaemonIssueTaskRpcClient.js"
+import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
 import { BoardService } from "./BoardService.js"
 import { EditorService } from "./EditorService.js"
 import { GitSyncService } from "./GitSyncService.js"
@@ -21,7 +22,6 @@ import { DevServerHandlersService } from "./keyboard/DevServerHandlersService.js
 import { InputHandlersService } from "./keyboard/InputHandlersService.js"
 import { KeyboardHelpersService } from "./keyboard/KeyboardHelpersService.js"
 import { OrchestrateHandlersService } from "./keyboard/OrchestrateHandlersService.js"
-import { PRHandlersService } from "./keyboard/PRHandlersService.js"
 import { SessionHandlersService } from "./keyboard/SessionHandlersService.js"
 import { TaskHandlersService } from "./keyboard/TaskHandlersService.js"
 import type { Keybinding, KeyMode } from "./keyboard/types.js"
@@ -34,6 +34,16 @@ import { ViewService } from "./ViewService.js"
 // Re-export types for backwards compatibility
 export type { Keybinding, KeybindingDeps, KeyMode } from "./keyboard/types.js"
 
+type KeyboardIssueRpcMethod = "issueEpicChildren" | "issueShow"
+
+const requireKeyboardIssueRpcMethod = <TMethod extends KeyboardIssueRpcMethod>(
+	client: DaemonIssueTaskRpcClient,
+	method: TMethod,
+): Effect.Effect<NonNullable<DaemonIssueTaskRpcClient[TMethod]>, Error> =>
+	Effect.fromNullable(client[method]).pipe(
+		Effect.orElseFail(() => new Error(`Daemon RPC ${method} is unavailable in KeyboardService`)),
+	)
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -45,7 +55,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		KeyboardHelpersService.Default,
 		SessionHandlersService.Default,
 		TaskHandlersService.Default,
-		PRHandlersService.Default,
 		InputHandlersService.Default,
 		OrchestrateHandlersService.Default,
 		DevServerHandlersService.Default,
@@ -57,7 +66,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		EditorService.Default,
 		ViewService.Default,
 		TmuxService.Default,
-		IssueTrackerClient.Default,
 		BoardService.Default,
 		GitSyncService.Default,
 	],
@@ -69,7 +77,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const helpers = yield* KeyboardHelpersService
 		const sessionHandlers = yield* SessionHandlersService
 		const taskHandlers = yield* TaskHandlersService
-		const prHandlers = yield* PRHandlersService
 		const inputHandlers = yield* InputHandlersService
 		const orchestrateHandlers = yield* OrchestrateHandlersService
 		const devServerHandlers = yield* DevServerHandlersService
@@ -85,7 +92,12 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const viewService = yield* ViewService
 		const tmux = yield* TmuxService
 		const tmuxCapabilities = detectTmuxCapabilities()
-		const issueTrackerClient = yield* IssueTrackerClient
+		const daemonRpcClient = yield* DaemonRpcClient
+		const issueEpicChildren = yield* requireKeyboardIssueRpcMethod(
+			daemonRpcClient,
+			"issueEpicChildren",
+		)
+		const issueShow = yield* requireKeyboardIssueRpcMethod(daemonRpcClient, "issueShow")
 		const board = yield* BoardService
 		const gitSync = yield* GitSyncService
 
@@ -96,7 +108,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			// Handler services
 			sessionHandlers,
 			taskHandlers,
-			prHandlers,
 			inputHandlers,
 			orchestrateHandlers,
 			devServerHandlers,
@@ -110,7 +121,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			viewService,
 			tmux,
 			tmuxCapabilities,
-			issueTrackerClient,
+			issueEpicChildren,
+			issueShow,
 			board,
 			gitSync,
 		})

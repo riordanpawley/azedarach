@@ -4,7 +4,7 @@
  * Continuously monitors tmux pane output for active sessions and:
  * - Detects session state (busy, error, done) via pattern matching
  * - Extracts session metrics (tokens, agent phase, recent output)
- * - Reports state changes to SessionManager
+ * - Reports state changes to daemon session state RPC
  *
  * Works in tandem with TmuxSessionMonitor:
  * - PTY provides: busy detection, error detection, done detection, metrics
@@ -15,7 +15,7 @@
  * 1. PTYMonitor polls tmux panes every 1s
  * 2. Output is fed to StateDetector for pattern matching
  * 3. Detected state is compared against hook priority window
- * 4. If hooks haven't fired recently, PTY state updates SessionManager
+ * 4. If hooks haven't fired recently, PTY state updates daemon session state
  */
 
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
@@ -30,7 +30,6 @@ import {
 	type ForegroundKind,
 	shouldApplyHighPriorityDetectedState,
 } from "./ptyHeuristics.js"
-import { SessionManager } from "./SessionManager.js"
 import { type DetectionResult, StateDetector } from "./StateDetector.js"
 import { TmuxService } from "./TmuxService.js"
 
@@ -321,7 +320,6 @@ const classifyForegroundProcess = (cmd: string | null): ForegroundKind => {
 export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 	dependencies: [
 		TmuxService.Default,
-		SessionManager.Default,
 		StateDetector.Default,
 		DiagnosticsService.Default,
 		AppConfig.Default,
@@ -329,12 +327,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
-		const sessionManager = yield* SessionManager
 		const stateDetector = yield* StateDetector
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
 		const projectService = yield* ProjectService
-		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const daemonRpcClient = yield* DaemonRpcClient
 
 		// Register with diagnostics - will mark unhealthy when scope closes
 		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 1s")
@@ -346,6 +343,8 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		const metricsRef = yield* SubscriptionRef.make<HashMap.HashMap<string, ExtractedMetrics>>(
 			HashMap.empty(),
 		)
+		// Last known state per session (daemon-authoritative when available).
+		const sessionStatesRef = yield* Ref.make<HashMap.HashMap<string, SessionState>>(HashMap.empty())
 
 		const isPatternMatchingEnabled = () =>
 			SubscriptionRef.get(appConfig.config).pipe(
@@ -356,11 +355,17 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 			Effect.gen(function* () {
 				const currentMonitors = yield* Ref.get(monitors)
 				const currentMetrics = yield* SubscriptionRef.get(metricsRef)
-				if (HashMap.size(currentMonitors) === 0 && HashMap.size(currentMetrics) === 0) {
+				const currentStates = yield* Ref.get(sessionStatesRef)
+				if (
+					HashMap.size(currentMonitors) === 0 &&
+					HashMap.size(currentMetrics) === 0 &&
+					HashMap.size(currentStates) === 0
+				) {
 					return false
 				}
 				yield* Ref.set(monitors, HashMap.empty())
 				yield* SubscriptionRef.set(metricsRef, HashMap.empty())
+				yield* Ref.set(sessionStatesRef, HashMap.empty())
 				return true
 			})
 
@@ -368,13 +373,16 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 			Effect.gen(function* () {
 				const currentMonitors = yield* Ref.get(monitors)
 				const currentMetrics = yield* SubscriptionRef.get(metricsRef)
+				const currentStates = yield* Ref.get(sessionStatesRef)
 				const hasMonitor = HashMap.get(currentMonitors, issueId)._tag === "Some"
 				const hasMetrics = HashMap.get(currentMetrics, issueId)._tag === "Some"
-				if (!hasMonitor && !hasMetrics) {
+				const hasState = HashMap.get(currentStates, issueId)._tag === "Some"
+				if (!hasMonitor && !hasMetrics && !hasState) {
 					return false
 				}
 				yield* Ref.update(monitors, (m) => HashMap.remove(m, issueId))
 				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.remove(m, issueId))
+				yield* Ref.update(sessionStatesRef, (m) => HashMap.remove(m, issueId))
 				return true
 			})
 
@@ -396,23 +404,51 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				return monitor
 			})
 
-		const updateSessionStateWithPreferredRuntime = (issueId: string, state: SessionState) => {
-			if (
-				daemonRpcClient._tag === "Some" &&
-				daemonRpcClient.value.sessionUpdateState !== undefined
-			) {
-				const sessionUpdateState = daemonRpcClient.value.sessionUpdateState
-				return projectService.getCurrentPath().pipe(
-					Effect.flatMap((projectPath) =>
-						sessionUpdateState({
-							issueId,
-							state,
-							projectPath: projectPath ?? process.cwd(),
-						}),
-					),
-				)
+		const setLocalSessionState = (issueId: string, state: SessionState) =>
+			Ref.update(sessionStatesRef, (states) => HashMap.set(states, issueId, state))
+
+		const getLocalSessionState = (issueId: string): Effect.Effect<SessionState> =>
+			Ref.get(sessionStatesRef).pipe(
+				Effect.map((states) => {
+					const found = HashMap.get(states, issueId)
+					return found._tag === "Some" ? found.value : "idle"
+				}),
+			)
+
+		const seedStateFromSnapshot = (issueId: string): Effect.Effect<void> => {
+			const sessionSnapshot = daemonRpcClient.sessionSnapshot
+			if (sessionSnapshot === undefined) {
+				return setLocalSessionState(issueId, "idle")
 			}
-			return sessionManager.updateState(issueId, state)
+			return projectService.getCurrentPath().pipe(
+				Effect.flatMap((projectPath) =>
+					sessionSnapshot({
+						projectPath: projectPath ?? process.cwd(),
+					}),
+				),
+				Effect.flatMap((snapshot) => {
+					const session = snapshot.sessions.find((entry) => entry.issueId === issueId)
+					return setLocalSessionState(issueId, session?.state ?? "idle")
+				}),
+				Effect.catchAll(() => setLocalSessionState(issueId, "idle")),
+			)
+		}
+
+		const updateSessionStateWithPreferredRuntime = (issueId: string, state: SessionState) => {
+			if (daemonRpcClient.sessionUpdateState === undefined) {
+				return Effect.fail(new Error("Daemon sessionUpdateState RPC is unavailable"))
+			}
+			const sessionUpdateState = daemonRpcClient.sessionUpdateState
+			return projectService.getCurrentPath().pipe(
+				Effect.flatMap((projectPath) =>
+					sessionUpdateState({
+						issueId,
+						state,
+						projectPath: projectPath ?? process.cwd(),
+					}),
+				),
+				Effect.tap(() => setLocalSessionState(issueId, state)),
+			)
 		}
 
 		// ========================================================================
@@ -440,6 +476,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 
 				const monitor = yield* createSessionMonitor(issueId, tmuxSessionName)
 				yield* Ref.update(monitors, (m) => HashMap.set(m, issueId, monitor))
+				yield* seedStateFromSnapshot(issueId)
 				yield* Effect.log(`PTYMonitor: Registered session ${issueId}`)
 			})
 
@@ -505,6 +542,13 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					HashMap.empty<string, ExtractedMetrics>(),
 				)
 				yield* SubscriptionRef.set(metricsRef, nextMetrics)
+				yield* Ref.update(sessionStatesRef, (states) =>
+					Array.from(HashMap.entries(states)).reduce(
+						(acc, [issueId, state]) =>
+							seenIssueIds.has(issueId) ? HashMap.set(acc, issueId, state) : acc,
+						HashMap.empty<string, SessionState>(),
+					),
+				)
 			})
 
 		/**
@@ -524,7 +568,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					})
 				}
 				return m
-			})
+			}).pipe(Effect.zipRight(setLocalSessionState(issueId, state)))
 
 		// ========================================================================
 		// Polling Logic
@@ -588,16 +632,8 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				let newPendingCount = monitor.pendingCount
 
 				if (!hookHasPriority) {
-					// Get current state from SessionManager
-					const currentState = yield* sessionManager
-						.getState(issueId)
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(error).pipe(
-									Effect.zipRight(Effect.succeed("idle" as SessionState)),
-								),
-							),
-						)
+					// Get current state from local daemon-synced cache.
+					const currentState = yield* getLocalSessionState(issueId)
 
 					// Foreground process ground-truth (Grove-inspired):
 					// If the pane now has a shell as the foreground process and the session

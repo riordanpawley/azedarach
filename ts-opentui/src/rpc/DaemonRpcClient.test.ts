@@ -13,9 +13,9 @@ import {
 } from "./DaemonRpcSchemas.js"
 
 describe("DaemonRpc protocol version schemas", () => {
-	it("defaults missing request protocol version to current literal", () => {
+	it("does not add protocol version to non-handshake request payloads", () => {
 		const decoded = Schema.decodeUnknownSync(DaemonStatusRequestSchema)({})
-		expect(decoded.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(Object.hasOwn(decoded, "rpcProtocolVersion")).toBe(false)
 	})
 
 	it("rejects response payloads with mismatched protocol version", () => {

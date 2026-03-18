@@ -12,11 +12,10 @@
  */
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"
-import { Effect, Option } from "effect"
+import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
 import {
 	getIssueSessionName,
 	getWorktreePath,
@@ -24,7 +23,6 @@ import {
 	parseIssueSessionName,
 	WINDOW_NAMES,
 } from "../../core/paths.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { WorktreeManager, type WorktreeNameClashError } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
@@ -49,14 +47,12 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		dependencies: [
 			KeyboardHelpersService.Default,
 			ToastService.Default,
-			SessionManager.Default,
 			AttachmentService.Default,
 			ImageAttachmentService.Default,
 			TmuxService.Default,
 			WorktreeSessionService.Default,
 			WorktreeManager.Default,
 			AppConfig.Default,
-			PRWorkflow.Default,
 			OverlayService.Default,
 			BoardService.Default,
 		],
@@ -64,7 +60,6 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		effect: Effect.gen(function* () {
 			const helpers = yield* KeyboardHelpersService
 			const toast = yield* ToastService
-			const sessionManager = yield* SessionManager
 			const attachment = yield* AttachmentService
 			const imageAttachment = yield* ImageAttachmentService
 			const fs = yield* FileSystem.FileSystem
@@ -72,11 +67,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const worktreeSession = yield* WorktreeSessionService
 			const worktreeManager = yield* WorktreeManager
 			const appConfig = yield* AppConfig
-			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
 			const boardService = yield* BoardService
-			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-			const gitConfig = yield* appConfig.getGitConfig()
+			const daemonRpcClient = yield* DaemonRpcClient
 
 			const startSessionWithPreferredRuntime = (options: {
 				readonly issueId: string
@@ -87,23 +80,23 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				readonly dangerouslySkipPermissions?: boolean
 			}): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStart !== undefined) {
-						// Current daemon RPC start does not support prompt/image/skip-permissions arguments yet.
-						if (
-							options.initialPrompt === undefined &&
-							options.imagePaths === undefined &&
-							options.sessionEnv === undefined &&
-							options.dangerouslySkipPermissions !== true
-						) {
-							yield* daemonRpcClient.value.sessionStart({
-								issueId: options.issueId,
-								projectPath: options.projectPath,
-							})
-							return
-						}
+					if (daemonRpcClient.sessionStart === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
 					}
-
-					yield* sessionManager.start(options)
+					if (
+						options.initialPrompt !== undefined ||
+						options.imagePaths !== undefined ||
+						options.sessionEnv !== undefined ||
+						options.dangerouslySkipPermissions === true
+					) {
+						yield* Effect.logWarning(
+							"Daemon-rpc mode ignores local session start options (prompt/images/sessionEnv/skipPermissions)",
+						)
+					}
+					yield* daemonRpcClient.sessionStart({
+						issueId: options.issueId,
+						projectPath: options.projectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const stopSessionWithPreferredRuntime = (
@@ -111,15 +104,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionStop !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionStop({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionStop === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionStop RPC is unavailable"))
 					}
-					yield* sessionManager.stop(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionStop({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const pauseSessionWithPreferredRuntime = (
@@ -127,15 +119,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionPause !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionPause({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionPause === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionPause RPC is unavailable"))
 					}
-					yield* sessionManager.pause(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionPause({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const resumeSessionWithPreferredRuntime = (
@@ -143,15 +134,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (Option.isSome(daemonRpcClient) && daemonRpcClient.value.sessionResume !== undefined) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionResume({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionResume === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionResume RPC is unavailable"))
 					}
-					yield* sessionManager.resume(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionResume({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const recoverSessionWithPreferredRuntime = (
@@ -159,18 +149,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (
-						Option.isSome(daemonRpcClient) &&
-						daemonRpcClient.value.sessionRecover !== undefined
-					) {
-						const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
-						yield* daemonRpcClient.value.sessionRecover({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
+					if (daemonRpcClient.sessionRecover === undefined) {
+						return yield* Effect.fail(new Error("Daemon sessionRecover RPC is unavailable"))
 					}
-					yield* sessionManager.recoverSession(issueId)
+					const effectiveProjectPath = projectPath ?? (yield* helpers.getProjectPath())
+					yield* daemonRpcClient.sessionRecover({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
@@ -689,80 +675,7 @@ Delete the duplicate worktree and retry?`
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
-					// Get current project path
-					const projectPath = yield* helpers.getProjectPath()
-
-					// Check if branch is behind its base branch (epic branch for children, main for others)
-					const branchStatus = yield* prWorkflow
-						.checkBranchBehindBase({ issueId: task.id, projectPath })
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(error).pipe(
-									Effect.zipRight(
-										Effect.succeed({
-											behind: 0,
-											ahead: 0,
-											baseBranch: task.parentEpicId ?? gitConfig.baseBranch,
-										}),
-									),
-								),
-							),
-						)
-
-					// If not behind, just attach directly
-					if (branchStatus.behind === 0) {
-						yield* doAttach(task.id)
-						return
-					}
-
-					// If merge already in progress (MERGE_HEAD exists), skip merge choice
-					// and attach directly - user is likely resuming conflict resolution
-					if (task.hasMergeConflict) {
-						yield* toast.show("info", "Merge in progress - attaching directly")
-						yield* doAttach(task.id)
-						return
-					}
-
-					// Branch is behind - show merge choice dialog
-					const baseBranch = branchStatus.baseBranch
-					const message = `Merge ${baseBranch} into your branch before attaching?`
-
-					// Define the merge action (merge base branch, then attach)
-					const onMerge = Effect.gen(function* () {
-						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
-						yield* prWorkflow.mergeBaseIntoBranch({ issueId: task.id, projectPath }).pipe(
-							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
-							Effect.tap(() => boardService.refresh()),
-							Effect.tap(() => doAttach(task.id)),
-							Effect.catchAll((error) => {
-								// MergeConflictError means Claude was started to resolve
-								const errorObj = error && typeof error === "object" ? error : {}
-								const msg =
-									"_tag" in errorObj
-										? errorObj._tag === "MergeConflictError"
-											? String("message" in errorObj ? errorObj.message : "Conflicts detected")
-											: String("message" in errorObj ? errorObj.message : error)
-										: String(error)
-								return Effect.gen(function* () {
-									yield* Effect.logError(`Merge failed: ${msg}`, { error })
-									yield* toast.show("error", msg)
-								})
-							}),
-						)
-					})
-
-					// Define the skip action (attach directly without merging)
-					const onSkip = doAttach(task.id)
-
-					// Show the merge choice dialog
-					yield* overlay.push({
-						_tag: "mergeChoice",
-						message,
-						commitsBehind: branchStatus.behind,
-						baseBranch,
-						onMerge,
-						onSkip,
-					})
+					yield* doAttach(task.id)
 				})
 
 			/**

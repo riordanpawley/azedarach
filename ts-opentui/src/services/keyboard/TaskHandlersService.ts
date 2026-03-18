@@ -12,10 +12,6 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, SubscriptionRef } from "effect"
-import { IssueEditorService } from "../../core/IssueEditorService.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { COLUMNS, hasTaskSessionPresence } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
@@ -37,10 +33,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			NavigationService.Default,
 			EditorService.Default,
 			OverlayService.Default,
-			IssueTrackerClient.Default,
-			IssueEditorService.Default,
-			PRWorkflow.Default,
-			SessionManager.Default,
 			MutationQueue.Default,
 		],
 
@@ -51,12 +43,15 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const nav = yield* NavigationService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-			const issueTrackerClient = yield* IssueTrackerClient
-			const issueEditor = yield* IssueEditorService
-			const prWorkflow = yield* PRWorkflow
-			const sessionManager = yield* SessionManager
 			const mutationQueue = yield* MutationQueue
-			const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+			const daemonRpcClient = yield* DaemonRpcClient
+			const requireSessionStopRpc = (): Effect.Effect<
+				NonNullable<typeof daemonRpcClient.sessionStop>,
+				Error
+			> =>
+				Effect.fromNullable(daemonRpcClient.sessionStop).pipe(
+					Effect.orElseFail(() => new Error("Daemon sessionStop RPC is unavailable")),
+				)
 
 			const getActiveProjectPath = (): Effect.Effect<string | undefined> =>
 				SubscriptionRef.get(board.currentProjectPath).pipe(
@@ -87,16 +82,13 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				projectPath?: string,
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					if (daemonRpcClient._tag === "Some" && daemonRpcClient.value.sessionStop !== undefined) {
-						const effectiveProjectPath =
-							projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
-						yield* daemonRpcClient.value.sessionStop({
-							issueId,
-							projectPath: effectiveProjectPath,
-						})
-						return
-					}
-					yield* sessionManager.stop(issueId)
+					const sessionStop = yield* requireSessionStopRpc()
+					const effectiveProjectPath =
+						projectPath ?? (yield* getActiveProjectPath()) ?? process.cwd()
+					yield* sessionStop({
+						issueId,
+						projectPath: effectiveProjectPath,
+					})
 				}).pipe(Effect.asVoid)
 
 			const isColumnStatus = (status: string): status is (typeof COLUMNS)[number]["status"] =>
@@ -113,18 +105,12 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				Effect.gen(function* () {
 					const projectPath = yield* getActiveProjectPath()
 					if (hasSession) {
-						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
-						yield* prWorkflow
-							.cleanup({
-								issueId: taskId,
-								projectPath: process.cwd(),
-								closeIssue: false,
-							})
-							.pipe(
-								Effect.catchAll((error) => {
-									return Effect.logWarning(`Worktree cleanup failed for ${taskId}: ${error}`)
-								}),
-							)
+						yield* toast.show("info", `Stopping active session for ${taskId} before deletion...`)
+						yield* stopSessionWithPreferredRuntime(taskId, projectPath).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Session stop failed for ${taskId}: ${String(error)}`),
+							),
+						)
 					}
 
 					const deleteMutation: Mutation = {
@@ -137,85 +123,40 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* mutationQueue.enqueue(deleteMutation)
 					yield* toast.show("success", `Deleted ${taskId}`)
 					yield* nav.initialize()
-				})
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.gen(function* () {
+							const message = `Failed to delete ${taskId}: ${formatForToast(error)}`
+							yield* Effect.logError(message, { error })
+							yield* toast.show("error", message)
+						}),
+					),
+				)
 
 			const editIssue = () =>
 				Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
-
-					yield* issueEditor.editIssue(task).pipe(
-						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
-						Effect.tap(() => syncTaskFromBackend(task.id)),
-						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "ParseMarkdownError"
-										? `Invalid format: ${(error as { message: string }).message}`
-										: error._tag === "EditorError"
-											? `Editor error: ${(error as { message: string }).message}`
-											: `Failed to edit: ${error}`
-									: `Failed to edit: ${error}`
-							return Effect.gen(function* () {
-								yield* Effect.logError(`Edit issue: ${msg}`, { error })
-								yield* toast.show("error", msg)
-							})
-						}),
+					yield* toast.show(
+						"warning",
+						"Issue editor workflow is removed from TUI runtime; use daemon-backed issue mutations",
 					)
 				})
 
 			const createIssue = () =>
 				Effect.gen(function* () {
-					yield* issueEditor.createIssue().pipe(
-						Effect.flatMap((result) =>
-							Effect.gen(function* () {
-								const projectPath = yield* getActiveProjectPath()
-								const epicId = yield* nav.getDrillDownEpic()
-								let parentEpicId: string | null | undefined
-
-								if (epicId) {
-									yield* issueTrackerClient
-										.addDependency(result.id, epicId, "parent-child", projectPath)
-										.pipe(
-											Effect.tap(() => {
-												parentEpicId = epicId
-												return toast.show("success", `Created ${result.id} (added to epic)`)
-											}),
-											Effect.catchAll((error) =>
-												Effect.gen(function* () {
-													yield* Effect.logWarning(
-														`Failed to link ${result.id} to epic ${epicId}: ${error}`,
-													)
-													yield* toast.show(
-														"warning",
-														`Created ${result.id} (failed to link to epic)`,
-													)
-												}),
-											),
-										)
-								} else {
-									yield* toast.show("success", `Created ${result.id}`)
-								}
-
-								yield* syncTaskFromBackend(result.id, { parentEpicId })
-								yield* nav.jumpToTask(result.id)
-							}),
-						),
-						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "ParseMarkdownError"
-										? `Invalid format: ${(error as { message: string }).message}`
-										: error._tag === "EditorError"
-											? `Editor error: ${(error as { message: string }).message}`
-											: `Failed to create: ${error}`
-									: `Failed to create: ${error}`
-							return Effect.gen(function* () {
-								yield* Effect.logError(`Create issue: ${msg}`, { error })
-								yield* toast.show("error", msg)
-							})
-						}),
-					)
+					const epicId = yield* nav.getDrillDownEpic()
+					yield* overlay.push({
+						_tag: "create",
+						context:
+							epicId == null
+								? undefined
+								: {
+										_tag: "forkChild",
+										parentEpicId: epicId,
+										sourceTaskId: epicId,
+									},
+					})
 				})
 
 			const deleteIssue = () =>
@@ -267,7 +208,15 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						yield* mutationQueue.enqueue(updateMutation)
 						yield* toast.show("success", `Tombstoned ${task.id}`)
 						yield* nav.initialize()
-					})
+					}).pipe(
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								const message = `Failed to tombstone ${task.id}: ${formatForToast(error)}`
+								yield* Effect.logError(message, { error })
+								yield* toast.show("error", message)
+							}),
+						),
+					)
 
 					yield* overlay.push({
 						_tag: "confirm",
@@ -358,13 +307,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}
 
 					if (task.issue_type !== "epic") {
-						yield* toast.show("info", `Converting ${task.id} to epic...`)
-						const projectPath = yield* getActiveProjectPath()
-						yield* issueTrackerClient.update(task.id, { type: "epic" }, projectPath)
-						yield* board.patchTaskFromMutation(task.id, {
-							issue_type: "epic",
-							updated_at: new Date().toISOString(),
-						})
+						yield* toast.show(
+							"error",
+							`Fork failed: ${task.id} must already be an epic (daemon RPC does not support type conversion here)`,
+						)
+						return
 					}
 
 					yield* overlay.push({

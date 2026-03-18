@@ -34,17 +34,16 @@ const makeDaemonRpcClientStub = (options?: {
 const runWithQueue = <A, E>(
 	program: Effect.Effect<A, E, CommandQueueService | CommandExecutor.CommandExecutor>,
 	daemonLayer?: Layer.Layer<DaemonRpcClient, never, never>,
-): Promise<A> =>
-	Effect.runPromise(
+): Promise<A> => {
+	const daemonLayerOrDefault =
+		daemonLayer ?? Layer.succeed(DaemonRpcClient, makeDaemonRpcClientStub())
+	return Effect.runPromise(
 		program.pipe(
-			Effect.provide(
-				daemonLayer
-					? CommandQueueService.Default.pipe(Layer.provideMerge(daemonLayer))
-					: CommandQueueService.Default,
-			),
+			Effect.provide(CommandQueueService.Default.pipe(Layer.provideMerge(daemonLayerOrDefault))),
 			Effect.provide(BunContext.layer),
 		),
 	)
+}
 
 describe("CommandQueueService daemon adapter", () => {
 	it("delegates enqueue/query/cancel to daemon queue RPC when available", async () => {
@@ -184,74 +183,184 @@ describe("CommandQueueService daemon adapter", () => {
 		expect(result.afterCancel.queuedCount).toBe(0)
 	})
 
-	it("falls back to local queue when daemon queue RPC is unavailable", async () => {
+	it("fails closed when daemon queue RPC methods are unavailable", async () => {
 		let operationExecuted = false
 		const daemonLayer = Layer.succeed(DaemonRpcClient, makeDaemonRpcClientStub())
 
-		const result = await runWithQueue(
+		await expect(
+			runWithQueue(
+				Effect.gen(function* () {
+					const queue = yield* CommandQueueService
+					const taskId = "az-local-fallback"
+					const projectPath = "/tmp/local-fallback-project"
+
+					yield* queue.enqueue({
+						taskId,
+						queueKey: buildTaskQueueKey(taskId, projectPath),
+						label: "cleanup",
+						effect: Effect.sync(() => {
+							operationExecuted = true
+						}),
+					})
+				}),
+				daemonLayer,
+			),
+		).rejects.toBeTruthy()
+		expect(operationExecuted).toBe(false)
+	})
+
+	it("converges queue visibility across independent clients via daemon query", async () => {
+		const projectPath = "/tmp/daemon-queue-converge"
+		const taskId = "az-converge"
+		const queueKey = buildTaskQueueKey(taskId, projectPath)
+		let operationExecuted = false
+
+		const queueItems: Array<{
+			readonly domain: "command"
+			readonly operationId: string
+			readonly operation: string
+			readonly projectPath: string
+			readonly issueId: string | null
+			readonly dedupeKey: string | null
+			readonly payloadJson: string | null
+			readonly enqueuedAtMs: number
+			readonly startedAtMs: number | null
+			readonly finishedAtMs: number | null
+			readonly error: string | null
+			state: "queued" | "running" | "done" | "failed" | "cancelled"
+		}> = []
+
+		const daemonLayer = Layer.succeed(
+			DaemonRpcClient,
+			makeDaemonRpcClientStub({
+				queueEnqueue: (request) =>
+					Effect.sync(() => {
+						const item = {
+							domain: "command" as const,
+							operationId: `op-${queueItems.length + 1}`,
+							operation: request.operation,
+							projectPath: request.projectPath,
+							issueId: request.issueId ?? null,
+							dedupeKey: request.dedupeKey ?? null,
+							payloadJson: request.payloadJson ?? null,
+							state: "queued" as const,
+							enqueuedAtMs: Date.now(),
+							startedAtMs: null,
+							finishedAtMs: null,
+							error: null,
+						}
+						queueItems.push(item)
+						return {
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							acceptedAtMs: item.enqueuedAtMs,
+							item,
+						}
+					}),
+				queueQuery: (request) =>
+					Effect.sync(() => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						queriedAtMs: Date.now(),
+						items: queueItems.filter((item) => {
+							if (request.domain !== undefined && item.domain !== request.domain) return false
+							if (request.projectPath !== item.projectPath) return false
+							if (request.issueId !== undefined && item.issueId !== request.issueId) return false
+							return true
+						}),
+					})),
+				queueCancel: (_request) =>
+					Effect.succeed({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						cancelledAtMs: Date.now(),
+						cancelledOperationIds: [],
+					}),
+			}),
+		)
+
+		await runWithQueue(
 			Effect.gen(function* () {
 				const queue = yield* CommandQueueService
-				const taskId = "az-local-fallback"
-				const projectPath = "/tmp/local-fallback-project"
-
 				yield* queue.enqueue({
 					taskId,
-					queueKey: buildTaskQueueKey(taskId, projectPath),
-					label: "cleanup",
+					queueKey,
+					label: "sync-a",
 					effect: Effect.sync(() => {
 						operationExecuted = true
 					}),
 				})
-
-				return yield* queue.getTaskQueueInfo(taskId, projectPath)
 			}),
 			daemonLayer,
 		)
 
-		expect(operationExecuted).toBe(true)
-		expect(result.runningLabel).toBeNull()
-		expect(result.queuedCount).toBe(0)
-		expect(result.queuedLabels).toEqual([])
+		const observedFromSecondClient = await runWithQueue(
+			Effect.gen(function* () {
+				const queue = yield* CommandQueueService
+				return yield* queue.getQueueInfo(taskId, queueKey)
+			}),
+			daemonLayer,
+		)
+
+		expect(operationExecuted).toBe(false)
+		expect(observedFromSecondClient.queuedCount).toBe(1)
+		expect(observedFromSecondClient.queuedLabels).toEqual(["sync-a"])
 	})
 })
 
 describe("CommandQueueService stale recovery", () => {
-	it("recovers stale running commands", async () => {
+	it("returns false when daemon-authoritative queue has no local running command state", async () => {
+		const daemonLayer = Layer.succeed(
+			DaemonRpcClient,
+			makeDaemonRpcClientStub({
+				queueEnqueue: (_request) =>
+					Effect.succeed({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						acceptedAtMs: Date.now(),
+						item: {
+							domain: "command",
+							operationId: "op-1",
+							operation: "merge",
+							projectPath: "/tmp/project",
+							issueId: "az-stale",
+							dedupeKey: "az-stale",
+							payloadJson: null,
+							state: "queued",
+							enqueuedAtMs: Date.now(),
+							startedAtMs: null,
+							finishedAtMs: null,
+							error: null,
+						},
+					}),
+				queueQuery: (_request) =>
+					Effect.succeed({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						queriedAtMs: Date.now(),
+						items: [],
+					}),
+				queueCancel: (_request) =>
+					Effect.succeed({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						cancelledAtMs: Date.now(),
+						cancelledOperationIds: [],
+					}),
+			}),
+		)
+
 		const result = await runWithQueue(
 			Effect.gen(function* () {
 				const queue = yield* CommandQueueService
 				const taskId = "az-stale"
 
-				yield* Effect.fork(
-					queue
-						.enqueue({
-							taskId,
-							label: "merge",
-							effect: Effect.sleep(Duration.hours(1)).pipe(Effect.asVoid),
-							timeout: Duration.seconds(30),
-						})
-						.pipe(Effect.catchAll(() => Effect.void)),
-				)
-
-				yield* Effect.sleep(Duration.millis(5))
 				const before = yield* queue.getQueueInfo(taskId)
-
-				const originalNow = Date.now
-				try {
-					Date.now = () => originalNow() + Duration.toMillis(Duration.minutes(2))
-					const recovered = yield* queue.recoverStaleRunning(taskId, {
-						grace: Duration.millis(0),
-					})
-					const after = yield* queue.getQueueInfo(taskId)
-					return { before, recovered, after }
-				} finally {
-					Date.now = originalNow
-				}
+				const recovered = yield* queue.recoverStaleRunning(taskId, {
+					grace: Duration.millis(0),
+				})
+				const after = yield* queue.getQueueInfo(taskId)
+				return { before, recovered, after }
 			}),
+			daemonLayer,
 		)
 
-		expect(result.before.runningLabel).toBe("merge")
-		expect(result.recovered).toBe(true)
+		expect(result.before.runningLabel).toBeNull()
+		expect(result.recovered).toBe(false)
 		expect(result.after.runningLabel).toBeNull()
 	})
 })

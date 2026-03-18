@@ -14,7 +14,10 @@
 
 import { Effect, Stream, SubscriptionRef } from "effect"
 import { computeDependencyPhases } from "../core/dependencyPhases.js"
-import { type Issue, IssueTrackerClient } from "../core/IssueTrackerClient.js"
+import type { DependencyType, Issue } from "../core/IssueTrackerClient.js"
+import type { DaemonIssueTaskRpcClient } from "../rpc/clients/DaemonIssueTaskRpcClient.js"
+import { DaemonRpcClient } from "../rpc/DaemonRpcClient.js"
+import type { DaemonIssue } from "../rpc/DaemonRpcSchemas.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
@@ -52,24 +55,83 @@ export interface Position {
 	readonly taskIndex: number
 }
 
+type NavigationIssueRpcMethod = "issueEpicChildren" | "issueShow"
+
+const requireNavigationIssueRpcMethod = <TMethod extends NavigationIssueRpcMethod>(
+	client: DaemonIssueTaskRpcClient,
+	method: TMethod,
+): Effect.Effect<NonNullable<DaemonIssueTaskRpcClient[TMethod]>, Error> =>
+	Effect.fromNullable(client[method]).pipe(
+		Effect.orElseFail(
+			() => new Error(`Daemon RPC ${method} is unavailable for navigation drill-down`),
+		),
+	)
+
+const parseDependencyType = (value: string): DependencyType => {
+	switch (value) {
+		case "blocks":
+		case "related":
+		case "parent-child":
+		case "discovered-from":
+			return value
+		default:
+			return "related"
+	}
+}
+
+const toIssueFromDaemon = (issue: DaemonIssue): Issue => ({
+	id: issue.id,
+	title: issue.title,
+	description: issue.description,
+	status: issue.status,
+	priority: issue.priority,
+	issue_type: issue.issue_type,
+	created_at: issue.created_at,
+	updated_at: issue.updated_at,
+	closed_at: issue.closed_at ?? null,
+	assignee: issue.assignee,
+	labels: issue.labels,
+	design: issue.design,
+	notes: issue.notes,
+	acceptance: issue.acceptance,
+	estimate: issue.estimate,
+	implementations: issue.implementations,
+	dependent_count: issue.dependent_count,
+	dependency_count: issue.dependency_count,
+	dependents: issue.dependents?.map((dependency) => ({
+		id: dependency.id,
+		title: dependency.title,
+		status: dependency.status,
+		issue_type: dependency.issue_type,
+		dependency_type: parseDependencyType(dependency.dependency_type),
+	})),
+	dependencies: issue.dependencies?.map((dependency) => ({
+		id: dependency.id,
+		title: dependency.title,
+		status: dependency.status,
+		issue_type: dependency.issue_type,
+		dependency_type: parseDependencyType(dependency.dependency_type),
+	})),
+})
+
 // ============================================================================
 // Service Definition
 // ============================================================================
 
 export class NavigationService extends Effect.Service<NavigationService>()("NavigationService", {
-	dependencies: [
-		BoardService.Default,
-		DiagnosticsService.Default,
-		EditorService.Default,
-		IssueTrackerClient.Default,
-	],
+	dependencies: [BoardService.Default, DiagnosticsService.Default, EditorService.Default],
 
 	scoped: Effect.gen(function* () {
 		// Inject services
 		const board = yield* BoardService
 		const diagnostics = yield* DiagnosticsService
 		const editor = yield* EditorService
-		const issueTrackerClient = yield* IssueTrackerClient
+		const daemonRpcClient = yield* DaemonRpcClient
+		const issueEpicChildren = yield* requireNavigationIssueRpcMethod(
+			daemonRpcClient,
+			"issueEpicChildren",
+		)
+		const issueShow = yield* requireNavigationIssueRpcMethod(daemonRpcClient, "issueShow")
 
 		// Register with diagnostics - tracks service health
 		yield* diagnostics.trackService("NavigationService", "Cursor navigation and focus management")
@@ -347,39 +409,22 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 
 		const loadPersistedDrillDownState = (epicId: string) =>
 			Effect.gen(function* () {
-				const children = yield* issueTrackerClient
-					.getEpicChildren(epicId)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed([])),
-							),
+				const childrenResult = yield* issueEpicChildren({ epicId })
+				const children = childrenResult.children
+				const childIds = new Set(children.map((child) => child.id))
+				const childDetailsEntries = yield* Effect.all(
+					children.map((child) =>
+						issueShow({ issueId: child.id }).pipe(
+							Effect.map((issueResult): readonly [string, Issue] => [
+								child.id,
+								toIssueFromDaemon(issueResult.issue),
+							]),
 						),
-					)
-
-				const childIds = new Set(children.map((child: { id: string }) => child.id))
-				const childDetailsResults = yield* Effect.all(
-					children.map((child: { id: string }) =>
-						issueTrackerClient
-							.show(child.id)
-							.pipe(Effect.map((issue) => [child.id, issue] as const))
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed(null)),
-									),
-								),
-							),
 					),
 					{ concurrency: "unbounded" },
 				)
 
-				const childDetails = new Map<string, Issue>()
-				for (const result of childDetailsResults) {
-					if (result !== null) {
-						childDetails.set(result[0], result[1])
-					}
-				}
+				const childDetails = new Map<string, Issue>(childDetailsEntries)
 
 				return {
 					childIds,

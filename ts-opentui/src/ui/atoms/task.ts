@@ -8,15 +8,18 @@ import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
 import type { CliTool } from "../../config/schema.js"
-import { IssueEditorService } from "../../core/IssueEditorService.js"
-import { getIssueCreateImplementations } from "../../core/IssueImplementations.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
+import { resolveIssueCreateImplementations } from "../../core/IssueImplementations.js"
 import { stripAnsi } from "../../lib/ansi.js"
+import type { DaemonIssue, DaemonIssueStatus, DaemonIssueType } from "../../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { OverlayService } from "../../services/OverlayService.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import {
+	getRequiredDaemonDomainRpcClients,
+	type RequiredDaemonIssueTaskRpcClient,
+} from "../../services/RequiredDaemonDomainRpcClient.js"
 import { ToastService } from "../../services/ToastService.js"
 import type { TaskWithSession } from "../types.js"
 import { appRuntime } from "./runtime.js"
@@ -39,6 +42,64 @@ const decodeAIResponseJson = Schema.decode(Schema.parseJson(AITaskResponseSchema
 class AITaskCreateError extends Data.TaggedError("AITaskCreateError")<{
 	readonly message: string
 }> {}
+
+const parseDaemonIssueStatus = (status: string): DaemonIssueStatus | undefined => {
+	switch (status) {
+		case "open":
+		case "in_progress":
+		case "blocked":
+		case "closed":
+		case "tombstone":
+			return status
+		default:
+			return undefined
+	}
+}
+
+const parseDaemonIssueType = (issueType: string | undefined): DaemonIssueType | undefined => {
+	switch (issueType) {
+		case "bug":
+		case "feature":
+		case "task":
+		case "epic":
+		case "chore":
+			return issueType
+		default:
+			return undefined
+	}
+}
+
+const toBoardMutationIssue = (issue: DaemonIssue) => ({
+	id: issue.id,
+	title: issue.title,
+	description: issue.description,
+	status: issue.status,
+	priority: issue.priority,
+	issue_type: issue.issue_type,
+	created_at: issue.created_at,
+	updated_at: issue.updated_at,
+	closed_at: issue.closed_at,
+	assignee: issue.assignee,
+	labels: issue.labels,
+	design: issue.design,
+	notes: issue.notes,
+	acceptance: issue.acceptance,
+	estimate: issue.estimate,
+	implementations: issue.implementations,
+	dependent_count: issue.dependent_count,
+	dependency_count: issue.dependency_count,
+})
+
+const resolveIssueCreateImplementationsFromDaemon = (
+	issueTaskRpcClient: RequiredDaemonIssueTaskRpcClient,
+	params: { readonly requestedImplementations?: readonly string[] },
+) =>
+	Effect.gen(function* () {
+		const registryResult = yield* issueTaskRpcClient.issueImplementationRegistry()
+		return resolveIssueCreateImplementations(registryResult.registry, {
+			requestedImplementations: params.requestedImplementations,
+		})
+	})
 
 const unwrapMarkdownJson = (value: string): string => {
 	const trimmed = value.trim()
@@ -146,8 +207,18 @@ export const buildAiCreateCommand = (params: {
 export const moveTaskAtom = appRuntime.fn(
 	({ taskId, newStatus }: { taskId: string; newStatus: string }) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
-			yield* client.update(taskId, { status: newStatus })
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueUpdate = daemonRpcDomains.issueTask.issueUpdate
+			const status = parseDaemonIssueStatus(newStatus)
+			if (status === undefined) {
+				return yield* Effect.fail(
+					new Error(`Invalid task status for daemon issueUpdate: ${newStatus}`),
+				)
+			}
+			yield* issueUpdate({
+				issueId: taskId,
+				fields: { status },
+			})
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -157,9 +228,21 @@ export const moveTaskAtom = appRuntime.fn(
 export const moveTasksAtom = appRuntime.fn(
 	({ taskIds, newStatus }: { taskIds: string[]; newStatus: string }) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueUpdate = daemonRpcDomains.issueTask.issueUpdate
+			const status = parseDaemonIssueStatus(newStatus)
+			if (status === undefined) {
+				return yield* Effect.fail(
+					new Error(`Invalid task status for daemon issueUpdate: ${newStatus}`),
+				)
+			}
 			yield* Effect.all(
-				taskIds.map((id) => client.update(id, { status: newStatus })),
+				taskIds.map((id) =>
+					issueUpdate({
+						issueId: id,
+						fields: { status },
+					}),
+				),
 				{ concurrency: "unbounded" },
 			)
 		}).pipe(Effect.catchAll(Effect.logError)),
@@ -187,7 +270,9 @@ export const createTaskAtom = appRuntime.fn(
 		implementations?: readonly string[]
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueTaskRpcClient = daemonRpcDomains.issueTask
+			const issueCreate = issueTaskRpcClient.issueCreate
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
@@ -197,18 +282,21 @@ export const createTaskAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const implementations = yield* getIssueCreateImplementations({
-				requestedImplementations: params.implementations,
-				cwd: projectPath,
-			})
-			const issue = yield* client.create({
+			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+				issueTaskRpcClient,
+				{
+					requestedImplementations: params.implementations,
+				},
+			)
+			const issueCreateResult = yield* issueCreate({
 				title: params.title,
-				type: params.type,
+				type: parseDaemonIssueType(params.type),
 				priority: params.priority,
 				description: params.description,
 				implementations,
 				cwd: projectPath,
 			})
+			const issue = toBoardMutationIssue(issueCreateResult.issue)
 
 			yield* board.upsertIssueFromMutation(issue)
 			yield* navigation.jumpToTask(issue.id)
@@ -232,7 +320,10 @@ export const forkCreateChildAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueTaskRpcClient = daemonRpcDomains.issueTask
+			const issueCreate = issueTaskRpcClient.issueCreate
+			const issueUpdate = issueTaskRpcClient.issueUpdate
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
@@ -242,18 +333,25 @@ export const forkCreateChildAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const implementations = yield* getIssueCreateImplementations({
-				requestedImplementations: params.implementations,
-				cwd: projectPath,
-			})
-			const issue = yield* client.create({
+			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+				issueTaskRpcClient,
+				{
+					requestedImplementations: params.implementations,
+				},
+			)
+			const issueCreateResult = yield* issueCreate({
 				title: params.title,
-				type: params.type,
+				type: parseDaemonIssueType(params.type) ?? "task",
 				priority: params.priority,
 				implementations,
 				cwd: projectPath,
 			})
-			const linkResult = yield* client.update(issue.id, { parent: parentEpicId }, projectPath).pipe(
+			const issue = toBoardMutationIssue(issueCreateResult.issue)
+			const linkResult = yield* issueUpdate({
+				issueId: issue.id,
+				fields: { parent: parentEpicId },
+				cwd: projectPath,
+			}).pipe(
 				Effect.map(() => ({ linked: true as const })),
 				Effect.catchAll((error) =>
 					Effect.gen(function* () {
@@ -302,7 +400,10 @@ export const forkCreateEpicAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueTaskRpcClient = daemonRpcDomains.issueTask
+			const issueCreate = issueTaskRpcClient.issueCreate
+			const issueUpdate = issueTaskRpcClient.issueUpdate
 			const board = yield* BoardService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
@@ -311,37 +412,42 @@ export const forkCreateEpicAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const implementations = yield* getIssueCreateImplementations({
-				requestedImplementations: params.implementations,
-				cwd: projectPath,
-			})
-			const epic = yield* client.create({
+			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+				issueTaskRpcClient,
+				{
+					requestedImplementations: params.implementations,
+				},
+			)
+			const epicCreateResult = yield* issueCreate({
 				title: params.title,
 				type: "epic",
 				priority: params.priority,
 				implementations,
 				cwd: projectPath,
 			})
+			const epic = toBoardMutationIssue(epicCreateResult.issue)
 			yield* board.upsertIssueFromMutation(epic)
 
-			const reparentResult = yield* client
-				.update(sourceTaskId, { parent: epic.id }, projectPath)
-				.pipe(
-					Effect.map(() => ({ reparented: true as const })),
-					Effect.catchAll((error) =>
-						Effect.gen(function* () {
-							yield* Effect.logWarning(
-								`Fork create epic created ${epic.id} but failed to reparent ${sourceTaskId}: ${formatForToast(error)}`,
-							)
-							const toast = yield* ToastService
-							yield* toast.show(
-								"warning",
-								`Created epic ${epic.id} but failed to reparent ${sourceTaskId}`,
-							)
-							return { reparented: false as const }
-						}),
-					),
-				)
+			const reparentResult = yield* issueUpdate({
+				issueId: sourceTaskId,
+				fields: { parent: epic.id },
+				cwd: projectPath,
+			}).pipe(
+				Effect.map(() => ({ reparented: true as const })),
+				Effect.catchAll((error) =>
+					Effect.gen(function* () {
+						yield* Effect.logWarning(
+							`Fork create epic created ${epic.id} but failed to reparent ${sourceTaskId}: ${formatForToast(error)}`,
+						)
+						const toast = yield* ToastService
+						yield* toast.show(
+							"warning",
+							`Created epic ${epic.id} but failed to reparent ${sourceTaskId}`,
+						)
+						return { reparented: false as const }
+					}),
+				),
+			)
 
 			if (reparentResult.reparented) {
 				yield* board.patchTaskFromMutation(sourceTaskId, {
@@ -391,8 +497,11 @@ export const forkCreateEpicAtom = appRuntime.fn(
  */
 export const editIssueViaEditorAtom = appRuntime.fn((issue: TaskWithSession) =>
 	Effect.gen(function* () {
-		const editor = yield* IssueEditorService
-		yield* editor.editIssue(issue)
+		const toast = yield* ToastService
+		yield* Effect.logWarning(
+			`Issue editor flow is disabled in daemon-rpc mode; use inline task edits (${issue.id})`,
+		)
+		yield* toast.show("warning", "Issue editor is unavailable in daemon-rpc mode")
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -406,8 +515,9 @@ export const editIssueViaEditorAtom = appRuntime.fn((issue: TaskWithSession) =>
  */
 export const createIssueViaEditorAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* IssueEditorService
-		return yield* editor.createIssue()
+		const toast = yield* ToastService
+		yield* Effect.logWarning("Issue editor create flow is disabled in daemon-rpc mode")
+		yield* toast.show("warning", "Issue editor is unavailable in daemon-rpc mode")
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -416,7 +526,7 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
  *
  * Two-phase approach for reliability:
  * 1. AI tool extracts structured data (title, type, priority) from natural language
- * 2. We call tracker create directly via IssueTrackerClient
+ * 2. We create the issue via daemon issue RPC
  *
  * This avoids the unreliability of AI tools executing CLI commands and parsing free-form output.
  *
@@ -425,11 +535,13 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
  */
 export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const issueTaskRpcClient = daemonRpcDomains.issueTask
+		const issueCreate = issueTaskRpcClient.issueCreate
 		const board = yield* BoardService
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
-		const issueTrackerClient = yield* IssueTrackerClient
 		const projectService = yield* ProjectService
 		const appConfig = yield* AppConfig
 
@@ -496,16 +608,18 @@ Return ONLY the JSON object, no explanation or markdown.`
 		)
 
 		// Normalize type and priority
-		const validTypes = ["task", "bug", "feature", "chore", "epic"]
-		const taskType = validTypes.includes(parsed.type ?? "") ? parsed.type : "task"
+		const taskType = parseDaemonIssueType(parsed.type) ?? "task"
 		const priority =
 			typeof parsed.priority === "number" && parsed.priority >= 1 && parsed.priority <= 4
 				? parsed.priority
 				: 2
 
-		// Phase 2: Create the issue directly via IssueTrackerClient
-		const implementations = yield* getIssueCreateImplementations({ cwd: projectPath })
-		const createdIssue = yield* issueTrackerClient.create({
+		// Phase 2: Create the issue via daemon issue RPC
+		const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+			issueTaskRpcClient,
+			{},
+		)
+		const issueCreateResult = yield* issueCreate({
 			title: parsed.title,
 			type: taskType,
 			priority,
@@ -513,6 +627,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 			implementations,
 			cwd: projectPath,
 		})
+		const createdIssue = toBoardMutationIssue(issueCreateResult.issue)
 
 		yield* board.upsertIssueFromMutation(createdIssue)
 		yield* navigation.jumpToTask(createdIssue.id)
@@ -544,8 +659,9 @@ Return ONLY the JSON object, no explanation or markdown.`
  */
 export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const client = yield* IssueTrackerClient
-		yield* client.delete(issueId)
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const issueDelete = daemonRpcDomains.issueTask.issueDelete
+		yield* issueDelete({ issueId })
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -565,8 +681,9 @@ export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 export const epicChildrenAtom = (epicId: string) =>
 	appRuntime.fn(() =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
-			const result = yield* client.getEpicWithChildren(epicId)
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueEpicWithChildren = daemonRpcDomains.issueTask.issueEpicWithChildren
+			const result = yield* issueEpicWithChildren({ epicId })
 			return result.children
 		}).pipe(
 			Effect.catchAll((error) =>

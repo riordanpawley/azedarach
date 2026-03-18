@@ -183,7 +183,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const projectService = yield* ProjectService
 		const localIssueStore = yield* LocalIssueStore
 		const diagnostics = yield* DiagnosticsService
-		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const daemonRpcClient = yield* DaemonRpcClient
 		const serviceScope = yield* Effect.scope
 
 		yield* diagnostics.trackService("DevServerService", "Simplified dev server management")
@@ -653,77 +653,33 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return hasDevScript ? `${pm} run dev` : hasStartScript ? `${pm} run start` : `${pm} run dev`
 			})
 
-		const daemonHooks = Option.match(daemonRpcClient, {
-			onNone: () => null,
-			onSome: (client) => ({
-				status: client.devServerStatus,
-				list: client.devServerList,
-				start: client.devServerStart,
-				stop: client.devServerStop,
-			}),
+		const daemonHooks = yield* Effect.gen(function* () {
+			const status = daemonRpcClient.devServerStatus
+			const list = daemonRpcClient.devServerList
+			const start = daemonRpcClient.devServerStart
+			const stop = daemonRpcClient.devServerStop
+			if (status === undefined || list === undefined || start === undefined || stop === undefined) {
+				return yield* Effect.fail(
+					new DevServerError({
+						message:
+							"Daemon dev-server RPC is unavailable (devServerStatus/devServerList/devServerStart/devServerStop required).",
+					}),
+				)
+			}
+			return { status, list, start, stop }
 		})
 
 		const healthCheckFiber = yield* Effect.scheduleForked(
 			Schedule.spaced(`${HEALTH_CHECK_INTERVAL} millis`),
 		)(
 			Effect.gen(function* () {
-				if (daemonHooks?.list !== undefined) {
-					const projectPath = yield* getEffectiveProjectPath()
-					const daemonSnapshot = yield* daemonHooks.list({ projectPath }).pipe(
-						Effect.tap((result) => syncAllFromDaemonServers(result.servers).pipe(Effect.ignore)),
-						Effect.option,
-					)
-					if (Option.isSome(daemonSnapshot)) {
-						return
-					}
-				}
-
-				const servers = yield* SubscriptionRef.get(serversRef)
-				for (const [issueId, issueServers] of HashMap.entries(servers)) {
-					for (const [name, state] of HashMap.entries(issueServers)) {
-						// Check running servers - verify window exists and port is responding
-						if (state.status === "running" && state.tmuxSession) {
-							// Check if session and window still exist
-							const hasSession = yield* tmux.hasSession(state.tmuxSession)
-							let hasWindow = false
-							if (hasSession && state.windowName) {
-								hasWindow = yield* tmux.hasWindow(state.tmuxSession, state.windowName)
-							}
-
-							if (!hasSession || (state.windowName && !hasWindow)) {
-								// Session/window gone - mark as idle
-								if (state.port) yield* releasePort(state.port)
-								yield* updateState(issueId, name, {
-									...makeIdleState(name),
-									error: "Stopped unexpectedly",
-								})
-							} else if (state.port) {
-								// Window exists - check if port is still responding
-								const portOpen = yield* checkPortOpen(state.port)
-								if (!portOpen) {
-									// Port is down but window exists - server was stopped manually (e.g., Ctrl+C)
-									yield* updateState(issueId, name, {
-										status: "stopped",
-										error: undefined,
-									})
-								}
-							}
-						}
-
-						// Check stopped servers - detect if port comes back (manual restart)
-						if (state.status === "stopped" && state.port && state.tmuxSession) {
-							const portOpen = yield* checkPortOpen(state.port)
-							if (portOpen) {
-								// Port is back! Server was manually restarted
-								yield* updateState(issueId, name, {
-									status: "running",
-									startedAt: new Date(),
-									error: undefined,
-								})
-							}
-						}
-					}
-				}
+				const projectPath = yield* getEffectiveProjectPath()
+				yield* daemonHooks.list({ projectPath }).pipe(
+					Effect.tap((result) => syncAllFromDaemonServers(result.servers).pipe(Effect.ignore)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Dev server daemon health refresh failed: ${String(error)}`),
+					),
+				)
 			}),
 		)
 
@@ -889,101 +845,76 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 		const getServerState = (issueId: string, name: string) =>
 			Effect.gen(function* () {
-				if (daemonHooks?.status !== undefined) {
-					const projectPath = yield* getEffectiveProjectPath()
-					const daemonResult = yield* daemonHooks
-						.status({
-							issueId,
-							serverName: name,
-							projectPath,
-						})
-						.pipe(
-							Effect.tap((result) =>
-								syncIssueFromDaemonServers(issueId, [result.server]).pipe(Effect.ignore),
-							),
-							Effect.option,
-						)
-					if (Option.isSome(daemonResult)) {
-						return toLocalStateFromDaemon(daemonResult.value.server)
-					}
-				}
-				return yield* getServerStateLocal(issueId, name)
+				const projectPath = yield* getEffectiveProjectPath()
+				const daemonResult = yield* daemonHooks
+					.status({
+						issueId,
+						serverName: name,
+						projectPath,
+					})
+					.pipe(
+						Effect.tap((result) =>
+							syncIssueFromDaemonServers(issueId, [result.server]).pipe(Effect.ignore),
+						),
+					)
+				return toLocalStateFromDaemon(daemonResult.server)
 			})
 
 		const getIssueServers = (issueId: string) =>
 			Effect.gen(function* () {
-				if (daemonHooks?.list !== undefined) {
-					const projectPath = yield* getEffectiveProjectPath()
-					const daemonResult = yield* daemonHooks
-						.list({
-							issueId,
-							projectPath,
-						})
-						.pipe(
-							Effect.tap((result) =>
-								syncIssueFromDaemonServers(issueId, result.servers).pipe(Effect.ignore),
-							),
-							Effect.option,
-						)
-					if (Option.isSome(daemonResult)) {
-						let issueServers: IssueDevServersState = HashMap.empty()
-						for (const server of daemonResult.value.servers) {
-							const localState = toLocalStateFromDaemon(server)
-							if (!shouldPersistState(localState)) {
-								continue
-							}
-							issueServers = HashMap.set(issueServers, localState.name, localState)
-						}
-						return issueServers
+				const projectPath = yield* getEffectiveProjectPath()
+				const daemonResult = yield* daemonHooks
+					.list({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.tap((result) =>
+							syncIssueFromDaemonServers(issueId, result.servers).pipe(Effect.ignore),
+						),
+					)
+				let issueServers: IssueDevServersState = HashMap.empty()
+				for (const server of daemonResult.servers) {
+					const localState = toLocalStateFromDaemon(server)
+					if (!shouldPersistState(localState)) {
+						continue
 					}
+					issueServers = HashMap.set(issueServers, localState.name, localState)
 				}
-				return yield* getIssueServersLocal(issueId)
+				return issueServers
 			})
 
 		const start = (issueId: string, projectPath: string, name: string) =>
 			Effect.gen(function* () {
-				if (daemonHooks?.start !== undefined) {
-					const daemonResult = yield* daemonHooks
-						.start({
-							issueId,
-							projectPath,
-							serverName: name,
-						})
-						.pipe(
-							Effect.tap((result) =>
-								syncIssueFromDaemonServers(issueId, [result.server]).pipe(Effect.ignore),
-							),
-							Effect.option,
-						)
-					if (Option.isSome(daemonResult)) {
-						return toLocalStateFromDaemon(daemonResult.value.server)
-					}
-				}
-				return yield* startLocal(issueId, projectPath, name)
+				const daemonResult = yield* daemonHooks
+					.start({
+						issueId,
+						projectPath,
+						serverName: name,
+					})
+					.pipe(
+						Effect.tap((result) =>
+							syncIssueFromDaemonServers(issueId, [result.server]).pipe(Effect.ignore),
+						),
+					)
+				return toLocalStateFromDaemon(daemonResult.server)
 			})
 
 		const stop = (issueId: string, name: string, projectPath?: string) =>
 			Effect.gen(function* () {
-				if (daemonHooks?.stop !== undefined) {
-					const daemonProjectPath = projectPath ?? (yield* getEffectiveProjectPath())
-					const daemonResult = yield* daemonHooks
-						.stop({
-							issueId,
-							serverName: name,
-							projectPath: daemonProjectPath,
-						})
-						.pipe(
-							Effect.tap((result) =>
-								syncIssueFromDaemonServers(issueId, [result.server]).pipe(Effect.ignore),
-							),
-							Effect.option,
-						)
-					if (Option.isSome(daemonResult)) {
-						return toLocalStateFromDaemon(daemonResult.value.server)
-					}
-				}
-				yield* stopLocal(issueId, name)
-				return yield* getServerStateLocal(issueId, name)
+				const daemonProjectPath = projectPath ?? (yield* getEffectiveProjectPath())
+				const daemonResult = yield* daemonHooks
+					.stop({
+						issueId,
+						serverName: name,
+						projectPath: daemonProjectPath,
+					})
+					.pipe(
+						Effect.tap((result) =>
+							syncIssueFromDaemonServers(issueId, [result.server]).pipe(Effect.ignore),
+						),
+					)
+				return toLocalStateFromDaemon(daemonResult.server)
 			})
 
 		return {
@@ -1085,27 +1016,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				}),
 			syncState: (issueId: string, name = DEFAULT_SERVER_NAME) =>
 				Effect.gen(function* () {
-					if (daemonHooks?.status !== undefined) {
-						return yield* getServerState(issueId, name)
-					}
-
-					const s = yield* getServerState(issueId, name)
-					if (s.status === "running") {
-						const hasSession = yield* tmux.hasSession(s.tmuxSession ?? "")
-						let hasWindow = false
-						if (hasSession && s.windowName) {
-							hasWindow = yield* tmux.hasWindow(s.tmuxSession ?? "", s.windowName)
-						}
-
-						if (!hasSession || (s.windowName && !hasWindow)) {
-							if (s.port) yield* releasePort(s.port)
-							return yield* updateState(issueId, name, {
-								...makeIdleState(name),
-								error: "Stopped unexpectedly",
-							})
-						}
-					}
-					return s
+					return yield* getServerState(issueId, name)
 				}),
 		}
 	}),

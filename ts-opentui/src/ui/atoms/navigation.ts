@@ -10,8 +10,8 @@ import {
 	computeDependencyPhases,
 	type PhaseComputationResult,
 } from "../../core/dependencyPhases.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { NavigationService } from "../../services/NavigationService.js"
+import { getRequiredDaemonDomainRpcClients } from "../../services/RequiredDaemonDomainRpcClient.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -174,8 +174,9 @@ export const exitDrillDownAtom = appRuntime.fn(() =>
  */
 export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		return yield* issueTrackerClient.getEpicChildren(epicId)
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const result = yield* daemonRpcDomains.issueTask.issueEpicChildren({ epicId })
+		return result.children
 	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
 )
 
@@ -186,8 +187,9 @@ export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
  */
 export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		return yield* issueTrackerClient.show(epicId)
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const result = yield* daemonRpcDomains.issueTask.issueShow({ issueId: epicId })
+		return result.issue
 	}).pipe(
 		Effect.catchAll((e) =>
 			Effect.logError(e).pipe(

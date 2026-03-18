@@ -6,7 +6,6 @@
 
 import { Effect, SubscriptionRef } from "effect"
 import { AppConfig } from "../../config/index.js"
-import { type ImplementationRegistry, IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { SpecService } from "../../core/SpecService.js"
 import type {
 	SpecCoverageReport,
@@ -14,7 +13,12 @@ import type {
 	SpecPublishOutcome,
 } from "../../core/specTypes.js"
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../../core/specTypes.js"
+import type { DaemonImplementationRegistryResult } from "../../rpc/DaemonRpcSchemas.js"
 import { EditorService } from "../../services/EditorService.js"
+import {
+	getRequiredDaemonDomainRpcClients,
+	type RequiredDaemonIssueTaskRpcClient,
+} from "../../services/RequiredDaemonDomainRpcClient.js"
 import { appRuntime } from "./runtime.js"
 
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {
@@ -52,12 +56,14 @@ export const DEFAULT_SPEC_WORKSPACE_STATE: SpecWorkspaceState = {
 const errorMessage = (error: unknown): string =>
 	error instanceof Error ? error.message : String(error)
 
-const implementationNames = (registry: ImplementationRegistry): readonly string[] =>
+type DaemonImplementationRegistry = DaemonImplementationRegistryResult["registry"]
+
+const implementationNames = (registry: DaemonImplementationRegistry): readonly string[] =>
 	registry.implementations.map((implementation) => implementation.name)
 
 const resolveSelectedImplementation = (
 	requestedImplementation: string | null,
-	registry: ImplementationRegistry,
+	registry: DaemonImplementationRegistry,
 ): string => {
 	const availableImplementations = implementationNames(registry)
 	if (
@@ -72,13 +78,13 @@ const resolveSelectedImplementation = (
 const loadSpecWorkspaceState = ({
 	stateRef,
 	spec,
-	issueTrackerClient,
+	issueTaskRpcClient,
 	editor,
 	requestedImplementation,
 }: {
 	readonly stateRef: SubscriptionRef.SubscriptionRef<SpecWorkspaceState>
 	readonly spec: SpecService
-	readonly issueTrackerClient: IssueTrackerClient
+	readonly issueTaskRpcClient: RequiredDaemonIssueTaskRpcClient
 	readonly editor: EditorService
 	readonly requestedImplementation: string | null
 }) =>
@@ -89,7 +95,7 @@ const loadSpecWorkspaceState = ({
 			error: null,
 		}))
 
-		const registry = yield* issueTrackerClient.getImplementationRegistry()
+		const registry = (yield* issueTaskRpcClient.issueImplementationRegistry()).registry
 		const availableImplementations = implementationNames(registry)
 		const selectedImplementation = resolveSelectedImplementation(requestedImplementation, registry)
 
@@ -138,7 +144,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const spec = yield* SpecService
-		const issueTrackerClient = yield* IssueTrackerClient
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 		const editor = yield* EditorService
 		const stateRef = yield* get.result(specWorkspaceStateRefAtom)
 		const specConfig = yield* appConfig.getSpecConfig()
@@ -151,7 +157,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 		yield* loadSpecWorkspaceState({
 			stateRef,
 			spec,
-			issueTrackerClient,
+			issueTaskRpcClient: daemonRpcDomains.issueTask,
 			editor,
 			requestedImplementation: selectedImplementation,
 		})

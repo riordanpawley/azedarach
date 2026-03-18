@@ -19,6 +19,20 @@ import {
 	DaemonHealthResultSchema,
 	DaemonHeartbeatRequestSchema,
 	DaemonHeartbeatResultSchema,
+	DaemonImplementationRegistryResultSchema,
+	DaemonIssueCreateRequestSchema,
+	DaemonIssueCreateResultSchema,
+	DaemonIssueDeleteRequestSchema,
+	DaemonIssueDeleteResultSchema,
+	DaemonIssueEpicChildrenRequestSchema,
+	DaemonIssueEpicChildrenResultSchema,
+	DaemonIssueEpicWithChildrenResultSchema,
+	DaemonIssueParentEpicRequestSchema,
+	DaemonIssueParentEpicResultSchema,
+	DaemonIssueShowRequestSchema,
+	DaemonIssueShowResultSchema,
+	DaemonIssueUpdateRequestSchema,
+	DaemonIssueUpdateResultSchema,
 	DaemonLogsRequestSchema,
 	DaemonLogsResultSchema,
 	DaemonQueueCancelRequestSchema,
@@ -181,6 +195,54 @@ export const DaemonQueueCancelRpc = Rpc.make("daemonQueueCancel", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonIssueCreateRpc = Rpc.make("daemonIssueCreate", {
+	payload: DaemonIssueCreateRequestSchema,
+	success: DaemonIssueCreateResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueUpdateRpc = Rpc.make("daemonIssueUpdate", {
+	payload: DaemonIssueUpdateRequestSchema,
+	success: DaemonIssueUpdateResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueDeleteRpc = Rpc.make("daemonIssueDelete", {
+	payload: DaemonIssueDeleteRequestSchema,
+	success: DaemonIssueDeleteResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueShowRpc = Rpc.make("daemonIssueShow", {
+	payload: DaemonIssueShowRequestSchema,
+	success: DaemonIssueShowResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueEpicChildrenRpc = Rpc.make("daemonIssueEpicChildren", {
+	payload: DaemonIssueEpicChildrenRequestSchema,
+	success: DaemonIssueEpicChildrenResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueEpicWithChildrenRpc = Rpc.make("daemonIssueEpicWithChildren", {
+	payload: DaemonIssueEpicChildrenRequestSchema,
+	success: DaemonIssueEpicWithChildrenResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueParentEpicRpc = Rpc.make("daemonIssueParentEpic", {
+	payload: DaemonIssueParentEpicRequestSchema,
+	success: DaemonIssueParentEpicResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonIssueImplementationRegistryRpc = Rpc.make("daemonIssueImplementationRegistry", {
+	payload: DaemonStatusRequestSchema,
+	success: DaemonImplementationRegistryResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonEventStreamRpc = Rpc.make("daemonEventStream", {
 	payload: DaemonEventStreamRequestSchema,
 	success: DaemonEventStreamResultSchema,
@@ -211,6 +273,14 @@ export const DaemonRpcGroup = RpcGroup.make(
 	DaemonQueueEnqueueRpc,
 	DaemonQueueQueryRpc,
 	DaemonQueueCancelRpc,
+	DaemonIssueCreateRpc,
+	DaemonIssueUpdateRpc,
+	DaemonIssueDeleteRpc,
+	DaemonIssueShowRpc,
+	DaemonIssueEpicChildrenRpc,
+	DaemonIssueEpicWithChildrenRpc,
+	DaemonIssueParentEpicRpc,
+	DaemonIssueImplementationRegistryRpc,
 	DaemonEventStreamRpc,
 )
 

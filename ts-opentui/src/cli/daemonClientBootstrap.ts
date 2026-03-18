@@ -8,6 +8,10 @@ import {
 	readGlobalDaemonDiscovery,
 } from "../core/GlobalDaemonRegistry.js"
 import {
+	composeDaemonDomainRpcClients,
+	type DaemonDomainRpcClients,
+} from "../rpc/clients/DaemonDomainRpcClients.js"
+import {
 	classifyDaemonRpcClientError,
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
@@ -195,6 +199,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 }): Effect.Effect<
 	{
 		readonly client: DaemonRpcClientApi
+		readonly domains: DaemonDomainRpcClients
 		readonly discovery: GlobalDaemonDiscovery
 		readonly socketUrl: string
 		readonly startedDaemon: boolean
@@ -283,6 +288,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 				)
 				return {
 					client,
+					domains: composeDaemonDomainRpcClients(client),
 					discovery,
 					socketUrl,
 					startedDaemon,
@@ -297,6 +303,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 				)
 				return {
 					client,
+					domains: composeDaemonDomainRpcClients(client),
 					discovery,
 					socketUrl,
 					startedDaemon,

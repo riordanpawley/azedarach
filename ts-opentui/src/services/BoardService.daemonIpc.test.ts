@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
-import { Effect, Option, Ref } from "effect"
+import { Effect, Ref } from "effect"
 import type { DaemonRpcClientApi, DaemonRpcClientError } from "../rpc/DaemonRpcClient.js"
 import { DAEMON_RPC_PROTOCOL_VERSION } from "../rpc/DaemonRpcSchemas.js"
 import {
@@ -293,28 +293,12 @@ const makeDaemonRpcClientStub = (params: {
 })
 
 describe("BoardService daemon IPC signaling", () => {
-	it("no-ops when daemon rpc client is unavailable", async () => {
-		const signals = makeBoardDaemonIpcSignals({
-			daemonRpcClient: Option.none(),
-			daemonFrontendClientId: "board-ui:test",
-			nowMs: () => 1000,
-		})
-
-		await Effect.runPromise(signals.signalAttach())
-		await Effect.runPromise(signals.signalHeartbeat())
-		await Effect.runPromise(signals.signalReconnect())
-		const cursor = await Effect.runPromise(signals.consumeStreamBatch(undefined))
-		expect(cursor).toBeUndefined()
-	})
-
 	it("signals attach through daemon rpc client", async () => {
 		const attachCallsRef = await Effect.runPromise(Ref.make(0))
 		const signals = makeBoardDaemonIpcSignals({
-			daemonRpcClient: Option.some(
-				makeDaemonRpcClientStub({
-					onAttach: () => Ref.update(attachCallsRef, (count) => count + 1),
-				}),
-			),
+			daemonRpcClient: makeDaemonRpcClientStub({
+				onAttach: () => Ref.update(attachCallsRef, (count) => count + 1),
+			}),
 			daemonFrontendClientId: "board-ui:test",
 			nowMs: () => 1000,
 		})
@@ -328,24 +312,22 @@ describe("BoardService daemon IPC signaling", () => {
 		const reconnectCallsRef = await Effect.runPromise(Ref.make(0))
 		const heartbeatCallsRef = await Effect.runPromise(Ref.make(0))
 		const signals = makeBoardDaemonIpcSignals({
-			daemonRpcClient: Option.some(
-				makeDaemonRpcClientStub({
-					onReconnect: () => Ref.update(reconnectCallsRef, (count) => count + 1),
-					onHeartbeat: () =>
-						Effect.gen(function* () {
-							const callCount = yield* Ref.get(heartbeatCallsRef)
-							yield* Ref.set(heartbeatCallsRef, callCount + 1)
-							if (callCount === 0) {
-								return yield* Effect.fail(
-									new RpcClientError({
-										reason: "Protocol",
-										message: "daemon restarted",
-									}),
-								)
-							}
-						}),
-				}),
-			),
+			daemonRpcClient: makeDaemonRpcClientStub({
+				onReconnect: () => Ref.update(reconnectCallsRef, (count) => count + 1),
+				onHeartbeat: () =>
+					Effect.gen(function* () {
+						const callCount = yield* Ref.get(heartbeatCallsRef)
+						yield* Ref.set(heartbeatCallsRef, callCount + 1)
+						if (callCount === 0) {
+							return yield* Effect.fail(
+								new RpcClientError({
+									reason: "Protocol",
+									message: "daemon restarted",
+								}),
+							)
+						}
+					}),
+			}),
 			daemonFrontendClientId: "board-ui:test",
 			nowMs: () => 1000,
 		})
@@ -363,13 +345,11 @@ describe("BoardService daemon IPC signaling", () => {
 			Ref.make<ReadonlyArray<string | undefined>>([]),
 		)
 		const signals = makeBoardDaemonIpcSignals({
-			daemonRpcClient: Option.some(
-				makeDaemonRpcClientStub({
-					onSessionSnapshotRequest: (projectPath) =>
-						Ref.update(snapshotProjectPathRef, (paths) => [...paths, projectPath]),
-					onSessionSnapshot: () => Ref.update(snapshotCallsRef, (count) => count + 1),
-				}),
-			),
+			daemonRpcClient: makeDaemonRpcClientStub({
+				onSessionSnapshotRequest: (projectPath) =>
+					Ref.update(snapshotProjectPathRef, (paths) => [...paths, projectPath]),
+				onSessionSnapshot: () => Ref.update(snapshotCallsRef, (count) => count + 1),
+			}),
 			daemonFrontendClientId: "board-ui:test",
 			nowMs: () => 1000,
 			getProjectPath: () => Effect.succeed("/tmp/project-switched"),
@@ -387,11 +367,9 @@ describe("BoardService daemon IPC signaling", () => {
 		const streamCallsRef = await Effect.runPromise(Ref.make(0))
 		const observedBatchCursorRef = await Effect.runPromise(Ref.make<number | null>(null))
 		const signals = makeBoardDaemonIpcSignals({
-			daemonRpcClient: Option.some(
-				makeDaemonRpcClientStub({
-					onEventStream: () => Ref.update(streamCallsRef, (count) => count + 1),
-				}),
-			),
+			daemonRpcClient: makeDaemonRpcClientStub({
+				onEventStream: () => Ref.update(streamCallsRef, (count) => count + 1),
+			}),
 			daemonFrontendClientId: "board-ui:test",
 			nowMs: () => 1000,
 			onDaemonStreamBatch: (batch) => Ref.set(observedBatchCursorRef, batch.nextCursor),
@@ -407,20 +385,6 @@ describe("BoardService daemon IPC signaling", () => {
 })
 
 describe("resolveDaemonBoardReadModelRpc", () => {
-	it("returns none when daemon rpc client is unavailable", () => {
-		const resolved = resolveDaemonBoardReadModelRpc({
-			daemonRpcClient: Option.none(),
-		})
-		expect(Option.isNone(resolved)).toBe(true)
-	})
-
-	it("returns none when daemon rpc client has no boardReadModel operation", () => {
-		const resolved = resolveDaemonBoardReadModelRpc({
-			daemonRpcClient: Option.some(makeDaemonRpcClientStub({})),
-		})
-		expect(Option.isNone(resolved)).toBe(true)
-	})
-
 	it("returns boardReadModel rpc when client and project path are available", async () => {
 		const daemonRpcClient: DaemonRpcClientApi = {
 			...makeDaemonRpcClientStub({}),
@@ -433,13 +397,9 @@ describe("resolveDaemonBoardReadModelRpc", () => {
 				}),
 		}
 		const resolved = resolveDaemonBoardReadModelRpc({
-			daemonRpcClient: Option.some(daemonRpcClient),
+			daemonRpcClient,
 		})
-		expect(Option.isSome(resolved)).toBe(true)
-		if (Option.isNone(resolved)) {
-			throw new Error("Expected boardReadModel rpc")
-		}
-		const result = await Effect.runPromise(resolved.value({ projectPath: "/tmp/project" }))
+		const result = await Effect.runPromise(resolved({ projectPath: "/tmp/project" }))
 		expect(result.projectPath).toBe("/tmp/project")
 	})
 })

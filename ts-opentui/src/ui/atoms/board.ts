@@ -214,6 +214,17 @@ export type BoardRenderState =
 
 const EMPTY_TASKS_BY_COLUMN: readonly (readonly TaskWithSession[])[] = [[], [], [], []]
 
+const toBoardAvailabilityState = (
+	tasksResult: Result.Result<readonly (readonly TaskWithSession[])[], unknown>,
+): DrillDownBoardState => {
+	if (Result.isInterrupted(tasksResult)) {
+		return { _tag: "loading" }
+	}
+	return Result.isFailure(tasksResult)
+		? { _tag: "error", reason: "tasks_unavailable" }
+		: { _tag: "loading" }
+}
+
 export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) => {
 	// Get the child IDs for filtering
 	const childIdsResult = get(drillDownChildIdsAtom)
@@ -222,9 +233,7 @@ export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) 
 		// On failure or loading, degrade to "no drill-down" behavior.
 		const tasksResult = get(filteredTasksByColumnAtom)
 		if (!Result.isSuccess(tasksResult)) {
-			return tasksResult._tag === "Failure"
-				? { _tag: "error", reason: "tasks_unavailable" }
-				: { _tag: "loading" }
+			return toBoardAvailabilityState(tasksResult)
 		}
 		return {
 			_tag: "ready",
@@ -239,9 +248,7 @@ export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) 
 	// Get the filtered tasks
 	const tasksResult = get(filteredTasksByColumnAtom)
 	if (!Result.isSuccess(tasksResult)) {
-		return tasksResult._tag === "Failure"
-			? { _tag: "error", reason: "tasks_unavailable" }
-			: { _tag: "loading" }
+		return toBoardAvailabilityState(tasksResult)
 	}
 
 	const tasksByColumn = tasksResult.value

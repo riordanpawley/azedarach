@@ -23,6 +23,26 @@ bun run dev
 
 **Expected:** Kanban board with your linear issues organized by status.
 
+### TUI E2E Startup Smoke (tmux + PTY)
+
+```bash
+# Run just the startup smoke regression
+bun run e2e:tui:smoke
+
+# Run all TUI E2E specs
+bun run e2e:tui
+```
+
+What this validates:
+- launch in an isolated tmux/PTy session via `bun run bin/az.ts`
+- board/status bar becomes usable
+- no repeated `InterruptedException` spam appears in captured output
+- app quits cleanly on `q` without hanging
+
+Artifacts:
+- each run writes pane captures to a per-run temp directory under `/tmp/az-e2e-*/artifacts/`
+- use `*.pane.txt` (sanitized) and `*.pane.raw.txt` (raw capture) for debugging failures
+
 ### Navigation Testing
 
 | Test | Steps | Expected Result |

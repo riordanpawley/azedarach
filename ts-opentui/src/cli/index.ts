@@ -73,7 +73,8 @@ import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
 import { VCService } from "../core/VCService.js"
-import type { DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
+import type { DaemonBoardReadModelRpcClient } from "../rpc/clients/DaemonBoardReadModelRpcClient.js"
+import { DaemonRpcClient, type DaemonRpcClientApi } from "../rpc/DaemonRpcClient.js"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -154,6 +155,14 @@ const telemetryLayer =
 
 const CLI_VERSION = packageJson.version
 
+const daemonRpcClientLayer = Layer.effect(
+	DaemonRpcClient,
+	bootstrapDaemonRpcClient({
+		autoStart: false,
+		verifyReachable: true,
+	}).pipe(Effect.map((bootstrap) => bootstrap.client)),
+)
+
 const buildAppConfigLayer = (configPath: string | null) => {
 	if (configPath === null) {
 		return AppConfig.Default
@@ -215,6 +224,7 @@ const createFullCliLayer = (configPath: string | null) =>
 		PlanningService.Default,
 		SpecService.Default,
 	).pipe(
+		Layer.provideMerge(daemonRpcClientLayer),
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
@@ -230,7 +240,6 @@ const createCommandCliLayer = (configPath: string | null) =>
 		buildAppConfigLayer(configPath),
 		ProjectService.Default,
 		IssueTrackerClient.Default,
-		SessionManager.Default,
 		SpecService.Default,
 	).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
@@ -584,14 +593,14 @@ const startHandler = (args: {
 			const bootstrap = yield* bootstrapDaemonRpcClient({
 				autoStart: true,
 			})
-			if (bootstrap.client.sessionStart === undefined) {
+			if (bootstrap.domains.taskSession.sessionStart === undefined) {
 				return yield* Effect.fail(
 					new Error(
 						"Connected daemon does not support sessionStart RPC yet. Update daemon/runtime.",
 					),
 				)
 			}
-			const mutation = yield* bootstrap.client
+			const mutation = yield* bootstrap.domains.taskSession
 				.sessionStart({
 					issueId,
 					projectPath: cwd,
@@ -877,7 +886,7 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 			const bootstrap = yield* bootstrapDaemonRpcClient({
 				autoStart: true,
 			})
-			const currentStatus = yield* bootstrap.client.status().pipe(
+			const currentStatus = yield* bootstrap.domains.control.status().pipe(
 				Effect.mapError((error) =>
 					formatDaemonRpcClientFailure({
 						operation: "status",
@@ -898,7 +907,7 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 				return
 			}
 
-			yield* bootstrap.client
+			yield* bootstrap.domains.control
 				.restart({
 					projectPath: params.projectPath,
 					...(intervalMs === undefined ? {} : { intervalMs }),
@@ -1063,7 +1072,7 @@ const daemonSyncHandler = (args: {
 			client: bootstrap.client,
 			socketUrl: bootstrap.socketUrl,
 		})
-		const status = yield* bootstrap.client
+		const status = yield* bootstrap.domains.control
 			.restart({
 				projectPath: cwd,
 				...(intervalMs === undefined ? {} : { intervalMs }),
@@ -1182,7 +1191,7 @@ const formatDaemonSessionSnapshotSummaryLine = (summary: DaemonSessionSnapshotSu
 }
 
 export const getDaemonSessionSnapshotSummary = (params: {
-	readonly client: Pick<DaemonRpcClientApi, "sessionSnapshot">
+	readonly client: DaemonBoardReadModelRpcClient
 	readonly socketUrl: string
 	readonly projectPath: string
 }): Effect.Effect<Option.Option<DaemonSessionSnapshotSummary>, Error> => {
@@ -1242,7 +1251,7 @@ const formatDaemonEventStreamBatchSummaryLine = (batch: DaemonEventStreamResult)
 	`daemon stream batch: events=${batch.events.length} nextCursor=${batch.nextCursor} polledAtMs=${batch.polledAtMs}`
 
 export const consumeDaemonStatusStreamBatches = (params: {
-	readonly client: Pick<DaemonRpcClientApi, "eventStream">
+	readonly client: DaemonBoardReadModelRpcClient
 	readonly socketUrl: string
 	readonly clientId: string
 	readonly projectPath: string
@@ -1318,7 +1327,7 @@ const daemonStatusHandler = (args: {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("status"),
 		})
-		const status = yield* bootstrap.client.status().pipe(
+		const status = yield* bootstrap.domains.control.status().pipe(
 			Effect.mapError((error) =>
 				formatDaemonRpcClientFailure({
 					operation: "status",
@@ -1335,7 +1344,7 @@ const daemonStatusHandler = (args: {
 			}),
 		)
 		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
-			client: bootstrap.client,
+			client: bootstrap.domains.board,
 			socketUrl: bootstrap.socketUrl,
 			projectPath: status.sync.projectPath ?? process.cwd(),
 		}).pipe(
@@ -1361,7 +1370,7 @@ const daemonStatusHandler = (args: {
 				`daemon status watch: streaming event batches from cursor=${startCursorLabel} batchSize=${batchSize} waitMs=${waitMs}`,
 			)
 			const finalCursor = yield* consumeDaemonStatusStreamBatches({
-				client: bootstrap.client,
+				client: bootstrap.domains.board,
 				socketUrl: bootstrap.socketUrl,
 				clientId: `az-cli:daemon-status:${process.pid}`,
 				projectPath: status.sync.projectPath ?? process.cwd(),
@@ -1392,7 +1401,7 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("health"),
 		})
-		const health = yield* bootstrap.client.health().pipe(
+		const health = yield* bootstrap.domains.control.health().pipe(
 			Effect.mapError((error) =>
 				formatDaemonRpcClientFailure({
 					operation: "health",
@@ -1429,7 +1438,7 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 			client: bootstrap.client,
 			socketUrl: bootstrap.socketUrl,
 		})
-		const status = yield* bootstrap.client.stop().pipe(
+		const status = yield* bootstrap.domains.control.stop().pipe(
 			Effect.mapError((error) =>
 				formatDaemonRpcClientFailure({
 					operation: "stop",
@@ -1485,7 +1494,7 @@ const daemonRestartHandler = (args: {
 			)
 			yield* Console.log("daemon_restart: dispatch restart RPC")
 		}
-		const status = yield* bootstrap.client
+		const status = yield* bootstrap.domains.control
 			.restart({
 				projectPath: Option.getOrUndefined(args.projectDir),
 				intervalMs: Option.getOrUndefined(args.intervalMs),
@@ -1531,7 +1540,7 @@ const daemonLogsHandler = (args: {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("logs"),
 		})
-		const logResult = yield* bootstrap.client
+		const logResult = yield* bootstrap.domains.control
 			.logs({
 				projectPath: cwd,
 				lines: lineLimit,
