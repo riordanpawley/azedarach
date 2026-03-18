@@ -1,28 +1,23 @@
 import { describe, expect, it } from "bun:test"
-import { Command } from "@effect/cli"
 import { DAEMON_RPC_PROTOCOL_VERSION, type DaemonEventStreamResult } from "@azedarach/shared/rpc"
 import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Cause, Effect, Exit, Option } from "effect"
-import { AppConfig } from "../config/AppConfig.js"
-import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
-} from "./daemonClientBootstrap.js"
+} from "../../packages/cli/src/daemonClientBootstrap.js"
 import {
 	appendIssueNotes,
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
-	commandCli,
 	consumeDaemonStatusStreamBatches,
 	daemonCommandShouldAutoStart,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
-	formatDaemonControlFeedbackLine,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	formatParentChildCheckOutput,
@@ -31,17 +26,12 @@ import {
 	normalizeIssueJsonFlagOrder,
 	parseGitWorktreeListPaths,
 	resolveCliExecutionMode,
-	resolveCliLayerMode,
 	resolveStartSessionRuntimeMode,
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
-} from "./index.js"
-
-const runCommandCli = (argv: ReadonlyArray<string>) =>
-	Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(argv))), {
-		name: "Azedarach",
-		version: "test",
-	})(argv).pipe(Effect.provide(BunContext.layer))
+} from "../../packages/cli/src/index.js"
+import { AppConfig } from "../config/AppConfig.js"
+import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 
 describe("appendIssueNotes", () => {
 	it("returns appended text when existing notes are missing", () => {
@@ -352,7 +342,7 @@ describe("buildPrimeOutput", () => {
 		)
 
 		await Effect.runPromise(
-			runCommandCli([
+			cliRunner([
 				"bun",
 				"az",
 				"--config",
@@ -361,7 +351,7 @@ describe("buildPrimeOutput", () => {
 				"set",
 				"spec.enabled",
 				"false",
-			]),
+			]).pipe(Effect.provide(BunContext.layer)),
 		)
 
 		const updated = JSON.parse(await Bun.file(configPath).text()) as {
@@ -735,20 +725,6 @@ describe("resolveCliExecutionMode", () => {
 	})
 })
 
-describe("resolveCliLayerMode", () => {
-	it("uses dedicated tui-bootstrap layer for bare TUI launches", () => {
-		expect(resolveCliLayerMode("tui")).toBe("tui-bootstrap")
-	})
-
-	it("keeps dev-command mode on the full layer", () => {
-		expect(resolveCliLayerMode("dev-command")).toBe("dev-command")
-	})
-
-	it("keeps non-TUI commands on the command layer", () => {
-		expect(resolveCliLayerMode("command")).toBe("command")
-	})
-})
-
 describe("resolveStartSessionRuntimeMode", () => {
 	it("always requires daemon-rpc mode", () => {
 		const resolved = resolveStartSessionRuntimeMode()
@@ -1047,43 +1023,6 @@ describe("daemon control CLI commands", () => {
 				failure.value.message.includes("Timed out waiting for a reachable global daemon endpoint"),
 		).toBe(true)
 	}, 10_000)
-})
-
-describe("daemon control feedback formatting", () => {
-	it("includes project and interval context for start feedback", () => {
-		const line = formatDaemonControlFeedbackLine({
-			action: "started",
-			uptimeBeforeControl: Option.none(),
-			projectPath: "/tmp/project",
-			intervalMs: 120000,
-		})
-
-		expect(line).toBe(
-			"Headless backend sync daemon started successfully for /tmp/project (interval=120000ms).",
-		)
-	})
-
-	it("includes runtime duration when uptime is available", () => {
-		const line = formatDaemonControlFeedbackLine({
-			action: "restarted",
-			uptimeBeforeControl: Option.some(1000),
-			nowMs: 5_401_000,
-		})
-
-		expect(line).toBe(
-			"Headless backend sync daemon restarted successfully after running for 1h 30m.",
-		)
-	})
-
-	it("clamps negative uptime to zero seconds", () => {
-		const line = formatDaemonControlFeedbackLine({
-			action: "stopped",
-			uptimeBeforeControl: Option.some(5000),
-			nowMs: 4000,
-		})
-
-		expect(line).toBe("Headless backend sync daemon stopped successfully after running for 0s.")
-	})
 })
 
 describe("daemon session snapshot summaries", () => {
