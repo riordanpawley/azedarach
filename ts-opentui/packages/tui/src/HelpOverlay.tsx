@@ -1,0 +1,223 @@
+/**
+ * HelpOverlay component - modal showing all keybindings
+ */
+import { Result } from "@effect-atom/atom"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { appConfigAtom } from "./atoms/config.js"
+import {
+	getGitConflictToken,
+	getGitDirtyToken,
+	getIssueStatusToken,
+	getNetworkToken,
+	getPhaseToken,
+	getPrStateToken,
+	getSessionStateToken,
+	getTmuxSessionToken,
+	getWorktreeToken,
+} from "./statusTokens.js"
+import { theme } from "./theme.js"
+
+const ATTR_BOLD = 1
+
+/**
+ * Helper component for key hint lines
+ */
+const KeyLine = ({ keys, description }: { keys: string; description: string }) => (
+	<box flexDirection="row">
+		<text fg={theme.lavender}>{`  ${keys}`}</text>
+		<text fg={theme.text}>{" ".repeat(Math.max(1, 12 - keys.length)) + description}</text>
+	</box>
+)
+
+/**
+ * Helper component for symbol legend lines
+ */
+const SymbolLine = ({ token, description }: { token: string; description: string }) => (
+	<box flexDirection="row">
+		<text fg={theme.peach}>{`  ${token}`}</text>
+		<text fg={theme.text}>{" ".repeat(Math.max(1, 12 - token.length)) + description}</text>
+	</box>
+)
+
+/**
+ * Section header component
+ */
+const SectionHeader = ({ title }: { title: string }) => (
+	<text fg={theme.blue} attributes={ATTR_BOLD}>
+		{title}
+	</text>
+)
+
+/**
+ * HelpOverlay component
+ *
+ * Displays a centered modal overlay with all available keybindings
+ * grouped by category. Uses Catppuccin theme colors.
+ */
+export const HelpOverlay = () => {
+	const appConfigResult = useAtomValue(appConfigAtom)
+	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
+
+	return (
+		<box
+			position="absolute"
+			left={0}
+			right={0}
+			top={0}
+			bottom={0}
+			alignItems="center"
+			justifyContent="center"
+			backgroundColor={`${theme.crust}CC`}
+		>
+			<box
+				borderStyle="rounded"
+				border={true}
+				borderColor={theme.mauve}
+				backgroundColor={theme.base}
+				paddingLeft={2}
+				paddingRight={2}
+				paddingTop={1}
+				paddingBottom={1}
+				minWidth={60}
+				flexDirection="column"
+			>
+				{/* Header */}
+				<text fg={theme.mauve} attributes={ATTR_BOLD}>
+					{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}
+				</text>
+				<text fg={theme.mauve} attributes={ATTR_BOLD}>
+					{"  KEYBINDINGS HELP"}
+				</text>
+				<text fg={theme.mauve} attributes={ATTR_BOLD}>
+					{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}
+				</text>
+				<text> </text>
+
+				{/* Navigation section */}
+				<SectionHeader title="Navigation:" />
+				<KeyLine keys="h j k l" description="Left / Down / Up / Right" />
+				<KeyLine keys="Ctrl-d/u" description="Half page down / up" />
+				<KeyLine keys="gg" description="Go to first task" />
+				<KeyLine keys="ge" description="Go to last task" />
+				<KeyLine keys="gh" description="Go to first column" />
+				<KeyLine keys="gl" description="Go to last column" />
+				<KeyLine keys="gw" description="Jump mode (shows labels)" />
+				{specEnabled && <KeyLine keys="gs" description="Enter Spec workspace" />}
+				<text> </text>
+
+				{/* Modes section */}
+				<SectionHeader title="Modes:" />
+				<KeyLine keys="Space" description="Enter action mode (command menu)" />
+				<KeyLine keys="v" description="Enter select mode (multi-select)" />
+				<KeyLine keys="g" description="Enter goto mode (prefix)" />
+				<KeyLine keys="," description="Enter sort mode" />
+				<KeyLine keys="f" description="Enter filter mode" />
+				<KeyLine keys="/" description="Enter search mode" />
+				<text> </text>
+
+				{/* Select mode section */}
+				<SectionHeader title="Select Mode:" />
+				<KeyLine keys="a / 5" description="Toggle selection of current task" />
+				<KeyLine keys="Space" description="Enter action mode for selection" />
+				<KeyLine keys="v / q / Esc" description="Exit select mode" />
+				<text> </text>
+
+				{/* Action mode section */}
+				<SectionHeader title="Action Mode (Space+):" />
+				<KeyLine keys="s / S / Q / !" description="Start / Start+work / Question-first / Yolo" />
+				<KeyLine keys="a / A" description="Attach external / Attach inline" />
+				<KeyLine keys="p / R / x" description="Pause / Resume / Stop session" />
+				<KeyLine keys="r / C-r" description="Toggle / Restart dev server" />
+				<KeyLine keys="H" description="Open Helix editor" />
+				<KeyLine keys="h / l" description="Move task(s) left / right" />
+				<KeyLine keys="e / E" description="Edit ($EDITOR) / Edit (AI)" />
+				<KeyLine keys="i" description="Attach image" />
+				<KeyLine keys="F" description="Fork bead" />
+				<KeyLine keys="f" description="Show diff vs main" />
+				<KeyLine keys="P" description="Create PR" />
+				<KeyLine keys="m / M" description="Merge / Abort merge" />
+				<KeyLine keys="b" description="Merge bead into another bead" />
+				<KeyLine keys="u" description="Update from main" />
+				<KeyLine
+					keys="d / D / T"
+					description="Cleanup worktree + branch / Delete bead + cleanup / Tombstone bead"
+				/>
+				<text> </text>
+
+				{/* Create/Edit section */}
+				<SectionHeader title="Create & Edit:" />
+				<KeyLine keys="c / C" description="Create bead ($EDITOR / AI)" />
+				<KeyLine keys="Space+e/E" description="Edit bead ($EDITOR / AI)" />
+				<text> </text>
+
+				{/* Sort mode section */}
+				<SectionHeader title="Sort Mode (,):" />
+				<KeyLine keys="s" description="Sort by session status" />
+				<KeyLine keys="p" description="Sort by priority" />
+				<KeyLine keys="u" description="Sort by updated at" />
+				<KeyLine keys="Esc / q" description="Exit sort mode" />
+				<text> </text>
+
+				{/* Filter mode section */}
+				<SectionHeader title="Filter Mode (f):" />
+				<KeyLine keys="s/p/t/S" description="Status / Priority / Type / Session" />
+				<KeyLine keys="0-4" description="Toggle P0-P4 priority" />
+				<KeyLine keys="o/i/b/d" description="Open / In progress / Blocked / Closed" />
+				<KeyLine keys="c" description="Clear all filters" />
+				<KeyLine keys="Esc / q" description="Exit filter mode" />
+				<text> </text>
+
+				{/* Spec workspace section */}
+				{specEnabled && (
+					<>
+						<SectionHeader title="Spec Workspace (gs):" />
+						<KeyLine keys="Tab" description="Cycle Requirements/Coverage/Parity/Publish" />
+						<KeyLine keys="[ / ]" description="Change parity implementation" />
+						<KeyLine keys="Esc / q" description="Return to board view" />
+						<text> </text>
+					</>
+				)}
+
+				{/* General section */}
+				<SectionHeader title="General:" />
+				<KeyLine keys="Enter" description="Show task details / Enter epic" />
+				<KeyLine keys="Tab" description="Toggle board view (Kanban / Compact)" />
+				<KeyLine keys="a" description="Toggle VC auto-pilot" />
+				<KeyLine keys="d" description="Show diagnostics" />
+				<KeyLine keys="s" description="Show settings" />
+				<KeyLine keys="L" description="View logs" />
+				<KeyLine keys="?" description="Toggle this help screen" />
+				<KeyLine keys="q" description="Quit (or exit drill-down)" />
+				<KeyLine keys="Esc" description="Back to normal mode / dismiss" />
+				<text> </text>
+
+				{/* Symbol legend section */}
+				<SectionHeader title="Symbol Legend:" />
+				<SymbolLine token={getIssueStatusToken("open")} description="Issue open" />
+				<SymbolLine token={getIssueStatusToken("in_progress")} description="Issue in progress" />
+				<SymbolLine token={getIssueStatusToken("blocked")} description="Issue blocked" />
+				<SymbolLine token={getIssueStatusToken("closed")} description="Issue closed" />
+				<SymbolLine token={getSessionStateToken("busy")} description="Session busy" />
+				<SymbolLine token={getSessionStateToken("waiting")} description="Session waiting input" />
+				<SymbolLine token={getSessionStateToken("done")} description="Session done" />
+				<SymbolLine token={getPrStateToken("open")} description="PR open" />
+				<SymbolLine token={getPrStateToken("draft")} description="PR draft" />
+				<SymbolLine token={getPrStateToken("merged")} description="PR merged" />
+				<SymbolLine token={getGitDirtyToken()} description="Worktree has uncommitted changes" />
+				<SymbolLine token="G:Bn/G:↓n" description="Git behind base by n commits" />
+				<SymbolLine token={getGitConflictToken()} description="Git merge conflict present" />
+				<SymbolLine token={getTmuxSessionToken()} description="Issue tmux session exists" />
+				<SymbolLine token={getWorktreeToken()} description="Worktree exists (idle task)" />
+				<SymbolLine token={getPhaseToken("planning")} description="Agent planning phase" />
+				<SymbolLine token={getPhaseToken("action")} description="Agent action phase" />
+				<SymbolLine token={getPhaseToken("verification")} description="Agent verification phase" />
+				<SymbolLine token={getNetworkToken(true)} description="Network connected" />
+				<SymbolLine token={getNetworkToken(false)} description="Network disconnected" />
+				<text> </text>
+
+				{/* Footer */}
+				<text fg={theme.subtext0}>{"Press Esc or q to dismiss..."}</text>
+			</box>
+		</box>
+	)
+}

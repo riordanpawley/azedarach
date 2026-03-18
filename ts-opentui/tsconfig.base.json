@@ -3,6 +3,11 @@
 		"target": "ESNext",
 		"module": "ESNext",
 		"moduleResolution": "bundler",
+		"baseUrl": ".",
+		"paths": {
+			"@azedarach/shared": ["packages/shared/src/index.ts"],
+			"@azedarach/shared/*": ["packages/shared/src/*"]
+		},
 		"strict": true,
 		"skipLibCheck": true,
 		"esModuleInterop": true,

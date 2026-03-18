@@ -1,2 +1,1 @@
-export { DiffViewer } from "./DiffViewer.js"
-export type { ChangedFile, PickerMode } from "./types.js"
+export * from "../../../packages/tui/src/DiffViewer/index.js"

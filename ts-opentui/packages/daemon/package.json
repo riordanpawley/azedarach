@@ -2,6 +2,9 @@
 	"name": "@azedarach/daemon",
 	"private": true,
 	"type": "module",
+	"dependencies": {
+		"@azedarach/shared": "workspace:*"
+	},
 	"scripts": {
 		"type-check": "tsc --noEmit -p tsconfig.json"
 	}

@@ -6,47 +6,92 @@ cd "$repo_root"
 
 fail=0
 
+scan_globs=(
+	'*.ts'
+	'*.tsx'
+	'*.js'
+	'*.mjs'
+	'*.mts'
+	'*.cts'
+)
+
+print_violations() {
+	local label="$1"
+	shift
+
+	local violations=("$@")
+
+	printf 'Boundary violations in %s:\n' "$label" >&2
+	printf '  The following imports are not allowed here:\n' >&2
+	printf '  %s\n' "${violations[@]}" >&2
+}
+
 check_forbidden_imports() {
 	local package_dir="$1"
 	shift
 	local label="$1"
 	shift
 
-	local patterns=("$@")
-	local hits=()
+	local rules=("$@")
+	local violations=()
 
 	if [[ ! -d "$package_dir" ]]; then
 		return
 	fi
 
-	for pattern in "${patterns[@]}"; do
+	for rule in "${rules[@]}"; do
+		local pattern="${rule%%:::*}"
+		local message="${rule#*:::}"
+		local hits=()
+
 		while IFS= read -r hit; do
 			[[ -n "$hit" ]] && hits+=("$hit")
-		done < <(rg -n --glob '*.ts' --glob '*.tsx' --glob '*.js' --glob '*.mjs' --glob '*.mts' --glob '*.cts' "$pattern" "$package_dir" || true)
+		done < <(
+			rg -n --no-heading --glob '!**/node_modules/**' \
+				--glob "${scan_globs[0]}" \
+				--glob "${scan_globs[1]}" \
+				--glob "${scan_globs[2]}" \
+				--glob "${scan_globs[3]}" \
+				--glob "${scan_globs[4]}" \
+				--glob "${scan_globs[5]}" \
+				"$pattern" "$package_dir" || true
+		)
+
+		if ((${#hits[@]} > 0)); then
+			violations+=("  - ${message}")
+			for hit in "${hits[@]}"; do
+				violations+=("    ${hit}")
+			done
+		fi
 	done
 
-	if ((${#hits[@]} > 0)); then
-		printf 'Boundary violations in %s:\n' "$label" >&2
-		printf '  %s\n' "${hits[@]}" >&2
+	if ((${#violations[@]} > 0)); then
+		print_violations "$label" "${violations[@]}"
 		fail=1
 	fi
 }
 
+check_forbidden_imports "src" "src" \
+	'@azedarach/(daemon|tui):::Import workspace packages through the local source tree or the public facade instead of a package alias.'
+
+check_forbidden_imports "bin" "bin" \
+	'@azedarach/(daemon|tui):::Import workspace packages through the local source tree or the public facade instead of a package alias.'
+
 check_forbidden_imports "packages/tui/src" "packages/tui" \
-	'packages/(cli|daemon)/' \
-	'@azedarach/(cli|daemon)'
+	'packages/(cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+	'@azedarach/(cli|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/cli/src" "packages/cli" \
-	'packages/(tui|daemon)/' \
-	'@azedarach/(tui|daemon)'
+	'packages/(tui|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+	'@azedarach/(tui|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/daemon/src" "packages/daemon" \
-	'packages/(tui|cli)/' \
-	'@azedarach/(tui|cli)'
+	'packages/(tui|cli)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+	'@azedarach/(tui|cli):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/shared/src" "packages/shared" \
-	'packages/(tui|cli|daemon)/' \
-	'@azedarach/(tui|cli|daemon)'
+	'packages/(tui|cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+	'@azedarach/(tui|cli|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 if ((fail != 0)); then
 	exit 1

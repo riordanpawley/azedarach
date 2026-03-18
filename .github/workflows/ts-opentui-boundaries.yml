@@ -8,7 +8,7 @@ on:
 
 jobs:
   boundary-check:
-    name: Type-check and package boundaries
+    name: Lint, type-check, and package boundaries
     runs-on: ubuntu-latest
 
     steps:
@@ -23,6 +23,10 @@ jobs:
       - name: Install dependencies
         working-directory: ts-opentui
         run: bun install --frozen-lockfile
+
+      - name: Lint
+        working-directory: ts-opentui
+        run: bun run lint
 
       - name: Type-check
         working-directory: ts-opentui

@@ -34,6 +34,48 @@
 			}
 		}
 	},
+	"overrides": [
+		{
+			"includes": ["src/**", "bin/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"paths": {
+									"@azedarach/daemon": "Import workspace packages through the local source tree or the public facade instead of a package alias.",
+									"@azedarach/tui": "Import workspace packages through the local source tree or the public facade instead of a package alias."
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"includes": ["packages/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"paths": {
+									"@azedarach/cli": "Import sibling package source through the public facade or the local package source instead of a package alias.",
+									"@azedarach/daemon": "Import sibling package source through the public facade or the local package source instead of a package alias.",
+									"@azedarach/tui": "Import sibling package source through the public facade or the local package source instead of a package alias.",
+									"packages/cli/src": "Import sibling package source through the public facade or the local package source instead of a direct package path.",
+									"packages/daemon/src": "Import sibling package source through the public facade or the local package source instead of a direct package path.",
+									"packages/tui/src": "Import sibling package source through the public facade or the local package source instead of a direct package path."
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	],
 	"formatter": {
 		"enabled": true,
 		"indentStyle": "tab",

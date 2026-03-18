@@ -518,7 +518,7 @@ const defaultHandler = (args: {
 		yield* validateIssueTrackerStore(cwd)
 
 		// Launch TUI
-		const { launchTUI } = yield* Effect.promise(() => import("../../../packages/tui/src/launch.js"))
+		const { launchTUI } = yield* Effect.promise(() => import("../../../src/ui/launch.js"))
 		yield* Effect.promise(() => launchTUI())
 	})
 
