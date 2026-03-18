@@ -1,10 +1,1 @@
-/**
- * Reusable UI components
- */
-
-export {
-	calculateVisibleWindow,
-	VirtualList,
-	type VirtualListProps,
-	VirtualListWithPosition,
-} from "./VirtualList.js"
+export * from "../../../packages/tui/src/components/index.js"
