@@ -8,7 +8,6 @@
 import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { getRequiredDaemonDomainRpcClients } from "../../services/RequiredDaemonDomainRpcClient.js"
@@ -41,8 +40,8 @@ const isSyntheticTmuxDisappearance = (update: {
 export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
-		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 
 		yield* monitor.start((update) =>
 			Effect.gen(function* () {
@@ -51,19 +50,24 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 
 				if (!isSyntheticTmuxDisappearance(update)) {
 					// Hook/tmux status is authoritative; stamp hook recency for PTY priority window.
-					yield* ptyMonitor.recordHookSignal(
-						update.issueId,
-						mapTmuxStatusToSessionState(update.status),
-					)
-				}
+					const state = mapTmuxStatusToSessionState(update.status)
+					yield* ptyMonitor.recordHookSignal(update.issueId, state)
 
-				// Pass full session metadata for orphan recovery.
-				yield* manager.updateStateFromTmux(update.issueId, update.status, {
-					sessionName: update.sessionName,
-					createdAt: update.createdAt,
-					worktreePath: update.worktreePath,
-					projectPath: update.projectPath,
-				})
+					// Keep daemon session read-model aligned with live hook/tmux state.
+					yield* daemonRpcDomains.taskSession
+						.sessionUpdateState({
+							issueId: update.issueId,
+							state,
+							projectPath: update.projectPath ?? process.cwd(),
+						})
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							),
+						)
+				}
 			}).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
