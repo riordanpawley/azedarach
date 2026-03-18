@@ -187,7 +187,6 @@ const buildAppConfigLayer = (configPath: string | null) => {
  */
 const createFullCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
-		daemonRpcClientLayer,
 		BackendDaemonControlService.Default,
 		BackendSyncDaemonService.Default,
 		MutationQueue.Default,
@@ -225,6 +224,7 @@ const createFullCliLayer = (configPath: string | null) =>
 		PlanningService.Default,
 		SpecService.Default,
 	).pipe(
+		Layer.provideMerge(daemonRpcClientLayer),
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
@@ -7620,7 +7620,6 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 		}
 	})()
 	return runEffect.pipe(
-		Effect.provide(daemonRpcClientLayer),
 		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Effect.provide(Logger.minimumLogLevel(minimumLogLevel)),
 	)

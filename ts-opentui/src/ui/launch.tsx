@@ -238,9 +238,6 @@ export async function launchTUI(): Promise<void> {
 	})
 
 	root.render(<App launchStartedAtMs={launchStartedAtMs} />)
-	void (await waitForShutdownCompletion({
-		completion: shutdownComplete,
-		timeoutMs: SHUTDOWN_COMPLETE_TIMEOUT_MS,
-		diagnostics,
-	}))
+	// Keep the TUI process alive until a real shutdown signal resolves teardown.
+	await shutdownComplete
 }
