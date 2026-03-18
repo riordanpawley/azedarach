@@ -14,11 +14,8 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { BackendDaemonService } from "../../core/BackendDaemonService.js"
 import { BackendSyncDaemonService } from "../../core/BackendSyncDaemonService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
-import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { PlanningService } from "../../core/PlanningService.js"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { SpecService } from "../../core/SpecService.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { TerminalService } from "../../core/TerminalService.js"
@@ -76,14 +73,11 @@ const coreServicesLayer = Layer.mergeAll(
 	BoardService.Default,
 	ClockService.Default,
 	TmuxService.Default,
-	IssueEditorService.Default,
-	PRWorkflow.Default,
 	TerminalService.Default,
 	EditorService.Default,
 	KeyboardService.Default,
 	ToastService.Default,
 	NavigationService.Default,
-	SessionManager.Default,
 	AppConfig.Default,
 	ViewService.Default,
 	CommandQueueService.Default,

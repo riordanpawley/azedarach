@@ -25,7 +25,6 @@ import type { DevServerHandlersService } from "./DevServerHandlersService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
-import type { PRHandlersService } from "./PRHandlersService.js"
 import type { SessionHandlersService } from "./SessionHandlersService.js"
 import type { TaskHandlersService } from "./TaskHandlersService.js"
 import type { Keybinding } from "./types.js"
@@ -44,7 +43,6 @@ export interface BindingContext {
 	// Handler services
 	sessionHandlers: SessionHandlersService
 	taskHandlers: TaskHandlersService
-	prHandlers: PRHandlersService
 	inputHandlers: InputHandlersService
 	orchestrateHandlers: OrchestrateHandlersService
 	devServerHandlers: DevServerHandlersService
@@ -89,7 +87,7 @@ export interface BindingContext {
  * These modes use the same navigation bindings - moving cursor around the board.
  * Orchestrate mode is excluded because it has its own linear navigation.
  */
-const BOARD_NAV_MODES = ["normal", "select", "mergeSelect"] as const
+const BOARD_NAV_MODES = ["normal", "select"] as const
 
 const tmuxUnavailableMessage = (label: string): string => `${label} is unavailable outside tmux`
 
@@ -657,62 +655,6 @@ done
 		),
 	},
 	{
-		key: "S-p",
-		mode: "action",
-		description: "Create PR",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.createPR())),
-		),
-	},
-	{
-		key: "S-o",
-		mode: "action",
-		description: "Open PR",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.openPR())),
-		),
-	},
-	{
-		key: "d",
-		mode: "action",
-		description: "Cleanup worktree + branch",
-		action: Effect.suspend(() =>
-			bc.prHandlers.cleanup().pipe(Effect.ensuring(bc.editor.exitToNormal())),
-		),
-	},
-	{
-		key: "m",
-		mode: "action",
-		description: "Merge",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.merge())),
-		),
-	},
-	{
-		key: "S-m",
-		mode: "action",
-		description: "Abort merge",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
-		),
-	},
-	{
-		key: "f",
-		mode: "action",
-		description: "Diff menu",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
-		),
-	},
-	{
-		key: "u",
-		mode: "action",
-		description: "Update from main",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
-		),
-	},
-	{
 		key: "S-d",
 		mode: "action",
 		description: "Delete bead + cleanup",
@@ -751,12 +693,6 @@ done
 				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startHelixSession())),
 			),
 		),
-	},
-	{
-		key: "b",
-		mode: "action",
-		description: "Merge bead into...",
-		action: Effect.suspend(() => bc.prHandlers.enterMergeSelect()),
 	},
 
 	// ========================================================================
@@ -1275,33 +1211,5 @@ done
 		action: bc.orchestrateHandlers
 			.enterFromDetail()
 			.pipe(Effect.catchAll(Effect.logError), Effect.asVoid),
-	},
-
-	// ========================================================================
-	// Merge Select Mode (navigation handled by BOARD_NAV_MODES)
-	// ========================================================================
-	{
-		key: "space",
-		mode: "mergeSelect",
-		description: "Confirm merge",
-		action: Effect.suspend(() => bc.prHandlers.confirmMergeSelect()),
-	},
-	{
-		key: "return",
-		mode: "mergeSelect",
-		description: "Confirm merge",
-		action: Effect.suspend(() => bc.prHandlers.confirmMergeSelect()),
-	},
-	{
-		key: "escape",
-		mode: "mergeSelect",
-		description: "Cancel",
-		action: Effect.suspend(() => bc.prHandlers.cancelMergeSelect()),
-	},
-	{
-		key: "q",
-		mode: "mergeSelect",
-		description: "Cancel",
-		action: Effect.suspend(() => bc.prHandlers.cancelMergeSelect()),
 	},
 ]

@@ -8,7 +8,6 @@ import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
 import type { CliTool } from "../../config/schema.js"
-import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { resolveIssueCreateImplementations } from "../../core/IssueImplementations.js"
 import { stripAnsi } from "../../lib/ansi.js"
 import type { DaemonIssue, DaemonIssueStatus, DaemonIssueType } from "../../rpc/DaemonRpcSchemas.js"
@@ -498,8 +497,11 @@ export const forkCreateEpicAtom = appRuntime.fn(
  */
 export const editIssueViaEditorAtom = appRuntime.fn((issue: TaskWithSession) =>
 	Effect.gen(function* () {
-		const editor = yield* IssueEditorService
-		yield* editor.editIssue(issue)
+		const toast = yield* ToastService
+		yield* Effect.logWarning(
+			`Issue editor flow is disabled in daemon-rpc mode; use inline task edits (${issue.id})`,
+		)
+		yield* toast.show("warning", "Issue editor is unavailable in daemon-rpc mode")
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -513,8 +515,9 @@ export const editIssueViaEditorAtom = appRuntime.fn((issue: TaskWithSession) =>
  */
 export const createIssueViaEditorAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* IssueEditorService
-		return yield* editor.createIssue()
+		const toast = yield* ToastService
+		yield* Effect.logWarning("Issue editor create flow is disabled in daemon-rpc mode")
+		yield* toast.show("warning", "Issue editor is unavailable in daemon-rpc mode")
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

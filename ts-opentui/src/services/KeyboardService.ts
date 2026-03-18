@@ -22,7 +22,6 @@ import { DevServerHandlersService } from "./keyboard/DevServerHandlersService.js
 import { InputHandlersService } from "./keyboard/InputHandlersService.js"
 import { KeyboardHelpersService } from "./keyboard/KeyboardHelpersService.js"
 import { OrchestrateHandlersService } from "./keyboard/OrchestrateHandlersService.js"
-import { PRHandlersService } from "./keyboard/PRHandlersService.js"
 import { SessionHandlersService } from "./keyboard/SessionHandlersService.js"
 import { TaskHandlersService } from "./keyboard/TaskHandlersService.js"
 import type { Keybinding, KeyMode } from "./keyboard/types.js"
@@ -56,7 +55,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		KeyboardHelpersService.Default,
 		SessionHandlersService.Default,
 		TaskHandlersService.Default,
-		PRHandlersService.Default,
 		InputHandlersService.Default,
 		OrchestrateHandlersService.Default,
 		DevServerHandlersService.Default,
@@ -79,7 +77,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const helpers = yield* KeyboardHelpersService
 		const sessionHandlers = yield* SessionHandlersService
 		const taskHandlers = yield* TaskHandlersService
-		const prHandlers = yield* PRHandlersService
 		const inputHandlers = yield* InputHandlersService
 		const orchestrateHandlers = yield* OrchestrateHandlersService
 		const devServerHandlers = yield* DevServerHandlersService
@@ -111,7 +108,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			// Handler services
 			sessionHandlers,
 			taskHandlers,
-			prHandlers,
 			inputHandlers,
 			orchestrateHandlers,
 			devServerHandlers,

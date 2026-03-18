@@ -12,11 +12,10 @@
  */
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"
-import { Effect, Option } from "effect"
+import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
 import {
 	getIssueSessionName,
 	getWorktreePath,
@@ -54,7 +53,6 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			WorktreeSessionService.Default,
 			WorktreeManager.Default,
 			AppConfig.Default,
-			PRWorkflow.Default,
 			OverlayService.Default,
 			BoardService.Default,
 		],
@@ -69,11 +67,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const worktreeSession = yield* WorktreeSessionService
 			const worktreeManager = yield* WorktreeManager
 			const appConfig = yield* AppConfig
-			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
 			const boardService = yield* BoardService
 			const daemonRpcClient = yield* DaemonRpcClient
-			const gitConfig = yield* appConfig.getGitConfig()
 
 			const startSessionWithPreferredRuntime = (options: {
 				readonly issueId: string
@@ -673,80 +669,7 @@ Delete the duplicate worktree and retry?`
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
-					// Get current project path
-					const projectPath = yield* helpers.getProjectPath()
-
-					// Check if branch is behind its base branch (epic branch for children, main for others)
-					const branchStatus = yield* prWorkflow
-						.checkBranchBehindBase({ issueId: task.id, projectPath })
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(error).pipe(
-									Effect.zipRight(
-										Effect.succeed({
-											behind: 0,
-											ahead: 0,
-											baseBranch: task.parentEpicId ?? gitConfig.baseBranch,
-										}),
-									),
-								),
-							),
-						)
-
-					// If not behind, just attach directly
-					if (branchStatus.behind === 0) {
-						yield* doAttach(task.id)
-						return
-					}
-
-					// If merge already in progress (MERGE_HEAD exists), skip merge choice
-					// and attach directly - user is likely resuming conflict resolution
-					if (task.hasMergeConflict) {
-						yield* toast.show("info", "Merge in progress - attaching directly")
-						yield* doAttach(task.id)
-						return
-					}
-
-					// Branch is behind - show merge choice dialog
-					const baseBranch = branchStatus.baseBranch
-					const message = `Merge ${baseBranch} into your branch before attaching?`
-
-					// Define the merge action (merge base branch, then attach)
-					const onMerge = Effect.gen(function* () {
-						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
-						yield* prWorkflow.mergeBaseIntoBranch({ issueId: task.id, projectPath }).pipe(
-							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
-							Effect.tap(() => boardService.refresh()),
-							Effect.tap(() => doAttach(task.id)),
-							Effect.catchAll((error) => {
-								// MergeConflictError means Claude was started to resolve
-								const errorObj = error && typeof error === "object" ? error : {}
-								const msg =
-									"_tag" in errorObj
-										? errorObj._tag === "MergeConflictError"
-											? String("message" in errorObj ? errorObj.message : "Conflicts detected")
-											: String("message" in errorObj ? errorObj.message : error)
-										: String(error)
-								return Effect.gen(function* () {
-									yield* Effect.logError(`Merge failed: ${msg}`, { error })
-									yield* toast.show("error", msg)
-								})
-							}),
-						)
-					})
-
-					// Define the skip action (attach directly without merging)
-					const onSkip = doAttach(task.id)
-
-					// Show the merge choice dialog
-					yield* overlay.push({
-						_tag: "mergeChoice",
-						message,
-						commitsBehind: branchStatus.behind,
-						baseBranch,
-						onMerge,
-						onSkip,
-					})
+					yield* doAttach(task.id)
 				})
 
 			/**
