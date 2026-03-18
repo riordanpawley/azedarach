@@ -11,8 +11,6 @@ import { Effect, Layer, Logger } from "effect"
 import { bootstrapDaemonRpcClient } from "../../cli/daemonClientBootstrap.js"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import { BackendDaemonService } from "../../core/BackendDaemonService.js"
-import { BackendSyncDaemonService } from "../../core/BackendSyncDaemonService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PlanningService } from "../../core/PlanningService.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
@@ -64,8 +62,6 @@ export const resolveTuiRuntimeModeFromEnv = (
 
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
-	BackendDaemonService.Default,
-	BackendSyncDaemonService.Default,
 	SessionService.Default,
 	AttachmentService.Default,
 	OverlayService.Default,

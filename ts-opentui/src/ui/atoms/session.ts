@@ -9,8 +9,8 @@ import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
+import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { ProjectService } from "../../services/ProjectService.js"
-import { getRequiredDaemonDomainRpcClients } from "../../services/RequiredDaemonDomainRpcClient.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -41,7 +41,11 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
 		const ptyMonitor = yield* PTYMonitor
-		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const projectService = yield* ProjectService
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		const currentProjectPath = yield* projectService.getCurrentPath()
+		const sessionUpdateState =
+			daemonRpcClient._tag === "Some" ? daemonRpcClient.value.sessionUpdateState : undefined
 
 		yield* monitor.start((update) =>
 			Effect.gen(function* () {
@@ -50,24 +54,21 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 
 				if (!isSyntheticTmuxDisappearance(update)) {
 					// Hook/tmux status is authoritative; stamp hook recency for PTY priority window.
-					const state = mapTmuxStatusToSessionState(update.status)
-					yield* ptyMonitor.recordHookSignal(update.issueId, state)
-
-					// Keep daemon session read-model aligned with live hook/tmux state.
-					yield* daemonRpcDomains.taskSession
-						.sessionUpdateState({
-							issueId: update.issueId,
-							state,
-							projectPath: update.projectPath ?? process.cwd(),
-						})
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.void),
-								),
-							),
-						)
+					yield* ptyMonitor.recordHookSignal(
+						update.issueId,
+						mapTmuxStatusToSessionState(update.status),
+					)
 				}
+
+				if (sessionUpdateState === undefined) {
+					return
+				}
+
+				yield* sessionUpdateState({
+					issueId: update.issueId,
+					state: update.status,
+					projectPath: update.projectPath ?? currentProjectPath ?? process.cwd(),
+				})
 			}).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
@@ -114,11 +115,18 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
-		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-		const session = yield* daemonRpcDomains.taskSession
+		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
+
+		if (sessionRpc === undefined || sessionRpc.sessionStart === undefined) {
+			yield* Effect.fail(new Error("Daemon RPC client unavailable for session start"))
+			return
+		}
+
+		const session = yield* sessionRpc
 			.sessionStart({
 				issueId,
 				projectPath,
@@ -136,10 +144,16 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectService = yield* ProjectService
-		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
-		yield* daemonRpcDomains.taskSession.sessionPause({
+		if (sessionRpc === undefined || sessionRpc.sessionPause === undefined) {
+			yield* Effect.fail(new Error("Daemon RPC client unavailable for session pause"))
+			return
+		}
+
+		yield* sessionRpc.sessionPause({
 			issueId,
 			projectPath,
 		})
@@ -152,10 +166,16 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectService = yield* ProjectService
-		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
-		yield* daemonRpcDomains.taskSession.sessionResume({
+		if (sessionRpc === undefined || sessionRpc.sessionResume === undefined) {
+			yield* Effect.fail(new Error("Daemon RPC client unavailable for session resume"))
+			return
+		}
+
+		yield* sessionRpc.sessionResume({
 			issueId,
 			projectPath,
 		})
@@ -171,13 +191,19 @@ export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
-		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		// Unregister from PTYMonitor first (before session is stopped)
 		yield* ptyMonitor.unregisterSession(issueId)
 
-		yield* daemonRpcDomains.taskSession.sessionStop({
+		if (sessionRpc === undefined || sessionRpc.sessionStop === undefined) {
+			yield* Effect.fail(new Error("Daemon RPC client unavailable for session stop"))
+			return
+		}
+
+		yield* sessionRpc.sessionStop({
 			issueId,
 			projectPath,
 		})
