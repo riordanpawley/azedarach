@@ -66,9 +66,12 @@ fd "filename" -t f src docs
 
 ```text
 ts-opentui/
-├── src/ui/          # OpenTUI + React components
-├── src/core/        # Effect-backed core services
-├── src/services/    # App-level orchestration
+├── packages/
+│   ├── shared/      # Canonical daemon RPC contracts/client
+│   ├── daemon/      # Canonical daemon runtime/services
+│   ├── tui/         # Canonical TUI runtime/launch
+│   └── cli/         # Canonical CLI runtime/commands
+├── src/             # Transitional compatibility shims + remaining app modules
 ├── src/config/      # config + schema
 └── docs/spec/       # behavior specification
 ```
