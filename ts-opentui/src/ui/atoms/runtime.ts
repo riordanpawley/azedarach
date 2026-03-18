@@ -51,73 +51,9 @@ const platformLayer = BunContext.layer
 
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
 const loggerLayer = Logger.replaceScoped(Logger.defaultLogger, fileLogger)
-const thinClientBoundaryUnavailable = (
-    service: "SessionManager" | "PRWorkflow" | "IssueEditorService",
-    method: string,
-): Effect.Effect<never> =>
-    Effect.dieMessage(
-        `Thin client boundary violation: ${service}.${method} is unavailable in daemon-rpc runtime mode.`,
-    )
-
-const sessionManagerBoundaryService: SessionManager = {
-    _tag: "SessionManager",
-    start: (_options: unknown) => thinClientBoundaryUnavailable("SessionManager", "start"),
-    stop: (_issueId: unknown) => thinClientBoundaryUnavailable("SessionManager", "stop"),
-    pause: (_issueId: unknown) => thinClientBoundaryUnavailable("SessionManager", "pause"),
-    resume: (_issueId: unknown) => thinClientBoundaryUnavailable("SessionManager", "resume"),
-    recoverSession: (_issueId: unknown) =>
-        thinClientBoundaryUnavailable("SessionManager", "recoverSession"),
-    getState: (_issueId: unknown) => thinClientBoundaryUnavailable("SessionManager", "getState"),
-    listActive: () => thinClientBoundaryUnavailable("SessionManager", "listActive"),
-    updateState: (_issueId: unknown, _newState: unknown) =>
-        thinClientBoundaryUnavailable("SessionManager", "updateState"),
-    updateStateFromTmux: (_issueId: unknown, _status: unknown, _sessionMeta?: unknown) =>
-        thinClientBoundaryUnavailable("SessionManager", "updateStateFromTmux"),
-    subscribeToStateChanges: () =>
-        thinClientBoundaryUnavailable("SessionManager", "subscribeToStateChanges"),
-}
-
-const sessionManagerBoundaryLayer = Layer.succeed(SessionManager, sessionManagerBoundaryService)
-
-const prWorkflowBoundaryService: PRWorkflow = {
-    _tag: "PRWorkflow",
-    createPR: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "createPR"),
-    getPR: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "getPR"),
-    cleanup: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "cleanup"),
-    checkGHCLI: () => Effect.succeed(false),
-    mergeToMain: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "mergeToMain"),
-    checkMergeConflicts: (_options: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "checkMergeConflicts"),
-    abortMerge: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "abortMerge"),
-    checkUncommittedChanges: (_options: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "checkUncommittedChanges"),
-    updateFromBase: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "updateFromBase"),
-    getPRComments: (_options: unknown) => thinClientBoundaryUnavailable("PRWorkflow", "getPRComments"),
-    getEffectiveBaseBranchForIssue: (_options: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "getEffectiveBaseBranchForIssue"),
-    mergeIssueIntoIssue: (_options: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "mergeIssueIntoIssue"),
-    getTargetBranch: (_issueId: unknown, _projectPath: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "getTargetBranch"),
-    checkBranchBehindBase: (_options: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "checkBranchBehindBase"),
-    mergeBaseIntoBranch: (_options: unknown) =>
-        thinClientBoundaryUnavailable("PRWorkflow", "mergeBaseIntoBranch"),
-}
-
-const prWorkflowBoundaryLayer = Layer.succeed(PRWorkflow, prWorkflowBoundaryService)
-
-const issueEditorBoundaryService: IssueEditorService = {
-    _tag: "IssueEditorService",
-    editIssue: (_issue: unknown) => thinClientBoundaryUnavailable("IssueEditorService", "editIssue"),
-    createIssue: () => thinClientBoundaryUnavailable("IssueEditorService", "createIssue"),
-}
-
-const issueEditorBoundaryLayer = Layer.succeed(IssueEditorService, issueEditorBoundaryService)
-
 const daemonRpcClientLayer = Layer.effect(
-    DaemonRpcClient,
-    bootstrapDaemonRpcClient({
+	DaemonRpcClient,
+	bootstrapDaemonRpcClient({
 		autoStart: false,
 		verifyReachable: true,
 	}).pipe(Effect.map((bootstrap) => bootstrap.client)),
@@ -136,19 +72,19 @@ const coreServicesLayer = Layer.mergeAll(
 	SessionService.Default,
 	AttachmentService.Default,
 	OverlayService.Default,
-    ImageAttachmentService.Default,
-    BoardService.Default,
-    ClockService.Default,
-    TmuxService.Default,
-    TerminalService.Default,
-    EditorService.Default,
-    KeyboardService.Default,
-    ToastService.Default,
-    NavigationService.Default,
-    sessionManagerBoundaryLayer,
-    prWorkflowBoundaryLayer,
-    issueEditorBoundaryLayer,
-    AppConfig.Default,
+	ImageAttachmentService.Default,
+	BoardService.Default,
+	ClockService.Default,
+	TmuxService.Default,
+	IssueEditorService.Default,
+	PRWorkflow.Default,
+	TerminalService.Default,
+	EditorService.Default,
+	KeyboardService.Default,
+	ToastService.Default,
+	NavigationService.Default,
+	SessionManager.Default,
+	AppConfig.Default,
 	ViewService.Default,
 	CommandQueueService.Default,
 	PTYMonitor.Default,
