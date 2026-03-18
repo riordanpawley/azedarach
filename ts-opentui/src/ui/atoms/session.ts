@@ -5,13 +5,13 @@
  * Also includes tmux session monitoring and PTY metrics.
  */
 
-import { Effect, Option } from "effect"
+import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
-import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import { getRequiredDaemonDomainRpcClients } from "../../services/RequiredDaemonDomainRpcClient.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -110,18 +110,11 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-		if (daemonRpcClient.sessionStart === undefined) {
-			return yield* Effect.fail(new Error("Daemon sessionStart RPC is unavailable"))
-		}
-		const session = yield* daemonRpcClient
+		const session = yield* daemonRpcDomains.taskSession
 			.sessionStart({
 				issueId,
 				projectPath,
@@ -139,17 +132,10 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectService = yield* ProjectService
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-		if (daemonRpcClient.sessionPause === undefined) {
-			return yield* Effect.fail(new Error("Daemon sessionPause RPC is unavailable"))
-		}
 
-		yield* daemonRpcClient.sessionPause({
+		yield* daemonRpcDomains.taskSession.sessionPause({
 			issueId,
 			projectPath,
 		})
@@ -162,17 +148,10 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectService = yield* ProjectService
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-		if (daemonRpcClient.sessionResume === undefined) {
-			return yield* Effect.fail(new Error("Daemon sessionResume RPC is unavailable"))
-		}
 
-		yield* daemonRpcClient.sessionResume({
+		yield* daemonRpcDomains.taskSession.sessionResume({
 			issueId,
 			projectPath,
 		})
@@ -188,20 +167,13 @@ export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
-		if (daemonRpcClient.sessionStop === undefined) {
-			return yield* Effect.fail(new Error("Daemon sessionStop RPC is unavailable"))
-		}
 
 		// Unregister from PTYMonitor first (before session is stopped)
 		yield* ptyMonitor.unregisterSession(issueId)
 
-		yield* daemonRpcClient.sessionStop({
+		yield* daemonRpcDomains.taskSession.sessionStop({
 			issueId,
 			projectPath,
 		})

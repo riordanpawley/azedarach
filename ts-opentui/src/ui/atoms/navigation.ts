@@ -5,13 +5,13 @@
  */
 
 import { Atom, Result } from "@effect-atom/atom"
-import { Effect, Option, SubscriptionRef } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 import {
 	computeDependencyPhases,
 	type PhaseComputationResult,
 } from "../../core/dependencyPhases.js"
-import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import { NavigationService } from "../../services/NavigationService.js"
+import { getRequiredDaemonDomainRpcClients } from "../../services/RequiredDaemonDomainRpcClient.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -174,17 +174,8 @@ export const exitDrillDownAtom = appRuntime.fn(() =>
  */
 export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
-		if (daemonRpcClient.issueEpicChildren === undefined) {
-			return yield* Effect.fail(
-				new Error("Daemon RPC issueEpicChildren is unavailable for navigation drill-down"),
-			)
-		}
-		const result = yield* daemonRpcClient.issueEpicChildren({ epicId })
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const result = yield* daemonRpcDomains.issueTask.issueEpicChildren({ epicId })
 		return result.children
 	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
 )
@@ -196,17 +187,8 @@ export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
  */
 export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
-		if (daemonRpcClient.issueShow === undefined) {
-			return yield* Effect.fail(
-				new Error("Daemon RPC issueShow is unavailable for navigation drill-down"),
-			)
-		}
-		const result = yield* daemonRpcClient.issueShow({ issueId: epicId })
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const result = yield* daemonRpcDomains.issueTask.issueShow({ issueId: epicId })
 		return result.issue
 	}).pipe(
 		Effect.catchAll((e) =>

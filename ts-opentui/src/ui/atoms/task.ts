@@ -5,20 +5,22 @@
  */
 
 import { Command } from "@effect/platform"
-import { Data, Effect, Option, Schema } from "effect"
+import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
 import type { CliTool } from "../../config/schema.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { resolveIssueCreateImplementations } from "../../core/IssueImplementations.js"
 import { stripAnsi } from "../../lib/ansi.js"
-import type { DaemonRpcClientApi } from "../../rpc/DaemonRpcClient.js"
-import { DaemonRpcClient } from "../../rpc/DaemonRpcClient.js"
 import type { DaemonIssue, DaemonIssueStatus, DaemonIssueType } from "../../rpc/DaemonRpcSchemas.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { OverlayService } from "../../services/OverlayService.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import {
+	getRequiredDaemonDomainRpcClients,
+	type RequiredDaemonIssueTaskRpcClient,
+} from "../../services/RequiredDaemonDomainRpcClient.js"
 import { ToastService } from "../../services/ToastService.js"
 import type { TaskWithSession } from "../types.js"
 import { appRuntime } from "./runtime.js"
@@ -41,35 +43,6 @@ const decodeAIResponseJson = Schema.decode(Schema.parseJson(AITaskResponseSchema
 class AITaskCreateError extends Data.TaggedError("AITaskCreateError")<{
 	readonly message: string
 }> {}
-
-class MissingDaemonIssueRpcError extends Data.TaggedError("MissingDaemonIssueRpcError")<{
-	readonly method: string
-}> {}
-
-type DaemonIssueRpcMethod =
-	| "issueCreate"
-	| "issueUpdate"
-	| "issueDelete"
-	| "issueEpicWithChildren"
-	| "issueImplementationRegistry"
-
-const requireDaemonIssueRpcClient = () =>
-	Effect.serviceOption(DaemonRpcClient).pipe(
-		Effect.flatMap(
-			Option.match({
-				onNone: () => Effect.fail(new MissingDaemonIssueRpcError({ method: "daemonRpcClient" })),
-				onSome: Effect.succeed,
-			}),
-		),
-	)
-
-const requireDaemonIssueRpc = <TMethod extends DaemonIssueRpcMethod>(
-	daemonRpcClient: DaemonRpcClientApi,
-	method: TMethod,
-): Effect.Effect<NonNullable<DaemonRpcClientApi[TMethod]>, MissingDaemonIssueRpcError> =>
-	Effect.fromNullable(daemonRpcClient[method]).pipe(
-		Effect.orElseFail(() => new MissingDaemonIssueRpcError({ method })),
-	)
 
 const parseDaemonIssueStatus = (status: string): DaemonIssueStatus | undefined => {
 	switch (status) {
@@ -119,15 +92,11 @@ const toBoardMutationIssue = (issue: DaemonIssue) => ({
 })
 
 const resolveIssueCreateImplementationsFromDaemon = (
-	daemonRpcClient: DaemonRpcClientApi,
+	issueTaskRpcClient: RequiredDaemonIssueTaskRpcClient,
 	params: { readonly requestedImplementations?: readonly string[] },
 ) =>
 	Effect.gen(function* () {
-		const issueImplementationRegistry = yield* requireDaemonIssueRpc(
-			daemonRpcClient,
-			"issueImplementationRegistry",
-		)
-		const registryResult = yield* issueImplementationRegistry()
+		const registryResult = yield* issueTaskRpcClient.issueImplementationRegistry()
 		return resolveIssueCreateImplementations(registryResult.registry, {
 			requestedImplementations: params.requestedImplementations,
 		})
@@ -239,8 +208,8 @@ export const buildAiCreateCommand = (params: {
 export const moveTaskAtom = appRuntime.fn(
 	({ taskId, newStatus }: { taskId: string; newStatus: string }) =>
 		Effect.gen(function* () {
-			const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-			const issueUpdate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueUpdate")
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueUpdate = daemonRpcDomains.issueTask.issueUpdate
 			const status = parseDaemonIssueStatus(newStatus)
 			if (status === undefined) {
 				return yield* Effect.fail(
@@ -260,8 +229,8 @@ export const moveTaskAtom = appRuntime.fn(
 export const moveTasksAtom = appRuntime.fn(
 	({ taskIds, newStatus }: { taskIds: string[]; newStatus: string }) =>
 		Effect.gen(function* () {
-			const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-			const issueUpdate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueUpdate")
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueUpdate = daemonRpcDomains.issueTask.issueUpdate
 			const status = parseDaemonIssueStatus(newStatus)
 			if (status === undefined) {
 				return yield* Effect.fail(
@@ -302,8 +271,9 @@ export const createTaskAtom = appRuntime.fn(
 		implementations?: readonly string[]
 	}) =>
 		Effect.gen(function* () {
-			const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-			const issueCreate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueCreate")
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueTaskRpcClient = daemonRpcDomains.issueTask
+			const issueCreate = issueTaskRpcClient.issueCreate
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
@@ -313,9 +283,12 @@ export const createTaskAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(daemonRpcClient, {
-				requestedImplementations: params.implementations,
-			})
+			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+				issueTaskRpcClient,
+				{
+					requestedImplementations: params.implementations,
+				},
+			)
 			const issueCreateResult = yield* issueCreate({
 				title: params.title,
 				type: parseDaemonIssueType(params.type),
@@ -348,9 +321,10 @@ export const forkCreateChildAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
-			const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-			const issueCreate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueCreate")
-			const issueUpdate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueUpdate")
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueTaskRpcClient = daemonRpcDomains.issueTask
+			const issueCreate = issueTaskRpcClient.issueCreate
+			const issueUpdate = issueTaskRpcClient.issueUpdate
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
@@ -360,9 +334,12 @@ export const forkCreateChildAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(daemonRpcClient, {
-				requestedImplementations: params.implementations,
-			})
+			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+				issueTaskRpcClient,
+				{
+					requestedImplementations: params.implementations,
+				},
+			)
 			const issueCreateResult = yield* issueCreate({
 				title: params.title,
 				type: parseDaemonIssueType(params.type) ?? "task",
@@ -424,9 +401,10 @@ export const forkCreateEpicAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
-			const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-			const issueCreate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueCreate")
-			const issueUpdate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueUpdate")
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueTaskRpcClient = daemonRpcDomains.issueTask
+			const issueCreate = issueTaskRpcClient.issueCreate
+			const issueUpdate = issueTaskRpcClient.issueUpdate
 			const board = yield* BoardService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
@@ -435,9 +413,12 @@ export const forkCreateEpicAtom = appRuntime.fn(
 
 			yield* overlay.pop()
 
-			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(daemonRpcClient, {
-				requestedImplementations: params.implementations,
-			})
+			const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+				issueTaskRpcClient,
+				{
+					requestedImplementations: params.implementations,
+				},
+			)
 			const epicCreateResult = yield* issueCreate({
 				title: params.title,
 				type: "epic",
@@ -551,8 +532,9 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
  */
 export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
-		const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-		const issueCreate = yield* requireDaemonIssueRpc(daemonRpcClient, "issueCreate")
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const issueTaskRpcClient = daemonRpcDomains.issueTask
+		const issueCreate = issueTaskRpcClient.issueCreate
 		const board = yield* BoardService
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
@@ -630,7 +612,10 @@ Return ONLY the JSON object, no explanation or markdown.`
 				: 2
 
 		// Phase 2: Create the issue via daemon issue RPC
-		const implementations = yield* resolveIssueCreateImplementationsFromDaemon(daemonRpcClient, {})
+		const implementations = yield* resolveIssueCreateImplementationsFromDaemon(
+			issueTaskRpcClient,
+			{},
+		)
 		const issueCreateResult = yield* issueCreate({
 			title: parsed.title,
 			type: taskType,
@@ -671,8 +656,8 @@ Return ONLY the JSON object, no explanation or markdown.`
  */
 export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-		const issueDelete = yield* requireDaemonIssueRpc(daemonRpcClient, "issueDelete")
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+		const issueDelete = daemonRpcDomains.issueTask.issueDelete
 		yield* issueDelete({ issueId })
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -693,11 +678,8 @@ export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 export const epicChildrenAtom = (epicId: string) =>
 	appRuntime.fn(() =>
 		Effect.gen(function* () {
-			const daemonRpcClient = yield* requireDaemonIssueRpcClient()
-			const issueEpicWithChildren = yield* requireDaemonIssueRpc(
-				daemonRpcClient,
-				"issueEpicWithChildren",
-			)
+			const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
+			const issueEpicWithChildren = daemonRpcDomains.issueTask.issueEpicWithChildren
 			const result = yield* issueEpicWithChildren({ epicId })
 			return result.children
 		}).pipe(

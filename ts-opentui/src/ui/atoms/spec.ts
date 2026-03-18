@@ -4,7 +4,7 @@
  * Handles loading and refreshing Spec workspace data.
  */
 
-import { Effect, Option, SubscriptionRef } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { SpecService } from "../../core/SpecService.js"
 import type {
@@ -13,9 +13,12 @@ import type {
 	SpecPublishOutcome,
 } from "../../core/specTypes.js"
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../../core/specTypes.js"
-import { DaemonRpcClient, type DaemonRpcClientApi } from "../../rpc/DaemonRpcClient.js"
 import type { DaemonImplementationRegistryResult } from "../../rpc/DaemonRpcSchemas.js"
 import { EditorService } from "../../services/EditorService.js"
+import {
+	getRequiredDaemonDomainRpcClients,
+	type RequiredDaemonIssueTaskRpcClient,
+} from "../../services/RequiredDaemonDomainRpcClient.js"
 import { appRuntime } from "./runtime.js"
 
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {
@@ -75,13 +78,13 @@ const resolveSelectedImplementation = (
 const loadSpecWorkspaceState = ({
 	stateRef,
 	spec,
-	daemonRpcClient,
+	issueTaskRpcClient,
 	editor,
 	requestedImplementation,
 }: {
 	readonly stateRef: SubscriptionRef.SubscriptionRef<SpecWorkspaceState>
 	readonly spec: SpecService
-	readonly daemonRpcClient: DaemonRpcClientApi
+	readonly issueTaskRpcClient: RequiredDaemonIssueTaskRpcClient
 	readonly editor: EditorService
 	readonly requestedImplementation: string | null
 }) =>
@@ -92,12 +95,7 @@ const loadSpecWorkspaceState = ({
 			error: null,
 		}))
 
-		if (daemonRpcClient.issueImplementationRegistry === undefined) {
-			return yield* Effect.fail(
-				new Error("Daemon RPC issueImplementationRegistry is unavailable for spec workspace"),
-			)
-		}
-		const registry = (yield* daemonRpcClient.issueImplementationRegistry()).registry
+		const registry = (yield* issueTaskRpcClient.issueImplementationRegistry()).registry
 		const availableImplementations = implementationNames(registry)
 		const selectedImplementation = resolveSelectedImplementation(requestedImplementation, registry)
 
@@ -146,11 +144,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const spec = yield* SpecService
-		const daemonRpcClientOption = yield* Effect.serviceOption(DaemonRpcClient)
-		if (Option.isNone(daemonRpcClientOption)) {
-			return yield* Effect.fail(new Error("Daemon RPC client is unavailable for spec workspace"))
-		}
-		const daemonRpcClient = daemonRpcClientOption.value
+		const daemonRpcDomains = yield* getRequiredDaemonDomainRpcClients()
 		const editor = yield* EditorService
 		const stateRef = yield* get.result(specWorkspaceStateRefAtom)
 		const specConfig = yield* appConfig.getSpecConfig()
@@ -163,7 +157,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 		yield* loadSpecWorkspaceState({
 			stateRef,
 			spec,
-			daemonRpcClient,
+			issueTaskRpcClient: daemonRpcDomains.issueTask,
 			editor,
 			requestedImplementation: selectedImplementation,
 		})
