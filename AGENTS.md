@@ -49,6 +49,11 @@ Select the implementation based on user request or current working directory.
 9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
 11. **ts-opentui Boundary Guard**: For `ts-opentui`, run `bun run guard:effect-boundaries`; no new top-level Effect environment leaks are allowed without explicit baseline update + issue rationale.
+12. **ts-opentui Service Architecture Contract**:
+    - Service modules must export only service surface (`API`, service tag/class, typed errors/types, `Default` layer).
+    - Do not export top-level effectful helper functions from service modules.
+    - Capture infra dependencies at service construction (`effect`/`scoped`), then close over concrete values in methods.
+    - Keep `Effect.run*` at runtime entrypoints and test harnesses only.
 
 ## Quick Commands
 

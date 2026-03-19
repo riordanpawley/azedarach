@@ -5,7 +5,7 @@ description: "Effect Services & Layers Skill"
 
 # Effect Services & Layers Skill
 
-**Version:** 1.0
+**Version:** 1.1
 **Purpose:** Idiomatic patterns for Effect services, layers, and dependency injection
 **Source:** Adapted from [Effect Patterns Hub](https://github.com/PaulJPhilp/EffectPatterns)
 
@@ -15,6 +15,20 @@ Effect's service architecture uses **Layers** for dependency injection, providin
 
 For JSON/persistence boundary contracts, pair this skill with:
 - `.claude/skills/effect-schema/SKILL.md`
+
+## Repository Contract (ts-opentui)
+
+When working in `ts-opentui`, treat this as mandatory architecture:
+
+1. Service modules are service-only surfaces.
+2. Export only `API` + service tag/class + typed errors/types + `Default` layer.
+3. No exported top-level effectful helper functions in service modules.
+4. Capture infra deps once in service construction and close over them in methods.
+5. Service consumers must `yield* ServiceTag` and call methods; do not import helper effects.
+6. Compose layers in runtime entrypoints/tests, not in domain methods.
+7. Keep `Effect.run*` in runtime entrypoints and tests only.
+
+Use this for modules like daemon discovery/bootstrap where dependency threading and helper exports caused regressions.
 
 ## Core Concepts
 
@@ -245,6 +259,49 @@ export class UserOperations extends Effect.Service<UserOperations>()("UserOperat
   }),
 }) {}
 ```
+
+### Service Module Export Contract
+
+```typescript
+// ❌ WRONG: Mixed module with helper exports
+export const readRegistry = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem
+  // ...
+})
+
+export class RegistryService extends Effect.Service<RegistryService>()("RegistryService", {
+  effect: Effect.gen(function* () {
+    return { read: () => readRegistry } // helper leaks into service
+  }),
+}) {}
+
+// ✅ CORRECT: Service-only module; deps captured once
+export interface RegistryApi {
+  readonly read: Effect.Effect<Data, ReadError>
+}
+
+export class RegistryService extends Effect.Service<RegistryService>()("RegistryService", {
+  dependencies: [FileSystemLive, PathLive], // project-specific live layers
+  effect: Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const path = yield* Path.Path
+    const registryFile = path.join("...", "registry.json")
+
+    return {
+      read: fs.readFileString(registryFile),
+    } satisfies RegistryApi
+  }),
+}) {}
+```
+
+### Do Not Re-export Deleted Helper Surface
+
+If migrating from helper functions to service methods:
+
+1. Remove helper exports from the source module.
+2. Remove helper re-exports from barrel files.
+3. Update all imports to service tag/class usage.
+4. Update tests to provide service `Default` layers and call service methods only.
 
 ### Don't Wrap One-Liners
 

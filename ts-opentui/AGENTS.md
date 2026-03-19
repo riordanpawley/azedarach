@@ -25,9 +25,13 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
 
 1. **Type Safety**: Always use TypeScript strict mode. Never use `as` casting or `any`.
 2. **Effect Service Boundaries**:
-   - Do not create global Effect-returning helpers with service requirements.
+   - Service modules export only service-facing surface: `API` type, service tag/class, typed errors/types, and `Default` layer.
+   - Do not create or re-export top-level Effect-returning helpers in service modules.
    - Do not call `Effect.provide` / `Effect.provideService` inside service methods.
-   - Acquire dependencies at layer construction, then use concrete service values directly.
+   - Acquire dependencies at layer construction, then use concrete captured values directly in methods.
+   - Consumers must obtain services via `yield* ServiceTag` and call methods on that service instance.
+   - Compose layers in runtime entrypoints and test harnesses, not ad-hoc inside domain logic.
+   - Keep `Effect.runPromise`/`Effect.runSync` at runtime entrypoints and tests only.
    - `bun run guard:effect-boundaries` must pass before closing work.
    - If baseline updates are intentional, run `bun run guard:effect-boundaries:update` and record rationale in issue notes.
 3. **No `node:*` Imports**:
