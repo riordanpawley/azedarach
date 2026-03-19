@@ -6,8 +6,8 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import type { Project } from "../../../src/services/ProjectService.js"
 import { currentProjectAtom, projectsAtom } from "./atoms.js"
+import type { Project } from "./contracts.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1

@@ -9,8 +9,6 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { DependencyRef } from "../../../src/core/IssueTrackerClient.js"
-import { formatElapsedMs } from "../../../src/services/ClockService.js"
 import {
 	currentAttachmentsAtom,
 	detailScrollAtom,
@@ -18,6 +16,7 @@ import {
 	epicChildrenAtom,
 	taskPhaseInfoAtom,
 } from "./atoms.js"
+import type { DependencyRef } from "./contracts.js"
 import { isSmallScreen } from "./responsive.js"
 import {
 	getGitDirtyToken,
@@ -30,6 +29,7 @@ import {
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import { PHASE_LABELS } from "./types.js"
+import { formatElapsedMs } from "./utils/clock.js"
 
 // Panel chrome heights for maxHeight calculation
 const PANEL_CHROME_HEIGHT = 8 // borders (2) + padding (2) + header (3) + footer (1)

@@ -8,7 +8,7 @@
  * Keyboard handling is in KeyboardService, this component just renders.
  */
 
-import type { OrchestrationTask } from "../../../src/services/EditorService.js"
+import type { OrchestrationTask } from "./contracts.js"
 import { getIssueStatusToken } from "./statusTokens.js"
 import { theme } from "./theme.js"
 

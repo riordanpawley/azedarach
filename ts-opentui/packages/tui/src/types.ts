@@ -2,7 +2,7 @@
  * Shared types for UI components
  */
 import type { Record } from "effect"
-import type { Issue } from "../../../src/core/IssueTrackerClient.js"
+import type { Issue } from "./contracts.js"
 
 /**
  * Session state for a task

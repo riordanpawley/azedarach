@@ -1,7 +1,7 @@
 /**
  * SortMenu component - sort options popover (bottom-right, like ActionPalette)
  */
-import type { SortConfig, SortField } from "../../../src/services/EditorService.js"
+import type { SortConfig, SortField } from "./contracts.js"
 import { theme } from "./theme.js"
 
 export interface SortMenuProps {

@@ -9,9 +9,9 @@
 import type { MouseEvent } from "@opentui/core"
 import type { Record as R } from "effect"
 import { useMemo } from "react"
-import type { PhaseComputationResult } from "../../../src/core/dependencyPhases.js"
 import { Column } from "./Column.js"
 import { CompactView } from "./CompactView.js"
+import type { PhaseComputationResult } from "./contracts.js"
 import type { JumpTarget, TaskWithSession, ViewMode } from "./types.js"
 import { COLUMNS } from "./types.js"
 

@@ -4,8 +4,7 @@
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useMemo, useState } from "react"
 import type { WorkflowMode } from "../../../src/config/schema.js"
-import type { TmuxCapabilities } from "../../../src/core/TmuxCapabilities.js"
-import type { DevServerStatus } from "../../../src/services/DevServerService.js"
+import type { DevServerStatus, TmuxCapabilities } from "./contracts.js"
 import { theme } from "./theme.js"
 import { hasTaskSessionPresence, hasTaskWorktreeContext, type TaskWithSession } from "./types.js"
 

@@ -3,7 +3,7 @@
  */
 import type { MouseEvent } from "@opentui/core"
 import { useMemo } from "react"
-import type { PhaseComputationResult } from "../../../src/core/dependencyPhases.js"
+import type { PhaseComputationResult } from "./contracts.js"
 import { PhaseSeparator } from "./PhaseSeparator.js"
 import { TaskCard } from "./TaskCard.js"
 import { columnColors, theme } from "./theme.js"

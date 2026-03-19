@@ -7,7 +7,7 @@ import type {
 	FilterSessionState,
 	IssueStatus,
 	IssueType,
-} from "../../../src/services/EditorService.js"
+} from "./contracts.js"
 import { theme } from "./theme.js"
 
 export interface FilterMenuProps {
@@ -48,6 +48,7 @@ const getStatusName = (status: IssueStatus): string => {
 		case "blocked":
 			return "Blocked"
 		case "closed":
+		case "tombstone":
 			return "Closed"
 	}
 }

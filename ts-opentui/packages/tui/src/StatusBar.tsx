@@ -2,9 +2,7 @@
  * StatusBar component - bottom status bar with mode indicator and contextual keybinds
  */
 
-import type { VCStatus } from "../../../src/core/VCService.js"
-import type { DevServerStatus } from "../../../src/services/DevServerService.js"
-import type { EditorMode } from "../../../src/services/EditorService.js"
+import type { DevServerStatus, EditorMode, VCStatus } from "./contracts.js"
 import { formatWaitingSummary } from "./statusBarFormatting.js"
 import { getNetworkToken } from "./statusTokens.js"
 import { theme } from "./theme.js"

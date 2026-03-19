@@ -1,7 +1,6 @@
 import { DateTime } from "effect"
-import type { SpecCoverageGap, SpecParityRequirement } from "../../../src/core/specTypes.js"
-import type { SpecSubview } from "../../../src/services/EditorService.js"
 import type { SpecWorkspaceState } from "./atoms/spec.js"
+import type { SpecCoverageGap, SpecParityRequirement, SpecSubview } from "./contracts.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
