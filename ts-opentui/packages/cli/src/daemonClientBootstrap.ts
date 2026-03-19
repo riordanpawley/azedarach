@@ -20,7 +20,7 @@ const GLOBAL_DAEMON_BOOTSTRAP_TIMEOUT_MS = 5_000
 const GLOBAL_DAEMON_POLL_INTERVAL_MS = 50
 const GLOBAL_DAEMON_ATTACH_RETRY_BACKOFF_MS: ReadonlyArray<number> = [25, 50, 100]
 const GLOBAL_DAEMON_MAIN_ENTRY_PATH = decodeURIComponent(
-	new URL("../../../src/daemon/GlobalDaemonMain.ts", import.meta.url).pathname,
+	new URL("../../daemon/src/GlobalDaemonMain.ts", import.meta.url).pathname,
 )
 
 export class GlobalDaemonBootstrapError extends Data.TaggedError("GlobalDaemonBootstrapError")<{
@@ -99,7 +99,7 @@ const waitForGlobalDaemonDiscovery = (params: {
 		return yield* Effect.fail(
 			new GlobalDaemonBootstrapError({
 				message:
-					"Timed out waiting for global daemon discovery metadata. Run `bun run src/daemon/GlobalDaemonMain.ts` and retry.",
+					"Timed out waiting for global daemon discovery metadata. Run `bun run packages/daemon/src/GlobalDaemonMain.ts` and retry.",
 				reason: "discovery-timeout",
 			}),
 		)
