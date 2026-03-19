@@ -3,7 +3,7 @@ import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Cause, Data, DateTime, Effect, HashMap, Schema } from "effect"
 import { ProjectService } from "../services/ProjectService.js"
-import type { SessionState } from "../ui/types.js"
+import type { SessionState } from "./StateDetector.js"
 import { getProjectStoragePaths } from "./storagePaths.js"
 
 export interface PersistedSession {

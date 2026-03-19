@@ -48,6 +48,7 @@ import type {
 	SessionNotFoundError,
 	SessionWorktreeMissingError,
 } from "../core/SessionManager.js"
+import type { SessionState } from "../core/StateDetector.js"
 import type {
 	TmuxError,
 	SessionNotFoundError as TmuxSessionNotFoundError,
@@ -55,14 +56,8 @@ import type {
 import { WorktreeManager } from "../core/WorktreeManager.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
 import { emptyRecord } from "../lib/empty.js"
-import type {
-	ColumnStatus,
-	GitStatus,
-	PRState,
-	SessionState,
-	TaskWithSession,
-} from "../ui/types.js"
-import { COLUMNS, parsePRInfo } from "../ui/types.js"
+import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../lib/taskTypes.js"
+import { COLUMNS, parsePRInfo } from "../lib/taskTypes.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 import {

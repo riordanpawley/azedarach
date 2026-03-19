@@ -1,4 +1,4 @@
-import type { SessionState } from "../ui/types.js"
+import type { SessionState } from "./StateDetector.js"
 
 export type ForegroundKind = "agent" | "shell" | "subprocess" | "unknown"
 

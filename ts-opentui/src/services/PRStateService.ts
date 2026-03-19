@@ -9,7 +9,7 @@
 
 import { Command } from "@effect/platform"
 import { Effect, Ref, Schema } from "effect"
-import type { PRState } from "../ui/types.js"
+import type { PRState } from "../lib/taskTypes.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
 // ============================================================================

@@ -23,7 +23,6 @@ import { Cause, Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Sche
 import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
-import type { SessionState } from "../ui/types.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
 import {
 	IssueTrackerClient,
@@ -40,7 +39,7 @@ import {
 	WINDOW_NAMES,
 } from "./paths.js"
 import { SessionStateStore } from "./SessionStateStore.js"
-import { StateDetector } from "./StateDetector.js"
+import { type SessionState, StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
 	TmuxService,

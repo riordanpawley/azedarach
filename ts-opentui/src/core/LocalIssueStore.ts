@@ -5,10 +5,10 @@ import type { SqlError } from "@effect/sql/SqlError"
 import { Cause, Data, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { ResolvedConfig } from "../config/defaults.js"
+import type { PRState, TaskWithSession } from "../lib/taskTypes.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { type ProjectUIState, ProjectUIStateJsonSchema } from "../services/projectUiState.js"
-import type { AgentPhase, PRState, TaskWithSession } from "../ui/types.js"
 import type {
 	DependencyRef,
 	DependencyType,
@@ -22,6 +22,7 @@ import type {
 	IssueType,
 } from "./IssueTrackerClient.js"
 import { issueIdsEqualForLookup } from "./paths.js"
+import type { AgentPhase } from "./StateDetector.js"
 import type {
 	SpecCoverageGap,
 	SpecCoverageReport,

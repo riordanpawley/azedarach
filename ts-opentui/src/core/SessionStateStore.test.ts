@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
 import { DateTime, Effect, HashMap, Layer } from "effect"
-import type { SessionState } from "../ui/types.js"
 import { SessionStateStore } from "./SessionStateStore.js"
+import type { SessionState } from "./StateDetector.js"
 
 interface LegacySessionPayload {
 	readonly issueId: string

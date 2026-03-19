@@ -22,7 +22,7 @@ import {
 } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
-import { hasTaskWorktreeContext } from "../../ui/types.js"
+import { hasTaskWorktreeContext } from "../../lib/taskTypes.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"

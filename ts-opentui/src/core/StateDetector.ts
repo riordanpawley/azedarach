@@ -21,7 +21,16 @@ import { stripAnsi } from "../lib/ansi.js"
 /**
  * Session state types
  */
-export type SessionState = "idle" | "initializing" | "busy" | "waiting" | "done" | "error"
+export type SessionState =
+	| "idle"
+	| "initializing"
+	| "busy"
+	| "waiting"
+	| "done"
+	| "error"
+	| "paused"
+	| "warning"
+	| "crashed"
 
 /**
  * Agent workflow phase types

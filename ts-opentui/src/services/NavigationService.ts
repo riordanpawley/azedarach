@@ -15,7 +15,7 @@
 import { Effect, Stream, SubscriptionRef } from "effect"
 import { computeDependencyPhases } from "../core/dependencyPhases.js"
 import { type Issue, IssueTrackerClient } from "../core/IssueTrackerClient.js"
-import type { TaskWithSession } from "../ui/types.js"
+import type { TaskWithSession } from "../lib/taskTypes.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService } from "./EditorService.js"

@@ -10,7 +10,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import type { TaskWithSession } from "../../ui/types.js"
+import type { TaskWithSession } from "../../lib/taskTypes.js"
 import { BoardService } from "../BoardService.js"
 import { buildTaskQueueKey, CommandQueueService } from "../CommandQueueService.js"
 import { EditorService } from "../EditorService.js"
