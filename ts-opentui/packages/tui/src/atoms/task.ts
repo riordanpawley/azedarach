@@ -5,16 +5,17 @@
  */
 
 import { AppConfig, type CliTool } from "@azedarach/config"
+import { DaemonRpcClient, type TrackedIssueRelationshipRef } from "@azedarach/shared/rpc"
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
+import type { DependencyRef, IssueType } from "../contracts.js"
 import { stripAnsi } from "../lib/ansi.js"
-import type { TaskWithSession } from "../types.js"
+import type { ColumnStatus, TaskWithSession } from "../types.js"
 import {
 	BoardService,
 	formatForToast,
 	getIssueCreateImplementations,
 	IssueEditorService,
-	IssueTrackerClient,
 	NavigationService,
 	OverlayService,
 	ProjectService,
@@ -134,6 +135,38 @@ export const buildAiCreateCommand = (params: {
 	}
 }
 
+const getCurrentProjectPath = Effect.gen(function* () {
+	const projectService = yield* ProjectService
+	return (yield* projectService.getCurrentPath()) ?? process.cwd()
+})
+
+const isIssueType = (value: string | undefined): value is IssueType =>
+	value === "bug" ||
+	value === "feature" ||
+	value === "task" ||
+	value === "epic" ||
+	value === "chore"
+
+export const resolveIssueType = (
+	value: string | undefined,
+	fallback: IssueType = "task",
+): IssueType => (isIssueType(value) ? value : fallback)
+
+const toEpicChildDependencyRef = (child: TrackedIssueRelationshipRef): DependencyRef => ({
+	id: child.id,
+	title: child.title,
+	status: child.status,
+	dependency_type: child.dependency_type,
+	issue_type: child.issue_type,
+})
+
+export const toEpicChildDependencyRefs = (
+	children: ReadonlyArray<TrackedIssueRelationshipRef> | undefined,
+): ReadonlyArray<DependencyRef> =>
+	(children ?? [])
+		.filter((child) => child.dependency_type === "parent-child")
+		.map((child) => toEpicChildDependencyRef(child))
+
 // ============================================================================
 // Task Movement Atoms
 // ============================================================================
@@ -145,10 +178,20 @@ export const buildAiCreateCommand = (params: {
  *        await moveTask({ taskId: "az-123", newStatus: "in_progress" })
  */
 export const moveTaskAtom = appRuntime.fn(
-	({ taskId, newStatus }: { taskId: string; newStatus: string }) =>
+	({ taskId, newStatus }: { taskId: string; newStatus: ColumnStatus }) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
-			yield* client.update(taskId, { status: newStatus })
+			const daemonRpcClient = yield* DaemonRpcClient
+			const board = yield* BoardService
+			const projectPath = yield* getCurrentProjectPath
+			yield* daemonRpcClient.issueUpdate({
+				issueId: taskId,
+				patch: { status: newStatus },
+				projectPath,
+			})
+			yield* board.patchTaskFromMutation(taskId, {
+				status: newStatus,
+				updated_at: new Date().toISOString(),
+			})
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -156,11 +199,28 @@ export const moveTaskAtom = appRuntime.fn(
  * Move multiple tasks at once
  */
 export const moveTasksAtom = appRuntime.fn(
-	({ taskIds, newStatus }: { taskIds: string[]; newStatus: string }) =>
+	({ taskIds, newStatus }: { taskIds: string[]; newStatus: ColumnStatus }) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
-			yield* Effect.all(
-				taskIds.map((id) => client.update(id, { status: newStatus })),
+			const daemonRpcClient = yield* DaemonRpcClient
+			const projectPath = yield* getCurrentProjectPath
+			const board = yield* BoardService
+			yield* Effect.forEach(
+				taskIds,
+				(taskId) =>
+					daemonRpcClient
+						.issueUpdate({
+							issueId: taskId,
+							patch: { status: newStatus },
+							projectPath,
+						})
+						.pipe(
+							Effect.zipRight(
+								board.patchTaskFromMutation(taskId, {
+									status: newStatus,
+									updated_at: new Date().toISOString(),
+								}),
+							),
+						),
 				{ concurrency: "unbounded" },
 			)
 		}).pipe(Effect.catchAll(Effect.logError)),
@@ -188,13 +248,12 @@ export const createTaskAtom = appRuntime.fn(
 		implementations?: readonly string[]
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcClient = yield* DaemonRpcClient
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
-			const projectService = yield* ProjectService
-			const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+			const projectPath = yield* getCurrentProjectPath
 
 			yield* overlay.pop()
 
@@ -202,20 +261,22 @@ export const createTaskAtom = appRuntime.fn(
 				requestedImplementations: params.implementations,
 				cwd: projectPath,
 			})
-			const issue = yield* client.create({
-				title: params.title,
-				type: params.type,
-				priority: params.priority,
-				description: params.description,
-				implementations,
-				cwd: projectPath,
+			const issueResult = yield* daemonRpcClient.issueCreate({
+				projectPath,
+				input: {
+					title: params.title,
+					type: resolveIssueType(params.type),
+					priority: params.priority,
+					description: params.description,
+					implementations,
+				},
 			})
 
-			yield* board.upsertIssueFromMutation(issue)
-			yield* navigation.jumpToTask(issue.id)
-			yield* toast.show("success", `Created task: ${issue.id}`)
+			yield* board.upsertIssueFromMutation(issueResult.issue)
+			yield* navigation.jumpToTask(issueResult.issue.id)
+			yield* toast.show("success", `Created task: ${issueResult.issue.id}`)
 
-			return issue
+			return issueResult.issue
 		}).pipe(Effect.tapError(Effect.logError)),
 )
 
@@ -233,13 +294,12 @@ export const forkCreateChildAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcClient = yield* DaemonRpcClient
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
-			const projectService = yield* ProjectService
-			const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+			const projectPath = yield* getCurrentProjectPath
 
 			yield* overlay.pop()
 
@@ -247,37 +307,45 @@ export const forkCreateChildAtom = appRuntime.fn(
 				requestedImplementations: params.implementations,
 				cwd: projectPath,
 			})
-			const issue = yield* client.create({
-				title: params.title,
-				type: params.type,
-				priority: params.priority,
-				implementations,
-				cwd: projectPath,
+			const issueResult = yield* daemonRpcClient.issueCreate({
+				projectPath,
+				input: {
+					title: params.title,
+					type: resolveIssueType(params.type),
+					priority: params.priority,
+					implementations,
+				},
 			})
-			const linkResult = yield* client.update(issue.id, { parent: parentEpicId }, projectPath).pipe(
-				Effect.map(() => ({ linked: true as const })),
-				Effect.catchAll((error) =>
-					Effect.gen(function* () {
-						yield* Effect.logWarning(
-							`Fork create child created ${issue.id} but failed to link parent ${parentEpicId}: ${formatForToast(error)}`,
-						)
-						const toast = yield* ToastService
-						yield* toast.show(
-							"warning",
-							`Created ${issue.id} but failed to link to epic ${parentEpicId}`,
-						)
-						return { linked: false as const }
-					}),
-				),
-			)
+			const linkResult = yield* daemonRpcClient
+				.issueUpdate({
+					issueId: issueResult.issue.id,
+					projectPath,
+					patch: { parent: parentEpicId },
+				})
+				.pipe(
+					Effect.map(() => ({ linked: true as const })),
+					Effect.catchAll((error) =>
+						Effect.gen(function* () {
+							yield* Effect.logWarning(
+								`Fork create child created ${issueResult.issue.id} but failed to link parent ${parentEpicId}: ${formatForToast(error)}`,
+							)
+							const toast = yield* ToastService
+							yield* toast.show(
+								"warning",
+								`Created ${issueResult.issue.id} but failed to link to epic ${parentEpicId}`,
+							)
+							return { linked: false as const }
+						}),
+					),
+				)
 
-			yield* board.upsertIssueFromMutation(issue, {
+			yield* board.upsertIssueFromMutation(issueResult.issue, {
 				parentEpicId: linkResult.linked ? parentEpicId : undefined,
 			})
-			yield* navigation.jumpToTask(issue.id)
-			yield* toast.show("success", `Forked ${issue.id} from ${sourceTaskId}`)
+			yield* navigation.jumpToTask(issueResult.issue.id)
+			yield* toast.show("success", `Forked ${issueResult.issue.id} from ${sourceTaskId}`)
 
-			return issue
+			return issueResult.issue
 		}).pipe(
 			Effect.catchAll((error) =>
 				Effect.gen(function* () {
@@ -303,12 +371,11 @@ export const forkCreateEpicAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number; implementations?: readonly string[] }
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
+			const daemonRpcClient = yield* DaemonRpcClient
 			const board = yield* BoardService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
-			const projectService = yield* ProjectService
-			const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+			const projectPath = yield* getCurrentProjectPath
 
 			yield* overlay.pop()
 
@@ -316,28 +383,34 @@ export const forkCreateEpicAtom = appRuntime.fn(
 				requestedImplementations: params.implementations,
 				cwd: projectPath,
 			})
-			const epic = yield* client.create({
-				title: params.title,
-				type: "epic",
-				priority: params.priority,
-				implementations,
-				cwd: projectPath,
+			const epicResult = yield* daemonRpcClient.issueCreate({
+				projectPath,
+				input: {
+					title: params.title,
+					type: "epic",
+					priority: params.priority,
+					implementations,
+				},
 			})
-			yield* board.upsertIssueFromMutation(epic)
+			yield* board.upsertIssueFromMutation(epicResult.issue)
 
-			const reparentResult = yield* client
-				.update(sourceTaskId, { parent: epic.id }, projectPath)
+			const reparentResult = yield* daemonRpcClient
+				.issueUpdate({
+					issueId: sourceTaskId,
+					projectPath,
+					patch: { parent: epicResult.issue.id },
+				})
 				.pipe(
 					Effect.map(() => ({ reparented: true as const })),
 					Effect.catchAll((error) =>
 						Effect.gen(function* () {
 							yield* Effect.logWarning(
-								`Fork create epic created ${epic.id} but failed to reparent ${sourceTaskId}: ${formatForToast(error)}`,
+								`Fork create epic created ${epicResult.issue.id} but failed to reparent ${sourceTaskId}: ${formatForToast(error)}`,
 							)
 							const toast = yield* ToastService
 							yield* toast.show(
 								"warning",
-								`Created epic ${epic.id} but failed to reparent ${sourceTaskId}`,
+								`Created epic ${epicResult.issue.id} but failed to reparent ${sourceTaskId}`,
 							)
 							return { reparented: false as const }
 						}),
@@ -346,7 +419,7 @@ export const forkCreateEpicAtom = appRuntime.fn(
 
 			if (reparentResult.reparented) {
 				yield* board.patchTaskFromMutation(sourceTaskId, {
-					parentEpicId: epic.id,
+					parentEpicId: epicResult.issue.id,
 					updated_at: new Date().toISOString(),
 				})
 			}
@@ -354,8 +427,8 @@ export const forkCreateEpicAtom = appRuntime.fn(
 			yield* toast.show(
 				"success",
 				reparentResult.reparented
-					? `Created epic ${epic.id} and reparented ${sourceTaskId}`
-					: `Created epic ${epic.id}`,
+					? `Created epic ${epicResult.issue.id} and reparented ${sourceTaskId}`
+					: `Created epic ${epicResult.issue.id}`,
 			)
 
 			yield* overlay.push({
@@ -364,9 +437,9 @@ export const forkCreateEpicAtom = appRuntime.fn(
 				initial: {
 					type: "task",
 					priority: params.priority,
-					implementations: epic.implementations,
+					implementations: epicResult.issue.implementations,
 				},
-				context: { _tag: "forkChild", parentEpicId: epic.id, sourceTaskId },
+				context: { _tag: "forkChild", parentEpicId: epicResult.issue.id, sourceTaskId },
 			})
 		}).pipe(
 			Effect.catchAll((error) =>
@@ -417,7 +490,7 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
  *
  * Two-phase approach for reliability:
  * 1. AI tool extracts structured data (title, type, priority) from natural language
- * 2. We call tracker create directly via IssueTrackerClient
+ * 2. We call daemon issue create directly via RPC
  *
  * This avoids the unreliability of AI tools executing CLI commands and parsing free-form output.
  *
@@ -430,7 +503,7 @@ export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
-		const issueTrackerClient = yield* IssueTrackerClient
+		const daemonRpcClient = yield* DaemonRpcClient
 		const projectService = yield* ProjectService
 		const appConfig = yield* AppConfig
 
@@ -497,29 +570,30 @@ Return ONLY the JSON object, no explanation or markdown.`
 		)
 
 		// Normalize type and priority
-		const validTypes = ["task", "bug", "feature", "chore", "epic"]
-		const taskType = validTypes.includes(parsed.type ?? "") ? parsed.type : "task"
+		const taskType = resolveIssueType(parsed.type)
 		const priority =
 			typeof parsed.priority === "number" && parsed.priority >= 1 && parsed.priority <= 4
 				? parsed.priority
 				: 2
 
-		// Phase 2: Create the issue directly via IssueTrackerClient
+		// Phase 2: Create the issue directly via daemon issue RPC
 		const implementations = yield* getIssueCreateImplementations({ cwd: projectPath })
-		const createdIssue = yield* issueTrackerClient.create({
-			title: parsed.title,
-			type: taskType,
-			priority,
-			description: parsed.description,
-			implementations,
-			cwd: projectPath,
+		const createdIssueResult = yield* daemonRpcClient.issueCreate({
+			projectPath,
+			input: {
+				title: parsed.title,
+				type: taskType,
+				priority,
+				description: parsed.description,
+				implementations,
+			},
 		})
 
-		yield* board.upsertIssueFromMutation(createdIssue)
-		yield* navigation.jumpToTask(createdIssue.id)
-		yield* toast.show("success", `Created ${taskType}: ${createdIssue.id}`)
+		yield* board.upsertIssueFromMutation(createdIssueResult.issue)
+		yield* navigation.jumpToTask(createdIssueResult.issue.id)
+		yield* toast.show("success", `Created ${taskType}: ${createdIssueResult.issue.id}`)
 
-		return createdIssue.id
+		return createdIssueResult.issue.id
 	}).pipe(
 		Effect.catchAll((error) =>
 			Effect.gen(function* () {
@@ -545,8 +619,14 @@ Return ONLY the JSON object, no explanation or markdown.`
  */
 export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const client = yield* IssueTrackerClient
-		yield* client.delete(issueId)
+		const daemonRpcClient = yield* DaemonRpcClient
+		const board = yield* BoardService
+		const projectPath = yield* getCurrentProjectPath
+		yield* daemonRpcClient.issueDelete({
+			issueId,
+			projectPath,
+		})
+		yield* board.removeTaskFromMutation(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -566,9 +646,13 @@ export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 export const epicChildrenAtom = (epicId: string) =>
 	appRuntime.fn(() =>
 		Effect.gen(function* () {
-			const client = yield* IssueTrackerClient
-			const result = yield* client.getEpicWithChildren(epicId)
-			return result.children
+			const daemonRpcClient = yield* DaemonRpcClient
+			const projectPath = yield* getCurrentProjectPath
+			const result = yield* daemonRpcClient.issueGet({
+				issueId: epicId,
+				projectPath,
+			})
+			return toEpicChildDependencyRefs(result.issue.dependents)
 		}).pipe(
 			Effect.catchAll((error) =>
 				Effect.gen(function* () {

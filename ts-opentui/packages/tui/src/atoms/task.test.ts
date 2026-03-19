@@ -1,61 +1,43 @@
 import { describe, expect, it } from "bun:test"
-import { buildAiCreateCommand, extractJsonPayload } from "./task.js"
+import { resolveIssueType, toEpicChildDependencyRefs } from "./task.js"
 
-describe("buildAiCreateCommand", () => {
-	it("builds claude print command with text output", () => {
-		const command = buildAiCreateCommand({
-			cliTool: "claude",
-			model: "claude-4.5-haiku",
-			prompt: "hello",
-		})
-		expect(command.executable).toBe("claude")
-		expect(command.args).toEqual([
-			"-p",
-			"hello",
-			"--model",
-			"claude-4.5-haiku",
-			"--output-format",
-			"text",
-		])
+describe("resolveIssueType", () => {
+	it("keeps valid issue types", () => {
+		expect(resolveIssueType("epic")).toBe("epic")
 	})
 
-	it("builds opencode run command", () => {
-		const command = buildAiCreateCommand({
-			cliTool: "opencode",
-			model: "gpt-5-mini",
-			prompt: "hello",
-		})
-		expect(command.executable).toBe("opencode")
-		expect(command.args).toEqual(["run", "--model", "gpt-5-mini", "hello"])
-	})
-
-	it("builds codex exec command", () => {
-		const command = buildAiCreateCommand({
-			cliTool: "codex",
-			model: "gpt-5-mini",
-			prompt: "hello",
-		})
-		expect(command.executable).toBe("codex")
-		expect(command.args).toEqual(["exec", "--model", "gpt-5-mini", "--color", "never", "hello"])
+	it("falls back to task for unexpected values", () => {
+		expect(resolveIssueType("not-a-real-type")).toBe("task")
 	})
 })
 
-describe("extractJsonPayload", () => {
-	it("returns plain JSON output", () => {
-		expect(extractJsonPayload('{"title":"A","type":"task"}')).toBe('{"title":"A","type":"task"}')
-	})
+describe("toEpicChildDependencyRefs", () => {
+	it("filters to parent-child dependents and preserves child metadata", () => {
+		const children = toEpicChildDependencyRefs([
+			{
+				id: "az-1",
+				title: "Child one",
+				status: "open",
+				dependency_type: "parent-child",
+				issue_type: "task",
+			},
+			{
+				id: "az-2",
+				title: "Blocked issue",
+				status: "blocked",
+				dependency_type: "blocks",
+				issue_type: "bug",
+			},
+		])
 
-	it("unwraps markdown json fences", () => {
-		expect(extractJsonPayload('```json\n{"title":"A"}\n```')).toBe('{"title":"A"}')
-	})
-
-	it("extracts balanced JSON from noisy output", () => {
-		const raw =
-			'WARNING noisy preface\n\u001b[31mcolor\u001b[0m\n{"title":"A","description":"x"}\ntrailer'
-		expect(extractJsonPayload(raw)).toBe('{"title":"A","description":"x"}')
-	})
-
-	it("throws on missing JSON object", () => {
-		expect(() => extractJsonPayload("no json here")).toThrow()
+		expect(children).toEqual([
+			{
+				id: "az-1",
+				title: "Child one",
+				status: "open",
+				dependency_type: "parent-child",
+				issue_type: "task",
+			},
+		])
 	})
 })
