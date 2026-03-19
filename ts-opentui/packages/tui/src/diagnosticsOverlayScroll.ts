@@ -1,4 +1,4 @@
-import type { ScrollCommand } from "../../../src/services/OverlayService.js"
+import type { ScrollCommand } from "./contracts.js"
 
 /**
  * Scroll commands are delivered via SubscriptionRef (last-value).

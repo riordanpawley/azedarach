@@ -3,11 +3,11 @@
  */
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
-import { killActivePopup } from "../../../src/core/IssueEditorService.js"
 import { AZ_SESSION_NAME } from "../../../src/lib/tmux-wrap.js"
 import { App } from "./App.js"
 import { truncateAzLogOnStartup } from "./logMaintenance.js"
 import { clearShutdownHandler, registerShutdownHandler, requestShutdown } from "./runtimeControl.js"
+import { killActivePopup } from "./utils/popupCleanup.js"
 
 const AZ_RETURN_KEY = process.env.AZ_RETURN_KEY?.trim() || "g"
 const RESET_TERMINAL_MODES_SEQUENCE =

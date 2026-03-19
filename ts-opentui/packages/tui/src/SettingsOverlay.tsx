@@ -21,7 +21,6 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import { getVisibleSettings } from "../../../src/services/SettingsService.js"
 import {
 	appConfigAtom,
 	configLoadWarningAtom,
@@ -29,6 +28,7 @@ import {
 	settingsStateAtom,
 } from "./atoms.js"
 import { theme } from "./theme.js"
+import { getVisibleSettings } from "./utils/settings.js"
 
 const ATTR_BOLD = 1
 

@@ -5,15 +5,15 @@ import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef } from "react"
+import { diagnosticsAtom, diagnosticsScrollAtom } from "./atoms.js"
 import type {
 	DiagnosticSeverity,
 	FiberStatus,
 	IssueSyncLastStatus,
 	IssueSyncRuntimeReason,
+	LinearWebhookMode,
 	LinearWebhookStrategy,
-} from "../../../src/services/DiagnosticsService.js"
-import type { LinearWebhookMode } from "../../../src/services/LinearWebhookService.js"
-import { diagnosticsAtom, diagnosticsScrollAtom } from "./atoms.js"
+} from "./contracts.js"
 import { computeDiagnosticsOverlayLayout } from "./diagnosticsOverlayLayout.js"
 import { shouldApplyDiagnosticsScrollCommand } from "./diagnosticsOverlayScroll.js"
 import { sanitizeDiagnosticInlineText, sanitizeDiagnosticTextLines } from "./diagnosticsText.js"

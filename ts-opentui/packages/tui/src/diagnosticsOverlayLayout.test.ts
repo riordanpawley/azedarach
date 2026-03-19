@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test"
-import { shouldResetScrollCommandOnPush } from "../../../src/services/OverlayService.js"
 import { computeDiagnosticsOverlayLayout } from "./diagnosticsOverlayLayout.js"
 import { shouldApplyDiagnosticsScrollCommand } from "./diagnosticsOverlayScroll.js"
+import { shouldResetScrollCommandOnPush } from "./utils/overlay.js"
 
 describe("computeDiagnosticsOverlayLayout", () => {
 	it("derives panel and viewport sizes from terminal size", () => {

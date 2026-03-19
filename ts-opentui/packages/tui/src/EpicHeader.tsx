@@ -7,7 +7,7 @@
  * - Progress bar showing completed/total children
  */
 
-import type { DependencyRef, Issue } from "../../../src/core/IssueTrackerClient.js"
+import type { DependencyRef, Issue } from "./contracts.js"
 import { theme } from "./theme.js"
 
 interface EpicHeaderProps {

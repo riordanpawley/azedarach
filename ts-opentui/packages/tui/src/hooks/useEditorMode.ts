@@ -10,11 +10,6 @@ import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Record as R } from "effect"
 import { useMemo } from "react"
 import {
-	DEFAULT_FILTER_CONFIG,
-	type SortConfig,
-	type SortField,
-} from "../../../../src/services/EditorService.js"
-import {
 	activeFilterFieldAtom,
 	clearFiltersAtom,
 	clearSearchAtom,
@@ -37,6 +32,7 @@ import {
 	toggleSelectionAtom,
 	updateSearchAtom,
 } from "../atoms.js"
+import { DEFAULT_FILTER_CONFIG, type SortConfig, type SortField } from "../contracts.js"
 import type { JumpTarget } from "../types.js"
 
 // Default mode when loading
