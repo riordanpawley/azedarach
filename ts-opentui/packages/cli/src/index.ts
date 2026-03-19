@@ -113,7 +113,11 @@ import {
 	isRetryableRpcClientError,
 } from "./daemonClientBootstrap.js"
 import { devCommand } from "./dev-server.js"
-import { resolveCliIssueId } from "./issueIdResolver.js"
+import {
+	configureCliIssueIdResolutionContext,
+	INFER_PREFIX_SAMPLE_LIMIT,
+	resolveCliIssueId,
+} from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
 import {
 	buildPrimeOutput,
@@ -238,6 +242,30 @@ const createCommandCliLayer = (configPath: string | null) =>
 
 const fullCliLayer = createFullCliLayer(null)
 const commandCliLayer = createCommandCliLayer(null)
+
+configureCliIssueIdResolutionContext({
+	getConfig: Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		return yield* SubscriptionRef.get(appConfig.config)
+	}).pipe(Effect.provide(createCommandCliLayer(null))),
+	listIssueIds: (projectPath: string) =>
+		Effect.gen(function* () {
+			const issueTrackerClient = yield* IssueTrackerClient
+			return yield* issueTrackerClient
+				.list(undefined, projectPath, {
+					includeClosed: true,
+					limit: INFER_PREFIX_SAMPLE_LIMIT,
+				})
+				.pipe(
+					Effect.map((issues) => issues.map((issue) => issue.id)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					),
+				)
+		}).pipe(Effect.provide(createCommandCliLayer(null))),
+})
 
 // ============================================================================
 // Shared Options

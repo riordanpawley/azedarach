@@ -1,6 +1,6 @@
 import { FileSystem, Command as PlatformCommand } from "@effect/platform"
 import { Console, Effect } from "effect"
-import type { TmuxStatus } from "../../../src/core/TmuxSessionMonitor.js"
+import type { TmuxStatus } from "./contracts.js"
 import { deriveWaitingAttentionPlan } from "./output-formatting.js"
 
 export type HookEvent =
