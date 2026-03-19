@@ -1,9 +1,3 @@
-export {
-	clearGlobalDaemonArtifacts,
-	type GlobalDaemonDiscovery,
-	probeGlobalDaemonOwnerLiveness,
-	readGlobalDaemonDiscovery,
-} from "../../../packages/daemon/src/GlobalDaemonRegistry.js"
 export { AttachmentService } from "../../../src/core/AttachmentService.js"
 export type {
 	BackendFlushQueueOptions,
@@ -52,3 +46,4 @@ export { TerminalService } from "../../../src/core/TerminalService.js"
 export { TmuxService } from "../../../src/core/TmuxService.js"
 export { TmuxSessionMonitor } from "../../../src/core/TmuxSessionMonitor.js"
 export { VCService } from "../../../src/core/VCService.js"
+export * from "./GlobalDaemonRegistry.js"
