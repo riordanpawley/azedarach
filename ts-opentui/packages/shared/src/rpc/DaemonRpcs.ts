@@ -73,6 +73,20 @@ import {
 	DaemonStatusRequestSchema,
 	DaemonStopRequestSchema,
 } from "./DaemonRpcSchemas.js"
+import {
+	DaemonSpecIssueLinksRequestSchema,
+	DaemonSpecIssueLinksResultSchema,
+	DaemonSpecLintRequestSchema,
+	DaemonSpecLintResultSchema,
+	DaemonSpecParityRequestSchema,
+	DaemonSpecParityResultSchema,
+	DaemonSpecReadRequestSchema,
+	DaemonSpecReadResultSchema,
+	DaemonSpecRequirementGetRequestSchema,
+	DaemonSpecRequirementGetResultSchema,
+	DaemonSpecRequirementListRequestSchema,
+	DaemonSpecRequirementListResultSchema,
+} from "./DaemonSpecRpcSchemas.js"
 
 export const DaemonStatusRpc = Rpc.make("daemonStatus", {
 	payload: DaemonStatusRequestSchema,
@@ -296,6 +310,42 @@ export const DaemonImplementationSetDefaultRpc = Rpc.make("daemonImplementationS
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonSpecRequirementListRpc = Rpc.make("daemonSpecRequirementList", {
+	payload: DaemonSpecRequirementListRequestSchema,
+	success: DaemonSpecRequirementListResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecRequirementGetRpc = Rpc.make("daemonSpecRequirementGet", {
+	payload: DaemonSpecRequirementGetRequestSchema,
+	success: DaemonSpecRequirementGetResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecReadRpc = Rpc.make("daemonSpecRead", {
+	payload: DaemonSpecReadRequestSchema,
+	success: DaemonSpecReadResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecLintRpc = Rpc.make("daemonSpecLint", {
+	payload: DaemonSpecLintRequestSchema,
+	success: DaemonSpecLintResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecParityRpc = Rpc.make("daemonSpecParity", {
+	payload: DaemonSpecParityRequestSchema,
+	success: DaemonSpecParityResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecIssueLinksRpc = Rpc.make("daemonSpecIssueLinks", {
+	payload: DaemonSpecIssueLinksRequestSchema,
+	success: DaemonSpecIssueLinksResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonEventStreamRpc = Rpc.make("daemonEventStream", {
 	payload: DaemonEventStreamRequestSchema,
 	success: DaemonEventStreamResultSchema,
@@ -360,6 +410,20 @@ export const DaemonImplementationRpcGroup = RpcGroup.make(
 	DaemonImplementationDeleteRpc,
 	DaemonImplementationSetDefaultRpc,
 )
+
+export const DaemonSpecRequirementRpcGroup = RpcGroup.make(
+	DaemonSpecRequirementListRpc,
+	DaemonSpecRequirementGetRpc,
+)
+
+export const DaemonSpecReadRpcGroup = RpcGroup.make(
+	DaemonSpecReadRpc,
+	DaemonSpecLintRpc,
+	DaemonSpecParityRpc,
+	DaemonSpecIssueLinksRpc,
+)
+
+export const DaemonSpecRpcGroup = DaemonSpecRequirementRpcGroup.merge(DaemonSpecReadRpcGroup)
 
 export const DaemonRpcGroup = DaemonControlRpcGroup.merge(
 	DaemonClientRpcGroup,
