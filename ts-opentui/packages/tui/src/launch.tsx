@@ -3,8 +3,8 @@
  */
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
-import { AZ_SESSION_NAME } from "../../../src/lib/tmux-wrap.js"
 import { App } from "./App.js"
+import { AZ_SESSION_NAME } from "./lib/tmux-wrap.js"
 import { truncateAzLogOnStartup } from "./logMaintenance.js"
 import { clearShutdownHandler, registerShutdownHandler, requestShutdown } from "./runtimeControl.js"
 import { killActivePopup } from "./utils/popupCleanup.js"

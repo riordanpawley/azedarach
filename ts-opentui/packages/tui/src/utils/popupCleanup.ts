@@ -1,1 +1,1 @@
-export { killActiveEditorPopup as killActivePopup } from "../../../../src/lib/editorPopupState.js"
+export { killActiveEditorPopup as killActivePopup } from "../lib/editorPopupState.js"

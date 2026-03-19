@@ -4,11 +4,10 @@
  * Handles task creation, deletion, movement, and editing.
  */
 
+import { AppConfig, type CliTool } from "@azedarach/config"
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
-import { AppConfig } from "../../../../src/config/index.js"
-import type { CliTool } from "../../../../src/config/schema.js"
-import { stripAnsi } from "../../../../src/lib/ansi.js"
+import { stripAnsi } from "../lib/ansi.js"
 import type { TaskWithSession } from "../types.js"
 import {
 	BoardService,

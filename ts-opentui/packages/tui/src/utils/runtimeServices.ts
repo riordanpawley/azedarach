@@ -1,8 +1,4 @@
 export {
-	deriveWaitingSessionOptions,
-	type WaitingSessionOption,
-} from "../../../../src/lib/waitingSessions.js"
-export {
 	BoardService,
 	ClockService,
 	CommandQueueService,
@@ -68,6 +64,10 @@ export type {
 	TaskPhaseInfo,
 	VCExecutorInfo,
 } from "../contracts.js"
+export {
+	deriveWaitingSessionOptions,
+	type WaitingSessionOption,
+} from "../lib/waitingSessions.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"
 export { computeDependencyPhases } from "./dependencyPhases.js"
 export { formatForToast } from "./formatForToast.js"
