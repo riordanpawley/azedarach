@@ -4,11 +4,15 @@
  * Handles cursor navigation and position tracking.
  */
 
+import {
+	DaemonRpcClient,
+	type TrackedIssue,
+	type TrackedIssueRelationshipRef,
+} from "@azedarach/shared/rpc"
 import { Atom, Result } from "@effect-atom/atom"
-import { Effect, SubscriptionRef } from "effect"
+import { Effect, Option, SubscriptionRef } from "effect"
 import {
 	computeDependencyPhases,
-	IssueTrackerClient,
 	NavigationService,
 	type PhaseComputationResult,
 } from "../utils/runtimeServices.js"
@@ -167,6 +171,35 @@ export const exitDrillDownAtom = appRuntime.fn(() =>
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
+export const extractEpicChildren = (
+	issue: TrackedIssue,
+): ReadonlyArray<TrackedIssueRelationshipRef> =>
+	issue.dependents?.filter((relationship) => relationship.dependency_type === "parent-child") ??
+	EMPTY_EPIC_CHILDREN
+
+export const buildFallbackEpicIssue = (epicId: string): TrackedIssue => ({
+	id: epicId,
+	title: "Unknown Epic",
+	status: "open",
+	priority: 2,
+	issue_type: "epic",
+	created_at: "",
+	updated_at: "",
+	implementations: [],
+})
+
+const EMPTY_EPIC_CHILDREN: ReadonlyArray<TrackedIssueRelationshipRef> = []
+
+const loadEpicIssue = (epicId: string): Effect.Effect<TrackedIssue> =>
+	Effect.gen(function* () {
+		const maybeDaemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		if (Option.isNone(maybeDaemonRpcClient)) {
+			return buildFallbackEpicIssue(epicId)
+		}
+		const response = yield* maybeDaemonRpcClient.value.issueGet({ issueId: epicId })
+		return response.issue
+	}).pipe(Effect.catchAll(() => Effect.succeed(buildFallbackEpicIssue(epicId))))
+
 /**
  * Get epic children - fetches children for the current drill-down epic
  *
@@ -174,9 +207,9 @@ export const exitDrillDownAtom = appRuntime.fn(() =>
  */
 export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		return yield* issueTrackerClient.getEpicChildren(epicId)
-	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
+		const issue = yield* loadEpicIssue(epicId)
+		return extractEpicChildren(issue)
+	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as(EMPTY_EPIC_CHILDREN)))),
 )
 
 /**
@@ -186,22 +219,9 @@ export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
  */
 export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		return yield* issueTrackerClient.show(epicId)
+		return yield* loadEpicIssue(epicId)
 	}).pipe(
-		Effect.catchAll((e) =>
-			Effect.logError(e).pipe(
-				Effect.as({
-					id: epicId,
-					title: "Unknown Epic",
-					status: "open" as const,
-					priority: 2,
-					issue_type: "epic" as const,
-					created_at: "",
-					updated_at: "",
-				}),
-			),
-		),
+		Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as(buildFallbackEpicIssue(epicId)))),
 	),
 )
 
