@@ -149,6 +149,22 @@ check_legacy_service_imports() {
 	fi
 }
 
+check_workspace_effect_declarations() {
+    local hits=()
+    while IFS= read -r hit; do
+        [[ -n "$hit" ]] && hits+=("$hit")
+    done < <(
+        rg -n --no-heading '"(@effect/[^"]+|effect)"\s*:' packages/*/package.json || true
+    )
+
+    if ((${#hits[@]} > 0)); then
+        printf 'Boundary violations (workspace Effect dependency declarations):\n' >&2
+        printf '  Declare effect and @effect/* dependencies at ts-opentui/package.json only; packages/* must rely on the hoisted workspace install.\n' >&2
+        printf '  %s\n' "${hits[@]}" >&2
+        fail=1
+    fi
+}
+
 check_shared_surface_is_rpc_only() {
 	local hits=()
 	while IFS= read -r hit; do
@@ -205,6 +221,7 @@ check_legacy_shim_core_files_absent() {
 }
 
 check_legacy_service_imports
+check_workspace_effect_declarations
 check_shared_surface_is_rpc_only
 check_legacy_shim_tree_absent "src/cli"
 check_legacy_shim_tree_absent "src/rpc"

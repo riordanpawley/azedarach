@@ -37,11 +37,19 @@
       "name": "@azedarach/cli",
       "version": "0.0.0",
       "dependencies": {
+        "@azedarach/daemon-control": "workspace:*",
         "@azedarach/shared": "workspace:*",
       },
     },
     "packages/daemon": {
       "name": "@azedarach/daemon",
+      "dependencies": {
+        "@azedarach/daemon-control": "workspace:*",
+        "@azedarach/shared": "workspace:*",
+      },
+    },
+    "packages/daemon-control": {
+      "name": "@azedarach/daemon-control",
       "dependencies": {
         "@azedarach/shared": "workspace:*",
       },
@@ -49,6 +57,13 @@
     "packages/entry": {
       "name": "@azedarach/entry",
       "version": "0.0.0",
+      "dependencies": {
+        "@azedarach/cli": "workspace:*",
+        "@azedarach/daemon": "workspace:*",
+        "@azedarach/daemon-control": "workspace:*",
+        "@azedarach/shared": "workspace:*",
+        "@azedarach/tui": "workspace:*",
+      },
     },
     "packages/shared": {
       "name": "@azedarach/shared",
@@ -65,6 +80,8 @@
     "@azedarach/cli": ["@azedarach/cli@workspace:packages/cli"],
 
     "@azedarach/daemon": ["@azedarach/daemon@workspace:packages/daemon"],
+
+    "@azedarach/daemon-control": ["@azedarach/daemon-control@workspace:packages/daemon-control"],
 
     "@azedarach/entry": ["@azedarach/entry@workspace:packages/entry"],
 
