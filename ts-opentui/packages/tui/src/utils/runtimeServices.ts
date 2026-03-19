@@ -8,7 +8,6 @@ export {
 	CommandQueueService,
 	DiagnosticsService,
 	DiffService,
-	EditorService,
 	KeyboardService,
 	MutationQueue,
 	NavigationService,
@@ -22,8 +21,6 @@ export {
 	type SettingDefinition,
 	SettingsService,
 	type SettingValue,
-	ToastService,
-	ViewService,
 } from "../../../../src/runtime/appServicesFacade.js"
 export {
 	AttachmentService,
@@ -57,6 +54,9 @@ export {
 	deriveWaitingSessionOptions,
 	type WaitingSessionOption,
 } from "../lib/waitingSessions.js"
+export { EditorService } from "../services/EditorService.js"
+export { ToastService } from "../services/ToastService.js"
+export { ViewService } from "../services/ViewService.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"
 export { computeDependencyPhases } from "./dependencyPhases.js"
 export { formatForToast } from "./formatForToast.js"

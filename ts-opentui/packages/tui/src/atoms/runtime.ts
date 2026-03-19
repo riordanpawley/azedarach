@@ -17,13 +17,15 @@ import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
 import { Data, Effect, Layer, Logger, Stream } from "effect"
 import { ClockService } from "../services/ClockService.js"
+import { EditorService } from "../services/EditorService.js"
+import { ToastService } from "../services/ToastService.js"
+import { ViewService } from "../services/ViewService.js"
 import {
 	AttachmentService,
 	BoardService,
 	CommandQueueService,
 	DiagnosticsService,
 	DiffService,
-	EditorService,
 	ImageAttachmentService,
 	IssueEditorService,
 	KeyboardService,
@@ -44,9 +46,7 @@ import {
 	TerminalService,
 	TmuxService,
 	TmuxSessionMonitor,
-	ToastService,
 	VCService,
-	ViewService,
 } from "../utils/runtimeServices.js"
 
 const platformLayer = BunContext.layer
