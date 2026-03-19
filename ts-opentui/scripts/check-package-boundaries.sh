@@ -165,6 +165,22 @@ check_workspace_effect_declarations() {
     fi
 }
 
+check_root_effect_versions_pinned() {
+    local hits=()
+    while IFS= read -r hit; do
+        [[ -n "$hit" ]] && hits+=("$hit")
+    done < <(
+        rg -n --no-heading '"(@effect/[^"]+|effect)"\s*:\s*"(latest|[\^~][^"]*)"' package.json || true
+    )
+
+    if ((${#hits[@]} > 0)); then
+        printf 'Boundary violations (root Effect dependency version policy):\n' >&2
+        printf '  Declare effect and @effect/* at ts-opentui/package.json with explicit pinned versions only; do not use latest, ^, or ~ ranges.\n' >&2
+        printf '  %s\n' "${hits[@]}" >&2
+        fail=1
+    fi
+}
+
 check_tsconfig_paths_absent() {
     local hits=()
     while IFS= read -r hit; do
@@ -238,6 +254,7 @@ check_legacy_shim_core_files_absent() {
 
 check_legacy_service_imports
 check_workspace_effect_declarations
+check_root_effect_versions_pinned
 check_tsconfig_paths_absent
 check_shared_surface_is_rpc_only
 check_legacy_shim_tree_absent "src/cli"
