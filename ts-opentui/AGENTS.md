@@ -32,8 +32,8 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
    - Consumers must obtain services via `yield* ServiceTag` and call methods on that service instance.
    - Compose layers in runtime entrypoints and test harnesses, not ad-hoc inside domain logic.
    - Keep `Effect.runPromise`/`Effect.runSync` at runtime entrypoints and tests only.
-   - `bun run guard:effect-boundaries` must pass before closing work.
-   - If baseline updates are intentional, run `bun run guard:effect-boundaries:update` and record rationale in issue notes.
+   - Enforce the current repo boundary gate set with `bun run type-check` and `bun run check:boundaries` before closing work.
+   - There is no standalone `guard:effect-boundaries` script in the current repo state; if a real guard returns, update this file and `package.json` together.
 3. **No `node:*` Imports**:
    - Use `@effect/platform` alternatives (`Path`, `Command`, etc.).
    - Use `crypto.randomUUID()` and `process.env.HOME` where applicable.
@@ -62,7 +62,7 @@ cd ts-opentui
 bun run dev
 bun run type-check
 bun run build
-bun run guard:effect-boundaries
+bun run check:boundaries
 
 # focused search
 rg "pattern" --type ts src docs

@@ -48,7 +48,7 @@ Select the implementation based on user request or current working directory.
 8. **Spec Sync Discipline (ts-opentui)**: Keep `az spec` requirements/links aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
 9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
-11. **ts-opentui Boundary Guard**: For `ts-opentui`, run `bun run guard:effect-boundaries`; no new top-level Effect environment leaks are allowed without explicit baseline update + issue rationale.
+11. **ts-opentui Boundary Guard**: For `ts-opentui`, enforce Effect boundary hygiene with `bun run type-check` and `bun run check:boundaries`; there is no standalone `guard:effect-boundaries` script in the current repo state.
 12. **ts-opentui Service Architecture Contract**:
     - Service modules must export only service surface (`API`, service tag/class, typed errors/types, `Default` layer).
     - Do not export top-level effectful helper functions from service modules.
@@ -63,7 +63,7 @@ cd ts-opentui
 bun run dev                       # Start development TUI
 bun run type-check                # Full project check
 bun run build                     # Build the project
-bun run guard:effect-boundaries   # Block new top-level Effect environment leaks
+bun run check:boundaries          # Enforce current package boundary rules
 
 # go-bubbletea (Go)
 cd go-bubbletea
