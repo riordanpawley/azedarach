@@ -110,14 +110,23 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			"When fanning out to subagents, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent; reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.",
 		)
-		expect(output).toContain("Fan-out orchestration playbook (additive):")
-		expect(output).toContain("Keep each wave to 2-4 child issues; avoid over-fragmentation.")
-		expect(output).toContain("Child issue contract (additive):")
-		expect(output).toContain("Each child must include explicit AC and anti-goals.")
-		expect(output).toContain("AC quality gates (additive):")
+		expect(output).toContain("Subagent reconciliation protocol (risk-based):")
 		expect(output).toContain(
-			"Include cross-surface matrix: state -> expected token, actions, keybindings, fallback behavior.",
+			"Default: no dedicated worktree required when child tasks are disjoint and can be validated independently.",
 		)
+		expect(output).toContain(
+			"Require per-subagent worktrees when subagents edit the same package, shared AC gates are likely to conflict",
+		)
+		expect(output).toContain(
+			"Recommended worktree command: `git worktree add ../wt-<parent-id>-<area> -b <parent-id>/<area>`.",
+		)
+		expect(output).toContain("Validation strategy (fan-out vs integration):")
+		expect(output).toContain(
+			"Prefer package-scoped/type-scoped checks during fan-out to keep independent children unblocked.",
+		)
+		expect(output).toContain("Delegation and reconciliation contract:")
+		expect(output).toContain("Child commits must use `<child-id>: <summary>`.")
+		expect(output).toContain("Do not discard delegated edits without explicit user approval.")
 		expect(output).toContain(
 			'`az issue create "Title"` defaults to the active parent context (including `AZEDARACH_ISSUE_ID`) unless `--deferred` is set.',
 		)
