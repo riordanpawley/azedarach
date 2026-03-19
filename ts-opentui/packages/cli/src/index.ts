@@ -11,6 +11,12 @@
  */
 
 import {
+	formatDaemonRpcClientFailure,
+	GlobalDaemonBootstrap,
+	type GlobalDaemonBootstrapApi,
+	isRetryableRpcClientError,
+} from "@azedarach/daemon-control"
+import {
 	AttachmentService,
 	BoardService,
 	ClockService,
@@ -20,16 +26,12 @@ import {
 	DiffService,
 	deepMerge,
 	EditorService,
-	formatDaemonRpcClientFailure,
-	GlobalDaemonBootstrap,
-	type GlobalDaemonBootstrapApi,
 	generateHookConfig,
 	getIssueSessionName,
 	getProjectStoragePaths,
 	ImageAttachmentService,
 	IssueEditorService,
 	IssueTrackerClient,
-	isRetryableRpcClientError,
 	issueIdsEqualForLookup,
 	KeyboardService,
 	MutationQueue,
@@ -215,7 +217,6 @@ const createFullCliLayer = (configPath: string | null) =>
 		DiffService.Default,
 		PlanningService.Default,
 		SpecService.Default,
-		GlobalDaemonBootstrap.Default,
 	).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
@@ -234,7 +235,6 @@ const createCommandCliLayer = (configPath: string | null) =>
 		IssueTrackerClient.Default,
 		SessionManager.Default,
 		SpecService.Default,
-		GlobalDaemonBootstrap.Default,
 	).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),

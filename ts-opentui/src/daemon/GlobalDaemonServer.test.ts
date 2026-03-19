@@ -2,10 +2,13 @@ import { describe, expect, it } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { GlobalDaemonDiscovery, type GlobalDaemonDiscoveryApi } from "@azedarach/shared"
 import type { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Effect } from "effect"
+import {
+	GlobalDaemonDiscovery,
+	type GlobalDaemonDiscoveryApi,
+} from "../../packages/daemon/src/index.js"
 import {
 	makeGlobalDaemonServerRuntime,
 	startGlobalDaemonServer,

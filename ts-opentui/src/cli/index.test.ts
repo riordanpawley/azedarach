@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test"
-import { buildGlobalDaemonSocketUrl, formatDaemonRpcClientFailure } from "@azedarach/shared"
 import { DAEMON_RPC_PROTOCOL_VERSION, type DaemonEventStreamResult } from "@azedarach/shared/rpc"
 import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
-import { Cause, Effect, Exit, Option } from "effect"
+import { Cause, Effect, Exit, Layer, Option } from "effect"
 import {
 	appendIssueNotes,
 	buildCommandCliLayerForArgv,
@@ -27,8 +26,21 @@ import {
 	summarizeIssueBulkCreateResults,
 	summarizeIssueBulkUpdateResults,
 } from "../../packages/cli/src/index.js"
+import { DaemonControlLive } from "../../packages/daemon/src/index.js"
+import {
+	buildGlobalDaemonSocketUrl,
+	formatDaemonRpcClientFailure,
+	GlobalDaemonBootstrap,
+} from "../../packages/daemon-control/src/index.js"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+
+const daemonBootstrapTestLayer = Layer.succeed(GlobalDaemonBootstrap, {
+	bootstrapDaemonRpcClient: () => Effect.dieMessage("daemon bootstrap not expected in this test"),
+	formatDaemonRpcClientFailure,
+	isRetryableRpcClientError: (_error): _error is RpcClientError => false,
+	buildGlobalDaemonSocketUrl,
+})
 
 describe("appendIssueNotes", () => {
 	it("returns appended text when existing notes are missing", () => {
@@ -369,7 +381,7 @@ describe("buildPrimeOutput", () => {
 				"set",
 				"spec.enabled",
 				"false",
-			]).pipe(Effect.provide(BunContext.layer)),
+			]).pipe(Effect.provide(daemonBootstrapTestLayer), Effect.provide(BunContext.layer)),
 		)
 
 		const updated = JSON.parse(await Bun.file(configPath).text()) as {
@@ -1020,7 +1032,10 @@ describe("daemon control CLI commands", () => {
 		const originalHome = process.env.HOME
 		process.env.HOME = isolatedHome
 		const exit = await Effect.runPromiseExit(
-			cliRunner(["bun", "az", "daemon", "stop"]).pipe(Effect.provide(BunContext.layer)),
+			cliRunner(["bun", "az", "daemon", "stop"]).pipe(
+				Effect.provide(DaemonControlLive),
+				Effect.provide(BunContext.layer),
+			),
 		)
 		process.env.HOME = originalHome
 		expect(Exit.isFailure(exit)).toBe(true)

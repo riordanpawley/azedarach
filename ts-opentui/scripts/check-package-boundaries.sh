@@ -87,22 +87,29 @@ check_forbidden_imports "bin" "bin" \
 	'@azedarach/daemon:::Import workspace packages through the local source tree or the public facade instead of a package alias.'
 
 check_forbidden_imports "packages/tui/src" "packages/tui" \
-	'packages/(cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'\.\./\.\./cli/src/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'@azedarach/(cli|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
+    'packages/(cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '\.\./\.\./cli/src/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '@azedarach/cli(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.' \
+    '@azedarach/daemon(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/cli/src" "packages/cli" \
-	'packages/(tui|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'\.\./\.\./tui/src/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'@azedarach/(tui|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
+    'packages/(tui|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '\.\./\.\./tui/src/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '@azedarach/tui(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.' \
+    '@azedarach/daemon(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
 
 check_forbidden_imports "packages/daemon/src" "packages/daemon" \
-	'packages/(tui|cli)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'@azedarach/(tui|cli):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
+    'packages/(tui|cli)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '@azedarach/(tui|cli):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
+
+check_forbidden_imports "packages/daemon-control/src" "packages/daemon-control" \
+    'packages/daemon/src/:::Daemon-control must stay contract-only and must not import daemon implementation modules.' \
+    '@azedarach/daemon(["/]):::Daemon-control must stay contract-only and must not import daemon implementation modules.'
 
 check_forbidden_imports "packages/shared/src" "packages/shared" \
-	'packages/(tui|cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'@azedarach/(tui|cli|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
+    'packages/(tui|cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '@azedarach/(tui|cli|daemon)(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.' \
+    'GlobalDaemon(Bootstrap|Discovery):::Shared must not own daemon lifecycle or discovery wiring. Keep lifecycle contracts in daemon-control and live implementation in daemon.'
 
 check_forbidden_imports "packages/cli/src" "packages/cli" \
 	'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules, shared package exports, or public facades instead.'

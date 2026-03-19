@@ -5,17 +5,19 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Readable } from "node:stream"
-import {
-	GlobalDaemonBootstrap,
-	type GlobalDaemonBootstrapApi,
-	GlobalDaemonDiscovery,
-	type GlobalDaemonDiscoveryApi,
-	type GlobalDaemonDiscoveryMetadata,
-	type GlobalDaemonLease,
-} from "@azedarach/shared"
 import type { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Effect, Option } from "effect"
+import {
+	DaemonControlLive,
+	GlobalDaemonDiscovery,
+	type GlobalDaemonDiscoveryApi,
+	type GlobalDaemonLease,
+} from "../../packages/daemon/src/index.js"
+import {
+	GlobalDaemonBootstrap,
+	type GlobalDaemonDiscoveryMetadata,
+} from "../../packages/daemon-control/src/index.js"
 
 const projectRoot = process.cwd()
 const daemonMainPath = join(projectRoot, "src/daemon/GlobalDaemonMain.ts")
@@ -30,13 +32,13 @@ const runWithBunContext = <A, E>(
 	effect: Effect.Effect<
 		A,
 		E,
-		GlobalDaemonDiscoveryApi | GlobalDaemonBootstrapApi | FileSystem.FileSystem | Path.Path
+		GlobalDaemonDiscoveryApi | GlobalDaemonBootstrap | FileSystem.FileSystem | Path.Path
 	>,
 ) =>
 	Effect.runPromise(
 		effect.pipe(
 			Effect.provide(GlobalDaemonDiscovery.Default),
-			Effect.provide(GlobalDaemonBootstrap.Default),
+			Effect.provide(DaemonControlLive),
 			Effect.provide(BunContext.layer),
 		),
 	)

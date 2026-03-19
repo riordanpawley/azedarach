@@ -5,12 +5,8 @@
  * just CLI argument parsing and output formatting.
  */
 
-import {
-	DevServerService,
-	type DevServerState,
-	GlobalDaemonBootstrap,
-	ProjectService,
-} from "@azedarach/shared"
+import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
+import { DevServerService, type DevServerState, ProjectService } from "@azedarach/shared"
 import { Args, Command, Options } from "@effect/cli"
 import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
 import { resolveCliIssueId } from "./issueIdResolver.js"

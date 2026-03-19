@@ -69,3 +69,19 @@ release-ts-opentui-homebrew bump='patch' *args:
       target="{{ bump }}"; \
       target="${target#bump=}"; \
       ./ts-opentui/scripts/release-with-homebrew.sh "$target" --tap-dir "${AZ_HOMEBREW_TAP_DIR:-/Users/riordan/prog/homebrew-azedarach}" -- {{ args }}
+
+# ts-opentui package-scoped validation for daemon lifecycle boundary migration
+check-ts-daemon-contract:
+    @echo "Type-checking @azedarach/daemon-control"
+    cd ./ts-opentui && bun x tsc --noEmit -p packages/daemon-control/tsconfig.json
+
+check-ts-daemon-runtime:
+    @echo "Type-checking @azedarach/daemon"
+    cd ./ts-opentui && bun run --filter @azedarach/daemon type-check
+
+check-ts-boundaries:
+    @echo "Running ts-opentui package boundary checks"
+    cd ./ts-opentui && bun run check:boundaries
+
+check-ts-hard-boundary-wave: check-ts-daemon-contract check-ts-daemon-runtime check-ts-boundaries
+    @echo "Hard-boundary package checks complete"

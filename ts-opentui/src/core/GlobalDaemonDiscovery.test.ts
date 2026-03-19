@@ -2,15 +2,15 @@ import { describe, expect, it } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { FileSystem, Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Option } from "effect"
 import {
 	GlobalDaemonAlreadyRunningError,
 	GlobalDaemonDiscovery,
 	type GlobalDaemonDiscoveryApi,
 	type GlobalDaemonLease,
-} from "@azedarach/shared"
-import type { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Effect, Option } from "effect"
+} from "../../packages/daemon/src/index.js"
 
 const runWithBunContext = <A, E>(
 	effect: Effect.Effect<A, E, GlobalDaemonDiscoveryApi | FileSystem.FileSystem | Path.Path>,

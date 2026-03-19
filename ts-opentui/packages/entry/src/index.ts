@@ -4,7 +4,8 @@ import {
 	normalizeIssueOptionOrder,
 	resolveCliExecutionMode,
 } from "@azedarach/cli"
-import { GlobalDaemonBootstrap } from "@azedarach/shared"
+import { DaemonControlLive } from "@azedarach/daemon"
+import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
 import { launchTUI } from "@azedarach/tui"
 import { Effect } from "effect"
 
@@ -39,10 +40,10 @@ export const runAz = (argv: ReadonlyArray<string>) => {
 				autoStart: true,
 			})
 			return yield* Effect.promise(() => launchTUI())
-		}).pipe(Effect.provide(GlobalDaemonBootstrap.Default))
+		}).pipe(Effect.provide(DaemonControlLive))
 	}
 
-	return cliRunner(argv)
+	return cliRunner(argv).pipe(Effect.provide(DaemonControlLive))
 }
 
 export const run = (input: EntryRunInput) => runAz(input.argv)
