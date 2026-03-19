@@ -7,15 +7,15 @@ build-ts:
     @echo "Building ts-opentui"
     cd ./ts-opentui && bun run build
 
-# ts-opentui build and run from source
-build-run-ts: build-ts
-    @echo "Running ts-opentui from source"
-    cd ./ts-opentui && bun run bin/az.ts
+# ts-opentui build and run binary
+build-run-ts: build-sfe-ts
+    @echo "Running ts-opentui binary"
+    cd ./ts-opentui && ./bin/az
 
-# ts-opentui build and run from source with --verbose
-build-run-ts-verbose: build-ts
-    @echo "Running ts-opentui from source with --verbose"
-    cd ./ts-opentui && bun run bin/az.ts --verbose
+# ts-opentui build and run binary with --verbose
+build-run-ts-verbose: build-sfe-ts
+    @echo "Running ts-opentui binary with --verbose"
+    cd ./ts-opentui && ./bin/az --verbose
 
 # ts-opentui build (single-file executable)
 build-sfe-ts:
@@ -45,7 +45,7 @@ install-sfe-ts: build-sfe-ts link-sfe-ts
 
 run-sfe-ts: install-sfe-ts
     @echo "Running freshly built SFE"
-    az
+    cd ./ts-opentui && ./bin/az
 
 # Backward-compatible alias
 ts-build-link-run: run-sfe-ts

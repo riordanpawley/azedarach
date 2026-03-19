@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test"
-import { resolveAzEntrypointMode } from "./az.js"
+import { resolveAzEntrypointMode, route } from "./index.js"
 
-describe("resolveAzEntrypointMode", () => {
+describe("@azedarach/entry routing", () => {
+	it("copies route definitions without mutation", () => {
+		const definition = { name: "az", path: "/bin/az" }
+		expect(route(definition)).toEqual(definition)
+		expect(route(definition)).not.toBe(definition)
+	})
+
 	it("routes bare az invocations to the TUI", () => {
 		expect(resolveAzEntrypointMode(["bun", "az"])).toBe("tui")
 		expect(resolveAzEntrypointMode(["bun", "az", "--help"])).toBe("cli")

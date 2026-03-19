@@ -6,7 +6,9 @@
 		"baseUrl": ".",
 		"paths": {
 			"@azedarach/shared": ["packages/shared/src/index.ts"],
-			"@azedarach/shared/*": ["packages/shared/src/*"]
+			"@azedarach/shared/*": ["packages/shared/src/*"],
+			"@azedarach/entry": ["packages/entry/src/index.ts"],
+			"@azedarach/entry/*": ["packages/entry/src/*"]
 		},
 		"strict": true,
 		"skipLibCheck": true,

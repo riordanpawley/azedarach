@@ -7,15 +7,15 @@
 		"packages/*"
 	],
 	"bin": {
-		"az": "./bin/az.ts"
+		"az": "./bin/az"
 	},
 	"scripts": {
-		"dev": "bun run bin/az.ts",
-		"dev:watch": "AZ_NO_TMUX=1 bun --watch run bin/az.ts",
+		"dev": "bun run packages/entry/src/main.ts",
+		"dev:watch": "AZ_NO_TMUX=1 bun --watch run packages/entry/src/main.ts",
 		"workspace:install": "bun install",
-		"link": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$(pwd)/bin/az.ts\" \"$HOME/.local/bin/az\"",
-		"build": "tsup bin/az.ts --format esm --clean",
-		"build-sfe": "bun build bin/az.ts --compile --outfile ./bin/az",
+		"link": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$(pwd)/bin/az\" \"$HOME/.local/bin/az\"",
+		"build": "tsup packages/entry/src/main.ts --format esm --clean",
+		"build-sfe": "bun build packages/entry/src/main.ts --compile --outfile ./bin/az",
 		"type-check": "tsc --noEmit",
 		"check:boundaries": "bash scripts/check-package-boundaries.sh",
 		"check:ci": "bun run lint && bun run type-check && bun run check:boundaries",

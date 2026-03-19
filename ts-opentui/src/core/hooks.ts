@@ -36,8 +36,8 @@ const computeBinPath = (): string => {
 /** Cached absolute path to the bin directory */
 const BIN_PATH = computeBinPath()
 
-/** Cached absolute path to the az CLI script */
-const AZ_BINARY_PATH = `${BIN_PATH}/az.ts`
+/** Cached absolute path to the az CLI binary */
+const AZ_BINARY_PATH = `${BIN_PATH}/az`
 
 /** Cached absolute path to the fast notify shell script */
 const AZ_NOTIFY_PATH = `${BIN_PATH}/az-notify.sh`
@@ -46,9 +46,9 @@ const AZ_NOTIFY_PATH = `${BIN_PATH}/az-notify.sh`
 const AZ_PRE_COMPACT_PATH = `${BIN_PATH}/az-pre-compact.sh`
 
 /**
- * Get the absolute path to the az CLI script
+ * Get the absolute path to the az CLI binary
  *
- * Returns the pre-computed path to bin/az.ts.
+ * Returns the pre-computed path to bin/az.
  * This ensures hooks work even when az isn't in PATH.
  */
 export const getAzBinaryPath = (): string => AZ_BINARY_PATH

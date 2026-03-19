@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const decoder = new TextDecoder()
-const AZ_BIN_PATH = join(import.meta.dir, "..", "..", "bin", "az.ts")
+const AZ_BIN_PATH = join(import.meta.dir, "..", "..", "packages", "entry", "src", "main.ts")
 
 const runAz = (args: readonly string[], cwd: string): string => {
 	const result = Bun.spawnSync({

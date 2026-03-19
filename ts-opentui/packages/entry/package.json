@@ -1,0 +1,19 @@
+{
+	"name": "@azedarach/entry",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@azedarach/cli": "workspace:*",
+		"@azedarach/tui": "workspace:*",
+		"@effect/platform-bun": "latest",
+		"effect": "latest"
+	},
+	"exports": {
+		".": "./src/index.ts",
+		"./main": "./src/main.ts"
+	},
+	"scripts": {
+		"type-check": "tsc --noEmit -p tsconfig.json"
+	}
+}

@@ -42,6 +42,13 @@
     },
     "packages/daemon": {
       "name": "@azedarach/daemon",
+      "dependencies": {
+        "@azedarach/shared": "workspace:*",
+      },
+    },
+    "packages/entry": {
+      "name": "@azedarach/entry",
+      "version": "0.0.0",
     },
     "packages/shared": {
       "name": "@azedarach/shared",
@@ -58,6 +65,8 @@
     "@azedarach/cli": ["@azedarach/cli@workspace:packages/cli"],
 
     "@azedarach/daemon": ["@azedarach/daemon@workspace:packages/daemon"],
+
+    "@azedarach/entry": ["@azedarach/entry@workspace:packages/entry"],
 
     "@azedarach/shared": ["@azedarach/shared@workspace:packages/shared"],
 
