@@ -5,7 +5,7 @@
  */
 
 import { Effect } from "effect"
-import { KeyboardService } from "../../../../src/services/KeyboardService.js"
+import { KeyboardService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

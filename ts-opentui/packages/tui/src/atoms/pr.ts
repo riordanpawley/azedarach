@@ -5,8 +5,7 @@
  */
 
 import { Effect } from "effect"
-import { PRWorkflow } from "../../../../src/core/PRWorkflow.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
+import { PRWorkflow, ProjectService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

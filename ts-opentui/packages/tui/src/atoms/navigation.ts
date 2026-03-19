@@ -8,10 +8,10 @@ import { Atom, Result } from "@effect-atom/atom"
 import { Effect, SubscriptionRef } from "effect"
 import {
 	computeDependencyPhases,
+	IssueTrackerClient,
+	NavigationService,
 	type PhaseComputationResult,
-} from "../../../../src/core/dependencyPhases.js"
-import { IssueTrackerClient } from "../../../../src/core/IssueTrackerClient.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
+} from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

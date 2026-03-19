@@ -8,7 +8,7 @@
  */
 
 import { Effect } from "effect"
-import { GitSyncService } from "../../../../src/services/GitSyncService.js"
+import { GitSyncService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

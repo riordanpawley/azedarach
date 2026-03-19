@@ -6,7 +6,7 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { ClockService, computeElapsedFormatted } from "../../../../src/services/ClockService.js"
+import { ClockService, computeElapsedFormatted } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

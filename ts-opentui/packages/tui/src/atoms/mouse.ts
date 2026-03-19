@@ -6,12 +6,14 @@
  */
 
 import { Effect } from "effect"
-import { EditorService } from "../../../../src/services/EditorService.js"
-import { KeyboardService } from "../../../../src/services/KeyboardService.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
-import { OverlayService } from "../../../../src/services/OverlayService.js"
 import type { TaskWithSession } from "../types.js"
 import { COLUMNS } from "../types.js"
+import {
+	EditorService,
+	KeyboardService,
+	NavigationService,
+	OverlayService,
+} from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 type MouseButtonType = "left" | "right"

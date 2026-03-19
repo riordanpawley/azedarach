@@ -6,10 +6,9 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
-import { BoardService } from "../../../../src/services/BoardService.js"
-import { ViewService } from "../../../../src/services/ViewService.js"
 import { TASK_CARD_HEIGHT } from "../TaskCard.js"
 import type { TaskWithSession } from "../types.js"
+import { BoardService, ViewService } from "../utils/runtimeServices.js"
 import { drillDownChildIdsAtom, drillDownEpicAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 

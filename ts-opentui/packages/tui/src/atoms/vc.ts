@@ -5,7 +5,7 @@
  */
 
 import { Effect, pipe, Schedule, SubscriptionRef } from "effect"
-import { type VCExecutorInfo, VCService } from "../../../../src/core/VCService.js"
+import { type VCExecutorInfo, VCService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

@@ -8,17 +8,19 @@ import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../../../src/config/index.js"
 import type { CliTool } from "../../../../src/config/schema.js"
-import { IssueEditorService } from "../../../../src/core/IssueEditorService.js"
-import { getIssueCreateImplementations } from "../../../../src/core/IssueImplementations.js"
-import { IssueTrackerClient } from "../../../../src/core/IssueTrackerClient.js"
 import { stripAnsi } from "../../../../src/lib/ansi.js"
-import { BoardService } from "../../../../src/services/BoardService.js"
-import { formatForToast } from "../../../../src/services/ErrorFormatter.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
-import { OverlayService } from "../../../../src/services/OverlayService.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
-import { ToastService } from "../../../../src/services/ToastService.js"
 import type { TaskWithSession } from "../types.js"
+import {
+	BoardService,
+	formatForToast,
+	getIssueCreateImplementations,
+	IssueEditorService,
+	IssueTrackerClient,
+	NavigationService,
+	OverlayService,
+	ProjectService,
+	ToastService,
+} from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

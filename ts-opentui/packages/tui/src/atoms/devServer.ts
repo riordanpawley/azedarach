@@ -1,14 +1,14 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap, Option } from "effect"
-import { TmuxService } from "../../../../src/core/TmuxService.js"
 import {
 	DevServerService,
 	type DevServerState,
 	type DevServerStatus,
-} from "../../../../src/services/DevServerService.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
-import { ToastService } from "../../../../src/services/ToastService.js"
+	NavigationService,
+	ProjectService,
+	TmuxService,
+	ToastService,
+} from "../utils/runtimeServices.js"
 import { appConfigAtom } from "./config.js"
 import { appRuntime } from "./runtime.js"
 

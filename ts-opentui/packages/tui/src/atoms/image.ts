@@ -6,10 +6,7 @@
  */
 
 import { Effect } from "effect"
-import {
-	type ImageAttachment,
-	ImageAttachmentService,
-} from "../../../../src/core/ImageAttachmentService.js"
+import { type ImageAttachment, ImageAttachmentService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // Re-export ImageAttachment type for components

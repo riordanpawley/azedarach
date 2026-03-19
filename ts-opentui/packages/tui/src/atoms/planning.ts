@@ -5,17 +5,12 @@
  */
 
 import { Effect } from "effect"
-import { PlanningService } from "../../../../src/core/PlanningService.js"
-import { BoardService } from "../../../../src/services/BoardService.js"
+import type { Plan, PlannedTask, PlanningState, ReviewFeedback } from "../contracts.js"
+import { BoardService, PlanningService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // Re-export types for consumers
-export type {
-	Plan,
-	PlannedTask,
-	PlanningState,
-	ReviewFeedback,
-} from "../../../../src/core/PlanningService.js"
+export type { Plan, PlannedTask, PlanningState, ReviewFeedback }
 
 // ============================================================================
 // Planning State Atom

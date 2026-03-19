@@ -9,40 +9,42 @@ import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
 import { Layer, Logger } from "effect"
 import { AppConfig } from "../../../../src/config/index.js"
-import { AttachmentService } from "../../../../src/core/AttachmentService.js"
-import { ImageAttachmentService } from "../../../../src/core/ImageAttachmentService.js"
-import { IssueEditorService } from "../../../../src/core/IssueEditorService.js"
-import { IssueTrackerClient } from "../../../../src/core/IssueTrackerClient.js"
-import { PlanningService } from "../../../../src/core/PlanningService.js"
-import { PRWorkflow } from "../../../../src/core/PRWorkflow.js"
-import { PTYMonitor } from "../../../../src/core/PTYMonitor.js"
-import { SessionManager } from "../../../../src/core/SessionManager.js"
-import { SpecService } from "../../../../src/core/SpecService.js"
-import { TemplateService } from "../../../../src/core/TemplateService.js"
-import { TerminalService } from "../../../../src/core/TerminalService.js"
-import { TmuxService } from "../../../../src/core/TmuxService.js"
-import { TmuxSessionMonitor } from "../../../../src/core/TmuxSessionMonitor.js"
-import { VCService } from "../../../../src/core/VCService.js"
-import { BoardService } from "../../../../src/services/BoardService.js"
-import { ClockService } from "../../../../src/services/ClockService.js"
-import { CommandQueueService } from "../../../../src/services/CommandQueueService.js"
-import { DevServerService } from "../../../../src/services/DevServerService.js"
-import { DiagnosticsService } from "../../../../src/services/DiagnosticsService.js"
-import { DiffService } from "../../../../src/services/DiffService.js"
-import { EditorService } from "../../../../src/services/EditorService.js"
-import { GitSyncService } from "../../../../src/services/GitSyncService.js"
-import { KeyboardService } from "../../../../src/services/KeyboardService.js"
-import { MutationQueue } from "../../../../src/services/MutationQueue.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
-import { NetworkService } from "../../../../src/services/NetworkService.js"
-import { OfflineService } from "../../../../src/services/OfflineService.js"
-import { OverlayService } from "../../../../src/services/OverlayService.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
-import { ProjectStateService } from "../../../../src/services/ProjectStateService.js"
-import { SessionService } from "../../../../src/services/SessionService.js"
-import { SettingsService } from "../../../../src/services/SettingsService.js"
-import { ToastService } from "../../../../src/services/ToastService.js"
-import { ViewService } from "../../../../src/services/ViewService.js"
+import {
+	AttachmentService,
+	BoardService,
+	ClockService,
+	CommandQueueService,
+	DevServerService,
+	DiagnosticsService,
+	DiffService,
+	EditorService,
+	GitSyncService,
+	ImageAttachmentService,
+	IssueEditorService,
+	IssueTrackerClient,
+	KeyboardService,
+	MutationQueue,
+	NavigationService,
+	NetworkService,
+	OfflineService,
+	OverlayService,
+	PlanningService,
+	PRWorkflow,
+	ProjectService,
+	ProjectStateService,
+	PTYMonitor,
+	SessionManager,
+	SessionService,
+	SettingsService,
+	SpecService,
+	TemplateService,
+	TerminalService,
+	TmuxService,
+	TmuxSessionMonitor,
+	ToastService,
+	VCService,
+	ViewService,
+} from "../utils/runtimeServices.js"
 
 const platformLayer = BunContext.layer
 

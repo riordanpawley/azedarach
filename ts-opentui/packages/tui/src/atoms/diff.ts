@@ -5,8 +5,7 @@
  */
 
 import { Effect } from "effect"
-import { TmuxService } from "../../../../src/core/TmuxService.js"
-import { DiffService } from "../../../../src/services/DiffService.js"
+import { DiffService, TmuxService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

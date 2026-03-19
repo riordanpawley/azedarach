@@ -6,11 +6,7 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap } from "effect"
-import {
-	buildTaskQueueKey,
-	CommandQueueService,
-} from "../../../../src/services/CommandQueueService.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
+import { buildTaskQueueKey, CommandQueueService, ProjectService } from "../utils/runtimeServices.js"
 import { focusedTaskIdAtom } from "./navigation.js"
 import { currentProjectAtom } from "./project.js"
 import { appRuntime } from "./runtime.js"

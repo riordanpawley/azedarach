@@ -5,13 +5,15 @@
  */
 
 import { Effect, SubscriptionRef } from "effect"
-import { BoardService } from "../../../../src/services/BoardService.js"
-import { EditorService } from "../../../../src/services/EditorService.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
-import { ProjectStateService } from "../../../../src/services/ProjectStateService.js"
-import { ToastService } from "../../../../src/services/ToastService.js"
-import { ViewService } from "../../../../src/services/ViewService.js"
+import {
+	BoardService,
+	EditorService,
+	NavigationService,
+	ProjectService,
+	ProjectStateService,
+	ToastService,
+	ViewService,
+} from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

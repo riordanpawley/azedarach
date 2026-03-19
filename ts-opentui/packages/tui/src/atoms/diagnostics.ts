@@ -5,11 +5,11 @@
  */
 
 import { Effect } from "effect"
-import { DiagnosticsService } from "../../../../src/services/DiagnosticsService.js"
+import { DiagnosticsService, type DiagnosticsState } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // Re-export DiagnosticsState type for consumers
-export type { DiagnosticsState } from "../../../../src/services/DiagnosticsService.js"
+export type { DiagnosticsState }
 
 // ============================================================================
 // Diagnostics Atoms

@@ -7,10 +7,12 @@
 
 import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Effect } from "effect"
-import { AttachmentService } from "../../../../src/core/AttachmentService.js"
-import { PTYMonitor } from "../../../../src/core/PTYMonitor.js"
-import { TmuxSessionMonitor } from "../../../../src/core/TmuxSessionMonitor.js"
-import { ProjectService } from "../../../../src/services/ProjectService.js"
+import {
+	AttachmentService,
+	ProjectService,
+	PTYMonitor,
+	TmuxSessionMonitor,
+} from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

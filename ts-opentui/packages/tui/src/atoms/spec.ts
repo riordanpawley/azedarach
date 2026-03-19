@@ -6,18 +6,14 @@
 
 import { Effect, SubscriptionRef } from "effect"
 import { AppConfig } from "../../../../src/config/index.js"
-import {
-	type ImplementationRegistry,
-	IssueTrackerClient,
-} from "../../../../src/core/IssueTrackerClient.js"
-import { SpecService } from "../../../../src/core/SpecService.js"
 import type {
+	ImplementationRegistry,
 	SpecCoverageReport,
 	SpecParityReport,
 	SpecPublishOutcome,
-} from "../../../../src/core/specTypes.js"
-import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../../../../src/core/specTypes.js"
-import { EditorService } from "../../../../src/services/EditorService.js"
+} from "../contracts.js"
+import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../contracts.js"
+import { EditorService, IssueTrackerClient, SpecService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {

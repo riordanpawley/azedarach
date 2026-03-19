@@ -9,10 +9,10 @@ import { Effect, type Record } from "effect"
 import {
 	EditorService,
 	type FilterField,
+	NavigationService,
 	type OrchestrationTask,
 	type SortField,
-} from "../../../../src/services/EditorService.js"
-import { NavigationService } from "../../../../src/services/NavigationService.js"
+} from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

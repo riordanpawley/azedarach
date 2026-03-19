@@ -5,7 +5,7 @@
  */
 
 import { Effect } from "effect"
-import { NetworkService } from "../../../../src/services/NetworkService.js"
+import { NetworkService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 /**

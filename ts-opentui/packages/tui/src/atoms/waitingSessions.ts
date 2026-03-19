@@ -1,7 +1,6 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { TmuxSessionMonitor } from "../../../../src/core/TmuxSessionMonitor.js"
-import { deriveWaitingSessionOptions } from "../../../../src/lib/waitingSessions.js"
+import { deriveWaitingSessionOptions, TmuxSessionMonitor } from "../utils/runtimeServices.js"
 import { currentProjectAtom, projectsAtom } from "./project.js"
 import { appRuntime } from "./runtime.js"
 
