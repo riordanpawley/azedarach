@@ -76,16 +76,42 @@ import {
 import {
 	DaemonSpecIssueLinksRequestSchema,
 	DaemonSpecIssueLinksResultSchema,
+	DaemonSpecLinkAddRequestSchema,
+	DaemonSpecLinkAddResultSchema,
+	DaemonSpecLinkListRequestSchema,
+	DaemonSpecLinkListResultSchema,
+	DaemonSpecLinkRemoveRequestSchema,
+	DaemonSpecLinkRemoveResultSchema,
+	DaemonSpecLinkUpdateRequestSchema,
+	DaemonSpecLinkUpdateResultSchema,
 	DaemonSpecLintRequestSchema,
 	DaemonSpecLintResultSchema,
 	DaemonSpecParityRequestSchema,
 	DaemonSpecParityResultSchema,
+	DaemonSpecPublishConfigGetRequestSchema,
+	DaemonSpecPublishConfigGetResultSchema,
+	DaemonSpecPublishConfigSetRequestSchema,
+	DaemonSpecPublishConfigSetResultSchema,
+	DaemonSpecPublishOutcomeGetRequestSchema,
+	DaemonSpecPublishOutcomeGetResultSchema,
+	DaemonSpecPublishRequestSchema,
+	DaemonSpecPublishResultSchema,
 	DaemonSpecReadRequestSchema,
 	DaemonSpecReadResultSchema,
+	DaemonSpecRequirementCreateRequestSchema,
+	DaemonSpecRequirementCreateResultSchema,
+	DaemonSpecRequirementDeleteRequestSchema,
+	DaemonSpecRequirementDeleteResultSchema,
 	DaemonSpecRequirementGetRequestSchema,
 	DaemonSpecRequirementGetResultSchema,
+	DaemonSpecRequirementIssuesRequestSchema,
+	DaemonSpecRequirementIssuesResultSchema,
 	DaemonSpecRequirementListRequestSchema,
 	DaemonSpecRequirementListResultSchema,
+	DaemonSpecRequirementUpdateRequestSchema,
+	DaemonSpecRequirementUpdateResultSchema,
+	DaemonSpecSyncMarkdownRequestSchema,
+	DaemonSpecSyncMarkdownResultSchema,
 } from "./DaemonSpecRpcSchemas.js"
 
 export const DaemonStatusRpc = Rpc.make("daemonStatus", {
@@ -322,6 +348,24 @@ export const DaemonSpecRequirementGetRpc = Rpc.make("daemonSpecRequirementGet", 
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonSpecRequirementCreateRpc = Rpc.make("daemonSpecRequirementCreate", {
+	payload: DaemonSpecRequirementCreateRequestSchema,
+	success: DaemonSpecRequirementCreateResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecRequirementUpdateRpc = Rpc.make("daemonSpecRequirementUpdate", {
+	payload: DaemonSpecRequirementUpdateRequestSchema,
+	success: DaemonSpecRequirementUpdateResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecRequirementDeleteRpc = Rpc.make("daemonSpecRequirementDelete", {
+	payload: DaemonSpecRequirementDeleteRequestSchema,
+	success: DaemonSpecRequirementDeleteResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonSpecReadRpc = Rpc.make("daemonSpecRead", {
 	payload: DaemonSpecReadRequestSchema,
 	success: DaemonSpecReadResultSchema,
@@ -340,9 +384,69 @@ export const DaemonSpecParityRpc = Rpc.make("daemonSpecParity", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonSpecLinkListRpc = Rpc.make("daemonSpecLinkList", {
+	payload: DaemonSpecLinkListRequestSchema,
+	success: DaemonSpecLinkListResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecLinkAddRpc = Rpc.make("daemonSpecLinkAdd", {
+	payload: DaemonSpecLinkAddRequestSchema,
+	success: DaemonSpecLinkAddResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecLinkRemoveRpc = Rpc.make("daemonSpecLinkRemove", {
+	payload: DaemonSpecLinkRemoveRequestSchema,
+	success: DaemonSpecLinkRemoveResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecLinkUpdateRpc = Rpc.make("daemonSpecLinkUpdate", {
+	payload: DaemonSpecLinkUpdateRequestSchema,
+	success: DaemonSpecLinkUpdateResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonSpecIssueLinksRpc = Rpc.make("daemonSpecIssueLinks", {
 	payload: DaemonSpecIssueLinksRequestSchema,
 	success: DaemonSpecIssueLinksResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecRequirementIssuesRpc = Rpc.make("daemonSpecRequirementIssues", {
+	payload: DaemonSpecRequirementIssuesRequestSchema,
+	success: DaemonSpecRequirementIssuesResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecPublishConfigGetRpc = Rpc.make("daemonSpecPublishConfigGet", {
+	payload: DaemonSpecPublishConfigGetRequestSchema,
+	success: DaemonSpecPublishConfigGetResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecPublishConfigSetRpc = Rpc.make("daemonSpecPublishConfigSet", {
+	payload: DaemonSpecPublishConfigSetRequestSchema,
+	success: DaemonSpecPublishConfigSetResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecPublishOutcomeGetRpc = Rpc.make("daemonSpecPublishOutcomeGet", {
+	payload: DaemonSpecPublishOutcomeGetRequestSchema,
+	success: DaemonSpecPublishOutcomeGetResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecSyncMarkdownRpc = Rpc.make("daemonSpecSyncMarkdown", {
+	payload: DaemonSpecSyncMarkdownRequestSchema,
+	success: DaemonSpecSyncMarkdownResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonSpecPublishRpc = Rpc.make("daemonSpecPublish", {
+	payload: DaemonSpecPublishRequestSchema,
+	success: DaemonSpecPublishResultSchema,
 	error: DaemonRpcActionErrorSchema,
 })
 
@@ -416,14 +520,40 @@ export const DaemonSpecRequirementRpcGroup = RpcGroup.make(
 	DaemonSpecRequirementGetRpc,
 )
 
+export const DaemonSpecRequirementMutationRpcGroup = RpcGroup.make(
+	DaemonSpecRequirementCreateRpc,
+	DaemonSpecRequirementUpdateRpc,
+	DaemonSpecRequirementDeleteRpc,
+)
+
 export const DaemonSpecReadRpcGroup = RpcGroup.make(
 	DaemonSpecReadRpc,
 	DaemonSpecLintRpc,
 	DaemonSpecParityRpc,
 	DaemonSpecIssueLinksRpc,
+	DaemonSpecRequirementIssuesRpc,
 )
 
+export const DaemonSpecLinksRpcGroup = RpcGroup.make(
+	DaemonSpecLinkListRpc,
+	DaemonSpecLinkAddRpc,
+	DaemonSpecLinkRemoveRpc,
+	DaemonSpecLinkUpdateRpc,
+)
+
+export const DaemonSpecPublishConfigRpcGroup = RpcGroup.make(
+	DaemonSpecPublishConfigGetRpc,
+	DaemonSpecPublishConfigSetRpc,
+	DaemonSpecPublishOutcomeGetRpc,
+)
+
+export const DaemonSpecSyncRpcGroup = RpcGroup.make(DaemonSpecSyncMarkdownRpc, DaemonSpecPublishRpc)
+
 export const DaemonSpecRpcGroup = DaemonSpecRequirementRpcGroup.merge(DaemonSpecReadRpcGroup)
+	.merge(DaemonSpecRequirementMutationRpcGroup)
+	.merge(DaemonSpecLinksRpcGroup)
+	.merge(DaemonSpecPublishConfigRpcGroup)
+	.merge(DaemonSpecSyncRpcGroup)
 
 export const DaemonRpcGroup = DaemonControlRpcGroup.merge(
 	DaemonClientRpcGroup,
@@ -433,4 +563,9 @@ export const DaemonRpcGroup = DaemonControlRpcGroup.merge(
 	DaemonIssueRpcGroup,
 )
 
-export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonRpcGroup>
+export const DaemonAppRpcGroup = DaemonRpcGroup.merge(
+	DaemonImplementationRpcGroup,
+	DaemonSpecReadRpcGroup,
+)
+
+export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonAppRpcGroup>

@@ -8,8 +8,9 @@ import {
 	isRetryableRpcClientError,
 } from "@azedarach/daemon-control"
 import { DaemonRpcClient, type DaemonRpcClientApi, layerSocket } from "@azedarach/shared/rpc"
+import { BunContext } from "@effect/platform-bun"
 import type { RpcClientError } from "@effect/rpc/RpcClientError"
-import { Effect, Layer, Option } from "effect"
+import { Context, Effect, Exit, Layer, Option, Scope } from "effect"
 import { GlobalDaemonDiscovery } from "./GlobalDaemonDiscovery.js"
 
 const GLOBAL_DAEMON_BOOTSTRAP_TIMEOUT_MS = 5_000
@@ -56,10 +57,12 @@ const normalizeRetryBackoffMs = (
 	return normalized.length > 0 ? normalized : [0]
 }
 
-export const GlobalDaemonBootstrapLive = Layer.effect(
+export const GlobalDaemonBootstrapLive = Layer.scoped(
 	GlobalDaemonBootstrap,
 	Effect.gen(function* () {
 		const discoveryService = yield* GlobalDaemonDiscovery
+		const bootstrapScope = yield* Scope.make()
+		yield* Effect.addFinalizer(() => Scope.close(bootstrapScope, Exit.succeed(undefined)))
 
 		const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
 			Option.Option<GlobalDaemonDiscoveryMetadata>,
@@ -117,9 +120,9 @@ export const GlobalDaemonBootstrapLive = Layer.effect(
 			})
 
 		const buildDaemonRpcClient = (socketUrl: string): Effect.Effect<DaemonRpcClientApi> =>
-			Effect.gen(function* () {
-				return yield* DaemonRpcClient
-			}).pipe(Effect.provide(layerSocket(socketUrl)))
+			Layer.buildWithScope(bootstrapScope)(layerSocket(socketUrl)).pipe(
+				Effect.map((context) => Context.get(context, DaemonRpcClient)),
+			)
 
 		const bootstrapDaemonRpcClient: GlobalDaemonBootstrapApi["bootstrapDaemonRpcClient"] = (
 			params,
@@ -265,6 +268,6 @@ export const GlobalDaemonBootstrapLive = Layer.effect(
 			buildGlobalDaemonSocketUrl,
 		} satisfies GlobalDaemonBootstrapApi
 	}),
-).pipe(Layer.provide(GlobalDaemonDiscovery.Default))
+).pipe(Layer.provide(GlobalDaemonDiscovery.Default.pipe(Layer.provide(BunContext.layer))))
 
 export const DaemonControlLive = GlobalDaemonBootstrapLive

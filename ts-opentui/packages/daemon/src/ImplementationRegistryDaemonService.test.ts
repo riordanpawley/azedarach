@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite"
 import { describe, expect, it } from "bun:test"
 import { FileSystem } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer } from "effect"
+import { Effect } from "effect"
 import { ImplementationRegistryDaemonService } from "./ImplementationRegistryDaemonService.js"
 
 const makeProjectPath = (suffix: string): string =>
@@ -79,17 +79,11 @@ describe("ImplementationRegistryDaemonService", () => {
 			try {
 				database.run(
 					"INSERT INTO issues (id, implementations_json, updated_at, deleted_at) VALUES (?, ?, ?, NULL)",
-					"qc",
-					'["ts-opentui"]',
-					"2026-03-20T00:00:00.000Z",
+					["qc", '["ts-opentui"]', "2026-03-20T00:00:00.000Z"],
 				)
 				database.run(
 					"INSERT INTO spec_issue_links (issue_id, requirement_id, link_type, implementations_json, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, NULL)",
-					"qc",
-					"fr0001",
-					"implements",
-					'["ts-opentui"]',
-					"2026-03-20T00:00:00.000Z",
+					["qc", "fr0001", "implements", '["ts-opentui"]', "2026-03-20T00:00:00.000Z"],
 				)
 			} finally {
 				database.close()
@@ -147,9 +141,7 @@ describe("ImplementationRegistryDaemonService", () => {
 			try {
 				database.run(
 					"INSERT INTO issues (id, implementations_json, updated_at, deleted_at) VALUES (?, ?, ?, NULL)",
-					"qc",
-					'["ts-opentui"]',
-					"2026-03-20T00:00:00.000Z",
+					["qc", '["ts-opentui"]', "2026-03-20T00:00:00.000Z"],
 				)
 			} finally {
 				database.close()

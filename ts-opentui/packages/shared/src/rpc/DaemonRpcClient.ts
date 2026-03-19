@@ -77,20 +77,46 @@ import {
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
 } from "./DaemonRpcSchemas.js"
-import { DaemonImplementationRpcGroup, DaemonRpcGroup, DaemonSpecRpcGroup } from "./DaemonRpcs.js"
+import { DaemonAppRpcGroup, DaemonSpecRpcGroup } from "./DaemonRpcs.js"
 import type {
 	DaemonSpecIssueLinksRequest,
 	DaemonSpecIssueLinksResult,
+	DaemonSpecLinkAddRequest,
+	DaemonSpecLinkAddResult,
+	DaemonSpecLinkListRequest,
+	DaemonSpecLinkListResult,
+	DaemonSpecLinkRemoveRequest,
+	DaemonSpecLinkRemoveResult,
+	DaemonSpecLinkUpdateRequest,
+	DaemonSpecLinkUpdateResult,
 	DaemonSpecLintRequest,
 	DaemonSpecLintResult,
 	DaemonSpecParityRequest,
 	DaemonSpecParityResult,
+	DaemonSpecPublishConfigGetRequest,
+	DaemonSpecPublishConfigGetResult,
+	DaemonSpecPublishConfigSetRequest,
+	DaemonSpecPublishConfigSetResult,
+	DaemonSpecPublishOutcomeGetRequest,
+	DaemonSpecPublishOutcomeGetResult,
+	DaemonSpecPublishRequest,
+	DaemonSpecPublishResult,
 	DaemonSpecReadRequest,
 	DaemonSpecReadResult,
+	DaemonSpecRequirementCreateRequest,
+	DaemonSpecRequirementCreateResult,
+	DaemonSpecRequirementDeleteRequest,
+	DaemonSpecRequirementDeleteResult,
 	DaemonSpecRequirementGetRequest,
 	DaemonSpecRequirementGetResult,
+	DaemonSpecRequirementIssuesRequest,
+	DaemonSpecRequirementIssuesResult,
 	DaemonSpecRequirementListRequest,
 	DaemonSpecRequirementListResult,
+	DaemonSpecRequirementUpdateRequest,
+	DaemonSpecRequirementUpdateResult,
+	DaemonSpecSyncMarkdownRequest,
+	DaemonSpecSyncMarkdownResult,
 } from "./DaemonSpecRpcSchemas.js"
 
 export type DaemonRpcClientError = RpcClientError | DaemonRpcActionError
@@ -230,30 +256,67 @@ export interface DaemonRpcClientApi {
 	readonly implementationSetDefault: (
 		request: Omit<DaemonImplementationSetDefaultRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationSetDefaultResult, DaemonRpcClientError>
-	readonly specRequirementList?: (
+	readonly specRequirementList: (
 		request?: Omit<DaemonSpecRequirementListRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecRequirementListResult, DaemonRpcClientError>
-	readonly specRequirementGet?: (
+	readonly specRequirementGet: (
 		request: Omit<DaemonSpecRequirementGetRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecRequirementGetResult, DaemonRpcClientError>
-	readonly specRead?: (
+	readonly specRequirementCreate: (
+		request: Omit<DaemonSpecRequirementCreateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecRequirementCreateResult, DaemonRpcClientError>
+	readonly specRequirementUpdate: (
+		request: Omit<DaemonSpecRequirementUpdateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecRequirementUpdateResult, DaemonRpcClientError>
+	readonly specRequirementDelete: (
+		request: Omit<DaemonSpecRequirementDeleteRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecRequirementDeleteResult, DaemonRpcClientError>
+	readonly specRead: (
 		request?: Omit<DaemonSpecReadRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecReadResult, DaemonRpcClientError>
-	readonly specLint?: (
+	readonly specLint: (
 		request?: Omit<DaemonSpecLintRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecLintResult, DaemonRpcClientError>
-	readonly specParity?: (
+	readonly specParity: (
 		request?: Omit<DaemonSpecParityRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecParityResult, DaemonRpcClientError>
-	readonly specIssueLinks?: (
+	readonly specIssueLinks: (
 		request: Omit<DaemonSpecIssueLinksRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecIssueLinksResult, DaemonRpcClientError>
+	readonly specRequirementIssues: (
+		request: Omit<DaemonSpecRequirementIssuesRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecRequirementIssuesResult, DaemonRpcClientError>
+	readonly specLinkList: (
+		request?: Omit<DaemonSpecLinkListRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecLinkListResult, DaemonRpcClientError>
+	readonly specLinkAdd: (
+		request: Omit<DaemonSpecLinkAddRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecLinkAddResult, DaemonRpcClientError>
+	readonly specLinkRemove: (
+		request: Omit<DaemonSpecLinkRemoveRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecLinkRemoveResult, DaemonRpcClientError>
+	readonly specLinkUpdate: (
+		request: Omit<DaemonSpecLinkUpdateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecLinkUpdateResult, DaemonRpcClientError>
+	readonly specPublishConfigGet: (
+		request?: Omit<DaemonSpecPublishConfigGetRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecPublishConfigGetResult, DaemonRpcClientError>
+	readonly specPublishConfigSet: (
+		request: Omit<DaemonSpecPublishConfigSetRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecPublishConfigSetResult, DaemonRpcClientError>
+	readonly specPublishOutcomeGet: (
+		request?: Omit<DaemonSpecPublishOutcomeGetRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecPublishOutcomeGetResult, DaemonRpcClientError>
+	readonly specSyncMarkdown: (
+		request?: Omit<DaemonSpecSyncMarkdownRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecSyncMarkdownResult, DaemonRpcClientError>
+	readonly specPublish: (
+		request?: Omit<DaemonSpecPublishRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonSpecPublishResult, DaemonRpcClientError>
 }
 
 const makeDaemonRpcClient = Effect.gen(function* () {
-	const raw = yield* RpcClient.make(
-		DaemonRpcGroup.merge(DaemonImplementationRpcGroup, DaemonSpecRpcGroup),
-	)
+	const raw = yield* RpcClient.make(DaemonAppRpcGroup.merge(DaemonSpecRpcGroup))
 	return {
 		status: (request) =>
 			raw.daemonStatus(
@@ -464,6 +527,21 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
+		specRequirementCreate: (request) =>
+			raw.daemonSpecRequirementCreate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specRequirementUpdate: (request) =>
+			raw.daemonSpecRequirementUpdate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specRequirementDelete: (request) =>
+			raw.daemonSpecRequirementDelete({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
 		specRead: (request) =>
 			raw.daemonSpecRead(
 				request === undefined
@@ -487,6 +565,61 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
+		specRequirementIssues: (request) =>
+			raw.daemonSpecRequirementIssues({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specLinkList: (request) =>
+			raw.daemonSpecLinkList(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		specLinkAdd: (request) =>
+			raw.daemonSpecLinkAdd({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specLinkRemove: (request) =>
+			raw.daemonSpecLinkRemove({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specLinkUpdate: (request) =>
+			raw.daemonSpecLinkUpdate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specPublishConfigGet: (request) =>
+			raw.daemonSpecPublishConfigGet(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		specPublishConfigSet: (request) =>
+			raw.daemonSpecPublishConfigSet({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		specPublishOutcomeGet: (request) =>
+			raw.daemonSpecPublishOutcomeGet(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		specSyncMarkdown: (request) =>
+			raw.daemonSpecSyncMarkdown(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		specPublish: (request) =>
+			raw.daemonSpecPublish(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
 	} satisfies DaemonRpcClientApi
 })
 

@@ -1,26 +1,12 @@
-import type { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
-import { Effect } from "effect"
+import { AppConfig } from "@azedarach/config"
+import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
+import { Effect, SubscriptionRef } from "effect"
 import type { ResolvedConfig } from "./contracts.js"
 
 const LINEAR_IDENTIFIER_PATTERN = /^([A-Za-z][A-Za-z0-9]*)-([0-9]+)$/
 const NUMERIC_ISSUE_SUFFIX_PATTERN = /^[0-9]+$/
 const LINEAR_PREFIX_PATTERN = /^[A-Za-z][A-Za-z0-9]*$/
 export const INFER_PREFIX_SAMPLE_LIMIT = 200
-
-export interface CliIssueIdResolutionContext {
-	readonly getConfig: Effect.Effect<ResolvedConfig, unknown, never>
-	readonly listIssueIds: (
-		projectPath: string,
-	) => Effect.Effect<ReadonlyArray<string>, unknown, GlobalDaemonBootstrap>
-}
-
-let cliIssueIdResolutionContext: CliIssueIdResolutionContext | undefined
-
-export const configureCliIssueIdResolutionContext = (
-	context: CliIssueIdResolutionContext,
-): void => {
-	cliIssueIdResolutionContext = context
-}
 
 const parseLinearIdentifier = (
 	issueId: string,
@@ -107,18 +93,38 @@ export const resolveCliIssueId = (rawIssueId: string, projectPath: string) =>
 			return trimmedIssueId
 		}
 
-		const context = cliIssueIdResolutionContext
-		if (context === undefined) {
-			return yield* Effect.die(new Error("CLI issue ID resolver context has not been configured"))
-		}
-
-		const config = yield* context.getConfig
+		const appConfig = yield* AppConfig
+		const config: ResolvedConfig = yield* SubscriptionRef.get(appConfig.config)
 		const configuredPrefix = resolveConfiguredLinearPrefix(config)
 		if (configuredPrefix) {
 			return `${configuredPrefix}-${trimmedIssueId}`
 		}
 
-		const issueIds = yield* context.listIssueIds(projectPath)
+		const daemonBootstrap = yield* GlobalDaemonBootstrap
+		const bootstrap = yield* daemonBootstrap.bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const issueIds = yield* bootstrap.client
+			.issueList({
+				projectPath,
+				filters: undefined,
+				options: {
+					includeClosed: true,
+					limit: INFER_PREFIX_SAMPLE_LIMIT,
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.issues.map((issue) => issue.id)),
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						daemonBootstrap.formatDaemonRpcClientFailure({
+							operation: "issueList",
+							socketUrl: bootstrap.socketUrl,
+							error,
+						}).message,
+					).pipe(Effect.zipRight(Effect.succeed([]))),
+				),
+			)
 		const inferredPrefix = inferLinearIssuePrefixFromIds(issueIds)
 		return inferredPrefix ? `${inferredPrefix}-${trimmedIssueId}` : trimmedIssueId
 	})

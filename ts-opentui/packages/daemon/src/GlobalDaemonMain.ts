@@ -1,5 +1,5 @@
 import { BunContext } from "@effect/platform-bun"
-import { Console, Effect } from "effect"
+import { Console, Effect, Layer } from "effect"
 import { GlobalDaemonDiscovery } from "./GlobalDaemonDiscovery.js"
 import { startGlobalDaemonServer, stopGlobalDaemonServer } from "./GlobalDaemonServer.js"
 
@@ -35,13 +35,13 @@ export const runGlobalDaemonMain = Effect.gen(function* () {
 	),
 )
 
+const GlobalDaemonMainLayer = Layer.mergeAll(
+	BunContext.layer,
+	GlobalDaemonDiscovery.Default.pipe(Layer.provide(BunContext.layer)),
+)
+
 if (import.meta.main) {
-	Effect.runPromise(
-		runGlobalDaemonMain.pipe(
-			Effect.provide(GlobalDaemonDiscovery.Default),
-			Effect.provide(BunContext.layer),
-		),
-	).catch(() => {
+	Effect.runPromise(runGlobalDaemonMain.pipe(Effect.provide(GlobalDaemonMainLayer))).catch(() => {
 		process.exitCode = 1
 	})
 }

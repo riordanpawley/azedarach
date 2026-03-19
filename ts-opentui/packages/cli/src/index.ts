@@ -48,7 +48,6 @@ import { BunContext } from "@effect/platform-bun"
 import {
 	Console,
 	Data,
-	DateTime,
 	Duration,
 	Effect,
 	Layer,
@@ -76,11 +75,7 @@ import type {
 	TrackedIssue,
 } from "./contracts.js"
 import { devCommand } from "./dev-server.js"
-import {
-	configureCliIssueIdResolutionContext,
-	INFER_PREFIX_SAMPLE_LIMIT,
-	resolveCliIssueId,
-} from "./issueIdResolver.js"
+import { resolveCliIssueId } from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
 import {
 	buildPrimeOutput,
@@ -94,13 +89,11 @@ import {
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 import { resolveDaemonIntervalMsFromEnv } from "./runtime/daemonOperationsPolicy.js"
 import { deepMerge, generateHookConfig } from "./runtime/hooks.js"
-import { resolveConfiguredIssueBackend } from "./runtime/issueBackend.js"
 import {
 	getIssueSessionName,
 	issueIdsEqualForLookup,
 	parseIssueSessionName,
 } from "./runtime/paths.js"
-import { SpecService } from "./runtimeServices.js"
 import {
 	applyNotifyStatusToTmux,
 	isValidHookEvent,
@@ -161,13 +154,14 @@ const buildAppConfigLayer = (configPath: string | null) => {
  * `az dev` is daemon-RPC only, so command invocations no longer need a special
  * broad runtime path here.
  */
-const createCommandCliLayer = (configPath: string | null) =>
-	Layer.mergeAll(buildAppConfigLayer(configPath), appConfigNotifierLayer, SpecService.Default).pipe(
+const createCommandCliLayer = (configPath: string | null, minimumLogLevel: LogLevel.LogLevel) =>
+	Layer.mergeAll(buildAppConfigLayer(configPath), appConfigNotifierLayer).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(Logger.minimumLogLevel(minimumLogLevel)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
 	)
-const commandCliLayer = createCommandCliLayer(null)
+const commandCliLayer = createCommandCliLayer(null, LogLevel.None)
 
 type RegisteredProjectConfig = NonNullable<AzedarachConfig["projects"]>[number]
 
@@ -188,39 +182,6 @@ const getConfiguredCurrentProject = (
 
 	return projects.find((project) => project.name === config.defaultProject) ?? projects[0]
 }
-
-configureCliIssueIdResolutionContext({
-	getConfig: Effect.gen(function* () {
-		const appConfig = yield* AppConfig
-		return yield* SubscriptionRef.get(appConfig.config)
-	}).pipe(Effect.provide(createCommandCliLayer(null))),
-	listIssueIds: (projectPath: string) =>
-		Effect.gen(function* () {
-			const bootstrap = yield* bootstrapDaemonRpcClient({
-				autoStart: true,
-			})
-			return yield* bootstrap.client
-				.issueList({
-					projectPath,
-					filters: undefined,
-					options: {
-						includeClosed: true,
-						limit: INFER_PREFIX_SAMPLE_LIMIT,
-					},
-				})
-				.pipe(
-					Effect.map((response) => response.issues.map((issue) => issue.id)),
-					Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
-				)
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-							Effect.zipRight(Effect.succeed([])),
-						),
-					),
-				)
-		}).pipe(Effect.provide(createCommandCliLayer(null))),
-})
 
 // ============================================================================
 // Shared Options
@@ -496,7 +457,6 @@ const commandRootHandler = () => Console.log("Use `az --help` to see available c
  */
 type StartSessionRuntimeMode = "daemon-rpc"
 type StartSessionRuntimeDecision = "required-daemon-bootstrap"
-const AZEDARACH_TUI_RUNTIME_MODE_ENV = "AZEDARACH_TUI_RUNTIME_MODE"
 
 const mapDaemonSessionMutationToCliSession = (
 	result: DaemonSessionMutationResult,
@@ -557,14 +517,400 @@ const loadImplementationRegistryViaDaemon = (projectPath: string) =>
 		return registry
 	})
 
+const listIssueSpecRequirementsViaDaemon = (issueId: string, projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specIssueLinks({
+				issueId,
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.linkedRequirements),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specIssueLinks")),
+			)
+	})
+
+const listSpecRequirementsViaDaemon = (params: {
+	readonly projectPath: string
+	readonly query?: string
+	readonly kind?: "functional" | "acceptance" | "other"
+	readonly status?: string
+	readonly priority?: number
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specRequirementList({
+				projectPath: params.projectPath,
+				query: params.query,
+				kind: params.kind,
+				status: params.status,
+				priority: params.priority,
+			})
+			.pipe(
+				Effect.map((response) => response.requirements),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRequirementList")),
+			)
+	})
+
+const getSpecRequirementViaDaemon = (params: {
+	readonly projectPath: string
+	readonly reference: string
+	readonly selector?: "auto" | "id" | "local_id" | "external_code"
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specRequirementGet({
+				projectPath: params.projectPath,
+				reference: params.reference,
+				selector: params.selector,
+			})
+			.pipe(
+				Effect.map((response) => response.requirement ?? undefined),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRequirementGet")),
+			)
+	})
+
+const readSpecViaDaemon = (projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specRead({
+				projectPath,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRead")))
+	})
+
+const lintSpecViaDaemon = (projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specLint({
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.lint),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specLint")),
+			)
+	})
+
+const listRequirementIssuesViaDaemon = (params: {
+	readonly projectPath: string
+	readonly reference: string
+	readonly selector?: "auto" | "id" | "local_id" | "external_code"
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specRequirementIssues({
+				projectPath: params.projectPath,
+				reference: params.reference,
+				selector: params.selector,
+			})
+			.pipe(
+				Effect.map((response) => response.linkedIssues),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRequirementIssues")),
+			)
+	})
+
+const loadSpecParityReportViaDaemon = (projectPath: string, implementation: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		return yield* bootstrap.client
+			.specParity({
+				projectPath,
+				implementation,
+			})
+			.pipe(
+				Effect.map((response) => response.report),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specParity")),
+			)
+	})
+
+const createSpecRequirementViaDaemon = (params: {
+	readonly projectPath: string
+	readonly input: {
+		readonly id?: string
+		readonly local_id?: string
+		readonly external_code?: string
+		readonly title: string
+		readonly body: string
+		readonly kind?: "functional" | "acceptance" | "other"
+		readonly status?: string
+		readonly priority?: number
+	}
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specRequirementCreate({
+				projectPath: params.projectPath,
+				input: params.input,
+			})
+			.pipe(
+				Effect.map((response) => response.requirement),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRequirementCreate")),
+			)
+	})
+
+const updateSpecRequirementViaDaemon = (params: {
+	readonly projectPath: string
+	readonly reference: string
+	readonly selector?: "auto" | "id" | "local_id" | "external_code"
+	readonly fields: {
+		readonly title?: string
+		readonly body?: string
+		readonly kind?: "functional" | "acceptance" | "other"
+		readonly status?: string
+		readonly priority?: number
+	}
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specRequirementUpdate({
+				projectPath: params.projectPath,
+				reference: params.reference,
+				selector: params.selector,
+				fields: params.fields,
+			})
+			.pipe(
+				Effect.map((response) => response.updated),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRequirementUpdate")),
+			)
+	})
+
+const deleteSpecRequirementViaDaemon = (params: {
+	readonly projectPath: string
+	readonly reference: string
+	readonly selector?: "auto" | "id" | "local_id" | "external_code"
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specRequirementDelete({
+				projectPath: params.projectPath,
+				reference: params.reference,
+				selector: params.selector,
+			})
+			.pipe(
+				Effect.map((response) => response.deleted),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specRequirementDelete")),
+			)
+	})
+
+const listSpecLinksViaDaemon = (params: {
+	readonly projectPath: string
+	readonly filters?: {
+		readonly issueId?: string
+		readonly requirementId?: string
+		readonly requirementSelector?: "auto" | "id" | "local_id" | "external_code"
+		readonly implementation?: string
+	}
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specLinkList({
+				projectPath: params.projectPath,
+				filters: params.filters,
+			})
+			.pipe(
+				Effect.map((response) => response.links),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specLinkList")),
+			)
+	})
+
+const addSpecLinkViaDaemon = (params: {
+	readonly projectPath: string
+	readonly issueId: string
+	readonly requirementReference: string
+	readonly requirementSelector?: "auto" | "id" | "local_id" | "external_code"
+	readonly linkType: "implements" | "tests" | "blocks" | "relates"
+	readonly implementations?: ReadonlyArray<string>
+	readonly fulfillment?: {
+		readonly status?: "planned" | "partial" | "complete" | "verified"
+		readonly percent?: number | null
+		readonly evidenceNote?: string | null
+	}
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specLinkAdd({
+				projectPath: params.projectPath,
+				issueId: params.issueId,
+				requirementReference: params.requirementReference,
+				requirementSelector: params.requirementSelector,
+				linkType: params.linkType,
+				implementations: params.implementations,
+				fulfillment: params.fulfillment,
+			})
+			.pipe(
+				Effect.map((response) => response.added),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specLinkAdd")),
+			)
+	})
+
+const removeSpecLinkViaDaemon = (params: {
+	readonly projectPath: string
+	readonly issueId: string
+	readonly requirementReference: string
+	readonly requirementSelector?: "auto" | "id" | "local_id" | "external_code"
+	readonly linkType?: "implements" | "tests" | "blocks" | "relates"
+	readonly implementations?: ReadonlyArray<string>
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specLinkRemove({
+				projectPath: params.projectPath,
+				issueId: params.issueId,
+				requirementReference: params.requirementReference,
+				requirementSelector: params.requirementSelector,
+				linkType: params.linkType,
+				implementations: params.implementations,
+			})
+			.pipe(
+				Effect.map((response) => response.removed),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specLinkRemove")),
+			)
+	})
+
+const updateSpecLinkViaDaemon = (params: {
+	readonly projectPath: string
+	readonly issueId: string
+	readonly requirementReference: string
+	readonly requirementSelector?: "auto" | "id" | "local_id" | "external_code"
+	readonly linkType?: "implements" | "tests" | "blocks" | "relates"
+	readonly fields: {
+		readonly status?: "planned" | "partial" | "complete" | "verified"
+		readonly percent?: number | null
+		readonly evidenceNote?: string | null
+	}
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specLinkUpdate({
+				projectPath: params.projectPath,
+				issueId: params.issueId,
+				requirementReference: params.requirementReference,
+				requirementSelector: params.requirementSelector,
+				linkType: params.linkType,
+				fields: params.fields,
+			})
+			.pipe(
+				Effect.map((response) => response.updated),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specLinkUpdate")),
+			)
+	})
+
+const getSpecPublishConfigViaDaemon = (projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specPublishConfigGet({
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.config),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specPublishConfigGet")),
+			)
+	})
+
+const setSpecPublishConfigViaDaemon = (
+	projectPath: string,
+	config: {
+		readonly enabled: boolean
+		readonly debounce_ms: number
+		readonly target_project: string | null
+		readonly documents: {
+			readonly overview: string
+			readonly requirements: string
+			readonly acceptance: string
+			readonly change_log: string
+		}
+	},
+) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specPublishConfigSet({
+				projectPath,
+				config,
+			})
+			.pipe(
+				Effect.map((response) => response.updated),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specPublishConfigSet")),
+			)
+	})
+
+const getSpecPublishOutcomeViaDaemon = (projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specPublishOutcomeGet({
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.last_outcome ?? undefined),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specPublishOutcomeGet")),
+			)
+	})
+
+const syncSpecMarkdownViaDaemon = (params: {
+	readonly projectPath: string
+	readonly outDir?: string
+	readonly check?: boolean
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specSyncMarkdown({
+				projectPath: params.projectPath,
+				outDir: params.outDir,
+				check: params.check,
+			})
+			.pipe(
+				Effect.map((response) => response.sync),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specSyncMarkdown")),
+			)
+	})
+
+const publishSpecViaDaemon = (projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({ autoStart: true })
+		return yield* bootstrap.client
+			.specPublish({
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.outcome),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "specPublish")),
+			)
+	})
+
 export const resolveStartSessionRuntimeMode = (): {
 	readonly mode: StartSessionRuntimeMode
 	readonly decision: StartSessionRuntimeDecision
 } => ({ mode: "daemon-rpc", decision: "required-daemon-bootstrap" })
-
-const applyStartSessionRuntimeModeToTuiEnv = (mode: StartSessionRuntimeMode): void => {
-	process.env[AZEDARACH_TUI_RUNTIME_MODE_ENV] = mode
-}
 
 const startHandler = (args: {
 	readonly issueId: string
@@ -1852,16 +2198,16 @@ const issueGetHandler = (args: {
 				Effect.map((response) => response.issue),
 				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueGet")),
 			)
-		const specService = yield* SpecService
-		const linkedSpecRequirements = yield* specService
-			.listIssueRequirements(issue.id, explicitProjectDir ?? resolverCwd)
-			.pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(
-						`Unable to load linked spec requirements for ${issue.id}: ${error.message}`,
-					).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
-				),
-			)
+		const linkedSpecRequirements = yield* listIssueSpecRequirementsViaDaemon(
+			issue.id,
+			projectPath,
+		).pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(
+					`Unable to load linked spec requirements for ${issue.id}: ${error.message}`,
+				).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
+			),
+		)
 		const showImplementations = shouldShowIssueImplementations([issue])
 
 		if (args.json) {
@@ -3357,8 +3703,8 @@ const specReqListHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const parsedKind = yield* parseSpecRequirementKindOption(args.kind)
@@ -3366,8 +3712,8 @@ const specReqListHandler = (args: {
 		const query = Option.getOrUndefined(args.query)?.trim()
 		const status = Option.getOrUndefined(args.status)?.trim()
 
-		const specService = yield* SpecService
-		const requirements = yield* specService.listRequirements(explicitProjectDir, {
+		const requirements = yield* listSpecRequirementsViaDaemon({
+			projectPath,
 			query,
 			kind: parsedKind,
 			status,
@@ -3433,19 +3779,19 @@ const specReadHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 		const viewMode = yield* parseSpecRequirementViewMode(args.view)
 
-		const specService = yield* SpecService
-		const [requirements, links, coverage, publishConfig, lastOutcome] = yield* Effect.all([
-			specService.listRequirements(explicitProjectDir),
-			specService.listLinks(undefined, explicitProjectDir),
-			specService.getCoverageReport(explicitProjectDir),
-			specService.getPublishConfig(explicitProjectDir),
-			specService.getLastPublishOutcome(explicitProjectDir),
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
+		const [snapshot, publishConfig, lastOutcome] = yield* Effect.all([
+			readSpecViaDaemon(projectPath),
+			getSpecPublishConfigViaDaemon(projectPath),
+			getSpecPublishOutcomeViaDaemon(projectPath),
 		])
+		const requirements = snapshot.requirements
+		const links = snapshot.links
+		const coverage = snapshot.coverage
 
 		const payload = {
 			summary: {
@@ -3509,7 +3855,7 @@ const specReadHandler = (args: {
 		)
 		if (lastOutcome !== undefined) {
 			yield* Console.log(
-				`Last publish: status=${lastOutcome.status} finished_at=${DateTime.formatIso(lastOutcome.finished_at)}`,
+				`Last publish: status=${lastOutcome.status} finished_at=${lastOutcome.finished_at}`,
 			)
 		}
 	})
@@ -3524,8 +3870,8 @@ const specLintHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const specService = yield* SpecService
-		const lintResult = yield* specService.lint(explicitProjectDir)
+		const projectPath = explicitProjectDir ?? resolverCwd
+		const lintResult = yield* lintSpecViaDaemon(projectPath)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(lintResult, null, 2))
@@ -3565,12 +3911,11 @@ const specSyncHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 		const target = yield* parseSpecSyncTarget(args.target)
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 
-		const specService = yield* SpecService
 		if (args.check && target !== "md") {
 			return yield* Effect.fail(
 				new Error("--check is supported only for --target md (or default target)."),
@@ -3578,7 +3923,7 @@ const specSyncHandler = (args: {
 		}
 
 		if (target === "linear") {
-			const outcome = yield* specService.publish(explicitProjectDir)
+			const outcome = yield* publishSpecViaDaemon(projectPath)
 			if (args.json) {
 				yield* Console.log(JSON.stringify(outcome, null, 2))
 				return
@@ -3594,13 +3939,11 @@ const specSyncHandler = (args: {
 			return
 		}
 
-		const syncResult = yield* specService.syncMarkdown(
-			{
-				outDir: Option.getOrUndefined(args.outDir),
-				check: args.check,
-			},
-			explicitProjectDir,
-		)
+		const syncResult = yield* syncSpecMarkdownViaDaemon({
+			projectPath,
+			outDir: Option.getOrUndefined(args.outDir),
+			check: args.check,
+		})
 		if (target === "md") {
 			if (args.json) {
 				yield* Console.log(JSON.stringify(syncResult, null, 2))
@@ -3619,7 +3962,7 @@ const specSyncHandler = (args: {
 			return
 		}
 
-		const outcome = yield* specService.publish(explicitProjectDir)
+		const outcome = yield* publishSpecViaDaemon(projectPath)
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
@@ -3664,8 +4007,8 @@ const specReqGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
@@ -3681,20 +4024,19 @@ const specReqGetHandler = (args: {
 			externalCode: args.requirementExternalCode,
 		})
 
-		const specService = yield* SpecService
-		const requirement = yield* specService.getRequirement(
-			lookup.reference,
-			explicitProjectDir,
-			lookup.selector,
-		)
+		const requirement = yield* getSpecRequirementViaDaemon({
+			projectPath,
+			reference: lookup.reference,
+			selector: lookup.selector,
+		})
 		if (requirement === undefined) {
 			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
 		}
-		const linkedIssues = yield* specService.listRequirementIssues(
-			lookup.reference,
-			explicitProjectDir,
-			lookup.selector,
-		)
+		const linkedIssues = yield* listRequirementIssuesViaDaemon({
+			projectPath,
+			reference: lookup.reference,
+			selector: lookup.selector,
+		})
 
 		if (args.json) {
 			yield* Console.log(
@@ -3745,8 +4087,8 @@ const specReqCreateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
@@ -3818,9 +4160,9 @@ const specReqCreateHandler = (args: {
 			)
 		}
 
-		const specService = yield* SpecService
-		const created = yield* specService.createRequirement(
-			{
+		const created = yield* createSpecRequirementViaDaemon({
+			projectPath,
+			input: {
 				local_id: localId,
 				external_code: externalCode,
 				title: args.title,
@@ -3829,8 +4171,7 @@ const specReqCreateHandler = (args: {
 				status: Option.getOrUndefined(args.status),
 				priority: Option.getOrUndefined(args.priority),
 			},
-			explicitProjectDir,
-		)
+		})
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(created, null, 2))
@@ -3857,8 +4198,8 @@ const specReqUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
@@ -3906,13 +4247,12 @@ const specReqUpdateHandler = (args: {
 			)
 		}
 
-		const specService = yield* SpecService
-		const updated = yield* specService.updateRequirement(
-			lookup.reference,
+		const updated = yield* updateSpecRequirementViaDaemon({
+			projectPath,
+			reference: lookup.reference,
+			selector: lookup.selector,
 			fields,
-			explicitProjectDir,
-			lookup.selector,
-		)
+		})
 		if (!updated) {
 			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
 		}
@@ -3947,8 +4287,8 @@ const specReqDeleteHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
@@ -3964,12 +4304,11 @@ const specReqDeleteHandler = (args: {
 			externalCode: args.requirementExternalCode,
 		})
 
-		const specService = yield* SpecService
-		const deleted = yield* specService.deleteRequirement(
-			lookup.reference,
-			explicitProjectDir,
-			lookup.selector,
-		)
+		const deleted = yield* deleteSpecRequirementViaDaemon({
+			projectPath,
+			reference: lookup.reference,
+			selector: lookup.selector,
+		})
 		if (!deleted) {
 			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
 		}
@@ -4005,8 +4344,8 @@ const specLinkListHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
@@ -4035,19 +4374,18 @@ const specLinkListHandler = (args: {
 					externalCode: args.requirementExternalCode,
 				}).pipe(Effect.map((lookup) => lookup)),
 		})
-		const specService = yield* SpecService
 		const hasImplementationFilter = args.implementations.length > 0
 		const implementationFilter = hasImplementationFilter
 			? yield* parseSpecImplementationsForCli(args.implementations)
 			: undefined
-		const links = yield* specService.listLinks(
-			{
+		const links = yield* listSpecLinksViaDaemon({
+			projectPath,
+			filters: {
 				issueId,
 				requirementId: requirementLookup?.reference,
 				requirementSelector: requirementLookup?.selector,
 			},
-			explicitProjectDir,
-		)
+		})
 		const filteredLinks =
 			implementationFilter === undefined
 				? links
@@ -4096,8 +4434,8 @@ const specLinkAddHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
@@ -4151,28 +4489,27 @@ const specLinkAddHandler = (args: {
 		})
 		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
 		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
-		const specService = yield* SpecService
-		yield* specService.addIssueLink(
+		yield* addSpecLinkViaDaemon({
+			projectPath,
 			issueId,
-			lookup.reference,
+			requirementReference: lookup.reference,
+			requirementSelector: lookup.selector,
 			linkType,
-			explicitProjectDir,
-			lookup.selector,
 			implementations,
-			{
+			fulfillment: {
 				status: fulfillmentStatus,
 				percent: fulfillmentPercent,
 				evidenceNote,
 			},
-		)
-		const matchingLinks = yield* specService.listLinks(
-			{
+		})
+		const matchingLinks = yield* listSpecLinksViaDaemon({
+			projectPath,
+			filters: {
 				issueId,
 				requirementId: lookup.reference,
 				requirementSelector: lookup.selector,
 			},
-			explicitProjectDir,
-		)
+		})
 		const matchingLink = matchingLinks.find((link) => link.link_type === linkType)
 		const effectiveImplementations = matchingLink?.implementations ?? implementations ?? []
 
@@ -4220,8 +4557,8 @@ const specLinkRemoveHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
@@ -4256,15 +4593,14 @@ const specLinkRemoveHandler = (args: {
 			)
 		}
 		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
-		const specService = yield* SpecService
-		const removed = yield* specService.removeIssueLink(
+		const removed = yield* removeSpecLinkViaDaemon({
+			projectPath,
 			issueId,
-			lookup.reference,
+			requirementReference: lookup.reference,
+			requirementSelector: lookup.selector,
 			linkType,
-			explicitProjectDir,
-			lookup.selector,
 			implementations,
-		)
+		})
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ removed }, null, 2))
@@ -4287,8 +4623,7 @@ const specParityHandler = (args: {
 
 		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
 		const implementation = yield* resolveParityImplementationForCli(args.implementation, registry)
-		const specService = yield* SpecService
-		const report = yield* specService.getParityReport(implementation, explicitProjectDir)
+		const report = yield* loadSpecParityReportViaDaemon(projectPath, implementation)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(report, null, 2))
@@ -4323,8 +4658,8 @@ const specLinkUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
@@ -4384,19 +4719,18 @@ const specLinkUpdateHandler = (args: {
 			)
 		}
 
-		const specService = yield* SpecService
-		const updated = yield* specService.updateIssueLink(
+		const updated = yield* updateSpecLinkViaDaemon({
+			projectPath,
 			issueId,
-			lookup.reference,
-			{
+			requirementReference: lookup.reference,
+			requirementSelector: lookup.selector,
+			linkType,
+			fields: {
 				status: fulfillmentStatus,
 				percent: fulfillmentPercent,
 				evidenceNote,
 			},
-			linkType,
-			explicitProjectDir,
-			lookup.selector,
-		)
+		})
 
 		if (args.json) {
 			yield* Console.log(
@@ -4447,14 +4781,13 @@ const specPublishConfigGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const specService = yield* SpecService
-		const config = yield* specService.getPublishConfig(explicitProjectDir)
-		const lastOutcome = yield* specService.getLastPublishOutcome(explicitProjectDir)
+		const config = yield* getSpecPublishConfigViaDaemon(projectPath)
+		const lastOutcome = yield* getSpecPublishOutcomeViaDaemon(projectPath)
 		const payload = {
 			config,
 			last_outcome: lastOutcome,
@@ -4473,7 +4806,7 @@ const specPublishConfigGetHandler = (args: {
 		)
 		if (lastOutcome) {
 			yield* Console.log(
-				`last_outcome=${lastOutcome.status} finished_at=${DateTime.formatIso(lastOutcome.finished_at)} requirements=${lastOutcome.total_requirements} links=${lastOutcome.total_links}`,
+				`last_outcome=${lastOutcome.status} finished_at=${lastOutcome.finished_at} requirements=${lastOutcome.total_requirements} links=${lastOutcome.total_links}`,
 			)
 		}
 	})
@@ -4493,13 +4826,12 @@ const specPublishConfigSetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const specService = yield* SpecService
-		const current = yield* specService.getPublishConfig(explicitProjectDir)
+		const current = yield* getSpecPublishConfigViaDaemon(projectPath)
 
 		const nextConfig = {
 			enabled: Option.getOrElse(args.enabled, () => current.enabled),
@@ -4516,7 +4848,7 @@ const specPublishConfigSetHandler = (args: {
 			return yield* Effect.fail(new Error("--debounce-ms must be >= 0"))
 		}
 
-		yield* specService.setPublishConfig(nextConfig, explicitProjectDir)
+		yield* setSpecPublishConfigViaDaemon(projectPath, nextConfig)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(nextConfig, null, 2))
@@ -5255,10 +5587,7 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 						.pipe(
 							Effect.flatMap((issue) =>
 								(specConfig.enabled
-									? SpecService.pipe(
-											Effect.flatMap((specService) =>
-												specService.listIssueRequirements(issue.issue.id, projectPath),
-											),
+									? listIssueSpecRequirementsViaDaemon(issue.issue.id, projectPath).pipe(
 											Effect.catchAll(() => Effect.succeed([])),
 										)
 									: Effect.succeed([])
@@ -7654,7 +7983,8 @@ const commandCli = az.pipe(
 // ============================================================================
 const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	return createCommandCliLayer(configPath)
+	const minimumLogLevel = hasVerboseFlag(argv) ? LogLevel.Info : LogLevel.None
+	return createCommandCliLayer(configPath, minimumLogLevel)
 }
 
 /**
@@ -7663,8 +7993,7 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 const cliRunner = (argv: ReadonlyArray<string>) => {
 	const normalizedArgv = normalizeIssueOptionOrder(normalizeCliAliases(argv))
 	const mode = resolveCliExecutionMode(normalizedArgv)
-	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
-	const runEffect = (() => {
+	return (() => {
 		switch (mode) {
 			case "command":
 			case "tui":
@@ -7677,10 +8006,6 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 				)(normalizedArgv)
 		}
 	})()
-	return runEffect.pipe(
-		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-		Effect.provide(Logger.minimumLogLevel(minimumLogLevel)),
-	)
 }
 
 export { cli }

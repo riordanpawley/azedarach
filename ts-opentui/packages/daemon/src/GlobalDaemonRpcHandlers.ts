@@ -1,5 +1,6 @@
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
+	DaemonAppRpcGroup,
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
 	type DaemonBoardReadModelRequest,
@@ -56,7 +57,6 @@ import {
 	type DaemonReconnectRequest,
 	type DaemonRestartRequest,
 	type DaemonRpcActionError,
-	DaemonRpcGroup,
 	type DaemonRuntimeSnapshot,
 	type DaemonSessionMutationResult,
 	type DaemonSessionPauseRequest,
@@ -67,10 +67,48 @@ import {
 	type DaemonSessionStartRequest,
 	type DaemonSessionStopRequest,
 	type DaemonSessionUpdateStateRequest,
+	type DaemonSpecIssueLinksRequest,
+	type DaemonSpecIssueLinksResult,
+	type DaemonSpecLinkAddRequest,
+	type DaemonSpecLinkAddResult,
+	type DaemonSpecLinkListRequest,
+	type DaemonSpecLinkListResult,
+	type DaemonSpecLinkRemoveRequest,
+	type DaemonSpecLinkRemoveResult,
+	type DaemonSpecLinkUpdateRequest,
+	type DaemonSpecLinkUpdateResult,
+	type DaemonSpecLintRequest,
+	type DaemonSpecLintResult,
+	type DaemonSpecParityRequest,
+	type DaemonSpecParityResult,
+	type DaemonSpecPublishConfigGetRequest,
+	type DaemonSpecPublishConfigGetResult,
+	type DaemonSpecPublishConfigSetRequest,
+	type DaemonSpecPublishConfigSetResult,
+	type DaemonSpecPublishOutcomeGetRequest,
+	type DaemonSpecPublishOutcomeGetResult,
+	type DaemonSpecPublishRequest,
+	type DaemonSpecPublishResult,
+	type DaemonSpecReadRequest,
+	type DaemonSpecReadResult,
+	type DaemonSpecRequirementCreateRequest,
+	type DaemonSpecRequirementCreateResult,
+	type DaemonSpecRequirementDeleteRequest,
+	type DaemonSpecRequirementDeleteResult,
+	type DaemonSpecRequirementGetRequest,
+	type DaemonSpecRequirementGetResult,
+	type DaemonSpecRequirementIssuesRequest,
+	type DaemonSpecRequirementIssuesResult,
+	type DaemonSpecRequirementListRequest,
+	type DaemonSpecRequirementListResult,
+	type DaemonSpecRequirementUpdateRequest,
+	type DaemonSpecRequirementUpdateResult,
+	type DaemonSpecSyncMarkdownRequest,
+	type DaemonSpecSyncMarkdownResult,
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
 } from "@azedarach/shared/rpc"
-import { Effect, Layer } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 import {
 	type BackendDaemonControlHealth,
 	BackendDaemonControlRestartConfigurationError,
@@ -88,6 +126,7 @@ import {
 	ImplementationRegistryDaemonError,
 	ImplementationRegistryDaemonService,
 } from "./ImplementationRegistryDaemonService.js"
+import { SpecDaemonError, SpecDaemonService } from "./SpecDaemonService.js"
 import { TrackerIssueDaemonError, TrackerIssueDaemonService } from "./TrackerIssueDaemonService.js"
 
 const daemonRpcActionError = (params: {
@@ -171,6 +210,30 @@ const mapAttachResponse = (response: BackendDaemonAttachResponse): DaemonAttachR
 	snapshot: mapRuntimeSnapshot(response.snapshot),
 })
 
+const mapSpecPublishOutcome = (
+	outcome: Awaited<ReturnType<SpecDaemonService["publish"]>> extends Effect.Effect<
+		infer A,
+		infer _E,
+		infer _R
+	>
+		? A
+		: never,
+) => ({
+	started_at: DateTime.formatIso(outcome.started_at),
+	finished_at: DateTime.formatIso(outcome.finished_at),
+	status: outcome.status,
+	total_requirements: outcome.total_requirements,
+	total_links: outcome.total_links,
+	outcomes: outcome.outcomes.map((documentOutcome) => ({
+		document_key: documentOutcome.document_key,
+		title: documentOutcome.title,
+		status: documentOutcome.status,
+		message: documentOutcome.message,
+		requirement_count: documentOutcome.requirement_count,
+		link_count: documentOutcome.link_count,
+	})),
+})
+
 const unsupportedDaemonRpc = <A>(action: string): Effect.Effect<A, DaemonRpcActionError> =>
 	Effect.fail(
 		daemonRpcActionError({
@@ -183,6 +246,7 @@ const unsupportedDaemonRpc = <A>(action: string): Effect.Effect<A, DaemonRpcActi
 type DaemonRpcMappedError =
 	| BackendDaemonControlRestartConfigurationError
 	| ImplementationRegistryDaemonError
+	| SpecDaemonError
 	| TrackerIssueDaemonError
 	| Error
 	| { readonly _tag: string; readonly message?: string }
@@ -269,6 +333,23 @@ const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpc
 		}
 	}
 
+	if (error instanceof SpecDaemonError) {
+		switch (error.reason) {
+			case "storage":
+				return daemonRpcActionError({
+					action,
+					code: "storage",
+					message: error.message,
+				})
+			case "ambiguous-reference":
+				return daemonRpcActionError({
+					action,
+					code: "ambiguous-reference",
+					message: error.message,
+				})
+		}
+	}
+
 	if ("_tag" in error) {
 		switch (error._tag) {
 			case "BackendDaemonProtocolVersionMismatchError":
@@ -306,6 +387,7 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const sessionRecovery = yield* BackendDaemonSessionRecovery
 	const implementations = yield* ImplementationRegistryDaemonService
 	const issues = yield* TrackerIssueDaemonService
+	const specs = yield* SpecDaemonService
 
 	return {
 		daemonStatus: (_request: DaemonStatusRequest) =>
@@ -660,11 +742,248 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 				),
 				catchDaemonRpcError("issueSync"),
 			),
+		daemonSpecRequirementList: (request: DaemonSpecRequirementListRequest) =>
+			specs
+				.listRequirements(request.projectPath, {
+					query: request.query,
+					kind: request.kind,
+					status: request.status,
+					priority: request.priority,
+				})
+				.pipe(
+					Effect.map(
+						(requirements): DaemonSpecRequirementListResult => ({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							requirements: [...requirements],
+						}),
+					),
+					catchDaemonRpcError("specRequirementList"),
+				),
+		daemonSpecRequirementGet: (request: DaemonSpecRequirementGetRequest) =>
+			specs.getRequirement(request.reference, request.projectPath, request.selector).pipe(
+				Effect.map(
+					(requirement): DaemonSpecRequirementGetResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						requirement: requirement ?? null,
+					}),
+				),
+				catchDaemonRpcError("specRequirementGet"),
+			),
+		daemonSpecRequirementCreate: (request: DaemonSpecRequirementCreateRequest) =>
+			specs.createRequirement(request.input, request.projectPath).pipe(
+				Effect.map(
+					(requirement): DaemonSpecRequirementCreateResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						requirement,
+					}),
+				),
+				catchDaemonRpcError("specRequirementCreate"),
+			),
+		daemonSpecRequirementUpdate: (request: DaemonSpecRequirementUpdateRequest) =>
+			specs
+				.updateRequirement(request.reference, request.fields, request.projectPath, request.selector)
+				.pipe(
+					Effect.map(
+						(updated): DaemonSpecRequirementUpdateResult => ({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							updated,
+						}),
+					),
+					catchDaemonRpcError("specRequirementUpdate"),
+				),
+		daemonSpecRequirementDelete: (request: DaemonSpecRequirementDeleteRequest) =>
+			specs.deleteRequirement(request.reference, request.projectPath, request.selector).pipe(
+				Effect.map(
+					(deleted): DaemonSpecRequirementDeleteResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						deleted,
+					}),
+				),
+				catchDaemonRpcError("specRequirementDelete"),
+			),
+		daemonSpecRead: (request: DaemonSpecReadRequest) =>
+			specs.readSnapshot(request.projectPath).pipe(
+				Effect.map(
+					(snapshot): DaemonSpecReadResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						requirements: [...snapshot.requirements],
+						links: [...snapshot.links],
+						coverage: snapshot.coverage,
+					}),
+				),
+				catchDaemonRpcError("specRead"),
+			),
+		daemonSpecLint: (request: DaemonSpecLintRequest) =>
+			specs.lint(request.projectPath).pipe(
+				Effect.map(
+					(lint): DaemonSpecLintResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						lint,
+					}),
+				),
+				catchDaemonRpcError("specLint"),
+			),
+		daemonSpecParity: (request: DaemonSpecParityRequest) =>
+			specs.getParityReport(request.implementation?.trim() || "default", request.projectPath).pipe(
+				Effect.map(
+					(report): DaemonSpecParityResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						report,
+					}),
+				),
+				catchDaemonRpcError("specParity"),
+			),
+		daemonSpecIssueLinks: (request: DaemonSpecIssueLinksRequest) =>
+			specs.listIssueRequirements(request.issueId, request.projectPath).pipe(
+				Effect.map(
+					(linkedRequirements): DaemonSpecIssueLinksResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						linkedRequirements: [...linkedRequirements],
+					}),
+				),
+				catchDaemonRpcError("specIssueLinks"),
+			),
+		daemonSpecRequirementIssues: (request: DaemonSpecRequirementIssuesRequest) =>
+			specs.listRequirementIssues(request.reference, request.projectPath, request.selector).pipe(
+				Effect.map(
+					(linkedIssues): DaemonSpecRequirementIssuesResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						linkedIssues: [...linkedIssues],
+					}),
+				),
+				catchDaemonRpcError("specRequirementIssues"),
+			),
+		daemonSpecLinkList: (request: DaemonSpecLinkListRequest) =>
+			specs.listLinks(request.filters, request.projectPath).pipe(
+				Effect.map(
+					(links): DaemonSpecLinkListResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						links: [...links],
+					}),
+				),
+				catchDaemonRpcError("specLinkList"),
+			),
+		daemonSpecLinkAdd: (request: DaemonSpecLinkAddRequest) =>
+			specs
+				.addIssueLink(
+					request.issueId,
+					request.requirementReference,
+					request.linkType ?? "relates",
+					request.projectPath,
+					request.requirementSelector,
+					request.implementations,
+					request.fulfillment,
+				)
+				.pipe(
+					Effect.map(
+						(): DaemonSpecLinkAddResult => ({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							added: true,
+						}),
+					),
+					catchDaemonRpcError("specLinkAdd"),
+				),
+		daemonSpecLinkRemove: (request: DaemonSpecLinkRemoveRequest) =>
+			specs
+				.removeIssueLink(
+					request.issueId,
+					request.requirementReference,
+					request.linkType,
+					request.projectPath,
+					request.requirementSelector,
+					request.implementations,
+				)
+				.pipe(
+					Effect.map(
+						(removed): DaemonSpecLinkRemoveResult => ({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							removed,
+						}),
+					),
+					catchDaemonRpcError("specLinkRemove"),
+				),
+		daemonSpecLinkUpdate: (request: DaemonSpecLinkUpdateRequest) =>
+			specs
+				.updateIssueLink(
+					request.issueId,
+					request.requirementReference,
+					request.fields,
+					request.linkType,
+					request.projectPath,
+					request.requirementSelector,
+				)
+				.pipe(
+					Effect.map(
+						(updated): DaemonSpecLinkUpdateResult => ({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							updated,
+						}),
+					),
+					catchDaemonRpcError("specLinkUpdate"),
+				),
+		daemonSpecPublishConfigGet: (request: DaemonSpecPublishConfigGetRequest) =>
+			specs.getPublishConfig(request.projectPath).pipe(
+				Effect.map(
+					(config): DaemonSpecPublishConfigGetResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						config,
+					}),
+				),
+				catchDaemonRpcError("specPublishConfigGet"),
+			),
+		daemonSpecPublishConfigSet: (request: DaemonSpecPublishConfigSetRequest) =>
+			specs.setPublishConfig(request.config, request.projectPath).pipe(
+				Effect.map(
+					(): DaemonSpecPublishConfigSetResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						updated: true,
+					}),
+				),
+				catchDaemonRpcError("specPublishConfigSet"),
+			),
+		daemonSpecPublishOutcomeGet: (request: DaemonSpecPublishOutcomeGetRequest) =>
+			specs.getLastPublishOutcome(request.projectPath).pipe(
+				Effect.map(
+					(lastOutcome): DaemonSpecPublishOutcomeGetResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						last_outcome: lastOutcome === undefined ? null : mapSpecPublishOutcome(lastOutcome),
+					}),
+				),
+				catchDaemonRpcError("specPublishOutcomeGet"),
+			),
+		daemonSpecSyncMarkdown: (request: DaemonSpecSyncMarkdownRequest) =>
+			specs
+				.syncMarkdown(
+					{
+						outDir: request.outDir,
+						check: request.check,
+					},
+					request.projectPath,
+				)
+				.pipe(
+					Effect.map(
+						(sync): DaemonSpecSyncMarkdownResult => ({
+							rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+							sync,
+						}),
+					),
+					catchDaemonRpcError("specSyncMarkdown"),
+				),
+		daemonSpecPublish: (request: DaemonSpecPublishRequest) =>
+			specs.publish(request.projectPath).pipe(
+				Effect.map(
+					(outcome): DaemonSpecPublishResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						outcome: mapSpecPublishOutcome(outcome),
+					}),
+				),
+				catchDaemonRpcError("specPublish"),
+			),
 		daemonEventStream: (_request: DaemonEventStreamRequest) =>
 			unsupportedDaemonRpc<DaemonEventStreamResult>("eventStream"),
 	}
 })
 
 export const GlobalDaemonRpcHandlersLive = Layer.scopedContext(
-	DaemonRpcGroup.toHandlersContext(makeGlobalDaemonRpcHandlers),
+	DaemonAppRpcGroup.toHandlersContext(makeGlobalDaemonRpcHandlers),
 )

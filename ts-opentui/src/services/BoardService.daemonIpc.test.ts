@@ -273,6 +273,41 @@ const makeDaemonRpcClientStub = (params: {
 	issueDelete: () =>
 		Effect.dieMessage("Unexpected issueDelete RPC in BoardService daemon IPC test"),
 	issueSync: () => Effect.dieMessage("Unexpected issueSync RPC in BoardService daemon IPC test"),
+	specRequirementList: () =>
+		Effect.dieMessage("Unexpected specRequirementList RPC in BoardService daemon IPC test"),
+	specRequirementGet: () =>
+		Effect.dieMessage("Unexpected specRequirementGet RPC in BoardService daemon IPC test"),
+	specRequirementCreate: () =>
+		Effect.dieMessage("Unexpected specRequirementCreate RPC in BoardService daemon IPC test"),
+	specRequirementUpdate: () =>
+		Effect.dieMessage("Unexpected specRequirementUpdate RPC in BoardService daemon IPC test"),
+	specRequirementDelete: () =>
+		Effect.dieMessage("Unexpected specRequirementDelete RPC in BoardService daemon IPC test"),
+	specRead: () => Effect.dieMessage("Unexpected specRead RPC in BoardService daemon IPC test"),
+	specLint: () => Effect.dieMessage("Unexpected specLint RPC in BoardService daemon IPC test"),
+	specParity: () => Effect.dieMessage("Unexpected specParity RPC in BoardService daemon IPC test"),
+	specLinkList: () =>
+		Effect.dieMessage("Unexpected specLinkList RPC in BoardService daemon IPC test"),
+	specLinkAdd: () =>
+		Effect.dieMessage("Unexpected specLinkAdd RPC in BoardService daemon IPC test"),
+	specLinkRemove: () =>
+		Effect.dieMessage("Unexpected specLinkRemove RPC in BoardService daemon IPC test"),
+	specLinkUpdate: () =>
+		Effect.dieMessage("Unexpected specLinkUpdate RPC in BoardService daemon IPC test"),
+	specIssueLinks: () =>
+		Effect.dieMessage("Unexpected specIssueLinks RPC in BoardService daemon IPC test"),
+	specRequirementIssues: () =>
+		Effect.dieMessage("Unexpected specRequirementIssues RPC in BoardService daemon IPC test"),
+	specPublishConfigGet: () =>
+		Effect.dieMessage("Unexpected specPublishConfigGet RPC in BoardService daemon IPC test"),
+	specPublishConfigSet: () =>
+		Effect.dieMessage("Unexpected specPublishConfigSet RPC in BoardService daemon IPC test"),
+	specPublishOutcomeGet: () =>
+		Effect.dieMessage("Unexpected specPublishOutcomeGet RPC in BoardService daemon IPC test"),
+	specSyncMarkdown: () =>
+		Effect.dieMessage("Unexpected specSyncMarkdown RPC in BoardService daemon IPC test"),
+	specPublish: () =>
+		Effect.dieMessage("Unexpected specPublish RPC in BoardService daemon IPC test"),
 	eventStream: () =>
 		(params.onEventStream ?? (() => Effect.void))().pipe(
 			Effect.zipRight(

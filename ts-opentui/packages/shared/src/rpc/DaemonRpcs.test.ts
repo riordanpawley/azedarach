@@ -22,20 +22,56 @@ import {
 	DaemonSessionUpdateStateRequestSchema,
 	DaemonStatusRequestSchema,
 } from "./DaemonRpcSchemas.js"
-import { DaemonImplementationRpcGroup, DaemonRpcGroup, DaemonSpecRpcGroup } from "./DaemonRpcs.js"
+import {
+	DaemonAppRpcGroup,
+	DaemonImplementationRpcGroup,
+	DaemonRpcGroup,
+	DaemonSpecLinksRpcGroup,
+	DaemonSpecPublishConfigRpcGroup,
+	DaemonSpecReadRpcGroup,
+	DaemonSpecRequirementMutationRpcGroup,
+	DaemonSpecRpcGroup,
+	DaemonSpecSyncRpcGroup,
+} from "./DaemonRpcs.js"
 import {
 	DaemonSpecIssueLinksRequestSchema,
 	DaemonSpecIssueLinksResultSchema,
+	DaemonSpecLinkAddRequestSchema,
+	DaemonSpecLinkAddResultSchema,
+	DaemonSpecLinkListRequestSchema,
+	DaemonSpecLinkListResultSchema,
+	DaemonSpecLinkRemoveRequestSchema,
+	DaemonSpecLinkRemoveResultSchema,
+	DaemonSpecLinkUpdateRequestSchema,
+	DaemonSpecLinkUpdateResultSchema,
 	DaemonSpecLintRequestSchema,
 	DaemonSpecLintResultSchema,
 	DaemonSpecParityRequestSchema,
 	DaemonSpecParityResultSchema,
+	DaemonSpecPublishConfigGetRequestSchema,
+	DaemonSpecPublishConfigGetResultSchema,
+	DaemonSpecPublishConfigSetRequestSchema,
+	DaemonSpecPublishConfigSetResultSchema,
+	DaemonSpecPublishOutcomeGetRequestSchema,
+	DaemonSpecPublishOutcomeGetResultSchema,
+	DaemonSpecPublishRequestSchema,
+	DaemonSpecPublishResultSchema,
 	DaemonSpecReadRequestSchema,
 	DaemonSpecReadResultSchema,
+	DaemonSpecRequirementCreateRequestSchema,
+	DaemonSpecRequirementCreateResultSchema,
+	DaemonSpecRequirementDeleteRequestSchema,
+	DaemonSpecRequirementDeleteResultSchema,
 	DaemonSpecRequirementGetRequestSchema,
 	DaemonSpecRequirementGetResultSchema,
+	DaemonSpecRequirementIssuesRequestSchema,
+	DaemonSpecRequirementIssuesResultSchema,
 	DaemonSpecRequirementListRequestSchema,
 	DaemonSpecRequirementListResultSchema,
+	DaemonSpecRequirementUpdateRequestSchema,
+	DaemonSpecRequirementUpdateResultSchema,
+	DaemonSpecSyncMarkdownRequestSchema,
+	DaemonSpecSyncMarkdownResultSchema,
 } from "./DaemonSpecRpcSchemas.js"
 
 describe("DaemonRpcs", () => {
@@ -93,11 +129,85 @@ describe("DaemonRpcs", () => {
 		const keys = [...DaemonSpecRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
 			"daemonSpecIssueLinks",
+			"daemonSpecLinkAdd",
+			"daemonSpecLinkList",
+			"daemonSpecLinkRemove",
+			"daemonSpecLinkUpdate",
 			"daemonSpecLint",
 			"daemonSpecParity",
+			"daemonSpecPublish",
+			"daemonSpecPublishConfigGet",
+			"daemonSpecPublishConfigSet",
+			"daemonSpecPublishOutcomeGet",
 			"daemonSpecRead",
+			"daemonSpecRequirementCreate",
+			"daemonSpecRequirementDelete",
 			"daemonSpecRequirementGet",
+			"daemonSpecRequirementIssues",
 			"daemonSpecRequirementList",
+			"daemonSpecRequirementUpdate",
+			"daemonSpecSyncMarkdown",
+		])
+	})
+
+	it("registers the spec rpc groups by concern", () => {
+		expect([...DaemonSpecRequirementMutationRpcGroup.requests.keys()].sort()).toEqual([
+			"daemonSpecRequirementCreate",
+			"daemonSpecRequirementDelete",
+			"daemonSpecRequirementUpdate",
+		])
+		expect([...DaemonSpecLinksRpcGroup.requests.keys()].sort()).toEqual([
+			"daemonSpecLinkAdd",
+			"daemonSpecLinkList",
+			"daemonSpecLinkRemove",
+			"daemonSpecLinkUpdate",
+		])
+		expect([...DaemonSpecPublishConfigRpcGroup.requests.keys()].sort()).toEqual([
+			"daemonSpecPublishConfigGet",
+			"daemonSpecPublishConfigSet",
+			"daemonSpecPublishOutcomeGet",
+		])
+		expect([...DaemonSpecSyncRpcGroup.requests.keys()].sort()).toEqual([
+			"daemonSpecPublish",
+			"daemonSpecSyncMarkdown",
+		])
+	})
+
+	it("exposes the composed daemon application rpc contract", () => {
+		const keys = [...DaemonAppRpcGroup.requests.keys()].sort()
+		expect(keys).toEqual(
+			[
+				...new Set([
+					...DaemonRpcGroup.requests.keys(),
+					...DaemonImplementationRpcGroup.requests.keys(),
+					...DaemonSpecReadRpcGroup.requests.keys(),
+				]),
+			].sort(),
+		)
+	})
+
+	it("exposes the expanded spec rpc contract", () => {
+		const keys = [...DaemonSpecRpcGroup.requests.keys()].sort()
+		expect(keys).toEqual([
+			"daemonSpecIssueLinks",
+			"daemonSpecLinkAdd",
+			"daemonSpecLinkList",
+			"daemonSpecLinkRemove",
+			"daemonSpecLinkUpdate",
+			"daemonSpecLint",
+			"daemonSpecParity",
+			"daemonSpecPublish",
+			"daemonSpecPublishConfigGet",
+			"daemonSpecPublishConfigSet",
+			"daemonSpecPublishOutcomeGet",
+			"daemonSpecRead",
+			"daemonSpecRequirementCreate",
+			"daemonSpecRequirementDelete",
+			"daemonSpecRequirementGet",
+			"daemonSpecRequirementIssues",
+			"daemonSpecRequirementList",
+			"daemonSpecRequirementUpdate",
+			"daemonSpecSyncMarkdown",
 		])
 	})
 
@@ -205,6 +315,12 @@ describe("DaemonRpcs", () => {
 		const decodeParityResult = Schema.decodeUnknown(DaemonSpecParityResultSchema)
 		const decodeIssueLinksRequest = Schema.decodeUnknown(DaemonSpecIssueLinksRequestSchema)
 		const decodeIssueLinksResult = Schema.decodeUnknown(DaemonSpecIssueLinksResultSchema)
+		const decodeRequirementIssuesRequest = Schema.decodeUnknown(
+			DaemonSpecRequirementIssuesRequestSchema,
+		)
+		const decodeRequirementIssuesResult = Schema.decodeUnknown(
+			DaemonSpecRequirementIssuesResultSchema,
+		)
 
 		const listRequest = await Effect.runPromise(
 			decodeListRequest({
@@ -383,6 +499,32 @@ describe("DaemonRpcs", () => {
 				],
 			}),
 		)
+		const requirementIssuesRequest = await Effect.runPromise(
+			decodeRequirementIssuesRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				reference: "S1",
+				selector: "local_id",
+			}),
+		)
+		const requirementIssuesResult = await Effect.runPromise(
+			decodeRequirementIssuesResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				linkedIssues: [
+					{
+						id: "te",
+						title: "Track board state",
+						status: "in_progress",
+						issue_type: "task",
+						link_type: "implements",
+						implementations: ["default"],
+						fulfillment_status: "complete",
+						fulfillment_percent: 100,
+						evidence_note: null,
+					},
+				],
+			}),
+		)
 
 		expect(listRequest.query).toBe("board")
 		expect(listResult.requirements[0]?.local_id).toBe("S1")
@@ -396,6 +538,339 @@ describe("DaemonRpcs", () => {
 		expect(parityResult.report.requirements[0]?.implements_issue_ids).toEqual(["te"])
 		expect(issueLinksRequest.issueId).toBe("te")
 		expect(issueLinksResult.linkedRequirements[0]?.kind).toBe("functional")
+		expect(requirementIssuesRequest.reference).toBe("S1")
+		expect(requirementIssuesResult.linkedIssues[0]?.status).toBe("in_progress")
+	})
+
+	it("validates spec mutation and publish request and result schemas", async () => {
+		const decodeCreateRequest = Schema.decodeUnknown(DaemonSpecRequirementCreateRequestSchema)
+		const decodeCreateResult = Schema.decodeUnknown(DaemonSpecRequirementCreateResultSchema)
+		const decodeUpdateRequest = Schema.decodeUnknown(DaemonSpecRequirementUpdateRequestSchema)
+		const decodeUpdateResult = Schema.decodeUnknown(DaemonSpecRequirementUpdateResultSchema)
+		const decodeDeleteRequest = Schema.decodeUnknown(DaemonSpecRequirementDeleteRequestSchema)
+		const decodeDeleteResult = Schema.decodeUnknown(DaemonSpecRequirementDeleteResultSchema)
+		const decodeLinkListRequest = Schema.decodeUnknown(DaemonSpecLinkListRequestSchema)
+		const decodeLinkListResult = Schema.decodeUnknown(DaemonSpecLinkListResultSchema)
+		const decodeLinkAddRequest = Schema.decodeUnknown(DaemonSpecLinkAddRequestSchema)
+		const decodeLinkAddResult = Schema.decodeUnknown(DaemonSpecLinkAddResultSchema)
+		const decodeLinkRemoveRequest = Schema.decodeUnknown(DaemonSpecLinkRemoveRequestSchema)
+		const decodeLinkRemoveResult = Schema.decodeUnknown(DaemonSpecLinkRemoveResultSchema)
+		const decodeLinkUpdateRequest = Schema.decodeUnknown(DaemonSpecLinkUpdateRequestSchema)
+		const decodeLinkUpdateResult = Schema.decodeUnknown(DaemonSpecLinkUpdateResultSchema)
+		const decodePublishConfigGetRequest = Schema.decodeUnknown(
+			DaemonSpecPublishConfigGetRequestSchema,
+		)
+		const decodePublishConfigGetResult = Schema.decodeUnknown(
+			DaemonSpecPublishConfigGetResultSchema,
+		)
+		const decodePublishConfigSetRequest = Schema.decodeUnknown(
+			DaemonSpecPublishConfigSetRequestSchema,
+		)
+		const decodePublishConfigSetResult = Schema.decodeUnknown(
+			DaemonSpecPublishConfigSetResultSchema,
+		)
+		const decodePublishOutcomeGetRequest = Schema.decodeUnknown(
+			DaemonSpecPublishOutcomeGetRequestSchema,
+		)
+		const decodePublishOutcomeGetResult = Schema.decodeUnknown(
+			DaemonSpecPublishOutcomeGetResultSchema,
+		)
+		const decodeSyncMarkdownRequest = Schema.decodeUnknown(DaemonSpecSyncMarkdownRequestSchema)
+		const decodeSyncMarkdownResult = Schema.decodeUnknown(DaemonSpecSyncMarkdownResultSchema)
+		const decodePublishRequest = Schema.decodeUnknown(DaemonSpecPublishRequestSchema)
+		const decodePublishResult = Schema.decodeUnknown(DaemonSpecPublishResultSchema)
+		const requirement = {
+			id: "req-2",
+			local_id: "S2",
+			external_code: "A-2",
+			title: "Publish board spec",
+			body: "Keep spec artifacts aligned.",
+			kind: "functional",
+			status: "draft",
+			priority: 2,
+			created_at: "2026-03-14T06:10:00.000Z",
+			updated_at: "2026-03-14T06:11:00.000Z",
+		}
+
+		const createRequest = await Effect.runPromise(
+			decodeCreateRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				input: {
+					local_id: "s2",
+					title: "Publish board spec",
+					body: "Keep spec artifacts aligned.",
+					kind: "functional",
+					priority: 2,
+				},
+			}),
+		)
+		const createResult = await Effect.runPromise(
+			decodeCreateResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				requirement,
+			}),
+		)
+		const updateRequest = await Effect.runPromise(
+			decodeUpdateRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				reference: "S2",
+				selector: "local_id",
+				fields: {
+					title: "Publish board spec",
+					priority: 3,
+				},
+			}),
+		)
+		const updateResult = await Effect.runPromise(
+			decodeUpdateResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				updated: true,
+			}),
+		)
+		const deleteRequest = await Effect.runPromise(
+			decodeDeleteRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				reference: "S2",
+			}),
+		)
+		const deleteResult = await Effect.runPromise(
+			decodeDeleteResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				deleted: true,
+			}),
+		)
+		const linkListRequest = await Effect.runPromise(
+			decodeLinkListRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				filters: {
+					issueId: "te",
+				},
+			}),
+		)
+		const linkListResult = await Effect.runPromise(
+			decodeLinkListResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				links: [
+					{
+						issue_id: "te",
+						requirement_id: "req-2",
+						requirement_local_id: "S2",
+						requirement_external_code: "A-2",
+						link_type: "implements",
+						implementations: ["default"],
+						fulfillment_status: "planned",
+						fulfillment_percent: null,
+						evidence_note: null,
+						created_at: "2026-03-14T06:12:00.000Z",
+						updated_at: "2026-03-14T06:12:00.000Z",
+					},
+				],
+			}),
+		)
+		const linkAddRequest = await Effect.runPromise(
+			decodeLinkAddRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				issueId: "te",
+				requirementReference: "S2",
+				linkType: "implements",
+				implementations: ["default"],
+				fulfillment: {
+					status: "complete",
+					percent: 100,
+					evidenceNote: "covered by daemon test",
+				},
+			}),
+		)
+		const linkAddResult = await Effect.runPromise(
+			decodeLinkAddResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				added: true,
+			}),
+		)
+		const linkRemoveRequest = await Effect.runPromise(
+			decodeLinkRemoveRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				issueId: "te",
+				requirementReference: "S2",
+				linkType: "implements",
+			}),
+		)
+		const linkRemoveResult = await Effect.runPromise(
+			decodeLinkRemoveResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				removed: 1,
+			}),
+		)
+		const linkUpdateRequest = await Effect.runPromise(
+			decodeLinkUpdateRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				issueId: "te",
+				requirementReference: "S2",
+				linkType: "implements",
+				fields: {
+					status: "verified",
+					percent: 100,
+					evidenceNote: "verified",
+				},
+			}),
+		)
+		const linkUpdateResult = await Effect.runPromise(
+			decodeLinkUpdateResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				updated: 1,
+			}),
+		)
+		const publishConfigGetRequest = await Effect.runPromise(
+			decodePublishConfigGetRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+			}),
+		)
+		const publishConfigGetResult = await Effect.runPromise(
+			decodePublishConfigGetResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				config: {
+					enabled: true,
+					debounce_ms: 2000,
+					target_project: "team/spec",
+					documents: {
+						overview: "Spec Overview",
+						requirements: "Requirements Index",
+						acceptance: "Acceptance Index",
+						change_log: "Change Log",
+					},
+				},
+			}),
+		)
+		const publishConfigSetRequest = await Effect.runPromise(
+			decodePublishConfigSetRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				config: publishConfigGetResult.config,
+			}),
+		)
+		const publishConfigSetResult = await Effect.runPromise(
+			decodePublishConfigSetResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				updated: true,
+			}),
+		)
+		const publishOutcomeGetRequest = await Effect.runPromise(
+			decodePublishOutcomeGetRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+			}),
+		)
+		const publishOutcomeGetResult = await Effect.runPromise(
+			decodePublishOutcomeGetResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				last_outcome: {
+					started_at: "2026-03-14T06:13:00.000Z",
+					finished_at: "2026-03-14T06:14:00.000Z",
+					status: "success",
+					total_requirements: 1,
+					total_links: 1,
+					outcomes: [
+						{
+							document_key: "overview",
+							title: "Spec Overview",
+							status: "success",
+							message: "Created document 'Spec Overview'",
+							requirement_count: 1,
+							link_count: 1,
+						},
+					],
+				},
+			}),
+		)
+		const syncMarkdownRequest = await Effect.runPromise(
+			decodeSyncMarkdownRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				outDir: "/tmp/project/docs/spec",
+				check: true,
+			}),
+		)
+		const syncMarkdownResult = await Effect.runPromise(
+			decodeSyncMarkdownResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				sync: {
+					out_dir: "/tmp/project/docs/spec",
+					check: true,
+					ok: true,
+					total_documents: 4,
+					changed_documents: 0,
+					documents: [
+						{
+							key: "overview",
+							path: "/tmp/project/docs/spec/overview.md",
+							status: "unchanged",
+							changed: false,
+						},
+					],
+				},
+			}),
+		)
+		const publishRequest = await Effect.runPromise(
+			decodePublishRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+			}),
+		)
+		const publishResult = await Effect.runPromise(
+			decodePublishResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				outcome: {
+					started_at: "2026-03-14T06:15:00.000Z",
+					finished_at: "2026-03-14T06:16:00.000Z",
+					status: "partial",
+					total_requirements: 1,
+					total_links: 1,
+					outcomes: [
+						{
+							document_key: "overview",
+							title: "Spec Overview",
+							status: "success",
+							message: "Created document 'Spec Overview'",
+							requirement_count: 1,
+							link_count: 1,
+						},
+					],
+				},
+			}),
+		)
+
+		expect(createRequest.input.local_id).toBe("s2")
+		expect(createResult.requirement.title).toBe("Publish board spec")
+		expect(updateRequest.fields.priority).toBe(3)
+		expect(updateResult.updated).toBe(true)
+		expect(deleteRequest.reference).toBe("S2")
+		expect(deleteResult.deleted).toBe(true)
+		expect(linkListRequest.filters?.issueId).toBe("te")
+		expect(linkListResult.links[0]?.link_type).toBe("implements")
+		expect(linkAddRequest.fulfillment?.status).toBe("complete")
+		expect(linkAddResult.added).toBe(true)
+		expect(linkRemoveRequest.linkType).toBe("implements")
+		expect(linkRemoveResult.removed).toBe(1)
+		expect(linkUpdateRequest.fields.status).toBe("verified")
+		expect(linkUpdateResult.updated).toBe(1)
+		expect(publishConfigGetRequest.projectPath).toBe("/tmp/project")
+		expect(publishConfigGetResult.config.enabled).toBe(true)
+		expect(publishConfigSetRequest.config.documents.overview).toBe("Spec Overview")
+		expect(publishConfigSetResult.updated).toBe(true)
+		expect(publishOutcomeGetRequest.projectPath).toBe("/tmp/project")
+		expect(publishOutcomeGetResult.last_outcome?.status).toBe("success")
+		expect(syncMarkdownRequest.check).toBe(true)
+		expect(syncMarkdownResult.sync.ok).toBe(true)
+		expect(publishRequest.projectPath).toBe("/tmp/project")
+		expect(publishResult.outcome.status).toBe("partial")
 	})
 
 	it("validates daemon health response shape", async () => {
