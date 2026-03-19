@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { GlobalDaemonDiscovery, type GlobalDaemonDiscoveryApi } from "@azedarach/shared"
 import type { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Effect } from "effect"
@@ -11,8 +12,12 @@ import {
 	stopGlobalDaemonServer,
 } from "./GlobalDaemonServer.js"
 
-const runWithBunContext = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
-	Effect.runPromise(effect.pipe(Effect.provide(BunContext.layer)))
+const runWithBunContext = <A, E>(
+	effect: Effect.Effect<A, E, GlobalDaemonDiscoveryApi | FileSystem.FileSystem | Path.Path>,
+) =>
+	Effect.runPromise(
+		effect.pipe(Effect.provide(GlobalDaemonDiscovery.Default), Effect.provide(BunContext.layer)),
+	)
 
 describe("GlobalDaemonServer", () => {
 	it("tracks project runtime map, idle sweep, and shutdown observability", async () => {

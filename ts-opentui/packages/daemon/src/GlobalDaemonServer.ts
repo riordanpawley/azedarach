@@ -3,11 +3,10 @@ import * as BunSocketServer from "@effect/platform-bun/BunSocketServer"
 import { RpcSerialization, RpcServer } from "@effect/rpc"
 import { Data, Effect, Fiber, Layer, Ref } from "effect"
 import {
-	acquireGlobalDaemonLease,
 	type GlobalDaemonAlreadyRunningError,
+	GlobalDaemonDiscovery,
 	type GlobalDaemonDiscoveryError,
 	type GlobalDaemonLease,
-	releaseGlobalDaemonLease,
 } from "./GlobalDaemonDiscovery.js"
 
 export interface GlobalProjectRuntime {
@@ -308,14 +307,11 @@ export const makeGlobalDaemonServerRuntime = (params: {
 export const startGlobalDaemonServer = (params?: {
 	readonly homeDirectory?: string
 	readonly idleTimeoutMs?: number
-}): Effect.Effect<
-	GlobalDaemonServerHandle,
-	GlobalDaemonDiscoveryError | GlobalDaemonAlreadyRunningError | GlobalDaemonServerError,
-	FileSystem.FileSystem | Path.Path
-> =>
+}) =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
-		const lease = yield* acquireGlobalDaemonLease({ homeDirectory: params?.homeDirectory })
+		const discoveryService = yield* GlobalDaemonDiscovery
+		const lease = yield* discoveryService.acquireLease({ homeDirectory: params?.homeDirectory })
 		yield* fs.remove(lease.paths.socketPath, { force: true }).pipe(Effect.ignore)
 
 		const runtime = yield* makeGlobalDaemonServerRuntime({
@@ -346,15 +342,13 @@ export const startGlobalDaemonServer = (params?: {
 			lease,
 			runtime,
 			protocolFiber,
-		}
+		} satisfies GlobalDaemonServerHandle
 	})
 
-export const stopGlobalDaemonServer = (
-	handle: GlobalDaemonServerHandle,
-	reason: string,
-): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
+export const stopGlobalDaemonServer = (handle: GlobalDaemonServerHandle, reason: string) =>
 	Effect.gen(function* () {
+		const discoveryService = yield* GlobalDaemonDiscovery
 		yield* handle.runtime.requestShutdown(reason).pipe(Effect.ignore)
 		yield* Fiber.interrupt(handle.protocolFiber).pipe(Effect.ignore)
-		yield* releaseGlobalDaemonLease(handle.lease)
+		yield* discoveryService.releaseLease(handle.lease)
 	})

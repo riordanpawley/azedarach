@@ -1,14 +1,10 @@
 export {
-	acquireGlobalDaemonLease,
-	clearGlobalDaemonArtifacts,
 	GlobalDaemonAlreadyRunningError,
-	type GlobalDaemonDiscovery,
+	GlobalDaemonDiscovery,
+	type GlobalDaemonDiscoveryApi,
 	GlobalDaemonDiscoveryError,
+	type GlobalDaemonDiscoveryMetadata,
 	type GlobalDaemonDiscoveryPaths,
 	type GlobalDaemonLease,
 	type GlobalDaemonOwnerLiveness,
-	probeGlobalDaemonOwnerLiveness,
-	readGlobalDaemonDiscovery,
-	releaseGlobalDaemonLease,
-	resolveGlobalDaemonDiscoveryPaths,
 } from "@azedarach/shared"

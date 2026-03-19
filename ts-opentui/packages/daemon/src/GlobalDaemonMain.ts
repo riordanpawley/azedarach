@@ -1,5 +1,6 @@
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect } from "effect"
+import { GlobalDaemonDiscovery } from "./GlobalDaemonDiscovery.js"
 import { startGlobalDaemonServer, stopGlobalDaemonServer } from "./GlobalDaemonServer.js"
 
 const awaitShutdownSignal = (): Effect.Effect<"SIGINT" | "SIGTERM", never> =>
@@ -35,7 +36,12 @@ export const runGlobalDaemonMain = Effect.gen(function* () {
 )
 
 if (import.meta.main) {
-	Effect.runPromise(runGlobalDaemonMain.pipe(Effect.provide(BunContext.layer))).catch(() => {
+	Effect.runPromise(
+		runGlobalDaemonMain.pipe(
+			Effect.provide(GlobalDaemonDiscovery.Default),
+			Effect.provide(BunContext.layer),
+		),
+	).catch(() => {
 		process.exitCode = 1
 	})
 }

@@ -6,13 +6,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Readable } from "node:stream"
 import {
-	acquireGlobalDaemonLease,
 	GlobalDaemonBootstrap,
 	type GlobalDaemonBootstrapApi,
-	type GlobalDaemonDiscovery,
+	GlobalDaemonDiscovery,
+	type GlobalDaemonDiscoveryApi,
+	type GlobalDaemonDiscoveryMetadata,
 	type GlobalDaemonLease,
-	readGlobalDaemonDiscovery,
-	releaseGlobalDaemonLease,
 } from "@azedarach/shared"
 import type { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
@@ -28,10 +27,18 @@ const ATTACH_FANOUT_CLIENT_COUNT = 8
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const runWithBunContext = <A, E>(
-	effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path | GlobalDaemonBootstrapApi>,
+	effect: Effect.Effect<
+		A,
+		E,
+		GlobalDaemonDiscoveryApi | GlobalDaemonBootstrapApi | FileSystem.FileSystem | Path.Path
+	>,
 ) =>
 	Effect.runPromise(
-		effect.pipe(Effect.provide(GlobalDaemonBootstrap.Default), Effect.provide(BunContext.layer)),
+		effect.pipe(
+			Effect.provide(GlobalDaemonDiscovery.Default),
+			Effect.provide(GlobalDaemonBootstrap.Default),
+			Effect.provide(BunContext.layer),
+		),
 	)
 
 const bootstrapDaemonRpcClient = (params: {
@@ -51,17 +58,32 @@ const bootstrapDaemonRpcClient = (params: {
 		return yield* bootstrap.bootstrapDaemonRpcClient(params)
 	})
 
-const readDiscovery = (homeDirectory: string): Promise<Option.Option<GlobalDaemonDiscovery>> =>
+const acquireLease = (homeDirectory: string) =>
+	Effect.gen(function* () {
+		const discovery = yield* GlobalDaemonDiscovery
+		return yield* discovery.acquireLease({ homeDirectory })
+	})
+
+const releaseLease = (lease: GlobalDaemonLease) =>
+	Effect.gen(function* () {
+		const discovery = yield* GlobalDaemonDiscovery
+		return yield* discovery.releaseLease(lease)
+	})
+
+const readDiscovery = (
+	homeDirectory: string,
+): Promise<Option.Option<GlobalDaemonDiscoveryMetadata>> =>
 	runWithBunContext(
-		readGlobalDaemonDiscovery({
-			homeDirectory,
+		Effect.gen(function* () {
+			const discovery = yield* GlobalDaemonDiscovery
+			return yield* discovery.readDiscovery({ homeDirectory })
 		}),
 	)
 
 const waitForDiscovery = async (
 	homeDirectory: string,
 	timeoutMs: number,
-): Promise<GlobalDaemonDiscovery> => {
+): Promise<GlobalDaemonDiscoveryMetadata> => {
 	const startedAtMs = Date.now()
 	while (Date.now() - startedAtMs <= timeoutMs) {
 		const discovery = await readDiscovery(homeDirectory)
@@ -70,7 +92,7 @@ const waitForDiscovery = async (
 		}
 		await sleep(30)
 	}
-	throw new Error("Timed out waiting for global daemon discovery")
+	throw new Error("Timed out waiting for global daemon discovery metadata")
 }
 
 const waitForNoDiscovery = async (homeDirectory: string, timeoutMs: number): Promise<void> => {
@@ -141,7 +163,7 @@ describe("GlobalDaemonIpc integration", () => {
 			let lease: GlobalDaemonLease | null = null
 			let daemonB: SpawnedDaemon | null = null
 			try {
-				lease = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+				lease = await runWithBunContext(acquireLease(homeDirectory))
 				const firstDiscovery = await waitForDiscovery(homeDirectory, 8_000)
 				expect(firstDiscovery.pid).toBe(process.pid)
 				expect(firstDiscovery.lockId).toBe(lease.lockId)
@@ -158,7 +180,7 @@ describe("GlobalDaemonIpc integration", () => {
 					await terminateChild(daemonB)
 				}
 				if (lease !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(lease).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(lease).pipe(Effect.ignore))
 				}
 				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
 			}
@@ -169,7 +191,7 @@ describe("GlobalDaemonIpc integration", () => {
 		await withIsolatedHome(async (homeDirectory) => {
 			let lease: GlobalDaemonLease | null = null
 			const coldStartBegin = Date.now()
-			lease = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			lease = await runWithBunContext(acquireLease(homeDirectory))
 			try {
 				const discovery = await waitForDiscovery(homeDirectory, 8_000)
 				const coldActivationMs = Date.now() - coldStartBegin
@@ -201,7 +223,7 @@ describe("GlobalDaemonIpc integration", () => {
 				expect(hotSwitchMs).toBeLessThan(HOT_SWITCH_TARGET_MS)
 			} finally {
 				if (lease !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(lease).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(lease).pipe(Effect.ignore))
 				}
 				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
 			}
@@ -212,7 +234,7 @@ describe("GlobalDaemonIpc integration", () => {
 		await withIsolatedHome(async (homeDirectory) => {
 			let leaseA: GlobalDaemonLease | null = null
 			let leaseB: GlobalDaemonLease | null = null
-			leaseA = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			leaseA = await runWithBunContext(acquireLease(homeDirectory))
 			const firstDiscovery = await waitForDiscovery(homeDirectory, 8_000)
 			const firstAttach = await runWithBunContext(
 				bootstrapDaemonRpcClient({
@@ -223,11 +245,11 @@ describe("GlobalDaemonIpc integration", () => {
 			try {
 				expect(firstAttach.startedDaemon).toBe(false)
 				expect(firstAttach.attachAttemptCount).toBeGreaterThanOrEqual(1)
-				await runWithBunContext(releaseGlobalDaemonLease(leaseA))
+				await runWithBunContext(releaseLease(leaseA))
 				leaseA = null
 				await waitForNoDiscovery(homeDirectory, 8_000)
 
-				leaseB = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+				leaseB = await runWithBunContext(acquireLease(homeDirectory))
 				const restartedDiscovery = await waitForDiscovery(homeDirectory, 8_000)
 				const restartedAttach = await runWithBunContext(
 					bootstrapDaemonRpcClient({
@@ -255,10 +277,10 @@ describe("GlobalDaemonIpc integration", () => {
 				expect(reconnectAttach.socketUrl).toBe(restartedAttach.socketUrl)
 			} finally {
 				if (leaseA !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(leaseA).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(leaseA).pipe(Effect.ignore))
 				}
 				if (leaseB !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(leaseB).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(leaseB).pipe(Effect.ignore))
 				}
 				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
 			}
@@ -269,7 +291,7 @@ describe("GlobalDaemonIpc integration", () => {
 		await withIsolatedHome(async (homeDirectory) => {
 			let leaseA: GlobalDaemonLease | null = null
 			let leaseB: GlobalDaemonLease | null = null
-			leaseA = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			leaseA = await runWithBunContext(acquireLease(homeDirectory))
 			await waitForDiscovery(homeDirectory, 8_000)
 			try {
 				await runWithBunContext(
@@ -279,7 +301,7 @@ describe("GlobalDaemonIpc integration", () => {
 					}),
 				)
 
-				await runWithBunContext(releaseGlobalDaemonLease(leaseA))
+				await runWithBunContext(releaseLease(leaseA))
 				leaseA = null
 				await waitForNoDiscovery(homeDirectory, 8_000)
 
@@ -307,7 +329,7 @@ describe("GlobalDaemonIpc integration", () => {
 				)
 
 				await sleep(90)
-				leaseB = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+				leaseB = await runWithBunContext(acquireLease(homeDirectory))
 				const restartedDiscovery = await waitForDiscovery(homeDirectory, 8_000)
 
 				const reconnectAttach = await reconnectPromise
@@ -327,10 +349,10 @@ describe("GlobalDaemonIpc integration", () => {
 				).toBe(true)
 			} finally {
 				if (leaseA !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(leaseA).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(leaseA).pipe(Effect.ignore))
 				}
 				if (leaseB !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(leaseB).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(leaseB).pipe(Effect.ignore))
 				}
 				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
 			}
@@ -340,7 +362,7 @@ describe("GlobalDaemonIpc integration", () => {
 	it("allows multi-client attach fanout on one daemon endpoint without a fixed cap", async () => {
 		await withIsolatedHome(async (homeDirectory) => {
 			let lease: GlobalDaemonLease | null = null
-			lease = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			lease = await runWithBunContext(acquireLease(homeDirectory))
 			try {
 				const discovery = await waitForDiscovery(homeDirectory, 8_000)
 				const attaches = await Promise.all(
@@ -364,7 +386,7 @@ describe("GlobalDaemonIpc integration", () => {
 				}
 			} finally {
 				if (lease !== null) {
-					await runWithBunContext(releaseGlobalDaemonLease(lease).pipe(Effect.ignore))
+					await runWithBunContext(releaseLease(lease).pipe(Effect.ignore))
 				}
 				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
 			}
