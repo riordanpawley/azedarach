@@ -1,4 +1,3 @@
-import { Effect, Ref } from "effect"
 import {
 	BACKEND_CLIENT_SESSION_NEGOTIATED_CAPABILITIES,
 	BACKEND_CLIENT_SESSION_PROTOCOL_VERSION,
@@ -18,7 +17,8 @@ import {
 	hasBackendClientCapability,
 	negotiateBackendClientProtocolHandshake,
 	requireBackendClientCapability,
-} from "../../../src/core/BackendClientSessionProtocol.js"
+} from "@azedarach/shared/rpc"
+import { Effect, Ref } from "effect"
 import {
 	type DaemonLifecycleEvent,
 	type DaemonLifecycleState,

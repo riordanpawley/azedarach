@@ -1,7 +1,7 @@
+import type { BackendSyncInterface } from "@azedarach/shared"
+import { BackendSyncRouter } from "@azedarach/shared"
 import { FileSystem, Path } from "@effect/platform"
 import { Effect, Fiber, Option, Ref, type Scope } from "effect"
-import type { BackendSyncInterface } from "../../../src/core/BackendSyncInterface.js"
-import { BackendSyncRouter } from "../../../src/core/BackendSyncRouter.js"
 import {
 	type DaemonStateStoreApi,
 	makeDaemonStateStore,

@@ -1,6 +1,6 @@
+import { AZEDARACH_STORAGE_DIRECTORY } from "@azedarach/shared"
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Option, Schema } from "effect"
-import { AZEDARACH_STORAGE_DIRECTORY } from "../../../src/core/storagePaths.js"
 
 const DAEMON_DIRECTORY_NAME = "daemon"
 const SYNC_LOCK_DIRECTORY_NAME = "sync.lock"

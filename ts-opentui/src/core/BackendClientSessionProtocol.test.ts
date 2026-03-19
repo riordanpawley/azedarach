@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test"
-import { Cause, Effect, Exit, Option } from "effect"
 import {
 	BACKEND_CLIENT_SESSION_PROTOCOL_VERSION,
 	BACKEND_SYSTEM_AUTH_CONTEXT,
@@ -10,7 +9,8 @@ import {
 	hasBackendClientCapability,
 	negotiateBackendClientProtocolHandshake,
 	requireBackendClientCapability,
-} from "./BackendClientSessionProtocol.js"
+} from "@azedarach/shared/rpc"
+import { Cause, Effect, Exit, Option } from "effect"
 
 describe("BackendClientSessionProtocol", () => {
 	it("normalizes attach/reconnect intents with explicit identity, auth, and reconnect cursor", () => {

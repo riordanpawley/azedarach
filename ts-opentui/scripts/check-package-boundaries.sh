@@ -34,6 +34,14 @@ check_forbidden_imports() {
 
 	local rules=("$@")
 	local violations=()
+	local extra_globs=()
+
+	if [[ "$package_dir" == "packages/shared/src" ]]; then
+		extra_globs+=(
+			--glob '!packages/shared/src/core.ts'
+			--glob '!packages/shared/src/storagePaths.ts'
+		)
+	fi
 
 	if [[ ! -d "$package_dir" ]]; then
 		return
@@ -54,13 +62,14 @@ check_forbidden_imports() {
 				--glob "${scan_globs[3]}" \
 				--glob "${scan_globs[4]}" \
 				--glob "${scan_globs[5]}" \
+				"${extra_globs[@]}" \
 				"(import|export).*${pattern}" "$package_dir" || true
 		)
 
 		if ((${#hits[@]} > 0)); then
 			violations+=("  - ${message}")
 			for hit in "${hits[@]}"; do
-				violations+=("    ${hit}")
+				violations+=("    ${hit} | ${message}")
 			done
 		fi
 	done
@@ -94,6 +103,18 @@ check_forbidden_imports "packages/daemon/src" "packages/daemon" \
 check_forbidden_imports "packages/shared/src" "packages/shared" \
 	'packages/(tui|cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
 	'@azedarach/(tui|cli|daemon):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.'
+
+check_forbidden_imports "packages/cli/src" "packages/cli" \
+	'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules, shared package exports, or public facades instead.'
+
+check_forbidden_imports "packages/tui/src" "packages/tui" \
+	'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules, shared package exports, or public facades instead.'
+
+check_forbidden_imports "packages/daemon/src" "packages/daemon" \
+	'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules, shared package exports, or public facades instead.'
+
+check_forbidden_imports "packages/shared/src" "packages/shared" \
+	'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules, shared package exports, or public facades instead.'
 
 if ((fail != 0)); then
 	exit 1

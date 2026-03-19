@@ -1,7 +1,6 @@
+import { LocalIssueStore, SessionManager } from "@azedarach/shared"
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
 import { AppConfig } from "../../../src/config/AppConfig.js"
-import { LocalIssueStore } from "../../../src/core/LocalIssueStore.js"
-import { SessionManager } from "../../../src/core/SessionManager.js"
 import type { TaskWithSession } from "../../../src/ui/types.js"
 import {
 	BackendDaemonService,
