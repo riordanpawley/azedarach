@@ -19,7 +19,7 @@ export type GlobalDaemonDiscovery = Schema.Schema.Type<typeof GlobalDaemonDiscov
 
 export type GlobalDaemonOwnerLiveness = "alive" | "dead" | "inaccessible"
 
-export interface GlobalDaemonRegistryPaths {
+export interface GlobalDaemonDiscoveryPaths {
 	readonly daemonDir: string
 	readonly socketPath: string
 	readonly lockDir: string
@@ -30,7 +30,7 @@ export interface GlobalDaemonLease {
 	readonly lockId: string
 	readonly pid: number
 	readonly discovery: GlobalDaemonDiscovery
-	readonly paths: GlobalDaemonRegistryPaths
+	readonly paths: GlobalDaemonDiscoveryPaths
 }
 
 interface ErrnoLike {
@@ -43,7 +43,7 @@ const isErrnoLike = (value: unknown): value is ErrnoLike =>
 const decodeDiscovery = Schema.decode(Schema.parseJson(GlobalDaemonDiscoverySchema))
 const encodeDiscovery = Schema.encode(Schema.parseJson(GlobalDaemonDiscoverySchema))
 
-export class GlobalDaemonRegistryError extends Data.TaggedError("GlobalDaemonRegistryError")<{
+export class GlobalDaemonDiscoveryError extends Data.TaggedError("GlobalDaemonDiscoveryError")<{
 	readonly message: string
 	readonly cause: unknown
 }> {}
@@ -51,7 +51,7 @@ export class GlobalDaemonRegistryError extends Data.TaggedError("GlobalDaemonReg
 export class GlobalDaemonAlreadyRunningError extends Data.TaggedError(
 	"GlobalDaemonAlreadyRunningError",
 )<{
-	readonly paths: GlobalDaemonRegistryPaths
+	readonly paths: GlobalDaemonDiscoveryPaths
 	readonly discovery: GlobalDaemonDiscovery
 	readonly liveness: GlobalDaemonOwnerLiveness
 }> {}
@@ -61,7 +61,7 @@ export interface GlobalDaemonDiscoveryApi {
 		readonly homeDirectory?: string
 	}) => Effect.Effect<
 		Option.Option<GlobalDaemonDiscovery>,
-		GlobalDaemonRegistryError,
+		GlobalDaemonDiscoveryError,
 		FileSystem.FileSystem | Path.Path
 	>
 	readonly probeOwnerLiveness: (
@@ -69,16 +69,16 @@ export interface GlobalDaemonDiscoveryApi {
 	) => Effect.Effect<GlobalDaemonOwnerLiveness, never>
 	readonly clearArtifacts: (params?: {
 		readonly homeDirectory?: string
-	}) => Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem | Path.Path>
+	}) => Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem | Path.Path>
 }
 
 const resolveHomeDirectory = (
 	homeDirectory: string | undefined,
-): Effect.Effect<string, GlobalDaemonRegistryError> => {
+): Effect.Effect<string, GlobalDaemonDiscoveryError> => {
 	const resolvedHome = homeDirectory ?? process.env.HOME
 	if (resolvedHome === undefined || resolvedHome.trim().length === 0) {
 		return Effect.fail(
-			new GlobalDaemonRegistryError({
+			new GlobalDaemonDiscoveryError({
 				message: "HOME is not set; cannot resolve global daemon directory",
 				cause: "missing_home",
 			}),
@@ -87,10 +87,10 @@ const resolveHomeDirectory = (
 	return Effect.succeed(resolvedHome)
 }
 
-export const resolveGlobalDaemonRegistryPaths = (params: {
+export const resolveGlobalDaemonDiscoveryPaths = (params: {
 	readonly homeDirectory?: string
 	readonly pathOps: Pick<Path.Path, "join">
-}): Effect.Effect<GlobalDaemonRegistryPaths, GlobalDaemonRegistryError> =>
+}): Effect.Effect<GlobalDaemonDiscoveryPaths, GlobalDaemonDiscoveryError> =>
 	Effect.gen(function* () {
 		const home = yield* resolveHomeDirectory(params.homeDirectory)
 		const daemonDir = params.pathOps.join(home, GLOBAL_DAEMON_STORAGE_DIR)
@@ -107,7 +107,7 @@ const readDiscoveryAtPath = (
 	discoveryPath: string,
 ): Effect.Effect<
 	Option.Option<GlobalDaemonDiscovery>,
-	GlobalDaemonRegistryError,
+	GlobalDaemonDiscoveryError,
 	FileSystem.FileSystem
 > =>
 	Effect.gen(function* () {
@@ -115,7 +115,7 @@ const readDiscoveryAtPath = (
 		const exists = yield* fs.exists(discoveryPath).pipe(
 			Effect.catchAll((cause) =>
 				Effect.fail(
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to check discovery file '${discoveryPath}'`,
 						cause,
 					}),
@@ -128,7 +128,7 @@ const readDiscoveryAtPath = (
 		const raw = yield* fs.readFileString(discoveryPath).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to read discovery file '${discoveryPath}'`,
 						cause,
 					}),
@@ -137,7 +137,7 @@ const readDiscoveryAtPath = (
 		const decoded = yield* decodeDiscovery(raw).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to decode discovery file '${discoveryPath}'`,
 						cause,
 					}),
@@ -147,16 +147,16 @@ const readDiscoveryAtPath = (
 	})
 
 const writeDiscoveryAtomically = (
-	paths: GlobalDaemonRegistryPaths,
+	paths: GlobalDaemonDiscoveryPaths,
 	discovery: GlobalDaemonDiscovery,
 	lockId: string,
-): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		const encoded = yield* encodeDiscovery(discovery).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to encode discovery metadata '${paths.discoveryPath}'`,
 						cause,
 					}),
@@ -166,7 +166,7 @@ const writeDiscoveryAtomically = (
 		yield* fs.writeFileString(tempPath, encoded).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to write discovery temp file '${tempPath}'`,
 						cause,
 					}),
@@ -175,7 +175,7 @@ const writeDiscoveryAtomically = (
 		yield* fs.rename(tempPath, paths.discoveryPath).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to finalize discovery file '${paths.discoveryPath}'`,
 						cause,
 					}),
@@ -184,14 +184,14 @@ const writeDiscoveryAtomically = (
 	})
 
 const tryAcquireLockDir = (
-	paths: GlobalDaemonRegistryPaths,
-): Effect.Effect<boolean, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+	paths: GlobalDaemonDiscoveryPaths,
+): Effect.Effect<boolean, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		yield* fs.makeDirectory(paths.daemonDir, { recursive: true }).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to create daemon directory '${paths.daemonDir}'`,
 						cause,
 					}),
@@ -205,7 +205,7 @@ const tryAcquireLockDir = (
 						exists
 							? Effect.succeed(false)
 							: Effect.fail(
-									new GlobalDaemonRegistryError({
+									new GlobalDaemonDiscoveryError({
 										message: `Failed to create lock dir '${paths.lockDir}'`,
 										cause,
 									}),
@@ -213,7 +213,7 @@ const tryAcquireLockDir = (
 					),
 					Effect.catchAll((existsCause) =>
 						Effect.fail(
-							new GlobalDaemonRegistryError({
+							new GlobalDaemonDiscoveryError({
 								message: `Failed to inspect lock dir '${paths.lockDir}'`,
 								cause: existsCause,
 							}),
@@ -226,13 +226,13 @@ const tryAcquireLockDir = (
 
 const clearLockDir = (
 	lockDir: string,
-): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		yield* fs.remove(lockDir, { recursive: true, force: true }).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to clear lock dir '${lockDir}'`,
 						cause,
 					}),
@@ -242,13 +242,13 @@ const clearLockDir = (
 
 const clearSocketPath = (
 	socketPath: string,
-): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		yield* fs.remove(socketPath, { force: true }).pipe(
 			Effect.mapError(
 				(cause) =>
-					new GlobalDaemonRegistryError({
+					new GlobalDaemonDiscoveryError({
 						message: `Failed to clear socket path '${socketPath}'`,
 						cause,
 					}),
@@ -278,12 +278,12 @@ export const readGlobalDaemonDiscovery = (params?: {
 	readonly homeDirectory?: string
 }): Effect.Effect<
 	Option.Option<GlobalDaemonDiscovery>,
-	GlobalDaemonRegistryError,
+	GlobalDaemonDiscoveryError,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
 		const pathService = yield* Path.Path
-		const paths = yield* resolveGlobalDaemonRegistryPaths({
+		const paths = yield* resolveGlobalDaemonDiscoveryPaths({
 			homeDirectory: params?.homeDirectory,
 			pathOps: pathService,
 		})
@@ -292,10 +292,10 @@ export const readGlobalDaemonDiscovery = (params?: {
 
 export const clearGlobalDaemonArtifacts = (params?: {
 	readonly homeDirectory?: string
-}): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem | Path.Path> =>
+}): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem | Path.Path> =>
 	Effect.gen(function* () {
 		const pathService = yield* Path.Path
-		const paths = yield* resolveGlobalDaemonRegistryPaths({
+		const paths = yield* resolveGlobalDaemonDiscoveryPaths({
 			homeDirectory: params?.homeDirectory,
 			pathOps: pathService,
 		})
@@ -308,12 +308,12 @@ export const acquireGlobalDaemonLease = (params?: {
 	readonly nowMs?: number
 }): Effect.Effect<
 	GlobalDaemonLease,
-	GlobalDaemonRegistryError | GlobalDaemonAlreadyRunningError,
+	GlobalDaemonDiscoveryError | GlobalDaemonAlreadyRunningError,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
 		const pathService = yield* Path.Path
-		const paths = yield* resolveGlobalDaemonRegistryPaths({
+		const paths = yield* resolveGlobalDaemonDiscoveryPaths({
 			homeDirectory: params?.homeDirectory,
 			pathOps: pathService,
 		})
@@ -339,7 +339,7 @@ export const acquireGlobalDaemonLease = (params?: {
 				const reacquired = yield* tryAcquireLockDir(paths)
 				if (!reacquired) {
 					return yield* Effect.fail(
-						new GlobalDaemonRegistryError({
+						new GlobalDaemonDiscoveryError({
 							message: `Failed to reacquire lock dir '${paths.lockDir}' after stale missing-discovery cleanup`,
 							cause: "reacquire_failed",
 						}),
@@ -362,7 +362,7 @@ export const acquireGlobalDaemonLease = (params?: {
 				const reacquired = yield* tryAcquireLockDir(paths)
 				if (!reacquired) {
 					return yield* Effect.fail(
-						new GlobalDaemonRegistryError({
+						new GlobalDaemonDiscoveryError({
 							message: `Failed to reacquire lock dir '${paths.lockDir}' after stale cleanup`,
 							cause: "reacquire_failed",
 						}),
@@ -398,7 +398,7 @@ export const acquireGlobalDaemonLease = (params?: {
 
 export const releaseGlobalDaemonLease = (
 	lease: GlobalDaemonLease,
-): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
 	Effect.gen(function* () {
 		const existing = yield* readDiscoveryAtPath(lease.paths.discoveryPath)
 		if (Option.isNone(existing)) {

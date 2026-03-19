@@ -1,12 +1,9 @@
 import { describe, expect, it } from "bun:test"
+import { buildGlobalDaemonSocketUrl, formatDaemonRpcClientFailure } from "@azedarach/shared"
 import { DAEMON_RPC_PROTOCOL_VERSION, type DaemonEventStreamResult } from "@azedarach/shared/rpc"
 import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Cause, Effect, Exit, Option } from "effect"
-import {
-	buildGlobalDaemonSocketUrl,
-	formatDaemonRpcClientFailure,
-} from "../../packages/cli/src/daemonClientBootstrap.js"
 import {
 	appendIssueNotes,
 	buildCommandCliLayerForArgv,

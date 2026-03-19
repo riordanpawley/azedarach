@@ -20,12 +20,16 @@ import {
 	DiffService,
 	deepMerge,
 	EditorService,
+	formatDaemonRpcClientFailure,
+	GlobalDaemonBootstrap,
+	type GlobalDaemonBootstrapApi,
 	generateHookConfig,
 	getIssueSessionName,
 	getProjectStoragePaths,
 	ImageAttachmentService,
 	IssueEditorService,
 	IssueTrackerClient,
+	isRetryableRpcClientError,
 	issueIdsEqualForLookup,
 	KeyboardService,
 	MutationQueue,
@@ -107,11 +111,6 @@ import type {
 	SpecRequirementLookupSelector,
 	TrackedIssue,
 } from "./contracts.js"
-import {
-	bootstrapDaemonRpcClient,
-	formatDaemonRpcClientFailure,
-	isRetryableRpcClientError,
-} from "./daemonClientBootstrap.js"
 import { devCommand } from "./dev-server.js"
 import {
 	configureCliIssueIdResolutionContext,
@@ -216,6 +215,7 @@ const createFullCliLayer = (configPath: string | null) =>
 		DiffService.Default,
 		PlanningService.Default,
 		SpecService.Default,
+		GlobalDaemonBootstrap.Default,
 	).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
@@ -234,6 +234,7 @@ const createCommandCliLayer = (configPath: string | null) =>
 		IssueTrackerClient.Default,
 		SessionManager.Default,
 		SpecService.Default,
+		GlobalDaemonBootstrap.Default,
 	).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
@@ -523,6 +524,14 @@ const mapDaemonSessionMutationToCliSession = (
 	worktreePath: result.session.worktreePath,
 	tmuxSessionName: result.session.tmuxSessionName,
 })
+
+const bootstrapDaemonRpcClient = (
+	params?: Parameters<GlobalDaemonBootstrapApi["bootstrapDaemonRpcClient"]>[0],
+) =>
+	Effect.gen(function* () {
+		const daemonBootstrap = yield* GlobalDaemonBootstrap
+		return yield* daemonBootstrap.bootstrapDaemonRpcClient(params)
+	})
 
 export const resolveStartSessionRuntimeMode = (): {
 	readonly mode: StartSessionRuntimeMode

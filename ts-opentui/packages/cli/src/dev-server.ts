@@ -5,10 +5,14 @@
  * just CLI argument parsing and output formatting.
  */
 
-import { DevServerService, type DevServerState, ProjectService } from "@azedarach/shared"
+import {
+	DevServerService,
+	type DevServerState,
+	GlobalDaemonBootstrap,
+	ProjectService,
+} from "@azedarach/shared"
 import { Args, Command, Options } from "@effect/cli"
 import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
-import { bootstrapDaemonRpcClient } from "./daemonClientBootstrap.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 
 const CLI_DEFAULT_SERVER_NAME = "default"
@@ -99,9 +103,12 @@ const toCliState = (server: {
 })
 
 const getDaemonClient = () =>
-	bootstrapDaemonRpcClient({
-		autoStart: false,
-		verifyReachable: true,
+	Effect.gen(function* () {
+		const daemonBootstrap = yield* GlobalDaemonBootstrap
+		return yield* daemonBootstrap.bootstrapDaemonRpcClient({
+			autoStart: false,
+			verifyReachable: true,
+		})
 	}).pipe(
 		Effect.map((bootstrap) => Option.some(bootstrap.client)),
 		Effect.catchAll(() => Effect.succeed(Option.none())),

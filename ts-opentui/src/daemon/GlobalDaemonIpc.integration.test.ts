@@ -5,17 +5,18 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Readable } from "node:stream"
-import type { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Effect, Option } from "effect"
-import { bootstrapDaemonRpcClient } from "../cli/daemonClientBootstrap.js"
 import {
 	acquireGlobalDaemonLease,
+	GlobalDaemonBootstrap,
+	type GlobalDaemonBootstrapApi,
 	type GlobalDaemonDiscovery,
 	type GlobalDaemonLease,
 	readGlobalDaemonDiscovery,
 	releaseGlobalDaemonLease,
-} from "../core/GlobalDaemonRegistry.js"
+} from "@azedarach/shared"
+import type { FileSystem, Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Option } from "effect"
 
 const projectRoot = process.cwd()
 const daemonMainPath = join(projectRoot, "src/daemon/GlobalDaemonMain.ts")
@@ -26,8 +27,29 @@ const ATTACH_FANOUT_CLIENT_COUNT = 8
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-const runWithBunContext = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
-	Effect.runPromise(effect.pipe(Effect.provide(BunContext.layer)))
+const runWithBunContext = <A, E>(
+	effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path | GlobalDaemonBootstrapApi>,
+) =>
+	Effect.runPromise(
+		effect.pipe(Effect.provide(GlobalDaemonBootstrap.Default), Effect.provide(BunContext.layer)),
+	)
+
+const bootstrapDaemonRpcClient = (params: {
+	readonly autoStart: boolean
+	readonly timeoutMs?: number
+	readonly attachRetryBackoffMs?: ReadonlyArray<number>
+	readonly onAttachAttempt?: (observation: {
+		readonly attempt: number
+		readonly delayMs: number
+		readonly timeoutRemainingMs: number
+		readonly socketPath: string | null
+		readonly socketUrl: string | null
+	}) => void
+}) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* GlobalDaemonBootstrap
+		return yield* bootstrap.bootstrapDaemonRpcClient(params)
+	})
 
 const readDiscovery = (homeDirectory: string): Promise<Option.Option<GlobalDaemonDiscovery>> =>
 	runWithBunContext(

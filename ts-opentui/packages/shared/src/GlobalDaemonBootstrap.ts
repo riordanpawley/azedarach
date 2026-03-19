@@ -3,6 +3,7 @@ import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Data, Effect, Option } from "effect"
 import {
 	type GlobalDaemonDiscovery,
+	type GlobalDaemonDiscoveryApi,
 	GlobalDaemonDiscoveryService,
 } from "./GlobalDaemonDiscovery.js"
 import {
@@ -24,8 +25,8 @@ const GLOBAL_DAEMON_MAIN_ENTRY_PATH = decodeURIComponent(
 export class GlobalDaemonBootstrapError extends Data.TaggedError("GlobalDaemonBootstrapError")<{
 	readonly message: string
 	readonly reason:
-		| "registry-read"
-		| "registry-clear"
+		| "discovery-read"
+		| "discovery-clear"
 		| "discovery-timeout"
 		| "spawn-failed"
 		| "rpc-protocol-mismatch"
@@ -43,19 +44,20 @@ const withGlobalDaemonClient = <A, E>(
 	effect: Effect.Effect<A, E, DaemonRpcClient>,
 ): Effect.Effect<A, E> => effect.pipe(Effect.provide(layerSocket(socketUrl)))
 
-const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
+const readLiveGlobalDaemonDiscovery = (
+	discoveryService: GlobalDaemonDiscoveryApi,
+): Effect.Effect<
 	Option.Option<GlobalDaemonDiscovery>,
 	GlobalDaemonBootstrapError,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
-		const discoveryService = yield* GlobalDaemonDiscoveryService
 		const discovery = yield* discoveryService.readDiscovery().pipe(
 			Effect.mapError(
 				(error) =>
 					new GlobalDaemonBootstrapError({
 						message: error.message,
-						reason: "registry-read",
+						reason: "discovery-read",
 					}),
 			),
 		)
@@ -70,17 +72,18 @@ const readLiveGlobalDaemonDiscovery = (): Effect.Effect<
 					(error) =>
 						new GlobalDaemonBootstrapError({
 							message: error.message,
-							reason: "registry-clear",
+							reason: "discovery-clear",
 						}),
 				),
 			)
 			return Option.none<GlobalDaemonDiscovery>()
 		}
 		return Option.some(discovery.value)
-	}).pipe(Effect.provide(GlobalDaemonDiscoveryService.Default))
+	})
 
 const waitForGlobalDaemonDiscovery = (params: {
 	readonly timeoutMs: number
+	readonly discoveryService: GlobalDaemonDiscoveryApi
 }): Effect.Effect<
 	GlobalDaemonDiscovery,
 	GlobalDaemonBootstrapError,
@@ -89,7 +92,7 @@ const waitForGlobalDaemonDiscovery = (params: {
 	Effect.gen(function* () {
 		const deadline = Date.now() + params.timeoutMs
 		while (Date.now() <= deadline) {
-			const discovery = yield* readLiveGlobalDaemonDiscovery()
+			const discovery = yield* readLiveGlobalDaemonDiscovery(params.discoveryService)
 			if (Option.isSome(discovery)) {
 				return discovery.value
 			}
@@ -167,6 +170,33 @@ export interface GlobalDaemonAttachAttemptObservation {
 	readonly socketUrl: string | null
 }
 
+export interface GlobalDaemonBootstrapApi {
+	readonly bootstrapDaemonRpcClient: (params?: {
+		readonly autoStart: boolean
+		readonly timeoutMs?: number
+		readonly attachRetryBackoffMs?: ReadonlyArray<number>
+		readonly onAttachAttempt?: (observation: GlobalDaemonAttachAttemptObservation) => void
+		readonly verifyReachable?: boolean
+	}) => Effect.Effect<
+		{
+			readonly client: DaemonRpcClientApi
+			readonly discovery: GlobalDaemonDiscovery
+			readonly socketUrl: string
+			readonly startedDaemon: boolean
+			readonly attachAttemptCount: number
+		},
+		GlobalDaemonBootstrapError,
+		FileSystem.FileSystem | Path.Path
+	>
+	readonly formatDaemonRpcClientFailure: (params: {
+		readonly operation: string
+		readonly socketUrl: string
+		readonly error: DaemonRpcClientError
+	}) => GlobalDaemonBootstrapError
+	readonly isRetryableRpcClientError: (error: DaemonRpcClientError) => error is RpcClientError
+	readonly buildGlobalDaemonSocketUrl: (socketPath: string) => string
+}
+
 const retryDelayForAttempt = (attempt: number, retryBackoffMs: ReadonlyArray<number>): number => {
 	if (attempt <= 1 || retryBackoffMs.length === 0) {
 		return 0
@@ -185,13 +215,16 @@ const normalizeRetryBackoffMs = (
 	return normalized.length > 0 ? normalized : [0]
 }
 
-export const bootstrapDaemonRpcClient = (params?: {
-	readonly autoStart: boolean
-	readonly timeoutMs?: number
-	readonly attachRetryBackoffMs?: ReadonlyArray<number>
-	readonly onAttachAttempt?: (observation: GlobalDaemonAttachAttemptObservation) => void
-	readonly verifyReachable?: boolean
-}): Effect.Effect<
+const bootstrapDaemonRpcClient = (
+	discoveryService: GlobalDaemonDiscoveryApi,
+	params?: {
+		readonly autoStart: boolean
+		readonly timeoutMs?: number
+		readonly attachRetryBackoffMs?: ReadonlyArray<number>
+		readonly onAttachAttempt?: (observation: GlobalDaemonAttachAttemptObservation) => void
+		readonly verifyReachable?: boolean
+	},
+): Effect.Effect<
 	{
 		readonly client: DaemonRpcClientApi
 		readonly discovery: GlobalDaemonDiscovery
@@ -228,7 +261,7 @@ export const bootstrapDaemonRpcClient = (params?: {
 				yield* sleep(delayMs)
 			}
 
-			const liveDiscovery = yield* readLiveGlobalDaemonDiscovery()
+			const liveDiscovery = yield* readLiveGlobalDaemonDiscovery(discoveryService)
 			if (Option.isSome(liveDiscovery)) {
 				yield* Effect.log(
 					`daemon_bootstrap: discovered live daemon socket=${liveDiscovery.value.socketPath} pid=${liveDiscovery.value.pid} attempt=${attempt}`,
@@ -240,7 +273,10 @@ export const bootstrapDaemonRpcClient = (params?: {
 					`daemon_bootstrap: no discovery found; spawning daemon (remainingTimeoutMs=${remainingTimeoutMs})`,
 				)
 				yield* spawnGlobalDaemonMain()
-				discovery = yield* waitForGlobalDaemonDiscovery({ timeoutMs: remainingTimeoutMs })
+				discovery = yield* waitForGlobalDaemonDiscovery({
+					timeoutMs: remainingTimeoutMs,
+					discoveryService,
+				})
 				startedDaemon = true
 				yield* Effect.log(
 					`daemon_bootstrap: spawned daemon discovered socket=${discovery.socketPath} pid=${discovery.pid}`,
@@ -338,3 +374,19 @@ export const bootstrapDaemonRpcClient = (params?: {
 			}),
 		)
 	})
+
+export class GlobalDaemonBootstrap extends Effect.Service<GlobalDaemonBootstrapApi>()(
+	"GlobalDaemonBootstrap",
+	{
+		effect: Effect.gen(function* () {
+			const discoveryService = yield* GlobalDaemonDiscoveryService
+			return {
+				bootstrapDaemonRpcClient: (params) => bootstrapDaemonRpcClient(discoveryService, params),
+				formatDaemonRpcClientFailure,
+				isRetryableRpcClientError,
+				buildGlobalDaemonSocketUrl,
+			} satisfies GlobalDaemonBootstrapApi
+		}),
+		dependencies: [GlobalDaemonDiscoveryService.Default],
+	},
+) {}

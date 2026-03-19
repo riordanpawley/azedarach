@@ -2,21 +2,21 @@ import { describe, expect, it } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Effect, Option } from "effect"
 import {
 	acquireGlobalDaemonLease,
 	GlobalDaemonAlreadyRunningError,
 	readGlobalDaemonDiscovery,
 	releaseGlobalDaemonLease,
-	resolveGlobalDaemonRegistryPaths,
-} from "./GlobalDaemonRegistry.js"
+	resolveGlobalDaemonDiscoveryPaths,
+} from "@azedarach/shared"
+import type { FileSystem, Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Option } from "effect"
 
 const runWithBunContext = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
 	Effect.runPromise(effect.pipe(Effect.provide(BunContext.layer)))
 
-describe("GlobalDaemonRegistry", () => {
+describe("GlobalDaemonDiscovery", () => {
 	it("acquires and releases a global daemon lease with discovery metadata", async () => {
 		const homeDirectory = mkdtempSync(join(tmpdir(), "az-global-daemon-home-"))
 
@@ -62,7 +62,7 @@ describe("GlobalDaemonRegistry", () => {
 		const homeDirectory = mkdtempSync(join(tmpdir(), "az-global-daemon-stale-"))
 		try {
 			const paths = await runWithBunContext(
-				resolveGlobalDaemonRegistryPaths({
+				resolveGlobalDaemonDiscoveryPaths({
 					homeDirectory,
 					pathOps: { join },
 				}),
@@ -97,7 +97,7 @@ describe("GlobalDaemonRegistry", () => {
 		const homeDirectory = mkdtempSync(join(tmpdir(), "az-global-daemon-missing-discovery-"))
 		try {
 			const paths = await runWithBunContext(
-				resolveGlobalDaemonRegistryPaths({
+				resolveGlobalDaemonDiscoveryPaths({
 					homeDirectory,
 					pathOps: { join },
 				}),

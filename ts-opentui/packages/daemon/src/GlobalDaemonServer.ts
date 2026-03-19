@@ -5,10 +5,10 @@ import { Data, Effect, Fiber, Layer, Ref } from "effect"
 import {
 	acquireGlobalDaemonLease,
 	type GlobalDaemonAlreadyRunningError,
+	type GlobalDaemonDiscoveryError,
 	type GlobalDaemonLease,
-	type GlobalDaemonRegistryError,
 	releaseGlobalDaemonLease,
-} from "./GlobalDaemonRegistry.js"
+} from "./GlobalDaemonDiscovery.js"
 
 export interface GlobalProjectRuntime {
 	readonly projectPath: string
@@ -310,7 +310,7 @@ export const startGlobalDaemonServer = (params?: {
 	readonly idleTimeoutMs?: number
 }): Effect.Effect<
 	GlobalDaemonServerHandle,
-	GlobalDaemonRegistryError | GlobalDaemonAlreadyRunningError | GlobalDaemonServerError,
+	GlobalDaemonDiscoveryError | GlobalDaemonAlreadyRunningError | GlobalDaemonServerError,
 	FileSystem.FileSystem | Path.Path
 > =>
 	Effect.gen(function* () {
@@ -352,7 +352,7 @@ export const startGlobalDaemonServer = (params?: {
 export const stopGlobalDaemonServer = (
 	handle: GlobalDaemonServerHandle,
 	reason: string,
-): Effect.Effect<void, GlobalDaemonRegistryError, FileSystem.FileSystem> =>
+): Effect.Effect<void, GlobalDaemonDiscoveryError, FileSystem.FileSystem> =>
 	Effect.gen(function* () {
 		yield* handle.runtime.requestShutdown(reason).pipe(Effect.ignore)
 		yield* Fiber.interrupt(handle.protocolFiber).pipe(Effect.ignore)
