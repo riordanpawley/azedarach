@@ -1,6 +1,4 @@
-import type { Issue as TrackedIssue } from "../../../src/core/IssueTrackerClient.js"
-import type { SpecRequirementRef } from "../../../src/core/specTypes.js"
-import type { TmuxStatus } from "../../../src/core/TmuxSessionMonitor.js"
+import type { SpecRequirementRef, TmuxStatus, TrackedIssue } from "./contracts.js"
 
 type DependencyCountLabel =
 	| "blocking"
@@ -406,6 +404,24 @@ ${questionFirstGuardrails === undefined ? "" : `${questionFirstGuardrails}\n`}
   - There is no top-level \`az dep\` command; use \`az issue dep ...\`.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
   - Use \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to remove dependency relationships.
+- Fan-out orchestration playbook (additive):
+  - Fan out when work can be split by independent ownership (files/modules/surfaces) with minimal overlap.
+  - Keep each wave to 2-4 child issues; avoid over-fragmentation.
+  - For each child, define: owned scope, acceptance criteria, anti-goals, validation commands.
+  - Prefer non-blocking parallel work; wait only on critical-path dependencies.
+  - Integrate child results in small batches; run one final full validation pass after merge.
+  - Recommended child title format: \`<parent-id>: [agent-<area>] <outcome>\`.
+- Child issue contract (additive):
+  - Each child must include explicit AC and anti-goals.
+  - Each child must append implementation notes (decisions, tradeoffs, blockers).
+  - Each child must report proof: changed files, tests updated/added, and validation results.
+  - Close when complete; otherwise set \`blocked\` with a concrete unblock condition.
+- AC quality gates (additive):
+  - Include anti-goals: what outcomes are explicitly disallowed.
+  - Include invariants: rules that must hold across all affected surfaces.
+  - Include cross-surface matrix: state -> expected token, actions, keybindings, fallback behavior.
+  - Include implementation constraints: required shared helpers/patterns, no duplicated gating logic.
+  - Include proof AC: failing-before/passing-after evidence.
 - Issue-context guardrails:
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
@@ -427,6 +443,12 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
   - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
   - \`az issue --help\`
 ${specGuardrails === undefined ? "" : `- Spec workflow:\n${specGuardrails}\n`}
+- Parent merge gate (additive):
+  - Do not close the parent until all children are closed or explicitly blocked with owner and unblock condition.
+  - Validate anti-goals/invariants against the integrated (post-merge) behavior, not only per-child behavior.
+  - Run and record final cross-surface validation after integration.
+  - Ensure spec links/fulfillment status are updated (or record \`Spec impact: none\` with rationale).
+  - Ensure local commit(s) include issue ID(s).
 - When work is complete:
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
   - Always include the issue ID in the commit message.

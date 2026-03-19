@@ -110,6 +110,14 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			"When fanning out to subagents, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent; reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.",
 		)
+		expect(output).toContain("Fan-out orchestration playbook (additive):")
+		expect(output).toContain("Keep each wave to 2-4 child issues; avoid over-fragmentation.")
+		expect(output).toContain("Child issue contract (additive):")
+		expect(output).toContain("Each child must include explicit AC and anti-goals.")
+		expect(output).toContain("AC quality gates (additive):")
+		expect(output).toContain(
+			"Include cross-surface matrix: state -> expected token, actions, keybindings, fallback behavior.",
+		)
 		expect(output).toContain(
 			'`az issue create "Title"` defaults to the active parent context (including `AZEDARACH_ISSUE_ID`) unless `--deferred` is set.',
 		)
@@ -140,6 +148,10 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("Avoid positional-first ordering like `az spec link add <issue-id>")
 		expect(output).toContain("az config set spec.enabled false")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
+		expect(output).toContain("Parent merge gate (additive):")
+		expect(output).toContain(
+			"Validate anti-goals/invariants against the integrated (post-merge) behavior, not only per-child behavior.",
+		)
 		expect(output).toContain(
 			"Review flow policy: reviews target closed tasks, not in-progress tasks.",
 		)
