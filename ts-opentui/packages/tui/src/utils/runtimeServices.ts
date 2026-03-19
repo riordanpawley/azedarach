@@ -13,9 +13,6 @@ export {
 	ProjectService,
 	ProjectStateService,
 	SessionService,
-	type SettingDefinition,
-	SettingsService,
-	type SettingValue,
 } from "../../../../src/runtime/appServicesFacade.js"
 export {
 	AttachmentService,
@@ -55,6 +52,11 @@ export { DiffService } from "../services/DiffService.js"
 export { EditorService } from "../services/EditorService.js"
 export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
+export {
+	type SettingDefinition,
+	SettingsService,
+	type SettingValue,
+} from "../services/SettingsService.js"
 export { ToastService } from "../services/ToastService.js"
 export { ViewService } from "../services/ViewService.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"

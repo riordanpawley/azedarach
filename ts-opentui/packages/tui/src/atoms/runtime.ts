@@ -23,6 +23,7 @@ import { DiffService } from "../services/DiffService.js"
 import { EditorService } from "../services/EditorService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
+import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
 import {
@@ -41,7 +42,6 @@ import {
 	PTYMonitor,
 	SessionManager,
 	SessionService,
-	SettingsService,
 	TemplateService,
 	TerminalService,
 	TmuxService,
@@ -110,6 +110,8 @@ const daemonRpcClientLayer = Layer.effect(
 	}),
 )
 
+const settingsLayer = SettingsService.Default.pipe(Layer.provide(appConfigProjectContextLayer))
+
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	SessionService.Default,
@@ -135,7 +137,7 @@ const coreServicesLayer = Layer.mergeAll(
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
 	ProjectStateService.Default,
-	SettingsService.Default,
+	settingsLayer,
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,
