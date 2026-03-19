@@ -134,7 +134,7 @@ const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"opencode",
 ])
 
-export type CliExecutionMode = "tui" | "command" | "dev-command"
+export type CliExecutionMode = "tui" | "command"
 
 export const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | null => {
 	for (let index = 2; index < argv.length; index++) {
@@ -335,9 +335,6 @@ export const resolveCliExecutionMode = (argv: ReadonlyArray<string>): CliExecuti
 	const subcommand = parseTopLevelSubcommand(normalizedArgv)
 	if (subcommand === null) {
 		return hasGlobalHelpOrVersionFlag(normalizedArgv) ? "command" : "tui"
-	}
-	if (subcommand === "dev") {
-		return "dev-command"
 	}
 	return "command"
 }

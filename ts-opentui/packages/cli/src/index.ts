@@ -20,6 +20,8 @@ import {
 	type AzedarachConfig,
 	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
+	getProjectStoragePaths,
+	resolveConfigBasePath,
 } from "@azedarach/config"
 import {
 	formatDaemonRpcClientFailure,
@@ -101,41 +103,11 @@ import {
 	parseIssueSessionName,
 } from "./runtime/paths.js"
 import {
-	AttachmentService,
-	BoardService,
-	ClockService,
-	CommandQueueService,
-	DevServerService,
-	DiagnosticsService,
-	DiffService,
-	EditorService,
-	getProjectStoragePaths,
-	ImageAttachmentService,
-	IssueEditorService,
 	IssueTrackerClient,
-	KeyboardService,
-	MutationQueue,
-	NavigationService,
-	NetworkService,
-	OfflineService,
-	OverlayService,
-	PlanningService,
-	PRWorkflow,
 	ProjectService,
-	ProjectStateService,
-	PTYMonitor,
-	resolveConfigBasePath,
 	SessionManager,
-	SessionService,
-	SettingsService,
 	SpecService,
-	TemplateService,
-	TerminalService,
-	TmuxService,
-	TmuxSessionMonitor,
 	ToastService,
-	VCService,
-	ViewService,
 } from "./runtimeServices.js"
 import {
 	applyNotifyStatusToTmux,
@@ -209,57 +181,9 @@ const buildAppConfigLayer = (configPath: string | null) => {
 }
 
 /**
- * Full CLI layer used for commands that still need the broader application
- * service graph (for now, `az dev`).
- */
-const createFullCliLayer = (configPath: string | null) =>
-	Layer.mergeAll(
-		MutationQueue.Default,
-		SessionService.Default,
-		AttachmentService.Default,
-		OverlayService.Default,
-		ImageAttachmentService.Default,
-		BoardService.Default,
-		ClockService.Default,
-		TmuxService.Default,
-		IssueEditorService.Default,
-		PRWorkflow.Default,
-		TerminalService.Default,
-		EditorService.Default,
-		KeyboardService.Default,
-		NavigationService.Default,
-		SessionManager.Default,
-		IssueTrackerClient.Default,
-		buildAppConfigLayer(configPath),
-		appConfigProjectContextLayer,
-		appConfigNotifierLayer,
-		VCService.Default,
-		ViewService.Default,
-		TmuxSessionMonitor.Default,
-		CommandQueueService.Default,
-		PTYMonitor.Default,
-		DiagnosticsService.Default,
-		ProjectStateService.Default,
-		SettingsService.Default,
-		TemplateService.Default,
-		NetworkService.Default,
-		OfflineService.Default,
-		DevServerService.Default,
-		DiffService.Default,
-		PlanningService.Default,
-		SpecService.Default,
-	).pipe(
-		Layer.provideMerge(ToastService.Default),
-		Layer.provideMerge(ProjectService.Default),
-		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-		Layer.provideMerge(telemetryLayer),
-		Layer.provideMerge(BunContext.layer),
-	)
-
-/**
  * Lean command layer for non-TUI CLI commands.
- * Intentionally excludes board/navigation/overlay/view services so command
- * invocations don't start board refresh polling or webhook listeners.
+ * `az dev` is daemon-RPC only, so command invocations no longer need a special
+ * broad runtime path here.
  */
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
@@ -276,8 +200,6 @@ const createCommandCliLayer = (configPath: string | null) =>
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
 	)
-
-const fullCliLayer = createFullCliLayer(null)
 const commandCliLayer = createCommandCliLayer(null)
 
 configureCliIssueIdResolutionContext({
@@ -7471,14 +7393,8 @@ const cli = az.pipe(
 	]),
 )
 
-const devCommandPlaceholder = Command.make("dev", {}, () =>
-	Console.error("Use `az dev --help` for dev server command usage."),
-).pipe(Command.withDescription("Manage dev servers for issues"))
-
 /**
  * Command-only CLI tree used for non-TUI subcommands.
- * Uses a lightweight `dev` placeholder because DevServerService is still coupled
- * to navigation/overlay services in the full runtime.
  */
 const commandCli = az.pipe(
 	Command.withSubcommands([
@@ -7497,7 +7413,7 @@ const commandCli = az.pipe(
 		implCommand,
 		specCommand,
 		gateCommand,
-		devCommandPlaceholder,
+		devCommand,
 		notifyCommand,
 		hooksCommand,
 		projectCommand,
@@ -7508,11 +7424,6 @@ const commandCli = az.pipe(
 // ============================================================================
 // CLI Runner
 // ============================================================================
-const buildFullCliLayerForArgv = (argv: ReadonlyArray<string>) => {
-	const configPath = parseConfigPathFromArgv(argv)
-	return createFullCliLayer(configPath)
-}
-
 const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
 	return createCommandCliLayer(configPath)
@@ -7527,11 +7438,6 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect = (() => {
 		switch (mode) {
-			case "dev-command":
-				return Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
-					name: "Azedarach",
-					version: CLI_VERSION,
-				})(normalizedArgv)
 			case "command":
 			case "tui":
 				return Command.run(
@@ -7555,7 +7461,7 @@ export { commandCli }
 /**
  * Export the layer for ManagedRuntime usage
  */
-const cliLayer = fullCliLayer
+const cliLayer = commandCliLayer
 export { cliLayer, commandCliLayer }
 
 /**
