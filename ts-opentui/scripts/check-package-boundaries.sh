@@ -132,11 +132,10 @@ check_legacy_service_imports() {
 			packages/tui/src packages/cli/src packages/daemon/src packages/shared/src || true
 	)
 
-	local allow_runtime_services='^packages/tui/src/utils/runtimeServices\.ts:[0-9]+:export \{ GitSyncService \} from "\.\./\.\./\.\./\.\./src/services/GitSyncService\.js"$'
 	local allow_shared_bridge='^packages/shared/src/services\.ts:[0-9]+:'
 	local violations=()
 	for hit in "${hits[@]}"; do
-		if [[ "$hit" =~ $allow_runtime_services ]] || [[ "$hit" =~ $allow_shared_bridge ]]; then
+		if [[ "$hit" =~ $allow_shared_bridge ]]; then
 			continue
 		fi
 		violations+=("$hit")
@@ -147,7 +146,6 @@ check_legacy_service_imports() {
 		printf '  The following imports are not allowed here:\n' >&2
 		printf '  - Import legacy src/services from packages/* is forbidden.\n' >&2
 		printf '    Allowed temporary exceptions:\n' >&2
-		printf '    - packages/tui/src/utils/runtimeServices.ts GitSyncService only (tracked by wv).\n' >&2
 		printf '    - packages/shared/src/services.ts bridge file only (tracked by wt).\n' >&2
 		printf '  %s\n' "${violations[@]}" >&2
 		fail=1
