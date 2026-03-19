@@ -28,6 +28,8 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
    - Do not create global Effect-returning helpers with service requirements.
    - Do not call `Effect.provide` / `Effect.provideService` inside service methods.
    - Acquire dependencies at layer construction, then use concrete service values directly.
+   - `bun run guard:effect-boundaries` must pass before closing work.
+   - If baseline updates are intentional, run `bun run guard:effect-boundaries:update` and record rationale in issue notes.
 3. **No `node:*` Imports**:
    - Use `@effect/platform` alternatives (`Path`, `Command`, etc.).
    - Use `crypto.randomUUID()` and `process.env.HOME` where applicable.
@@ -56,6 +58,7 @@ cd ts-opentui
 bun run dev
 bun run type-check
 bun run build
+bun run guard:effect-boundaries
 
 # focused search
 rg "pattern" --type ts src docs
