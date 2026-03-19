@@ -53,7 +53,7 @@ describe("formatLinearOperationError", () => {
 
 		expect(message).toContain("issues: Argument Validation Error")
 		expect(message).toContain("issues.team.or.0.id.eq -> isUuid: eq must be a UUID")
-		expect(message).toContain("value=\"AZE\"")
+		expect(message).toContain('value="AZE"')
 	})
 
 	it("falls back to base message when validation details are absent", () => {

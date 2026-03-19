@@ -37,7 +37,7 @@ const INIT_FAILED_OPTION = "@az_init_failed"
 const INIT_FAILED_COMMAND_OPTION = "@az_init_failed_command"
 const INIT_FAILED_STATUS_OPTION = "@az_status"
 
-const quoteForShellSingleString = (value: string): string => `'${value.replace(/'/g, `'\"'\"'`)}'`
+const quoteForShellSingleString = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`
 
 const sanitizeTmuxOptionValue = (value: string): string => value.replace(/\s+/g, " ").trim()
 
@@ -227,11 +227,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 				sessionName: string,
 				target: string,
 				command: string,
-			): Effect.Effect<
-				void,
-				SessionNotFoundError | TmuxError,
-				CommandExecutor.CommandExecutor
-			> =>
+			): Effect.Effect<void, SessionNotFoundError | TmuxError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const initFailed = yield* tmux.getUserOption(sessionName, INIT_FAILED_OPTION)
 					if (Option.isSome(initFailed) && initFailed.value === "1") {
@@ -332,7 +328,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 									if (initCommands && initCommands.length > 0) {
 										for (const cmd of initCommands) {
-											yield* tmux.sendLiteralCommand(sessionName, buildGuardedInitCommand(sessionName, cmd))
+											yield* tmux.sendLiteralCommand(
+												sessionName,
+												buildGuardedInitCommand(sessionName, cmd),
+											)
 										}
 									}
 
@@ -459,7 +458,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								if (options.initCommands && options.initCommands.length > 0) {
 									for (const cmd of options.initCommands) {
-										yield* tmux.sendLiteralCommand(sessionName, buildGuardedInitCommand(sessionName, cmd))
+										yield* tmux.sendLiteralCommand(
+											sessionName,
+											buildGuardedInitCommand(sessionName, cmd),
+										)
 									}
 								}
 
@@ -552,7 +554,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								if (options.initCommands && options.initCommands.length > 0) {
 									for (const cmd of options.initCommands) {
-										yield* tmux.sendLiteralCommand(target, buildGuardedInitCommand(sessionName, cmd))
+										yield* tmux.sendLiteralCommand(
+											target,
+											buildGuardedInitCommand(sessionName, cmd),
+										)
 									}
 								}
 

@@ -1,10 +1,10 @@
-import { BunContext } from "@effect/platform-bun"
 import { describe, expect, it } from "bun:test"
-import { Effect, Layer } from "effect"
-import type { CommandExecutor } from "@effect/platform"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { CommandExecutor } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Layer } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { IssueTrackerClient } from "./IssueTrackerClient.js"
 
