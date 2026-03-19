@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import type { ImplementationRegistry } from "../contracts.js"
-import { IssueTrackerClient } from "./runtimeServices.js"
+import { getImplementationRegistryFromDaemon } from "./daemonRpc.js"
 
 const normalizeImplementationName = (value: string): string => value.trim().toLowerCase()
 
@@ -69,8 +69,6 @@ export const getIssueCreateImplementations = (options?: {
 	readonly configuredDefaultImplementation?: string
 	readonly cwd?: string
 }) =>
-	Effect.gen(function* () {
-		const issueTrackerClient = yield* IssueTrackerClient
-		const registry = yield* issueTrackerClient.getImplementationRegistry(options?.cwd)
-		return resolveIssueCreateImplementations(registry, options)
-	})
+	getImplementationRegistryFromDaemon(options?.cwd).pipe(
+		Effect.map((registry) => resolveIssueCreateImplementations(registry, options)),
+	)
