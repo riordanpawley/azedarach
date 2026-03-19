@@ -69,6 +69,7 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 - 2026-03-19 `ye` landed daemon-local sync/board/session contracts in `packages/daemon` and deleted `packages/daemon/src/runtimeServices.ts`.
 - 2026-03-19 `yi` made `packages/cli/src/dev-server.ts` daemon-RPC only, removed the special `dev-command` execution mode, and narrowed `packages/cli/src/runtimeServices.ts` to the five services still used by `packages/cli/src/index.ts`.
 - 2026-03-19 `yl` moved TUI dev-server atoms to a package-local daemon-RPC state path, removed `DevServerService` from `packages/tui/src/atoms/runtime.ts`, and narrowed `packages/tui/src/utils/runtimeServices.ts` accordingly.
+- 2026-03-19 `yn` removed dead CLI `SessionManager` / `ToastService` dependencies; `packages/cli/src/runtimeServices.ts` is now down to `ProjectService`, `IssueTrackerClient`, and `SpecService`.
 - Remaining runtime-facade package edges are CLI/TUI only; `yf` is blocked pending either a narrow boundary exception or prior migration of the underlying `src/core`/`src/services` implementations.
 
 ## Classification Legend

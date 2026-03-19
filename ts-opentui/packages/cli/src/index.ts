@@ -102,13 +102,7 @@ import {
 	issueIdsEqualForLookup,
 	parseIssueSessionName,
 } from "./runtime/paths.js"
-import {
-	IssueTrackerClient,
-	ProjectService,
-	SessionManager,
-	SpecService,
-	ToastService,
-} from "./runtimeServices.js"
+import { IssueTrackerClient, ProjectService, SpecService } from "./runtimeServices.js"
 import {
 	applyNotifyStatusToTmux,
 	isValidHookEvent,
@@ -153,12 +147,9 @@ const appConfigProjectContextLayer = Layer.effect(
 
 const appConfigNotifierLayer = Layer.effect(
 	AppConfigNotifier,
-	Effect.gen(function* () {
-		const toastService = yield* ToastService
-		return {
-			showError: (message: string) => Effect.asVoid(toastService.show("error", message)),
-		} satisfies AppConfigNotifierApi
-	}),
+	Effect.succeed({
+		showError: (message: string) => Console.error(message),
+	} satisfies AppConfigNotifierApi),
 )
 
 const buildAppConfigLayer = (configPath: string | null) => {
@@ -191,10 +182,8 @@ const createCommandCliLayer = (configPath: string | null) =>
 		appConfigProjectContextLayer,
 		appConfigNotifierLayer,
 		IssueTrackerClient.Default,
-		SessionManager.Default,
 		SpecService.Default,
 	).pipe(
-		Layer.provideMerge(ToastService.Default),
 		Layer.provideMerge(ProjectService.Default),
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
