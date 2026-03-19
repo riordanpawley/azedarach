@@ -60,13 +60,11 @@ Risk controls:
 
 - current package->src import edges:
 ```
-ts-opentui/packages/cli/src/ui-launch.d.ts:1:declare module "../../../src/ui/launch.js" {
 ts-opentui/packages/cli/src/runtimeServices.ts:29:} from "../../../src/runtime/appServicesFacade.js"
-ts-opentui/packages/cli/src/runtimeServices.ts:61:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/daemon/src/BackendDaemonControlService.ts:3:import type { TaskWithSession } from "../../../src/ui/types.js"
+ts-opentui/packages/cli/src/runtimeServices.ts:55:} from "../../../src/runtime/coreServicesFacade.js"
 ts-opentui/packages/daemon/src/runtimeServices.ts:8:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/tui/src/utils/runtimeServices.ts:29:} from "../../../../src/runtime/appServicesFacade.js"
-ts-opentui/packages/tui/src/utils/runtimeServices.ts:59:} from "../../../../src/runtime/coreServicesFacade.js"
+ts-opentui/packages/tui/src/utils/runtimeServices.ts:30:} from "../../../../src/runtime/appServicesFacade.js"
+ts-opentui/packages/tui/src/utils/runtimeServices.ts:49:} from "../../../../src/runtime/coreServicesFacade.js"
 ```
 
 ## Classification Legend
@@ -301,7 +299,7 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:59:} from "../../../../src/
 - [ ] status=pending owner-child= path=src/ui/hooks/usePaste.ts
 - [ ] status=pending owner-child= path=src/ui/hooks/useToasts.ts
 - [ ] status=pending owner-child= path=src/ui/launch.test.ts
-- [ ] status=pending owner-child= path=src/ui/launch.tsx
+- [x] status=approved-residual owner-child=xl path=src/ui/launch.tsx
 - [ ] status=pending owner-child= path=src/ui/logMaintenance.test.ts
 - [ ] status=pending owner-child= path=src/ui/logMaintenance.ts
 - [ ] status=pending owner-child= path=src/ui/quitFallbackPolicy.test.ts
@@ -315,4 +313,4 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:59:} from "../../../../src/
 - [ ] status=pending owner-child= path=src/ui/statusTokens.ts
 - [ ] status=pending owner-child= path=src/ui/theme.ts
 - [ ] status=pending owner-child= path=src/ui/types.sessionPresence.test.ts
-- [ ] status=pending owner-child= path=src/ui/types.ts
+- [x] status=approved-residual owner-child=xl path=src/ui/types.ts

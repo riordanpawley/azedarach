@@ -92,6 +92,14 @@ import {
 	type PrimeMode,
 } from "./output-formatting.js"
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
+import { resolveDaemonIntervalMsFromEnv } from "./runtime/daemonOperationsPolicy.js"
+import { deepMerge, generateHookConfig } from "./runtime/hooks.js"
+import { resolveConfiguredIssueBackend } from "./runtime/issueBackend.js"
+import {
+	getIssueSessionName,
+	issueIdsEqualForLookup,
+	parseIssueSessionName,
+} from "./runtime/paths.js"
 import {
 	AttachmentService,
 	BoardService,
@@ -100,15 +108,11 @@ import {
 	DevServerService,
 	DiagnosticsService,
 	DiffService,
-	deepMerge,
 	EditorService,
-	generateHookConfig,
-	getIssueSessionName,
 	getProjectStoragePaths,
 	ImageAttachmentService,
 	IssueEditorService,
 	IssueTrackerClient,
-	issueIdsEqualForLookup,
 	KeyboardService,
 	MutationQueue,
 	NavigationService,
@@ -120,10 +124,7 @@ import {
 	ProjectService,
 	ProjectStateService,
 	PTYMonitor,
-	parseIssueSessionName,
 	resolveConfigBasePath,
-	resolveConfiguredIssueBackend,
-	resolveDaemonIntervalMsFromEnv,
 	SessionManager,
 	SessionService,
 	SettingsService,
