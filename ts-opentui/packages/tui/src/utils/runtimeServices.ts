@@ -33,7 +33,6 @@ export {
 	type ImplementationRegistry,
 	type Issue,
 	IssueEditorService,
-	IssueTrackerClient,
 	PlanningService,
 	PRWorkflow,
 	PTYMonitor,

@@ -86,7 +86,7 @@ export const boardIsLoadingAtom = appRuntime.subscribable(
 )
 
 /**
- * Refresh board data from IssueTrackerClient
+ * Refresh board data from the board service snapshot
  *
  * Must be called before navigation can work.
  *
