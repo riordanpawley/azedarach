@@ -17,22 +17,22 @@ import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
 import { Data, Effect, Layer, Logger, Stream } from "effect"
 import { ClockService } from "../services/ClockService.js"
+import { CommandQueueService } from "../services/CommandQueueService.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import { DiffService } from "../services/DiffService.js"
 import { EditorService } from "../services/EditorService.js"
+import { NetworkService } from "../services/NetworkService.js"
+import { OfflineService } from "../services/OfflineService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
 import {
 	AttachmentService,
 	BoardService,
-	CommandQueueService,
-	DiagnosticsService,
-	DiffService,
 	ImageAttachmentService,
 	IssueEditorService,
 	KeyboardService,
 	MutationQueue,
 	NavigationService,
-	NetworkService,
-	OfflineService,
 	OverlayService,
 	PlanningService,
 	PRWorkflow,

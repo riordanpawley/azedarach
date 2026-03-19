@@ -5,14 +5,9 @@ export {
 } from "@azedarach/config"
 export {
 	BoardService,
-	CommandQueueService,
-	DiagnosticsService,
-	DiffService,
 	KeyboardService,
 	MutationQueue,
 	NavigationService,
-	NetworkService,
-	OfflineService,
 	OverlayService,
 	type Project,
 	ProjectService,
@@ -54,7 +49,12 @@ export {
 	deriveWaitingSessionOptions,
 	type WaitingSessionOption,
 } from "../lib/waitingSessions.js"
+export { CommandQueueService } from "../services/CommandQueueService.js"
+export { DiagnosticsService } from "../services/DiagnosticsService.js"
+export { DiffService } from "../services/DiffService.js"
 export { EditorService } from "../services/EditorService.js"
+export { NetworkService } from "../services/NetworkService.js"
+export { OfflineService } from "../services/OfflineService.js"
 export { ToastService } from "../services/ToastService.js"
 export { ViewService } from "../services/ViewService.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"
