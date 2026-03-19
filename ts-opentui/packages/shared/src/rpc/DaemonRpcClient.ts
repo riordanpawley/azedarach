@@ -201,19 +201,19 @@ export interface DaemonRpcClientApi {
 	readonly issueSync: (
 		request?: Omit<DaemonIssueSyncRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonIssueSyncResultEnvelope, DaemonRpcClientError>
-	readonly implementationGetRegistry?: (
+	readonly implementationGetRegistry: (
 		request?: Omit<DaemonImplementationGetRegistryRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationGetRegistryResult, DaemonRpcClientError>
-	readonly implementationCreate?: (
+	readonly implementationCreate: (
 		request: Omit<DaemonImplementationCreateRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationCreateResult, DaemonRpcClientError>
-	readonly implementationUpdate?: (
+	readonly implementationUpdate: (
 		request: Omit<DaemonImplementationUpdateRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationUpdateResult, DaemonRpcClientError>
-	readonly implementationDelete?: (
+	readonly implementationDelete: (
 		request: Omit<DaemonImplementationDeleteRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationDeleteResult, DaemonRpcClientError>
-	readonly implementationSetDefault?: (
+	readonly implementationSetDefault: (
 		request: Omit<DaemonImplementationSetDefaultRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationSetDefaultResult, DaemonRpcClientError>
 }

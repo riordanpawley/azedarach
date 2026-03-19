@@ -249,6 +249,30 @@ const makeDaemonRpcClientStub = (params: {
 				}),
 			),
 		),
+	issueGet: () => Effect.dieMessage("Unexpected issueGet RPC in BoardService daemon IPC test"),
+	issueList: () => Effect.dieMessage("Unexpected issueList RPC in BoardService daemon IPC test"),
+	issueCreate: () =>
+		Effect.dieMessage("Unexpected issueCreate RPC in BoardService daemon IPC test"),
+	issueUpdate: () =>
+		Effect.dieMessage("Unexpected issueUpdate RPC in BoardService daemon IPC test"),
+	implementationGetRegistry: () =>
+		Effect.dieMessage("Unexpected implementationGetRegistry RPC in BoardService daemon IPC test"),
+	implementationCreate: () =>
+		Effect.dieMessage("Unexpected implementationCreate RPC in BoardService daemon IPC test"),
+	implementationUpdate: () =>
+		Effect.dieMessage("Unexpected implementationUpdate RPC in BoardService daemon IPC test"),
+	implementationDelete: () =>
+		Effect.dieMessage("Unexpected implementationDelete RPC in BoardService daemon IPC test"),
+	implementationSetDefault: () =>
+		Effect.dieMessage("Unexpected implementationSetDefault RPC in BoardService daemon IPC test"),
+	issueAddDependency: () =>
+		Effect.dieMessage("Unexpected issueAddDependency RPC in BoardService daemon IPC test"),
+	issueRemoveDependency: () =>
+		Effect.dieMessage("Unexpected issueRemoveDependency RPC in BoardService daemon IPC test"),
+	issueClose: () => Effect.dieMessage("Unexpected issueClose RPC in BoardService daemon IPC test"),
+	issueDelete: () =>
+		Effect.dieMessage("Unexpected issueDelete RPC in BoardService daemon IPC test"),
+	issueSync: () => Effect.dieMessage("Unexpected issueSync RPC in BoardService daemon IPC test"),
 	eventStream: () =>
 		(params.onEventStream ?? (() => Effect.void))().pipe(
 			Effect.zipRight(

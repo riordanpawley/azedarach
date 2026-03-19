@@ -31,6 +31,7 @@ import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
 	DaemonRpcClientApi,
+	DaemonRpcClientError,
 	DaemonSessionMutationResult,
 	DaemonSessionSnapshotResult,
 } from "@azedarach/shared/rpc"
@@ -99,7 +100,7 @@ import {
 	issueIdsEqualForLookup,
 	parseIssueSessionName,
 } from "./runtime/paths.js"
-import { IssueTrackerClient, SpecService } from "./runtimeServices.js"
+import { SpecService } from "./runtimeServices.js"
 import {
 	applyNotifyStatusToTmux,
 	isValidHookEvent,
@@ -161,12 +162,7 @@ const buildAppConfigLayer = (configPath: string | null) => {
  * broad runtime path here.
  */
 const createCommandCliLayer = (configPath: string | null) =>
-	Layer.mergeAll(
-		buildAppConfigLayer(configPath),
-		appConfigNotifierLayer,
-		IssueTrackerClient.Default,
-		SpecService.Default,
-	).pipe(
+	Layer.mergeAll(buildAppConfigLayer(configPath), appConfigNotifierLayer, SpecService.Default).pipe(
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
@@ -200,14 +196,23 @@ configureCliIssueIdResolutionContext({
 	}).pipe(Effect.provide(createCommandCliLayer(null))),
 	listIssueIds: (projectPath: string) =>
 		Effect.gen(function* () {
-			const issueTrackerClient = yield* IssueTrackerClient
-			return yield* issueTrackerClient
-				.list(undefined, projectPath, {
-					includeClosed: true,
-					limit: INFER_PREFIX_SAMPLE_LIMIT,
+			const bootstrap = yield* bootstrapDaemonRpcClient({
+				autoStart: true,
+			})
+			return yield* bootstrap.client
+				.issueList({
+					projectPath,
+					filters: undefined,
+					options: {
+						includeClosed: true,
+						limit: INFER_PREFIX_SAMPLE_LIMIT,
+					},
 				})
 				.pipe(
-					Effect.map((issues) => issues.map((issue) => issue.id)),
+					Effect.map((response) => response.issues.map((issue) => issue.id)),
+					Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
+				)
+				.pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 							Effect.zipRight(Effect.succeed([])),
@@ -511,6 +516,47 @@ const bootstrapDaemonRpcClient = (
 		return yield* daemonBootstrap.bootstrapDaemonRpcClient(params)
 	})
 
+const mapBootstrappedDaemonRpcFailure =
+	(
+		bootstrap: {
+			readonly socketUrl: string
+		},
+		operation: string,
+	) =>
+	(error: DaemonRpcClientError) =>
+		formatDaemonRpcClientFailure({
+			operation,
+			socketUrl: bootstrap.socketUrl,
+			error,
+		})
+
+const shouldShowIssueImplementations = (
+	issues: ReadonlyArray<{
+		readonly implementations: ReadonlyArray<string>
+	}>,
+): boolean =>
+	issues.some(
+		(issue) =>
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default"),
+	)
+
+const loadImplementationRegistryViaDaemon = (projectPath: string) =>
+	Effect.gen(function* () {
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const registry = yield* bootstrap.client
+			.implementationGetRegistry({
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.registry),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "implementationGetRegistry")),
+			)
+		return registry
+	})
+
 export const resolveStartSessionRuntimeMode = (): {
 	readonly mode: StartSessionRuntimeMode
 	readonly decision: StartSessionRuntimeDecision
@@ -578,18 +624,21 @@ const startHandler = (args: {
 			return mapDaemonSessionMutationToCliSession(mutation)
 		})
 
-		// Claim the issue with session assignee
-		const issueTrackerClient = yield* IssueTrackerClient
-		yield* issueTrackerClient
-			.update(
+		// Claim the issue with session assignee.
+		const claimBootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		yield* claimBootstrap.client
+			.issueUpdate({
 				issueId,
-				{
+				projectPath: cwd,
+				patch: {
 					status: "in_progress",
 					assignee: session.tmuxSessionName,
 				},
-				cwd,
-			)
+			})
 			.pipe(
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(claimBootstrap, "issueUpdate")),
 				Effect.tap(() => {
 					if (args.verbose) {
 						return Console.log(`Claimed issue ${issueId} with assignee ${session.tmuxSessionName}`)
@@ -816,22 +865,6 @@ const listSyncTargetPaths = (cwd: string, includeAllWorktrees: boolean) =>
 		return parsedPaths.length > 0 ? parsedPaths : [cwd]
 	})
 
-const hasStringMessage = (value: unknown): value is { readonly message: string } =>
-	typeof value === "object" &&
-	value !== null &&
-	"message" in value &&
-	typeof value.message === "string"
-
-const getSyncFailureMessage = (error: unknown): string => {
-	if (error instanceof Error) {
-		return error.message
-	}
-	if (hasStringMessage(error)) {
-		return error.message
-	}
-	return String(error)
-}
-
 const ensureDaemonAutoStartForCliCommand = (params: {
 	readonly command: "tui-default" | "sync"
 	readonly projectPath: string
@@ -899,50 +932,6 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 		}
 	})
 
-const syncLinearAfterIssueMutation = (params: {
-	readonly issueTrackerClient: IssueTrackerClient
-	readonly explicitProjectDir: string | undefined
-	readonly resolverCwd: string
-	readonly commandLabel: string
-	readonly verbose: boolean
-}) =>
-	Effect.gen(function* () {
-		const appConfig = yield* AppConfig
-		const projectPath = params.explicitProjectDir ?? params.resolverCwd
-		const syncConfig = yield* appConfig
-			.getIssueTrackerSyncConfigForProjectPath(projectPath)
-			.pipe(
-				Effect.mapError(
-					(error) =>
-						new Error(
-							`Failed to load issue tracker sync config for post-mutation sync (${projectPath}): ${error.message}`,
-						),
-				),
-			)
-
-		const backend = resolveConfiguredIssueBackend(syncConfig.issueTracker)
-		if (backend !== "linear" || !syncConfig.syncEnabled) {
-			return
-		}
-
-		const syncResult = yield* params.issueTrackerClient
-			.sync(params.explicitProjectDir, { hydrateRemote: false })
-			.pipe(
-				Effect.mapError(
-					(error) =>
-						new Error(
-							`Post-mutation linear sync failed after ${params.commandLabel}: ${getSyncFailureMessage(error)}`,
-						),
-				),
-			)
-
-		if (params.verbose) {
-			yield* Console.error(
-				`post_sync pushed=${syncResult.pushed} pulled=${syncResult.pulled} backend=${backend}`,
-			)
-		}
-	})
-
 /**
  * Sync issue tracker state in current or all worktrees
  */
@@ -953,7 +942,6 @@ const syncHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueTrackerClient = yield* IssueTrackerClient
 		yield* ensureDaemonAutoStartForCliCommand({
 			command: "sync",
 			projectPath: cwd,
@@ -971,6 +959,9 @@ const syncHandler = (args: {
 		if (args.all) {
 			yield* Console.log(`Targets: ${targetPaths.length} worktree(s)`)
 		}
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
 
 		let totalPushed = 0
 		let totalPulled = 0
@@ -983,11 +974,21 @@ const syncHandler = (args: {
 			}
 
 			const result = yield* validateIssueTrackerStore(targetPath).pipe(
-				Effect.zipRight(issueTrackerClient.sync(targetPath)),
+				Effect.zipRight(
+					bootstrap.client
+						.issueSync({
+							projectPath: targetPath,
+							hydrateRemote: false,
+						})
+						.pipe(
+							Effect.map((response) => response.sync),
+							Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueSync")),
+						),
+				),
 				Effect.either,
 			)
 			if (result._tag === "Left") {
-				const message = getSyncFailureMessage(result.left)
+				const message = result.left.message
 				failures.push({ path: targetPath, message })
 				yield* Console.error(`  Failed: ${message}`)
 				continue
@@ -1825,6 +1826,7 @@ const issueGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 
 		if (args.verbose) {
@@ -1833,18 +1835,22 @@ const issueGetHandler = (args: {
 		}
 
 		yield* validateIssueTrackerStore(resolverCwd)
-
-		const issueTrackerClient = yield* IssueTrackerClient
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
 		const maxSyncWaitMs = resolveIssueGetSyncWaitMs({
 			wait: args.wait,
 			maxWaitMs: args.maxWaitMs,
 		})
-		const issue = yield* issueTrackerClient
-			.show(issueId, explicitProjectDir, { maxSyncWaitMs })
+		const issue = yield* bootstrap.client
+			.issueGet({
+				issueId,
+				projectPath,
+				maxSyncWaitMs,
+			})
 			.pipe(
-				Effect.catchTag("NotFoundError", () =>
-					Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
-				),
+				Effect.map((response) => response.issue),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueGet")),
 			)
 		const specService = yield* SpecService
 		const linkedSpecRequirements = yield* specService
@@ -1856,8 +1862,7 @@ const issueGetHandler = (args: {
 					).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
 				),
 			)
-		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
-		const showImplementations = registry.implementations.length > 1
+		const showImplementations = shouldShowIssueImplementations([issue])
 
 		if (args.json) {
 			yield* Console.log(
@@ -1910,6 +1915,7 @@ const issueListHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const requestedLimit = Option.getOrUndefined(args.limit)
@@ -1918,31 +1924,37 @@ const issueListHandler = (args: {
 		}
 
 		const filters = {
-			status: Option.getOrUndefined(args.status),
+			status: yield* parseIssueFilterStatus(Option.getOrUndefined(args.status), "--status"),
 			priority: Option.getOrUndefined(args.priority),
-			type: Option.getOrUndefined(args.issueType),
+			type: yield* parseIssueType(Option.getOrUndefined(args.issueType), "--type"),
 			parent: Option.getOrUndefined(args.parent),
 			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 		}
 		const hasFilters = Object.values(filters).some((value) => value !== undefined)
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		const issues = yield* issueTrackerClient.list(
-			hasFilters ? filters : undefined,
-			explicitProjectDir,
-			{
-				limit: requestedLimit === undefined ? undefined : Math.floor(requestedLimit),
-				sortBy: "updated_at",
-				sortDirection: "desc",
-			},
-		)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const issues = yield* bootstrap.client
+			.issueList({
+				projectPath,
+				filters: hasFilters ? filters : undefined,
+				options: {
+					limit: requestedLimit === undefined ? undefined : Math.floor(requestedLimit),
+					sortBy: "updated_at",
+					sortDirection: "desc",
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.issues),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issues, null, 2))
 			return
 		}
-		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
-		const showImplementations = registry.implementations.length > 1
+		const showImplementations = shouldShowIssueImplementations(issues)
 
 		if (issues.length === 0) {
 			yield* Console.log("No issues found.")
@@ -1983,6 +1995,7 @@ const issueCreateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 		const parentContext = yield* Option.match(args.parent, {
 			onSome: (parentIssueId) =>
@@ -2004,30 +2017,33 @@ const issueCreateHandler = (args: {
 			onSome: (value) => value.issueId,
 		})
 		const status = yield* parseIssueCreateStatusOption(args.status)
-
-		const issueTrackerClient = yield* IssueTrackerClient
-		const issue = yield* issueTrackerClient.create({
-			title: args.title,
-			type: Option.getOrUndefined(args.issueType),
-			status,
-			priority: Option.getOrUndefined(args.priority),
-			description: Option.getOrUndefined(args.description),
-			design: Option.getOrUndefined(args.design),
-			acceptance: Option.getOrUndefined(args.acceptance),
-			assignee: Option.getOrUndefined(args.assignee),
-			estimate: Option.getOrUndefined(args.estimate),
-			labels: parseLabelsOption(args.labels),
-			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
-			parent: resolvedParent,
-			cwd: explicitProjectDir,
+		const issueType = yield* parseIssueType(Option.getOrUndefined(args.issueType), "--type")
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue create",
-			verbose: args.verbose,
-		})
+		const issue = yield* bootstrap.client
+			.issueCreate({
+				projectPath,
+				input: {
+					title: args.title,
+					type: issueType,
+					status,
+					priority: Option.getOrUndefined(args.priority),
+					description: Option.getOrUndefined(args.description),
+					design: Option.getOrUndefined(args.design),
+					acceptance: Option.getOrUndefined(args.acceptance),
+					assignee: Option.getOrUndefined(args.assignee),
+					estimate: Option.getOrUndefined(args.estimate),
+					labels: parseLabelsOption(args.labels),
+					implementations,
+					parent: resolvedParent,
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.issue),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueCreate")),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
@@ -2076,6 +2092,7 @@ const issueChildHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const parentContext = yield* Option.match(args.parent, {
@@ -2099,30 +2116,33 @@ const issueChildHandler = (args: {
 		}
 		const resolvedParent = parentContext.value.issueId
 		const status = yield* parseIssueCreateStatusOption(args.status)
-
-		const issueTrackerClient = yield* IssueTrackerClient
-		const issue = yield* issueTrackerClient.create({
-			title: args.title,
-			type: Option.getOrUndefined(args.issueType),
-			status,
-			priority: Option.getOrUndefined(args.priority),
-			description: Option.getOrUndefined(args.description),
-			design: Option.getOrUndefined(args.design),
-			acceptance: Option.getOrUndefined(args.acceptance),
-			assignee: Option.getOrUndefined(args.assignee),
-			estimate: Option.getOrUndefined(args.estimate),
-			labels: parseLabelsOption(args.labels),
-			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
-			parent: resolvedParent,
-			cwd: explicitProjectDir,
+		const issueType = yield* parseIssueType(Option.getOrUndefined(args.issueType), "--type")
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue child",
-			verbose: args.verbose,
-		})
+		const issue = yield* bootstrap.client
+			.issueCreate({
+				projectPath,
+				input: {
+					title: args.title,
+					type: issueType,
+					status,
+					priority: Option.getOrUndefined(args.priority),
+					description: Option.getOrUndefined(args.description),
+					design: Option.getOrUndefined(args.design),
+					acceptance: Option.getOrUndefined(args.acceptance),
+					assignee: Option.getOrUndefined(args.assignee),
+					estimate: Option.getOrUndefined(args.estimate),
+					labels: parseLabelsOption(args.labels),
+					implementations,
+					parent: resolvedParent,
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.issue),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueCreate")),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
@@ -2154,6 +2174,7 @@ const issueBulkCreateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const defaultParentContext =
@@ -2175,7 +2196,9 @@ const issueBulkCreateHandler = (args: {
 			),
 		)
 
-		const issueTrackerClient = yield* IssueTrackerClient
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
 		const results = yield* Effect.forEach(entries, (entry, index) =>
 			Effect.gen(function* () {
 				const requestedTitle = getIssueBulkCreateRequestedTitle(entry)
@@ -2186,22 +2209,34 @@ const issueBulkCreateHandler = (args: {
 								decodedEntry.parent === undefined
 									? defaultParent
 									: yield* resolveCliIssueId(decodedEntry.parent, resolverCwd)
-							const issue = yield* issueTrackerClient.create({
-								title: decodedEntry.title,
-								type: decodedEntry.type,
-								priority: decodedEntry.priority,
-								description: decodedEntry.description,
-								design: decodedEntry.design,
-								acceptance: decodedEntry.acceptance,
-								assignee: decodedEntry.assignee,
-								estimate: decodedEntry.estimate,
-								labels: decodedEntry.labels === undefined ? undefined : [...decodedEntry.labels],
-								implementations: yield* parseOptionalImplementationListForCli(
-									decodedEntry.implementations ?? [],
-								),
-								parent: resolvedParent,
-								cwd: explicitProjectDir,
-							})
+							const issueType = yield* parseIssueType(
+								decodedEntry.type,
+								`bulk create type for "${decodedEntry.title}"`,
+							)
+							const issue = yield* bootstrap.client
+								.issueCreate({
+									projectPath,
+									input: {
+										title: decodedEntry.title,
+										type: issueType,
+										priority: decodedEntry.priority,
+										description: decodedEntry.description,
+										design: decodedEntry.design,
+										acceptance: decodedEntry.acceptance,
+										assignee: decodedEntry.assignee,
+										estimate: decodedEntry.estimate,
+										labels:
+											decodedEntry.labels === undefined ? undefined : [...decodedEntry.labels],
+										implementations: yield* parseOptionalImplementationListForCli(
+											decodedEntry.implementations ?? [],
+										),
+										parent: resolvedParent,
+									},
+								})
+								.pipe(
+									Effect.map((response) => response.issue),
+									Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueCreate")),
+								)
 
 							return {
 								index,
@@ -2224,15 +2259,6 @@ const issueBulkCreateHandler = (args: {
 		)
 
 		const summary = summarizeIssueBulkCreateResults(results)
-		if (summary.createdCount > 0) {
-			yield* syncLinearAfterIssueMutation({
-				issueTrackerClient,
-				explicitProjectDir,
-				resolverCwd,
-				commandLabel: "issue bulk-create",
-				verbose: args.verbose,
-			})
-		}
 		if (args.json) {
 			yield* Console.log(JSON.stringify(summary, null, 2))
 			return
@@ -2297,6 +2323,7 @@ const issueUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
@@ -2322,21 +2349,31 @@ const issueUpdateHandler = (args: {
 			)
 		}
 
-		const issueTrackerClient = yield* IssueTrackerClient
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
 		const resolvedNotes = yield* Option.match(args.appendNotes, {
 			onNone: () => Effect.succeed(notes),
 			onSome: (valueToAppend) =>
-				issueTrackerClient
-					.show(issueId, explicitProjectDir)
-					.pipe(Effect.map((issue) => appendIssueNotes(issue.notes, valueToAppend))),
+				bootstrap.client
+					.issueGet({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((response) => appendIssueNotes(response.issue.notes, valueToAppend)),
+						Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueGet")),
+					),
 		})
+		const status = yield* parseIssueMutationStatus(Option.getOrUndefined(args.status), "--status")
+		const issueType = yield* parseIssueType(Option.getOrUndefined(args.issueType), "--type")
 
 		const fields = {
-			status: Option.getOrUndefined(args.status),
+			status,
 			notes: resolvedNotes,
 			priority: Option.getOrUndefined(args.priority),
 			title: Option.getOrUndefined(args.title),
-			type: Option.getOrUndefined(args.issueType),
+			type: issueType,
 			description: Option.getOrUndefined(args.description),
 			design: Option.getOrUndefined(args.design),
 			acceptance: Option.getOrUndefined(args.acceptance),
@@ -2356,14 +2393,13 @@ const issueUpdateHandler = (args: {
 			)
 		}
 
-		yield* issueTrackerClient.update(issueId, fields, explicitProjectDir)
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue update",
-			verbose: args.verbose,
-		})
+		yield* bootstrap.client
+			.issueUpdate({
+				issueId,
+				projectPath,
+				patch: fields,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueUpdate")))
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, updated: true }, null, 2))
 			return
@@ -2383,6 +2419,7 @@ const issueBulkUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const inputContent = yield* readIssueBulkUpdateInput(args.input)
@@ -2395,10 +2432,12 @@ const issueBulkUpdateHandler = (args: {
 			),
 		)
 
-		const issueTrackerClient = yield* IssueTrackerClient
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
 		const results = yield* Effect.forEach(updates, (entry, index) =>
 			Effect.gen(function* () {
-				const fields = mapIssueBulkUpdateFields(entry)
+				const fields = yield* mapIssueBulkUpdateFields(entry)
 				if (!hasIssueBulkUpdateChanges(fields)) {
 					return {
 						index,
@@ -2411,14 +2450,21 @@ const issueBulkUpdateHandler = (args: {
 
 				return yield* resolveCliIssueId(entry.id, resolverCwd).pipe(
 					Effect.flatMap((issueId) =>
-						issueTrackerClient.update(issueId, fields, explicitProjectDir).pipe(
-							Effect.as<IssueBulkUpdateResult>({
-								index,
-								requestedId: entry.id,
+						bootstrap.client
+							.issueUpdate({
 								issueId,
-								updated: true,
-							}),
-						),
+								projectPath,
+								patch: fields,
+							})
+							.pipe(
+								Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueUpdate")),
+								Effect.as<IssueBulkUpdateResult>({
+									index,
+									requestedId: entry.id,
+									issueId,
+									updated: true,
+								}),
+							),
 					),
 					Effect.catchAll((error) =>
 						Effect.succeed<IssueBulkUpdateResult>({
@@ -2434,15 +2480,6 @@ const issueBulkUpdateHandler = (args: {
 		)
 
 		const summary = summarizeIssueBulkUpdateResults(results)
-		if (summary.updatedCount > 0) {
-			yield* syncLinearAfterIssueMutation({
-				issueTrackerClient,
-				explicitProjectDir,
-				resolverCwd,
-				commandLabel: "issue bulk-update",
-				verbose: args.verbose,
-			})
-		}
 		if (args.json) {
 			yield* Console.log(JSON.stringify(summary, null, 2))
 			return
@@ -2474,11 +2511,11 @@ const implListHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const appConfig = yield* AppConfig
-		const issueTrackerClient = yield* IssueTrackerClient
-		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
 		const issueEditorConfig = yield* appConfig.getIssueEditorConfig()
 
 		if (args.json) {
@@ -2516,11 +2553,11 @@ const implGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
-		const issueTrackerClient = yield* IssueTrackerClient
-		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
 		const implementation = registry.implementations.find(
 			(entry) => entry.name === implementationName,
 		)
@@ -2547,17 +2584,27 @@ const implAddHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
-		const issueTrackerClient = yield* IssueTrackerClient
-		const implementation = yield* issueTrackerClient.createImplementation({
-			name: implementationName,
-			description: Option.getOrUndefined(args.description),
-			directory: Option.getOrUndefined(args.directory),
-			setDefault: args.setDefault,
-			cwd: explicitProjectDir,
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
+		const implementation = yield* bootstrap.client
+			.implementationCreate({
+				projectPath,
+				input: {
+					name: implementationName,
+					description: Option.getOrUndefined(args.description),
+					directory: Option.getOrUndefined(args.directory),
+					setDefault: args.setDefault ? true : undefined,
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.implementation),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "implementationCreate")),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(implementation, null, 2))
@@ -2582,6 +2629,7 @@ const implUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
@@ -2608,17 +2656,24 @@ const implUpdateHandler = (args: {
 			)
 		}
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		const implementation = yield* issueTrackerClient.updateImplementation(
-			implementationName,
-			{
-				name: nextName,
-				description,
-				directory,
-				setDefault: args.setDefault ? true : undefined,
-			},
-			explicitProjectDir,
-		)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const implementation = yield* bootstrap.client
+			.implementationUpdate({
+				projectPath,
+				currentName: implementationName,
+				fields: {
+					name: nextName,
+					description,
+					directory,
+					setDefault: args.setDefault ? true : undefined,
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.implementation),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "implementationUpdate")),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(implementation, null, 2))
@@ -2639,17 +2694,19 @@ const implDeleteHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
-		const issueTrackerClient = yield* IssueTrackerClient
-		const deleted = yield* issueTrackerClient.deleteImplementation(
-			implementationName,
-			explicitProjectDir,
-		)
-		if (!deleted) {
-			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
-		}
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		yield* bootstrap.client
+			.implementationDelete({
+				projectPath,
+				name: implementationName,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "implementationDelete")))
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ name: implementationName, deleted: true }, null, 2))
@@ -2667,14 +2724,22 @@ const implSetDefaultHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
-		const issueTrackerClient = yield* IssueTrackerClient
-		const registry = yield* issueTrackerClient.setDefaultImplementation(
-			implementationName,
-			explicitProjectDir,
-		)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const registry = yield* bootstrap.client
+			.implementationSetDefault({
+				projectPath,
+				name: implementationName,
+			})
+			.pipe(
+				Effect.map((response) => response.registry),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "implementationSetDefault")),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(registry, null, 2))
@@ -2692,11 +2757,11 @@ const implSetEditorDefaultHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
-		const issueTrackerClient = yield* IssueTrackerClient
-		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
 		const implementationExists = registry.implementations.some(
 			(entry) => entry.name === implementationName,
 		)
@@ -2773,6 +2838,7 @@ const issueDepAddHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
@@ -2792,20 +2858,17 @@ const issueDepAddHandler = (args: {
 			},
 		})
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		yield* issueTrackerClient.addDependency(
-			issueId,
-			dependsOnId,
-			dependencyType,
-			explicitProjectDir,
-		)
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue dep add",
-			verbose: args.verbose,
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
+		yield* bootstrap.client
+			.issueAddDependency({
+				issueId,
+				dependsOnId,
+				dependencyType,
+				projectPath,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueAddDependency")))
 
 		if (args.json) {
 			yield* Console.log(
@@ -2843,6 +2906,7 @@ const issueDepRemoveHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
@@ -2862,20 +2926,17 @@ const issueDepRemoveHandler = (args: {
 			},
 		})
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		yield* issueTrackerClient.removeDependency(
-			issueId,
-			dependsOnId,
-			dependencyType,
-			explicitProjectDir,
-		)
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue dep remove",
-			verbose: args.verbose,
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
+		yield* bootstrap.client
+			.issueRemoveDependency({
+				issueId,
+				dependsOnId,
+				dependencyType,
+				projectPath,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueRemoveDependency")))
 
 		if (args.json) {
 			yield* Console.log(
@@ -2916,11 +2977,22 @@ const issueCloseHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		const issue = yield* issueTrackerClient.show(issueId, explicitProjectDir)
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const issue = yield* bootstrap.client
+			.issueGet({
+				issueId,
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.issue),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueGet")),
+			)
 		const childIds = Array.from(
 			new Set(
 				(issue.dependents ?? []).flatMap((dependent) => {
@@ -2934,9 +3006,15 @@ const issueCloseHandler = (args: {
 		)
 		const openChildren: TrackedIssue[] = []
 		for (const childId of childIds) {
-			const child = yield* issueTrackerClient
-				.show(childId, explicitProjectDir)
-				.pipe(Effect.catchAll(() => Effect.succeed<TrackedIssue | undefined>(undefined)))
+			const child = yield* bootstrap.client
+				.issueGet({
+					issueId: childId,
+					projectPath,
+				})
+				.pipe(
+					Effect.map((response) => response.issue),
+					Effect.catchAll(() => Effect.succeed<TrackedIssue | undefined>(undefined)),
+				)
 			if (child !== undefined && isOpenChildForCloseGuard(child)) {
 				openChildren.push(child)
 			}
@@ -2949,14 +3027,13 @@ const issueCloseHandler = (args: {
 			)
 		}
 
-		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), explicitProjectDir)
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue close",
-			verbose: args.verbose,
-		})
+		yield* bootstrap.client
+			.issueClose({
+				issueId,
+				reason: Option.getOrUndefined(args.reason),
+				projectPath,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueClose")))
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
@@ -3099,6 +3176,7 @@ const issueCheckHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const parentContext = yield* Option.match(args.issueId, {
@@ -3123,15 +3201,33 @@ const issueCheckHandler = (args: {
 		}
 
 		const parentIssueId = parentContext.value.issueId
-		const issueTrackerClient = yield* IssueTrackerClient
-		const parentIssue = yield* issueTrackerClient.show(parentIssueId, explicitProjectDir)
-
-		const issues = yield* issueTrackerClient.list(undefined, explicitProjectDir, {
-			limit: Option.getOrElse(args.limit, () => 200),
-			includeClosed: args.includeClosed,
-			sortBy: "updated_at",
-			sortDirection: "desc",
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
+		const parentIssue = yield* bootstrap.client
+			.issueGet({
+				issueId: parentIssueId,
+				projectPath,
+			})
+			.pipe(
+				Effect.map((response) => response.issue),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueGet")),
+			)
+
+		const issues = yield* bootstrap.client
+			.issueList({
+				projectPath,
+				options: {
+					limit: Option.getOrElse(args.limit, () => 200),
+					includeClosed: args.includeClosed,
+					sortBy: "updated_at",
+					sortDirection: "desc",
+				},
+			})
+			.pipe(
+				Effect.map((response) => response.issues),
+				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
+			)
 		const misses = findLikelyParentChildTrackingMisses(parentIssueId, issues)
 
 		if (args.json) {
@@ -3184,18 +3280,19 @@ const issueDeleteHandler = (args: {
 
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		yield* issueTrackerClient.delete(issueId, explicitProjectDir)
-		yield* syncLinearAfterIssueMutation({
-			issueTrackerClient,
-			explicitProjectDir,
-			resolverCwd,
-			commandLabel: "issue delete",
-			verbose: false,
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
 		})
+		yield* bootstrap.client
+			.issueDelete({
+				issueId,
+				projectPath,
+			})
+			.pipe(Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueDelete")))
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, deleted: true }, null, 2))
 			return
@@ -4184,11 +4281,11 @@ const specParityHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = explicitProjectDir ?? resolverCwd
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueTrackerClient = yield* IssueTrackerClient
-		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
 		const implementation = yield* resolveParityImplementationForCli(args.implementation, registry)
 		const specService = yield* SpecService
 		const report = yield* specService.getParityReport(implementation, explicitProjectDir)
@@ -4778,25 +4875,76 @@ const parseLabelsOption = (labels: Option.Option<string>): string[] | undefined 
 
 const parseIssueCreateStatusOption = (
 	status: Option.Option<string>,
-): Effect.Effect<"open" | "in_progress" | "blocked" | "closed" | undefined, Error> =>
+): Effect.Effect<CliIssueMutationStatus | undefined, Error> =>
 	Option.match(status, {
 		onNone: () => Effect.succeed(undefined),
-		onSome: (value) => {
-			switch (value) {
-				case "open":
-				case "in_progress":
-				case "blocked":
-				case "closed":
-					return Effect.succeed(value)
-				default:
-					return Effect.fail(
-						new Error(
-							`Invalid --status value '${value}'. Expected one of: open, in_progress, blocked, closed.`,
-						),
-					)
-			}
-		},
+		onSome: (value) => parseIssueMutationStatus(value, "--status"),
 	})
+
+const parseIssueMutationStatus = (
+	value: string | undefined,
+	context: string,
+): Effect.Effect<CliIssueMutationStatus | undefined, Error> => {
+	switch (value) {
+		case undefined:
+			return Effect.succeed(undefined)
+		case "open":
+		case "in_progress":
+		case "blocked":
+		case "closed":
+			return Effect.succeed(value)
+		default:
+			return Effect.fail(
+				new Error(
+					`Invalid ${context} value '${value}'. Expected one of: open, in_progress, blocked, closed.`,
+				),
+			)
+	}
+}
+
+const parseIssueFilterStatus = (
+	value: string | undefined,
+	context: string,
+): Effect.Effect<CliIssueFilterStatus | undefined, Error> => {
+	switch (value) {
+		case undefined:
+			return Effect.succeed(undefined)
+		case "open":
+		case "in_progress":
+		case "blocked":
+		case "closed":
+		case "tombstone":
+			return Effect.succeed(value)
+		default:
+			return Effect.fail(
+				new Error(
+					`Invalid ${context} value '${value}'. Expected one of: open, in_progress, blocked, closed, tombstone.`,
+				),
+			)
+	}
+}
+
+const parseIssueType = (
+	value: string | undefined,
+	context: string,
+): Effect.Effect<CliIssueType | undefined, Error> => {
+	switch (value) {
+		case undefined:
+			return Effect.succeed(undefined)
+		case "bug":
+		case "feature":
+		case "task":
+		case "epic":
+		case "chore":
+			return Effect.succeed(value)
+		default:
+			return Effect.fail(
+				new Error(
+					`Invalid ${context} value '${value}'. Expected one of: bug, feature, task, epic, chore.`,
+				),
+			)
+	}
+}
 
 const IssueBulkCreateEntrySchema = Schema.Struct({
 	title: Schema.String,
@@ -4820,6 +4968,9 @@ const IssueBulkCreatePayloadSchema = Schema.Union(
 )
 
 type IssueBulkCreatePayload = Schema.Schema.Type<typeof IssueBulkCreatePayloadSchema>
+type CliIssueMutationStatus = Exclude<TrackedIssue["status"], "tombstone">
+type CliIssueFilterStatus = TrackedIssue["status"]
+type CliIssueType = TrackedIssue["issue_type"]
 
 interface IssueBulkCreateResult {
 	readonly index: number
@@ -4837,11 +4988,11 @@ interface IssueBulkCreateSummary {
 }
 
 interface IssueBulkUpdateFields {
-	readonly status?: string
+	readonly status?: CliIssueMutationStatus
 	readonly notes?: string
 	readonly priority?: number
 	readonly title?: string
-	readonly type?: string
+	readonly type?: CliIssueType
 	readonly description?: string
 	readonly design?: string
 	readonly acceptance?: string
@@ -4936,24 +5087,29 @@ const isIssueBulkUpdateEntryArray = (
 	payload: IssueBulkUpdatePayload,
 ): payload is readonly IssueBulkUpdateEntry[] => Array.isArray(payload)
 
-const mapIssueBulkUpdateFields = (entry: IssueBulkUpdateEntry): IssueBulkUpdateFields => ({
-	status: entry.status,
-	notes: entry.notes,
-	priority: entry.priority,
-	title: entry.title,
-	type: entry.type,
-	description: entry.description,
-	design: entry.design,
-	acceptance: entry.acceptance,
-	assignee: entry.assignee,
-	estimate: entry.estimate,
-	labels: entry.labels === undefined ? undefined : [...entry.labels],
-	implementations:
-		entry.implementations !== undefined && entry.implementations.length > 0
-			? [...entry.implementations]
-			: undefined,
-	parent: entry.parent,
-})
+const mapIssueBulkUpdateFields = (
+	entry: IssueBulkUpdateEntry,
+): Effect.Effect<IssueBulkUpdateFields, Error> =>
+	Effect.gen(function* () {
+		return {
+			status: yield* parseIssueMutationStatus(entry.status, "bulk update status"),
+			notes: entry.notes,
+			priority: entry.priority,
+			title: entry.title,
+			type: yield* parseIssueType(entry.type, "bulk update type"),
+			description: entry.description,
+			design: entry.design,
+			acceptance: entry.acceptance,
+			assignee: entry.assignee,
+			estimate: entry.estimate,
+			labels: entry.labels === undefined ? undefined : [...entry.labels],
+			implementations:
+				entry.implementations !== undefined && entry.implementations.length > 0
+					? [...entry.implementations]
+					: undefined,
+			parent: entry.parent,
+		}
+	})
 
 const hasIssueBulkUpdateChanges = (fields: IssueBulkUpdateFields): boolean =>
 	fields.status !== undefined ||
@@ -5063,48 +5219,59 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const projectPath = process.cwd()
 		const primeMode = resolvePrimeModeFromEnv(process.env)
 		const appConfig = yield* AppConfig
 		const specConfig = yield* appConfig.getSpecConfig()
-		const implementationContext = yield* IssueTrackerClient.pipe(
-			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
-			Effect.map((registry) => ({
-				implementations: registry.implementations.map((implementation) => ({
-					name: implementation.name,
-					description: implementation.description,
-					directory: implementation.directory,
-					is_default: implementation.is_default,
-					is_builtin: implementation.is_builtin,
+		const bootstrap = yield* bootstrapDaemonRpcClient({
+			autoStart: true,
+		})
+		const implementationContext = yield* bootstrap.client
+			.implementationGetRegistry({
+				projectPath,
+			})
+			.pipe(
+				Effect.map((registry) => ({
+					implementations: registry.registry.implementations.map((implementation) => ({
+						name: implementation.name,
+						description: implementation.description,
+						directory: implementation.directory,
+						is_default: implementation.is_default,
+						is_builtin: implementation.is_builtin,
+					})),
 				})),
-			})),
-			Effect.catchAll(() => Effect.succeed(undefined)),
-		)
+				Effect.catchAll(() => Effect.succeed(undefined)),
+			)
 		const showImplementations =
 			implementationContext !== undefined && implementationContext.implementations.length > 1
 		const issueContext =
 			issueId === undefined
 				? undefined
-				: yield* IssueTrackerClient.pipe(
-						Effect.flatMap((issueTrackerClient) => issueTrackerClient.show(issueId)),
-						Effect.flatMap((issue) =>
-							(specConfig.enabled
-								? SpecService.pipe(
-										Effect.flatMap((specService) =>
-											specService.listIssueRequirements(issue.id, process.cwd()),
-										),
-										Effect.catchAll(() => Effect.succeed([])),
-									)
-								: Effect.succeed([])
-							).pipe(
-								Effect.map((linkedSpecRequirements) => ({
-									issue,
-									linkedSpecRequirements,
-									showImplementations,
-								})),
+				: yield* bootstrap.client
+						.issueGet({
+							issueId,
+							projectPath,
+						})
+						.pipe(
+							Effect.flatMap((issue) =>
+								(specConfig.enabled
+									? SpecService.pipe(
+											Effect.flatMap((specService) =>
+												specService.listIssueRequirements(issue.issue.id, projectPath),
+											),
+											Effect.catchAll(() => Effect.succeed([])),
+										)
+									: Effect.succeed([])
+								).pipe(
+									Effect.map((linkedSpecRequirements) => ({
+										issue: issue.issue,
+										linkedSpecRequirements,
+										showImplementations,
+									})),
+								),
 							),
-						),
-						Effect.catchAll(() => Effect.succeed(undefined)),
-					)
+							Effect.catchAll(() => Effect.succeed(undefined)),
+						)
 
 		yield* Console.log(
 			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled, primeMode),

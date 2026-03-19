@@ -39,9 +39,10 @@ export class BackendDaemonSessionRecovery extends Effect.Service<BackendDaemonSe
 	"BackendDaemonSessionRecovery",
 	{
 		effect: Effect.succeed({
-			listActive: () => Effect.succeed([]),
-			recoverSession: () => Effect.void,
-			updateState: () => Effect.void,
+			listActive: (_projectPath: string) =>
+				Effect.succeed<ReadonlyArray<BackendDaemonSessionSnapshot>>([]),
+			recoverSession: (_issueId: string) => Effect.void,
+			updateState: (_issueId: string, _newState: BackendDaemonSessionState) => Effect.void,
 		} satisfies BackendDaemonSessionRecoveryApi),
 	},
 ) {}

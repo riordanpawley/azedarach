@@ -1,4 +1,1 @@
-export {
-	IssueTrackerClient,
-	SpecService,
-} from "../../../src/runtime/coreServicesFacade.js"
+export { SpecService } from "../../../src/runtime/coreServicesFacade.js"

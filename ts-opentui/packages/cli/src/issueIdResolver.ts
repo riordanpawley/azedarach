@@ -1,3 +1,4 @@
+import type { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
 import { Effect } from "effect"
 import type { ResolvedConfig } from "./contracts.js"
 
@@ -10,7 +11,7 @@ export interface CliIssueIdResolutionContext {
 	readonly getConfig: Effect.Effect<ResolvedConfig, unknown, never>
 	readonly listIssueIds: (
 		projectPath: string,
-	) => Effect.Effect<ReadonlyArray<string>, unknown, never>
+	) => Effect.Effect<ReadonlyArray<string>, unknown, GlobalDaemonBootstrap>
 }
 
 let cliIssueIdResolutionContext: CliIssueIdResolutionContext | undefined

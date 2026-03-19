@@ -1,13 +1,21 @@
+import { DaemonRpcGroup } from "@azedarach/shared/rpc"
 import { FileSystem, type Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
 import * as BunSocketServer from "@effect/platform-bun/BunSocketServer"
 import { RpcSerialization, RpcServer } from "@effect/rpc"
-import { Data, Effect, Fiber, Layer, Ref } from "effect"
+import { Cause, Data, Effect, Fiber, Layer, Ref } from "effect"
+import { BackendDaemonControlService } from "./BackendDaemonControlService.js"
+import { BackendDaemonService } from "./BackendDaemonService.js"
+import { BackendDaemonSessionRecovery } from "./BackendDaemonSessionRecovery.js"
 import {
 	type GlobalDaemonAlreadyRunningError,
 	GlobalDaemonDiscovery,
 	type GlobalDaemonDiscoveryError,
 	type GlobalDaemonLease,
 } from "./GlobalDaemonDiscovery.js"
+import { GlobalDaemonRpcHandlersLive } from "./GlobalDaemonRpcHandlers.js"
+import { ImplementationRegistryDaemonService } from "./ImplementationRegistryDaemonService.js"
+import { TrackerIssueDaemonService } from "./TrackerIssueDaemonService.js"
 
 export interface GlobalProjectRuntime {
 	readonly projectPath: string
@@ -92,7 +100,7 @@ export interface GlobalDaemonServerHandle {
 
 export class GlobalDaemonServerError extends Data.TaggedError("GlobalDaemonServerError")<{
 	readonly message: string
-	readonly cause: unknown
+	readonly cause: string
 }> {}
 
 const MAX_EVENTS = 256
@@ -159,6 +167,22 @@ export const makeGlobalDaemonTransportLayer = (
 		Layer.provide(RpcSerialization.layerJson),
 		Layer.provide(BunSocketServer.layer({ path: socketPath })),
 	)
+
+const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
+	const daemonServicesLayer = Layer.mergeAll(
+		BunContext.layer,
+		BackendDaemonControlService.Default,
+		BackendDaemonService.Default,
+		BackendDaemonSessionRecovery.Default,
+		ImplementationRegistryDaemonService.Default,
+		TrackerIssueDaemonService.Default,
+	)
+
+	return Layer.mergeAll(
+		makeGlobalDaemonTransportLayer(socketPath),
+		GlobalDaemonRpcHandlersLive.pipe(Layer.provide(daemonServicesLayer)),
+	)
+}
 
 export const makeGlobalDaemonServerRuntime = (params: {
 	readonly socketPath: string
@@ -319,10 +343,9 @@ export const startGlobalDaemonServer = (params?: {
 			idleTimeoutMs: params?.idleTimeoutMs ?? 5 * 60 * 1000,
 		})
 
-		const protocolLoop = Effect.gen(function* () {
-			const protocol = yield* RpcServer.Protocol
-			return yield* protocol.run(() => Effect.void)
-		}).pipe(Effect.provide(makeGlobalDaemonTransportLayer(lease.paths.socketPath)))
+		const protocolLoop = RpcServer.make(DaemonRpcGroup).pipe(
+			Effect.provide(makeGlobalDaemonRpcServerLayer(lease.paths.socketPath)),
+		)
 
 		const protocolFiber = yield* Effect.forkDaemon(
 			protocolLoop.pipe(
@@ -330,7 +353,7 @@ export const startGlobalDaemonServer = (params?: {
 					Effect.fail(
 						new GlobalDaemonServerError({
 							message: "Global daemon protocol loop failed",
-							cause,
+							cause: Cause.pretty(cause),
 						}),
 					),
 				),
