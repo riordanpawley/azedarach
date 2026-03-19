@@ -5,6 +5,7 @@
 	"type": "module",
 	"dependencies": {
 		"@azedarach/cli": "workspace:*",
+		"@azedarach/shared": "workspace:*",
 		"@azedarach/tui": "workspace:*",
 		"@effect/platform-bun": "latest",
 		"effect": "latest"
