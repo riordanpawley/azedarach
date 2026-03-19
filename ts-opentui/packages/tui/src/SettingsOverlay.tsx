@@ -25,6 +25,7 @@ import {
 	appConfigAtom,
 	configLoadWarningAtom,
 	loadedConfigPathAtom,
+	settingsDefinitionsAtom,
 	settingsStateAtom,
 } from "./atoms.js"
 import { theme } from "./theme.js"
@@ -69,6 +70,10 @@ export const SettingsOverlay = () => {
 		Result.getOrElse(() => null),
 	)
 	const settingsStateResult = useAtomValue(settingsStateAtom)
+	const settingsDefinitions = useAtomValue(
+		settingsDefinitionsAtom,
+		Result.getOrElse(() => []),
+	)
 
 	if (!config) return null
 	if (!Result.isSuccess(settingsStateResult)) return null
@@ -76,7 +81,7 @@ export const SettingsOverlay = () => {
 	const settingsState = settingsStateResult.value
 	if (!settingsState.isOpen) return null
 
-	const visibleSettings = getVisibleSettings(config)
+	const visibleSettings = getVisibleSettings(settingsDefinitions, config)
 	const settingsRows: Array<
 		| {
 				readonly _tag: "group"

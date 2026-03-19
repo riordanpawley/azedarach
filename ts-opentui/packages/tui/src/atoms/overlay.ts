@@ -213,6 +213,14 @@ export const settingsStateAtom = appRuntime.subscriptionRef(
 	}),
 )
 
+export const settingsDefinitionsAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		return settings.settings
+	}),
+	{ initialValue: [] },
+)
+
 /**
  * Open settings atom - open the settings overlay
  *

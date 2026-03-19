@@ -308,6 +308,17 @@ export interface ImageAttachment {
 
 export type DevServerStatus = "idle" | "starting" | "running" | "stopped" | "error"
 
+export interface DevServerState {
+	readonly name: string
+	readonly status: DevServerStatus
+	readonly port: number | undefined
+	readonly windowName: string | undefined
+	readonly tmuxSession: string | undefined
+	readonly worktreePath: string | undefined
+	readonly startedAt: Date | undefined
+	readonly error: string | undefined
+}
+
 export interface Project {
 	readonly name: string
 	readonly path: string

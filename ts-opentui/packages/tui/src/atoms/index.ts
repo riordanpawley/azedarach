@@ -165,6 +165,7 @@ export {
 	overlaysAtom,
 	popOverlayAtom,
 	pushOverlayAtom,
+	settingsDefinitionsAtom,
 	settingsStateAtom,
 	showToastAtom,
 	toastsAtom,
