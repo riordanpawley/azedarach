@@ -3,6 +3,37 @@ import * as RpcClient from "@effect/rpc/RpcClient"
 import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import * as RpcSerialization from "@effect/rpc/RpcSerialization"
 import { Context, Effect, Layer } from "effect"
+import type {
+	DaemonImplementationCreateRequest,
+	DaemonImplementationCreateResult,
+	DaemonImplementationDeleteRequest,
+	DaemonImplementationDeleteResult,
+	DaemonImplementationGetRegistryRequest,
+	DaemonImplementationGetRegistryResult,
+	DaemonImplementationSetDefaultRequest,
+	DaemonImplementationSetDefaultResult,
+	DaemonImplementationUpdateRequest,
+	DaemonImplementationUpdateResult,
+} from "./DaemonImplementationRpcSchemas.js"
+import type {
+	DaemonIssueAddDependencyRequest,
+	DaemonIssueCloseRequest,
+	DaemonIssueCloseResult,
+	DaemonIssueCreateRequest,
+	DaemonIssueCreateResult,
+	DaemonIssueDeleteRequest,
+	DaemonIssueDeleteResult,
+	DaemonIssueDependencyMutationResult,
+	DaemonIssueGetRequest,
+	DaemonIssueGetResult,
+	DaemonIssueListRequest,
+	DaemonIssueListResult,
+	DaemonIssueRemoveDependencyRequest,
+	DaemonIssueSyncRequest,
+	DaemonIssueSyncResultEnvelope,
+	DaemonIssueUpdateRequest,
+	DaemonIssueUpdateResult,
+} from "./DaemonIssueRpcSchemas.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonAttachReconnectResult,
@@ -46,7 +77,7 @@ import {
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
 } from "./DaemonRpcSchemas.js"
-import { DaemonRpcGroup } from "./DaemonRpcs.js"
+import { DaemonImplementationRpcGroup, DaemonRpcGroup } from "./DaemonRpcs.js"
 
 export type DaemonRpcClientError = RpcClientError | DaemonRpcActionError
 export type DaemonRpcClientFailureKind = "protocol-mismatch" | "transport" | "remote-action"
@@ -143,10 +174,52 @@ export interface DaemonRpcClientApi {
 	readonly queueCancel?: (
 		request: Omit<DaemonQueueCancelRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonQueueCancelResult, DaemonRpcClientError>
+	readonly issueGet: (
+		request: Omit<DaemonIssueGetRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueGetResult, DaemonRpcClientError>
+	readonly issueList: (
+		request?: Omit<DaemonIssueListRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueListResult, DaemonRpcClientError>
+	readonly issueCreate: (
+		request: Omit<DaemonIssueCreateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueCreateResult, DaemonRpcClientError>
+	readonly issueUpdate: (
+		request: Omit<DaemonIssueUpdateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueUpdateResult, DaemonRpcClientError>
+	readonly issueAddDependency: (
+		request: Omit<DaemonIssueAddDependencyRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueDependencyMutationResult, DaemonRpcClientError>
+	readonly issueRemoveDependency: (
+		request: Omit<DaemonIssueRemoveDependencyRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueDependencyMutationResult, DaemonRpcClientError>
+	readonly issueClose: (
+		request: Omit<DaemonIssueCloseRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueCloseResult, DaemonRpcClientError>
+	readonly issueDelete: (
+		request: Omit<DaemonIssueDeleteRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueDeleteResult, DaemonRpcClientError>
+	readonly issueSync: (
+		request?: Omit<DaemonIssueSyncRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonIssueSyncResultEnvelope, DaemonRpcClientError>
+	readonly implementationGetRegistry?: (
+		request?: Omit<DaemonImplementationGetRegistryRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonImplementationGetRegistryResult, DaemonRpcClientError>
+	readonly implementationCreate?: (
+		request: Omit<DaemonImplementationCreateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonImplementationCreateResult, DaemonRpcClientError>
+	readonly implementationUpdate?: (
+		request: Omit<DaemonImplementationUpdateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonImplementationUpdateResult, DaemonRpcClientError>
+	readonly implementationDelete?: (
+		request: Omit<DaemonImplementationDeleteRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonImplementationDeleteResult, DaemonRpcClientError>
+	readonly implementationSetDefault?: (
+		request: Omit<DaemonImplementationSetDefaultRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonImplementationSetDefaultResult, DaemonRpcClientError>
 }
 
 const makeDaemonRpcClient = Effect.gen(function* () {
-	const raw = yield* RpcClient.make(DaemonRpcGroup)
+	const raw = yield* RpcClient.make(DaemonRpcGroup.merge(DaemonImplementationRpcGroup))
 	return {
 		status: (request) =>
 			raw.daemonStatus(
@@ -270,6 +343,79 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 			}),
 		queueCancel: (request) =>
 			raw.daemonQueueCancel({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueGet: (request) =>
+			raw.daemonIssueGet({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueList: (request) =>
+			raw.daemonIssueList(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		issueCreate: (request) =>
+			raw.daemonIssueCreate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueUpdate: (request) =>
+			raw.daemonIssueUpdate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueAddDependency: (request) =>
+			raw.daemonIssueAddDependency({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueRemoveDependency: (request) =>
+			raw.daemonIssueRemoveDependency({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueClose: (request) =>
+			raw.daemonIssueClose({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueDelete: (request) =>
+			raw.daemonIssueDelete({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		issueSync: (request) =>
+			raw.daemonIssueSync(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		implementationGetRegistry: (request) =>
+			raw.daemonImplementationGetRegistry(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		implementationCreate: (request) =>
+			raw.daemonImplementationCreate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		implementationUpdate: (request) =>
+			raw.daemonImplementationUpdate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		implementationDelete: (request) =>
+			raw.daemonImplementationDelete({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		implementationSetDefault: (request) =>
+			raw.daemonImplementationSetDefault({
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),

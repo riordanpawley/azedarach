@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test"
 import { Effect, Schema } from "effect"
 import {
+	DaemonImplementationCreateRequestSchema,
+	DaemonImplementationGetRegistryResultSchema,
+} from "./DaemonImplementationRpcSchemas.js"
+import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
 	DaemonBoardReadModelRequestSchema,
@@ -18,7 +22,7 @@ import {
 	DaemonSessionUpdateStateRequestSchema,
 	DaemonStatusRequestSchema,
 } from "./DaemonRpcSchemas.js"
-import { DaemonRpcGroup } from "./DaemonRpcs.js"
+import { DaemonImplementationRpcGroup, DaemonRpcGroup } from "./DaemonRpcs.js"
 
 describe("DaemonRpcs", () => {
 	it("registers all daemon rpc operations in a single group", () => {
@@ -33,6 +37,15 @@ describe("DaemonRpcs", () => {
 			"daemonEventStream",
 			"daemonHealth",
 			"daemonHeartbeat",
+			"daemonIssueAddDependency",
+			"daemonIssueClose",
+			"daemonIssueCreate",
+			"daemonIssueDelete",
+			"daemonIssueGet",
+			"daemonIssueList",
+			"daemonIssueRemoveDependency",
+			"daemonIssueSync",
+			"daemonIssueUpdate",
 			"daemonLogs",
 			"daemonQueueCancel",
 			"daemonQueueEnqueue",
@@ -48,6 +61,17 @@ describe("DaemonRpcs", () => {
 			"daemonSessionUpdateState",
 			"daemonStatus",
 			"daemonStop",
+		])
+	})
+
+	it("registers implementation registry rpc operations in a dedicated group", () => {
+		const keys = [...DaemonImplementationRpcGroup.requests.keys()].sort()
+		expect(keys).toEqual([
+			"daemonImplementationCreate",
+			"daemonImplementationDelete",
+			"daemonImplementationGetRegistry",
+			"daemonImplementationSetDefault",
+			"daemonImplementationUpdate",
 		])
 	})
 
@@ -257,6 +281,49 @@ describe("DaemonRpcs", () => {
 		expect(result.tasks).toHaveLength(1)
 		expect(result.tasks[0]?.id).toBe("sm-1")
 		expect(result.tasks[0]?.gitBehindCount).toBe(2)
+	})
+
+	it("validates implementation registry request and result schemas", async () => {
+		const decodeRequest = Schema.decodeUnknown(DaemonImplementationCreateRequestSchema)
+		const decodeResult = Schema.decodeUnknown(DaemonImplementationGetRegistryResultSchema)
+
+		const request = await Effect.runPromise(
+			decodeRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				projectPath: "/tmp/project",
+				input: {
+					name: "alpha",
+					description: "Alpha implementation",
+					directory: "packages/alpha",
+					setDefault: true,
+				},
+			}),
+		)
+		const result = await Effect.runPromise(
+			decodeResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				registry: {
+					default_implementation: "alpha",
+					implicit_default_allowed: false,
+					implementations: [
+						{
+							name: "alpha",
+							description: "Alpha implementation",
+							directory: "packages/alpha",
+							created_at: "2026-03-14T06:00:00.000Z",
+							updated_at: "2026-03-14T06:00:00.000Z",
+							is_default: true,
+							is_builtin: false,
+						},
+					],
+				},
+			}),
+		)
+
+		expect(request.input.name).toBe("alpha")
+		expect(request.input.setDefault).toBe(true)
+		expect(result.registry.default_implementation).toBe("alpha")
+		expect(result.registry.implementations[0]?.is_default).toBe(true)
 	})
 
 	it("validates daemon event stream response shape", async () => {
