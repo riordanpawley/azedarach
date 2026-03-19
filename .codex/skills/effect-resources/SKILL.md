@@ -262,7 +262,7 @@ const main = Effect.gen(function* () {
   // Build application with all resources
   const runtime = yield* Layer.toRuntime(AppLayer)
 
-  // Run the application
+  // Run the application (single provide at the runtime boundary)
   yield* application.pipe(Effect.provide(runtime))
 })
 

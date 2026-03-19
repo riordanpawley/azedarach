@@ -27,6 +27,8 @@ When working in `ts-opentui`, treat this as mandatory architecture:
 5. Service consumers must `yield* ServiceTag` and call methods; do not import helper effects.
 6. Compose layers in runtime entrypoints/tests, not in domain methods.
 7. Keep `Effect.run*` in runtime entrypoints and tests only.
+8. For any given program, apply `Effect.provide(...)` once at the runtime boundary.
+9. Compose dependencies in `Layer` (`mergeAll` / `provideMerge`) before that single provide.
 
 Use this for modules like daemon discovery/bootstrap where dependency threading and helper exports caused regressions.
 
@@ -179,6 +181,8 @@ export class PollingService extends Effect.Service<PollingService>()("PollingSer
 
 ## Layer Composition
 
+Build one composed application layer, then provide it once when executing the program.
+
 ### Layer.mergeAll
 
 Combine independent layers:
@@ -201,6 +205,27 @@ When layers have ordering dependencies (rare with proper `dependencies:` usage):
 const appLayer = LoggerService.Default.pipe(
   Layer.provideMerge(UserService.Default),
   Layer.provideMerge(NotificationService.Default),
+)
+```
+
+### Runtime Boundary Rule
+
+```typescript
+// ✅ Preferred: compose in Layer space, provide once at the boundary
+const AppLayer = Layer.mergeAll(
+  LoggerService.Default,
+  UserService.Default,
+  NotificationService.Default,
+)
+
+const program = Effect.gen(function* () {
+  const notifications = yield* NotificationService
+  yield* notifications.notifyUser("123", "hello")
+})
+
+await program.pipe(
+  Effect.provide(AppLayer),
+  Effect.runPromise,
 )
 ```
 

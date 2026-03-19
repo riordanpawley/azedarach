@@ -13,6 +13,7 @@ description: "Effect Testing Skill"
 TDD with Effect requires understanding how to test effectful computations. This skill covers patterns for testing Effect services, React/OpenTUI components, and async workflows.
 
 **Core Principle:** Tests are **specifications**, not just coverage metrics.
+**Environment Principle:** Compose test dependencies as `Layer`s, then call `Effect.provide(...)` once per test program at the execution boundary.
 
 When tests involve schema boundaries (DB metadata, JSON payloads, config codecs), use:
 - `.claude/skills/effect-schema/SKILL.md`
@@ -115,6 +116,21 @@ describe("WorktreeManager", () => {
         expect(result.path).toBe("/tmp/test")
     })
 })
+```
+
+If a test needs multiple dependencies, compose them as a single layer first, then provide once:
+
+```typescript
+const TestLayer = Layer.mergeAll(
+  TestGitService,
+  TestClockService,
+  TestTelemetryService,
+)
+
+const result = await program.pipe(
+  Effect.provide(TestLayer),
+  Effect.runPromise,
+)
 ```
 
 ### Testing Error Scenarios
