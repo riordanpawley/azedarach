@@ -62,10 +62,12 @@ Risk controls:
 ```
 ts-opentui/packages/cli/src/runtimeServices.ts:29:} from "../../../src/runtime/appServicesFacade.js"
 ts-opentui/packages/cli/src/runtimeServices.ts:55:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/daemon/src/runtimeServices.ts:8:} from "../../../src/runtime/coreServicesFacade.js"
 ts-opentui/packages/tui/src/utils/runtimeServices.ts:30:} from "../../../../src/runtime/appServicesFacade.js"
 ts-opentui/packages/tui/src/utils/runtimeServices.ts:49:} from "../../../../src/runtime/coreServicesFacade.js"
 ```
+
+- 2026-03-19 `ye` landed daemon-local sync/board/session contracts in `packages/daemon` and deleted `packages/daemon/src/runtimeServices.ts`.
+- Remaining runtime-facade package edges are CLI/TUI only; `yf` is blocked pending either a narrow boundary exception or prior migration of the underlying `src/core`/`src/services` implementations.
 
 ## Classification Legend
 

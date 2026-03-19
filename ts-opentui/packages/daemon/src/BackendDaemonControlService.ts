@@ -1,10 +1,19 @@
 import { AppConfig } from "@azedarach/config"
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
 import {
+	BackendDaemonBoardStore,
+	type BackendDaemonBoardStoreApi,
+	type BackendDaemonBoardTaskSnapshot,
+} from "./BackendDaemonBoardStore.js"
+import {
 	BackendDaemonService,
 	type BackendDaemonServiceApi,
 	type BackendDaemonSnapshot,
 } from "./BackendDaemonService.js"
+import {
+	BackendDaemonSessionRecovery,
+	type BackendDaemonSessionRecoveryApi,
+} from "./BackendDaemonSessionRecovery.js"
 import {
 	BackendSyncDaemonService,
 	type BackendSyncDaemonServiceApi,
@@ -19,7 +28,6 @@ import {
 	type DevServerDaemonStatusRequest,
 	type DevServerDaemonStatusResult,
 } from "./DevServerDaemonService.js"
-import { LocalIssueStore, SessionManager } from "./runtimeServices.js"
 
 export interface BackendDaemonControlStatus {
 	readonly checkedAtMs: number
@@ -106,10 +114,6 @@ export interface BackendDaemonControlQueueCancelResult {
 
 export interface BackendDaemonControlBoardReadModelRequest {
 	readonly projectPath: string
-}
-
-export interface BackendDaemonBoardTaskSnapshot {
-	readonly updated_at: string
 }
 
 export interface BackendDaemonControlBoardReadModelResult {
@@ -250,9 +254,7 @@ export const makeBackendDaemonControlService = (params: {
 	readonly runtime: BackendDaemonServiceApi
 	readonly sync: BackendSyncDaemonServiceApi
 	readonly devServer: DevServerDaemonServiceApi
-	readonly readBoardTasks?: (
-		projectPath: string,
-	) => Effect.Effect<ReadonlyArray<BackendDaemonBoardTaskSnapshot>, unknown>
+	readonly listBoardTasks?: BackendDaemonBoardStoreApi["listBoardTasks"]
 }): BackendDaemonControlServiceApi => {
 	const queueItems = new Map<string, BackendDaemonControlQueueItem>()
 
@@ -364,9 +366,9 @@ export const makeBackendDaemonControlService = (params: {
 				} satisfies BackendDaemonControlQueueCancelResult
 			}),
 		boardReadModel: (request) =>
-			(params.readBoardTasks === undefined
+			(params.listBoardTasks === undefined
 				? Effect.succeed<ReadonlyArray<BackendDaemonBoardTaskSnapshot>>([])
-				: params.readBoardTasks(request.projectPath)
+				: params.listBoardTasks(request.projectPath)
 			).pipe(
 				Effect.map((tasks) => ({
 					capturedAtMs: Date.now(),
@@ -399,16 +401,16 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			BackendDaemonService.Default,
 			BackendSyncDaemonService.Default,
 			DevServerDaemonService.Default,
-			SessionManager.Default,
+			BackendDaemonSessionRecovery.Default,
 			AppConfig.Default,
-			LocalIssueStore.Default,
+			BackendDaemonBoardStore.Default,
 		],
 		effect: Effect.gen(function* () {
 			const runtime = yield* BackendDaemonService
 			const sync = yield* BackendSyncDaemonService
 			const devServer = yield* DevServerDaemonService
-			const localIssueStore = yield* LocalIssueStore
-			const sessionManager = yield* SessionManager
+			const boardStore: BackendDaemonBoardStoreApi = yield* BackendDaemonBoardStore
+			const sessionRecovery: BackendDaemonSessionRecoveryApi = yield* BackendDaemonSessionRecovery
 			const appConfig = yield* AppConfig
 			const recoveryInFlightRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 
@@ -447,7 +449,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 					const autoRecoveryDelayMs = Math.max(0, Math.floor(recoveryConfig.autoRecoveryDelayMs))
 
 					yield* Effect.sleep(`${autoRecoveryDelayMs} millis`).pipe(
-						Effect.zipRight(sessionManager.recoverSession(issueId)),
+						Effect.zipRight(sessionRecovery.recoverSession(issueId)),
 						Effect.retry({ schedule }),
 						Effect.tap(() =>
 							Effect.log(
@@ -460,7 +462,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 									yield* Effect.logWarning(
 										`Daemon session recovery terminal failure for ${issueId} (projectPath=${projectPath}): worktree missing; resetting session state to idle`,
 									)
-									yield* sessionManager
+									yield* sessionRecovery
 										.updateState(issueId, "idle")
 										.pipe(Effect.catchAll(() => Effect.void))
 									return
@@ -487,7 +489,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 					return
 				}
 
-				const sessions = yield* sessionManager.listActive(projectPath)
+				const sessions = yield* sessionRecovery.listActive(projectPath)
 				const crashedIssueIds = Array.from(
 					new Set(
 						sessions
@@ -513,7 +515,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 				runtime,
 				sync,
 				devServer,
-				readBoardTasks: (projectPath) => localIssueStore.listBoardTasks(projectPath),
+				listBoardTasks: (projectPath) => boardStore.listBoardTasks(projectPath),
 			})
 		}),
 	},
