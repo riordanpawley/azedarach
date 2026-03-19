@@ -1,6 +1,5 @@
 import { AppConfig } from "@azedarach/config"
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
-import type { TaskWithSession } from "../../../src/ui/types.js"
 import {
 	BackendDaemonService,
 	type BackendDaemonServiceApi,
@@ -109,10 +108,14 @@ export interface BackendDaemonControlBoardReadModelRequest {
 	readonly projectPath: string
 }
 
+export interface BackendDaemonBoardTaskSnapshot {
+	readonly updated_at: string
+}
+
 export interface BackendDaemonControlBoardReadModelResult {
 	readonly capturedAtMs: number
 	readonly projectPath: string
-	readonly tasks: ReadonlyArray<TaskWithSession>
+	readonly tasks: ReadonlyArray<BackendDaemonBoardTaskSnapshot>
 }
 
 export interface BackendDaemonControlServiceApi {
@@ -249,13 +252,13 @@ export const makeBackendDaemonControlService = (params: {
 	readonly devServer: DevServerDaemonServiceApi
 	readonly readBoardTasks?: (
 		projectPath: string,
-	) => Effect.Effect<ReadonlyArray<TaskWithSession>, unknown>
+	) => Effect.Effect<ReadonlyArray<BackendDaemonBoardTaskSnapshot>, unknown>
 }): BackendDaemonControlServiceApi => {
 	const queueItems = new Map<string, BackendDaemonControlQueueItem>()
 
 	const sortBoardTasksForReadModel = (
-		tasks: ReadonlyArray<TaskWithSession>,
-	): ReadonlyArray<TaskWithSession> =>
+		tasks: ReadonlyArray<BackendDaemonBoardTaskSnapshot>,
+	): ReadonlyArray<BackendDaemonBoardTaskSnapshot> =>
 		[...tasks].sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
 
 	const queueMatches = (
@@ -362,7 +365,7 @@ export const makeBackendDaemonControlService = (params: {
 			}),
 		boardReadModel: (request) =>
 			(params.readBoardTasks === undefined
-				? Effect.succeed<ReadonlyArray<TaskWithSession>>([])
+				? Effect.succeed<ReadonlyArray<BackendDaemonBoardTaskSnapshot>>([])
 				: params.readBoardTasks(request.projectPath)
 			).pipe(
 				Effect.map((tasks) => ({
