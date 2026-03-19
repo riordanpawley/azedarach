@@ -11,9 +11,7 @@
  */
 
 import { FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effect"
-import { ProjectService } from "../../../src/services/ProjectService.js"
-import { ToastService } from "../../../src/services/ToastService.js"
+import { Context, Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effect"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
 import {
 	getProjectStoragePaths,
@@ -42,6 +40,32 @@ export class ConfigParseError extends Data.TaggedError("ConfigParseError")<{
 	readonly path: string
 	readonly details?: string
 }> {}
+
+export interface AppConfigProjectContextApi {
+	readonly getCurrentPath: () => Effect.Effect<string | undefined>
+	readonly currentProjectPathChanges: Stream.Stream<string | undefined>
+}
+
+export const AppConfigProjectContext = Context.GenericTag<AppConfigProjectContextApi>(
+	"@azedarach/config/AppConfigProjectContext",
+)
+
+export interface AppConfigNotifierApi {
+	readonly showError: (message: string) => Effect.Effect<void>
+}
+
+export const AppConfigNotifier = Context.GenericTag<AppConfigNotifierApi>(
+	"@azedarach/config/AppConfigNotifier",
+)
+
+const defaultProjectContext: AppConfigProjectContextApi = {
+	getCurrentPath: () => Effect.succeed(undefined),
+	currentProjectPathChanges: Stream.empty,
+}
+
+const defaultNotifier: AppConfigNotifierApi = {
+	showError: () => Effect.void,
+}
 
 const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
 	typeof value === "object" && value !== null && !Array.isArray(value)
@@ -185,18 +209,23 @@ export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfi
  * Uses scoped service pattern to manage the project change watcher fiber.
  */
 export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
-	dependencies: [ProjectService.Default, ToastService.Default],
 	scoped: Effect.gen(function* () {
 		const pathService = yield* Path.Path
 		const fs = yield* FileSystem.FileSystem
-		const projectService = yield* ProjectService
-		const toast = yield* ToastService
+		const projectContext = yield* Effect.serviceOption(AppConfigProjectContext).pipe(
+			Effect.map(Option.getOrElse(() => defaultProjectContext)),
+		)
+		const notifier = yield* Effect.serviceOption(AppConfigNotifier).pipe(
+			Effect.map(Option.getOrElse(() => defaultNotifier)),
+		)
 		const { configPath } = yield* Effect.serviceOption(AppConfigConfig).pipe(
 			Effect.map(
-				Option.getOrElse(() => ({
-					projectPath: process.cwd(),
-					configPath: null as string | null,
-				})),
+				Option.getOrElse(
+					(): { readonly projectPath: string; readonly configPath: string | null } => ({
+						projectPath: process.cwd(),
+						configPath: null,
+					}),
+				),
 			),
 		)
 		// ============================================================================
@@ -223,8 +252,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				const lastKey = yield* Ref.get(lastToastWarningRef)
 				if (lastKey === key) return
 				yield* Ref.set(lastToastWarningRef, key)
-				yield* toast.show(
-					"error",
+				yield* notifier.showError(
 					`Config parse failed at ${warning.path}; using fallback defaults. Open settings (e) to fix.`,
 				)
 			})
@@ -640,7 +668,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		}
 
 		// Get initial project path from ProjectService
-		const initialProjectPath = yield* projectService.getCurrentPath()
+		const initialProjectPath = yield* projectContext.getCurrentPath()
 		const effectiveProjectPath = initialProjectPath ?? process.cwd()
 
 		// Load initial config
@@ -671,10 +699,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		// Watch for project changes and reload config
 		yield* Effect.forkScoped(
-			projectService.currentProject.changes.pipe(
-				Stream.runForEach((project) =>
+			projectContext.currentProjectPathChanges.pipe(
+				Stream.runForEach((projectPath) =>
 					Effect.gen(function* () {
-						const newProjectPath = project?.path ?? process.cwd()
+						const newProjectPath = projectPath ?? process.cwd()
 						yield* Effect.log(`[DEBUG] Project watcher triggered: path=${newProjectPath}`)
 						const loaded = yield* loadConfigForPath(newProjectPath).pipe(
 							Effect.tap((v) =>
@@ -716,7 +744,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			 */
 			reload: () =>
 				Effect.gen(function* () {
-					const currentProjectPath = yield* projectService.getCurrentPath()
+					const currentProjectPath = yield* projectContext.getCurrentPath()
 					const effectiveProjectPath = currentProjectPath ?? process.cwd()
 					const loaded = yield* loadConfigForPath(effectiveProjectPath).pipe(
 						Effect.catchAll((e) => {

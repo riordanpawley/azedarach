@@ -9,6 +9,10 @@ export {
 	// Service
 	AppConfig,
 	AppConfigConfig,
+	AppConfigNotifier,
+	type AppConfigNotifierApi,
+	AppConfigProjectContext,
+	type AppConfigProjectContextApi,
 	type AppConfigService,
 	// Errors
 	ConfigError,

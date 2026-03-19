@@ -13,6 +13,10 @@
 import {
 	AppConfig,
 	AppConfigConfig,
+	AppConfigNotifier,
+	type AppConfigNotifierApi,
+	AppConfigProjectContext,
+	type AppConfigProjectContextApi,
 	type AzedarachConfig,
 	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
@@ -51,6 +55,7 @@ import {
 	LogLevel,
 	Option,
 	Schema,
+	Stream,
 	SubscriptionRef,
 } from "effect"
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
@@ -160,22 +165,46 @@ const telemetryLayer =
 
 const CLI_VERSION = packageJson.version
 
-const buildAppConfigLayer = (configPath: string | null) => {
-	if (configPath === null) {
-		return AppConfig.Default
-	}
-
-	return AppConfig.Default.pipe(
-		Layer.provide(
-			Layer.succeed(
-				AppConfigConfig,
-				AppConfigConfig.make({
-					configPath,
-					projectPath: process.cwd(),
-				}),
+const appConfigProjectContextLayer = Layer.effect(
+	AppConfigProjectContext,
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		return {
+			getCurrentPath: () => projectService.getCurrentPath(),
+			currentProjectPathChanges: projectService.currentProject.changes.pipe(
+				Stream.map((project) => project?.path),
 			),
-		),
-	)
+		} satisfies AppConfigProjectContextApi
+	}),
+)
+
+const appConfigNotifierLayer = Layer.effect(
+	AppConfigNotifier,
+	Effect.gen(function* () {
+		const toastService = yield* ToastService
+		return {
+			showError: (message: string) => Effect.asVoid(toastService.show("error", message)),
+		} satisfies AppConfigNotifierApi
+	}),
+)
+
+const buildAppConfigLayer = (configPath: string | null) => {
+	const baseLayer =
+		configPath === null
+			? AppConfig.Default
+			: AppConfig.Default.pipe(
+					Layer.provide(
+						Layer.succeed(
+							AppConfigConfig,
+							AppConfigConfig.make({
+								configPath,
+								projectPath: process.cwd(),
+							}),
+						),
+					),
+				)
+
+	return baseLayer
 }
 
 /**
@@ -197,18 +226,18 @@ const createFullCliLayer = (configPath: string | null) =>
 		TerminalService.Default,
 		EditorService.Default,
 		KeyboardService.Default,
-		ToastService.Default,
 		NavigationService.Default,
 		SessionManager.Default,
 		IssueTrackerClient.Default,
 		buildAppConfigLayer(configPath),
+		appConfigProjectContextLayer,
+		appConfigNotifierLayer,
 		VCService.Default,
 		ViewService.Default,
 		TmuxSessionMonitor.Default,
 		CommandQueueService.Default,
 		PTYMonitor.Default,
 		DiagnosticsService.Default,
-		ProjectService.Default,
 		ProjectStateService.Default,
 		SettingsService.Default,
 		TemplateService.Default,
@@ -219,6 +248,8 @@ const createFullCliLayer = (configPath: string | null) =>
 		PlanningService.Default,
 		SpecService.Default,
 	).pipe(
+		Layer.provideMerge(ToastService.Default),
+		Layer.provideMerge(ProjectService.Default),
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
@@ -232,11 +263,14 @@ const createFullCliLayer = (configPath: string | null) =>
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
 		buildAppConfigLayer(configPath),
-		ProjectService.Default,
+		appConfigProjectContextLayer,
+		appConfigNotifierLayer,
 		IssueTrackerClient.Default,
 		SessionManager.Default,
 		SpecService.Default,
 	).pipe(
+		Layer.provideMerge(ToastService.Default),
+		Layer.provideMerge(ProjectService.Default),
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),

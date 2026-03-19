@@ -4,11 +4,17 @@
  * Creates the appRuntime that all other atoms use for Effect integration.
  */
 
-import { AppConfig } from "@azedarach/config"
+import {
+	AppConfig,
+	AppConfigNotifier,
+	type AppConfigNotifierApi,
+	AppConfigProjectContext,
+	type AppConfigProjectContextApi,
+} from "@azedarach/config"
 import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
-import { Layer, Logger } from "effect"
+import { Effect, Layer, Logger, Stream } from "effect"
 import {
 	AttachmentService,
 	BoardService,
@@ -56,6 +62,29 @@ export const resolveTuiRuntimeModeFromEnv = (
 	_env: Readonly<Record<string, string | undefined>>,
 ): TuiRuntimeMode => "daemon-rpc"
 
+const appConfigProjectContextLayer = Layer.effect(
+	AppConfigProjectContext,
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		return {
+			getCurrentPath: () => projectService.getCurrentPath(),
+			currentProjectPathChanges: projectService.currentProject.changes.pipe(
+				Stream.map((project) => project?.path),
+			),
+		} satisfies AppConfigProjectContextApi
+	}),
+)
+
+const appConfigNotifierLayer = Layer.effect(
+	AppConfigNotifier,
+	Effect.gen(function* () {
+		const toastService = yield* ToastService
+		return {
+			showError: (message: string) => Effect.asVoid(toastService.show("error", message)),
+		} satisfies AppConfigNotifierApi
+	}),
+)
+
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	SessionService.Default,
@@ -70,16 +99,16 @@ const coreServicesLayer = Layer.mergeAll(
 	TerminalService.Default,
 	EditorService.Default,
 	KeyboardService.Default,
-	ToastService.Default,
 	NavigationService.Default,
 	SessionManager.Default,
 	IssueTrackerClient.Default,
+	appConfigProjectContextLayer,
+	appConfigNotifierLayer,
 	AppConfig.Default,
 	ViewService.Default,
 	CommandQueueService.Default,
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
-	ProjectService.Default,
 	ProjectStateService.Default,
 	SettingsService.Default,
 	TemplateService.Default,
@@ -87,7 +116,7 @@ const coreServicesLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
-)
+).pipe(Layer.provideMerge(ToastService.Default), Layer.provideMerge(ProjectService.Default))
 
 const deferredServicesLayer = Layer.mergeAll(
 	PlanningService.Default,

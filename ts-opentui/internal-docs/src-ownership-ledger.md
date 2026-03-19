@@ -63,8 +63,6 @@ Risk controls:
 ts-opentui/packages/cli/src/ui-launch.d.ts:1:declare module "../../../src/ui/launch.js" {
 ts-opentui/packages/cli/src/runtimeServices.ts:29:} from "../../../src/runtime/appServicesFacade.js"
 ts-opentui/packages/cli/src/runtimeServices.ts:61:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/config/src/AppConfig.ts:15:import { ProjectService } from "../../../src/services/ProjectService.js"
-ts-opentui/packages/config/src/AppConfig.ts:16:import { ToastService } from "../../../src/services/ToastService.js"
 ts-opentui/packages/daemon/src/BackendDaemonControlService.ts:3:import type { TaskWithSession } from "../../../src/ui/types.js"
 ts-opentui/packages/daemon/src/runtimeServices.ts:8:} from "../../../src/runtime/coreServicesFacade.js"
 ts-opentui/packages/tui/src/utils/runtimeServices.ts:29:} from "../../../../src/runtime/appServicesFacade.js"
@@ -195,12 +193,12 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:59:} from "../../../../src/
 - [ ] status=pending owner-child= path=src/services/OverlayService.ts
 - [ ] status=pending owner-child= path=src/services/PRStateService.ts
 - [ ] status=pending owner-child= path=src/services/ProjectService.test.ts
-- [ ] status=pending owner-child= path=src/services/ProjectService.ts
+- [x] status=approved-residual owner-child=xj path=src/services/ProjectService.ts
 - [ ] status=pending owner-child= path=src/services/ProjectStateService.ts
 - [ ] status=pending owner-child= path=src/services/SessionService.ts
 - [ ] status=pending owner-child= path=src/services/SettingsService.test.ts
 - [ ] status=pending owner-child= path=src/services/SettingsService.ts
-- [ ] status=pending owner-child= path=src/services/ToastService.ts
+- [x] status=approved-residual owner-child=xj path=src/services/ToastService.ts
 - [ ] status=pending owner-child= path=src/services/ViewService.ts
 - [ ] status=pending owner-child= path=src/services/keyboard/DevServerHandlersService.ts
 - [ ] status=pending owner-child= path=src/services/keyboard/InputHandlersService.ts

@@ -125,7 +125,8 @@ check_forbidden_imports "packages/entry/src" "packages/entry" \
     'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules or dedicated runtime facades instead.'
 
 check_forbidden_imports "packages/config/src" "packages/config" \
-    'src/core/:::Do not import legacy src/core from @azedarach/config. Move path/config helpers into the package-owned surface.'
+    'src/core/:::Do not import legacy src/core from @azedarach/config. Move path/config helpers into the package-owned surface.' \
+    'src/services/:::Do not import legacy src/services from @azedarach/config. Provide config-facing service ports from composition sites instead.'
 
 check_legacy_service_imports() {
 	local hits=()
