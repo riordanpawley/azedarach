@@ -5,7 +5,12 @@
  */
 
 import { AppConfig } from "@azedarach/config"
-import { Effect, SubscriptionRef } from "effect"
+import {
+	DaemonRpcClient,
+	type DaemonRpcClientApi,
+	type SpecPublishOutcome as DaemonSpecPublishOutcome,
+} from "@azedarach/shared/rpc"
+import { Data, DateTime, Effect, SubscriptionRef } from "effect"
 import type {
 	ImplementationRegistry,
 	SpecCoverageReport,
@@ -13,7 +18,7 @@ import type {
 	SpecPublishOutcome,
 } from "../contracts.js"
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../contracts.js"
-import { EditorService, IssueTrackerClient, SpecService } from "../utils/runtimeServices.js"
+import { EditorService, ProjectService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {
@@ -51,10 +56,14 @@ export const DEFAULT_SPEC_WORKSPACE_STATE: SpecWorkspaceState = {
 const errorMessage = (error: unknown): string =>
 	error instanceof Error ? error.message : String(error)
 
+class TuiSpecRpcUnavailableError extends Data.TaggedError("TuiSpecRpcUnavailableError")<{
+	readonly message: string
+}> {}
+
 const implementationNames = (registry: ImplementationRegistry): readonly string[] =>
 	registry.implementations.map((implementation) => implementation.name)
 
-const resolveSelectedImplementation = (
+export const resolveSelectedImplementation = (
 	requestedImplementation: string | null,
 	registry: ImplementationRegistry,
 ): string => {
@@ -68,17 +77,36 @@ const resolveSelectedImplementation = (
 	return registry.default_implementation
 }
 
+export const toTuiSpecPublishOutcome = (outcome: DaemonSpecPublishOutcome): SpecPublishOutcome => ({
+	...outcome,
+	started_at: DateTime.unsafeMake(outcome.started_at),
+	finished_at: DateTime.unsafeMake(outcome.finished_at),
+})
+
+const getDaemonRpcClient = (): Effect.Effect<DaemonRpcClientApi, TuiSpecRpcUnavailableError> =>
+	Effect.gen(function* () {
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		if (daemonRpcClient._tag === "None") {
+			return yield* Effect.fail(
+				new TuiSpecRpcUnavailableError({
+					message: "Daemon RPC client is unavailable for the TUI spec workspace",
+				}),
+			)
+		}
+		return daemonRpcClient.value
+	})
+
 const loadSpecWorkspaceState = ({
 	stateRef,
-	spec,
-	issueTrackerClient,
+	daemonRpcClient,
 	editor,
+	projectPath,
 	requestedImplementation,
 }: {
 	readonly stateRef: SubscriptionRef.SubscriptionRef<SpecWorkspaceState>
-	readonly spec: SpecService
-	readonly issueTrackerClient: IssueTrackerClient
+	readonly daemonRpcClient: DaemonRpcClientApi
 	readonly editor: EditorService
+	readonly projectPath: string
 	readonly requestedImplementation: string | null
 }) =>
 	Effect.gen(function* () {
@@ -88,16 +116,30 @@ const loadSpecWorkspaceState = ({
 			error: null,
 		}))
 
-		const registry = yield* issueTrackerClient.getImplementationRegistry()
+		const registryResponse = yield* daemonRpcClient.implementationGetRegistry({
+			projectPath,
+		})
+		const registry = registryResponse.registry
 		const availableImplementations = implementationNames(registry)
 		const selectedImplementation = resolveSelectedImplementation(requestedImplementation, registry)
 
-		const [coverageReport, parityReport, publishConfig, lastPublishOutcome] = yield* Effect.all([
-			spec.getCoverageReport(),
-			spec.getParityReport(selectedImplementation),
-			spec.getPublishConfig(),
-			spec.getLastPublishOutcome(),
-		])
+		const [readResult, parityResult, publishConfigResult, publishOutcomeResult] = yield* Effect.all(
+			[
+				daemonRpcClient.specRead({
+					projectPath,
+				}),
+				daemonRpcClient.specParity({
+					implementation: selectedImplementation,
+					projectPath,
+				}),
+				daemonRpcClient.specPublishConfigGet({
+					projectPath,
+				}),
+				daemonRpcClient.specPublishOutcomeGet({
+					projectPath,
+				}),
+			],
+		)
 
 		yield* editor.syncSpecImplementations(availableImplementations, selectedImplementation)
 
@@ -106,10 +148,13 @@ const loadSpecWorkspaceState = ({
 			error: null,
 			availableImplementations,
 			selectedImplementation,
-			coverageReport,
-			parityReport,
-			publishConfig,
-			lastPublishOutcome: lastPublishOutcome ?? null,
+			coverageReport: readResult.coverage,
+			parityReport: parityResult.report,
+			publishConfig: publishConfigResult.config,
+			lastPublishOutcome:
+				publishOutcomeResult.last_outcome === null
+					? null
+					: toTuiSpecPublishOutcome(publishOutcomeResult.last_outcome),
 			refreshedAt: new Date().toISOString(),
 		})
 	}).pipe(
@@ -136,22 +181,23 @@ export const specWorkspaceStateAtom = appRuntime.subscriptionRef((get) =>
 export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
-		const spec = yield* SpecService
-		const issueTrackerClient = yield* IssueTrackerClient
 		const editor = yield* EditorService
+		const projectService = yield* ProjectService
 		const stateRef = yield* get.result(specWorkspaceStateRefAtom)
 		const specConfig = yield* appConfig.getSpecConfig()
 		if (!specConfig.enabled) {
 			yield* SubscriptionRef.set(stateRef, DEFAULT_SPEC_WORKSPACE_STATE)
 			return
 		}
+		const daemonRpcClient = yield* getDaemonRpcClient()
 		const selectedImplementation = yield* editor.getSpecSelectedImplementation()
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		yield* loadSpecWorkspaceState({
 			stateRef,
-			spec,
-			issueTrackerClient,
+			daemonRpcClient,
 			editor,
+			projectPath,
 			requestedImplementation: selectedImplementation,
 		})
 	}),

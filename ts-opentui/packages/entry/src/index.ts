@@ -5,7 +5,7 @@ import {
 	resolveCliExecutionMode,
 } from "@azedarach/cli"
 import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
-import { launchTUI } from "@azedarach/tui"
+import { configureTuiDaemonRpcClient, launchTUI } from "@azedarach/tui"
 import { Effect } from "effect"
 
 export type AzEntrypointMode = "cli" | "tui"
@@ -35,9 +35,10 @@ export const runAz = (argv: ReadonlyArray<string>) => {
 	if (resolveAzEntrypointMode(argv) === "tui") {
 		return Effect.gen(function* () {
 			const daemonBootstrap = yield* GlobalDaemonBootstrap
-			yield* daemonBootstrap.bootstrapDaemonRpcClient({
+			const bootstrap = yield* daemonBootstrap.bootstrapDaemonRpcClient({
 				autoStart: true,
 			})
+			configureTuiDaemonRpcClient(bootstrap.client)
 			return yield* Effect.promise(() => launchTUI())
 		})
 	}

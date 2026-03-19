@@ -11,10 +11,11 @@ import {
 	AppConfigProjectContext,
 	type AppConfigProjectContextApi,
 } from "@azedarach/config"
+import { DaemonRpcClient, type DaemonRpcClientApi } from "@azedarach/shared/rpc"
 import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
-import { Effect, Layer, Logger, Stream } from "effect"
+import { Data, Effect, Layer, Logger, Stream } from "effect"
 import {
 	AttachmentService,
 	BoardService,
@@ -40,7 +41,6 @@ import {
 	SessionManager,
 	SessionService,
 	SettingsService,
-	SpecService,
 	TemplateService,
 	TerminalService,
 	TmuxService,
@@ -56,6 +56,18 @@ const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { fl
 const loggerLayer = Logger.replaceScoped(Logger.defaultLogger, fileLogger)
 export type TuiRuntimeMode = "daemon-rpc"
 export const AZEDARACH_TUI_RUNTIME_MODE_ENV = "AZEDARACH_TUI_RUNTIME_MODE"
+
+class TuiDaemonRpcClientNotConfiguredError extends Data.TaggedError(
+	"TuiDaemonRpcClientNotConfiguredError",
+)<{
+	readonly message: string
+}> {}
+
+let configuredTuiDaemonRpcClient: DaemonRpcClientApi | undefined
+
+export const configureTuiDaemonRpcClient = (daemonRpcClient: DaemonRpcClientApi): void => {
+	configuredTuiDaemonRpcClient = daemonRpcClient
+}
 
 export const resolveTuiRuntimeModeFromEnv = (
 	_env: Readonly<Record<string, string | undefined>>,
@@ -84,6 +96,21 @@ const appConfigNotifierLayer = Layer.effect(
 	}),
 )
 
+const daemonRpcClientLayer = Layer.effect(
+	DaemonRpcClient,
+	Effect.gen(function* () {
+		const daemonRpcClient = configuredTuiDaemonRpcClient
+		if (daemonRpcClient === undefined) {
+			return yield* Effect.fail(
+				new TuiDaemonRpcClientNotConfiguredError({
+					message: "TUI daemon RPC client must be configured before launch",
+				}),
+			)
+		}
+		return daemonRpcClient
+	}),
+)
+
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	SessionService.Default,
@@ -104,6 +131,7 @@ const coreServicesLayer = Layer.mergeAll(
 	appConfigProjectContextLayer,
 	appConfigNotifierLayer,
 	AppConfig.Default,
+	daemonRpcClientLayer,
 	ViewService.Default,
 	CommandQueueService.Default,
 	PTYMonitor.Default,
@@ -118,7 +146,6 @@ const coreServicesLayer = Layer.mergeAll(
 
 const deferredServicesLayer = Layer.mergeAll(
 	PlanningService.Default,
-	SpecService.Default,
 	TmuxSessionMonitor.Default,
 	VCService.Default,
 )

@@ -181,7 +181,7 @@ export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "
 // Project service atoms
 export { currentProjectAtom, projectsAtom, switchProjectAtom } from "./project.js"
 // Runtime (foundation for all other atoms)
-export { appRuntime } from "./runtime.js"
+export { appRuntime, configureTuiDaemonRpcClient } from "./runtime.js"
 // Session management atoms
 export {
 	attachExternalAtom,

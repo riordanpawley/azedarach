@@ -38,7 +38,6 @@ export {
 	PRWorkflow,
 	PTYMonitor,
 	SessionManager,
-	SpecService,
 	TemplateService,
 	TerminalService,
 	TmuxService,
