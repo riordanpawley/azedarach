@@ -1,5 +1,3 @@
-import type { BackendSyncInterface } from "@azedarach/shared"
-import { BackendSyncRouter } from "@azedarach/shared"
 import { FileSystem, Path } from "@effect/platform"
 import { Effect, Fiber, Option, Ref, type Scope } from "effect"
 import {
@@ -7,6 +5,7 @@ import {
 	makeDaemonStateStore,
 	toDaemonStatus,
 } from "./DaemonStateStore.js"
+import { type BackendSyncInterface, BackendSyncRouter } from "./runtimeServices.js"
 
 const DEFAULT_INTERVAL_MS = 5_000
 const MIN_INTERVAL_MS = 50

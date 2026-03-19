@@ -1,8 +1,4 @@
 export {
-	deriveWaitingSessionOptions,
-	type WaitingSessionOption,
-} from "../../../../src/lib/waitingSessions.js"
-export {
 	BoardService,
 	ClockService,
 	CommandQueueService,
@@ -27,10 +23,13 @@ export {
 	type SettingValue,
 	ToastService,
 	ViewService,
-} from "../../../../src/runtime/appServicesFacade.js"
+} from "../../../src/runtime/appServicesFacade.js"
 export {
 	AttachmentService,
 	AZEDARACH_STORAGE_DIRECTORY,
+	type BackendSyncInterface,
+	BackendSyncRouter,
+	type BackendSyncRouterService,
 	deepMerge,
 	deepMergeWithDedup,
 	generateHookConfig,
@@ -43,6 +42,7 @@ export {
 	IssueEditorService,
 	IssueTrackerClient,
 	issueIdsEqualForLookup,
+	LocalIssueStore,
 	PlanningService,
 	PRWorkflow,
 	PTYMonitor,
@@ -50,26 +50,12 @@ export {
 	resolveConfiguredIssueBackend,
 	resolveDaemonIntervalMsFromEnv,
 	SessionManager,
+	type SpecLinkFulfillmentStatus,
+	type SpecRequirementLookupSelector,
 	SpecService,
 	TemplateService,
 	TerminalService,
 	TmuxService,
 	TmuxSessionMonitor,
 	VCService,
-} from "../../../../src/runtime/coreServicesFacade.js"
-export type {
-	DevServerStatus,
-	DiagnosticsState,
-	FilterField,
-	ImageAttachment,
-	OrchestrationTask,
-	PhaseComputationResult,
-	SortField,
-	TaskPhaseInfo,
-	VCExecutorInfo,
-} from "../contracts.js"
-export { computeElapsedFormatted } from "./clockHelpers.js"
-export { computeDependencyPhases } from "./dependencyPhases.js"
-export { formatForToast } from "./formatForToast.js"
-export { getIssueCreateImplementations } from "./issueImplementations.js"
-export { buildTaskQueueKey } from "./queueKey.js"
+} from "../../../src/runtime/coreServicesFacade.js"

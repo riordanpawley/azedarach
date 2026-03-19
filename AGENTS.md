@@ -108,11 +108,18 @@ Sync behavior:
 
 ```
 ts-opentui/
+├── packages/
+│   ├── shared/         # RPC contracts/client primitives only
+│   ├── daemon-control/ # lifecycle contract only
+│   ├── daemon/         # live daemon implementation
+│   ├── cli/            # CLI runtime
+│   ├── tui/            # TUI runtime
+│   └── entry/          # az runtime composition/router
 ├── src/
-│   ├── ui/           # OpenTUI + React components (Board, TaskCard, etc.)
-│   ├── core/         # Effect services (SessionManager, TmuxService, etc.)
-│   ├── services/     # Application services (Navigation, Editor, etc.)
-│   └── config/       # Configuration and schemas
+│   ├── core/           # remaining app-core modules
+│   ├── services/       # remaining app services
+│   ├── runtime/        # package-safe runtime facades
+│   └── config/         # Configuration and schemas
 
 go-bubbletea/
 ├── cmd/              # Main applications (minimal wiring)

@@ -1,6 +1,6 @@
-import { IssueTrackerClient } from "@azedarach/shared"
 import { Effect } from "effect"
 import type { ImplementationRegistry } from "../contracts.js"
+import { IssueTrackerClient } from "./runtimeServices.js"
 
 const normalizeImplementationName = (value: string): string => value.trim().toLowerCase()
 

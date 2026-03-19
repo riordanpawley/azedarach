@@ -6,10 +6,10 @@
  */
 
 import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
-import { DevServerService, type DevServerState, ProjectService } from "@azedarach/shared"
 import { Args, Command, Options } from "@effect/cli"
 import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
 import { resolveCliIssueId } from "./issueIdResolver.js"
+import { DevServerService, type DevServerState, ProjectService } from "./runtimeServices.js"
 
 const CLI_DEFAULT_SERVER_NAME = "default"
 

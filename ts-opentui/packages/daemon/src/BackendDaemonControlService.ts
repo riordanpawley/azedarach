@@ -1,4 +1,3 @@
-import { LocalIssueStore, SessionManager } from "@azedarach/shared"
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
 import { AppConfig } from "../../../src/config/AppConfig.js"
 import type { TaskWithSession } from "../../../src/ui/types.js"
@@ -21,6 +20,7 @@ import {
 	type DevServerDaemonStatusRequest,
 	type DevServerDaemonStatusResult,
 } from "./DevServerDaemonService.js"
+import { LocalIssueStore, SessionManager } from "./runtimeServices.js"
 
 export interface BackendDaemonControlStatus {
 	readonly checkedAtMs: number

@@ -74,14 +74,27 @@ fd "filename" -t f src docs
 ```text
 ts-opentui/
 ├── packages/
-│   ├── shared/      # Canonical daemon RPC contracts/client
-│   ├── daemon/      # Canonical daemon runtime/services
-│   ├── tui/         # Canonical TUI runtime/launch
-│   └── cli/         # Canonical CLI runtime/commands
-├── src/             # Transitional compatibility shims + remaining app modules
-├── src/config/      # config + schema
-└── docs/spec/       # behavior specification
+│   ├── shared/         # RPC contracts/client primitives only
+│   ├── daemon-control/ # Lifecycle service contract only
+│   ├── daemon/         # Live daemon lifecycle/discovery implementation
+│   ├── cli/            # CLI runtime/commands (depends on daemon-control contract)
+│   ├── tui/            # TUI runtime/launch (depends on daemon-control contract)
+│   └── entry/          # Runtime composition + mode routing for az
+├── src/
+│   ├── core/           # Remaining app-core modules not yet package-owned
+│   ├── services/       # Remaining app services not yet package-owned
+│   ├── runtime/        # Facades used to avoid package->legacy src/core|services imports
+│   └── config/         # config + schema
+└── docs/spec/          # behavior specification
 ```
+
+## Boundary Contributor Guide
+
+- Keep `@azedarach/shared` RPC-only; import shared contracts from `@azedarach/shared/rpc`.
+- Keep daemon lifecycle contracts in `@azedarach/daemon-control` and live implementation in `@azedarach/daemon`.
+- Do not import `@azedarach/daemon` from `packages/cli` or `packages/tui`.
+- Do not add package imports to legacy `src/cli`, `src/core`, `src/daemon`, `src/rpc`, or `src/services`.
+- Compose runtime layers in `packages/entry` (CLI + TUI launch paths), not in package internals.
 
 ## Skills
 
