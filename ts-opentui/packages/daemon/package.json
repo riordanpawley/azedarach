@@ -3,6 +3,7 @@
 	"private": true,
 	"type": "module",
 	"dependencies": {
+		"@azedarach/config": "workspace:*",
 		"@azedarach/daemon-control": "workspace:*",
 		"@azedarach/shared": "workspace:*"
 	},

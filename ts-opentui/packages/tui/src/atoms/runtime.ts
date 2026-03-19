@@ -4,11 +4,11 @@
  * Creates the appRuntime that all other atoms use for Effect integration.
  */
 
+import { AppConfig } from "@azedarach/config"
 import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
 import { Layer, Logger } from "effect"
-import { AppConfig } from "../../../../src/config/index.js"
 import {
 	AttachmentService,
 	BoardService,

@@ -88,11 +88,11 @@ ts-opentui/packages/tui/src/runtimeControl.ts:5:} from "../../../src/lib/runtime
 
 ## config
 
-- [ ] status=pending owner-child= path=src/config/AppConfig.ts
-- [ ] status=pending owner-child= path=src/config/defaults.ts
-- [ ] status=pending owner-child= path=src/config/index.ts
-- [ ] status=pending owner-child= path=src/config/schema.test.ts
-- [ ] status=pending owner-child= path=src/config/schema.ts
+- [x] status=approved-residual owner-child=xh path=src/config/AppConfig.ts
+- [x] status=approved-residual owner-child=xh path=src/config/defaults.ts
+- [x] status=approved-residual owner-child=xh path=src/config/index.ts
+- [x] status=approved-residual owner-child=xh path=src/config/schema.test.ts
+- [x] status=approved-residual owner-child=xh path=src/config/schema.ts
 
 ## core
 
@@ -160,14 +160,14 @@ ts-opentui/packages/tui/src/runtimeControl.ts:5:} from "../../../src/lib/runtime
 
 ## lib
 
-- [ ] status=pending owner-child= path=src/lib/ansi.ts
-- [ ] status=pending owner-child= path=src/lib/editorPopupState.ts
-- [ ] status=pending owner-child= path=src/lib/empty.ts
-- [ ] status=pending owner-child= path=src/lib/runtimeControl.ts
-- [ ] status=pending owner-child= path=src/lib/taskTypes.ts
-- [ ] status=pending owner-child= path=src/lib/tmux-wrap.ts
-- [ ] status=pending owner-child= path=src/lib/waitingSessions.test.ts
-- [ ] status=pending owner-child= path=src/lib/waitingSessions.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/ansi.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/editorPopupState.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/empty.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/runtimeControl.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/taskTypes.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/tmux-wrap.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/waitingSessions.test.ts
+- [x] status=approved-residual owner-child=xh path=src/lib/waitingSessions.ts
 
 ## runtime
 

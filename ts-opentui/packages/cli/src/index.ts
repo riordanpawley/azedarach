@@ -11,6 +11,13 @@
  */
 
 import {
+	AppConfig,
+	AppConfigConfig,
+	type AzedarachConfig,
+	AzedarachConfigJsonSchema,
+	AzedarachConfigSchema,
+} from "@azedarach/config"
+import {
 	formatDaemonRpcClientFailure,
 	GlobalDaemonBootstrap,
 	type GlobalDaemonBootstrapApi,
@@ -48,12 +55,6 @@ import {
 } from "effect"
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
 import packageJson from "../../../package.json" with { type: "json" }
-import { AppConfig, AppConfigConfig } from "../../../src/config/AppConfig.js"
-import {
-	type AzedarachConfig,
-	AzedarachConfigJsonSchema,
-	AzedarachConfigSchema,
-} from "../../../src/config/schema.js"
 import {
 	hasVerboseFlag,
 	normalizeCliAliases,

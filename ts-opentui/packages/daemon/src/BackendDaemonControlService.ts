@@ -1,5 +1,5 @@
+import { AppConfig } from "@azedarach/config"
 import { Data, Duration, Effect, Ref, Schedule } from "effect"
-import { AppConfig } from "../../../src/config/AppConfig.js"
 import type { TaskWithSession } from "../../../src/ui/types.js"
 import {
 	BackendDaemonService,

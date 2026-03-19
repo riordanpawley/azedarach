@@ -1,9 +1,10 @@
 /**
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
+
+import type { WorkflowMode } from "@azedarach/config"
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useMemo, useState } from "react"
-import type { WorkflowMode } from "../../../src/config/schema.js"
 import type { DevServerStatus, TmuxCapabilities } from "./contracts.js"
 import { theme } from "./theme.js"
 import { hasTaskSessionPresence, hasTaskWorktreeContext, type TaskWithSession } from "./types.js"

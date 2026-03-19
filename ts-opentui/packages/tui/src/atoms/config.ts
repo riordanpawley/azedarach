@@ -2,9 +2,9 @@
  * Config atoms
  */
 
+import { AppConfig } from "@azedarach/config"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { AppConfig } from "../../../../src/config/index.js"
 import { appRuntime } from "./runtime.js"
 
 export const appConfigAtom = appRuntime.subscriptionRef(

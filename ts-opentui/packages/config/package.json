@@ -1,12 +1,8 @@
 {
-	"name": "@azedarach/tui",
+	"name": "@azedarach/config",
 	"version": "0.0.0",
 	"private": true,
 	"type": "module",
-	"dependencies": {
-		"@azedarach/config": "workspace:*",
-		"@azedarach/shared": "workspace:*"
-	},
 	"exports": {
 		".": "./src/index.ts"
 	},

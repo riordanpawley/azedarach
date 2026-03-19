@@ -37,13 +37,19 @@
       "name": "@azedarach/cli",
       "version": "0.0.0",
       "dependencies": {
+        "@azedarach/config": "workspace:*",
         "@azedarach/daemon-control": "workspace:*",
         "@azedarach/shared": "workspace:*",
       },
     },
+    "packages/config": {
+      "name": "@azedarach/config",
+      "version": "0.0.0",
+    },
     "packages/daemon": {
       "name": "@azedarach/daemon",
       "dependencies": {
+        "@azedarach/config": "workspace:*",
         "@azedarach/daemon-control": "workspace:*",
         "@azedarach/shared": "workspace:*",
       },
@@ -72,12 +78,15 @@
       "name": "@azedarach/tui",
       "version": "0.0.0",
       "dependencies": {
+        "@azedarach/config": "workspace:*",
         "@azedarach/shared": "workspace:*",
       },
     },
   },
   "packages": {
     "@azedarach/cli": ["@azedarach/cli@workspace:packages/cli"],
+
+    "@azedarach/config": ["@azedarach/config@workspace:packages/config"],
 
     "@azedarach/daemon": ["@azedarach/daemon@workspace:packages/daemon"],
 

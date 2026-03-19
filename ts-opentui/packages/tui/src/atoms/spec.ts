@@ -4,8 +4,8 @@
  * Handles loading and refreshing Spec workspace data.
  */
 
+import { AppConfig } from "@azedarach/config"
 import { Effect, SubscriptionRef } from "effect"
-import { AppConfig } from "../../../../src/config/index.js"
 import type {
 	ImplementationRegistry,
 	SpecCoverageReport,
