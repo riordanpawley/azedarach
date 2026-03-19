@@ -297,6 +297,15 @@ export interface VCExecutorInfo {
 	readonly lastActivity?: Date
 }
 
+export interface ImageAttachment {
+	readonly id: string
+	readonly filename: string
+	readonly originalPath: string
+	readonly mimeType: string
+	readonly size: number
+	readonly createdAt: string
+}
+
 export type DevServerStatus = "idle" | "starting" | "running" | "stopped" | "error"
 
 export interface Project {

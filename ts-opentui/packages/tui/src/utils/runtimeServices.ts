@@ -1,26 +1,19 @@
-export { AttachmentService } from "../../../../src/core/AttachmentService.js"
 export {
-	computeDependencyPhases,
-	type PhaseComputationResult,
-	type TaskPhaseInfo,
-} from "../../../../src/core/dependencyPhases.js"
-export {
-	type ImageAttachment,
+	AttachmentService,
 	ImageAttachmentService,
-} from "../../../../src/core/ImageAttachmentService.js"
-export { IssueEditorService } from "../../../../src/core/IssueEditorService.js"
-export { getIssueCreateImplementations } from "../../../../src/core/IssueImplementations.js"
-export { IssueTrackerClient } from "../../../../src/core/IssueTrackerClient.js"
-export { PlanningService } from "../../../../src/core/PlanningService.js"
-export { PRWorkflow } from "../../../../src/core/PRWorkflow.js"
-export { PTYMonitor } from "../../../../src/core/PTYMonitor.js"
-export { SessionManager } from "../../../../src/core/SessionManager.js"
-export { SpecService } from "../../../../src/core/SpecService.js"
-export { TemplateService } from "../../../../src/core/TemplateService.js"
-export { TerminalService } from "../../../../src/core/TerminalService.js"
-export { TmuxService } from "../../../../src/core/TmuxService.js"
-export { TmuxSessionMonitor } from "../../../../src/core/TmuxSessionMonitor.js"
-export { type VCExecutorInfo, VCService } from "../../../../src/core/VCService.js"
+	IssueEditorService,
+	IssueTrackerClient,
+	PlanningService,
+	PRWorkflow,
+	PTYMonitor,
+	SessionManager,
+	SpecService,
+	TemplateService,
+	TerminalService,
+	TmuxService,
+	TmuxSessionMonitor,
+	VCService,
+} from "@azedarach/shared"
 export {
 	deriveWaitingSessionOptions,
 	type WaitingSessionOption,
@@ -61,3 +54,11 @@ export { SessionService } from "../../../../src/services/SessionService.js"
 export { SettingsService } from "../../../../src/services/SettingsService.js"
 export { ToastService } from "../../../../src/services/ToastService.js"
 export { ViewService } from "../../../../src/services/ViewService.js"
+export type {
+	ImageAttachment,
+	PhaseComputationResult,
+	TaskPhaseInfo,
+	VCExecutorInfo,
+} from "../contracts.js"
+export { computeDependencyPhases } from "./dependencyPhases.js"
+export { getIssueCreateImplementations } from "./issueImplementations.js"

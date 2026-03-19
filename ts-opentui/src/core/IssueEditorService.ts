@@ -8,6 +8,11 @@
 import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Data, Effect } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import {
+	clearActiveEditorPopup,
+	killActiveEditorPopup,
+	setActiveEditorPopup,
+} from "../lib/editorPopupState.js"
 import { ProjectService } from "../services/ProjectService.js"
 import {
 	formatIssueImplementations,
@@ -18,75 +23,7 @@ import {
 import type { Issue } from "./IssueTrackerClient.js"
 import { IssueTrackerClient } from "./IssueTrackerClient.js"
 
-// ============================================================================
-// Popup State Tracking (for cleanup on SIGINT)
-// ============================================================================
-
-/**
- * Track active editor popup state for cleanup on process exit.
- * Stores both channel name and temp file path so we can kill the editor.
- */
-let activeEditorState: { channel: string; tempFile: string } | null = null
-
-/**
- * Kill any active tmux popup by terminating processes related to the editor.
- * Called on SIGINT to prevent orphaned popups.
- *
- * The popup is created with `-E` flag, so it closes when its command exits.
- * By killing processes that have the temp file in their command line, we close the popup.
- *
- * Note: lsof doesn't work because editors (vim, etc.) don't keep files open -
- * they read into a buffer and close the fd. We use pkill -f instead.
- */
-export const killActivePopup = (): void => {
-	if (activeEditorState) {
-		const { tempFile } = activeEditorState
-
-		try {
-			// Use pkill to kill any process with the temp file in its command line
-			// This catches: the shell in the popup, the editor, etc.
-			// The -f flag matches against the full command line
-			Bun.spawnSync(["pkill", "-f", tempFile], {
-				stdin: "ignore",
-				stdout: "ignore",
-				stderr: "ignore",
-			})
-		} catch {
-			// pkill may not be available, try pgrep + manual kill
-			try {
-				const result = Bun.spawnSync(["pgrep", "-f", tempFile], {
-					stdin: "ignore",
-					stdout: "pipe",
-					stderr: "ignore",
-				})
-
-				if (result.stdout) {
-					const output = Buffer.isBuffer(result.stdout)
-						? result.stdout.toString()
-						: String(result.stdout)
-					const pids = output.trim().split("\n").filter(Boolean)
-
-					for (const pidStr of pids) {
-						const pid = parseInt(pidStr, 10)
-						// Don't kill ourselves!
-						if (!Number.isNaN(pid) && pid > 0 && pid !== process.pid) {
-							try {
-								process.kill(pid, "SIGTERM")
-							} catch {
-								// Process may have already exited
-							}
-						}
-					}
-				}
-			} catch {
-				// Fallback failed too
-			}
-		}
-
-		// Clear the state
-		activeEditorState = null
-	}
-}
+export const killActivePopup = killActiveEditorPopup
 
 // ============================================================================
 // Error Types
@@ -762,7 +699,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 					const channel = `az-editor-${Date.now()}`
 
 					// Track state for cleanup on SIGINT
-					activeEditorState = { channel, tempFile }
+					setActiveEditorPopup({ channel, tempFile })
 
 					// Launch popup - when editor exits, it signals the channel
 					Bun.spawnSync(
@@ -791,7 +728,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 						stderr: "inherit",
 					})
 
-					activeEditorState = null
+					clearActiveEditorPopup()
 
 					// 5. Read edited content
 					const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
@@ -902,7 +839,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 					const channel = `az-editor-${Date.now()}`
 
 					// Track state for cleanup on SIGINT
-					activeEditorState = { channel, tempFile }
+					setActiveEditorPopup({ channel, tempFile })
 
 					// Launch popup - when editor exits, it signals the channel
 					Bun.spawnSync(
@@ -931,7 +868,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 						stderr: "inherit",
 					})
 
-					activeEditorState = null
+					clearActiveEditorPopup()
 
 					// 5. Read edited content
 					const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
