@@ -66,6 +66,7 @@ coverage/
 .nyc_output/
 .beads/bd.sock.startlock
 .codanna/index
+ts-opentui/.codanna/
 .fastembed_cache
 .beads/export-state/b02f4e6754393de9.json
 
