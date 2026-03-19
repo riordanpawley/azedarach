@@ -3,17 +3,6 @@
 		"target": "ESNext",
 		"module": "ESNext",
 		"moduleResolution": "bundler",
-		"baseUrl": ".",
-		"paths": {
-			"@azedarach/daemon": ["packages/daemon/src/index.ts"],
-			"@azedarach/daemon/*": ["packages/daemon/src/*"],
-			"@azedarach/daemon-control": ["packages/daemon-control/src/index.ts"],
-			"@azedarach/daemon-control/*": ["packages/daemon-control/src/*"],
-			"@azedarach/shared": ["packages/shared/src/index.ts"],
-			"@azedarach/shared/*": ["packages/shared/src/*"],
-			"@azedarach/entry": ["packages/entry/src/index.ts"],
-			"@azedarach/entry/*": ["packages/entry/src/*"]
-		},
 		"strict": true,
 		"skipLibCheck": true,
 		"esModuleInterop": true,

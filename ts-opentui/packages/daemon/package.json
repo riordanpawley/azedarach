@@ -6,6 +6,10 @@
 		"@azedarach/daemon-control": "workspace:*",
 		"@azedarach/shared": "workspace:*"
 	},
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"main": "./src/index.ts",
 	"scripts": {
 		"type-check": "tsc --noEmit -p tsconfig.json"
 	}

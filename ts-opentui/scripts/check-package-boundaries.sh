@@ -165,6 +165,22 @@ check_workspace_effect_declarations() {
     fi
 }
 
+check_tsconfig_paths_absent() {
+    local hits=()
+    while IFS= read -r hit; do
+        [[ -n "$hit" ]] && hits+=("$hit")
+    done < <(
+        rg -n --no-heading '"paths"\s*:' . --glob 'tsconfig*.json' || true
+    )
+
+    if ((${#hits[@]} > 0)); then
+        printf 'Boundary violations (tsconfig path aliases):\n' >&2
+        printf '  Do not use tsconfig paths in this repo. Resolve workspace packages through package manifests and exports only.\n' >&2
+        printf '  %s\n' "${hits[@]}" >&2
+        fail=1
+    fi
+}
+
 check_shared_surface_is_rpc_only() {
 	local hits=()
 	while IFS= read -r hit; do
@@ -222,6 +238,7 @@ check_legacy_shim_core_files_absent() {
 
 check_legacy_service_imports
 check_workspace_effect_declarations
+check_tsconfig_paths_absent
 check_shared_surface_is_rpc_only
 check_legacy_shim_tree_absent "src/cli"
 check_legacy_shim_tree_absent "src/rpc"
