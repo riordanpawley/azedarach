@@ -5,7 +5,6 @@ export {
 } from "@azedarach/config"
 export {
 	BoardService,
-	ClockService,
 	CommandQueueService,
 	DiagnosticsService,
 	DiffService,
