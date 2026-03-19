@@ -7,6 +7,7 @@ export {
 	DiagnosticsService,
 	DiffService,
 	EditorService,
+	GitSyncService,
 	ImageAttachmentService,
 	IssueEditorService,
 	IssueTrackerClient,
@@ -37,7 +38,6 @@ export {
 	deriveWaitingSessionOptions,
 	type WaitingSessionOption,
 } from "../../../../src/lib/waitingSessions.js"
-export { GitSyncService } from "../../../../src/services/GitSyncService.js"
 export type {
 	DevServerState,
 	DevServerStatus,
