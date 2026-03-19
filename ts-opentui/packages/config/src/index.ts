@@ -17,6 +17,13 @@ export {
 
 // Defaults and resolved types
 export { DEFAULT_CONFIG, mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
+export {
+	AZEDARACH_STORAGE_DIRECTORY,
+	getProjectStoragePaths,
+	type ProjectStoragePaths,
+	resolveConfigBasePath,
+	resolveConfigSchemaPath,
+} from "./projectPaths.js"
 // Schema and types
 export {
 	AZEDARACH_CONFIG_JSON_SCHEMA_URI,

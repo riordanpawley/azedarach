@@ -12,10 +12,14 @@
 
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effect"
-import { getProjectStoragePaths, resolveConfigSchemaPath } from "../../../src/core/storagePaths.js"
-import { ProjectService, resolveConfigBasePath } from "../../../src/services/ProjectService.js"
+import { ProjectService } from "../../../src/services/ProjectService.js"
 import { ToastService } from "../../../src/services/ToastService.js"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
+import {
+	getProjectStoragePaths,
+	resolveConfigBasePath,
+	resolveConfigSchemaPath,
+} from "./projectPaths.js"
 import { type AzedarachConfig, AzedarachConfigJsonSchema, AzedarachConfigSchema } from "./schema.js"
 
 // ============================================================================

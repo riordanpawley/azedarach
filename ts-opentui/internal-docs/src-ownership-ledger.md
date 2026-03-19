@@ -61,24 +61,14 @@ Risk controls:
 - current package->src import edges:
 ```
 ts-opentui/packages/cli/src/ui-launch.d.ts:1:declare module "../../../src/ui/launch.js" {
-ts-opentui/packages/cli/src/runtimeServices.ts:26:} from "../../../src/runtime/appServicesFacade.js"
+ts-opentui/packages/cli/src/runtimeServices.ts:29:} from "../../../src/runtime/appServicesFacade.js"
 ts-opentui/packages/cli/src/runtimeServices.ts:61:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/cli/src/index.ts:51:import { AppConfig, AppConfigConfig } from "../../../src/config/AppConfig.js"
-ts-opentui/packages/cli/src/index.ts:56:} from "../../../src/config/schema.js"
-ts-opentui/packages/daemon/src/runtimeServices.ts:8:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/daemon/src/BackendDaemonControlService.ts:2:import { AppConfig } from "../../../src/config/AppConfig.js"
+ts-opentui/packages/config/src/AppConfig.ts:15:import { ProjectService } from "../../../src/services/ProjectService.js"
+ts-opentui/packages/config/src/AppConfig.ts:16:import { ToastService } from "../../../src/services/ToastService.js"
 ts-opentui/packages/daemon/src/BackendDaemonControlService.ts:3:import type { TaskWithSession } from "../../../src/ui/types.js"
-ts-opentui/packages/tui/src/utils/popupCleanup.ts:1:export { killActiveEditorPopup as killActivePopup } from "../../../../src/lib/editorPopupState.js"
-ts-opentui/packages/tui/src/atoms/task.ts:9:import { AppConfig } from "../../../../src/config/index.js"
-ts-opentui/packages/tui/src/atoms/task.ts:10:import type { CliTool } from "../../../../src/config/schema.js"
-ts-opentui/packages/tui/src/atoms/task.ts:11:import { stripAnsi } from "../../../../src/lib/ansi.js"
-ts-opentui/packages/tui/src/atoms/spec.ts:8:import { AppConfig } from "../../../../src/config/index.js"
-ts-opentui/packages/tui/src/atoms/config.ts:7:import { AppConfig } from "../../../../src/config/index.js"
-ts-opentui/packages/tui/src/atoms/runtime.ts:11:import { AppConfig } from "../../../../src/config/index.js"
-ts-opentui/packages/tui/src/utils/runtimeServices.ts:4:} from "../../../../src/lib/waitingSessions.js"
-ts-opentui/packages/tui/src/utils/runtimeServices.ts:30:} from "../../../../src/runtime/appServicesFacade.js"
+ts-opentui/packages/daemon/src/runtimeServices.ts:8:} from "../../../src/runtime/coreServicesFacade.js"
+ts-opentui/packages/tui/src/utils/runtimeServices.ts:29:} from "../../../../src/runtime/appServicesFacade.js"
 ts-opentui/packages/tui/src/utils/runtimeServices.ts:59:} from "../../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/tui/src/runtimeControl.ts:5:} from "../../../src/lib/runtimeControl.js"
 ```
 
 ## Classification Legend
@@ -156,7 +146,7 @@ ts-opentui/packages/tui/src/runtimeControl.ts:5:} from "../../../src/lib/runtime
 - [ ] status=pending owner-child= path=src/core/ptyHeuristics.ts
 - [ ] status=pending owner-child= path=src/core/shell.ts
 - [ ] status=pending owner-child= path=src/core/specTypes.ts
-- [ ] status=pending owner-child= path=src/core/storagePaths.ts
+- [x] status=approved-residual owner-child=xg path=src/core/storagePaths.ts
 
 ## lib
 

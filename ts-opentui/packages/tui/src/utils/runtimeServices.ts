@@ -1,4 +1,9 @@
 export {
+	AZEDARACH_STORAGE_DIRECTORY,
+	getProjectStoragePaths,
+	resolveConfigBasePath,
+} from "@azedarach/config"
+export {
 	BoardService,
 	ClockService,
 	CommandQueueService,
@@ -16,7 +21,6 @@ export {
 	type Project,
 	ProjectService,
 	ProjectStateService,
-	resolveConfigBasePath,
 	SessionService,
 	type SettingDefinition,
 	SettingsService,
@@ -26,12 +30,10 @@ export {
 } from "../../../../src/runtime/appServicesFacade.js"
 export {
 	AttachmentService,
-	AZEDARACH_STORAGE_DIRECTORY,
 	deepMerge,
 	deepMergeWithDedup,
 	generateHookConfig,
 	getIssueSessionName,
-	getProjectStoragePaths,
 	ImageAttachmentService,
 	type ImplementationRecord,
 	type ImplementationRegistry,
