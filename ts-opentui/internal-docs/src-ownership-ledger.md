@@ -12,6 +12,41 @@ uw cannot close until:
 3) src file count matches approved target.
 4) package->src imports are zero except explicitly approved residual paths.
 
+## Execution Plan (v2)
+
+Phase order:
+1) `xm` restore green baseline (`type-check` + boundaries)
+2) `xi` ledger discipline (always-on)
+3) `xh` migrate `src/config` + `src/lib`
+4) `xg` migrate `src/core` by ownership tranche
+5) `xj` migrate `src/services`
+6) `xl` migrate `src/ui` into `packages/tui`
+7) `xk` remove `src/runtime` facades and finalize zero package->src
+
+Dependency rules:
+- `xi` must remain in progress until all other migration children are closed.
+- `xm` must be closed before `xh/xg/xj/xl/xk` can close.
+- `xk` starts only after `xh`, `xg`, `xj`, and `xl` are complete.
+- No child can close unless ledger entries it touched are updated from `pending` to `migrated` or `approved-residual`.
+
+Per-phase gates:
+- Required per slice:
+  - `cd ts-opentui && bun run type-check`
+  - `cd ts-opentui && bun run check:boundaries`
+  - focused tests for touched surfaces
+- Required for integration checkpoints:
+  - `cd ts-opentui && bun run check:ci`
+- Required evidence:
+  - changed file list
+  - commands run + outcomes
+  - ledger delta (what moved, what remains)
+
+Risk controls:
+- No temporary facade additions without a tracked removal owner + child issue.
+- No acceptance drift: if target changes, update child AC before code changes.
+- No “green-check illusion”: package-only scans are insufficient without ledger-count delta.
+- No parent close while any `pending` ledger entries remain.
+
 ## Baseline Snapshot
 
 - src total files: 225
@@ -293,4 +328,3 @@ ts-opentui/packages/tui/src/runtimeControl.ts:5:} from "../../../src/lib/runtime
 - [ ] status=pending owner-child= path=src/ui/theme.ts
 - [ ] status=pending owner-child= path=src/ui/types.sessionPresence.test.ts
 - [ ] status=pending owner-child= path=src/ui/types.ts
-
