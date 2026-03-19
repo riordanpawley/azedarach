@@ -8,7 +8,6 @@ export {
 export { DiagnosticsService } from "../../../src/services/DiagnosticsService.js"
 export { DiffService } from "../../../src/services/DiffService.js"
 export { EditorService } from "../../../src/services/EditorService.js"
-export { GitSyncService } from "../../../src/services/GitSyncService.js"
 export { KeyboardService } from "../../../src/services/KeyboardService.js"
 export { MutationQueue } from "../../../src/services/MutationQueue.js"
 export { NavigationService } from "../../../src/services/NavigationService.js"

@@ -1,14 +1,13 @@
 /**
  * Git Sync Atoms
  *
- * Reactive state for GitSyncService - git fetch polling and pull notifications.
- *
- * Note: The notification logic (showing overlay when commits behind) is handled
- * entirely within GitSyncService using Stream.changes - no React side effects needed.
+ * Transitional boundary-safe facade while git sync migrates to daemon RPC.
+ * These atoms keep command surfaces available without depending on legacy
+ * TUI runtime service injection.
  */
 
 import { Effect } from "effect"
-import { GitSyncService } from "../utils/runtimeServices.js"
+import { BoardService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -23,24 +22,14 @@ import { appRuntime } from "./runtime.js"
  *
  * Usage: const commitsBehind = useAtomValue(commitsBehindAtom)
  */
-export const commitsBehindAtom = appRuntime.subscriptionRef(
-	Effect.gen(function* () {
-		const gitSync = yield* GitSyncService
-		return gitSync.commitsBehind
-	}),
-)
+export const commitsBehindAtom = appRuntime.atom(Effect.succeed(0), { initialValue: 0 })
 
 /**
  * Whether a git fetch is currently in progress
  *
  * Usage: const isFetching = useAtomValue(isFetchingAtom)
  */
-export const isFetchingAtom = appRuntime.subscriptionRef(
-	Effect.gen(function* () {
-		const gitSync = yield* GitSyncService
-		return gitSync.isFetching
-	}),
-)
+export const isFetchingAtom = appRuntime.atom(Effect.succeed(false), { initialValue: false })
 
 // ============================================================================
 // Action Atoms
@@ -56,8 +45,8 @@ export const isFetchingAtom = appRuntime.subscriptionRef(
  */
 export const fetchAndCheckAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const gitSync = yield* GitSyncService
-		yield* gitSync.fetchAndCheck()
+		const board = yield* BoardService
+		yield* board.refreshGitStats()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -69,7 +58,7 @@ export const fetchAndCheckAtom = appRuntime.fn(() =>
  */
 export const pullAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const gitSync = yield* GitSyncService
-		yield* gitSync.pull()
+		const board = yield* BoardService
+		yield* board.refreshGitStats()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )

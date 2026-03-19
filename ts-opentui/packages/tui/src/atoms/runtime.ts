@@ -18,7 +18,6 @@ import {
 	DiagnosticsService,
 	DiffService,
 	EditorService,
-	GitSyncService,
 	ImageAttachmentService,
 	IssueEditorService,
 	IssueTrackerClient,
@@ -88,7 +87,6 @@ const coreServicesLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
-	GitSyncService.Default,
 )
 
 const deferredServicesLayer = Layer.mergeAll(

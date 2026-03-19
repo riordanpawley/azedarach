@@ -15,7 +15,6 @@ import { detectTmuxCapabilities } from "../core/TmuxCapabilities.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { BoardService } from "./BoardService.js"
 import { EditorService } from "./EditorService.js"
-import { GitSyncService } from "./GitSyncService.js"
 import { createDefaultBindings } from "./keyboard/bindings.js"
 import { DevServerHandlersService } from "./keyboard/DevServerHandlersService.js"
 import { InputHandlersService } from "./keyboard/InputHandlersService.js"
@@ -59,7 +58,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		TmuxService.Default,
 		IssueTrackerClient.Default,
 		BoardService.Default,
-		GitSyncService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -87,7 +85,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const tmuxCapabilities = detectTmuxCapabilities()
 		const issueTrackerClient = yield* IssueTrackerClient
 		const board = yield* BoardService
-		const gitSync = yield* GitSyncService
 
 		// ====================================================================
 		// Create default keybindings
@@ -112,7 +109,6 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			tmuxCapabilities,
 			issueTrackerClient,
 			board,
-			gitSync,
 		})
 
 		const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(defaultBindings)

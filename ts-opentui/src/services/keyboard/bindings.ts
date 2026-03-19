@@ -12,7 +12,6 @@ import type { TmuxService } from "../../core/TmuxService.js"
 import { requestShutdown } from "../../lib/runtimeControl.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
-import type { GitSyncService } from "../GitSyncService.js"
 import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
 import type { SettingsService } from "../SettingsService.js"
@@ -58,7 +57,6 @@ export interface BindingContext {
 	tmuxCapabilities: TmuxCapabilities
 	issueTrackerClient: IssueTrackerClient
 	board: BoardService
-	gitSync: GitSyncService
 }
 
 // ============================================================================
@@ -339,7 +337,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "r",
 		mode: "normal",
 		description: "Refresh git stats",
-		action: bc.gitSync.fetchAndCheck().pipe(Effect.zipRight(bc.board.refreshGitStats())),
+		action: bc.board.refreshGitStats(),
 	},
 	{
 		key: "S-r",

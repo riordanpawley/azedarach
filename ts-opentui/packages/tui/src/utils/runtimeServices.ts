@@ -7,7 +7,6 @@ export {
 	DiagnosticsService,
 	DiffService,
 	EditorService,
-	GitSyncService,
 	ImageAttachmentService,
 	IssueEditorService,
 	IssueTrackerClient,
