@@ -7,8 +7,6 @@ export {
 	BoardService,
 	ClockService,
 	CommandQueueService,
-	DevServerService,
-	type DevServerState,
 	DiagnosticsService,
 	DiffService,
 	EditorService,

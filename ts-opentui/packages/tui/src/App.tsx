@@ -21,6 +21,7 @@ import {
 	createTaskAtom,
 	currentProjectAtom,
 	DEFAULT_SPEC_WORKSPACE_STATE,
+	devServerSyncStarterAtom,
 	drillDownEpicAtom,
 	drillDownPhasesAtom,
 	exitToNormalAtom,
@@ -252,6 +253,11 @@ const HydratedApp = () => {
 		if (!startupCapabilities.sessionMonitorReady) return
 		startSessionMonitor()
 	}, [startSessionMonitor, startupCapabilities.sessionMonitorReady])
+
+	const startDevServerSync = useAtomSet(devServerSyncStarterAtom, { mode: "promise" })
+	useEffect(() => {
+		startDevServerSync(undefined)
+	}, [startDevServerSync])
 
 	// Actions for prompts (these bypass keyboard handling)
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms

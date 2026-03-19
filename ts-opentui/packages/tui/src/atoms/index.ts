@@ -49,6 +49,7 @@ export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {
 	attachDevServerAtom,
+	devServerSyncStarterAtom,
 	devServersAtom,
 	focusedIssueDevServerViewsAtom,
 	focusedIssuePrimaryDevServerAtom,

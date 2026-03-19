@@ -1,9 +1,19 @@
-import { Atom, Result } from "@effect-atom/atom"
-import { Effect, HashMap, Option } from "effect"
 import {
-	DevServerService,
-	type DevServerState,
-	type DevServerStatus,
+	type DaemonDevServerListRequest,
+	type DaemonDevServerListResult,
+	type DaemonDevServerMutationResult,
+	type DaemonDevServerStartRequest,
+	type DaemonDevServerState,
+	type DaemonDevServerStatusRequest,
+	type DaemonDevServerStatusResult,
+	type DaemonDevServerStopRequest,
+	DaemonRpcClient,
+	type DaemonRpcClientApi,
+} from "@azedarach/shared/rpc"
+import { Atom, Result } from "@effect-atom/atom"
+import { Data, Effect, HashMap, Option, Schedule, SubscriptionRef } from "effect"
+import type { DevServerStatus } from "../contracts.js"
+import {
 	NavigationService,
 	ProjectService,
 	TmuxService,
@@ -22,27 +32,236 @@ export interface DevServerView {
 	readonly error?: string
 }
 
+interface DevServerState {
+	readonly name: string
+	readonly status: DevServerStatus
+	readonly port: number | undefined
+	readonly windowName: string | undefined
+	readonly tmuxSession: string | undefined
+	readonly worktreePath: string | undefined
+	readonly startedAt: Date | undefined
+	readonly error: string | undefined
+}
+
+type IssueDevServersState = HashMap.HashMap<string, DevServerState>
+type DevServersState = HashMap.HashMap<string, IssueDevServersState>
+
 const EMPTY_DEV_SERVER_VIEWS: readonly DevServerView[] = []
+const EMPTY_DEV_SERVERS_STATE: DevServersState = HashMap.empty()
+const DEFAULT_SERVER_NAME = "default"
 
-export const devServersAtom = appRuntime.subscriptionRef(
+class TuiDevServerRpcUnavailableError extends Data.TaggedError("TuiDevServerRpcUnavailableError")<{
+	readonly message: string
+}> {}
+
+const parseStartedAt = (startedAt: string | null): Date | undefined => {
+	if (startedAt === null) return undefined
+	const parsed = new Date(startedAt)
+	return Number.isNaN(parsed.getTime()) ? undefined : parsed
+}
+
+const toDevServerState = (server: DaemonDevServerState): DevServerState => ({
+	name: server.serverName,
+	status: server.status,
+	port: server.port ?? undefined,
+	windowName: server.windowName ?? undefined,
+	tmuxSession: server.tmuxSession ?? undefined,
+	worktreePath: server.worktreePath ?? undefined,
+	startedAt: parseStartedAt(server.startedAt),
+	error: server.error ?? undefined,
+})
+
+const toIssueDevServersState = (
+	servers: ReadonlyArray<DaemonDevServerState>,
+): IssueDevServersState => {
+	let issueServers: IssueDevServersState = HashMap.empty()
+	for (const server of servers) {
+		issueServers = HashMap.set(issueServers, server.serverName, toDevServerState(server))
+	}
+	return issueServers
+}
+
+const toDevServersState = (servers: ReadonlyArray<DaemonDevServerState>): DevServersState => {
+	let allServers: DevServersState = HashMap.empty()
+	for (const server of servers) {
+		const issueServers = HashMap.get(allServers, server.issueId).pipe(
+			Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+		)
+		allServers = HashMap.set(
+			allServers,
+			server.issueId,
+			HashMap.set(issueServers, server.serverName, toDevServerState(server)),
+		)
+	}
+	return allServers
+}
+
+const updateServerInRef = (
+	ref: SubscriptionRef.SubscriptionRef<DevServersState>,
+	server: DaemonDevServerState,
+): Effect.Effect<void> =>
+	SubscriptionRef.update(ref, (allServers) => {
+		const issueServers = HashMap.get(allServers, server.issueId).pipe(
+			Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+		)
+		return HashMap.set(
+			allServers,
+			server.issueId,
+			HashMap.set(issueServers, server.serverName, toDevServerState(server)),
+		)
+	})
+
+const getProjectPath = Effect.gen(function* () {
+	const projectService = yield* ProjectService
+	return (yield* projectService.getCurrentPath()) ?? process.cwd()
+})
+
+const getDaemonRpcClient = (): Effect.Effect<DaemonRpcClientApi, TuiDevServerRpcUnavailableError> =>
 	Effect.gen(function* () {
-		const svc = yield* DevServerService
-		return svc.servers
+		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
+		if (daemonRpcClient._tag === "None") {
+			return yield* Effect.fail(
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC unavailable for TUI dev-server operations",
+				}),
+			)
+		}
+		return daemonRpcClient.value
+	})
+
+const devServerStatus = (
+	daemonClient: DaemonRpcClientApi,
+	request: Omit<DaemonDevServerStatusRequest, "rpcProtocolVersion">,
+): Effect.Effect<DaemonDevServerStatusResult, TuiDevServerRpcUnavailableError> =>
+	Effect.gen(function* () {
+		const method = daemonClient.devServerStatus
+		if (method === undefined) {
+			return yield* Effect.fail(
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server status unavailable",
+				}),
+			)
+		}
+		return yield* method(request)
+	}).pipe(
+		Effect.mapError(
+			() =>
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server status unavailable",
+				}),
+		),
+	)
+
+const devServerList = (
+	daemonClient: DaemonRpcClientApi,
+	request: Omit<DaemonDevServerListRequest, "rpcProtocolVersion">,
+): Effect.Effect<DaemonDevServerListResult, TuiDevServerRpcUnavailableError> =>
+	Effect.gen(function* () {
+		const method = daemonClient.devServerList
+		if (method === undefined) {
+			return yield* Effect.fail(
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server list unavailable",
+				}),
+			)
+		}
+		return yield* method(request)
+	}).pipe(
+		Effect.mapError(
+			() =>
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server list unavailable",
+				}),
+		),
+	)
+
+const devServerStart = (
+	daemonClient: DaemonRpcClientApi,
+	request: Omit<DaemonDevServerStartRequest, "rpcProtocolVersion">,
+): Effect.Effect<DaemonDevServerMutationResult, TuiDevServerRpcUnavailableError> =>
+	Effect.gen(function* () {
+		const method = daemonClient.devServerStart
+		if (method === undefined) {
+			return yield* Effect.fail(
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server start unavailable",
+				}),
+			)
+		}
+		return yield* method(request)
+	}).pipe(
+		Effect.mapError(
+			() =>
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server start unavailable",
+				}),
+		),
+	)
+
+const devServerStop = (
+	daemonClient: DaemonRpcClientApi,
+	request: Omit<DaemonDevServerStopRequest, "rpcProtocolVersion">,
+): Effect.Effect<DaemonDevServerMutationResult, TuiDevServerRpcUnavailableError> =>
+	Effect.gen(function* () {
+		const method = daemonClient.devServerStop
+		if (method === undefined) {
+			return yield* Effect.fail(
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server stop unavailable",
+				}),
+			)
+		}
+		return yield* method(request)
+	}).pipe(
+		Effect.mapError(
+			() =>
+				new TuiDevServerRpcUnavailableError({
+					message: "daemon RPC dev-server stop unavailable",
+				}),
+		),
+	)
+
+const refreshAllDevServers = (ref: SubscriptionRef.SubscriptionRef<DevServersState>) =>
+	Effect.gen(function* () {
+		const daemonClient = yield* getDaemonRpcClient()
+		const projectPath = yield* getProjectPath
+		const result = yield* devServerList(daemonClient, { projectPath })
+		yield* SubscriptionRef.set(ref, toDevServersState(result.servers))
+	})
+
+const refreshIssueDevServers = (
+	ref: SubscriptionRef.SubscriptionRef<DevServersState>,
+	issueId: string,
+) =>
+	Effect.gen(function* () {
+		const daemonClient = yield* getDaemonRpcClient()
+		const projectPath = yield* getProjectPath
+		const result = yield* devServerList(daemonClient, { issueId, projectPath })
+		yield* SubscriptionRef.update(ref, (allServers) =>
+			HashMap.set(allServers, issueId, toIssueDevServersState(result.servers)),
+		)
+	})
+
+const logRefreshFailure = (error: TuiDevServerRpcUnavailableError) =>
+	Effect.logWarning(error.message).pipe(Effect.asVoid)
+
+export const devServersRefAtom = appRuntime.atom(
+	SubscriptionRef.make<DevServersState>(EMPTY_DEV_SERVERS_STATE),
+	{
+		initialValue: undefined,
+	},
+)
+
+export const devServerSyncStarterAtom = appRuntime.fn((_: undefined, get) =>
+	Effect.gen(function* () {
+		const ref = yield* get.result(devServersRefAtom)
+		const refresh = refreshAllDevServers(ref).pipe(Effect.catchAll(logRefreshFailure))
+		yield* refresh
+		yield* Effect.scheduleForked(Schedule.spaced("5 seconds"))(refresh)
 	}),
 )
 
-export const devServersForOverlayAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const svc = yield* DevServerService
-		return yield* svc.getServersForOverlay
-	}),
-)
-export const devServersForTaskCardAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const svc = yield* DevServerService
-		return yield* svc.getServersForTaskCard
-	}),
-)
+export const devServersAtom = appRuntime.subscriptionRef((get) => get.result(devServersRefAtom))
 
 export const focusedTaskIdAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
@@ -120,85 +339,117 @@ export const focusedIssueDevServerViewsAtom = Atom.readable((get) => {
 })
 
 const IDLE_VIEW: DevServerView = {
-	name: "default",
+	name: DEFAULT_SERVER_NAME,
 	status: "idle",
 	isConfigured: false,
 }
 
 export const focusedIssuePrimaryDevServerAtom = Atom.readable((get) => {
 	const views = get(focusedIssueDevServerViewsAtom)
-	const running = views.find((v) => v.status === "running" || v.status === "starting")
+	const running = views.find((view) => view.status === "running" || view.status === "starting")
 	if (running) return running
 
-	const defaultSrv = views.find((v) => v.name === "default")
-	return defaultSrv ?? views[0] ?? IDLE_VIEW
+	const defaultServer = views.find((view) => view.name === DEFAULT_SERVER_NAME)
+	return defaultServer ?? views[0] ?? IDLE_VIEW
 })
 
-export const toggleDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
-	Effect.gen(function* () {
-		const svc = yield* DevServerService
-		const projectService = yield* ProjectService
-		const project = yield* projectService.requireCurrentProject()
-		const path = project.path
+export const toggleDevServerAtom = appRuntime.fn(
+	(args: { issueId: string; serverName: string }, get) =>
+		Effect.gen(function* () {
+			const ref = yield* get.result(devServersRefAtom)
+			const daemonClient = yield* getDaemonRpcClient()
+			const projectPath = yield* getProjectPath
+			const current = yield* devServerStatus(daemonClient, {
+				issueId: args.issueId,
+				serverName: args.serverName,
+				projectPath,
+			})
+			yield* updateServerInRef(ref, current.server)
 
-		return yield* svc.toggle(args.issueId, path, args.serverName)
-	}),
+			const next =
+				current.server.status === "running" || current.server.status === "starting"
+					? yield* devServerStop(daemonClient, {
+							issueId: args.issueId,
+							serverName: args.serverName,
+							projectPath,
+						})
+					: yield* devServerStart(daemonClient, {
+							issueId: args.issueId,
+							serverName: args.serverName,
+							projectPath,
+						})
+
+			yield* updateServerInRef(ref, next.server)
+			return toDevServerState(next.server)
+		}),
 )
 
-export const attachDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
-	Effect.gen(function* () {
-		const devServer = yield* DevServerService
-		const tmux = yield* TmuxService
-		const toast = yield* ToastService
+export const attachDevServerAtom = appRuntime.fn(
+	(args: { issueId: string; serverName: string }, get) =>
+		Effect.gen(function* () {
+			const ref = yield* get.result(devServersRefAtom)
+			const daemonClient = yield* getDaemonRpcClient()
+			const projectPath = yield* getProjectPath
+			const tmux = yield* TmuxService
+			const toast = yield* ToastService
+			const serverStatus = yield* devServerStatus(daemonClient, {
+				issueId: args.issueId,
+				serverName: args.serverName,
+				projectPath,
+			})
+			yield* updateServerInRef(ref, serverStatus.server)
+			const serverState = toDevServerState(serverStatus.server)
 
-		// Get the server state for the specific server
-		const serverState = yield* devServer.getStatus(args.issueId, args.serverName)
+			if (serverState.status !== "running" && serverState.status !== "starting") {
+				yield* toast.show("error", `Dev server ${args.serverName} is not running`)
+				return
+			}
 
-		if (serverState.status !== "running" && serverState.status !== "starting") {
-			yield* toast.show("error", `Dev server ${args.serverName} is not running`)
-			return
-		}
+			if (!serverState.tmuxSession) {
+				yield* toast.show("error", `Dev server session not found for ${args.serverName}`)
+				return
+			}
 
-		if (!serverState.tmuxSession) {
-			yield* toast.show("error", `Dev server session not found for ${args.serverName}`)
-			return
-		}
-
-		// Attach to the tmux session
-		yield* tmux.switchClient(serverState.tmuxSession).pipe(
-			Effect.catchAll((err) => {
-				const logError = Effect.logWarning(err)
-				if (err._tag === "SessionNotFoundError") {
+			yield* tmux.switchClient(serverState.tmuxSession).pipe(
+				Effect.catchAll((error) => {
+					const logError = Effect.logWarning(error)
+					if (error._tag === "SessionNotFoundError") {
+						return logError.pipe(
+							Effect.zipRight(toast.show("error", `Session not found: ${error.session}`)),
+						)
+					}
+					if (error._tag === "TmuxError") {
+						return logError.pipe(
+							Effect.zipRight(toast.show("error", `tmux error: ${error.message}`)),
+						)
+					}
 					return logError.pipe(
-						Effect.zipRight(toast.show("error", `Session not found: ${err.session}`)),
+						Effect.zipRight(toast.show("error", "Failed to attach to dev server session")),
 					)
-				}
-				if (err._tag === "TmuxError") {
-					return logError.pipe(Effect.zipRight(toast.show("error", `tmux error: ${err.message}`)))
-				}
-				return logError.pipe(
-					Effect.zipRight(toast.show("error", "Failed to attach to dev server session")),
-				)
-			}),
-		)
-	}),
+				}),
+			)
+		}),
 )
 
-export const stopDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
-	Effect.gen(function* () {
-		const svc = yield* DevServerService
-		const projectService = yield* ProjectService
-		const project = yield* projectService.requireCurrentProject()
-		return yield* svc.stop(args.issueId, args.serverName, project.path)
-	}),
+export const stopDevServerAtom = appRuntime.fn(
+	(args: { issueId: string; serverName: string }, get) =>
+		Effect.gen(function* () {
+			const ref = yield* get.result(devServersRefAtom)
+			const daemonClient = yield* getDaemonRpcClient()
+			const projectPath = yield* getProjectPath
+			const stopped = yield* devServerStop(daemonClient, {
+				issueId: args.issueId,
+				serverName: args.serverName,
+				projectPath,
+			})
+			yield* updateServerInRef(ref, stopped.server)
+			return toDevServerState(stopped.server)
+		}),
 )
 
-export const syncDevServerStateAtom = appRuntime.fn((issueId: string) =>
+export const syncDevServerStateAtom = appRuntime.fn((issueId: string, get) =>
 	Effect.gen(function* () {
-		const svc = yield* DevServerService
-		const servers = yield* svc.getIssueServers(issueId)
-		for (const [name] of HashMap.entries(servers)) {
-			yield* svc.syncState(issueId, name)
-		}
+		const ref = yield* get.result(devServersRefAtom)
+		yield* refreshIssueDevServers(ref, issueId)
 	}),
 )

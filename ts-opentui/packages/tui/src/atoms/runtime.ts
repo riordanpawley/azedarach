@@ -20,7 +20,6 @@ import {
 	BoardService,
 	ClockService,
 	CommandQueueService,
-	DevServerService,
 	DiagnosticsService,
 	DiffService,
 	EditorService,
@@ -114,7 +113,6 @@ const coreServicesLayer = Layer.mergeAll(
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,
-	DevServerService.Default,
 	DiffService.Default,
 ).pipe(Layer.provideMerge(ToastService.Default), Layer.provideMerge(ProjectService.Default))
 
