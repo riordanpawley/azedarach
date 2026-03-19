@@ -15,8 +15,6 @@ import {
 	AppConfigConfig,
 	AppConfigNotifier,
 	type AppConfigNotifierApi,
-	AppConfigProjectContext,
-	type AppConfigProjectContextApi,
 	type AzedarachConfig,
 	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
@@ -57,7 +55,6 @@ import {
 	LogLevel,
 	Option,
 	Schema,
-	Stream,
 	SubscriptionRef,
 } from "effect"
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
@@ -102,7 +99,7 @@ import {
 	issueIdsEqualForLookup,
 	parseIssueSessionName,
 } from "./runtime/paths.js"
-import { IssueTrackerClient, ProjectService, SpecService } from "./runtimeServices.js"
+import { IssueTrackerClient, SpecService } from "./runtimeServices.js"
 import {
 	applyNotifyStatusToTmux,
 	isValidHookEvent,
@@ -131,19 +128,6 @@ const telemetryLayer =
 		: Layer.empty
 
 const CLI_VERSION = packageJson.version
-
-const appConfigProjectContextLayer = Layer.effect(
-	AppConfigProjectContext,
-	Effect.gen(function* () {
-		const projectService = yield* ProjectService
-		return {
-			getCurrentPath: () => projectService.getCurrentPath(),
-			currentProjectPathChanges: projectService.currentProject.changes.pipe(
-				Stream.map((project) => project?.path),
-			),
-		} satisfies AppConfigProjectContextApi
-	}),
-)
 
 const appConfigNotifierLayer = Layer.effect(
 	AppConfigNotifier,
@@ -179,17 +163,35 @@ const buildAppConfigLayer = (configPath: string | null) => {
 const createCommandCliLayer = (configPath: string | null) =>
 	Layer.mergeAll(
 		buildAppConfigLayer(configPath),
-		appConfigProjectContextLayer,
 		appConfigNotifierLayer,
 		IssueTrackerClient.Default,
 		SpecService.Default,
 	).pipe(
-		Layer.provideMerge(ProjectService.Default),
 		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 		Layer.provideMerge(telemetryLayer),
 		Layer.provideMerge(BunContext.layer),
 	)
 const commandCliLayer = createCommandCliLayer(null)
+
+type RegisteredProjectConfig = NonNullable<AzedarachConfig["projects"]>[number]
+
+const getConfiguredProjects = (config: AzedarachConfig): ReadonlyArray<RegisteredProjectConfig> =>
+	config.projects ?? []
+
+const getConfiguredCurrentProject = (
+	config: AzedarachConfig,
+): RegisteredProjectConfig | undefined => {
+	const projects = getConfiguredProjects(config)
+	if (projects.length === 0) {
+		return undefined
+	}
+
+	if (config.defaultProject === undefined) {
+		return projects[0]
+	}
+
+	return projects.find((project) => project.name === config.defaultProject) ?? projects[0]
+}
 
 configureCliIssueIdResolutionContext({
 	getConfig: Effect.gen(function* () {
@@ -302,6 +304,34 @@ const ensureSpecEnabled = (projectDir: string) =>
 
 const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
 
+const loadConfigIfExists = (configPath: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const exists = yield* fs
+			.exists(configPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		if (!exists) {
+			return undefined
+		}
+		return yield* loadWritableConfig(configPath)
+	})
+
+const resolveSelectedProjectPathFromWorkspaceConfig = (cwdPath: string) =>
+	Effect.gen(function* () {
+		const pathService = yield* Path.Path
+		const storagePaths = getProjectStoragePaths(cwdPath, pathService)
+		const config =
+			(yield* loadConfigIfExists(storagePaths.canonicalConfigPath)) ??
+			(yield* loadConfigIfExists(storagePaths.legacyConfigPath))
+		return getConfiguredCurrentProject(config ?? {})?.path
+	})
+
 const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
@@ -312,10 +342,11 @@ const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
 
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
-		const projectService = yield* ProjectService
-		const projectPath =
-			explicitProjectDir ?? (yield* projectService.getCurrentPath()) ?? process.cwd()
 		const cwdPath = explicitProjectDir ?? process.cwd()
+		const selectedProjectPath =
+			explicitProjectDir === undefined
+				? yield* resolveSelectedProjectPathFromWorkspaceConfig(cwdPath)
+				: undefined
 		const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
 		const cwdHasConfig = yield* fs
 			.exists(cwdConfigPath)
@@ -328,7 +359,7 @@ const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
 			)
 		const configBasePath = resolveConfigBasePath({
 			cwdPath,
-			projectPath,
+			projectPath: explicitProjectDir ?? selectedProjectPath ?? cwdPath,
 			pathOps: pathService,
 			cwdHasConfig,
 		})
@@ -5156,8 +5187,8 @@ const notifyHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const projectService = yield* ProjectService
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath =
+			(yield* resolveSelectedProjectPathFromWorkspaceConfig(process.cwd())) ?? process.cwd()
 		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		// Validate event type using type guard
@@ -5360,13 +5391,34 @@ const projectAddHandler = (args: {
 			fs,
 			verbose: args.verbose,
 		})
+		const configPath = yield* resolveWritableConfigPath(undefined)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const currentProjects = getConfiguredProjects(currentConfig)
 
-		// Add project via ProjectService (provided by cliLayer)
-		const projectService = yield* ProjectService
-		yield* projectService.addProject({
-			name: projectName,
-			path: absolutePath,
-			issueStorePath: tracker === "tracker" || tracker === "legacy" ? issueStorePath : undefined,
+		if (currentProjects.some((project) => project.name === projectName)) {
+			return yield* Effect.fail(new Error(`Project with name '${projectName}' already exists`))
+		}
+
+		if (
+			currentProjects.some(
+				(project) => pathService.normalize(project.path) === pathService.normalize(absolutePath),
+			)
+		) {
+			return yield* Effect.fail(new Error(`Project with path '${absolutePath}' already exists`))
+		}
+
+		yield* saveWritableConfig(configPath, {
+			...currentConfig,
+			projects: [
+				...currentProjects,
+				{
+					name: projectName,
+					path: absolutePath,
+					issueStorePath:
+						tracker === "tracker" || tracker === "legacy" ? issueStorePath : undefined,
+				},
+			],
+			defaultProject: currentConfig.defaultProject ?? projectName,
 		})
 
 		yield* Console.log(`Project '${projectName}' added successfully.`)
@@ -5377,9 +5429,10 @@ const projectAddHandler = (args: {
  */
 const projectListHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
-		const projectService = yield* ProjectService
-		const projects = yield* projectService.getProjects()
-		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+		const configPath = yield* resolveWritableConfigPath(undefined)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const projects = getConfiguredProjects(currentConfig)
+		const currentProject = getConfiguredCurrentProject(currentConfig)
 
 		if (projects.length === 0) {
 			yield* Console.log("No projects registered.")
@@ -5418,8 +5471,19 @@ const projectRemoveHandler = (args: { readonly name: string; readonly verbose: b
 			yield* Console.log(`Removing project: ${args.name}`)
 		}
 
-		const projectService = yield* ProjectService
-		yield* projectService.removeProject(args.name)
+		const configPath = yield* resolveWritableConfigPath(undefined)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const currentProjects = getConfiguredProjects(currentConfig)
+		if (!currentProjects.some((project) => project.name === args.name)) {
+			return yield* Effect.fail(new Error(`Project not found: ${args.name}`))
+		}
+
+		yield* saveWritableConfig(configPath, {
+			...currentConfig,
+			projects: currentProjects.filter((project) => project.name !== args.name),
+			defaultProject:
+				currentConfig.defaultProject === args.name ? undefined : currentConfig.defaultProject,
+		})
 
 		yield* Console.log(`Project '${args.name}' removed successfully.`)
 	})
@@ -5433,9 +5497,17 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
 			yield* Console.log(`Switching to project: ${args.name}`)
 		}
 
-		const projectService = yield* ProjectService
-		yield* projectService.switchProject(args.name)
-		yield* projectService.setDefaultProject(args.name)
+		const configPath = yield* resolveWritableConfigPath(undefined)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const currentProjects = getConfiguredProjects(currentConfig)
+		if (!currentProjects.some((project) => project.name === args.name)) {
+			return yield* Effect.fail(new Error(`Project not found: ${args.name}`))
+		}
+
+		yield* saveWritableConfig(configPath, {
+			...currentConfig,
+			defaultProject: args.name,
+		})
 
 		yield* Console.log(`Switched to project '${args.name}' and set as default.`)
 	})

@@ -1,4 +1,3 @@
-export { ProjectService } from "../../../src/runtime/appServicesFacade.js"
 export {
 	IssueTrackerClient,
 	SpecService,

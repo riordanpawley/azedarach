@@ -60,8 +60,7 @@ Risk controls:
 
 - current package->src import edges:
 ```
-ts-opentui/packages/cli/src/runtimeServices.ts:4:} from "../../../src/runtime/appServicesFacade.js"
-ts-opentui/packages/cli/src/runtimeServices.ts:9:} from "../../../src/runtime/coreServicesFacade.js"
+ts-opentui/packages/cli/src/runtimeServices.ts:4:} from "../../../src/runtime/coreServicesFacade.js"
 ts-opentui/packages/tui/src/utils/runtimeServices.ts:28:} from "../../../../src/runtime/appServicesFacade.js"
 ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/runtime/coreServicesFacade.js"
 ```
@@ -70,6 +69,7 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 - 2026-03-19 `yi` made `packages/cli/src/dev-server.ts` daemon-RPC only, removed the special `dev-command` execution mode, and narrowed `packages/cli/src/runtimeServices.ts` to the five services still used by `packages/cli/src/index.ts`.
 - 2026-03-19 `yl` moved TUI dev-server atoms to a package-local daemon-RPC state path, removed `DevServerService` from `packages/tui/src/atoms/runtime.ts`, and narrowed `packages/tui/src/utils/runtimeServices.ts` accordingly.
 - 2026-03-19 `yn` removed dead CLI `SessionManager` / `ToastService` dependencies; `packages/cli/src/runtimeServices.ts` is now down to `ProjectService`, `IssueTrackerClient`, and `SpecService`.
+- 2026-03-19 `yo` replaced CLI `ProjectService` usage with config-backed helpers; `packages/cli/src/runtimeServices.ts` now exports only `IssueTrackerClient` and `SpecService`.
 - Remaining runtime-facade package edges are CLI/TUI only; `yf` is blocked pending either a narrow boundary exception or prior migration of the underlying `src/core`/`src/services` implementations.
 
 ## Classification Legend
