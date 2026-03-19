@@ -22,6 +22,7 @@ const daemonMainPath = join(projectRoot, "src/daemon/GlobalDaemonMain.ts")
 type SpawnedDaemon = ChildProcessByStdio<null, Readable, Readable>
 const COLD_ACTIVATION_TARGET_MS = 1_500
 const HOT_SWITCH_TARGET_MS = 100
+const ATTACH_FANOUT_CLIENT_COUNT = 8
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -308,6 +309,40 @@ describe("GlobalDaemonIpc integration", () => {
 				}
 				if (leaseB !== null) {
 					await runWithBunContext(releaseGlobalDaemonLease(leaseB).pipe(Effect.ignore))
+				}
+				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
+			}
+		})
+	}, 30_000)
+
+	it("allows multi-client attach fanout on one daemon endpoint without a fixed cap", async () => {
+		await withIsolatedHome(async (homeDirectory) => {
+			let lease: GlobalDaemonLease | null = null
+			lease = await runWithBunContext(acquireGlobalDaemonLease({ homeDirectory }))
+			try {
+				const discovery = await waitForDiscovery(homeDirectory, 8_000)
+				const attaches = await Promise.all(
+					Array.from({ length: ATTACH_FANOUT_CLIENT_COUNT }, () =>
+						runWithBunContext(
+							bootstrapDaemonRpcClient({
+								autoStart: false,
+								timeoutMs: 8_000,
+							}),
+						),
+					),
+				)
+
+				expect(attaches.length).toBe(ATTACH_FANOUT_CLIENT_COUNT)
+				for (const attach of attaches) {
+					expect(attach.startedDaemon).toBe(false)
+					expect(attach.attachAttemptCount).toBeGreaterThanOrEqual(1)
+					expect(attach.discovery.pid).toBe(discovery.pid)
+					expect(attach.discovery.lockId).toBe(discovery.lockId)
+					expect(attach.socketUrl).toBe(`ws+unix://${discovery.socketPath}:/`)
+				}
+			} finally {
+				if (lease !== null) {
+					await runWithBunContext(releaseGlobalDaemonLease(lease).pipe(Effect.ignore))
 				}
 				await waitForNoDiscovery(homeDirectory, 8_000).catch(() => undefined)
 			}
