@@ -4,10 +4,10 @@
  * These handlers delegate to DevServerService - they don't contain business logic,
  * just CLI argument parsing and output formatting.
  */
+
+import { DevServerService, type DevServerState, ProjectService } from "@azedarach/shared"
 import { Args, Command, Options } from "@effect/cli"
 import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
-import { DevServerService, type DevServerState } from "../../../src/services/DevServerService.js"
-import { ProjectService } from "../../../src/services/ProjectService.js"
 import { bootstrapDaemonRpcClient } from "./daemonClientBootstrap.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 

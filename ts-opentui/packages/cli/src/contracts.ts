@@ -24,6 +24,22 @@ export interface TrackedIssue {
 	readonly dependent_count?: number
 }
 
+export interface ImplementationRecord {
+	readonly name: string
+	readonly description?: string
+	readonly directory?: string
+	readonly is_default: boolean
+	readonly is_builtin: boolean
+	readonly created_at: string
+	readonly updated_at: string
+}
+
+export interface ImplementationRegistry {
+	readonly implementations: ReadonlyArray<ImplementationRecord>
+	readonly default_implementation: string
+	readonly implicit_default_allowed: boolean
+}
+
 export interface SpecRequirementRef {
 	readonly id: string
 	readonly local_id: string
@@ -36,6 +52,10 @@ export interface SpecRequirementRef {
 	readonly fulfillment_percent?: number | null
 	readonly evidence_note?: string | null
 }
+
+export type SpecLinkFulfillmentStatus = "planned" | "partial" | "complete" | "verified"
+
+export type SpecRequirementLookupSelector = "auto" | "id" | "local_id" | "external_code"
 
 export interface ResolvedConfig {
 	readonly issueTracker:

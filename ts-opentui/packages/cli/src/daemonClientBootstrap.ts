@@ -1,4 +1,10 @@
 import {
+	clearGlobalDaemonArtifacts,
+	type GlobalDaemonDiscovery,
+	probeGlobalDaemonOwnerLiveness,
+	readGlobalDaemonDiscovery,
+} from "@azedarach/shared"
+import {
 	classifyDaemonRpcClientError,
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
@@ -9,12 +15,6 @@ import {
 import type { FileSystem, Path } from "@effect/platform"
 import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Data, Effect, Option } from "effect"
-import {
-	clearGlobalDaemonArtifacts,
-	type GlobalDaemonDiscovery,
-	probeGlobalDaemonOwnerLiveness,
-	readGlobalDaemonDiscovery,
-} from "../../../src/core/GlobalDaemonRegistry.js"
 
 const GLOBAL_DAEMON_BOOTSTRAP_TIMEOUT_MS = 5_000
 const GLOBAL_DAEMON_POLL_INTERVAL_MS = 50

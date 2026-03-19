@@ -10,6 +10,50 @@
  * - Handlers should NEVER use `Effect.provide` internally
  */
 
+import {
+	AttachmentService,
+	BoardService,
+	ClockService,
+	CommandQueueService,
+	DevServerService,
+	DiagnosticsService,
+	DiffService,
+	deepMerge,
+	EditorService,
+	generateHookConfig,
+	getIssueSessionName,
+	getProjectStoragePaths,
+	ImageAttachmentService,
+	IssueEditorService,
+	IssueTrackerClient,
+	issueIdsEqualForLookup,
+	KeyboardService,
+	MutationQueue,
+	NavigationService,
+	NetworkService,
+	OfflineService,
+	OverlayService,
+	PlanningService,
+	PRWorkflow,
+	ProjectService,
+	ProjectStateService,
+	PTYMonitor,
+	parseIssueSessionName,
+	resolveConfigBasePath,
+	resolveConfiguredIssueBackend,
+	resolveDaemonIntervalMsFromEnv,
+	SessionManager,
+	SessionService,
+	SettingsService,
+	SpecService,
+	TemplateService,
+	TerminalService,
+	TmuxService,
+	TmuxSessionMonitor,
+	ToastService,
+	VCService,
+	ViewService,
+} from "@azedarach/shared"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -48,57 +92,6 @@ import {
 	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
 } from "../../../src/config/schema.js"
-import { AttachmentService } from "../../../src/core/AttachmentService.js"
-import { resolveDaemonIntervalMsFromEnv } from "../../../src/core/DaemonOperationsPolicy.js"
-import { deepMerge, generateHookConfig } from "../../../src/core/hooks.js"
-import { ImageAttachmentService } from "../../../src/core/ImageAttachmentService.js"
-import { IssueEditorService } from "../../../src/core/IssueEditorService.js"
-import {
-	type ImplementationRecord,
-	type ImplementationRegistry,
-	IssueTrackerClient,
-	resolveConfiguredIssueBackend,
-	type Issue as TrackedIssue,
-} from "../../../src/core/IssueTrackerClient.js"
-import { PlanningService } from "../../../src/core/PlanningService.js"
-import { PRWorkflow } from "../../../src/core/PRWorkflow.js"
-import { PTYMonitor } from "../../../src/core/PTYMonitor.js"
-import {
-	getIssueSessionName,
-	issueIdsEqualForLookup,
-	parseIssueSessionName,
-} from "../../../src/core/paths.js"
-import { SessionManager } from "../../../src/core/SessionManager.js"
-import { SpecService } from "../../../src/core/SpecService.js"
-import type {
-	SpecLinkFulfillmentStatus,
-	SpecRequirementLookupSelector,
-} from "../../../src/core/specTypes.js"
-import { getProjectStoragePaths } from "../../../src/core/storagePaths.js"
-import { TemplateService } from "../../../src/core/TemplateService.js"
-import { TerminalService } from "../../../src/core/TerminalService.js"
-import { TmuxService } from "../../../src/core/TmuxService.js"
-import { TmuxSessionMonitor } from "../../../src/core/TmuxSessionMonitor.js"
-import { VCService } from "../../../src/core/VCService.js"
-import { BoardService } from "../../../src/services/BoardService.js"
-import { ClockService } from "../../../src/services/ClockService.js"
-import { CommandQueueService } from "../../../src/services/CommandQueueService.js"
-import { DevServerService } from "../../../src/services/DevServerService.js"
-import { DiagnosticsService } from "../../../src/services/DiagnosticsService.js"
-import { DiffService } from "../../../src/services/DiffService.js"
-import { EditorService } from "../../../src/services/EditorService.js"
-import { KeyboardService } from "../../../src/services/KeyboardService.js"
-import { MutationQueue } from "../../../src/services/MutationQueue.js"
-import { NavigationService } from "../../../src/services/NavigationService.js"
-import { NetworkService } from "../../../src/services/NetworkService.js"
-import { OfflineService } from "../../../src/services/OfflineService.js"
-import { OverlayService } from "../../../src/services/OverlayService.js"
-import { ProjectService, resolveConfigBasePath } from "../../../src/services/ProjectService.js"
-import { ProjectStateService } from "../../../src/services/ProjectStateService.js"
-import { SessionService } from "../../../src/services/SessionService.js"
-import { SettingsService } from "../../../src/services/SettingsService.js"
-import { ToastService } from "../../../src/services/ToastService.js"
-import { ViewService } from "../../../src/services/ViewService.js"
 import {
 	hasVerboseFlag,
 	normalizeCliAliases,
@@ -107,6 +100,13 @@ import {
 	parseConfigPathFromArgv,
 	resolveCliExecutionMode,
 } from "./argv-normalization.js"
+import type {
+	ImplementationRecord,
+	ImplementationRegistry,
+	SpecLinkFulfillmentStatus,
+	SpecRequirementLookupSelector,
+	TrackedIssue,
+} from "./contracts.js"
 import {
 	bootstrapDaemonRpcClient,
 	formatDaemonRpcClientFailure,
