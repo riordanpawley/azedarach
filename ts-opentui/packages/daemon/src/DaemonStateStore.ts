@@ -1,10 +1,10 @@
-import { AZEDARACH_STORAGE_DIRECTORY } from "@azedarach/shared"
 import type { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Option, Schema } from "effect"
 import type {
 	BackendSyncDaemonRunStatus,
 	BackendSyncDaemonStatus,
 } from "./BackendSyncDaemonService.js"
+import { AZEDARACH_STORAGE_DIRECTORY } from "./storagePaths.js"
 
 const DAEMON_DIRECTORY_NAME = "daemon"
 const DAEMON_STATE_FILENAME = "backend-sync-state.json"
