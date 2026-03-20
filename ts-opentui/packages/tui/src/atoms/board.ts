@@ -6,9 +6,10 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
+import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
 import { TASK_CARD_HEIGHT } from "../TaskCard.js"
 import type { TaskWithSession } from "../types.js"
-import { BoardService, ViewService } from "../utils/runtimeServices.js"
+import { ViewService } from "../utils/runtimeServices.js"
 import { drillDownEpicAtom, drillDownScopeStateAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 
@@ -25,7 +26,7 @@ import { appRuntime } from "./runtime.js"
  */
 export const boardTasksAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		return board.tasks
 	}),
 )
@@ -39,7 +40,7 @@ export const boardTasksAtom = appRuntime.subscriptionRef(
  */
 export const boardTasksByColumnAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		return board.tasksByColumn
 	}),
 )
@@ -56,7 +57,7 @@ export const boardTasksByColumnAtom = appRuntime.subscriptionRef(
  */
 export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		return board.filteredTasksByColumn
 	}),
 )
@@ -73,7 +74,7 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
  */
 export const boardIsLoadingAtom = appRuntime.subscribable(
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		const ref = board.isLoading
 
 		// Create a Subscribable with debounced changes stream
@@ -95,7 +96,7 @@ export const boardIsLoadingAtom = appRuntime.subscribable(
  */
 export const refreshBoardAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		yield* board.refresh()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -109,7 +110,7 @@ export const refreshBoardAtom = appRuntime.fn(() =>
  */
 export const isRefreshingGitStatsAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		return board.isRefreshingGitStats
 	}),
 )
@@ -126,7 +127,7 @@ export const isRefreshingGitStatsAtom = appRuntime.subscriptionRef(
  */
 export const refreshGitStatsAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		yield* board.refreshGitStats()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -136,7 +137,7 @@ export const refreshGitStatsAtom = appRuntime.fn(() =>
  */
 export const setVisibleTaskIdsAtom = appRuntime.fn((taskIds: ReadonlyArray<string>) =>
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		yield* board.setVisibleTaskIds(new Set(taskIds))
 	}).pipe(Effect.catchAll(Effect.logError)),
 )

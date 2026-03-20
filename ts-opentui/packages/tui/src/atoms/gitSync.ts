@@ -7,7 +7,7 @@
  */
 
 import { Effect } from "effect"
-import { BoardService } from "../utils/runtimeServices.js"
+import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -45,7 +45,7 @@ export const isFetchingAtom = appRuntime.atom(Effect.succeed(false), { initialVa
  */
 export const fetchAndCheckAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		yield* board.refreshGitStats()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -58,7 +58,7 @@ export const fetchAndCheckAtom = appRuntime.fn(() =>
  */
 export const pullAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		yield* board.refreshGitStats()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )

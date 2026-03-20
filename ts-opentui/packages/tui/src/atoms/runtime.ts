@@ -26,6 +26,7 @@ import { OfflineService } from "../services/OfflineService.js"
 import { OverlayService } from "../services/OverlayService.js"
 import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
+import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
 import { ViewService } from "../services/ViewService.js"
 import {
 	AttachmentService,
@@ -111,6 +112,10 @@ const daemonRpcClientLayer = Layer.effect(
 )
 
 const settingsLayer = SettingsService.Default.pipe(Layer.provide(appConfigProjectContextLayer))
+const tuiBoardStoreLayer = TuiBoardStoreService.Default.pipe(
+	Layer.provide(appConfigProjectContextLayer),
+	Layer.provideMerge(daemonRpcClientLayer),
+)
 
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
@@ -138,6 +143,7 @@ const coreServicesLayer = Layer.mergeAll(
 	DiagnosticsService.Default,
 	ProjectStateService.Default,
 	settingsLayer,
+	tuiBoardStoreLayer,
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,

@@ -5,13 +5,13 @@
  */
 
 import { Effect, SubscriptionRef } from "effect"
+import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
 import {
 	getTuiCurrentProjectRef,
 	getTuiProjectContextRead,
 	getTuiProjectsRef,
 } from "../services/TuiProjectContextService.js"
 import {
-	BoardService,
 	EditorService,
 	NavigationService,
 	ProjectStateService,
@@ -60,7 +60,7 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 	Effect.gen(function* () {
 		const projectContext = yield* getTuiProjectContextRead
 		const projectState = yield* ProjectStateService
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		const editor = yield* EditorService
 		const navigation = yield* NavigationService
 		const view = yield* ViewService

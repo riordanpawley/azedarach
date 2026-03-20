@@ -10,9 +10,9 @@ import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import type { DependencyRef, IssueType } from "../contracts.js"
 import { stripAnsi } from "../lib/ansi.js"
+import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
 import type { ColumnStatus, TaskWithSession } from "../types.js"
 import {
-	BoardService,
 	formatForToast,
 	getIssueCreateImplementations,
 	IssueEditorService,
@@ -181,7 +181,7 @@ export const moveTaskAtom = appRuntime.fn(
 	({ taskId, newStatus }: { taskId: string; newStatus: ColumnStatus }) =>
 		Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
-			const board = yield* BoardService
+			const board = yield* TuiBoardStoreService
 			const projectPath = yield* getCurrentProjectPath
 			yield* daemonRpcClient.issueUpdate({
 				issueId: taskId,
@@ -203,7 +203,7 @@ export const moveTasksAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
 			const projectPath = yield* getCurrentProjectPath
-			const board = yield* BoardService
+			const board = yield* TuiBoardStoreService
 			yield* Effect.forEach(
 				taskIds,
 				(taskId) =>
@@ -249,7 +249,7 @@ export const createTaskAtom = appRuntime.fn(
 	}) =>
 		Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
-			const board = yield* BoardService
+			const board = yield* TuiBoardStoreService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
@@ -295,7 +295,7 @@ export const forkCreateChildAtom = appRuntime.fn(
 	}) =>
 		Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
-			const board = yield* BoardService
+			const board = yield* TuiBoardStoreService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
@@ -372,7 +372,7 @@ export const forkCreateEpicAtom = appRuntime.fn(
 	}) =>
 		Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
-			const board = yield* BoardService
+			const board = yield* TuiBoardStoreService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
 			const projectPath = yield* getCurrentProjectPath
@@ -499,7 +499,7 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
  */
 export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
@@ -620,7 +620,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const daemonRpcClient = yield* DaemonRpcClient
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 		const projectPath = yield* getCurrentProjectPath
 		yield* daemonRpcClient.issueDelete({
 			issueId,

@@ -6,7 +6,8 @@
 
 import { Effect } from "effect"
 import type { Plan, PlannedTask, PlanningState, ReviewFeedback } from "../contracts.js"
-import { BoardService, PlanningService } from "../utils/runtimeServices.js"
+import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
+import { PlanningService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // Re-export types for consumers
@@ -52,7 +53,7 @@ export const planningStateAtom = appRuntime.subscriptionRef(
 export const runPlanningAtom = appRuntime.fn((featureDescription: string) =>
 	Effect.gen(function* () {
 		const planning = yield* PlanningService
-		const board = yield* BoardService
+		const board = yield* TuiBoardStoreService
 
 		const createdIssues = yield* planning.runPlanningWorkflow(featureDescription)
 		const epicId = createdIssues.find((issue) => issue.issue_type === "epic")?.id
