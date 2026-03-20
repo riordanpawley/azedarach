@@ -36,6 +36,14 @@ export interface TuiBoardStoreServiceApi {
 	readonly refresh: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly refreshGitStats: () => Effect.Effect<void, DaemonRpcClientError>
 	readonly setVisibleTaskIds: (taskIds: ReadonlySet<string>) => Effect.Effect<void>
+	readonly getTasks: () => Effect.Effect<readonly TaskWithSession[]>
+	readonly getFilteredTasksByColumn: (
+		searchQuery: string,
+		sortConfig: SortConfig,
+		filterConfig: FilterConfig,
+	) => Effect.Effect<readonly (readonly TaskWithSession[])[]>
+	readonly findTaskById: (taskId: string) => Effect.Effect<TaskWithSession | undefined>
+	readonly applyOptimisticMove: (taskId: string, newStatus: ColumnStatus) => Effect.Effect<void>
 	readonly removeTaskFromMutation: (taskId: string) => Effect.Effect<void>
 	readonly patchTaskFromMutation: (
 		taskId: string,
@@ -502,6 +510,30 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 					yield* refresh()
 				}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
+			const getTasks = (): Effect.Effect<readonly TaskWithSession[]> => SubscriptionRef.get(tasks)
+
+			const getFilteredTasksByColumn = (
+				searchQuery: string,
+				sortConfig: SortConfig,
+				filterConfig: FilterConfig,
+			): Effect.Effect<readonly (readonly TaskWithSession[])[]> =>
+				Effect.gen(function* () {
+					const allTasks = yield* SubscriptionRef.get(tasks)
+					return computeFilteredTasksByColumn(allTasks, searchQuery, sortConfig, filterConfig)
+				})
+
+			const findTaskById = (taskId: string): Effect.Effect<TaskWithSession | undefined> =>
+				Effect.gen(function* () {
+					const allTasks = yield* SubscriptionRef.get(tasks)
+					return allTasks.find((task) => task.id === taskId)
+				})
+
+			const applyOptimisticMove = (taskId: string, newStatus: ColumnStatus): Effect.Effect<void> =>
+				patchTaskFromMutation(taskId, {
+					status: newStatus,
+					updated_at: new Date().toISOString(),
+				})
+
 			const switchToProject = <E>(
 				newProjectPath: string,
 				onRefreshComplete: Effect.Effect<void, E, never>,
@@ -559,6 +591,10 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 				refresh,
 				refreshGitStats,
 				setVisibleTaskIds: (taskIds: ReadonlySet<string>) => Ref.set(visibleTaskIds, taskIds),
+				getTasks,
+				getFilteredTasksByColumn,
+				findTaskById,
+				applyOptimisticMove,
 				removeTaskFromMutation,
 				patchTaskFromMutation,
 				upsertIssueFromMutation,

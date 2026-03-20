@@ -17,6 +17,8 @@ export interface TuiProjectContextReadApi {
 }
 
 export interface TuiProjectContextServiceApi extends TuiProjectContextReadApi {
+	readonly getProjects: () => Effect.Effect<ReadonlyArray<Project>>
+	readonly requireCurrentProject: () => Effect.Effect<Project, TuiProjectContextError>
 	readonly switchProject: (name: string) => Effect.Effect<Project, TuiProjectContextError>
 }
 
@@ -228,6 +230,19 @@ export class TuiProjectContextService extends Effect.Service<TuiProjectContextSe
 			const service: TuiProjectContextServiceApi = {
 				currentProject,
 				projects,
+				getProjects: () => SubscriptionRef.get(projects),
+				requireCurrentProject: () =>
+					Effect.gen(function* () {
+						const project = yield* SubscriptionRef.get(currentProject)
+						if (project === undefined) {
+							return yield* Effect.fail(
+								new TuiProjectContextError({
+									message: "No project selected. Use 'az project add' to register a project.",
+								}),
+							)
+						}
+						return project
+					}),
 				getCurrentPath: () =>
 					Effect.gen(function* () {
 						const project = yield* SubscriptionRef.get(currentProject)

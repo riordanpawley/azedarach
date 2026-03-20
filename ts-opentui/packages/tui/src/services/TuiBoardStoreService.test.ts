@@ -9,6 +9,7 @@ import {
 } from "@azedarach/shared/rpc"
 import { Effect, Layer, type Scope, Stream, SubscriptionRef } from "effect"
 import type { Issue } from "../contracts.js"
+import { DEFAULT_FILTER_CONFIG, DEFAULT_SORT_CONFIG } from "./EditorService.js"
 import { TuiBoardStoreService } from "./TuiBoardStoreService.js"
 
 const unexpectedDaemonRpcCall = <A>(): Effect.Effect<A, DaemonRpcClientError> =>
@@ -201,5 +202,44 @@ describe("TuiBoardStoreService", () => {
 
 		expect(result.switchedBack.cacheHit).toBe(true)
 		expect(result.cachedTasks.map((task) => task.id)).toEqual(["az-a"])
+	})
+
+	it("exposes keyboard compatibility read/update APIs", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: ({ projectPath }) =>
+				Effect.succeed(
+					makeBoardReadModelResult(projectPath, [
+						makeBoardTask({ id: "az-open", status: "open" }),
+						makeBoardTask({ id: "az-blocked", status: "blocked" }),
+					]),
+				),
+		})
+
+		const result = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				const beforeMove = yield* board.findTaskById("az-open")
+				yield* board.applyOptimisticMove("az-open", "in_progress")
+				const afterMove = yield* board.findTaskById("az-open")
+				const allTasks = yield* board.getTasks()
+				const filtered = yield* board.getFilteredTasksByColumn("", DEFAULT_SORT_CONFIG, {
+					...DEFAULT_FILTER_CONFIG,
+					status: new Set(["in_progress"]),
+				})
+				return { beforeMove, afterMove, allTasks, filtered }
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(result.beforeMove?.status).toBe("open")
+		expect(result.afterMove?.status).toBe("in_progress")
+		expect(result.allTasks.map((task) => task.id)).toEqual(["az-open", "az-blocked"])
+		expect(result.filtered[1]?.map((task) => task.id)).toEqual(["az-open"])
+		expect(result.filtered[0]?.length).toBe(0)
+		expect(result.filtered[2]?.length).toBe(0)
+		expect(result.filtered[3]?.length).toBe(0)
 	})
 })

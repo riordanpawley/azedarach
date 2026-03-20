@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer, SubscriptionRef } from "effect"
+import { Effect, Layer, Schema, SubscriptionRef } from "effect"
 import { TuiProjectContextService } from "./TuiProjectContextService.js"
 
 const makeLayer = TuiProjectContextService.Default.pipe(Layer.provideMerge(BunContext.layer))
@@ -91,10 +91,71 @@ describe("TuiProjectContextService", () => {
 				),
 			)
 
-			const nextConfig = JSON.parse(readFileSync(configPath, "utf8")) as {
-				readonly defaultProject?: string
-			}
+			const nextConfig = Schema.decodeSync(
+				Schema.Struct({
+					defaultProject: Schema.optional(Schema.String),
+				}),
+			)(JSON.parse(readFileSync(configPath, "utf8")))
 			expect(nextConfig.defaultProject).toBe("beta")
+		})
+	})
+
+	it("provides getProjects and requireCurrentProject compatibility APIs", async () => {
+		await withTempWorkspace(async (workspacePath) => {
+			const alphaPath = join(workspacePath, "alpha")
+			const betaPath = join(workspacePath, "beta")
+			mkdirSync(alphaPath, { recursive: true })
+			mkdirSync(betaPath, { recursive: true })
+			mkdirSync(join(workspacePath, ".azedarach"), { recursive: true })
+			writeFileSync(
+				join(workspacePath, ".azedarach", "config.json"),
+				JSON.stringify(
+					{
+						projects: [
+							{ name: "alpha", path: alphaPath },
+							{ name: "beta", path: betaPath },
+						],
+						defaultProject: "beta",
+					},
+					null,
+					2,
+				),
+			)
+
+			const result = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const service = yield* TuiProjectContextService
+						const projects = yield* service.getProjects()
+						const currentProject = yield* service.requireCurrentProject()
+						return { projects, currentProject }
+					}).pipe(Effect.provide(makeLayer)),
+				),
+			)
+
+			expect(result.projects.map((project) => project.name)).toEqual(["alpha", "beta"])
+			expect(result.currentProject.name).toBe("beta")
+		})
+	})
+
+	it("fails requireCurrentProject when no configured projects exist", async () => {
+		await withTempWorkspace(async (workspacePath) => {
+			mkdirSync(join(workspacePath, ".azedarach"), { recursive: true })
+			writeFileSync(join(workspacePath, ".azedarach", "config.json"), JSON.stringify({}, null, 2))
+
+			const errorTag = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const service = yield* TuiProjectContextService
+						return yield* service.requireCurrentProject().pipe(
+							Effect.flip,
+							Effect.map((error) => error._tag),
+						)
+					}).pipe(Effect.provide(makeLayer)),
+				),
+			)
+
+			expect(errorTag).toBe("TuiProjectContextError")
 		})
 	})
 })
