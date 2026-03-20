@@ -250,6 +250,25 @@ const validateIssueTrackerStore = (projectDir: string) =>
 		}
 	})
 
+const resolveBaseWorktreePath = (startPath: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		let currentPath = pathService.normalize(startPath)
+		while (true) {
+			const gitEntryPath = pathService.join(currentPath, ".git")
+			const hasGitEntry = yield* fs.exists(gitEntryPath).pipe(Effect.orElseSucceed(() => false))
+			if (hasGitEntry) {
+				return currentPath
+			}
+			const parentPath = pathService.dirname(currentPath)
+			if (parentPath === currentPath) {
+				return pathService.normalize(startPath)
+			}
+			currentPath = parentPath
+		}
+	})
+
 /**
  * Validate that spec workflows are enabled for the project before using az spec surfaces.
  */
@@ -2413,8 +2432,11 @@ const issueListHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath =
+			explicitProjectDir === undefined
+				? yield* resolveBaseWorktreePath(resolverCwd)
+				: yield* resolveBaseWorktreePath(explicitProjectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const requestedLimit = Option.getOrUndefined(args.limit)
 		if (requestedLimit !== undefined && requestedLimit <= 0) {
