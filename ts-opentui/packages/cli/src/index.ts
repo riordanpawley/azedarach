@@ -1714,11 +1714,44 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 		}
 	})
 
+const forceResetGlobalDaemonRuntime = Effect.gen(function* () {
+	const fs = yield* FileSystem.FileSystem
+	const pathService = yield* Path.Path
+	const home = process.env.HOME
+	if (home === undefined || home.trim().length === 0) {
+		return
+	}
+
+	const daemonDir = pathService.join(home, ".azedarach", "daemon")
+	const socketPath = pathService.join(daemonDir, "global.sock")
+	const lockDir = pathService.join(daemonDir, "global.lock")
+
+	yield* PlatformCommand.exitCode(
+		PlatformCommand.make("pkill", "-9", "-f", "packages/daemon/src/GlobalDaemonMain.ts"),
+	).pipe(Effect.orElseSucceed(() => 1))
+
+	yield* fs
+		.remove(socketPath, { force: true, recursive: false })
+		.pipe(Effect.orElseSucceed(() => undefined))
+	yield* fs
+		.remove(lockDir, { force: true, recursive: true })
+		.pipe(Effect.orElseSucceed(() => undefined))
+})
+
 const daemonRestartHandler = (args: {
 	readonly intervalMs: Option.Option<number>
+	readonly force: boolean
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
+		if (args.force) {
+			if (args.verbose) {
+				yield* Console.log(
+					"daemon_restart: force reset requested; clearing daemon process/socket/lock",
+				)
+			}
+			yield* forceResetGlobalDaemonRuntime
+		}
 		if (args.verbose) {
 			yield* Console.log("daemon_restart: bootstrap begin")
 		}
@@ -6160,6 +6193,10 @@ const daemonStopCommand = Command.make(
 const daemonRestartCommand = Command.make(
 	"restart",
 	{
+		force: Options.boolean("force").pipe(
+			Options.withAlias("f"),
+			Options.withDescription("Force-kill daemon process and clear lock/socket before restart"),
+		),
 		intervalMs: Options.integer("interval-ms").pipe(
 			Options.withAlias("i"),
 			Options.optional,
@@ -6185,7 +6222,7 @@ const daemonLogsCommand = Command.make(
 
 const daemonCommand = Command.make("daemon", {}, () =>
 	Console.log(
-		"Usage: az daemon <sync|status|health|stop|restart|logs> [--interval-ms <ms>] [--project-dir <path>]",
+		"Usage: az daemon <sync|status|health|stop|restart|logs> [--interval-ms <ms>] [--force] [--project-dir <path>]",
 	),
 ).pipe(
 	Command.withDescription("Headless backend daemon commands"),
