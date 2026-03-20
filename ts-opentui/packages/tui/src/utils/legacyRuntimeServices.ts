@@ -2,7 +2,6 @@ export {
 	BoardService,
 	KeyboardService,
 	MutationQueue,
-	NavigationService,
 	ProjectService,
 	ProjectStateService,
 	SessionService,

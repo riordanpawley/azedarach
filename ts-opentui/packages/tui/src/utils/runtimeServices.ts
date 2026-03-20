@@ -27,6 +27,7 @@ export { CommandQueueService } from "../services/CommandQueueService.js"
 export { DiagnosticsService } from "../services/DiagnosticsService.js"
 export { DiffService } from "../services/DiffService.js"
 export { EditorService } from "../services/EditorService.js"
+export { NavigationService } from "../services/NavigationService.js"
 export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
 export { OverlayService } from "../services/OverlayService.js"
@@ -52,7 +53,6 @@ export {
 	IssueEditorService,
 	KeyboardService,
 	MutationQueue,
-	NavigationService,
 	PlanningService,
 	PRWorkflow,
 	ProjectService,

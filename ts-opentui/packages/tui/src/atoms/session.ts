@@ -7,12 +7,8 @@
 
 import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Effect } from "effect"
-import {
-	AttachmentService,
-	ProjectService,
-	PTYMonitor,
-	TmuxSessionMonitor,
-} from "../utils/runtimeServices.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
+import { AttachmentService, PTYMonitor, TmuxSessionMonitor } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -74,9 +70,9 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
 		const ptyMonitor = yield* PTYMonitor
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const currentProjectPath = yield* projectService.getCurrentPath()
+		const currentProjectPath = yield* projectContext.getCurrentPath()
 		const sessionUpdateState =
 			daemonRpcClient._tag === "Some" ? daemonRpcClient.value.sessionUpdateState : undefined
 
@@ -143,11 +139,11 @@ export const sessionMetricsAtom = appRuntime.subscriptionRef(
 export const startSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const ptyMonitor = yield* PTYMonitor
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionStart === undefined) {
@@ -172,9 +168,9 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
  */
 export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionPause === undefined) {
@@ -194,9 +190,9 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
  */
 export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionResume === undefined) {
@@ -219,9 +215,9 @@ export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const ptyMonitor = yield* PTYMonitor
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		// Unregister from PTYMonitor first (before session is stopped)

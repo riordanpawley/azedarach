@@ -18,7 +18,8 @@ import type {
 	SpecPublishOutcome,
 } from "../contracts.js"
 import { DEFAULT_SPEC_PUBLISH_CONFIG } from "../contracts.js"
-import { EditorService, ProjectService } from "../utils/runtimeServices.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
+import { EditorService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {
@@ -182,7 +183,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const editor = yield* EditorService
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const stateRef = yield* get.result(specWorkspaceStateRefAtom)
 		const specConfig = yield* appConfig.getSpecConfig()
 		if (!specConfig.enabled) {
@@ -191,7 +192,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 		}
 		const daemonRpcClient = yield* getDaemonRpcClient()
 		const selectedImplementation = yield* editor.getSpecSelectedImplementation()
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 
 		yield* loadSpecWorkspaceState({
 			stateRef,

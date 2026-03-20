@@ -13,12 +13,8 @@ import {
 import { Atom, Result } from "@effect-atom/atom"
 import { Data, Effect, HashMap, Option, Schedule, SubscriptionRef } from "effect"
 import type { DevServerStatus } from "../contracts.js"
-import {
-	NavigationService,
-	ProjectService,
-	TmuxService,
-	ToastService,
-} from "../utils/runtimeServices.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
+import { NavigationService, TmuxService, ToastService } from "../utils/runtimeServices.js"
 import { appConfigAtom } from "./config.js"
 import { appRuntime } from "./runtime.js"
 
@@ -112,8 +108,8 @@ const updateServerInRef = (
 	})
 
 const getProjectPath = Effect.gen(function* () {
-	const projectService = yield* ProjectService
-	return (yield* projectService.getCurrentPath()) ?? process.cwd()
+	const projectContext = yield* getTuiProjectContextRead
+	return (yield* projectContext.getCurrentPath()) ?? process.cwd()
 })
 
 const getDaemonRpcClient = (): Effect.Effect<DaemonRpcClientApi, TuiDevServerRpcUnavailableError> =>

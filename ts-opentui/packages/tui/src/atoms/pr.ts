@@ -5,7 +5,8 @@
  */
 
 import { Effect } from "effect"
-import { PRWorkflow, ProjectService } from "../utils/runtimeServices.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
+import { PRWorkflow } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -21,10 +22,10 @@ import { appRuntime } from "./runtime.js"
 export const createPRAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 
 		return yield* prWorkflow.createPR({
 			issueId,
@@ -42,10 +43,10 @@ export const createPRAtom = appRuntime.fn((issueId: string) =>
 export const cleanupAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 
 		yield* prWorkflow.cleanup({ issueId, projectPath, closeIssue: true })
 	}).pipe(Effect.catchAll(Effect.logError)),
@@ -63,10 +64,10 @@ export const cleanupAtom = appRuntime.fn((issueId: string) =>
 export const mergeToMainAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 
 		yield* prWorkflow.mergeToMain({
 			issueId,

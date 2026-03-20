@@ -116,6 +116,10 @@ const tuiBoardStoreLayer = TuiBoardStoreService.Default.pipe(
 	Layer.provide(appConfigProjectContextLayer),
 	Layer.provideMerge(daemonRpcClientLayer),
 )
+const navigationLayer = NavigationService.Default.pipe(
+	Layer.provideMerge(tuiBoardStoreLayer),
+	Layer.provideMerge(daemonRpcClientLayer),
+)
 
 const coreServicesLayer = Layer.mergeAll(
 	MutationQueue.Default,
@@ -131,7 +135,7 @@ const coreServicesLayer = Layer.mergeAll(
 	TerminalService.Default,
 	EditorService.Default,
 	KeyboardService.Default,
-	NavigationService.Default,
+	navigationLayer,
 	SessionManager.Default,
 	appConfigProjectContextLayer,
 	appConfigNotifierLayer,

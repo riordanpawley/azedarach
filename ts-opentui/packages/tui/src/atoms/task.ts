@@ -11,6 +11,7 @@ import { Data, Effect, Schema } from "effect"
 import type { DependencyRef, IssueType } from "../contracts.js"
 import { stripAnsi } from "../lib/ansi.js"
 import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
 import type { ColumnStatus, TaskWithSession } from "../types.js"
 import {
 	formatForToast,
@@ -18,7 +19,6 @@ import {
 	IssueEditorService,
 	NavigationService,
 	OverlayService,
-	ProjectService,
 	ToastService,
 } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
@@ -136,8 +136,8 @@ export const buildAiCreateCommand = (params: {
 }
 
 const getCurrentProjectPath = Effect.gen(function* () {
-	const projectService = yield* ProjectService
-	return (yield* projectService.getCurrentPath()) ?? process.cwd()
+	const projectContext = yield* getTuiProjectContextRead
+	return (yield* projectContext.getCurrentPath()) ?? process.cwd()
 })
 
 const isIssueType = (value: string | undefined): value is IssueType =>
@@ -504,7 +504,7 @@ export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
 		const daemonRpcClient = yield* DaemonRpcClient
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const appConfig = yield* AppConfig
 
 		// Dismiss overlay first
@@ -513,7 +513,7 @@ export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 		yield* toast.show("info", "Creating task with AI...")
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 
 		// Phase 1: Ask the configured AI tool to extract structured task data
 		// Using JSON output format for deterministic parsing

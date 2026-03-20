@@ -6,7 +6,8 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap } from "effect"
-import { buildTaskQueueKey, CommandQueueService, ProjectService } from "../utils/runtimeServices.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
+import { buildTaskQueueKey, CommandQueueService } from "../utils/runtimeServices.js"
 import { focusedTaskIdAtom } from "./navigation.js"
 import { currentProjectAtom } from "./project.js"
 import { appRuntime } from "./runtime.js"
@@ -102,8 +103,8 @@ export const taskRunningOperationAtom = (taskId: string) =>
 export const getQueueInfoAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
 		const queue = yield* CommandQueueService
-		const projectService = yield* ProjectService
-		const projectPath = yield* projectService.getCurrentPath()
+		const projectContext = yield* getTuiProjectContextRead
+		const projectPath = yield* projectContext.getCurrentPath()
 		return yield* queue.getTaskQueueInfo(taskId, projectPath)
 	}),
 )
@@ -116,8 +117,8 @@ export const getQueueInfoAtom = appRuntime.fn((taskId: string) =>
 export const checkTaskBusyAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
 		const queue = yield* CommandQueueService
-		const projectService = yield* ProjectService
-		const projectPath = yield* projectService.getCurrentPath()
+		const projectContext = yield* getTuiProjectContextRead
+		const projectPath = yield* projectContext.getCurrentPath()
 		return yield* queue.isTaskBusy(taskId, projectPath)
 	}),
 )
