@@ -87,7 +87,7 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 
 ## core
 
-- [ ] status=pending owner-child= path=src/core/AttachmentService.ts
+- [x] status=migrated owner-child=aab path=src/core/AttachmentService.ts
 - [ ] status=pending owner-child= path=src/core/BackendClientSessionProtocol.test.ts
 - [ ] status=pending owner-child= path=src/core/BackendClientSessionProtocol.ts
 - [ ] status=pending owner-child= path=src/core/BackendSyncInterface.ts
@@ -124,13 +124,13 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 - [ ] status=pending owner-child= path=src/core/SpecService.test.ts
 - [ ] status=pending owner-child= path=src/core/SpecService.ts
 - [ ] status=pending owner-child= path=src/core/StateDetector.ts
-- [ ] status=pending owner-child= path=src/core/TemplateService.ts
-- [ ] status=pending owner-child= path=src/core/TerminalService.ts
+- [x] status=migrated owner-child=aab path=src/core/TemplateService.ts
+- [x] status=migrated owner-child=aab path=src/core/TerminalService.ts
 - [ ] status=pending owner-child= path=src/core/TmuxCapabilities.test.ts
 - [ ] status=pending owner-child= path=src/core/TmuxCapabilities.ts
-- [ ] status=pending owner-child= path=src/core/TmuxService.ts
+- [x] status=migrated owner-child=aab path=src/core/TmuxService.ts
 - [x] status=migrated owner-child=zz path=src/core/TmuxSessionMonitor.ts
-- [ ] status=pending owner-child= path=src/core/VCService.ts
+- [x] status=migrated owner-child=aab path=src/core/VCService.ts
 - [ ] status=pending owner-child= path=src/core/WorktreeManager.branchNaming.test.ts
 - [ ] status=pending owner-child= path=src/core/WorktreeManager.lookup.test.ts
 - [ ] status=pending owner-child= path=src/core/WorktreeManager.ts

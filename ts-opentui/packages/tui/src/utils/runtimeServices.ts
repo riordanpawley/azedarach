@@ -14,17 +14,12 @@ export {
 	SessionService,
 } from "../../../../src/runtime/appServicesFacade.js"
 export {
-	AttachmentService,
 	ImageAttachmentService,
 	IssueEditorService,
 	PlanningService,
 	PRWorkflow,
 	PTYMonitor,
 	SessionManager,
-	TemplateService,
-	TerminalService,
-	TmuxService,
-	VCService,
 } from "../../../../src/runtime/coreServicesFacade.js"
 export type {
 	DevServerStatus,
@@ -45,6 +40,7 @@ export {
 	deriveWaitingSessionOptions,
 	type WaitingSessionOption,
 } from "../lib/waitingSessions.js"
+export { AttachmentService } from "../services/AttachmentService.js"
 export { CommandQueueService } from "../services/CommandQueueService.js"
 export { DiagnosticsService } from "../services/DiagnosticsService.js"
 export { DiffService } from "../services/DiffService.js"
@@ -56,8 +52,12 @@ export {
 	SettingsService,
 	type SettingValue,
 } from "../services/SettingsService.js"
+export { TemplateService } from "../services/TemplateService.js"
+export { TerminalService } from "../services/TerminalService.js"
+export { TmuxService } from "../services/TmuxService.js"
 export { TmuxSessionMonitor } from "../services/TmuxSessionMonitor.js"
 export { ToastService } from "../services/ToastService.js"
+export { VCService } from "../services/VCService.js"
 export { ViewService } from "../services/ViewService.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"
 export { computeDependencyPhases } from "./dependencyPhases.js"
