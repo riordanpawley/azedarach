@@ -1,4 +1,4 @@
-import { AppConfig, type ResolvedConfig } from "@azedarach/config"
+import { AppConfig, getProjectStoragePaths, type ResolvedConfig } from "@azedarach/config"
 import {
 	type DaemonIssueCreateInput,
 	type DaemonIssueSyncResult,
@@ -9,7 +9,7 @@ import {
 	type TrackedIssue,
 	TrackedIssueSchema,
 } from "@azedarach/shared/rpc"
-import { Command, CommandExecutor } from "@effect/platform"
+import { Command, CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 
 type IssueBackendMode = "tracker" | "legacy" | "local" | "linear"
@@ -129,6 +129,96 @@ const decodeJson = <A, I>(
 		),
 	)
 
+const LocalIssueRowSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	description: Schema.NullOr(Schema.String),
+	status: Schema.String,
+	priority: Schema.Number,
+	issue_type: Schema.String,
+	created_at: Schema.String,
+	updated_at: Schema.String,
+	closed_at: Schema.NullOr(Schema.String),
+	assignee: Schema.NullOr(Schema.String),
+	labels_json: Schema.NullOr(Schema.String),
+	implementations_json: Schema.NullOr(Schema.String),
+	design: Schema.NullOr(Schema.String),
+	notes: Schema.NullOr(Schema.String),
+	acceptance: Schema.NullOr(Schema.String),
+	estimate: Schema.NullOr(Schema.Number),
+})
+
+const LocalDependencyRowSchema = Schema.Struct({
+	issue_id: Schema.String,
+	depends_on_id: Schema.String,
+	dependency_type: Schema.String,
+	depends_on_title: Schema.NullOr(Schema.String),
+	depends_on_status: Schema.NullOr(Schema.String),
+	depends_on_issue_type: Schema.NullOr(Schema.String),
+	issue_title: Schema.NullOr(Schema.String),
+	issue_status: Schema.NullOr(Schema.String),
+	issue_issue_type: Schema.NullOr(Schema.String),
+})
+
+const toIssueStatus = (value: string): TrackedIssue["status"] => {
+	switch (value) {
+		case "open":
+		case "in_progress":
+		case "blocked":
+		case "closed":
+		case "tombstone":
+			return value
+		default:
+			return "open"
+	}
+}
+
+const toIssueType = (value: string): TrackedIssue["issue_type"] => {
+	switch (value) {
+		case "bug":
+		case "feature":
+		case "task":
+		case "epic":
+		case "chore":
+			return value
+		default:
+			return "task"
+	}
+}
+
+const toDependencyType = (value: string): DependencyType => {
+	switch (value) {
+		case "blocks":
+		case "related":
+		case "parent-child":
+		case "discovered-from":
+			return value
+		default:
+			return "related"
+	}
+}
+
+const parseJsonStringArray = (value: string | null): ReadonlyArray<string> => {
+	if (value === null) {
+		return []
+	}
+	try {
+		const parsed: unknown = JSON.parse(value)
+		if (!Array.isArray(parsed)) {
+			return []
+		}
+		const strings: Array<string> = []
+		for (const entry of parsed) {
+			if (typeof entry === "string") {
+				strings.push(entry)
+			}
+		}
+		return strings
+	} catch {
+		return []
+	}
+}
+
 const sortIssuesInMemory = (
 	issues: ReadonlyArray<TrackedIssue>,
 	sortBy: "updated_at" | "created_at",
@@ -177,6 +267,8 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 		effect: Effect.gen(function* () {
 			const appConfig = yield* AppConfig
 			const commandExecutor = yield* CommandExecutor.CommandExecutor
+			const fs = yield* FileSystem.FileSystem
+			const pathService = yield* Path.Path
 
 			const getRuntimeConfig = (
 				projectPath?: string,
@@ -279,6 +371,164 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 				)
 			}
 
+			const runSqliteJson = <A, I>(
+				dbPath: string,
+				query: string,
+				schema: Schema.Schema<A, I>,
+			): Effect.Effect<A, TrackerIssueDaemonError> =>
+				commandExecutor.string(Command.make("sqlite3", "-json", dbPath, query)).pipe(
+					Effect.mapError(
+						(error) =>
+							new TrackerIssueDaemonError({
+								reason: "command-failed",
+								message: "stderr" in error ? String(error.stderr) : String(error),
+							}),
+					),
+					Effect.flatMap((output) =>
+						decodeJson(schema, output.trim().length === 0 ? "[]" : output),
+					),
+				)
+
+			const listFromLocalSqlite = (
+				filters: IssueListFilters | undefined,
+				projectPath: string | undefined,
+				options: IssueListOptions | undefined,
+			): Effect.Effect<ReadonlyArray<TrackedIssue>, TrackerIssueDaemonError> =>
+				Effect.gen(function* () {
+					const targetProjectPath = projectPath ?? process.cwd()
+					const storagePaths = getProjectStoragePaths(targetProjectPath, pathService)
+					const hasIssuesTable = (dbPath: string) =>
+						runSqliteJson(
+							dbPath,
+							"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'issues';",
+							Schema.Array(Schema.Struct({ name: Schema.String })),
+						).pipe(
+							Effect.map((rows) => rows.length > 0),
+							Effect.catchAll(() => Effect.succeed(false)),
+						)
+					const canonicalExists = yield* fs
+						.exists(storagePaths.canonicalDbPath)
+						.pipe(Effect.orElseSucceed(() => false))
+					const legacyExists = yield* fs
+						.exists(storagePaths.legacyDbPath)
+						.pipe(Effect.orElseSucceed(() => false))
+					const dbPath =
+						canonicalExists && (yield* hasIssuesTable(storagePaths.canonicalDbPath))
+							? storagePaths.canonicalDbPath
+							: legacyExists
+								? storagePaths.legacyDbPath
+								: storagePaths.canonicalDbPath
+					const issueRows = yield* runSqliteJson(
+						dbPath,
+						"SELECT id, title, description, status, priority, issue_type, created_at, updated_at, closed_at, assignee, labels_json, implementations_json, design, notes, acceptance, estimate FROM issues WHERE deleted_at IS NULL;",
+						Schema.Array(LocalIssueRowSchema),
+					)
+					const dependencyRows = yield* runSqliteJson(
+						dbPath,
+						"SELECT d.issue_id, d.depends_on_id, d.dependency_type, parent.title AS depends_on_title, parent.status AS depends_on_status, parent.issue_type AS depends_on_issue_type, child.title AS issue_title, child.status AS issue_status, child.issue_type AS issue_issue_type FROM issue_dependencies d LEFT JOIN issues parent ON parent.id = d.depends_on_id AND parent.deleted_at IS NULL LEFT JOIN issues child ON child.id = d.issue_id AND child.deleted_at IS NULL WHERE d.tombstoned_at IS NULL;",
+						Schema.Array(LocalDependencyRowSchema),
+					)
+
+					const dependenciesByIssueId = new Map<
+						string,
+						Array<NonNullable<TrackedIssue["dependencies"]>[number]>
+					>()
+					const dependentsByIssueId = new Map<
+						string,
+						Array<NonNullable<TrackedIssue["dependents"]>[number]>
+					>()
+
+					for (const row of dependencyRows) {
+						const dependencyType = toDependencyType(row.dependency_type)
+						const dependencies = dependenciesByIssueId.get(row.issue_id) ?? []
+						dependencies.push({
+							id: row.depends_on_id,
+							dependency_type: dependencyType,
+							title: row.depends_on_title ?? undefined,
+							status:
+								row.depends_on_status === null ? undefined : toIssueStatus(row.depends_on_status),
+							issue_type:
+								row.depends_on_issue_type === null
+									? undefined
+									: toIssueType(row.depends_on_issue_type),
+						})
+						dependenciesByIssueId.set(row.issue_id, dependencies)
+
+						const dependents = dependentsByIssueId.get(row.depends_on_id) ?? []
+						dependents.push({
+							id: row.issue_id,
+							dependency_type: dependencyType,
+							title: row.issue_title ?? undefined,
+							status: row.issue_status === null ? undefined : toIssueStatus(row.issue_status),
+							issue_type:
+								row.issue_issue_type === null ? undefined : toIssueType(row.issue_issue_type),
+						})
+						dependentsByIssueId.set(row.depends_on_id, dependents)
+					}
+
+					const issues = issueRows.map((row): TrackedIssue => {
+						const dependencies = dependenciesByIssueId.get(row.id) ?? []
+						const dependents = dependentsByIssueId.get(row.id) ?? []
+						return {
+							id: row.id,
+							title: row.title,
+							description: row.description ?? undefined,
+							status: toIssueStatus(row.status),
+							priority: row.priority,
+							issue_type: toIssueType(row.issue_type),
+							created_at: row.created_at,
+							updated_at: row.updated_at,
+							closed_at: row.closed_at,
+							assignee: row.assignee,
+							labels: [...parseJsonStringArray(row.labels_json)],
+							design: row.design ?? undefined,
+							notes: row.notes ?? undefined,
+							acceptance: row.acceptance ?? undefined,
+							estimate: row.estimate ?? undefined,
+							implementations: [...parseJsonStringArray(row.implementations_json)],
+							dependencies,
+							dependents,
+							dependency_count: dependencies.length,
+							dependent_count: dependents.length,
+						}
+					})
+
+					const filtered = issues.filter((issue) => {
+						if (filters?.status !== undefined && issue.status !== filters.status) return false
+						if (filters?.priority !== undefined && issue.priority !== filters.priority) return false
+						if (filters?.type !== undefined && issue.issue_type !== filters.type) return false
+						if (
+							filters?.parent !== undefined &&
+							!(issue.dependencies ?? []).some(
+								(dependency) =>
+									dependency.id === filters.parent && dependency.dependency_type === "parent-child",
+							)
+						) {
+							return false
+						}
+						if (
+							filters?.implementations !== undefined &&
+							filters.implementations.length > 0 &&
+							!issue.implementations.some((implementation) =>
+								filters.implementations?.includes(implementation),
+							)
+						) {
+							return false
+						}
+						return true
+					})
+
+					const includeClosed = options?.includeClosed ?? true
+					const visible = includeClosed
+						? filtered
+						: filtered.filter((issue) => issue.status !== "closed" && issue.status !== "tombstone")
+					const sortBy = options?.sortBy ?? "updated_at"
+					const sortDirection = options?.sortDirection ?? "desc"
+					const sorted = sortIssuesInMemory(visible, sortBy, sortDirection)
+					const limit = options?.limit
+					return limit === undefined ? sorted : sorted.slice(0, Math.max(0, limit))
+				})
+
 			const rejectUnsupportedImplementations = (
 				implementations: ReadonlyArray<string> | undefined,
 			): Effect.Effect<void, TrackerIssueDaemonError> =>
@@ -295,6 +545,20 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 			return {
 				get: (issueId, projectPath) =>
 					Effect.gen(function* () {
+						const { issueTracker } = yield* getRuntimeConfig(projectPath)
+						if (resolveConfiguredIssueBackend(issueTracker) === "local") {
+							const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined)
+							const issue = issues.find((candidate) => candidate.id === issueId)
+							if (issue === undefined || issue.status === "tombstone") {
+								return yield* Effect.fail(
+									new TrackerIssueDaemonError({
+										reason: "not-found",
+										message: `Issue not found: ${issueId}`,
+									}),
+								)
+							}
+							return issue
+						}
 						const { executable } = yield* resolveExecutable(projectPath)
 						const output = yield* runJson(executable, ["show", issueId], projectPath)
 						const issues = yield* decodeJson(Schema.Array(TrackedIssueSchema), output)
@@ -312,6 +576,10 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 				list: (filters, projectPath, options) =>
 					Effect.gen(function* () {
 						yield* rejectUnsupportedImplementations(filters?.implementations)
+						const { issueTracker } = yield* getRuntimeConfig(projectPath)
+						if (resolveConfiguredIssueBackend(issueTracker) === "local") {
+							return yield* listFromLocalSqlite(filters, projectPath, options)
+						}
 						const { executable } = yield* resolveExecutable(projectPath)
 						const output = yield* runJson(executable, buildListArgs(filters, options), projectPath)
 						const issues = yield* decodeJson(Schema.Array(TrackedIssueSchema), output)
