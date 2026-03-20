@@ -16,6 +16,8 @@ const unexpectedDaemonRpcCall = <A>(): Effect.Effect<A, DaemonRpcClientError> =>
 const makeDaemonRpcClientStub = (options?: {
 	readonly issueGet?: DaemonRpcClientApi["issueGet"]
 	readonly issueUpdate?: DaemonRpcClientApi["issueUpdate"]
+	readonly issueAddDependency?: DaemonRpcClientApi["issueAddDependency"]
+	readonly issueRemoveDependency?: DaemonRpcClientApi["issueRemoveDependency"]
 }): DaemonRpcClientApi => ({
 	status: () => unexpectedDaemonRpcCall(),
 	health: () => unexpectedDaemonRpcCall(),
@@ -51,8 +53,8 @@ const makeDaemonRpcClientStub = (options?: {
 	issueList: () => unexpectedDaemonRpcCall(),
 	issueCreate: () => unexpectedDaemonRpcCall(),
 	issueUpdate: options?.issueUpdate ?? (() => unexpectedDaemonRpcCall()),
-	issueAddDependency: () => unexpectedDaemonRpcCall(),
-	issueRemoveDependency: () => unexpectedDaemonRpcCall(),
+	issueAddDependency: options?.issueAddDependency ?? (() => unexpectedDaemonRpcCall()),
+	issueRemoveDependency: options?.issueRemoveDependency ?? (() => unexpectedDaemonRpcCall()),
 	issueClose: () => unexpectedDaemonRpcCall(),
 	issueDelete: () => unexpectedDaemonRpcCall(),
 	issueSync: () => unexpectedDaemonRpcCall(),
@@ -145,7 +147,7 @@ const issue: Issue = {
 }
 
 describe("TuiIssueAdapterService", () => {
-	it("shows, updates, and loads epic children through daemon rpc", async () => {
+	it("shows, updates, mutates dependencies, and loads epic children through daemon rpc", async () => {
 		const service = await Effect.runPromise(
 			Effect.gen(function* () {
 				return yield* TuiIssueAdapterService
@@ -174,6 +176,26 @@ describe("TuiIssueAdapterService", () => {
 									updated: true,
 								})
 							},
+							issueAddDependency: (request) => {
+								expect(request.issueId).toBe("az-child-1")
+								expect(request.dependsOnId).toBe("az-epic")
+								expect(request.dependencyType).toBe("parent-child")
+								expect(request.projectPath).toBe("/tmp/project")
+								return Effect.succeed({
+									rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+									updated: true,
+								})
+							},
+							issueRemoveDependency: (request) => {
+								expect(request.issueId).toBe("az-child-1")
+								expect(request.dependsOnId).toBe("az-epic")
+								expect(request.dependencyType).toBe("parent-child")
+								expect(request.projectPath).toBe("/tmp/project")
+								return Effect.succeed({
+									rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+									updated: true,
+								})
+							},
 						}),
 					),
 				),
@@ -191,6 +213,17 @@ describe("TuiIssueAdapterService", () => {
 				{ title: "Updated epic", notes: "Updated notes" },
 				{ projectPath: "/tmp/project" },
 			),
+		)
+		await Effect.runPromise(
+			service.addDependency("az-child-1", "az-epic", "parent-child", {
+				projectPath: "/tmp/project",
+			}),
+		)
+		await Effect.runPromise(
+			service.removeDependency("az-child-1", "az-epic", {
+				dependencyType: "parent-child",
+				projectPath: "/tmp/project",
+			}),
 		)
 
 		const epicWithChildren = await Effect.runPromise(

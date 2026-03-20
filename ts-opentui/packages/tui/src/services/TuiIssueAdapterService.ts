@@ -9,7 +9,12 @@ import type { DependencyRef, Issue } from "../contracts.js"
 
 export class TuiIssueAdapterServiceError extends Data.TaggedError("TuiIssueAdapterServiceError")<{
 	readonly reason: "rpc-failed"
-	readonly operation: "issueShow" | "issueUpdate" | "issueGetEpicWithChildren"
+	readonly operation:
+		| "issueShow"
+		| "issueUpdate"
+		| "issueAddDependency"
+		| "issueRemoveDependency"
+		| "issueGetEpicWithChildren"
 	readonly message: string
 }> {}
 
@@ -25,6 +30,22 @@ export interface TuiIssueAdapterServiceApi {
 		issueId: string,
 		patch: DaemonIssueUpdatePatch,
 		options?: {
+			readonly projectPath?: string
+		},
+	) => Effect.Effect<void, TuiIssueAdapterServiceError>
+	readonly addDependency: (
+		issueId: string,
+		dependsOnId: string,
+		dependencyType: DependencyRef["dependency_type"],
+		options?: {
+			readonly projectPath?: string
+		},
+	) => Effect.Effect<void, TuiIssueAdapterServiceError>
+	readonly removeDependency: (
+		issueId: string,
+		dependsOnId: string,
+		options?: {
+			readonly dependencyType?: DependencyRef["dependency_type"]
 			readonly projectPath?: string
 		},
 	) => Effect.Effect<void, TuiIssueAdapterServiceError>
@@ -119,6 +140,30 @@ export class TuiIssueAdapterService extends Effect.Service<TuiIssueAdapterServic
 						.pipe(
 							Effect.asVoid,
 							Effect.mapError((error) => rpcFailure("issueUpdate", error.message)),
+						),
+				addDependency: (issueId, dependsOnId, dependencyType, options) =>
+					daemonRpcClient
+						.issueAddDependency({
+							issueId,
+							dependsOnId,
+							dependencyType,
+							projectPath: options?.projectPath,
+						})
+						.pipe(
+							Effect.asVoid,
+							Effect.mapError((error) => rpcFailure("issueAddDependency", error.message)),
+						),
+				removeDependency: (issueId, dependsOnId, options) =>
+					daemonRpcClient
+						.issueRemoveDependency({
+							issueId,
+							dependsOnId,
+							dependencyType: options?.dependencyType,
+							projectPath: options?.projectPath,
+						})
+						.pipe(
+							Effect.asVoid,
+							Effect.mapError((error) => rpcFailure("issueRemoveDependency", error.message)),
 						),
 				getEpicWithChildren: (epicId, options) => {
 					return daemonRpcClient
