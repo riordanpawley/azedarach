@@ -463,7 +463,11 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 										`Daemon session recovery terminal failure for ${issueId} (projectPath=${projectPath}): worktree missing; resetting session state to idle`,
 									)
 									yield* sessionRecovery
-										.updateState(issueId, "idle")
+										.updateState({
+											issueId,
+											state: "idle",
+											projectPath,
+										})
 										.pipe(Effect.catchAll(() => Effect.void))
 									return
 								}

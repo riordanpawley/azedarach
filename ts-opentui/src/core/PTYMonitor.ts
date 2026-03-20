@@ -396,7 +396,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				return monitor
 			})
 
-		const updateSessionStateWithPreferredRuntime = (issueId: string, state: SessionState) => {
+		const updateSessionStateWithPreferredRuntime = (params: {
+			readonly issueId: string
+			readonly state: SessionState
+			readonly tmuxSessionName?: string
+		}) => {
 			if (
 				daemonRpcClient._tag === "Some" &&
 				daemonRpcClient.value.sessionUpdateState !== undefined
@@ -405,14 +409,15 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				return projectService.getCurrentPath().pipe(
 					Effect.flatMap((projectPath) =>
 						sessionUpdateState({
-							issueId,
-							state,
+							issueId: params.issueId,
+							state: params.state,
 							projectPath: projectPath ?? process.cwd(),
+							tmuxSessionName: params.tmuxSessionName,
 						}),
 					),
 				)
 			}
-			return sessionManager.updateState(issueId, state)
+			return sessionManager.updateState(params.issueId, params.state)
 		}
 
 		// ========================================================================
@@ -613,7 +618,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					})
 
 					if (shellForegroundState !== null) {
-						yield* updateSessionStateWithPreferredRuntime(issueId, shellForegroundState)
+						yield* updateSessionStateWithPreferredRuntime({
+							issueId,
+							state: shellForegroundState,
+							tmuxSessionName: monitor.tmuxSessionName,
+						})
 						yield* Effect.log(
 							`PTYMonitor: ${issueId} state ${currentState} → ${shellForegroundState} (shell foreground${alertState.bell && !monitor.lastBellFlag ? ", fresh bell" : ""})`,
 						)
@@ -630,7 +639,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 							newPendingCount = 1
 						}
 						if (newPendingCount >= PENDING_STATE_THRESHOLD) {
-							yield* updateSessionStateWithPreferredRuntime(issueId, "busy")
+							yield* updateSessionStateWithPreferredRuntime({
+								issueId,
+								state: "busy",
+								tmuxSessionName: monitor.tmuxSessionName,
+							})
 							yield* Effect.log(
 								`PTYMonitor: ${issueId} state idle → busy (subprocess '${foregroundCmd}' is foreground)`,
 							)
@@ -654,7 +667,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 							})
 
 							if (canTransition && currentState !== detectedState) {
-								yield* updateSessionStateWithPreferredRuntime(issueId, detectedState)
+								yield* updateSessionStateWithPreferredRuntime({
+									issueId,
+									state: detectedState,
+									tmuxSessionName: monitor.tmuxSessionName,
+								})
 								yield* Effect.log(
 									`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY high-priority)`,
 								)
@@ -680,7 +697,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 								}
 
 								if (newPendingCount >= PENDING_STATE_THRESHOLD) {
-									yield* updateSessionStateWithPreferredRuntime(issueId, detectedState)
+									yield* updateSessionStateWithPreferredRuntime({
+										issueId,
+										state: detectedState,
+										tmuxSessionName: monitor.tmuxSessionName,
+									})
 									yield* Effect.log(
 										`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY, confirmed after ${newPendingCount} polls)`,
 									)

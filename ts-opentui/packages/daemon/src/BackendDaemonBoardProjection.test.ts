@@ -42,7 +42,17 @@ describe("buildBoardTaskSnapshots", () => {
 	it("projects tracker issues into daemon board tasks", () => {
 		const tasks = buildBoardTaskSnapshots({
 			issues: [epicIssue, parentIssue, childIssue],
-			sessionStateByIssueId: new Map([["task-1", "busy"]]),
+			sessionsByIssueId: new Map([
+				[
+					"task-1",
+					{
+						state: "busy",
+						startedAt: "2026-03-20T01:30:00.000Z",
+						tmuxSessionName: "az-task-1",
+						worktreePath: "/tmp/project/.worktrees/task-1",
+					},
+				],
+			]),
 			devServerIssueIds: new Set(["task-2"]),
 		})
 
@@ -50,6 +60,8 @@ describe("buildBoardTaskSnapshots", () => {
 		const child = tasks.find((task) => task.id === "task-2")
 
 		expect(parent?.sessionState).toBe("busy")
+		expect(parent?.sessionStartedAt).toBe("2026-03-20T01:30:00.000Z")
+		expect(parent?.hasTmuxSession).toBe(true)
 		expect(parent?.hasWorktree).toBe(true)
 		expect(parent?.hasPR).toBe(true)
 		expect(parent?.prUrl).toBe("https://github.com/acme/repo/pull/42")
@@ -74,7 +86,7 @@ describe("buildBoardTaskSnapshots", () => {
 					].join("\n"),
 				},
 			],
-			sessionStateByIssueId: new Map(),
+			sessionsByIssueId: new Map(),
 			devServerIssueIds: new Set(),
 		})
 

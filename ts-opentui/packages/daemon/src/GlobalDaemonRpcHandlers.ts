@@ -124,7 +124,12 @@ import {
 	BackendDaemonService,
 	type BackendDaemonSnapshot,
 } from "./BackendDaemonService.js"
-import { BackendDaemonSessionRecovery } from "./BackendDaemonSessionRecovery.js"
+import {
+	BackendDaemonSessionRecovery,
+	type BackendDaemonSessionRecoveryApi,
+	type BackendDaemonSessionSnapshot,
+	type BackendDaemonSessionUpdate,
+} from "./BackendDaemonSessionRecovery.js"
 import {
 	ImplementationRegistryDaemonError,
 	ImplementationRegistryDaemonService,
@@ -407,6 +412,54 @@ export const makeDaemonBoardReadModelRpcHandler =
 				catchDaemonRpcError("boardReadModel"),
 			)
 
+const toDaemonSessionSnapshotEntry = (
+	session: BackendDaemonSessionSnapshot,
+): DaemonSessionSnapshotResult["sessions"][number] => ({
+	issueId: session.issueId,
+	worktreePath: session.worktreePath,
+	tmuxSessionName: session.tmuxSessionName,
+	state: session.state,
+	startedAt: session.startedAt,
+	projectPath: session.projectPath,
+})
+
+export const makeDaemonSessionSnapshotRpcHandler =
+	(sessionRecovery: Pick<BackendDaemonSessionRecoveryApi, "listActive">) =>
+	(request: DaemonSessionSnapshotRequest) =>
+		sessionRecovery.listActive(request.projectPath).pipe(
+			Effect.map(
+				(sessions): DaemonSessionSnapshotResult => ({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					capturedAtMs: Date.now(),
+					sessions: sessions.map(toDaemonSessionSnapshotEntry),
+				}),
+			),
+			catchDaemonRpcError("sessionSnapshot"),
+		)
+
+export const makeDaemonSessionUpdateStateRpcHandler =
+	(sessionRecovery: Pick<BackendDaemonSessionRecoveryApi, "updateState">) =>
+	(request: DaemonSessionUpdateStateRequest) => {
+		const update: BackendDaemonSessionUpdate = {
+			issueId: request.issueId,
+			state: request.state,
+			projectPath: request.projectPath,
+			tmuxSessionName: request.tmuxSessionName,
+			worktreePath: request.worktreePath,
+			startedAt: request.startedAt,
+		}
+		return sessionRecovery.updateState(update).pipe(
+			Effect.map(
+				(session): DaemonSessionMutationResult => ({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					capturedAtMs: Date.now(),
+					session: toDaemonSessionSnapshotEntry(session),
+				}),
+			),
+			catchDaemonRpcError("sessionUpdateState"),
+		)
+	}
+
 export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const runtime = yield* BackendDaemonService
 	const control = yield* BackendDaemonControlService
@@ -458,24 +511,7 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 				),
 				catchDaemonRpcError("heartbeat"),
 			),
-		daemonSessionSnapshot: (request: DaemonSessionSnapshotRequest) =>
-			sessionRecovery.listActive(request.projectPath).pipe(
-				Effect.map(
-					(sessions): DaemonSessionSnapshotResult => ({
-						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-						capturedAtMs: Date.now(),
-						sessions: sessions.map((session) => ({
-							issueId: session.issueId,
-							worktreePath: "",
-							tmuxSessionName: "",
-							state: session.state,
-							startedAt: new Date(0).toISOString(),
-							projectPath: request.projectPath,
-						})),
-					}),
-				),
-				catchDaemonRpcError("sessionSnapshot"),
-			),
+		daemonSessionSnapshot: makeDaemonSessionSnapshotRpcHandler(sessionRecovery),
 		daemonBoardReadModel: makeDaemonBoardReadModelRpcHandler(control),
 		daemonSessionStart: (_request: DaemonSessionStartRequest) =>
 			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionStart"),
@@ -487,8 +523,7 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionResume"),
 		daemonSessionRecover: (_request: DaemonSessionRecoverRequest) =>
 			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionRecover"),
-		daemonSessionUpdateState: (_request: DaemonSessionUpdateStateRequest) =>
-			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionUpdateState"),
+		daemonSessionUpdateState: makeDaemonSessionUpdateStateRpcHandler(sessionRecovery),
 		daemonDevServerStatus: (request: DaemonDevServerStatusRequest) =>
 			control
 				.devServerStatus({

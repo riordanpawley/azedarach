@@ -930,7 +930,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			}
 		}
 
-		const parseDaemonStartedAt = (value: string): DateTime.Utc | undefined => {
+		const parseDaemonStartedAt = (value: string | null): DateTime.Utc | undefined => {
+			if (value === null) {
+				return undefined
+			}
 			const timestampMs = Date.parse(value)
 			if (Number.isNaN(timestampMs)) {
 				return undefined
@@ -942,7 +945,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			readonly issueId: string
 			readonly state: string
 			readonly tmuxSessionName: string
-			readonly startedAt: string
+			readonly startedAt: string | null
 		}): AuthoritativeSessionView | undefined => {
 			const state = parseDaemonSessionState(entry.state)
 			if (state === undefined) {

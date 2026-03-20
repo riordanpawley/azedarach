@@ -39,6 +39,37 @@ const isSyntheticTmuxDisappearance = (update: {
 	createdAt: number
 }) => update.status === "idle" && update.createdAt === 0
 
+type TmuxSessionMonitorUpdate = {
+	readonly issueId: string
+	readonly status: "busy" | "waiting" | "idle"
+	readonly sessionName: string
+	readonly createdAt: number
+	readonly worktreePath: string | null
+	readonly projectPath: string | null
+}
+
+const toStartedAtIso = (createdAt: number): string | null =>
+	createdAt > 0 ? new Date(createdAt * 1000).toISOString() : null
+
+export const buildSessionUpdateStateRequest = (
+	update: TmuxSessionMonitorUpdate,
+	currentProjectPath: string | null | undefined,
+): {
+	readonly issueId: string
+	readonly state: "busy" | "waiting" | "idle"
+	readonly projectPath: string
+	readonly tmuxSessionName: string
+	readonly worktreePath: string | null
+	readonly startedAt: string | null
+} => ({
+	issueId: update.issueId,
+	state: update.status,
+	projectPath: update.projectPath ?? currentProjectPath ?? process.cwd(),
+	tmuxSessionName: update.sessionName,
+	worktreePath: update.worktreePath,
+	startedAt: toStartedAtIso(update.createdAt),
+})
+
 export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
@@ -66,11 +97,7 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 					return
 				}
 
-				yield* sessionUpdateState({
-					issueId: update.issueId,
-					state: update.status,
-					projectPath: update.projectPath ?? currentProjectPath ?? process.cwd(),
-				})
+				yield* sessionUpdateState(buildSessionUpdateStateRequest(update, currentProjectPath))
 			}).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(

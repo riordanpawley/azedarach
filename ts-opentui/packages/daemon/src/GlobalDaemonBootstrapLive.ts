@@ -268,6 +268,8 @@ export const GlobalDaemonBootstrapLive = Layer.scoped(
 			buildGlobalDaemonSocketUrl,
 		} satisfies GlobalDaemonBootstrapApi
 	}),
-).pipe(Layer.provide(GlobalDaemonDiscovery.Default.pipe(Layer.provide(BunContext.layer))))
+)
 
-export const DaemonControlLive = GlobalDaemonBootstrapLive
+const DaemonControlDependencies = Layer.mergeAll(BunContext.layer, GlobalDaemonDiscovery.Default)
+
+export const DaemonControlLive = Layer.provide(GlobalDaemonBootstrapLive, DaemonControlDependencies)

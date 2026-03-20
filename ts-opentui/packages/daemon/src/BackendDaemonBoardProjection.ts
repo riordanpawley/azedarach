@@ -2,7 +2,15 @@ import type { DaemonBoardTask, TrackedIssue } from "@azedarach/shared/rpc"
 
 export interface BackendDaemonBoardProjectionInput {
 	readonly issues: ReadonlyArray<TrackedIssue>
-	readonly sessionStateByIssueId: ReadonlyMap<string, DaemonBoardTask["sessionState"]>
+	readonly sessionsByIssueId: ReadonlyMap<
+		string,
+		{
+			readonly state: DaemonBoardTask["sessionState"]
+			readonly startedAt: string | null
+			readonly tmuxSessionName: string
+			readonly worktreePath: string | null
+		}
+	>
 	readonly devServerIssueIds: ReadonlySet<string>
 }
 
@@ -64,11 +72,11 @@ const resolveParentEpicId = (
 const toBoardTask = (params: {
 	readonly issue: TrackedIssue
 	readonly issuesById: ReadonlyMap<string, TrackedIssue>
-	readonly sessionStateByIssueId: ReadonlyMap<string, DaemonBoardTask["sessionState"]>
+	readonly sessionsByIssueId: BackendDaemonBoardProjectionInput["sessionsByIssueId"]
 	readonly devServerIssueIds: ReadonlySet<string>
 }): BackendDaemonBoardTaskSnapshot => {
-	const sessionState = params.sessionStateByIssueId.get(params.issue.id) ?? "idle"
-	const hasWorktree = sessionState === "idle" ? undefined : true
+	const session = params.sessionsByIssueId.get(params.issue.id)
+	const sessionState = session?.state ?? "idle"
 	const prInfo = parsePrInfo(params.issue.notes)
 	return {
 		id: params.issue.id,
@@ -90,7 +98,9 @@ const toBoardTask = (params: {
 		dependent_count: params.issue.dependent_count,
 		dependency_count: params.issue.dependency_count,
 		sessionState,
-		hasWorktree,
+		sessionStartedAt: session?.startedAt ?? undefined,
+		hasTmuxSession: session === undefined ? undefined : true,
+		hasWorktree: session?.worktreePath === null || session === undefined ? undefined : true,
 		parentEpicId: resolveParentEpicId(params.issue, params.issuesById),
 		hasDevServer: params.devServerIssueIds.has(params.issue.id) ? true : undefined,
 		...prInfo,
@@ -105,7 +115,7 @@ export const buildBoardTaskSnapshots = (
 		toBoardTask({
 			issue,
 			issuesById,
-			sessionStateByIssueId: input.sessionStateByIssueId,
+			sessionsByIssueId: input.sessionsByIssueId,
 			devServerIssueIds: input.devServerIssueIds,
 		}),
 	)

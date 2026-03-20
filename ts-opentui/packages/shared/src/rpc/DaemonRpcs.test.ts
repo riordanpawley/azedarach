@@ -248,11 +248,17 @@ describe("DaemonRpcs", () => {
 				issueId: "qc",
 				state: "waiting",
 				projectPath: "/tmp/project",
+				tmuxSessionName: "az-qc",
+				worktreePath: "/tmp/project/.worktrees/qc",
+				startedAt: "2026-03-20T00:00:00.000Z",
 			}),
 		)
 
 		expect(start.issueId).toBe("qc")
 		expect(start.projectPath).toBe("/tmp/project")
+		expect(update.tmuxSessionName).toBe("az-qc")
+		expect(update.worktreePath).toBe("/tmp/project/.worktrees/qc")
+		expect(update.startedAt).toBe("2026-03-20T00:00:00.000Z")
 		expect(update.state).toBe("waiting")
 	})
 
@@ -940,13 +946,22 @@ describe("DaemonRpcs", () => {
 						startedAt: "2026-03-14T06:00:00.000Z",
 						projectPath: "/tmp/project",
 					},
+					{
+						issueId: "zz",
+						worktreePath: null,
+						tmuxSessionName: "az-zz",
+						state: "waiting",
+						startedAt: null,
+						projectPath: "/tmp/project",
+					},
 				],
 			}),
 		)
 
-		expect(decoded.sessions).toHaveLength(1)
+		expect(decoded.sessions).toHaveLength(2)
 		expect(decoded.sessions[0]?.issueId).toBe("qc")
 		expect(decoded.sessions[0]?.state).toBe("busy")
+		expect(decoded.sessions[1]?.startedAt).toBeNull()
 	})
 
 	it("validates daemon board read model request and response shape", async () => {

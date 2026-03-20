@@ -461,7 +461,7 @@ type StartSessionRuntimeDecision = "required-daemon-bootstrap"
 const mapDaemonSessionMutationToCliSession = (
 	result: DaemonSessionMutationResult,
 ): {
-	readonly worktreePath: string
+	readonly worktreePath: string | null
 	readonly tmuxSessionName: string
 } => ({
 	worktreePath: result.session.worktreePath,
@@ -1000,7 +1000,7 @@ const startHandler = (args: {
 			)
 
 		yield* Console.log(`Session started successfully!`)
-		yield* Console.log(`  Worktree: ${session.worktreePath}`)
+		yield* Console.log(`  Worktree: ${session.worktreePath ?? "<not reported by daemon>"}`)
 		yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
 		yield* Console.log(`  Issue claimed: ${issueId} (assignee: ${session.tmuxSessionName})`)
 		yield* Console.log(``)

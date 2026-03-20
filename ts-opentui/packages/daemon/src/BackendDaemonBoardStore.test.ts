@@ -48,7 +48,10 @@ const makeSessionRecoveryStub = (
 ): Parameters<typeof BackendDaemonSessionRecovery.make>[0] => ({
 	listActive,
 	recoverSession: () => Effect.void,
-	updateState: () => Effect.void,
+	updateState: () =>
+		Effect.dieMessage(
+			"unexpected session recovery updateState call in BackendDaemonBoardStore test",
+		),
 })
 
 const makeDevServerStub = (list: DevServerDaemonServiceApi["list"]): DevServerDaemonServiceApi => ({
@@ -93,6 +96,10 @@ describe("BackendDaemonBoardStore", () => {
 					{
 						issueId: "task-1",
 						state: "busy",
+						projectPath: "/tmp/project",
+						tmuxSessionName: "az-task-1",
+						worktreePath: "/tmp/project/.worktrees/task-1",
+						startedAt: "2026-03-20T01:30:00.000Z",
 					},
 				])
 			}),
@@ -140,6 +147,8 @@ describe("BackendDaemonBoardStore", () => {
 		expect(tasks).toHaveLength(1)
 		expect(tasks[0]?.id).toBe("task-1")
 		expect(tasks[0]?.sessionState).toBe("busy")
+		expect(tasks[0]?.sessionStartedAt).toBe("2026-03-20T01:30:00.000Z")
+		expect(tasks[0]?.hasTmuxSession).toBe(true)
 		expect(tasks[0]?.hasWorktree).toBe(true)
 		expect(tasks[0]?.hasDevServer).toBe(true)
 	})

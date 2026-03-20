@@ -35,10 +35,7 @@ export const runGlobalDaemonMain = Effect.gen(function* () {
 	),
 )
 
-const GlobalDaemonMainLayer = Layer.mergeAll(
-	BunContext.layer,
-	GlobalDaemonDiscovery.Default.pipe(Layer.provide(BunContext.layer)),
-)
+const GlobalDaemonMainLayer = Layer.mergeAll(BunContext.layer, GlobalDaemonDiscovery.Default)
 
 if (import.meta.main) {
 	Effect.runPromise(runGlobalDaemonMain.pipe(Effect.provide(GlobalDaemonMainLayer))).catch(() => {

@@ -158,10 +158,10 @@ export const DaemonSessionStateSchema = Schema.Literal(
 
 export const DaemonSessionSnapshotEntrySchema = Schema.Struct({
 	issueId: Schema.String,
-	worktreePath: Schema.String,
+	worktreePath: Schema.NullOr(Schema.String),
 	tmuxSessionName: Schema.String,
 	state: DaemonSessionStateSchema,
-	startedAt: Schema.String,
+	startedAt: Schema.NullOr(Schema.String),
 	projectPath: Schema.String,
 })
 export type DaemonSessionSnapshotEntry = Schema.Schema.Type<typeof DaemonSessionSnapshotEntrySchema>
@@ -277,6 +277,9 @@ export const DaemonSessionUpdateStateRequestSchema = Schema.Struct({
 	issueId: Schema.String,
 	state: DaemonSessionStateSchema,
 	projectPath: Schema.String,
+	tmuxSessionName: Schema.optional(Schema.String),
+	worktreePath: Schema.optional(Schema.NullOr(Schema.String)),
+	startedAt: Schema.optional(Schema.NullOr(Schema.String)),
 })
 export type DaemonSessionUpdateStateRequest = Schema.Schema.Type<
 	typeof DaemonSessionUpdateStateRequestSchema
@@ -312,6 +315,7 @@ export const DaemonBoardTaskSchema = Schema.Struct({
 	dependency_count: Schema.optional(Schema.Number),
 	sessionState: DaemonSessionStateSchema,
 	sessionStartedAt: Schema.optional(Schema.String),
+	hasTmuxSession: Schema.optional(Schema.Boolean),
 	hasWorktree: Schema.optional(Schema.Boolean),
 	hasMergeConflict: Schema.optional(Schema.Boolean),
 	parentEpicId: Schema.optional(Schema.String),

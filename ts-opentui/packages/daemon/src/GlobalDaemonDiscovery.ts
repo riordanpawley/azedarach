@@ -1,4 +1,5 @@
 import { FileSystem, Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
 import { Data, Effect, Option, Schema } from "effect"
 
 const GLOBAL_DAEMON_STORAGE_DIR = ".azedarach/daemon"
@@ -117,6 +118,7 @@ const probeGlobalDaemonOwnerLiveness = (
 export class GlobalDaemonDiscovery extends Effect.Service<GlobalDaemonDiscoveryApi>()(
 	"GlobalDaemonDiscovery",
 	{
+		dependencies: [BunContext.layer],
 		effect: Effect.gen(function* () {
 			const fileSystem = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path

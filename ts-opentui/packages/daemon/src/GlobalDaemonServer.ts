@@ -159,9 +159,9 @@ export const makeGlobalDaemonTransportLayer = (
 	import("@effect/platform/SocketServer").SocketServerError,
 	never
 > =>
-	RpcServer.layerProtocolSocketServer.pipe(
-		Layer.provide(RpcSerialization.layerJson),
-		Layer.provide(BunSocketServer.layer({ path: socketPath })),
+	Layer.provide(
+		RpcServer.layerProtocolSocketServer,
+		Layer.mergeAll(RpcSerialization.layerJson, BunSocketServer.layer({ path: socketPath })),
 	)
 
 const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
@@ -175,10 +175,13 @@ const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
 		TrackerIssueDaemonService.Default,
 	)
 
-	return RpcServer.layer(DaemonAppRpcGroup).pipe(
-		Layer.provideMerge(makeGlobalDaemonTransportLayer(socketPath)),
-		Layer.provideMerge(GlobalDaemonRpcHandlersLive.pipe(Layer.provide(daemonServicesLayer))),
+	const handlersLayer = Layer.provide(GlobalDaemonRpcHandlersLive, daemonServicesLayer)
+	const rpcDependenciesLayer = Layer.mergeAll(
+		makeGlobalDaemonTransportLayer(socketPath),
+		handlersLayer,
 	)
+
+	return Layer.provide(RpcServer.layer(DaemonAppRpcGroup), rpcDependenciesLayer)
 }
 
 export const makeGlobalDaemonServerRuntime = (params: {

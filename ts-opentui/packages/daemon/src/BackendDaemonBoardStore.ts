@@ -38,8 +38,19 @@ const makeBackendDaemonBoardStore = (params: {
 				params.devServers.list({ projectPath }),
 			])
 
-			const sessionStateByIssueId = new Map(
-				activeSessions.map((session) => [session.issueId, session.state] as const),
+			const sessionsByIssueId = new Map(
+				activeSessions.map(
+					(session) =>
+						[
+							session.issueId,
+							{
+								state: session.state,
+								startedAt: session.startedAt,
+								tmuxSessionName: session.tmuxSessionName,
+								worktreePath: session.worktreePath,
+							},
+						] as const,
+				),
 			)
 			const devServerIssueIds = new Set(
 				devServerList.servers
@@ -49,7 +60,7 @@ const makeBackendDaemonBoardStore = (params: {
 
 			return buildBoardTaskSnapshots({
 				issues,
-				sessionStateByIssueId,
+				sessionsByIssueId,
 				devServerIssueIds,
 			})
 		}).pipe(
