@@ -6,6 +6,5 @@ export {
 
 export {
 	ImageAttachmentService,
-	PlanningService,
 	PRWorkflow,
 } from "../../../../src/runtime/coreServicesFacade.js"

@@ -7,6 +7,7 @@ import { Cause, Data, Effect, Fiber, Layer, Ref } from "effect"
 import { BackendDaemonControlService } from "./BackendDaemonControlService.js"
 import { BackendDaemonService } from "./BackendDaemonService.js"
 import { BackendDaemonSessionRecovery } from "./BackendDaemonSessionRecovery.js"
+import { DaemonPlanningService } from "./DaemonPlanningService.js"
 import { GlobalDaemonDiscovery, type GlobalDaemonLease } from "./GlobalDaemonDiscovery.js"
 import { GlobalDaemonRpcHandlersLive } from "./GlobalDaemonRpcHandlers.js"
 import { ImplementationRegistryDaemonService } from "./ImplementationRegistryDaemonService.js"
@@ -175,7 +176,12 @@ const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
 		TrackerIssueDaemonService.Default,
 	)
 
-	const handlersLayer = Layer.provide(GlobalDaemonRpcHandlersLive, daemonServicesLayer)
+	const daemonServicesWithPlanningLayer = Layer.mergeAll(
+		daemonServicesLayer,
+		DaemonPlanningService.Default,
+	)
+
+	const handlersLayer = Layer.provide(GlobalDaemonRpcHandlersLive, daemonServicesWithPlanningLayer)
 	const rpcDependenciesLayer = Layer.mergeAll(
 		makeGlobalDaemonTransportLayer(socketPath),
 		handlersLayer,

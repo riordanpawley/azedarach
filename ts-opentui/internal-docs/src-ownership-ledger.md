@@ -71,7 +71,9 @@ ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../.
 - 2026-03-19 `yo` replaced CLI `ProjectService` usage with config-backed helpers; `packages/cli/src/runtimeServices.ts` now exports only `IssueTrackerClient` and `SpecService`.
 - 2026-03-20 `aam` moved TUI issue-editor ownership into `packages/tui`, added package-local markdown/editor utilities, and removed `IssueEditorService` from the legacy runtime seam.
 - 2026-03-20 `aap` removed dead TUI legacy runtime exports/layers for `BoardService`, `MutationQueue`, `SessionService`, and `SessionManager`.
-- 2026-03-20 `aat` removed `PTYMonitor` from TUI runtime wiring and session atoms; the remaining legacy runtime seam is now `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, `PlanningService`, and `PRWorkflow`.
+- 2026-03-20 `aat` removed `PTYMonitor` from TUI runtime wiring and session atoms; the remaining legacy runtime seam afterward was `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, `PlanningService`, and `PRWorkflow`.
+- 2026-03-20 `aas` moved TUI planning onto the daemon planning RPC group, added package-local `packages/tui/src/services/PlanningService.ts`, made the public `@azedarach/shared/rpc` barrel expose planning schemas/contracts, and removed `PlanningService` from `packages/tui/src/utils/legacyRuntimeServices.ts`.
+- Current remaining TUI legacy runtime seam: `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, and `PRWorkflow`.
 - Remaining runtime-facade package edges are TUI-only through `packages/tui/src/utils/legacyRuntimeServices.ts`.
 
 ## Classification Legend
@@ -118,7 +120,7 @@ ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../.
 - [ ] status=pending owner-child= path=src/core/LocalIssueStore.ts
 - [ ] status=pending owner-child= path=src/core/PRWorkflow.ts
 - [ ] status=pending owner-child= path=src/core/PTYMonitor.ts
-- [ ] status=pending owner-child= path=src/core/PlanningService.ts
+- [x] status=migrated owner-child=aas path=src/core/PlanningService.ts
 - [ ] status=pending owner-child= path=src/core/SessionManager.recovery.test.ts
 - [ ] status=pending owner-child= path=src/core/SessionManager.ts
 - [ ] status=pending owner-child= path=src/core/SessionStateStore.test.ts

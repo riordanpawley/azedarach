@@ -32,6 +32,7 @@ export { NavigationService } from "../services/NavigationService.js"
 export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
 export { OverlayService } from "../services/OverlayService.js"
+export { PlanningService } from "../services/PlanningService.js"
 export {
 	type SettingDefinition,
 	SettingsService,
@@ -51,7 +52,6 @@ export { getIssueCreateImplementations } from "./issueImplementations.js"
 export {
 	ImageAttachmentService,
 	KeyboardService,
-	PlanningService,
 	PRWorkflow,
 	ProjectService,
 	ProjectStateService,

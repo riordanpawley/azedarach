@@ -32,6 +32,16 @@ import {
 	DaemonIssueUpdateResultSchema,
 } from "./DaemonIssueRpcSchemas.js"
 import {
+	DaemonPlanningCreateIssuesRequestSchema,
+	DaemonPlanningCreateIssuesResultSchema,
+	DaemonPlanningGenerateRequestSchema,
+	DaemonPlanningGenerateResultSchema,
+	DaemonPlanningRefineRequestSchema,
+	DaemonPlanningRefineResultSchema,
+	DaemonPlanningReviewRequestSchema,
+	DaemonPlanningReviewResultSchema,
+} from "./DaemonPlanningRpcSchemas.js"
+import {
 	DaemonAttachReconnectResultSchema,
 	DaemonAttachRequestSchema,
 	DaemonBoardReadModelRequestSchema,
@@ -515,6 +525,37 @@ export const DaemonImplementationRpcGroup = RpcGroup.make(
 	DaemonImplementationSetDefaultRpc,
 )
 
+export const DaemonPlanningGenerateRpc = Rpc.make("daemonPlanningGenerate", {
+	payload: DaemonPlanningGenerateRequestSchema,
+	success: DaemonPlanningGenerateResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPlanningReviewRpc = Rpc.make("daemonPlanningReview", {
+	payload: DaemonPlanningReviewRequestSchema,
+	success: DaemonPlanningReviewResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPlanningRefineRpc = Rpc.make("daemonPlanningRefine", {
+	payload: DaemonPlanningRefineRequestSchema,
+	success: DaemonPlanningRefineResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPlanningCreateIssuesRpc = Rpc.make("daemonPlanningCreateIssues", {
+	payload: DaemonPlanningCreateIssuesRequestSchema,
+	success: DaemonPlanningCreateIssuesResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPlanningRpcGroup = RpcGroup.make(
+	DaemonPlanningGenerateRpc,
+	DaemonPlanningReviewRpc,
+	DaemonPlanningRefineRpc,
+	DaemonPlanningCreateIssuesRpc,
+)
+
 export const DaemonSpecRequirementRpcGroup = RpcGroup.make(
 	DaemonSpecRequirementListRpc,
 	DaemonSpecRequirementGetRpc,
@@ -565,6 +606,7 @@ export const DaemonRpcGroup = DaemonControlRpcGroup.merge(
 
 export const DaemonAppRpcGroup = DaemonRpcGroup.merge(
 	DaemonImplementationRpcGroup,
+	DaemonPlanningRpcGroup,
 	DaemonSpecReadRpcGroup,
 )
 

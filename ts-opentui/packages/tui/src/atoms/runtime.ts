@@ -148,7 +148,7 @@ const coreServicesLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(ToastService.Default), Layer.provideMerge(ProjectService.Default))
 
 const deferredServicesLayer = Layer.mergeAll(
-	PlanningService.Default,
+	PlanningService.Default.pipe(Layer.provideMerge(daemonRpcClientLayer)),
 	TmuxSessionMonitor.Default,
 	VCService.Default,
 )

@@ -48,6 +48,14 @@ import {
 	type DaemonIssueUpdateResult,
 	type DaemonLogsRequest,
 	type DaemonLogsResult,
+	type DaemonPlanningCreateIssuesRequest,
+	type DaemonPlanningCreateIssuesResult,
+	type DaemonPlanningGenerateRequest,
+	type DaemonPlanningGenerateResult,
+	type DaemonPlanningRefineRequest,
+	type DaemonPlanningRefineResult,
+	type DaemonPlanningReviewRequest,
+	type DaemonPlanningReviewResult,
 	type DaemonQueueCancelRequest,
 	type DaemonQueueCancelResult,
 	type DaemonQueueEnqueueRequest,
@@ -130,6 +138,13 @@ import {
 	type BackendDaemonSessionSnapshot,
 	type BackendDaemonSessionUpdate,
 } from "./BackendDaemonSessionRecovery.js"
+import {
+	type DaemonPlanningCreateIssuesResult as DaemonPlanningCreateIssuesServiceResult,
+	DaemonPlanningError,
+	type DaemonPlanningPlan,
+	type DaemonPlanningReviewFeedback,
+	DaemonPlanningService,
+} from "./DaemonPlanningService.js"
 import {
 	ImplementationRegistryDaemonError,
 	ImplementationRegistryDaemonService,
@@ -254,6 +269,7 @@ const unsupportedDaemonRpc = <A>(action: string): Effect.Effect<A, DaemonRpcActi
 type DaemonRpcMappedError =
 	| BackendDaemonControlRestartConfigurationError
 	| ImplementationRegistryDaemonError
+	| DaemonPlanningError
 	| SpecDaemonError
 	| TrackerIssueDaemonError
 	| Error
@@ -301,6 +317,41 @@ const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpc
 				return daemonRpcActionError({
 					action,
 					code: "not-found",
+					message: error.message,
+				})
+		}
+	}
+
+	if (error instanceof DaemonPlanningError) {
+		switch (error.reason) {
+			case "invalid-input":
+				return daemonRpcActionError({
+					action,
+					code: "invalid-input",
+					message: error.message,
+				})
+			case "generation":
+				return daemonRpcActionError({
+					action,
+					code: "generation-failed",
+					message: error.message,
+				})
+			case "review":
+				return daemonRpcActionError({
+					action,
+					code: "review-failed",
+					message: error.message,
+				})
+			case "refinement":
+				return daemonRpcActionError({
+					action,
+					code: "refinement-failed",
+					message: error.message,
+				})
+			case "issues-creation":
+				return daemonRpcActionError({
+					action,
+					code: "issues-creation-failed",
 					message: error.message,
 				})
 		}
@@ -389,6 +440,30 @@ const catchDaemonRpcError =
 	(effect: Effect.Effect<A, E>) =>
 		effect.pipe(Effect.mapError((error) => mapControlError(action, error)))
 
+const mapPlanningGenerateResult = (plan: DaemonPlanningPlan): DaemonPlanningGenerateResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	plan,
+})
+
+const mapPlanningReviewResult = (
+	feedback: DaemonPlanningReviewFeedback,
+): DaemonPlanningReviewResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	feedback,
+})
+
+const mapPlanningRefineResult = (plan: DaemonPlanningPlan): DaemonPlanningRefineResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	plan,
+})
+
+const mapPlanningCreateIssuesResult = (
+	result: DaemonPlanningCreateIssuesServiceResult,
+): DaemonPlanningCreateIssuesResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	createdIssues: result.createdIssues,
+})
+
 export const makeDaemonBoardReadModelRpcHandler =
 	(control: {
 		readonly boardReadModel: (
@@ -460,10 +535,36 @@ export const makeDaemonSessionUpdateStateRpcHandler =
 		)
 	}
 
+export const makeDaemonPlanningGenerateRpcHandler =
+	(planning: Pick<DaemonPlanningService, "generate">) => (request: DaemonPlanningGenerateRequest) =>
+		planning
+			.generate(request.featureDescription)
+			.pipe(Effect.map(mapPlanningGenerateResult), catchDaemonRpcError("planningGenerate"))
+
+export const makeDaemonPlanningReviewRpcHandler =
+	(planning: Pick<DaemonPlanningService, "review">) => (request: DaemonPlanningReviewRequest) =>
+		planning
+			.review(request.plan)
+			.pipe(Effect.map(mapPlanningReviewResult), catchDaemonRpcError("planningReview"))
+
+export const makeDaemonPlanningRefineRpcHandler =
+	(planning: Pick<DaemonPlanningService, "refine">) => (request: DaemonPlanningRefineRequest) =>
+		planning
+			.refine(request.plan, request.feedback)
+			.pipe(Effect.map(mapPlanningRefineResult), catchDaemonRpcError("planningRefine"))
+
+export const makeDaemonPlanningCreateIssuesRpcHandler =
+	(planning: Pick<DaemonPlanningService, "createIssues">) =>
+	(request: DaemonPlanningCreateIssuesRequest) =>
+		planning
+			.createIssues(request)
+			.pipe(Effect.map(mapPlanningCreateIssuesResult), catchDaemonRpcError("planningCreateIssues"))
+
 export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const runtime = yield* BackendDaemonService
 	const control = yield* BackendDaemonControlService
 	const sessionRecovery = yield* BackendDaemonSessionRecovery
+	const planning = yield* DaemonPlanningService
 	const implementations = yield* ImplementationRegistryDaemonService
 	const issues = yield* TrackerIssueDaemonService
 	const specs = yield* SpecDaemonService
@@ -524,6 +625,10 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 		daemonSessionRecover: (_request: DaemonSessionRecoverRequest) =>
 			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionRecover"),
 		daemonSessionUpdateState: makeDaemonSessionUpdateStateRpcHandler(sessionRecovery),
+		daemonPlanningGenerate: makeDaemonPlanningGenerateRpcHandler(planning),
+		daemonPlanningReview: makeDaemonPlanningReviewRpcHandler(planning),
+		daemonPlanningRefine: makeDaemonPlanningRefineRpcHandler(planning),
+		daemonPlanningCreateIssues: makeDaemonPlanningCreateIssuesRpcHandler(planning),
 		daemonDevServerStatus: (request: DaemonDevServerStatusRequest) =>
 			control
 				.devServerStatus({

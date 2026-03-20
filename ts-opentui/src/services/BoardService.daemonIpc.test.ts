@@ -273,6 +273,14 @@ const makeDaemonRpcClientStub = (params: {
 	issueDelete: () =>
 		Effect.dieMessage("Unexpected issueDelete RPC in BoardService daemon IPC test"),
 	issueSync: () => Effect.dieMessage("Unexpected issueSync RPC in BoardService daemon IPC test"),
+	planningGenerate: () =>
+		Effect.dieMessage("Unexpected planningGenerate RPC in BoardService daemon IPC test"),
+	planningReview: () =>
+		Effect.dieMessage("Unexpected planningReview RPC in BoardService daemon IPC test"),
+	planningRefine: () =>
+		Effect.dieMessage("Unexpected planningRefine RPC in BoardService daemon IPC test"),
+	planningCreateIssues: () =>
+		Effect.dieMessage("Unexpected planningCreateIssues RPC in BoardService daemon IPC test"),
 	specRequirementList: () =>
 		Effect.dieMessage("Unexpected specRequirementList RPC in BoardService daemon IPC test"),
 	specRequirementGet: () =>
