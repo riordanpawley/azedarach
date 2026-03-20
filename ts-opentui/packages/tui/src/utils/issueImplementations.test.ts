@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test"
 import type { ImplementationRegistry } from "../contracts.js"
 import {
+	formatIssueImplementations,
+	parseIssueImplementations,
 	resolveIssueCreateImplementations,
 	resolveIssueEditorDefaultImplementation,
 } from "./issueImplementations.js"
@@ -51,5 +53,15 @@ describe("resolveIssueCreateImplementations", () => {
 
 	it("falls back to the resolved default implementation when none are requested", () => {
 		expect(resolveIssueCreateImplementations(registry)).toEqual(["default"])
+	})
+})
+
+describe("issue implementation parsing", () => {
+	it("normalizes and deduplicates parsed implementation values", () => {
+		expect(parseIssueImplementations(" Alpha, alpha, beta , ")).toEqual(["alpha", "beta"])
+	})
+
+	it("formats implementation values for editor markdown", () => {
+		expect(formatIssueImplementations(["tui", "daemon"])).toBe("tui, daemon")
 	})
 })

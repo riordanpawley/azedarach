@@ -60,9 +60,8 @@ Risk controls:
 
 - current package->src import edges:
 ```
-ts-opentui/packages/cli/src/runtimeServices.ts:4:} from "../../../src/runtime/coreServicesFacade.js"
-ts-opentui/packages/tui/src/utils/runtimeServices.ts:28:} from "../../../../src/runtime/appServicesFacade.js"
-ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/runtime/coreServicesFacade.js"
+ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:5:} from "../../../../src/runtime/appServicesFacade.js"
+ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../../src/runtime/coreServicesFacade.js"
 ```
 
 - 2026-03-19 `ye` landed daemon-local sync/board/session contracts in `packages/daemon` and deleted `packages/daemon/src/runtimeServices.ts`.
@@ -70,7 +69,9 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 - 2026-03-19 `yl` moved TUI dev-server atoms to a package-local daemon-RPC state path, removed `DevServerService` from `packages/tui/src/atoms/runtime.ts`, and narrowed `packages/tui/src/utils/runtimeServices.ts` accordingly.
 - 2026-03-19 `yn` removed dead CLI `SessionManager` / `ToastService` dependencies; `packages/cli/src/runtimeServices.ts` is now down to `ProjectService`, `IssueTrackerClient`, and `SpecService`.
 - 2026-03-19 `yo` replaced CLI `ProjectService` usage with config-backed helpers; `packages/cli/src/runtimeServices.ts` now exports only `IssueTrackerClient` and `SpecService`.
-- Remaining runtime-facade package edges are CLI/TUI only; `yf` is blocked pending either a narrow boundary exception or prior migration of the underlying `src/core`/`src/services` implementations.
+- 2026-03-20 `aam` moved TUI issue-editor ownership into `packages/tui`, added package-local markdown/editor utilities, and removed `IssueEditorService` from the legacy runtime seam.
+- 2026-03-20 `aap` removed dead TUI legacy runtime exports/layers for `BoardService`, `MutationQueue`, `SessionService`, and `SessionManager`.
+- Remaining runtime-facade package edges are TUI-only through `packages/tui/src/utils/legacyRuntimeServices.ts`.
 
 ## Classification Legend
 
@@ -100,9 +101,9 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 - [ ] status=pending owner-child= path=src/core/FileLockManager.ts
 - [ ] status=pending owner-child= path=src/core/GlobalDaemonDiscovery.test.ts
 - [ ] status=pending owner-child= path=src/core/ImageAttachmentService.ts
-- [ ] status=pending owner-child= path=src/core/IssueEditorService.ts
-- [ ] status=pending owner-child= path=src/core/IssueImplementations.test.ts
-- [ ] status=pending owner-child= path=src/core/IssueImplementations.ts
+- [x] status=migrated owner-child=aam path=src/core/IssueEditorService.ts
+- [x] status=migrated owner-child=aam path=src/core/IssueImplementations.test.ts
+- [x] status=migrated owner-child=aam path=src/core/IssueImplementations.ts
 - [ ] status=pending owner-child= path=src/core/IssueSyncService.test.ts
 - [ ] status=pending owner-child= path=src/core/IssueSyncService.ts
 - [ ] status=pending owner-child= path=src/core/IssueTrackerClient.linear-type.test.ts

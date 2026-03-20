@@ -28,6 +28,13 @@ const normalizeImplementationList = (
 const hasImplementation = (registry: ImplementationRegistry, implementation: string): boolean =>
 	registry.implementations.some((entry) => entry.name === implementation)
 
+export const parseIssueImplementations = (value: string): readonly string[] | undefined =>
+	normalizeImplementationList(value.split(","))
+
+export const formatIssueImplementations = (
+	implementations: readonly string[] | undefined,
+): string => implementations?.join(", ") ?? ""
+
 export const resolveIssueEditorDefaultImplementation = (
 	registry: ImplementationRegistry,
 	configuredDefaultImplementation: string | undefined,
@@ -61,7 +68,7 @@ export const resolveIssueCreateImplementations = (
 
 	return [
 		resolveIssueEditorDefaultImplementation(registry, options?.configuredDefaultImplementation),
-	] as const
+	]
 }
 
 export const getIssueCreateImplementations = (options?: {

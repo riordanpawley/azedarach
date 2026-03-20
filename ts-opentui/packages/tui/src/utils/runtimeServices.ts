@@ -27,6 +27,7 @@ export { CommandQueueService } from "../services/CommandQueueService.js"
 export { DiagnosticsService } from "../services/DiagnosticsService.js"
 export { DiffService } from "../services/DiffService.js"
 export { EditorService } from "../services/EditorService.js"
+export { IssueEditorService } from "../services/IssueEditorService.js"
 export { NavigationService } from "../services/NavigationService.js"
 export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
@@ -48,17 +49,12 @@ export { computeDependencyPhases } from "./dependencyPhases.js"
 export { formatForToast } from "./formatForToast.js"
 export { getIssueCreateImplementations } from "./issueImplementations.js"
 export {
-	BoardService,
 	ImageAttachmentService,
-	IssueEditorService,
 	KeyboardService,
-	MutationQueue,
 	PlanningService,
 	PRWorkflow,
 	ProjectService,
 	ProjectStateService,
 	PTYMonitor,
-	SessionManager,
-	SessionService,
 } from "./legacyRuntimeServices.js"
 export { buildTaskQueueKey } from "./queueKey.js"
