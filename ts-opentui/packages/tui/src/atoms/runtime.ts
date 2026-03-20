@@ -21,6 +21,7 @@ import { CommandQueueService } from "../services/CommandQueueService.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { DiffService } from "../services/DiffService.js"
 import { EditorService } from "../services/EditorService.js"
+import { configureTuiKeyboardService, KeyboardService } from "../services/KeyboardService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { OverlayService } from "../services/OverlayService.js"
@@ -34,7 +35,6 @@ import {
 	AttachmentService,
 	ImageAttachmentService,
 	IssueEditorService,
-	KeyboardService,
 	NavigationService,
 	PlanningService,
 	PRWorkflow,
@@ -63,6 +63,8 @@ let configuredTuiDaemonRpcClient: DaemonRpcClientApi | undefined
 export const configureTuiDaemonRpcClient = (daemonRpcClient: DaemonRpcClientApi): void => {
 	configuredTuiDaemonRpcClient = daemonRpcClient
 }
+
+export { configureTuiKeyboardService }
 
 export const resolveTuiRuntimeModeFromEnv = (
 	_env: Readonly<Record<string, string | undefined>>,
@@ -140,10 +142,7 @@ const coreServicesLayer = Layer.mergeAll(
 	PRWorkflow.Default.pipe(Layer.provideMerge(daemonRpcClientLayer)),
 	TerminalService.Default,
 	EditorService.Default,
-	KeyboardService.Default.pipe(
-		Layer.provideMerge(daemonRpcClientLayer),
-		Layer.provideMerge(appConfigProjectContextLayer),
-	),
+	KeyboardService.Default,
 	navigationLayer,
 	appConfigProjectContextLayer,
 	appConfigNotifierLayer,

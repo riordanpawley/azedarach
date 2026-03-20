@@ -1,4 +1,5 @@
 export * from "./App.js"
 export * from "./atoms.js"
 export * from "./launch.js"
+export { configureTuiKeyboardService } from "./services/KeyboardService.js"
 export * from "./types.js"
