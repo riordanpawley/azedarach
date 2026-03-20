@@ -1,6 +1,19 @@
 import { describe, expect, it } from "bun:test"
 import { Effect, Schema } from "effect"
 import {
+	DaemonAttachmentAttachClipboardRequestSchema,
+	DaemonAttachmentAttachFileRequestSchema,
+	DaemonAttachmentAttachResultSchema,
+	DaemonAttachmentCountBatchRequestSchema,
+	DaemonAttachmentCountBatchResultSchema,
+	DaemonAttachmentListRequestSchema,
+	DaemonAttachmentListResultSchema,
+	DaemonAttachmentMaterializePathRequestSchema,
+	DaemonAttachmentMaterializePathResultSchema,
+	DaemonAttachmentRemoveRequestSchema,
+	DaemonAttachmentRemoveResultSchema,
+} from "./DaemonAttachmentRpcSchemas.js"
+import {
 	DaemonImplementationCreateRequestSchema,
 	DaemonImplementationGetRegistryResultSchema,
 } from "./DaemonImplementationRpcSchemas.js"
@@ -94,6 +107,12 @@ describe("DaemonRpcs", () => {
 		const keys = [...DaemonRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
 			"daemonAttach",
+			"daemonAttachmentAttachClipboard",
+			"daemonAttachmentAttachFile",
+			"daemonAttachmentCountBatch",
+			"daemonAttachmentList",
+			"daemonAttachmentMaterializePath",
+			"daemonAttachmentRemove",
 			"daemonBoardReadModel",
 			"daemonDevServerList",
 			"daemonDevServerStart",
@@ -1147,6 +1166,136 @@ describe("DaemonRpcs", () => {
 		expect(enqueue.operation).toBe("sessionStart")
 		expect(query.items[0]?.operationId).toBe("queue-op-1")
 		expect(cancel.cancelledOperationIds).toEqual(["queue-op-1"])
+	})
+
+	it("validates attachment request and result schemas", async () => {
+		const decodeListRequest = Schema.decodeUnknown(DaemonAttachmentListRequestSchema)
+		const decodeListResult = Schema.decodeUnknown(DaemonAttachmentListResultSchema)
+		const decodeCountRequest = Schema.decodeUnknown(DaemonAttachmentCountBatchRequestSchema)
+		const decodeCountResult = Schema.decodeUnknown(DaemonAttachmentCountBatchResultSchema)
+		const decodeAttachFileRequest = Schema.decodeUnknown(DaemonAttachmentAttachFileRequestSchema)
+		const decodeAttachClipboardRequest = Schema.decodeUnknown(
+			DaemonAttachmentAttachClipboardRequestSchema,
+		)
+		const decodeAttachResult = Schema.decodeUnknown(DaemonAttachmentAttachResultSchema)
+		const decodeRemoveRequest = Schema.decodeUnknown(DaemonAttachmentRemoveRequestSchema)
+		const decodeRemoveResult = Schema.decodeUnknown(DaemonAttachmentRemoveResultSchema)
+		const decodeMaterializeRequest = Schema.decodeUnknown(
+			DaemonAttachmentMaterializePathRequestSchema,
+		)
+		const decodeMaterializeResult = Schema.decodeUnknown(
+			DaemonAttachmentMaterializePathResultSchema,
+		)
+
+		const listRequest = await Effect.runPromise(
+			decodeListRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const listResult = await Effect.runPromise(
+			decodeListResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				attachments: [
+					{
+						id: "att-1",
+						filename: "att-1.png",
+						originalPath: "/tmp/source.png",
+						mimeType: "image/png",
+						size: 42,
+						createdAt: "2026-03-20T00:00:00.000Z",
+					},
+				],
+			}),
+		)
+		const countRequest = await Effect.runPromise(
+			decodeCountRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueIds: ["te-1", "te-2"],
+				projectPath: "/tmp/project",
+			}),
+		)
+		const countResult = await Effect.runPromise(
+			decodeCountResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				counts: {
+					"te-1": 2,
+					"te-2": 0,
+				},
+			}),
+		)
+		const attachFileRequest = await Effect.runPromise(
+			decodeAttachFileRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				filePath: "/tmp/source.png",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const attachClipboardRequest = await Effect.runPromise(
+			decodeAttachClipboardRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				base64Content: "aGVsbG8=",
+				filename: "clipboard.png",
+				mimeType: "image/png",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const attachResult = await Effect.runPromise(
+			decodeAttachResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				attachment: {
+					id: "att-1",
+					filename: "att-1.png",
+					originalPath: "clipboard",
+					mimeType: "image/png",
+					size: 42,
+					createdAt: "2026-03-20T00:00:00.000Z",
+				},
+			}),
+		)
+		const removeRequest = await Effect.runPromise(
+			decodeRemoveRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				attachmentId: "att-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const removeResult = await Effect.runPromise(
+			decodeRemoveResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				removed: true,
+			}),
+		)
+		const materializeRequest = await Effect.runPromise(
+			decodeMaterializeRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				attachmentId: "att-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const materializeResult = await Effect.runPromise(
+			decodeMaterializeResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				path: "/tmp/project/.azedarach/tmp/attachments/te-1/att-1/att-1.png",
+			}),
+		)
+
+		expect(listRequest.issueId).toBe("te-1")
+		expect(listResult.attachments[0]?.filename).toBe("att-1.png")
+		expect(countRequest.issueIds).toEqual(["te-1", "te-2"])
+		expect(countResult.counts["te-1"]).toBe(2)
+		expect(attachFileRequest.filePath).toBe("/tmp/source.png")
+		expect(attachClipboardRequest.mimeType).toBe("image/png")
+		expect(attachResult.attachment.originalPath).toBe("clipboard")
+		expect(removeRequest.attachmentId).toBe("att-1")
+		expect(removeResult.removed).toBe(true)
+		expect(materializeRequest.issueId).toBe("te-1")
+		expect(materializeResult.path).toContain(".azedarach/tmp/attachments")
 	})
 
 	it("validates planning request and result schemas", async () => {

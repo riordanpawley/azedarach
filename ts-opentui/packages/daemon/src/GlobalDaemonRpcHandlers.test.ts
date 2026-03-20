@@ -1,9 +1,20 @@
 import { describe, expect, it } from "bun:test"
-import { DAEMON_RPC_PROTOCOL_VERSION, type DaemonBoardTask } from "@azedarach/shared/rpc"
+import {
+	DAEMON_RPC_PROTOCOL_VERSION,
+	type DaemonBoardTask,
+	type ImageAttachment,
+} from "@azedarach/shared/rpc"
 import { Effect } from "effect"
 import type { BackendDaemonSessionSnapshot } from "./BackendDaemonSessionRecovery.js"
+import { DaemonAttachmentError } from "./DaemonAttachmentService.js"
 import { DaemonSessionError } from "./DaemonSessionService.js"
 import {
+	makeDaemonAttachmentAttachClipboardRpcHandler,
+	makeDaemonAttachmentAttachFileRpcHandler,
+	makeDaemonAttachmentCountBatchRpcHandler,
+	makeDaemonAttachmentListRpcHandler,
+	makeDaemonAttachmentMaterializePathRpcHandler,
+	makeDaemonAttachmentRemoveRpcHandler,
 	makeDaemonBoardReadModelRpcHandler,
 	makeDaemonSessionPauseRpcHandler,
 	makeDaemonSessionRecoverRpcHandler,
@@ -33,6 +44,15 @@ const sessionSnapshot: BackendDaemonSessionSnapshot = {
 	tmuxSessionName: "az-task-1",
 	worktreePath: "/tmp/project/.worktrees/task-1",
 	startedAt: "2026-03-20T02:00:00.000Z",
+}
+
+const imageAttachment: ImageAttachment = {
+	id: "att-1",
+	filename: "att-1.png",
+	originalPath: "/tmp/source.png",
+	mimeType: "image/png",
+	size: 42,
+	createdAt: "2026-03-20T02:00:00.000Z",
 }
 
 describe("makeDaemonBoardReadModelRpcHandler", () => {
@@ -298,5 +318,147 @@ describe("makeDaemonSessionUpdateStateRpcHandler", () => {
 			worktreePath: "/tmp/project/.worktrees/task-1",
 			startedAt: "2026-03-20T02:00:00.000Z",
 		})
+	})
+})
+
+describe("attachment rpc handlers", () => {
+	it("maps attachment list and count results into rpc envelopes", async () => {
+		const listHandler = makeDaemonAttachmentListRpcHandler({
+			list: (issueId, projectPath) => {
+				expect(issueId).toBe("task-1")
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.succeed([imageAttachment])
+			},
+		})
+		const countHandler = makeDaemonAttachmentCountBatchRpcHandler({
+			countBatch: (issueIds, projectPath) => {
+				expect(issueIds).toEqual(["task-1", "task-2"])
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.succeed({
+					"task-1": 1,
+					"task-2": 0,
+				})
+			},
+		})
+
+		const listResult = await Effect.runPromise(
+			listHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const countResult = await Effect.runPromise(
+			countHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueIds: ["task-1", "task-2"],
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(listResult.attachments).toEqual([imageAttachment])
+		expect(countResult.counts["task-1"]).toBe(1)
+	})
+
+	it("maps attachment mutation and path handlers into rpc envelopes", async () => {
+		const attachFileHandler = makeDaemonAttachmentAttachFileRpcHandler({
+			attachFile: (request) => {
+				expect(request.filePath).toBe("/tmp/source.png")
+				return Effect.succeed(imageAttachment)
+			},
+		})
+		const attachClipboardHandler = makeDaemonAttachmentAttachClipboardRpcHandler({
+			attachClipboard: (request) => {
+				expect(request.base64Content).toBe("aGVsbG8=")
+				expect(request.mimeType).toBe("image/png")
+				return Effect.succeed({
+					...imageAttachment,
+					originalPath: "clipboard",
+				})
+			},
+		})
+		const removeHandler = makeDaemonAttachmentRemoveRpcHandler({
+			remove: (request) => {
+				expect(request.attachmentId).toBe("att-1")
+				return Effect.void
+			},
+		})
+		const materializeHandler = makeDaemonAttachmentMaterializePathRpcHandler({
+			materializePath: (request) => {
+				expect(request.issueId).toBe("task-1")
+				return Effect.succeed("/tmp/project/.azedarach/tmp/attachments/task-1/att-1/att-1.png")
+			},
+		})
+
+		const attachFileResult = await Effect.runPromise(
+			attachFileHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				filePath: "/tmp/source.png",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const attachClipboardResult = await Effect.runPromise(
+			attachClipboardHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				base64Content: "aGVsbG8=",
+				filename: "clipboard.png",
+				mimeType: "image/png",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const removeResult = await Effect.runPromise(
+			removeHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				attachmentId: "att-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const materializeResult = await Effect.runPromise(
+			materializeHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				attachmentId: "att-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(attachFileResult.attachment).toEqual(imageAttachment)
+		expect(attachClipboardResult.attachment.originalPath).toBe("clipboard")
+		expect(removeResult.removed).toBe(true)
+		expect(materializeResult.path).toContain(".azedarach/tmp/attachments")
+	})
+
+	it("maps attachment daemon errors into rpc action errors", async () => {
+		const handler = makeDaemonAttachmentAttachFileRpcHandler({
+			attachFile: () =>
+				Effect.fail(
+					new DaemonAttachmentError({
+						reason: "storage",
+						message: "attachment sqlite failed",
+					}),
+				),
+		})
+
+		const exit = await Effect.runPromiseExit(
+			handler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				filePath: "/tmp/source.png",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(exit._tag).toBe("Failure")
+		if (exit._tag === "Failure" && exit.cause._tag === "Fail") {
+			expect(exit.cause.error).toEqual({
+				_tag: "DaemonRpcActionError",
+				action: "attachmentAttachFile",
+				code: "storage",
+				message: "attachment sqlite failed",
+			})
+		}
 	})
 })

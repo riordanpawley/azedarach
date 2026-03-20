@@ -27,6 +27,7 @@ export { CommandQueueService } from "../services/CommandQueueService.js"
 export { DiagnosticsService } from "../services/DiagnosticsService.js"
 export { DiffService } from "../services/DiffService.js"
 export { EditorService } from "../services/EditorService.js"
+export { ImageAttachmentService } from "../services/ImageAttachmentService.js"
 export { IssueEditorService } from "../services/IssueEditorService.js"
 export { NavigationService } from "../services/NavigationService.js"
 export { NetworkService } from "../services/NetworkService.js"
@@ -50,7 +51,6 @@ export { computeDependencyPhases } from "./dependencyPhases.js"
 export { formatForToast } from "./formatForToast.js"
 export { getIssueCreateImplementations } from "./issueImplementations.js"
 export {
-	ImageAttachmentService,
 	KeyboardService,
 	PRWorkflow,
 	ProjectService,

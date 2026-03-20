@@ -273,6 +273,18 @@ const makeDaemonRpcClientStub = (params: {
 	issueDelete: () =>
 		Effect.dieMessage("Unexpected issueDelete RPC in BoardService daemon IPC test"),
 	issueSync: () => Effect.dieMessage("Unexpected issueSync RPC in BoardService daemon IPC test"),
+	attachmentList: () =>
+		Effect.dieMessage("Unexpected attachmentList RPC in BoardService daemon IPC test"),
+	attachmentCountBatch: () =>
+		Effect.dieMessage("Unexpected attachmentCountBatch RPC in BoardService daemon IPC test"),
+	attachmentAttachFile: () =>
+		Effect.dieMessage("Unexpected attachmentAttachFile RPC in BoardService daemon IPC test"),
+	attachmentAttachClipboard: () =>
+		Effect.dieMessage("Unexpected attachmentAttachClipboard RPC in BoardService daemon IPC test"),
+	attachmentRemove: () =>
+		Effect.dieMessage("Unexpected attachmentRemove RPC in BoardService daemon IPC test"),
+	attachmentMaterializePath: () =>
+		Effect.dieMessage("Unexpected attachmentMaterializePath RPC in BoardService daemon IPC test"),
 	planningGenerate: () =>
 		Effect.dieMessage("Unexpected planningGenerate RPC in BoardService daemon IPC test"),
 	planningReview: () =>

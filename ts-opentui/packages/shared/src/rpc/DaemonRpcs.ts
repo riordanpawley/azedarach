@@ -1,6 +1,19 @@
 import * as Rpc from "@effect/rpc/Rpc"
 import * as RpcGroup from "@effect/rpc/RpcGroup"
 import {
+	DaemonAttachmentAttachClipboardRequestSchema,
+	DaemonAttachmentAttachFileRequestSchema,
+	DaemonAttachmentAttachResultSchema,
+	DaemonAttachmentCountBatchRequestSchema,
+	DaemonAttachmentCountBatchResultSchema,
+	DaemonAttachmentListRequestSchema,
+	DaemonAttachmentListResultSchema,
+	DaemonAttachmentMaterializePathRequestSchema,
+	DaemonAttachmentMaterializePathResultSchema,
+	DaemonAttachmentRemoveRequestSchema,
+	DaemonAttachmentRemoveResultSchema,
+} from "./DaemonAttachmentRpcSchemas.js"
+import {
 	DaemonImplementationCreateRequestSchema,
 	DaemonImplementationCreateResultSchema,
 	DaemonImplementationDeleteRequestSchema,
@@ -262,6 +275,42 @@ export const DaemonQueueCancelRpc = Rpc.make("daemonQueueCancel", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonAttachmentListRpc = Rpc.make("daemonAttachmentList", {
+	payload: DaemonAttachmentListRequestSchema,
+	success: DaemonAttachmentListResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonAttachmentCountBatchRpc = Rpc.make("daemonAttachmentCountBatch", {
+	payload: DaemonAttachmentCountBatchRequestSchema,
+	success: DaemonAttachmentCountBatchResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonAttachmentAttachFileRpc = Rpc.make("daemonAttachmentAttachFile", {
+	payload: DaemonAttachmentAttachFileRequestSchema,
+	success: DaemonAttachmentAttachResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonAttachmentAttachClipboardRpc = Rpc.make("daemonAttachmentAttachClipboard", {
+	payload: DaemonAttachmentAttachClipboardRequestSchema,
+	success: DaemonAttachmentAttachResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonAttachmentRemoveRpc = Rpc.make("daemonAttachmentRemove", {
+	payload: DaemonAttachmentRemoveRequestSchema,
+	success: DaemonAttachmentRemoveResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonAttachmentMaterializePathRpc = Rpc.make("daemonAttachmentMaterializePath", {
+	payload: DaemonAttachmentMaterializePathRequestSchema,
+	success: DaemonAttachmentMaterializePathResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonIssueGetRpc = Rpc.make("daemonIssueGet", {
 	payload: DaemonIssueGetRequestSchema,
 	success: DaemonIssueGetResultSchema,
@@ -505,6 +554,15 @@ export const DaemonQueueRpcGroup = RpcGroup.make(
 	DaemonQueueCancelRpc,
 )
 
+export const DaemonAttachmentRpcGroup = RpcGroup.make(
+	DaemonAttachmentListRpc,
+	DaemonAttachmentCountBatchRpc,
+	DaemonAttachmentAttachFileRpc,
+	DaemonAttachmentAttachClipboardRpc,
+	DaemonAttachmentRemoveRpc,
+	DaemonAttachmentMaterializePathRpc,
+)
+
 export const DaemonIssueRpcGroup = RpcGroup.make(
 	DaemonIssueGetRpc,
 	DaemonIssueListRpc,
@@ -601,6 +659,7 @@ export const DaemonRpcGroup = DaemonControlRpcGroup.merge(
 	DaemonSessionRpcGroup,
 	DaemonDevServerRpcGroup,
 	DaemonQueueRpcGroup,
+	DaemonAttachmentRpcGroup,
 	DaemonIssueRpcGroup,
 )
 

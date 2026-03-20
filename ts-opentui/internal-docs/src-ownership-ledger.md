@@ -73,7 +73,8 @@ ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../.
 - 2026-03-20 `aap` removed dead TUI legacy runtime exports/layers for `BoardService`, `MutationQueue`, `SessionService`, and `SessionManager`.
 - 2026-03-20 `aat` removed `PTYMonitor` from TUI runtime wiring and session atoms; the remaining legacy runtime seam afterward was `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, `PlanningService`, and `PRWorkflow`.
 - 2026-03-20 `aas` moved TUI planning onto the daemon planning RPC group, added package-local `packages/tui/src/services/PlanningService.ts`, made the public `@azedarach/shared/rpc` barrel expose planning schemas/contracts, and removed `PlanningService` from `packages/tui/src/utils/legacyRuntimeServices.ts`.
-- Current remaining TUI legacy runtime seam: `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, and `PRWorkflow`.
+- 2026-03-20 `aaq` moved image attachments onto shared attachment RPC contracts plus daemon/sqlite live ownership and a package-local TUI adapter, removed `ImageAttachmentService` from `packages/tui/src/utils/legacyRuntimeServices.ts`, and converted `src/core/ImageAttachmentService.ts` into a compatibility re-export while legacy keyboard/PR code still migrates.
+- Current remaining TUI legacy runtime seam: `KeyboardService`, `ProjectService`, `ProjectStateService`, and `PRWorkflow`.
 - Remaining runtime-facade package edges are TUI-only through `packages/tui/src/utils/legacyRuntimeServices.ts`.
 
 ## Classification Legend
@@ -103,7 +104,7 @@ ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../.
 - [ ] status=pending owner-child= path=src/core/FileLockManager.test.ts
 - [ ] status=pending owner-child= path=src/core/FileLockManager.ts
 - [ ] status=pending owner-child= path=src/core/GlobalDaemonDiscovery.test.ts
-- [ ] status=pending owner-child= path=src/core/ImageAttachmentService.ts
+- [x] status=migrated owner-child=aaq path=src/core/ImageAttachmentService.ts
 - [x] status=migrated owner-child=aam path=src/core/IssueEditorService.ts
 - [x] status=migrated owner-child=aam path=src/core/IssueImplementations.test.ts
 - [x] status=migrated owner-child=aam path=src/core/IssueImplementations.ts

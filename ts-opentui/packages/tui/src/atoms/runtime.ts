@@ -107,6 +107,11 @@ const daemonRpcClientLayer = Layer.effect(
 )
 
 const settingsLayer = SettingsService.Default.pipe(Layer.provide(appConfigProjectContextLayer))
+const imageAttachmentLayer = ImageAttachmentService.Default.pipe(
+	Layer.provideMerge(daemonRpcClientLayer),
+	Layer.provideMerge(appConfigProjectContextLayer),
+)
+const overlayLayer = OverlayService.Default.pipe(Layer.provideMerge(imageAttachmentLayer))
 const tuiBoardStoreLayer = TuiBoardStoreService.Default.pipe(
 	Layer.provide(appConfigProjectContextLayer),
 	Layer.provideMerge(daemonRpcClientLayer),
@@ -118,18 +123,24 @@ const navigationLayer = NavigationService.Default.pipe(
 
 const coreServicesLayer = Layer.mergeAll(
 	AttachmentService.Default,
-	OverlayService.Default,
-	ImageAttachmentService.Default,
+	overlayLayer,
+	imageAttachmentLayer,
 	ClockService.Default,
 	TmuxService.Default,
 	IssueEditorService.Default.pipe(
 		Layer.provideMerge(daemonRpcClientLayer),
 		Layer.provideMerge(AppConfig.Default),
 	),
-	PRWorkflow.Default,
+	PRWorkflow.Default.pipe(
+		Layer.provideMerge(daemonRpcClientLayer),
+		Layer.provideMerge(appConfigProjectContextLayer),
+	),
 	TerminalService.Default,
 	EditorService.Default,
-	KeyboardService.Default,
+	KeyboardService.Default.pipe(
+		Layer.provideMerge(daemonRpcClientLayer),
+		Layer.provideMerge(appConfigProjectContextLayer),
+	),
 	navigationLayer,
 	appConfigProjectContextLayer,
 	appConfigNotifierLayer,

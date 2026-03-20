@@ -1,6 +1,17 @@
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAppRpcGroup,
+	type DaemonAttachmentAttachClipboardRequest,
+	type DaemonAttachmentAttachFileRequest,
+	type DaemonAttachmentAttachResult,
+	type DaemonAttachmentCountBatchRequest,
+	type DaemonAttachmentCountBatchResult,
+	type DaemonAttachmentListRequest,
+	type DaemonAttachmentListResult,
+	type DaemonAttachmentMaterializePathRequest,
+	type DaemonAttachmentMaterializePathResult,
+	type DaemonAttachmentRemoveRequest,
+	type DaemonAttachmentRemoveResult,
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
 	type DaemonBoardReadModelRequest,
@@ -115,6 +126,7 @@ import {
 	type DaemonSpecSyncMarkdownResult,
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
+	type ImageAttachment,
 } from "@azedarach/shared/rpc"
 import { DateTime, Effect, Layer } from "effect"
 import {
@@ -138,6 +150,11 @@ import {
 	type BackendDaemonSessionSnapshot,
 	type BackendDaemonSessionUpdate,
 } from "./BackendDaemonSessionRecovery.js"
+import {
+	DaemonAttachmentError,
+	DaemonAttachmentService,
+	type DaemonAttachmentServiceApi,
+} from "./DaemonAttachmentService.js"
 import {
 	type DaemonPlanningCreateIssuesResult as DaemonPlanningCreateIssuesServiceResult,
 	DaemonPlanningError,
@@ -273,6 +290,7 @@ const unsupportedDaemonRpc = <A>(action: string): Effect.Effect<A, DaemonRpcActi
 
 type DaemonRpcMappedError =
 	| BackendDaemonControlRestartConfigurationError
+	| DaemonAttachmentError
 	| ImplementationRegistryDaemonError
 	| DaemonPlanningError
 	| DaemonSessionError
@@ -358,6 +376,35 @@ const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpc
 				return daemonRpcActionError({
 					action,
 					code: "issues-creation-failed",
+					message: error.message,
+				})
+		}
+	}
+
+	if (error instanceof DaemonAttachmentError) {
+		switch (error.reason) {
+			case "invalid-input":
+				return daemonRpcActionError({
+					action,
+					code: "invalid-input",
+					message: error.message,
+				})
+			case "not-found":
+				return daemonRpcActionError({
+					action,
+					code: "not-found",
+					message: error.message,
+				})
+			case "storage":
+				return daemonRpcActionError({
+					action,
+					code: "storage",
+					message: error.message,
+				})
+			case "issue-tracker":
+				return daemonRpcActionError({
+					action,
+					code: "issue-tracker",
 					message: error.message,
 				})
 		}
@@ -537,6 +584,13 @@ const mapDaemonSessionMutationResult = (
 	session: toDaemonSessionSnapshotEntry(session),
 })
 
+const mapDaemonAttachmentAttachResult = (
+	attachment: ImageAttachment,
+): DaemonAttachmentAttachResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	attachment,
+})
+
 export const makeDaemonSessionStartRpcHandler =
 	(sessionService: Pick<DaemonSessionServiceApi, "start">) =>
 	(request: DaemonSessionStartRequest) =>
@@ -682,11 +736,104 @@ export const makeDaemonPlanningCreateIssuesRpcHandler =
 			.createIssues(request)
 			.pipe(Effect.map(mapPlanningCreateIssuesResult), catchDaemonRpcError("planningCreateIssues"))
 
+export const makeDaemonAttachmentListRpcHandler =
+	(attachments: Pick<DaemonAttachmentServiceApi, "list">) =>
+	(request: DaemonAttachmentListRequest) =>
+		attachments.list(request.issueId, request.projectPath).pipe(
+			Effect.map(
+				(result): DaemonAttachmentListResult => ({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					attachments: [...result],
+				}),
+			),
+			catchDaemonRpcError("attachmentList"),
+		)
+
+export const makeDaemonAttachmentCountBatchRpcHandler =
+	(attachments: Pick<DaemonAttachmentServiceApi, "countBatch">) =>
+	(request: DaemonAttachmentCountBatchRequest) =>
+		attachments.countBatch(request.issueIds, request.projectPath).pipe(
+			Effect.map(
+				(counts): DaemonAttachmentCountBatchResult => ({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					counts,
+				}),
+			),
+			catchDaemonRpcError("attachmentCountBatch"),
+		)
+
+export const makeDaemonAttachmentAttachFileRpcHandler =
+	(attachments: Pick<DaemonAttachmentServiceApi, "attachFile">) =>
+	(request: DaemonAttachmentAttachFileRequest) =>
+		attachments
+			.attachFile({
+				issueId: request.issueId,
+				filePath: request.filePath,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(mapDaemonAttachmentAttachResult),
+				catchDaemonRpcError("attachmentAttachFile"),
+			)
+
+export const makeDaemonAttachmentAttachClipboardRpcHandler =
+	(attachments: Pick<DaemonAttachmentServiceApi, "attachClipboard">) =>
+	(request: DaemonAttachmentAttachClipboardRequest) =>
+		attachments
+			.attachClipboard({
+				issueId: request.issueId,
+				filename: request.filename,
+				mimeType: request.mimeType,
+				base64Content: request.base64Content,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(mapDaemonAttachmentAttachResult),
+				catchDaemonRpcError("attachmentAttachClipboard"),
+			)
+
+export const makeDaemonAttachmentRemoveRpcHandler =
+	(attachments: Pick<DaemonAttachmentServiceApi, "remove">) =>
+	(request: DaemonAttachmentRemoveRequest) =>
+		attachments
+			.remove({
+				issueId: request.issueId,
+				attachmentId: request.attachmentId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					removed: true,
+				} satisfies DaemonAttachmentRemoveResult),
+				catchDaemonRpcError("attachmentRemove"),
+			)
+
+export const makeDaemonAttachmentMaterializePathRpcHandler =
+	(attachments: Pick<DaemonAttachmentServiceApi, "materializePath">) =>
+	(request: DaemonAttachmentMaterializePathRequest) =>
+		attachments
+			.materializePath({
+				issueId: request.issueId,
+				attachmentId: request.attachmentId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(path): DaemonAttachmentMaterializePathResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						path,
+					}),
+				),
+				catchDaemonRpcError("attachmentMaterializePath"),
+			)
+
 export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const runtime = yield* BackendDaemonService
 	const control = yield* BackendDaemonControlService
 	const sessionRecovery = yield* BackendDaemonSessionRecovery
 	const sessionService = yield* DaemonSessionService
+	const attachments = yield* DaemonAttachmentService
 	const planning = yield* DaemonPlanningService
 	const implementations = yield* ImplementationRegistryDaemonService
 	const issues = yield* TrackerIssueDaemonService
@@ -871,6 +1018,12 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 					),
 					catchDaemonRpcError("queueCancel"),
 				),
+		daemonAttachmentList: makeDaemonAttachmentListRpcHandler(attachments),
+		daemonAttachmentCountBatch: makeDaemonAttachmentCountBatchRpcHandler(attachments),
+		daemonAttachmentAttachFile: makeDaemonAttachmentAttachFileRpcHandler(attachments),
+		daemonAttachmentAttachClipboard: makeDaemonAttachmentAttachClipboardRpcHandler(attachments),
+		daemonAttachmentRemove: makeDaemonAttachmentRemoveRpcHandler(attachments),
+		daemonAttachmentMaterializePath: makeDaemonAttachmentMaterializePathRpcHandler(attachments),
 		daemonImplementationGetRegistry: (request: DaemonImplementationGetRegistryRequest) =>
 			implementations.getRegistry(request.projectPath).pipe(
 				Effect.map(

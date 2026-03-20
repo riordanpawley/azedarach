@@ -1,6 +1,6 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, SubscriptionRef } from "effect"
-import { ImageAttachmentService } from "../utils/legacyRuntimeServices.js"
+import { ImageAttachmentService } from "./ImageAttachmentService.js"
 
 type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 const emptyArray = <A>(): ReadonlyArray<A> => []

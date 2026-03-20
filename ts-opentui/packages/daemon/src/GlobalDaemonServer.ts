@@ -7,6 +7,7 @@ import { Cause, Data, Effect, Fiber, Layer, Ref } from "effect"
 import { BackendDaemonControlService } from "./BackendDaemonControlService.js"
 import { BackendDaemonService } from "./BackendDaemonService.js"
 import { BackendDaemonSessionRecovery } from "./BackendDaemonSessionRecovery.js"
+import { DaemonAttachmentService } from "./DaemonAttachmentService.js"
 import { DaemonPlanningService } from "./DaemonPlanningService.js"
 import { DaemonSessionService } from "./DaemonSessionService.js"
 import { GlobalDaemonDiscovery, type GlobalDaemonLease } from "./GlobalDaemonDiscovery.js"
@@ -172,6 +173,7 @@ const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
 		BackendDaemonControlService.Default,
 		BackendDaemonService.Default,
 		BackendDaemonSessionRecovery.Default,
+		DaemonAttachmentService.Default,
 		DaemonSessionService.Default,
 		ImplementationRegistryDaemonService.Default,
 		SpecDaemonService.Default,

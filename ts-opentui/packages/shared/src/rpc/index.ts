@@ -1,4 +1,5 @@
 export * from "./BackendClientSessionProtocol.js"
+export * from "./DaemonAttachmentRpcSchemas.js"
 export * from "./DaemonImplementationRpcSchemas.js"
 export * from "./DaemonIssueRpcSchemas.js"
 export * from "./DaemonPlanningRpcSchemas.js"

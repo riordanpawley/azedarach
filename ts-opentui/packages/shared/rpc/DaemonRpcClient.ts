@@ -4,6 +4,19 @@ import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import * as RpcSerialization from "@effect/rpc/RpcSerialization"
 import { Context, Effect, Layer } from "effect"
 import type {
+	DaemonAttachmentAttachClipboardRequest,
+	DaemonAttachmentAttachFileRequest,
+	DaemonAttachmentAttachResult,
+	DaemonAttachmentCountBatchRequest,
+	DaemonAttachmentCountBatchResult,
+	DaemonAttachmentListRequest,
+	DaemonAttachmentListResult,
+	DaemonAttachmentMaterializePathRequest,
+	DaemonAttachmentMaterializePathResult,
+	DaemonAttachmentRemoveRequest,
+	DaemonAttachmentRemoveResult,
+} from "./DaemonAttachmentRpcSchemas.js"
+import type {
 	DaemonImplementationCreateRequest,
 	DaemonImplementationCreateResult,
 	DaemonImplementationDeleteRequest,
@@ -224,6 +237,24 @@ export interface DaemonRpcClientApi {
 	readonly queueCancel?: (
 		request: Omit<DaemonQueueCancelRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonQueueCancelResult, DaemonRpcClientError>
+	readonly attachmentList: (
+		request: Omit<DaemonAttachmentListRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachmentListResult, DaemonRpcClientError>
+	readonly attachmentCountBatch: (
+		request: Omit<DaemonAttachmentCountBatchRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachmentCountBatchResult, DaemonRpcClientError>
+	readonly attachmentAttachFile: (
+		request: Omit<DaemonAttachmentAttachFileRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachmentAttachResult, DaemonRpcClientError>
+	readonly attachmentAttachClipboard: (
+		request: Omit<DaemonAttachmentAttachClipboardRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachmentAttachResult, DaemonRpcClientError>
+	readonly attachmentRemove: (
+		request: Omit<DaemonAttachmentRemoveRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachmentRemoveResult, DaemonRpcClientError>
+	readonly attachmentMaterializePath: (
+		request: Omit<DaemonAttachmentMaterializePathRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonAttachmentMaterializePathResult, DaemonRpcClientError>
 	readonly issueGet: (
 		request: Omit<DaemonIssueGetRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonIssueGetResult, DaemonRpcClientError>
@@ -462,6 +493,36 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 			}),
 		queueCancel: (request) =>
 			raw.daemonQueueCancel({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		attachmentList: (request) =>
+			raw.daemonAttachmentList({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		attachmentCountBatch: (request) =>
+			raw.daemonAttachmentCountBatch({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		attachmentAttachFile: (request) =>
+			raw.daemonAttachmentAttachFile({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		attachmentAttachClipboard: (request) =>
+			raw.daemonAttachmentAttachClipboard({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		attachmentRemove: (request) =>
+			raw.daemonAttachmentRemove({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		attachmentMaterializePath: (request) =>
+			raw.daemonAttachmentMaterializePath({
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
