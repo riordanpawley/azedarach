@@ -1,0 +1,427 @@
+/**
+ * TmuxSessionMonitor - Effect service for monitoring Claude Code session state
+ *
+ * Polls tmux session options to detect session state changes set by
+ * `az notify` commands. This enables authoritative state detection
+ * from Claude Code's native hook system.
+ *
+ * State detection flow:
+ * 1. Claude Code hooks call `az notify <event> <issueId>`
+ * 2. `az notify` sets tmux session option `@az_status` on the Claude session
+ * 3. TmuxSessionMonitor polls tmux sessions and reads their `@az_status`
+ * 4. State changes trigger handler callbacks
+ *
+ * Status values:
+ * - "busy" → SessionState "busy" (Claude is working)
+ * - "waiting" → SessionState "waiting" (Claude awaits input)
+ * - "idle" → SessionState "idle" (Session ended)
+ */
+
+import { Command } from "@effect/platform"
+import { Effect, type Fiber, Ref, Schedule, type Scope, SubscriptionRef } from "effect"
+import { issueIdsEqualForLookup, resolveIssueIdFromSessionName } from "../utils/sessionNames.js"
+import { DiagnosticsService } from "./DiagnosticsService.js"
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/**
+ * Tmux status values (what `az notify` sets)
+ */
+export type TmuxStatus = "busy" | "waiting" | "idle"
+
+/**
+ * Session state update from tmux polling
+ */
+export interface SessionStateUpdate {
+	readonly issueId: string
+	readonly status: TmuxStatus
+	readonly sessionName: string
+	/**
+	 * Unix timestamp when the tmux session was created.
+	 * `0` means this update was synthesized because the session disappeared.
+	 */
+	readonly createdAt: number
+	/** Path to the worktree directory (from @az_worktree option) */
+	readonly worktreePath: string | null
+	/** Path to the main project directory (from @az_project option) */
+	readonly projectPath: string | null
+}
+
+/**
+ * Callback for processing state updates
+ */
+export type StateUpdateHandler = (update: SessionStateUpdate) => Effect.Effect<void, never>
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/**
+ * Polling interval for watching tmux sessions
+ */
+const POLL_INTERVAL_MS = 1000
+
+// ============================================================================
+// Service Definition
+// ============================================================================
+
+/**
+ * TmuxSessionMonitor service interface
+ *
+ * Provides tmux session polling capabilities for detecting session state
+ * from Claude Code sessions running in worktrees.
+ */
+export interface TmuxSessionMonitorService {
+	/**
+	 * Reactive snapshot of all tmux sessions discovered by the poller.
+	 */
+	readonly sessions: SubscriptionRef.SubscriptionRef<readonly SessionStateUpdate[]>
+
+	/**
+	 * Start watching for session state changes
+	 *
+	 * Returns a Fiber that can be interrupted to stop watching.
+	 * State changes are pushed to the provided handler.
+	 *
+	 * IMPORTANT: The returned fiber is scoped to the caller's scope.
+	 * Use Effect.forkScoped internally so the fiber survives after start() returns.
+	 */
+	readonly start: (
+		handler: StateUpdateHandler,
+	) => Effect.Effect<Fiber.RuntimeFiber<number, never>, never, Scope.Scope>
+
+	/**
+	 * Get current status for a specific session
+	 */
+	readonly getSessionStatus: (issueId: string) => Effect.Effect<TmuxStatus | null, never>
+
+	/**
+	 * Get session creation time (Unix timestamp)
+	 *
+	 * Uses tmux's built-in #{session_created} variable.
+	 */
+	readonly getSessionCreatedAt: (issueId: string) => Effect.Effect<number | null, never>
+
+	/**
+	 * List all active Claude sessions with their status
+	 */
+	readonly listSessions: () => Effect.Effect<readonly SessionStateUpdate[], never>
+}
+
+// ============================================================================
+// Service Implementation
+// ============================================================================
+
+/**
+ * TmuxSessionMonitor service
+ *
+ * Polls tmux sessions to detect state changes set by `az notify` hooks.
+ * Uses tmux session option `@az_status` for IPC.
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const monitor = yield* TmuxSessionMonitor
+ *   const fiber = yield* monitor.start((update) =>
+ *     Effect.gen(function* () {
+ *       const newState = mapStatusToState(update.status)
+ *       yield* sessionManager.updateState(update.issueId, newState)
+ *     })
+ *   )
+ *   // Later: yield* Fiber.interrupt(fiber)
+ * }).pipe(Effect.provide(TmuxSessionMonitor.Default))
+ * ```
+ */
+/**
+ * Previous session state for change detection
+ */
+interface PreviousSessionState {
+	readonly issueId: string
+	readonly status: TmuxStatus
+	readonly sessionName: string
+	readonly projectPath: string | null
+}
+
+export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("TmuxSessionMonitor", {
+	dependencies: [DiagnosticsService.Default],
+	scoped: Effect.gen(function* () {
+		const diagnostics = yield* DiagnosticsService
+
+		// Track previous state to detect changes (sessionName → session state snapshot)
+		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
+		const sessionsRef = yield* SubscriptionRef.make<readonly SessionStateUpdate[]>([])
+
+		const listIssueSessions = () =>
+			diagnostics.measure(
+				{
+					source: "TmuxSessionMonitor",
+					name: "listSessions",
+					thresholdMs: 200,
+				},
+				Effect.gen(function* () {
+					const command = Command.make(
+						"tmux",
+						"list-sessions",
+						"-F",
+						"#{session_name}|#{session_created}",
+					)
+
+					const output = yield* Command.string(command).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
+					)
+
+					return output
+						.split("\n")
+						.map((line) => line.trim())
+						.filter((line) => line.length > 0)
+						.map((line) => {
+							const [name, createdStr] = line.split("|")
+							return {
+								name: name ?? "",
+								createdAt: parseInt(createdStr ?? "0", 10) || 0,
+							}
+						})
+				}).pipe(Effect.withSpan("tmux.listSessions")),
+			)
+
+		/**
+		 * Get a tmux session option by name
+		 */
+		const getTmuxOption = (sessionName: string, optionName: string) =>
+			Effect.gen(function* () {
+				const command = Command.make("tmux", "show-option", "-t", sessionName, "-v", optionName)
+
+				const output = yield* Command.string(command).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
+				)
+
+				const value = output.trim()
+				return value || null
+			})
+
+		/**
+		 * Get the @az_status option for a tmux session
+		 */
+		const getSessionOption = (sessionName: string) =>
+			Effect.gen(function* () {
+				const status = yield* getTmuxOption(sessionName, "@az_status")
+				if (status === "busy" || status === "waiting" || status === "idle") {
+					return status
+				}
+				// Default to busy for new AI sessions that haven't notified yet
+				// This handles the gap between session creation and the first az notify
+				return "busy" as const
+			})
+
+		const extractIssueIdFromSession = (
+			sessionName: string,
+			projectPath?: string | null,
+		): string | null =>
+			resolveIssueIdFromSessionName(sessionName, {
+				projectPath,
+			}) ?? null
+
+		/**
+		 * List all sessions with their current status and creation time
+		 */
+		const listSessions = () =>
+			Effect.gen(function* () {
+				const sessions = yield* listIssueSessions()
+				const results: SessionStateUpdate[] = []
+
+				for (const session of sessions) {
+					const projectPath = yield* getTmuxOption(session.name, "@az_project")
+					const issueId = extractIssueIdFromSession(session.name, projectPath)
+					if (!issueId) continue
+
+					const status = yield* getSessionOption(session.name)
+					if (status) {
+						// Fetch worktree and project paths from tmux session options
+						const worktreePath = yield* getTmuxOption(session.name, "@az_worktree")
+
+						results.push({
+							issueId: issueId,
+							status,
+							sessionName: session.name,
+							createdAt: session.createdAt,
+							worktreePath,
+							projectPath,
+						})
+					}
+				}
+
+				return results
+			})
+
+		/**
+		 * Find the tmux session name for a given issueId
+		 *
+		 * Searches through running sessions to find one that matches the issueId.
+		 * Handles both new format (claude-{project}-{issueId}) and legacy (claude-{issueId}).
+		 */
+		const findSessionByIssueId = (issueId: string) =>
+			Effect.gen(function* () {
+				const sessions = yield* listIssueSessions()
+				for (const session of sessions) {
+					const projectPath = yield* getTmuxOption(session.name, "@az_project")
+					const sessionIssueId = extractIssueIdFromSession(session.name, projectPath)
+					if (sessionIssueId !== null && issueIdsEqualForLookup(sessionIssueId, issueId)) {
+						return session.name
+					}
+				}
+				return null
+			})
+
+		/**
+		 * Get status for a specific session
+		 *
+		 * Searches for the session by issueId since we don't know the project name.
+		 */
+		const getSessionStatus = (issueId: string) =>
+			Effect.gen(function* () {
+				const sessionName = yield* findSessionByIssueId(issueId)
+				if (!sessionName) return null
+				return yield* getSessionOption(sessionName)
+			})
+
+		/**
+		 * Get session creation time (Unix timestamp)
+		 * Uses tmux's built-in #{session_created} variable.
+		 *
+		 * Searches for the session by issueId since we don't know the project name.
+		 */
+		const getSessionCreatedAt = (issueId: string) =>
+			Effect.gen(function* () {
+				const sessionName = yield* findSessionByIssueId(issueId)
+				if (!sessionName) return null
+
+				const command = Command.make(
+					"tmux",
+					"display",
+					"-t",
+					sessionName,
+					"-p",
+					"#{session_created}",
+				)
+
+				const output = yield* Command.string(command).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
+				)
+
+				const timestamp = parseInt(output.trim(), 10)
+				return Number.isNaN(timestamp) ? null : timestamp
+			})
+
+		/**
+		 * Start polling for state changes
+		 */
+		const start = (handler: StateUpdateHandler) =>
+			Effect.gen(function* () {
+				// Initial poll to populate state
+				const initialSessions = yield* listSessions()
+				const initialMap = new Map<string, PreviousSessionState>()
+				for (const session of initialSessions) {
+					initialMap.set(session.sessionName, {
+						issueId: session.issueId,
+						status: session.status,
+						sessionName: session.sessionName,
+						projectPath: session.projectPath,
+					})
+				}
+				yield* Ref.set(previousStateRef, initialMap)
+				yield* SubscriptionRef.set(sessionsRef, initialSessions)
+
+				// Log initial state
+				if (initialSessions.length > 0) {
+					yield* Effect.log(
+						`TmuxSessionMonitor: Found ${initialSessions.length} active AI sessions`,
+					)
+				}
+
+				// Start polling fiber
+				const pollerFiber = yield* Effect.gen(function* () {
+					const polledSessions = yield* listSessions()
+					const previousState = yield* Ref.get(previousStateRef)
+					const newState = new Map<string, PreviousSessionState>()
+
+					for (const session of polledSessions) {
+						newState.set(session.sessionName, {
+							issueId: session.issueId,
+							status: session.status,
+							sessionName: session.sessionName,
+							projectPath: session.projectPath,
+						})
+
+						const prevState = previousState.get(session.sessionName)
+						if (prevState === undefined || prevState.status !== session.status) {
+							// State changed - call handler
+							yield* Effect.log(
+								`TmuxSessionMonitor: ${session.issueId} status changed: ${prevState?.status ?? "none"} → ${session.status}`,
+							)
+							yield* handler(session)
+						}
+					}
+
+					// Check for sessions that disappeared (session ended)
+					for (const [sessionName, prevState] of previousState.entries()) {
+						if (!newState.has(sessionName)) {
+							// Session disappeared - treat as idle
+							// Use the session metadata we stored, createdAt is 0.
+							yield* Effect.log(`TmuxSessionMonitor: ${prevState.issueId} session ended`)
+							yield* handler({
+								issueId: prevState.issueId,
+								status: "idle",
+								sessionName: prevState.sessionName,
+								createdAt: 0,
+								worktreePath: null,
+								projectPath: prevState.projectPath,
+							})
+						}
+					}
+
+					yield* Ref.set(previousStateRef, newState)
+					yield* SubscriptionRef.set(sessionsRef, polledSessions)
+				}).pipe(
+					// Catch errors to prevent stopping
+					Effect.catchAll((e) =>
+						Effect.logWarning(`TmuxSessionMonitor poll error: ${e}`).pipe(Effect.asVoid),
+					),
+					// Repeat with polling interval
+					Effect.repeat(Schedule.spaced(`${POLL_INTERVAL_MS} millis`)),
+					Effect.forkScoped,
+				)
+
+				// Track the polling fiber in diagnostics
+				yield* diagnostics.registerFiber({
+					id: "tmux-session-monitor-poller",
+					name: "TmuxSessionMonitor Poller",
+					description: "Polls tmux sessions for Claude Code session state",
+					fiber: pollerFiber,
+				})
+
+				return pollerFiber
+			})
+
+		return {
+			sessions: sessionsRef,
+			start,
+			getSessionStatus,
+			getSessionCreatedAt,
+			listSessions,
+		}
+	}),
+}) {}

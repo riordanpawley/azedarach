@@ -129,7 +129,7 @@ ts-opentui/packages/tui/src/utils/runtimeServices.ts:47:} from "../../../../src/
 - [ ] status=pending owner-child= path=src/core/TmuxCapabilities.test.ts
 - [ ] status=pending owner-child= path=src/core/TmuxCapabilities.ts
 - [ ] status=pending owner-child= path=src/core/TmuxService.ts
-- [ ] status=pending owner-child= path=src/core/TmuxSessionMonitor.ts
+- [x] status=migrated owner-child=zz path=src/core/TmuxSessionMonitor.ts
 - [ ] status=pending owner-child= path=src/core/VCService.ts
 - [ ] status=pending owner-child= path=src/core/WorktreeManager.branchNaming.test.ts
 - [ ] status=pending owner-child= path=src/core/WorktreeManager.lookup.test.ts

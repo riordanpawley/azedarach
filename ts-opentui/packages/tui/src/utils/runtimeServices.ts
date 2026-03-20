@@ -24,7 +24,6 @@ export {
 	TemplateService,
 	TerminalService,
 	TmuxService,
-	TmuxSessionMonitor,
 	VCService,
 } from "../../../../src/runtime/coreServicesFacade.js"
 export type {
@@ -57,6 +56,7 @@ export {
 	SettingsService,
 	type SettingValue,
 } from "../services/SettingsService.js"
+export { TmuxSessionMonitor } from "../services/TmuxSessionMonitor.js"
 export { ToastService } from "../services/ToastService.js"
 export { ViewService } from "../services/ViewService.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"
