@@ -75,7 +75,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const imageAttachment = yield* ImageAttachmentService
 			const projectContext = yield* TuiProjectContextService
 			const projectState = yield* ProjectStateService
-			const view = yield* ViewService
+			const _view = yield* ViewService
 			const settings = yield* SettingsService
 			const appConfig = yield* AppConfig
 			const taskHandlers = yield* TaskHandlersService
