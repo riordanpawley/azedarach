@@ -263,12 +263,13 @@ const ensureSpecEnabled = (projectDir: string) =>
 
 		return yield* Effect.fail(
 			new Error(
-				"Spec workflows are disabled for this project. Run `az config set spec.enabled true` or set `spec.enabled` to true in `.azedarach.json` to use `az spec` and spec-aware guidance.",
+				"Spec workflows are disabled for this project. Run `az config set spec.enabled true` or set `spec.enabled` to true in `.azedarach/config.json` to use `az spec` and spec-aware guidance.",
 			),
 		)
 	})
 
 const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+const PROJECT_REGISTRY_FILENAME = "projects.json"
 
 const loadConfigIfExists = (configPath: string) =>
 	Effect.gen(function* () {
@@ -286,6 +287,70 @@ const loadConfigIfExists = (configPath: string) =>
 			return undefined
 		}
 		return yield* loadWritableConfig(configPath)
+	})
+
+const resolveUserProjectRegistryPath = Effect.gen(function* () {
+	const pathService = yield* Path.Path
+	const configHome =
+		process.env.XDG_CONFIG_HOME ??
+		(process.env.HOME
+			? pathService.join(process.env.HOME, ".config")
+			: pathService.join(process.cwd(), ".config"))
+	return pathService.join(configHome, "azedarach", PROJECT_REGISTRY_FILENAME)
+})
+
+const loadProjectRegistryConfig = Effect.gen(function* () {
+	const projectRegistryPath = yield* resolveUserProjectRegistryPath
+	const fs = yield* FileSystem.FileSystem
+	const exists = yield* fs
+		.exists(projectRegistryPath)
+		.pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(false)),
+				),
+			),
+		)
+	if (!exists) {
+		return {
+			configPath: projectRegistryPath,
+			config: yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to create default registry snapshot: ${String(error)}`),
+				),
+			),
+		}
+	}
+	return {
+		configPath: projectRegistryPath,
+		config: yield* loadWritableConfig(projectRegistryPath),
+	}
+})
+
+const saveProjectRegistryConfig = (configPath: string, config: AzedarachConfig) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config).pipe(
+			Effect.mapError((error) => new Error(`Failed to encode config: ${String(error)}`)),
+		)
+		yield* fs
+			.makeDirectory(pathService.dirname(configPath), { recursive: true })
+			.pipe(
+				Effect.mapError(
+					(error) =>
+						new Error(
+							`Failed to create config directory ${pathService.dirname(configPath)}: ${String(error)}`,
+						),
+				),
+			)
+		yield* fs
+			.writeFileString(configPath, json)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to write config file ${configPath}: ${String(error)}`),
+				),
+			)
 	})
 
 const resolveSelectedProjectPathFromWorkspaceConfig = (cwdPath: string) =>
@@ -5915,8 +5980,7 @@ const projectAddHandler = (args: {
 			fs,
 			verbose: args.verbose,
 		})
-		const configPath = yield* resolveWritableConfigPath(undefined)
-		const currentConfig = yield* loadWritableConfig(configPath)
+		const { configPath, config: currentConfig } = yield* loadProjectRegistryConfig
 		const currentProjects = getConfiguredProjects(currentConfig)
 
 		if (currentProjects.some((project) => project.name === projectName)) {
@@ -5931,7 +5995,7 @@ const projectAddHandler = (args: {
 			return yield* Effect.fail(new Error(`Project with path '${absolutePath}' already exists`))
 		}
 
-		yield* saveWritableConfig(configPath, {
+		yield* saveProjectRegistryConfig(configPath, {
 			...currentConfig,
 			projects: [
 				...currentProjects,
@@ -5953,8 +6017,7 @@ const projectAddHandler = (args: {
  */
 const projectListHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
-		const configPath = yield* resolveWritableConfigPath(undefined)
-		const currentConfig = yield* loadWritableConfig(configPath)
+		const { config: currentConfig } = yield* loadProjectRegistryConfig
 		const projects = getConfiguredProjects(currentConfig)
 		const currentProject = getConfiguredCurrentProject(currentConfig)
 
@@ -5995,14 +6058,13 @@ const projectRemoveHandler = (args: { readonly name: string; readonly verbose: b
 			yield* Console.log(`Removing project: ${args.name}`)
 		}
 
-		const configPath = yield* resolveWritableConfigPath(undefined)
-		const currentConfig = yield* loadWritableConfig(configPath)
+		const { configPath, config: currentConfig } = yield* loadProjectRegistryConfig
 		const currentProjects = getConfiguredProjects(currentConfig)
 		if (!currentProjects.some((project) => project.name === args.name)) {
 			return yield* Effect.fail(new Error(`Project not found: ${args.name}`))
 		}
 
-		yield* saveWritableConfig(configPath, {
+		yield* saveProjectRegistryConfig(configPath, {
 			...currentConfig,
 			projects: currentProjects.filter((project) => project.name !== args.name),
 			defaultProject:
@@ -6021,14 +6083,13 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
 			yield* Console.log(`Switching to project: ${args.name}`)
 		}
 
-		const configPath = yield* resolveWritableConfigPath(undefined)
-		const currentConfig = yield* loadWritableConfig(configPath)
+		const { configPath, config: currentConfig } = yield* loadProjectRegistryConfig
 		const currentProjects = getConfiguredProjects(currentConfig)
 		if (!currentProjects.some((project) => project.name === args.name)) {
 			return yield* Effect.fail(new Error(`Project not found: ${args.name}`))
 		}
 
-		yield* saveWritableConfig(configPath, {
+		yield* saveProjectRegistryConfig(configPath, {
 			...currentConfig,
 			defaultProject: args.name,
 		})
