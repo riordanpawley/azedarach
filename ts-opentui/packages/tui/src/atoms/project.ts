@@ -6,10 +6,14 @@
 
 import { Effect, SubscriptionRef } from "effect"
 import {
+	getTuiCurrentProjectRef,
+	getTuiProjectContextRead,
+	getTuiProjectsRef,
+} from "../services/TuiProjectContextService.js"
+import {
 	BoardService,
 	EditorService,
 	NavigationService,
-	ProjectService,
 	ProjectStateService,
 	ToastService,
 	ViewService,
@@ -25,24 +29,14 @@ import { appRuntime } from "./runtime.js"
  *
  * Usage: const currentProject = useAtomValue(currentProjectAtom)
  */
-export const currentProjectAtom = appRuntime.subscriptionRef(
-	Effect.gen(function* () {
-		const projectService = yield* ProjectService
-		return projectService.currentProject
-	}),
-)
+export const currentProjectAtom = appRuntime.subscriptionRef(() => getTuiCurrentProjectRef)
 
 /**
  * Projects list atom - subscribes to ProjectService projects changes
  *
  * Usage: const projects = useAtomValue(projectsAtom)
  */
-export const projectsAtom = appRuntime.subscriptionRef(
-	Effect.gen(function* () {
-		const projectService = yield* ProjectService
-		return projectService.projects
-	}),
-)
+export const projectsAtom = appRuntime.subscriptionRef(() => getTuiProjectsRef)
 
 // ============================================================================
 // Project Action Atoms
@@ -64,7 +58,7 @@ export const projectsAtom = appRuntime.subscriptionRef(
  */
 export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 	Effect.gen(function* () {
-		const projectService = yield* ProjectService
+		const projectContext = yield* getTuiProjectContextRead
 		const projectState = yield* ProjectStateService
 		const board = yield* BoardService
 		const editor = yield* EditorService
@@ -73,7 +67,7 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 		const toast = yield* ToastService
 
 		// Find the target project
-		const projects = yield* SubscriptionRef.get(projectService.projects)
+		const projects = yield* SubscriptionRef.get(projectContext.projects)
 		const project = projects.find((p) => p.name === projectName)
 		if (!project) {
 			yield* toast.show("error", `Project not found: ${projectName}`)
@@ -81,7 +75,7 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 		}
 
 		// Save current project state to disk (for persistence across app restarts)
-		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+		const currentProject = yield* SubscriptionRef.get(projectContext.currentProject)
 		if (currentProject) {
 			yield* projectState.saveCurrentProjectState(currentProject.path)
 			yield* board.saveToCache(currentProject.path)

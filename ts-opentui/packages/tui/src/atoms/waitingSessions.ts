@@ -6,7 +6,7 @@ import {
 	toWaitingSessionSourcesFromDaemonSnapshot,
 	type WaitingSessionSource,
 } from "../lib/waitingSessions.js"
-import { ProjectService } from "../utils/runtimeServices.js"
+import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
 import { currentProjectAtom, projectsAtom } from "./project.js"
 import { appRuntime } from "./runtime.js"
 
@@ -40,9 +40,9 @@ const refreshWaitingSessions = (
 			return
 		}
 
-		const projectService = yield* ProjectService
-		const projects = yield* SubscriptionRef.get(projectService.projects)
-		const currentProjectPath = yield* projectService.getCurrentPath()
+		const projectContext = yield* getTuiProjectContextRead
+		const projects = yield* SubscriptionRef.get(projectContext.projects)
+		const currentProjectPath = yield* projectContext.getCurrentPath()
 		const projectPaths = collectKnownProjectPaths(
 			projects.map((project) => project.path),
 			currentProjectPath,
