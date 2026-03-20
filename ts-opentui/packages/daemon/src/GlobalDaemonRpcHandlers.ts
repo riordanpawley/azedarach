@@ -110,9 +110,12 @@ import {
 } from "@azedarach/shared/rpc"
 import { DateTime, Effect, Layer } from "effect"
 import {
+	type BackendDaemonControlBoardReadModelRequest,
+	type BackendDaemonControlBoardReadModelResult,
 	type BackendDaemonControlHealth,
 	BackendDaemonControlRestartConfigurationError,
 	BackendDaemonControlService,
+	type BackendDaemonControlServiceApi,
 	type BackendDaemonControlStatus,
 } from "./BackendDaemonControlService.js"
 import {
@@ -381,6 +384,29 @@ const catchDaemonRpcError =
 	(effect: Effect.Effect<A, E>) =>
 		effect.pipe(Effect.mapError((error) => mapControlError(action, error)))
 
+export const makeDaemonBoardReadModelRpcHandler =
+	(control: {
+		readonly boardReadModel: (
+			request: BackendDaemonControlBoardReadModelRequest,
+		) => Effect.Effect<BackendDaemonControlBoardReadModelResult, DaemonRpcMappedError>
+	}) =>
+	(request: DaemonBoardReadModelRequest) =>
+		control
+			.boardReadModel({
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(result): DaemonBoardReadModelResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						capturedAtMs: result.capturedAtMs,
+						projectPath: result.projectPath,
+						tasks: result.tasks,
+					}),
+				),
+				catchDaemonRpcError("boardReadModel"),
+			)
+
 export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const runtime = yield* BackendDaemonService
 	const control = yield* BackendDaemonControlService
@@ -450,8 +476,7 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 				),
 				catchDaemonRpcError("sessionSnapshot"),
 			),
-		daemonBoardReadModel: (_request: DaemonBoardReadModelRequest) =>
-			unsupportedDaemonRpc<DaemonBoardReadModelResult>("boardReadModel"),
+		daemonBoardReadModel: makeDaemonBoardReadModelRpcHandler(control),
 		daemonSessionStart: (_request: DaemonSessionStartRequest) =>
 			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionStart"),
 		daemonSessionStop: (_request: DaemonSessionStopRequest) =>
