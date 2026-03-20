@@ -214,6 +214,9 @@ describe("TuiSessionAdapterService", () => {
 		expect(
 			await Effect.runPromise(service.recover("az-task", { projectPath: "/tmp/project" })),
 		).toEqual(session)
+		expect(
+			await Effect.runPromise(service.recoverSession("az-task", { projectPath: "/tmp/project" })),
+		).toEqual(session)
 	})
 
 	it("wraps daemon rpc failures", async () => {

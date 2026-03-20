@@ -57,6 +57,12 @@ export interface TuiSessionAdapterServiceApi {
 			readonly projectPath?: string
 		},
 	) => Effect.Effect<DaemonSessionSnapshotEntry, TuiSessionAdapterServiceError>
+	readonly recoverSession: (
+		issueId: string,
+		options?: {
+			readonly projectPath?: string
+		},
+	) => Effect.Effect<DaemonSessionSnapshotEntry, TuiSessionAdapterServiceError>
 }
 
 const resolveProjectPath = (projectPath: string | undefined): string => projectPath ?? process.cwd()
@@ -190,6 +196,7 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 							Effect.mapError((error) => rpcFailure("sessionRecover", error.message)),
 						)
 				},
+				recoverSession: (issueId, options) => service.recover(issueId, options),
 			}
 
 			return service

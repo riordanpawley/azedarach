@@ -38,6 +38,13 @@ export interface TuiIssueAdapterServiceApi {
 		{ readonly epic: Issue; readonly children: ReadonlyArray<DependencyRef> },
 		TuiIssueAdapterServiceError
 	>
+	readonly getEpicChildren: (
+		epicId: string,
+		options?: {
+			readonly projectPath?: string
+			readonly maxSyncWaitMs?: number
+		},
+	) => Effect.Effect<ReadonlyArray<DependencyRef>, TuiIssueAdapterServiceError>
 }
 
 const toDependencyRef = (dependency: TrackedIssueRelationshipRef): DependencyRef => ({
@@ -134,6 +141,8 @@ export class TuiIssueAdapterService extends Effect.Service<TuiIssueAdapterServic
 							Effect.mapError((error) => rpcFailure("issueGetEpicWithChildren", error.message)),
 						)
 				},
+				getEpicChildren: (epicId, options) =>
+					service.getEpicWithChildren(epicId, options).pipe(Effect.map(({ children }) => children)),
 			}
 
 			return service

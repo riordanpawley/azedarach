@@ -206,6 +206,22 @@ describe("TuiIssueAdapterService", () => {
 				issue_type: "task",
 			},
 		])
+
+		const epicChildren = await Effect.runPromise(
+			service.getEpicChildren("az-epic", {
+				projectPath: "/tmp/project",
+				maxSyncWaitMs: 250,
+			}),
+		)
+		expect(epicChildren).toEqual([
+			{
+				id: "az-child-1",
+				title: "Child 1",
+				status: "open",
+				dependency_type: "parent-child",
+				issue_type: "task",
+			},
+		])
 	})
 
 	it("wraps daemon rpc failures", async () => {
