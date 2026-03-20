@@ -1,3 +1,4 @@
+import type { DaemonSessionSnapshotEntry } from "@azedarach/shared/rpc"
 import type { Project } from "../contracts.js"
 
 export interface WaitingSessionSource {
@@ -15,6 +16,16 @@ export interface WaitingSessionOption {
 	readonly isCurrentProject: boolean
 	readonly isRegisteredProject: boolean
 }
+
+export const toWaitingSessionSourcesFromDaemonSnapshot = (
+	sessions: readonly DaemonSessionSnapshotEntry[],
+): readonly WaitingSessionSource[] =>
+	sessions.map((session) => ({
+		issueId: session.issueId,
+		sessionName: session.tmuxSessionName,
+		projectPath: session.projectPath,
+		status: session.state,
+	}))
 
 const getProjectFallbackName = (projectPath: string | null): string => {
 	if (!projectPath) {

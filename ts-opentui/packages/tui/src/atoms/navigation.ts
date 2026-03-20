@@ -143,6 +143,70 @@ export const drillDownChildIdsAtom = appRuntime.subscriptionRef(
 	),
 )
 
+export type DrillDownScopeState =
+	| {
+			readonly _tag: "inactive"
+	  }
+	| {
+			readonly _tag: "loading"
+	  }
+	| {
+			readonly _tag: "error"
+	  }
+	| {
+			readonly _tag: "active"
+			readonly childIds: ReadonlySet<string>
+	  }
+
+type DrillDownScopeInputs = {
+	readonly drillDownEpicId: string | null | undefined
+	readonly drillDownEpicAvailable: "ready" | "loading" | "error"
+	readonly childIds: ReadonlySet<string> | undefined
+	readonly childIdsAvailable: "ready" | "loading" | "error"
+}
+
+export const resolveDrillDownScopeState = (inputs: DrillDownScopeInputs): DrillDownScopeState => {
+	if (inputs.drillDownEpicAvailable === "error") {
+		return { _tag: "error" }
+	}
+	if (inputs.drillDownEpicAvailable === "loading") {
+		return { _tag: "loading" }
+	}
+	if (inputs.drillDownEpicId === null || inputs.drillDownEpicId === undefined) {
+		return { _tag: "inactive" }
+	}
+	if (inputs.childIdsAvailable === "error") {
+		return { _tag: "error" }
+	}
+	if (inputs.childIdsAvailable === "loading" || inputs.childIds === undefined) {
+		return { _tag: "loading" }
+	}
+	return { _tag: "active", childIds: inputs.childIds }
+}
+
+export const drillDownScopeStateAtom = Atom.readable<DrillDownScopeState>((get) => {
+	const drillDownEpicResult = get(drillDownEpicAtom)
+	const childIdsResult = get(drillDownChildIdsAtom)
+
+	const drillDownEpicAvailable = Result.isSuccess(drillDownEpicResult)
+		? "ready"
+		: drillDownEpicResult._tag === "Failure"
+			? "error"
+			: "loading"
+	const childIdsAvailable = Result.isSuccess(childIdsResult)
+		? "ready"
+		: childIdsResult._tag === "Failure"
+			? "error"
+			: "loading"
+
+	return resolveDrillDownScopeState({
+		drillDownEpicId: Result.isSuccess(drillDownEpicResult) ? drillDownEpicResult.value : undefined,
+		drillDownEpicAvailable,
+		childIds: Result.isSuccess(childIdsResult) ? childIdsResult.value : undefined,
+		childIdsAvailable,
+	})
+})
+
 /**
  * Enter drill-down mode for an epic
  *

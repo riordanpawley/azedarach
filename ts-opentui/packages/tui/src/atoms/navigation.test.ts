@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test"
-import { buildFallbackEpicIssue, extractEpicChildren } from "./navigation.js"
+import {
+	buildFallbackEpicIssue,
+	extractEpicChildren,
+	resolveDrillDownScopeState,
+} from "./navigation.js"
 
 describe("navigation epic helpers", () => {
 	it("filters epic children to parent-child dependents only", () => {
@@ -36,5 +40,52 @@ describe("navigation epic helpers", () => {
 			updated_at: "",
 			implementations: [],
 		})
+	})
+})
+
+describe("resolveDrillDownScopeState", () => {
+	it("returns inactive when no drill-down epic is selected", () => {
+		expect(
+			resolveDrillDownScopeState({
+				drillDownEpicId: null,
+				drillDownEpicAvailable: "ready",
+				childIds: new Set(["AZ-1"]),
+				childIdsAvailable: "ready",
+			}),
+		).toEqual({ _tag: "inactive" })
+	})
+
+	it("returns loading when drill-down epic is active but child ids are still loading", () => {
+		expect(
+			resolveDrillDownScopeState({
+				drillDownEpicId: "AZ-E1",
+				drillDownEpicAvailable: "ready",
+				childIds: undefined,
+				childIdsAvailable: "loading",
+			}),
+		).toEqual({ _tag: "loading" })
+	})
+
+	it("returns error when drill-down epic is active but child ids fail", () => {
+		expect(
+			resolveDrillDownScopeState({
+				drillDownEpicId: "AZ-E1",
+				drillDownEpicAvailable: "ready",
+				childIds: undefined,
+				childIdsAvailable: "error",
+			}),
+		).toEqual({ _tag: "error" })
+	})
+
+	it("returns active with child ids when drill-down scope is available", () => {
+		const childIds = new Set(["AZ-1", "AZ-2"])
+		expect(
+			resolveDrillDownScopeState({
+				drillDownEpicId: "AZ-E1",
+				drillDownEpicAvailable: "ready",
+				childIds,
+				childIdsAvailable: "ready",
+			}),
+		).toEqual({ _tag: "active", childIds })
 	})
 })

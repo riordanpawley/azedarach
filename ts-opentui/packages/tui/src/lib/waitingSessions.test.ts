@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test"
 import {
 	deriveCurrentProjectWaitingIssueIds,
 	deriveWaitingSessionOptions,
+	toWaitingSessionSourcesFromDaemonSnapshot,
 	type WaitingSessionSource,
 } from "./waitingSessions.js"
 
@@ -15,6 +16,28 @@ const session = (
 })
 
 describe("waitingSessions", () => {
+	it("maps daemon session snapshot entries into waiting session sources", () => {
+		const sessions = toWaitingSessionSourcesFromDaemonSnapshot([
+			{
+				issueId: "az-1",
+				worktreePath: "/work/alpha/.worktrees/az-1",
+				tmuxSessionName: "az-1",
+				state: "waiting",
+				startedAt: "2026-03-20T02:00:00.000Z",
+				projectPath: "/work/alpha",
+			},
+		])
+
+		expect(sessions).toEqual([
+			{
+				issueId: "az-1",
+				sessionName: "az-1",
+				projectPath: "/work/alpha",
+				status: "waiting",
+			},
+		])
+	})
+
 	it("orders current project sessions first and deduplicates issue ids", () => {
 		const sessions: readonly WaitingSessionSource[] = [
 			session({ issueId: "az-2", sessionName: "two", projectPath: "/work/beta" }),

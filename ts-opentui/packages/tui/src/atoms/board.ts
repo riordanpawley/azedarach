@@ -9,7 +9,7 @@ import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
 import { TASK_CARD_HEIGHT } from "../TaskCard.js"
 import type { TaskWithSession } from "../types.js"
 import { BoardService, ViewService } from "../utils/runtimeServices.js"
-import { drillDownChildIdsAtom, drillDownEpicAtom } from "./navigation.js"
+import { drillDownEpicAtom, drillDownScopeStateAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -214,26 +214,13 @@ export type BoardRenderState =
 const EMPTY_TASKS_BY_COLUMN: readonly (readonly TaskWithSession[])[] = [[], [], [], []]
 
 export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) => {
-	// Get the child IDs for filtering
-	const childIdsResult = get(drillDownChildIdsAtom)
-	if (!Result.isSuccess(childIdsResult)) {
-		// Child-id availability should not block base board rendering.
-		// On failure or loading, degrade to "no drill-down" behavior.
-		const tasksResult = get(filteredTasksByColumnAtom)
-		if (!Result.isSuccess(tasksResult)) {
-			return tasksResult._tag === "Failure"
-				? { _tag: "error", reason: "tasks_unavailable" }
-				: { _tag: "loading" }
-		}
-		return {
-			_tag: "ready",
-			tasksByColumn: tasksResult.value.map((column) =>
-				column.filter((task) => task.parentEpicId === undefined),
-			),
-		}
+	const drillDownScope = get(drillDownScopeStateAtom)
+	if (drillDownScope._tag === "loading") {
+		return { _tag: "loading" }
 	}
-
-	const childIds = childIdsResult.value
+	if (drillDownScope._tag === "error") {
+		return { _tag: "error", reason: "tasks_unavailable" }
+	}
 
 	// Get the filtered tasks
 	const tasksResult = get(filteredTasksByColumnAtom)
@@ -245,9 +232,9 @@ export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) 
 
 	const tasksByColumn = tasksResult.value
 
-	// If no drill-down active (empty childIds), show main board view
+	// If drill-down inactive or no child ids, show main board view.
 	// Tasks with a parent are hidden on main board - only visible in drill-down
-	if (childIds.size === 0) {
+	if (drillDownScope._tag === "inactive" || drillDownScope.childIds.size === 0) {
 		return {
 			_tag: "ready",
 			tasksByColumn: tasksByColumn.map((column) =>
@@ -259,7 +246,9 @@ export const drillDownBoardStateAtom = Atom.readable<DrillDownBoardState>((get) 
 	// In drill-down mode: filter each column to only include the epic's children
 	return {
 		_tag: "ready",
-		tasksByColumn: tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id))),
+		tasksByColumn: tasksByColumn.map((column) =>
+			column.filter((task) => drillDownScope.childIds.has(task.id)),
+		),
 	}
 })
 
