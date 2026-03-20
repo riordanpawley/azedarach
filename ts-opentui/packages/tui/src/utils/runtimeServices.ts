@@ -34,6 +34,7 @@ export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
 export { OverlayService } from "../services/OverlayService.js"
 export { PlanningService } from "../services/PlanningService.js"
+export { ProjectStateService } from "../services/ProjectStateService.js"
 export { PrWorkflowService as PRWorkflow } from "../services/PrWorkflowService.js"
 export {
 	type SettingDefinition,
@@ -45,15 +46,12 @@ export { TerminalService } from "../services/TerminalService.js"
 export { TmuxService } from "../services/TmuxService.js"
 export { TmuxSessionMonitor } from "../services/TmuxSessionMonitor.js"
 export { ToastService } from "../services/ToastService.js"
+export { TuiProjectContextService } from "../services/TuiProjectContextService.js"
 export { VCService } from "../services/VCService.js"
 export { ViewService } from "../services/ViewService.js"
 export { computeElapsedFormatted } from "./clockHelpers.js"
 export { computeDependencyPhases } from "./dependencyPhases.js"
 export { formatForToast } from "./formatForToast.js"
 export { getIssueCreateImplementations } from "./issueImplementations.js"
-export {
-	KeyboardService,
-	ProjectService,
-	ProjectStateService,
-} from "./legacyRuntimeServices.js"
+export { KeyboardService } from "./legacyRuntimeServices.js"
 export { buildTaskQueueKey } from "./queueKey.js"

@@ -24,9 +24,11 @@ import { EditorService } from "../services/EditorService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { OverlayService } from "../services/OverlayService.js"
+import { ProjectStateService } from "../services/ProjectStateService.js"
 import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
 import { TuiBoardStoreService } from "../services/TuiBoardStoreService.js"
+import { TuiProjectContextService } from "../services/TuiProjectContextService.js"
 import { ViewService } from "../services/ViewService.js"
 import {
 	AttachmentService,
@@ -36,8 +38,6 @@ import {
 	NavigationService,
 	PlanningService,
 	PRWorkflow,
-	ProjectService,
-	ProjectStateService,
 	TemplateService,
 	TerminalService,
 	TmuxService,
@@ -71,10 +71,10 @@ export const resolveTuiRuntimeModeFromEnv = (
 const appConfigProjectContextLayer = Layer.effect(
 	AppConfigProjectContext,
 	Effect.gen(function* () {
-		const projectService = yield* ProjectService
+		const projectContext = yield* TuiProjectContextService
 		return {
-			getCurrentPath: () => projectService.getCurrentPath(),
-			currentProjectPathChanges: projectService.currentProject.changes.pipe(
+			getCurrentPath: () => projectContext.getCurrentPath(),
+			currentProjectPathChanges: projectContext.currentProject.changes.pipe(
 				Stream.map((project) => project?.path),
 			),
 		} satisfies AppConfigProjectContextApi
@@ -120,6 +120,12 @@ const navigationLayer = NavigationService.Default.pipe(
 	Layer.provideMerge(tuiBoardStoreLayer),
 	Layer.provideMerge(daemonRpcClientLayer),
 )
+const projectStateLayer = ProjectStateService.Default.pipe(
+	Layer.provideMerge(TuiProjectContextService.Default),
+	Layer.provideMerge(navigationLayer),
+	Layer.provideMerge(ViewService.Default),
+	Layer.provideMerge(EditorService.Default),
+)
 
 const coreServicesLayer = Layer.mergeAll(
 	AttachmentService.Default,
@@ -146,14 +152,17 @@ const coreServicesLayer = Layer.mergeAll(
 	ViewService.Default,
 	CommandQueueService.Default,
 	DiagnosticsService.Default,
-	ProjectStateService.Default,
+	projectStateLayer,
 	settingsLayer,
 	tuiBoardStoreLayer,
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,
 	DiffService.Default,
-).pipe(Layer.provideMerge(ToastService.Default), Layer.provideMerge(ProjectService.Default))
+).pipe(
+	Layer.provideMerge(ToastService.Default),
+	Layer.provideMerge(TuiProjectContextService.Default),
+)
 
 const deferredServicesLayer = Layer.mergeAll(
 	PlanningService.Default.pipe(Layer.provideMerge(daemonRpcClientLayer)),
