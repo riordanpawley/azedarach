@@ -14,6 +14,7 @@ export class TuiIssueAdapterServiceError extends Data.TaggedError("TuiIssueAdapt
 		| "issueUpdate"
 		| "issueAddDependency"
 		| "issueRemoveDependency"
+		| "issueDelete"
 		| "issueGetEpicWithChildren"
 	readonly message: string
 }> {}
@@ -46,6 +47,12 @@ export interface TuiIssueAdapterServiceApi {
 		dependsOnId: string,
 		options?: {
 			readonly dependencyType?: DependencyRef["dependency_type"]
+			readonly projectPath?: string
+		},
+	) => Effect.Effect<void, TuiIssueAdapterServiceError>
+	readonly delete: (
+		issueId: string,
+		options?: {
 			readonly projectPath?: string
 		},
 	) => Effect.Effect<void, TuiIssueAdapterServiceError>
@@ -164,6 +171,16 @@ export class TuiIssueAdapterService extends Effect.Service<TuiIssueAdapterServic
 						.pipe(
 							Effect.asVoid,
 							Effect.mapError((error) => rpcFailure("issueRemoveDependency", error.message)),
+						),
+				delete: (issueId, options) =>
+					daemonRpcClient
+						.issueDelete({
+							issueId,
+							projectPath: options?.projectPath,
+						})
+						.pipe(
+							Effect.asVoid,
+							Effect.mapError((error) => rpcFailure("issueDelete", error.message)),
 						),
 				getEpicWithChildren: (epicId, options) => {
 					return daemonRpcClient
