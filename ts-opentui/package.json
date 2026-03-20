@@ -21,7 +21,7 @@
 		"typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
 		"clean": "rm -rf dist packages/*/dist tsconfig.tsbuildinfo packages/*/dist/tsconfig.tsbuildinfo dist/tsconfig.tsbuildinfo",
 		"link": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$(pwd)/bin/az\" \"$HOME/.local/bin/az\"",
-		"build": "tsup packages/entry/src/main.ts --format esm --clean",
+		"build": "bun build packages/entry/src/main.ts --outfile ./bin/az.ts --target bun",
 		"build-sfe": "bun build packages/entry/src/main.ts --compile --outfile ./bin/az",
 		"check:deps": "manypkg check",
 		"check:boundaries": "bash scripts/check-package-boundaries.sh",

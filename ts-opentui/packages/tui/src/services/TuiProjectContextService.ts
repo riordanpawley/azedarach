@@ -1,10 +1,8 @@
 import {
 	type AzedarachConfig,
-	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
 	getProjectStoragePaths,
 	resolveConfigBasePath,
-	resolveConfigSchemaPath,
 } from "@azedarach/config"
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
@@ -28,25 +26,10 @@ export class TuiProjectContextError extends Data.TaggedError("TuiProjectContextE
 
 type RegisteredProjectConfig = NonNullable<AzedarachConfig["projects"]>[number]
 
-const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+const PROJECT_REGISTRY_FILENAME = "projects.json"
 
 const getConfiguredProjects = (config: AzedarachConfig): ReadonlyArray<RegisteredProjectConfig> =>
 	config.projects ?? []
-
-const getConfiguredCurrentProject = (
-	config: AzedarachConfig,
-): RegisteredProjectConfig | undefined => {
-	const projects = getConfiguredProjects(config)
-	if (projects.length === 0) {
-		return undefined
-	}
-
-	if (config.defaultProject === undefined) {
-		return projects[0]
-	}
-
-	return projects.find((project) => project.name === config.defaultProject) ?? projects[0]
-}
 
 export class TuiProjectContextService extends Effect.Service<TuiProjectContextService>()(
 	"TuiProjectContextService",
@@ -88,32 +71,34 @@ export class TuiProjectContextService extends Effect.Service<TuiProjectContextSe
 					)
 				})
 
-			const saveWritableConfig = (configPath: string, config: AzedarachConfig) =>
+			const saveRegistryConfig = (configPath: string, config: AzedarachConfig) =>
 				Effect.gen(function* () {
-					const configDir = pathService.dirname(configPath)
-					const encoded = yield* Schema.encode(AzedarachConfigSchema)(config).pipe(
+					const encoded = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(
+						config,
+					).pipe(
 						Effect.mapError(
 							(error) =>
 								new TuiProjectContextError({
-									message: `Failed to encode config: ${String(error)}`,
+									message: `Failed to encode registry config: ${String(error)}`,
 								}),
 						),
 					)
-					yield* fs
-						.makeDirectory(configDir, { recursive: true })
-						.pipe(Effect.orElseSucceed(() => void 0))
-					yield* fs.writeFileString(configPath, `${JSON.stringify(encoded, null, 2)}\n`).pipe(
+					yield* fs.makeDirectory(pathService.dirname(configPath), { recursive: true }).pipe(
 						Effect.mapError(
 							(error) =>
 								new TuiProjectContextError({
-									message: `Failed to write config file ${configPath}: ${String(error)}`,
+									message: `Failed to create registry directory ${pathService.dirname(configPath)}: ${String(error)}`,
 								}),
 						),
 					)
-					const schemaPath = resolveConfigSchemaPath(configPath, pathService)
-					yield* fs
-						.writeFileString(schemaPath, configJsonSchemaString)
-						.pipe(Effect.orElseSucceed(() => void 0))
+					yield* fs.writeFileString(configPath, encoded).pipe(
+						Effect.mapError(
+							(error) =>
+								new TuiProjectContextError({
+									message: `Failed to write registry file ${configPath}: ${String(error)}`,
+								}),
+						),
+					)
 				})
 
 			const loadConfigIfExists = (configPath: string) =>
@@ -125,33 +110,37 @@ export class TuiProjectContextService extends Effect.Service<TuiProjectContextSe
 					return yield* loadWritableConfig(configPath)
 				})
 
-			const resolveSelectedProjectPathFromWorkspaceConfig = (cwdPath: string) =>
+			const resolveUserProjectRegistryPath = Effect.succeed(
+				pathService.join(
+					process.env.XDG_CONFIG_HOME ??
+						(process.env.HOME
+							? pathService.join(process.env.HOME, ".config")
+							: pathService.join(process.cwd(), ".config")),
+					"azedarach",
+					PROJECT_REGISTRY_FILENAME,
+				),
+			)
+
+			const loadProjectRegistryConfig = Effect.gen(function* () {
+				const registryConfigPath = yield* resolveUserProjectRegistryPath
+				return {
+					configPath: registryConfigPath,
+					config:
+						(yield* loadConfigIfExists(registryConfigPath)) ??
+						(yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
+							Effect.mapError(
+								(error) =>
+									new TuiProjectContextError({
+										message: `Failed to create default registry snapshot: ${String(error)}`,
+									}),
+							),
+						)),
+				} as const
+			})
+
+			const resolveWorkspaceConfigPath = (cwdPath: string) =>
 				Effect.gen(function* () {
 					const storagePaths = getProjectStoragePaths(cwdPath, pathService)
-					const config =
-						(yield* loadConfigIfExists(storagePaths.canonicalConfigPath)) ??
-						(yield* loadConfigIfExists(storagePaths.legacyConfigPath))
-					return getConfiguredCurrentProject(config ?? {})?.path
-				})
-
-			const resolveWritableConfigPath = (cwdPath: string, projectPath: string | undefined) =>
-				Effect.gen(function* () {
-					const cwdStoragePaths = getProjectStoragePaths(cwdPath, pathService)
-					const cwdHasCanonicalConfig = yield* fs
-						.exists(cwdStoragePaths.canonicalConfigPath)
-						.pipe(Effect.orElseSucceed(() => false))
-					const cwdHasLegacyConfig = cwdHasCanonicalConfig
-						? false
-						: yield* fs
-								.exists(cwdStoragePaths.legacyConfigPath)
-								.pipe(Effect.orElseSucceed(() => false))
-					const configBasePath = resolveConfigBasePath({
-						cwdPath,
-						projectPath: projectPath ?? cwdPath,
-						pathOps: pathService,
-						cwdHasConfig: cwdHasCanonicalConfig || cwdHasLegacyConfig,
-					})
-					const storagePaths = getProjectStoragePaths(configBasePath, pathService)
 					const canonicalExists = yield* fs
 						.exists(storagePaths.canonicalConfigPath)
 						.pipe(Effect.orElseSucceed(() => false))
@@ -208,9 +197,13 @@ export class TuiProjectContextService extends Effect.Service<TuiProjectContextSe
 			}
 
 			const cwdPath = process.cwd()
-			const selectedProjectPath = yield* resolveSelectedProjectPathFromWorkspaceConfig(cwdPath)
-			const configPath = yield* resolveWritableConfigPath(cwdPath, selectedProjectPath)
-			const initialConfig = yield* loadWritableConfig(configPath)
+			const registrySnapshot = yield* loadProjectRegistryConfig
+			const workspaceConfigPath = yield* resolveWorkspaceConfigPath(cwdPath)
+			const workspaceConfig = yield* loadConfigIfExists(workspaceConfigPath)
+			const initialConfig =
+				getConfiguredProjects(registrySnapshot.config).length > 0
+					? registrySnapshot.config
+					: (workspaceConfig ?? registrySnapshot.config)
 			const initialProjects = getConfiguredProjects(initialConfig)
 			const currentProject = yield* SubscriptionRef.make<Project | undefined>(
 				determineInitialProject(initialProjects, initialConfig.defaultProject, cwdPath),
@@ -219,10 +212,10 @@ export class TuiProjectContextService extends Effect.Service<TuiProjectContextSe
 
 			const persistSelection = (projectName: string) =>
 				Effect.gen(function* () {
-					const currentConfig = yield* loadWritableConfig(configPath)
-					yield* saveWritableConfig(configPath, {
-						...currentConfig,
-						projects: [...(currentConfig.projects ?? [])],
+					const currentRegistryConfig = yield* loadWritableConfig(registrySnapshot.configPath)
+					yield* saveRegistryConfig(registrySnapshot.configPath, {
+						...currentRegistryConfig,
+						projects: [...(currentRegistryConfig.projects ?? [])],
 						defaultProject: projectName,
 					})
 				})

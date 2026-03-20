@@ -83,3 +83,4 @@ coverage/
 /ts-opentui/az
 /.agents/memories/overview.md
 /.azedarach.schema.json
+ts-opentui/bin

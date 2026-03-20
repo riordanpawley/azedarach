@@ -20,6 +20,7 @@ const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	dm: "daemon",
 	s: "status",
 	st: "start",
+	projects: "project",
 }
 
 const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> =
