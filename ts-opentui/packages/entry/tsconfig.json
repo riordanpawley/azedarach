@@ -1,8 +1,18 @@
 {
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
-		"noEmit": true
+		"composite": true,
+		"declaration": true,
+		"noEmit": false
 	},
 	"include": ["src/**/*"],
+	"references": [
+		{ "path": "../cli" },
+		{ "path": "../config" },
+		{ "path": "../daemon" },
+		{ "path": "../daemon-control" },
+		{ "path": "../shared" },
+		{ "path": "../tui" }
+	],
 	"exclude": ["node_modules"]
 }

@@ -1,0 +1,14 @@
+{
+	"extends": "./tsconfig.base.json",
+	"include": [
+		"packages/cli/src/**/*",
+		"packages/config/src/**/*",
+		"packages/daemon/src/**/*",
+		"packages/daemon-control/src/**/*",
+		"packages/entry/src/**/*",
+		"packages/shared/src/**/*",
+		"packages/shared/rpc/**/*",
+		"packages/tui/src/**/*"
+	],
+	"exclude": ["node_modules"]
+}
