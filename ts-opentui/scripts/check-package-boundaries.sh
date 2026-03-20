@@ -156,14 +156,21 @@ check_legacy_service_imports() {
 check_workspace_effect_declarations() {
     local hits=()
     while IFS= read -r hit; do
-        [[ -n "$hit" ]] && hits+=("$hit")
+        [[ -z "$hit" ]] && continue
+        if [[ "$hit" == packages/daemon/package.json:*'"@effect/sql"'* ]]; then
+            continue
+        fi
+        if [[ "$hit" == packages/daemon/package.json:*'"@effect/sql-sqlite-bun"'* ]]; then
+            continue
+        fi
+        hits+=("$hit")
     done < <(
         rg -n --no-heading '"(@effect/[^"]+|effect)"\s*:' packages/*/package.json || true
     )
 
     if ((${#hits[@]} > 0)); then
         printf 'Boundary violations (workspace Effect dependency declarations):\n' >&2
-        printf '  Declare effect and @effect/* dependencies at ts-opentui/package.json only; packages/* must rely on the hoisted workspace install.\n' >&2
+        printf '  Declare effect and @effect/* dependencies at ts-opentui/package.json only; the only exception is sqlite ownership in packages/daemon/package.json.\n' >&2
         printf '  %s\n' "${hits[@]}" >&2
         fail=1
     fi

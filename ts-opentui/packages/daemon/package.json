@@ -5,7 +5,9 @@
 	"dependencies": {
 		"@azedarach/config": "workspace:*",
 		"@azedarach/daemon-control": "workspace:*",
-		"@azedarach/shared": "workspace:*"
+		"@azedarach/shared": "workspace:*",
+		"@effect/sql": "0.49.0",
+		"@effect/sql-sqlite-bun": "0.50.2"
 	},
 	"exports": {
 		".": "./src/index.ts"
