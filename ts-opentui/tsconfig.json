@@ -1,11 +1,12 @@
 {
-	"extends": "./tsconfig.base.json",
-	"include": [
-		"src/**/*",
-		"bin/**/*",
-		"packages/tui/src/**/*",
-		"packages/cli/src/**/*",
-		"packages/entry/src/**/*"
-	],
-	"exclude": ["node_modules"]
+	"files": [],
+	"references": [
+		{ "path": "./packages/shared" },
+		{ "path": "./packages/config" },
+		{ "path": "./packages/daemon-control" },
+		{ "path": "./packages/daemon" },
+		{ "path": "./packages/cli" },
+		{ "path": "./packages/tui" },
+		{ "path": "./packages/entry" }
+	]
 }

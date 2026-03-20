@@ -3,7 +3,10 @@
 	"compilerOptions": {
 		"composite": true,
 		"declaration": true,
-		"noEmit": false
+		"declarationMap": true,
+		"emitDeclarationOnly": true,
+		"outDir": "dist",
+		"tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
 	},
 	"include": ["src/**/*", "rpc/**/*"],
 	"exclude": ["node_modules"]

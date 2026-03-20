@@ -4,12 +4,11 @@
 		"module": "ESNext",
 		"moduleResolution": "bundler",
 		"strict": true,
+		"incremental": true,
 		"skipLibCheck": true,
 		"esModuleInterop": true,
 		"allowSyntheticDefaultImports": true,
 		"resolveJsonModule": true,
-		"isolatedModules": true,
-		"noEmit": true,
 		"jsx": "react-jsx",
 		"jsxImportSource": "@opentui/react",
 		"types": ["bun"]
