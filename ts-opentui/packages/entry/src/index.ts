@@ -4,13 +4,9 @@ import {
 	normalizeIssueOptionOrder,
 	resolveCliExecutionMode,
 } from "@azedarach/cli"
-import { AppConfigProjectContext, type AppConfigProjectContextApi } from "@azedarach/config"
 import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
-import { DaemonRpcClient } from "@azedarach/shared/rpc"
-import { configureTuiDaemonRpcClient, configureTuiKeyboardService, launchTUI } from "@azedarach/tui"
-import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer, Stream } from "effect"
-import { KeyboardService as LegacyKeyboardService } from "../../../src/runtime/appServicesFacade.js"
+import { configureTuiDaemonRpcClient, launchTUI } from "@azedarach/tui"
+import { Effect } from "effect"
 
 export type AzEntrypointMode = "cli" | "tui"
 
@@ -42,23 +38,7 @@ export const runAz = (argv: ReadonlyArray<string>) => {
 			const bootstrap = yield* daemonBootstrap.bootstrapDaemonRpcClient({
 				autoStart: true,
 			})
-			const projectContext: AppConfigProjectContextApi = {
-				getCurrentPath: () => Effect.succeed(process.cwd()),
-				currentProjectPathChanges: Stream.empty,
-			}
-			const keyboardService = yield* Effect.gen(function* () {
-				return yield* LegacyKeyboardService
-			}).pipe(
-				Effect.provide(
-					LegacyKeyboardService.Default.pipe(
-						Layer.provideMerge(Layer.succeed(DaemonRpcClient, bootstrap.client)),
-						Layer.provideMerge(Layer.succeed(AppConfigProjectContext, projectContext)),
-						Layer.provideMerge(BunContext.layer),
-					),
-				),
-			)
 			configureTuiDaemonRpcClient(bootstrap.client)
-			configureTuiKeyboardService(keyboardService)
 			return yield* Effect.promise(() => launchTUI())
 		})
 	}
