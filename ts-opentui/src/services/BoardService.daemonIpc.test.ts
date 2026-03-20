@@ -299,6 +299,12 @@ const makeDaemonRpcClientStub = (params: {
 		Effect.dieMessage("Unexpected prMergeToMain RPC in BoardService daemon IPC test"),
 	prCheckGhCli: () =>
 		Effect.dieMessage("Unexpected prCheckGhCli RPC in BoardService daemon IPC test"),
+	prUpdateFromBase: () =>
+		Effect.dieMessage("Unexpected prUpdateFromBase RPC in BoardService daemon IPC test"),
+	prMergeBaseIntoBranch: () =>
+		Effect.dieMessage("Unexpected prMergeBaseIntoBranch RPC in BoardService daemon IPC test"),
+	prAbortMerge: () =>
+		Effect.dieMessage("Unexpected prAbortMerge RPC in BoardService daemon IPC test"),
 	specRequirementList: () =>
 		Effect.dieMessage("Unexpected specRequirementList RPC in BoardService daemon IPC test"),
 	specRequirementGet: () =>

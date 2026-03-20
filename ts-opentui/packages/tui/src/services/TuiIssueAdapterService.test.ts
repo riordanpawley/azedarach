@@ -88,6 +88,9 @@ const makeDaemonRpcClientStub = (options?: {
 	prCleanup: () => unexpectedDaemonRpcCall(),
 	prMergeToMain: () => unexpectedDaemonRpcCall(),
 	prCheckGhCli: () => unexpectedDaemonRpcCall(),
+	prUpdateFromBase: () => unexpectedDaemonRpcCall(),
+	prMergeBaseIntoBranch: () => unexpectedDaemonRpcCall(),
+	prAbortMerge: () => unexpectedDaemonRpcCall(),
 })
 
 const makeLayer = (daemonRpcClient: DaemonRpcClientApi) =>
