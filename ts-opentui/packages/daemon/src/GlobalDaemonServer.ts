@@ -9,6 +9,7 @@ import { BackendDaemonService } from "./BackendDaemonService.js"
 import { BackendDaemonSessionRecovery } from "./BackendDaemonSessionRecovery.js"
 import { DaemonAttachmentService } from "./DaemonAttachmentService.js"
 import { DaemonPlanningService } from "./DaemonPlanningService.js"
+import { DaemonPrService } from "./DaemonPrService.js"
 import { DaemonSessionService } from "./DaemonSessionService.js"
 import { GlobalDaemonDiscovery, type GlobalDaemonLease } from "./GlobalDaemonDiscovery.js"
 import { GlobalDaemonRpcHandlersLive } from "./GlobalDaemonRpcHandlers.js"
@@ -183,6 +184,7 @@ const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
 	const daemonServicesWithPlanningLayer = Layer.mergeAll(
 		daemonServicesLayer,
 		DaemonPlanningService.Default,
+		DaemonPrService.Default,
 	)
 
 	const handlersLayer = Layer.provide(GlobalDaemonRpcHandlersLive, daemonServicesWithPlanningLayer)

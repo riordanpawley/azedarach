@@ -7,6 +7,7 @@ import {
 import { Effect } from "effect"
 import type { BackendDaemonSessionSnapshot } from "./BackendDaemonSessionRecovery.js"
 import { DaemonAttachmentError } from "./DaemonAttachmentService.js"
+import { DaemonPrError } from "./DaemonPrService.js"
 import { DaemonSessionError } from "./DaemonSessionService.js"
 import {
 	makeDaemonAttachmentAttachClipboardRpcHandler,
@@ -16,6 +17,10 @@ import {
 	makeDaemonAttachmentMaterializePathRpcHandler,
 	makeDaemonAttachmentRemoveRpcHandler,
 	makeDaemonBoardReadModelRpcHandler,
+	makeDaemonPrCheckGhCliRpcHandler,
+	makeDaemonPrCleanupRpcHandler,
+	makeDaemonPrCreateRpcHandler,
+	makeDaemonPrMergeToMainRpcHandler,
 	makeDaemonSessionPauseRpcHandler,
 	makeDaemonSessionRecoverRpcHandler,
 	makeDaemonSessionResumeRpcHandler,
@@ -318,6 +323,104 @@ describe("makeDaemonSessionUpdateStateRpcHandler", () => {
 			worktreePath: "/tmp/project/.worktrees/task-1",
 			startedAt: "2026-03-20T02:00:00.000Z",
 		})
+	})
+})
+
+describe("PR rpc handlers", () => {
+	it("maps PR workflow handlers into rpc envelopes", async () => {
+		const createHandler = makeDaemonPrCreateRpcHandler({
+			create: (issueId, projectPath) => {
+				expect(issueId).toBe("task-1")
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.succeed({
+					number: 42,
+					url: "https://example.com/pr/42",
+					title: "[task] Board task (task-1)",
+					state: "open",
+					draft: true,
+					branch: "author/task-1/board-task",
+				})
+			},
+		})
+		const cleanupHandler = makeDaemonPrCleanupRpcHandler({
+			cleanup: ({ issueId, closeIssue }) => {
+				expect(issueId).toBe("task-1")
+				expect(closeIssue).toBe(true)
+				return Effect.void
+			},
+		})
+		const mergeHandler = makeDaemonPrMergeToMainRpcHandler({
+			mergeToMain: ({ issueId }) => {
+				expect(issueId).toBe("task-1")
+				return Effect.void
+			},
+		})
+		const checkHandler = makeDaemonPrCheckGhCliRpcHandler({
+			checkGhCli: () => Effect.succeed(true),
+		})
+
+		const createResult = await Effect.runPromise(
+			createHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const cleanupResult = await Effect.runPromise(
+			cleanupHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+				closeIssue: true,
+			}),
+		)
+		const mergeResult = await Effect.runPromise(
+			mergeHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const checkResult = await Effect.runPromise(
+			checkHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		)
+
+		expect(createResult.pullRequest.number).toBe(42)
+		expect(cleanupResult.cleanedUp).toBe(true)
+		expect(mergeResult.merged).toBe(true)
+		expect(checkResult.available).toBe(true)
+	})
+
+	it("maps PR workflow failures into daemon rpc action errors", async () => {
+		const handler = makeDaemonPrCreateRpcHandler({
+			create: () =>
+				Effect.fail(
+					new DaemonPrError({
+						reason: "worktree-missing",
+						message: "No worktree found for task-1",
+					}),
+				),
+		})
+
+		const exit = await Effect.runPromiseExit(
+			handler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(exit._tag).toBe("Failure")
+		if (exit._tag === "Failure" && exit.cause._tag === "Fail") {
+			expect(exit.cause.error).toEqual({
+				_tag: "DaemonRpcActionError",
+				action: "prCreate",
+				code: "worktree-missing",
+				message: "No worktree found for task-1",
+			})
+		}
 	})
 })
 

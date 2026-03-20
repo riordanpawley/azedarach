@@ -131,10 +131,7 @@ const coreServicesLayer = Layer.mergeAll(
 		Layer.provideMerge(daemonRpcClientLayer),
 		Layer.provideMerge(AppConfig.Default),
 	),
-	PRWorkflow.Default.pipe(
-		Layer.provideMerge(daemonRpcClientLayer),
-		Layer.provideMerge(appConfigProjectContextLayer),
-	),
+	PRWorkflow.Default.pipe(Layer.provideMerge(daemonRpcClientLayer)),
 	TerminalService.Default,
 	EditorService.Default,
 	KeyboardService.Default.pipe(

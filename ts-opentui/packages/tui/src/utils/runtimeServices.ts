@@ -34,6 +34,7 @@ export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
 export { OverlayService } from "../services/OverlayService.js"
 export { PlanningService } from "../services/PlanningService.js"
+export { PrWorkflowService as PRWorkflow } from "../services/PrWorkflowService.js"
 export {
 	type SettingDefinition,
 	SettingsService,
@@ -52,7 +53,6 @@ export { formatForToast } from "./formatForToast.js"
 export { getIssueCreateImplementations } from "./issueImplementations.js"
 export {
 	KeyboardService,
-	PRWorkflow,
 	ProjectService,
 	ProjectStateService,
 } from "./legacyRuntimeServices.js"

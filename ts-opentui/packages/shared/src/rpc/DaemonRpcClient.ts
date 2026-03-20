@@ -57,6 +57,16 @@ import type {
 	DaemonPlanningReviewRequest,
 	DaemonPlanningReviewResult,
 } from "./DaemonPlanningRpcSchemas.js"
+import type {
+	DaemonPrCheckGhCliRequest,
+	DaemonPrCheckGhCliResult,
+	DaemonPrCleanupRequest,
+	DaemonPrCleanupResult,
+	DaemonPrCreateRequest,
+	DaemonPrCreateResult,
+	DaemonPrMergeToMainRequest,
+	DaemonPrMergeToMainResult,
+} from "./DaemonPrRpcSchemas.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonAttachReconnectResult,
@@ -309,6 +319,18 @@ export interface DaemonRpcClientApi {
 	readonly planningCreateIssues: (
 		request: Omit<DaemonPlanningCreateIssuesRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPlanningCreateIssuesResult, DaemonRpcClientError>
+	readonly prCreate: (
+		request: Omit<DaemonPrCreateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrCreateResult, DaemonRpcClientError>
+	readonly prCleanup: (
+		request: Omit<DaemonPrCleanupRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrCleanupResult, DaemonRpcClientError>
+	readonly prMergeToMain: (
+		request: Omit<DaemonPrMergeToMainRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrMergeToMainResult, DaemonRpcClientError>
+	readonly prCheckGhCli: (
+		request?: Omit<DaemonPrCheckGhCliRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrCheckGhCliResult, DaemonRpcClientError>
 	readonly specRequirementList: (
 		request?: Omit<DaemonSpecRequirementListRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecRequirementListResult, DaemonRpcClientError>
@@ -619,6 +641,27 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
+		prCreate: (request) =>
+			raw.daemonPrCreate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		prCleanup: (request) =>
+			raw.daemonPrCleanup({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		prMergeToMain: (request) =>
+			raw.daemonPrMergeToMain({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		prCheckGhCli: (request) =>
+			raw.daemonPrCheckGhCli(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
 		specRequirementList: (request) =>
 			raw.daemonSpecRequirementList(
 				request === undefined

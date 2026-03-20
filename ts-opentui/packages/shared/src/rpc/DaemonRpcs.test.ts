@@ -32,6 +32,16 @@ import {
 	PlanningReviewFeedbackSchema,
 } from "./DaemonPlanningRpcSchemas.js"
 import {
+	DaemonPrCheckGhCliRequestSchema,
+	DaemonPrCheckGhCliResultSchema,
+	DaemonPrCleanupRequestSchema,
+	DaemonPrCleanupResultSchema,
+	DaemonPrCreateRequestSchema,
+	DaemonPrCreateResultSchema,
+	DaemonPrMergeToMainRequestSchema,
+	DaemonPrMergeToMainResultSchema,
+} from "./DaemonPrRpcSchemas.js"
+import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
 	DaemonBoardReadModelRequestSchema,
@@ -53,6 +63,7 @@ import {
 	DaemonAppRpcGroup,
 	DaemonImplementationRpcGroup,
 	DaemonPlanningRpcGroup,
+	DaemonPrRpcGroup,
 	DaemonRpcGroup,
 	DaemonSpecLinksRpcGroup,
 	DaemonSpecPublishConfigRpcGroup,
@@ -169,6 +180,16 @@ describe("DaemonRpcs", () => {
 		])
 	})
 
+	it("registers PR rpc operations in a dedicated group", () => {
+		const keys = [...DaemonPrRpcGroup.requests.keys()].sort()
+		expect(keys).toEqual([
+			"daemonPrCheckGhCli",
+			"daemonPrCleanup",
+			"daemonPrCreate",
+			"daemonPrMergeToMain",
+		])
+	})
+
 	it("registers spec rpc operations in a dedicated group", () => {
 		const keys = [...DaemonSpecRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
@@ -225,6 +246,7 @@ describe("DaemonRpcs", () => {
 					...DaemonRpcGroup.requests.keys(),
 					...DaemonImplementationRpcGroup.requests.keys(),
 					...DaemonPlanningRpcGroup.requests.keys(),
+					...DaemonPrRpcGroup.requests.keys(),
 					...DaemonSpecReadRpcGroup.requests.keys(),
 				]),
 			].sort(),
@@ -1407,5 +1429,84 @@ describe("DaemonRpcs", () => {
 		expect(reviewResult.feedback.isApproved).toBe(false)
 		expect(refineResult.plan.summary).toContain("tasks")
 		expect(createIssuesResult.createdIssues[0]?.id).toBe("az-1")
+	})
+
+	it("validates PR request and result schemas", async () => {
+		const decodeCreateRequest = Schema.decodeUnknown(DaemonPrCreateRequestSchema)
+		const decodeCreateResult = Schema.decodeUnknown(DaemonPrCreateResultSchema)
+		const decodeCleanupRequest = Schema.decodeUnknown(DaemonPrCleanupRequestSchema)
+		const decodeCleanupResult = Schema.decodeUnknown(DaemonPrCleanupResultSchema)
+		const decodeMergeRequest = Schema.decodeUnknown(DaemonPrMergeToMainRequestSchema)
+		const decodeMergeResult = Schema.decodeUnknown(DaemonPrMergeToMainResultSchema)
+		const decodeCheckRequest = Schema.decodeUnknown(DaemonPrCheckGhCliRequestSchema)
+		const decodeCheckResult = Schema.decodeUnknown(DaemonPrCheckGhCliResultSchema)
+
+		const createRequest = await Effect.runPromise(
+			decodeCreateRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const createResult = await Effect.runPromise(
+			decodeCreateResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				pullRequest: {
+					number: 42,
+					url: "https://example.com/pr/42",
+					title: "[task] Test PR (te-1)",
+					state: "open",
+					draft: true,
+					branch: "author/te-1/test-pr",
+				},
+			}),
+		)
+		const cleanupRequest = await Effect.runPromise(
+			decodeCleanupRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+				closeIssue: true,
+			}),
+		)
+		const cleanupResult = await Effect.runPromise(
+			decodeCleanupResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				cleanedUp: true,
+			}),
+		)
+		const mergeRequest = await Effect.runPromise(
+			decodeMergeRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const mergeResult = await Effect.runPromise(
+			decodeMergeResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				merged: true,
+			}),
+		)
+		const checkRequest = await Effect.runPromise(
+			decodeCheckRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		)
+		const checkResult = await Effect.runPromise(
+			decodeCheckResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				available: true,
+			}),
+		)
+
+		expect(createRequest.issueId).toBe("te-1")
+		expect(createResult.pullRequest.number).toBe(42)
+		expect(cleanupRequest.closeIssue).toBe(true)
+		expect(cleanupResult.cleanedUp).toBe(true)
+		expect(mergeRequest.projectPath).toBe("/tmp/project")
+		expect(mergeResult.merged).toBe(true)
+		expect(checkRequest.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(checkResult.available).toBe(true)
 	})
 })

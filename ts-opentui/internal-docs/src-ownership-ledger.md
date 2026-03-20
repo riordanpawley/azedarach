@@ -61,7 +61,6 @@ Risk controls:
 - current package->src import edges:
 ```
 ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:5:} from "../../../../src/runtime/appServicesFacade.js"
-ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../../src/runtime/coreServicesFacade.js"
 ```
 
 - 2026-03-19 `ye` landed daemon-local sync/board/session contracts in `packages/daemon` and deleted `packages/daemon/src/runtimeServices.ts`.
@@ -74,7 +73,8 @@ ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../.
 - 2026-03-20 `aat` removed `PTYMonitor` from TUI runtime wiring and session atoms; the remaining legacy runtime seam afterward was `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, `PlanningService`, and `PRWorkflow`.
 - 2026-03-20 `aas` moved TUI planning onto the daemon planning RPC group, added package-local `packages/tui/src/services/PlanningService.ts`, made the public `@azedarach/shared/rpc` barrel expose planning schemas/contracts, and removed `PlanningService` from `packages/tui/src/utils/legacyRuntimeServices.ts`.
 - 2026-03-20 `aaq` moved image attachments onto shared attachment RPC contracts plus daemon/sqlite live ownership and a package-local TUI adapter, removed `ImageAttachmentService` from `packages/tui/src/utils/legacyRuntimeServices.ts`, and converted `src/core/ImageAttachmentService.ts` into a compatibility re-export while legacy keyboard/PR code still migrates.
-- Current remaining TUI legacy runtime seam: `KeyboardService`, `ProjectService`, `ProjectStateService`, and `PRWorkflow`.
+- 2026-03-20 `aau` added a dedicated shared daemon PR RPC group plus daemon live implementation, moved package-owned TUI PR actions onto `packages/tui/src/services/PrWorkflowService.ts`, and removed direct package imports of legacy `src/core/PRWorkflow.ts`.
+- Current remaining TUI legacy runtime seam: `KeyboardService`, `ProjectService`, and `ProjectStateService`.
 - Remaining runtime-facade package edges are TUI-only through `packages/tui/src/utils/legacyRuntimeServices.ts`.
 
 ## Classification Legend

@@ -67,6 +67,14 @@ import {
 	type DaemonPlanningRefineResult,
 	type DaemonPlanningReviewRequest,
 	type DaemonPlanningReviewResult,
+	type DaemonPrCheckGhCliRequest,
+	type DaemonPrCheckGhCliResult,
+	type DaemonPrCleanupRequest,
+	type DaemonPrCleanupResult,
+	type DaemonPrCreateRequest,
+	type DaemonPrCreateResult,
+	type DaemonPrMergeToMainRequest,
+	type DaemonPrMergeToMainResult,
 	type DaemonQueueCancelRequest,
 	type DaemonQueueCancelResult,
 	type DaemonQueueEnqueueRequest,
@@ -162,6 +170,7 @@ import {
 	type DaemonPlanningReviewFeedback,
 	DaemonPlanningService,
 } from "./DaemonPlanningService.js"
+import { DaemonPrError, DaemonPrService, type DaemonPrServiceApi } from "./DaemonPrService.js"
 import {
 	DaemonSessionError,
 	DaemonSessionService,
@@ -293,6 +302,7 @@ type DaemonRpcMappedError =
 	| DaemonAttachmentError
 	| ImplementationRegistryDaemonError
 	| DaemonPlanningError
+	| DaemonPrError
 	| DaemonSessionError
 	| SpecDaemonError
 	| TrackerIssueDaemonError
@@ -376,6 +386,47 @@ const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpc
 				return daemonRpcActionError({
 					action,
 					code: "issues-creation-failed",
+					message: error.message,
+				})
+		}
+	}
+
+	if (error instanceof DaemonPrError) {
+		switch (error.reason) {
+			case "worktree-missing":
+				return daemonRpcActionError({
+					action,
+					code: "worktree-missing",
+					message: error.message,
+				})
+			case "pr-disabled":
+				return daemonRpcActionError({
+					action,
+					code: "pr-disabled",
+					message: error.message,
+				})
+			case "validation-failed":
+				return daemonRpcActionError({
+					action,
+					code: "validation-failed",
+					message: error.message,
+				})
+			case "config":
+				return daemonRpcActionError({
+					action,
+					code: "config-error",
+					message: error.message,
+				})
+			case "issue-tracker":
+				return daemonRpcActionError({
+					action,
+					code: "issue-tracker-error",
+					message: error.message,
+				})
+			case "command-failed":
+				return daemonRpcActionError({
+					action,
+					code: "command-failed",
 					message: error.message,
 				})
 		}
@@ -576,6 +627,13 @@ const mapPlanningCreateIssuesResult = (
 	createdIssues: result.createdIssues,
 })
 
+const mapDaemonPrCreateResult = (
+	pullRequest: DaemonPrCreateResult["pullRequest"],
+): DaemonPrCreateResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	pullRequest,
+})
+
 const mapDaemonSessionMutationResult = (
 	session: BackendDaemonSessionSnapshot,
 ): DaemonSessionMutationResult => ({
@@ -736,6 +794,55 @@ export const makeDaemonPlanningCreateIssuesRpcHandler =
 			.createIssues(request)
 			.pipe(Effect.map(mapPlanningCreateIssuesResult), catchDaemonRpcError("planningCreateIssues"))
 
+export const makeDaemonPrCreateRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "create">) => (request: DaemonPrCreateRequest) =>
+		prs
+			.create(request.issueId, request.projectPath)
+			.pipe(Effect.map(mapDaemonPrCreateResult), catchDaemonRpcError("prCreate"))
+
+export const makeDaemonPrCleanupRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "cleanup">) => (request: DaemonPrCleanupRequest) =>
+		prs
+			.cleanup({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+				closeIssue: request.closeIssue,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					cleanedUp: true,
+				} satisfies DaemonPrCleanupResult),
+				catchDaemonRpcError("prCleanup"),
+			)
+
+export const makeDaemonPrMergeToMainRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "mergeToMain">) => (request: DaemonPrMergeToMainRequest) =>
+		prs
+			.mergeToMain({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					merged: true,
+				} satisfies DaemonPrMergeToMainResult),
+				catchDaemonRpcError("prMergeToMain"),
+			)
+
+export const makeDaemonPrCheckGhCliRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "checkGhCli">) => (_request: DaemonPrCheckGhCliRequest) =>
+		prs.checkGhCli().pipe(
+			Effect.map(
+				(available): DaemonPrCheckGhCliResult => ({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					available,
+				}),
+			),
+			catchDaemonRpcError("prCheckGhCli"),
+		)
+
 export const makeDaemonAttachmentListRpcHandler =
 	(attachments: Pick<DaemonAttachmentServiceApi, "list">) =>
 	(request: DaemonAttachmentListRequest) =>
@@ -835,6 +942,7 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const sessionService = yield* DaemonSessionService
 	const attachments = yield* DaemonAttachmentService
 	const planning = yield* DaemonPlanningService
+	const prs = yield* DaemonPrService
 	const implementations = yield* ImplementationRegistryDaemonService
 	const issues = yield* TrackerIssueDaemonService
 	const specs = yield* SpecDaemonService
@@ -894,6 +1002,10 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 		daemonPlanningReview: makeDaemonPlanningReviewRpcHandler(planning),
 		daemonPlanningRefine: makeDaemonPlanningRefineRpcHandler(planning),
 		daemonPlanningCreateIssues: makeDaemonPlanningCreateIssuesRpcHandler(planning),
+		daemonPrCreate: makeDaemonPrCreateRpcHandler(prs),
+		daemonPrCleanup: makeDaemonPrCleanupRpcHandler(prs),
+		daemonPrMergeToMain: makeDaemonPrMergeToMainRpcHandler(prs),
+		daemonPrCheckGhCli: makeDaemonPrCheckGhCliRpcHandler(prs),
 		daemonDevServerStatus: (request: DaemonDevServerStatusRequest) =>
 			control
 				.devServerStatus({

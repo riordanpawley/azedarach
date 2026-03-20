@@ -85,6 +85,10 @@ const makeDaemonRpcClientStub = (options?: {
 	planningReview: options?.planningReview ?? unexpectedDaemonRpcCall,
 	planningRefine: options?.planningRefine ?? unexpectedDaemonRpcCall,
 	planningCreateIssues: options?.planningCreateIssues ?? unexpectedDaemonRpcCall,
+	prCreate: () => unexpectedDaemonRpcCall(),
+	prCleanup: () => unexpectedDaemonRpcCall(),
+	prMergeToMain: () => unexpectedDaemonRpcCall(),
+	prCheckGhCli: () => unexpectedDaemonRpcCall(),
 })
 
 const plan: Plan = {
