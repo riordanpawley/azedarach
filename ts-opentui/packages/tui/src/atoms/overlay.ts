@@ -7,7 +7,8 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { OverlayService, SettingsService, ToastService } from "../utils/runtimeServices.js"
+import { OverlayService } from "../services/OverlayService.js"
+import { SettingsService, ToastService } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================

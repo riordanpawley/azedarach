@@ -23,6 +23,7 @@ import { DiffService } from "../services/DiffService.js"
 import { EditorService } from "../services/EditorService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
+import { OverlayService } from "../services/OverlayService.js"
 import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
@@ -34,7 +35,6 @@ import {
 	KeyboardService,
 	MutationQueue,
 	NavigationService,
-	OverlayService,
 	PlanningService,
 	PRWorkflow,
 	ProjectService,

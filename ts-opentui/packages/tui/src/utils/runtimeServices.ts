@@ -3,24 +3,6 @@ export {
 	getProjectStoragePaths,
 	resolveConfigBasePath,
 } from "@azedarach/config"
-export {
-	BoardService,
-	KeyboardService,
-	MutationQueue,
-	NavigationService,
-	OverlayService,
-	ProjectService,
-	ProjectStateService,
-	SessionService,
-} from "../../../../src/runtime/appServicesFacade.js"
-export {
-	ImageAttachmentService,
-	IssueEditorService,
-	PlanningService,
-	PRWorkflow,
-	PTYMonitor,
-	SessionManager,
-} from "../../../../src/runtime/coreServicesFacade.js"
 export type {
 	DevServerStatus,
 	DiagnosticsState,
@@ -47,6 +29,7 @@ export { DiffService } from "../services/DiffService.js"
 export { EditorService } from "../services/EditorService.js"
 export { NetworkService } from "../services/NetworkService.js"
 export { OfflineService } from "../services/OfflineService.js"
+export { OverlayService } from "../services/OverlayService.js"
 export {
 	type SettingDefinition,
 	SettingsService,
@@ -63,4 +46,19 @@ export { computeElapsedFormatted } from "./clockHelpers.js"
 export { computeDependencyPhases } from "./dependencyPhases.js"
 export { formatForToast } from "./formatForToast.js"
 export { getIssueCreateImplementations } from "./issueImplementations.js"
+export {
+	BoardService,
+	ImageAttachmentService,
+	IssueEditorService,
+	KeyboardService,
+	MutationQueue,
+	NavigationService,
+	PlanningService,
+	PRWorkflow,
+	ProjectService,
+	ProjectStateService,
+	PTYMonitor,
+	SessionManager,
+	SessionService,
+} from "./legacyRuntimeServices.js"
 export { buildTaskQueueKey } from "./queueKey.js"
