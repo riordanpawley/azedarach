@@ -5,6 +5,20 @@ import {
 	DaemonImplementationGetRegistryResultSchema,
 } from "./DaemonImplementationRpcSchemas.js"
 import {
+	DaemonPlanningCreateIssuesRequestSchema,
+	DaemonPlanningCreateIssuesResultSchema,
+	DaemonPlanningGenerateRequestSchema,
+	DaemonPlanningGenerateResultSchema,
+	DaemonPlanningRefineRequestSchema,
+	DaemonPlanningRefineResultSchema,
+	DaemonPlanningReviewRequestSchema,
+	DaemonPlanningReviewResultSchema,
+	type PlanningPlan,
+	PlanningPlanSchema,
+	type PlanningReviewFeedback,
+	PlanningReviewFeedbackSchema,
+} from "./DaemonPlanningRpcSchemas.js"
+import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	DaemonAttachRequestSchema,
 	DaemonBoardReadModelRequestSchema,
@@ -25,6 +39,7 @@ import {
 import {
 	DaemonAppRpcGroup,
 	DaemonImplementationRpcGroup,
+	DaemonPlanningRpcGroup,
 	DaemonRpcGroup,
 	DaemonSpecLinksRpcGroup,
 	DaemonSpecPublishConfigRpcGroup,
@@ -125,6 +140,16 @@ describe("DaemonRpcs", () => {
 		])
 	})
 
+	it("registers planning rpc operations in a dedicated group", () => {
+		const keys = [...DaemonPlanningRpcGroup.requests.keys()].sort()
+		expect(keys).toEqual([
+			"daemonPlanningCreateIssues",
+			"daemonPlanningGenerate",
+			"daemonPlanningRefine",
+			"daemonPlanningReview",
+		])
+	})
+
 	it("registers spec rpc operations in a dedicated group", () => {
 		const keys = [...DaemonSpecRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
@@ -180,6 +205,7 @@ describe("DaemonRpcs", () => {
 				...new Set([
 					...DaemonRpcGroup.requests.keys(),
 					...DaemonImplementationRpcGroup.requests.keys(),
+					...DaemonPlanningRpcGroup.requests.keys(),
 					...DaemonSpecReadRpcGroup.requests.keys(),
 				]),
 			].sort(),
@@ -1121,5 +1147,116 @@ describe("DaemonRpcs", () => {
 		expect(enqueue.operation).toBe("sessionStart")
 		expect(query.items[0]?.operationId).toBe("queue-op-1")
 		expect(cancel.cancelledOperationIds).toEqual(["queue-op-1"])
+	})
+
+	it("validates planning request and result schemas", async () => {
+		const decodeGenerate = Schema.decodeUnknown(DaemonPlanningGenerateRequestSchema)
+		const decodeReview = Schema.decodeUnknown(DaemonPlanningReviewRequestSchema)
+		const decodeRefine = Schema.decodeUnknown(DaemonPlanningRefineRequestSchema)
+		const decodeCreateIssues = Schema.decodeUnknown(DaemonPlanningCreateIssuesRequestSchema)
+		const decodeGenerateResult = Schema.decodeUnknown(DaemonPlanningGenerateResultSchema)
+		const decodeReviewResult = Schema.decodeUnknown(DaemonPlanningReviewResultSchema)
+		const decodeRefineResult = Schema.decodeUnknown(DaemonPlanningRefineResultSchema)
+		const decodeCreateIssuesResult = Schema.decodeUnknown(DaemonPlanningCreateIssuesResultSchema)
+
+		const plan: PlanningPlan = {
+			epicTitle: "Add oauth login",
+			epicDescription: "Deliver an OAuth login flow.",
+			summary: "Split the flow into UI, auth, and persistence tasks.",
+			tasks: [
+				{
+					id: "task-1",
+					title: "Implement OAuth callback",
+					description: "Handle provider callbacks and token exchange.",
+					type: "task",
+					priority: 1,
+					estimate: 2,
+					dependsOn: [],
+					canParallelize: false,
+					design: "Keep callback handling isolated from UI.",
+					acceptance: "Callback returns a persisted session.",
+				},
+			],
+			reviewNotes: "Initial pass",
+			parallelizationScore: 75,
+		}
+		const feedback: PlanningReviewFeedback = {
+			score: 88,
+			issues: ["Task boundaries need to be narrower"],
+			suggestions: ["Split UI and auth setup"],
+			parallelizationOpportunities: ["Move persistence work into a separate task"],
+			tasksTooLarge: ["task-1"],
+			missingDependencies: [
+				{
+					taskId: "task-1",
+					shouldDependOn: "task-0",
+					reason: "The callback depends on shared token bootstrap.",
+				},
+			],
+			isApproved: false,
+		}
+		const encodedPlan = Schema.encodeSync(PlanningPlanSchema)(plan)
+		const encodedFeedback = Schema.encodeSync(PlanningReviewFeedbackSchema)(feedback)
+
+		const generate = await Effect.runPromise(
+			decodeGenerate({
+				featureDescription: "Add OAuth login",
+			}),
+		)
+		const review = await Effect.runPromise(decodeReview({ plan }))
+		const refine = await Effect.runPromise(decodeRefine({ plan, feedback }))
+		const createIssues = await Effect.runPromise(decodeCreateIssues({ plan }))
+		const generateResult = await Effect.runPromise(
+			decodeGenerateResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				plan,
+			}),
+		)
+		const reviewResult = await Effect.runPromise(
+			decodeReviewResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				feedback,
+			}),
+		)
+		const refineResult = await Effect.runPromise(
+			decodeRefineResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				plan,
+			}),
+		)
+		const createIssuesResult = await Effect.runPromise(
+			decodeCreateIssuesResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				createdIssues: [
+					{
+						id: "az-1",
+						title: "Implement OAuth callback",
+						status: "open",
+						priority: 1,
+						issue_type: "task",
+						created_at: "2026-03-20T00:00:00.000Z",
+						updated_at: "2026-03-20T00:00:00.000Z",
+						closed_at: null,
+						assignee: null,
+						design: "Keep callback handling isolated from UI.",
+						acceptance: "Callback returns a persisted session.",
+						implementations: ["ts-opentui"],
+					},
+				],
+			}),
+		)
+
+		expect(generate.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(review.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(refine.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(createIssues.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(Schema.decodeUnknownSync(PlanningPlanSchema)(encodedPlan)).toEqual(plan)
+		expect(Schema.decodeUnknownSync(PlanningReviewFeedbackSchema)(encodedFeedback)).toEqual(
+			feedback,
+		)
+		expect(generateResult.plan.tasks[0]?.id).toBe("task-1")
+		expect(reviewResult.feedback.isApproved).toBe(false)
+		expect(refineResult.plan.summary).toContain("tasks")
+		expect(createIssuesResult.createdIssues[0]?.id).toBe("az-1")
 	})
 })

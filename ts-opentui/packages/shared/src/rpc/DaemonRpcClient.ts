@@ -34,6 +34,16 @@ import type {
 	DaemonIssueUpdateRequest,
 	DaemonIssueUpdateResult,
 } from "./DaemonIssueRpcSchemas.js"
+import type {
+	DaemonPlanningCreateIssuesRequest,
+	DaemonPlanningCreateIssuesResult,
+	DaemonPlanningGenerateRequest,
+	DaemonPlanningGenerateResult,
+	DaemonPlanningRefineRequest,
+	DaemonPlanningRefineResult,
+	DaemonPlanningReviewRequest,
+	DaemonPlanningReviewResult,
+} from "./DaemonPlanningRpcSchemas.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
 	type DaemonAttachReconnectResult,
@@ -256,6 +266,18 @@ export interface DaemonRpcClientApi {
 	readonly implementationSetDefault: (
 		request: Omit<DaemonImplementationSetDefaultRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonImplementationSetDefaultResult, DaemonRpcClientError>
+	readonly planningGenerate: (
+		request: Omit<DaemonPlanningGenerateRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPlanningGenerateResult, DaemonRpcClientError>
+	readonly planningReview: (
+		request: Omit<DaemonPlanningReviewRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPlanningReviewResult, DaemonRpcClientError>
+	readonly planningRefine: (
+		request: Omit<DaemonPlanningRefineRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPlanningRefineResult, DaemonRpcClientError>
+	readonly planningCreateIssues: (
+		request: Omit<DaemonPlanningCreateIssuesRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPlanningCreateIssuesResult, DaemonRpcClientError>
 	readonly specRequirementList: (
 		request?: Omit<DaemonSpecRequirementListRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecRequirementListResult, DaemonRpcClientError>
@@ -513,6 +535,26 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 			}),
 		implementationSetDefault: (request) =>
 			raw.daemonImplementationSetDefault({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		planningGenerate: (request) =>
+			raw.daemonPlanningGenerate({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		planningReview: (request) =>
+			raw.daemonPlanningReview({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		planningRefine: (request) =>
+			raw.daemonPlanningRefine({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		planningCreateIssues: (request) =>
+			raw.daemonPlanningCreateIssues({
 				...request,
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),

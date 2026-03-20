@@ -2,6 +2,16 @@ import { describe, expect, it } from "bun:test"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { ParseResult, Schema } from "effect"
 import {
+	DaemonPlanningCreateIssuesRequestSchema,
+	DaemonPlanningGenerateRequestSchema,
+	DaemonPlanningRefineRequestSchema,
+	DaemonPlanningReviewRequestSchema,
+	type PlanningPlan,
+	PlanningPlanSchema,
+	type PlanningReviewFeedback,
+	PlanningReviewFeedbackSchema,
+} from "./DaemonPlanningRpcSchemas.js"
+import {
 	classifyDaemonRpcClientError,
 	isDaemonRpcClientProtocolMismatch,
 	isDaemonRpcClientRetryableTransport,
@@ -57,6 +67,80 @@ describe("DaemonRpc protocol version schemas", () => {
 		}
 		expect(ParseResult.TreeFormatter.formatErrorSync(result.left)).toContain(
 			String(DAEMON_RPC_PROTOCOL_VERSION),
+		)
+	})
+
+	it("defaults planning request protocol versions and round-trips planning codecs", () => {
+		const generate = Schema.decodeUnknownSync(DaemonPlanningGenerateRequestSchema)({
+			featureDescription: "Add dark mode",
+		})
+		const review = Schema.decodeUnknownSync(DaemonPlanningReviewRequestSchema)({
+			plan: {
+				epicTitle: "Dark mode",
+				epicDescription: "Add dark mode support.",
+				summary: "Split theme, persistence, and UI tasks.",
+				tasks: [],
+			},
+		})
+		const refine = Schema.decodeUnknownSync(DaemonPlanningRefineRequestSchema)({
+			plan: {
+				epicTitle: "Dark mode",
+				epicDescription: "Add dark mode support.",
+				summary: "Split theme, persistence, and UI tasks.",
+				tasks: [],
+			},
+			feedback: {
+				score: 90,
+				issues: [],
+				suggestions: [],
+				parallelizationOpportunities: [],
+				tasksTooLarge: [],
+				missingDependencies: [],
+				isApproved: true,
+			},
+		})
+		const createIssues = Schema.decodeUnknownSync(DaemonPlanningCreateIssuesRequestSchema)({
+			plan: {
+				epicTitle: "Dark mode",
+				epicDescription: "Add dark mode support.",
+				summary: "Split theme, persistence, and UI tasks.",
+				tasks: [],
+			},
+		})
+		const plan: PlanningPlan = {
+			epicTitle: "Dark mode",
+			epicDescription: "Add dark mode support.",
+			summary: "Split theme, persistence, and UI tasks.",
+			tasks: [],
+		}
+		const encodedPlan = Schema.encodeSync(PlanningPlanSchema)(plan)
+		const encodedFeedback = Schema.encodeSync(PlanningReviewFeedbackSchema)({
+			score: 90,
+			issues: [],
+			suggestions: [],
+			parallelizationOpportunities: [],
+			tasksTooLarge: [],
+			missingDependencies: [],
+			isApproved: true,
+		})
+
+		expect(generate.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(review.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(refine.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(createIssues.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
+		expect(Schema.decodeUnknownSync(PlanningPlanSchema)(encodedPlan)).toEqual(plan)
+		const feedback: PlanningReviewFeedback = {
+			score: 90,
+			issues: [],
+			suggestions: [],
+			parallelizationOpportunities: [],
+			tasksTooLarge: [],
+			missingDependencies: [],
+			isApproved: true,
+		}
+
+		expect(Schema.decodeUnknownSync(PlanningReviewFeedbackSchema)(encodedFeedback)).toEqual(
+			feedback,
 		)
 	})
 })
