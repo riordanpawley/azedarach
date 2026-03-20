@@ -52,7 +52,6 @@ export type DaemonRuntimeSnapshot = Schema.Schema.Type<typeof DaemonRuntimeSnaps
 export const DaemonSyncStatusSchema = Schema.Struct({
 	state: DaemonSyncStateSchema,
 	generation: Schema.Number,
-	projectPath: Schema.NullOr(Schema.String),
 	intervalMs: Schema.NullOr(Schema.Number),
 	startedAtMs: Schema.NullOr(Schema.Number),
 	runCount: Schema.Number,
@@ -197,7 +196,6 @@ export type DaemonStopRequest = Schema.Schema.Type<typeof DaemonStopRequestSchem
 
 export const DaemonRestartRequestSchema = Schema.Struct({
 	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
-	projectPath: Schema.optional(Schema.String),
 	intervalMs: Schema.optional(Schema.Number),
 })
 export type DaemonRestartRequest = Schema.Schema.Type<typeof DaemonRestartRequestSchema>

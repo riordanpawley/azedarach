@@ -128,7 +128,7 @@ import {
 	type DaemonStatusRequest,
 	type DaemonStopRequest,
 } from "./DaemonRpcSchemas.js"
-import { DaemonAppRpcGroup, DaemonSpecRpcGroup } from "./DaemonRpcs.js"
+import { DaemonGlobalRpcGroup } from "./DaemonRpcs.js"
 import type {
 	DaemonSpecIssueLinksRequest,
 	DaemonSpecIssueLinksResult,
@@ -436,7 +436,7 @@ export interface DaemonRpcClientApi {
 }
 
 const makeDaemonRpcClient = Effect.gen(function* () {
-	const raw = yield* RpcClient.make(DaemonAppRpcGroup.merge(DaemonSpecRpcGroup))
+	const raw = yield* RpcClient.make(DaemonGlobalRpcGroup)
 	return {
 		status: (request) =>
 			raw.daemonStatus(
@@ -864,12 +864,24 @@ export class DaemonRpcClient extends Context.Tag("DaemonRpcClient")<
 	DaemonRpcClientApi
 >() {}
 
+const resolveUnixSocketPath = (url: string): string => {
+	if (url.startsWith("ws+unix://")) {
+		const suffix = url.slice("ws+unix://".length)
+		return suffix.endsWith(":/") ? suffix.slice(0, -2) : suffix
+	}
+	return url
+}
+
 export const layerSocket = (url: string) =>
 	Layer.scoped(DaemonRpcClient, makeDaemonRpcClient).pipe(
 		Layer.provide(
 			RpcClient.layerProtocolSocket().pipe(
-				Layer.provideMerge(BunSocket.layerWebSocket(url)),
-				Layer.provideMerge(RpcSerialization.layerMsgPack),
+				Layer.provideMerge(
+					BunSocket.layerNet({
+						path: resolveUnixSocketPath(url),
+					}),
+				),
+				Layer.provideMerge(RpcSerialization.layerJson),
 			),
 		),
 	)

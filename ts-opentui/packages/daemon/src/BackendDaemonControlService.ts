@@ -1,5 +1,5 @@
 import { AppConfig } from "@azedarach/config"
-import { Data, Duration, Effect, Ref, Schedule } from "effect"
+import { Duration, Effect, Ref, Schedule, SubscriptionRef } from "effect"
 import {
 	BackendDaemonBoardStore,
 	type BackendDaemonBoardStoreApi,
@@ -45,7 +45,6 @@ export interface BackendDaemonControlHealth {
 }
 
 export interface BackendDaemonControlRestartOptions {
-	readonly projectPath?: string
 	readonly intervalMs?: number
 }
 
@@ -128,7 +127,7 @@ export interface BackendDaemonControlServiceApi {
 	readonly stop: () => Effect.Effect<BackendDaemonControlStatus>
 	readonly restart: (
 		options: BackendDaemonControlRestartOptions,
-	) => Effect.Effect<BackendDaemonControlStatus, BackendDaemonControlRestartConfigurationError>
+	) => Effect.Effect<BackendDaemonControlStatus>
 	readonly queueEnqueue: (
 		request: BackendDaemonControlQueueEnqueueRequest,
 	) => Effect.Effect<BackendDaemonControlQueueEnqueueResult>
@@ -154,13 +153,6 @@ export interface BackendDaemonControlServiceApi {
 		request: Parameters<DevServerDaemonServiceApi["stop"]>[0],
 	) => Effect.Effect<DevServerDaemonMutationResult>
 }
-
-export class BackendDaemonControlRestartConfigurationError extends Data.TaggedError(
-	"BackendDaemonControlRestartConfigurationError",
-)<{
-	readonly reason: "missing-project-path"
-	readonly daemonSyncState: BackendSyncDaemonStatus["state"]
-}> {}
 
 const SESSION_RECOVERY_POLL_INTERVAL = "2 seconds"
 
@@ -292,21 +284,10 @@ export const makeBackendDaemonControlService = (params: {
 		restart: (options: BackendDaemonControlRestartOptions) =>
 			Effect.gen(function* () {
 				const previousSyncStatus = yield* params.sync.getStatus()
-				const projectPath = options.projectPath ?? previousSyncStatus.projectPath
-				if (projectPath === null) {
-					return yield* Effect.fail(
-						new BackendDaemonControlRestartConfigurationError({
-							reason: "missing-project-path",
-							daemonSyncState: previousSyncStatus.state,
-						}),
-					)
-				}
-
 				const intervalMs = options.intervalMs ?? previousSyncStatus.intervalMs ?? undefined
 				yield* params.sync.stop()
 				yield* params.runtime.markRuntimeRestart(Date.now())
 				yield* params.sync.start({
-					projectPath,
 					...(intervalMs === undefined ? {} : { intervalMs }),
 				})
 				return yield* readStatus(params.runtime, params.sync)
@@ -413,6 +394,21 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			const sessionRecovery: BackendDaemonSessionRecoveryApi = yield* BackendDaemonSessionRecovery
 			const appConfig = yield* AppConfig
 			const recoveryInFlightRef = yield* Ref.make<ReadonlySet<string>>(new Set())
+			const resolveDaemonProjectPaths = Effect.gen(function* () {
+				const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
+				const candidatePaths = [
+					process.cwd(),
+					...(resolvedConfig.projects ?? []).map((p) => p.path),
+				]
+				const deduped = new Set<string>()
+				for (const path of candidatePaths) {
+					const normalized = path.trim()
+					if (normalized.length > 0) {
+						deduped.add(normalized)
+					}
+				}
+				return Array.from(deduped)
+			})
 
 			const markRecoveryInFlight = (issueId: string): Effect.Effect<boolean> =>
 				Ref.modify(recoveryInFlightRef, (current): [boolean, ReadonlySet<string>] => {
@@ -482,27 +478,24 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 				})
 
 			const runDaemonRecoverySweep = Effect.gen(function* () {
-				const status = yield* sync.getStatus()
-				const projectPath = status.projectPath
-				if (projectPath === null) {
-					return
-				}
-
 				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
 				if (recoveryConfig.mode !== "auto") {
 					return
 				}
 
-				const sessions = yield* sessionRecovery.listActive(projectPath)
-				const crashedIssueIds = Array.from(
-					new Set(
-						sessions
-							.filter((session) => session.state === "crashed")
-							.map((session) => session.issueId),
-					),
-				)
-				for (const issueId of crashedIssueIds) {
-					yield* Effect.forkDaemon(recoverIssueFromDaemonWorker(issueId, projectPath))
+				const projectPaths = yield* resolveDaemonProjectPaths
+				for (const projectPath of projectPaths) {
+					const sessions = yield* sessionRecovery.listActive(projectPath)
+					const crashedIssueIds = Array.from(
+						new Set(
+							sessions
+								.filter((session) => session.state === "crashed")
+								.map((session) => session.issueId),
+						),
+					)
+					for (const issueId of crashedIssueIds) {
+						yield* Effect.forkDaemon(recoverIssueFromDaemonWorker(issueId, projectPath))
+					}
 				}
 			}).pipe(
 				Effect.catchAll((error) =>

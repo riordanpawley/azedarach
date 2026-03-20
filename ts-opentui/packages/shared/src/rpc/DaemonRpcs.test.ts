@@ -67,6 +67,7 @@ import {
 } from "./DaemonRpcSchemas.js"
 import {
 	DaemonAppRpcGroup,
+	DaemonGlobalRpcGroup,
 	DaemonImplementationRpcGroup,
 	DaemonPlanningRpcGroup,
 	DaemonPrRpcGroup,
@@ -291,6 +292,15 @@ describe("DaemonRpcs", () => {
 			"daemonSpecRequirementUpdate",
 			"daemonSpecSyncMarkdown",
 		])
+	})
+
+	it("exposes a single global daemon rpc contract shared by client and server", () => {
+		const keys = [...DaemonGlobalRpcGroup.requests.keys()].sort()
+		expect(keys).toEqual(
+			[
+				...new Set([...DaemonAppRpcGroup.requests.keys(), ...DaemonSpecRpcGroup.requests.keys()]),
+			].sort(),
+		)
 	})
 
 	it("validates request schemas for protocol versioned operations", async () => {
@@ -998,7 +1008,6 @@ describe("DaemonRpcs", () => {
 					sync: {
 						state: "running",
 						generation: 1,
-						projectPath: "/tmp/project",
 						intervalMs: 5000,
 						startedAtMs: 9,
 						runCount: 1,

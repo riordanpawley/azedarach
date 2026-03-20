@@ -1,5 +1,6 @@
+import { AppConfig } from "@azedarach/config"
 import { FileSystem, Path } from "@effect/platform"
-import { Effect, Fiber, Option, Ref, type Scope } from "effect"
+import { Effect, Fiber, Option, Ref, type Scope, SubscriptionRef } from "effect"
 import { BackendSyncResolver, type BackendSyncRuntime } from "./BackendSyncResolver.js"
 import {
 	type DaemonStateStoreApi,
@@ -26,7 +27,6 @@ export interface BackendSyncDaemonRunStatus {
 export interface BackendSyncDaemonStatus {
 	readonly state: "stopped" | "running" | "degraded" | "crashed"
 	readonly generation: number
-	readonly projectPath: string | null
 	readonly intervalMs: number | null
 	readonly startedAtMs: number | null
 	readonly runCount: number
@@ -41,7 +41,6 @@ export interface BackendSyncDaemonStatus {
 }
 
 export interface BackendSyncDaemonStartOptions {
-	readonly projectPath: string
 	readonly intervalMs?: number
 }
 
@@ -65,7 +64,6 @@ const normalizeIntervalMs = (value: number | undefined): number => {
 const emptyStatus = (): BackendSyncDaemonStatus => ({
 	state: "stopped",
 	generation: 0,
-	projectPath: null,
 	intervalMs: null,
 	startedAtMs: null,
 	runCount: 0,
@@ -87,11 +85,12 @@ const calculateBackoffMs = (intervalMs: number, restartStreak: number): number =
 
 const runOnce = (
 	syncResolver: { readonly resolve: () => Effect.Effect<BackendSyncRuntime | undefined> },
-	projectPath: string,
+	resolveProjectPaths: () => Effect.Effect<ReadonlyArray<string>>,
 ): Effect.Effect<BackendSyncDaemonRunStatus> =>
 	Effect.gen(function* () {
 		const backendSync = yield* syncResolver.resolve()
 		const runAtMs = Date.now()
+		const projectPaths = yield* resolveProjectPaths()
 		if (backendSync === undefined) {
 			return {
 				runAtMs,
@@ -101,19 +100,46 @@ const runOnce = (
 				message: "no backend sync runtime available",
 			} satisfies BackendSyncDaemonRunStatus
 		}
+		if (projectPaths.length === 0) {
+			return {
+				runAtMs,
+				result: "skipped",
+				pushed: 0,
+				pulled: 0,
+				message: "no daemon sync targets available",
+			} satisfies BackendSyncDaemonRunStatus
+		}
 
-		const result = yield* backendSync
-			.flushQueue(projectPath)
-			.pipe(
-				Effect.mapError((error) =>
-					error instanceof Error ? error.message : `backend sync flush failed: ${String(error)}`,
-				),
-			)
+		let pushed = 0
+		let pulled = 0
+		const failures: Array<string> = []
+		for (const projectPath of projectPaths) {
+			const result = yield* backendSync.flushQueue(projectPath).pipe(Effect.either)
+			if (result._tag === "Right") {
+				pushed += result.right.pushed
+				pulled += result.right.pulled
+				continue
+			}
+			const message =
+				result.left instanceof Error
+					? result.left.message
+					: `backend sync flush failed: ${String(result.left)}`
+			failures.push(`${projectPath}: ${message}`)
+		}
+		if (failures.length > 0) {
+			return {
+				runAtMs,
+				result: "failed",
+				pushed,
+				pulled,
+				message: failures.join("; "),
+			} satisfies BackendSyncDaemonRunStatus
+		}
 		return {
 			runAtMs,
 			result: "flushed",
-			pushed: result.pushed,
-			pulled: result.pulled,
+			pushed,
+			pulled,
 			message: null,
 		} satisfies BackendSyncDaemonRunStatus
 	}).pipe(
@@ -131,12 +157,12 @@ const runOnce = (
 const pollingLoop = (
 	runtimeRef: Ref.Ref<RuntimeState>,
 	syncResolver: { readonly resolve: () => Effect.Effect<BackendSyncRuntime | undefined> },
+	resolveProjectPaths: () => Effect.Effect<ReadonlyArray<string>>,
 	stateStore: DaemonStateStoreApi,
-	projectPath: string,
 	intervalMs: number,
 ): Effect.Effect<void, never> =>
 	Effect.gen(function* () {
-		const loop: Effect.Effect<void, never> = runOnce(syncResolver, projectPath).pipe(
+		const loop: Effect.Effect<void, never> = runOnce(syncResolver, resolveProjectPaths).pipe(
 			Effect.flatMap((run) =>
 				Ref.modify(runtimeRef, (runtime) => {
 					const isSuccess = run.result === "flushed"
@@ -190,7 +216,7 @@ const pollingLoop = (
 				}),
 			),
 			Effect.tap(({ status }) =>
-				stateStore.persist(projectPath, status).pipe(Effect.catchAll(() => Effect.void)),
+				stateStore.persist(status).pipe(Effect.catchAll(() => Effect.void)),
 			),
 			Effect.map(({ nextDelayMs }) => nextDelayMs),
 			Effect.flatMap((delayMs) => Effect.sleep(`${delayMs} millis`)),
@@ -203,6 +229,7 @@ export const makeBackendSyncDaemonService = (
 	syncResolver: {
 		readonly resolve: () => Effect.Effect<BackendSyncRuntime | undefined>
 	},
+	resolveProjectPaths: () => Effect.Effect<ReadonlyArray<string>>,
 	stateStore: DaemonStateStoreApi = {
 		load: () => Effect.succeed(Option.none()),
 		persist: () => Effect.void,
@@ -231,15 +258,13 @@ export const makeBackendSyncDaemonService = (
 					const startedAtMs = Date.now()
 					const previous = yield* Ref.get(runtimeRef)
 					const shouldReuseExistingRuntime =
-						previous.status.state === "running" &&
-						previous.status.projectPath === options.projectPath &&
-						previous.status.intervalMs === intervalMs
+						previous.status.state === "running" && previous.status.intervalMs === intervalMs
 					if (shouldReuseExistingRuntime) {
 						return previous.status
 					}
 					yield* stopFiber(previous.fiber)
 					const recovered = yield* stateStore
-						.load(options.projectPath)
+						.load()
 						.pipe(Effect.catchAll(() => Effect.succeed(Option.none())))
 					const baseline = Option.isSome(recovered)
 						? toDaemonStatus(recovered.value)
@@ -249,7 +274,6 @@ export const makeBackendSyncDaemonService = (
 						const runningStatus: BackendSyncDaemonStatus = {
 							state: "running",
 							generation: baseline.generation + 1,
-							projectPath: options.projectPath,
 							intervalMs,
 							startedAtMs,
 							runCount: baseline.runCount,
@@ -271,14 +295,12 @@ export const makeBackendSyncDaemonService = (
 
 					yield* Ref.get(runtimeRef).pipe(
 						Effect.flatMap((runtime) =>
-							stateStore
-								.persist(options.projectPath, runtime.status)
-								.pipe(Effect.catchAll(() => Effect.void)),
+							stateStore.persist(runtime.status).pipe(Effect.catchAll(() => Effect.void)),
 						),
 					)
 
 					const fiber = yield* Effect.forkIn(
-						pollingLoop(runtimeRef, syncResolver, stateStore, options.projectPath, intervalMs),
+						pollingLoop(runtimeRef, syncResolver, resolveProjectPaths, stateStore, intervalMs),
 						serviceScope,
 					)
 
@@ -297,7 +319,6 @@ export const makeBackendSyncDaemonService = (
 						const stoppedStatus: BackendSyncDaemonStatus = {
 							state: "stopped",
 							generation: runtime.status.generation,
-							projectPath: null,
 							intervalMs: null,
 							startedAtMs: null,
 							runCount: runtime.status.runCount,
@@ -317,11 +338,7 @@ export const makeBackendSyncDaemonService = (
 					})
 					yield* Ref.get(runtimeRef).pipe(
 						Effect.flatMap((runtime) =>
-							current.status.projectPath === null
-								? Effect.void
-								: stateStore
-										.persist(current.status.projectPath, runtime.status)
-										.pipe(Effect.catchAll(() => Effect.void)),
+							stateStore.persist(runtime.status).pipe(Effect.catchAll(() => Effect.void)),
 						),
 					)
 					return yield* Ref.get(runtimeRef).pipe(Effect.map((runtime) => runtime.status))
@@ -332,11 +349,29 @@ export const makeBackendSyncDaemonService = (
 export class BackendSyncDaemonService extends Effect.Service<BackendSyncDaemonService>()(
 	"BackendSyncDaemonService",
 	{
-		dependencies: [BackendSyncResolver.Default],
+		dependencies: [BackendSyncResolver.Default, AppConfig.Default],
 		scoped: Effect.gen(function* () {
 			const backendSyncResolver = yield* BackendSyncResolver
+			const appConfig = yield* AppConfig
 			const maybeFileSystem = yield* Effect.serviceOption(FileSystem.FileSystem)
 			const maybePath = yield* Effect.serviceOption(Path.Path)
+			const resolveProjectPaths = () =>
+				SubscriptionRef.get(appConfig.config).pipe(
+					Effect.map((config) => {
+						const deduped = new Set<string>()
+						const cwdPath = process.cwd().trim()
+						if (cwdPath.length > 0) {
+							deduped.add(cwdPath)
+						}
+						for (const project of config.projects ?? []) {
+							const normalized = project.path.trim()
+							if (normalized.length > 0) {
+								deduped.add(normalized)
+							}
+						}
+						return Array.from(deduped)
+					}),
+				)
 			const daemonStateStore =
 				Option.isSome(maybeFileSystem) && Option.isSome(maybePath)
 					? makeDaemonStateStore({
@@ -347,7 +382,11 @@ export class BackendSyncDaemonService extends Effect.Service<BackendSyncDaemonSe
 							load: () => Effect.succeed(Option.none()),
 							persist: () => Effect.void,
 						}
-			return yield* makeBackendSyncDaemonService(backendSyncResolver, daemonStateStore)
+			return yield* makeBackendSyncDaemonService(
+				backendSyncResolver,
+				resolveProjectPaths,
+				daemonStateStore,
+			)
 		}),
 	},
 ) {}

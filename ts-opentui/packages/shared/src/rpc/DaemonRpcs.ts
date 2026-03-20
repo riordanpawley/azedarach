@@ -792,4 +792,11 @@ export const DaemonAppRpcGroup = DaemonRpcGroup.merge(
 	DaemonSpecReadRpcGroup,
 )
 
-export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonAppRpcGroup>
+export const DaemonGlobalRpcGroup = DaemonRpcGroup.merge(
+	DaemonImplementationRpcGroup,
+	DaemonPlanningRpcGroup,
+	DaemonPrRpcGroup,
+	DaemonSpecRpcGroup,
+)
+
+export type DaemonRpcContract = RpcGroup.Rpcs<typeof DaemonGlobalRpcGroup>

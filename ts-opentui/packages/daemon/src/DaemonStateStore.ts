@@ -9,7 +9,7 @@ import { AZEDARACH_STORAGE_DIRECTORY } from "./storagePaths.js"
 const DAEMON_DIRECTORY_NAME = "daemon"
 const DAEMON_STATE_FILENAME = "backend-sync-state.json"
 const DAEMON_STATE_TEMP_SUFFIX = ".tmp"
-const DAEMON_STATE_SCHEMA_VERSION = 1 as const
+const DAEMON_STATE_SCHEMA_VERSION = 2 as const
 
 const DaemonRunStatusSchema: Schema.Schema<BackendSyncDaemonRunStatus> = Schema.Struct({
 	runAtMs: Schema.Number.pipe(Schema.int()),
@@ -22,7 +22,6 @@ const DaemonRunStatusSchema: Schema.Schema<BackendSyncDaemonRunStatus> = Schema.
 const PersistedDaemonRuntimeSchema = Schema.Struct({
 	state: Schema.Literal("stopped", "running", "degraded", "crashed"),
 	generation: Schema.Number.pipe(Schema.int()),
-	projectPath: Schema.NullOr(Schema.String),
 	intervalMs: Schema.NullOr(Schema.Number.pipe(Schema.int())),
 	startedAtMs: Schema.NullOr(Schema.Number.pipe(Schema.int())),
 })
@@ -62,13 +61,8 @@ export interface DaemonStateStorePaths {
 }
 
 export interface DaemonStateStoreApi {
-	readonly load: (
-		projectPath: string,
-	) => Effect.Effect<Option.Option<PersistedDaemonState>, DaemonStateStoreError>
-	readonly persist: (
-		projectPath: string,
-		status: BackendSyncDaemonStatus,
-	) => Effect.Effect<void, DaemonStateStoreError>
+	readonly load: () => Effect.Effect<Option.Option<PersistedDaemonState>, DaemonStateStoreError>
+	readonly persist: (status: BackendSyncDaemonStatus) => Effect.Effect<void, DaemonStateStoreError>
 }
 
 export class DaemonStateStoreError extends Data.TaggedError("DaemonStateStoreError")<{
@@ -84,7 +78,6 @@ const toPersistedState = (status: BackendSyncDaemonStatus): PersistedDaemonState
 	runtime: {
 		state: status.state,
 		generation: status.generation,
-		projectPath: status.projectPath,
 		intervalMs: status.intervalMs,
 		startedAtMs: status.startedAtMs,
 	},
@@ -108,7 +101,6 @@ const toPersistedState = (status: BackendSyncDaemonStatus): PersistedDaemonState
 export const toDaemonStatus = (persisted: PersistedDaemonState): BackendSyncDaemonStatus => ({
 	state: persisted.runtime.state,
 	generation: persisted.runtime.generation,
-	projectPath: persisted.runtime.projectPath,
 	intervalMs: persisted.runtime.intervalMs,
 	startedAtMs: persisted.runtime.startedAtMs,
 	runCount: persisted.sync.runCount,
@@ -123,11 +115,11 @@ export const toDaemonStatus = (persisted: PersistedDaemonState): BackendSyncDaem
 })
 
 export const resolveDaemonStateStorePaths = (
-	projectPath: string,
 	pathOps: Pick<Path.Path, "join">,
 ): DaemonStateStorePaths => {
+	const daemonRootPath = process.env.HOME ?? process.cwd()
 	const daemonDirectory = pathOps.join(
-		projectPath,
+		daemonRootPath,
 		AZEDARACH_STORAGE_DIRECTORY,
 		DAEMON_DIRECTORY_NAME,
 	)
@@ -146,9 +138,9 @@ export const makeDaemonStateStore = (dependencies: {
 	>
 	readonly path: Pick<Path.Path, "join">
 }): DaemonStateStoreApi => ({
-	load: (projectPath: string) =>
+	load: () =>
 		Effect.gen(function* () {
-			const paths = resolveDaemonStateStorePaths(projectPath, dependencies.path)
+			const paths = resolveDaemonStateStorePaths(dependencies.path)
 			const exists = yield* dependencies.fs.exists(paths.statePath).pipe(
 				Effect.catchAll((cause) =>
 					Effect.fail(
@@ -178,9 +170,9 @@ export const makeDaemonStateStore = (dependencies: {
 			)
 			return decoded
 		}),
-	persist: (projectPath: string, status: BackendSyncDaemonStatus) =>
+	persist: (status: BackendSyncDaemonStatus) =>
 		Effect.gen(function* () {
-			const paths = resolveDaemonStateStorePaths(projectPath, dependencies.path)
+			const paths = resolveDaemonStateStorePaths(dependencies.path)
 			yield* dependencies.fs.makeDirectory(paths.daemonDirectory, { recursive: true }).pipe(
 				Effect.mapError(
 					(cause) =>

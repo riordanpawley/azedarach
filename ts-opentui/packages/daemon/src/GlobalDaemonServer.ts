@@ -1,4 +1,4 @@
-import { DaemonAppRpcGroup } from "@azedarach/shared/rpc"
+import { DaemonGlobalRpcGroup } from "@azedarach/shared/rpc"
 import { FileSystem } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import * as BunSocketServer from "@effect/platform-bun/BunSocketServer"
@@ -193,7 +193,7 @@ const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
 		handlersLayer,
 	)
 
-	return Layer.provide(RpcServer.layer(DaemonAppRpcGroup), rpcDependenciesLayer)
+	return Layer.provide(RpcServer.layer(DaemonGlobalRpcGroup), rpcDependenciesLayer)
 }
 
 export const makeGlobalDaemonServerRuntime = (params: {
@@ -360,14 +360,10 @@ export const startGlobalDaemonServer = (params?: {
 		const protocolFiber = yield* Effect.forkDaemon(
 			protocolLoop.pipe(
 				Effect.catchAllCause((cause) =>
-					Effect.fail(
-						new GlobalDaemonServerError({
-							message: "Global daemon protocol loop failed",
-							cause: Cause.pretty(cause),
-						}),
+					Effect.logError(`Global daemon protocol loop failed: ${Cause.pretty(cause)}`).pipe(
+						Effect.asVoid,
 					),
 				),
-				Effect.catchAll(() => Effect.void),
 			),
 		)
 

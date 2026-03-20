@@ -1,6 +1,5 @@
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
-	DaemonAppRpcGroup,
 	type DaemonAttachmentAttachClipboardRequest,
 	type DaemonAttachmentAttachFileRequest,
 	type DaemonAttachmentAttachResult,
@@ -26,6 +25,7 @@ import {
 	type DaemonDevServerStopRequest,
 	type DaemonEventStreamRequest,
 	type DaemonEventStreamResult,
+	DaemonGlobalRpcGroup,
 	type DaemonHealthRequest,
 	type DaemonHealthResult,
 	type DaemonHeartbeatRequest,
@@ -159,7 +159,6 @@ import {
 	type BackendDaemonControlBoardReadModelRequest,
 	type BackendDaemonControlBoardReadModelResult,
 	type BackendDaemonControlHealth,
-	BackendDaemonControlRestartConfigurationError,
 	BackendDaemonControlService,
 	type BackendDaemonControlServiceApi,
 	type BackendDaemonControlStatus,
@@ -316,7 +315,6 @@ const unsupportedDaemonRpc = <A>(action: string): Effect.Effect<A, DaemonRpcActi
 	)
 
 type DaemonRpcMappedError =
-	| BackendDaemonControlRestartConfigurationError
 	| DaemonAttachmentError
 	| ImplementationRegistryDaemonError
 	| DaemonPlanningError
@@ -328,17 +326,6 @@ type DaemonRpcMappedError =
 	| { readonly _tag: string; readonly message?: string }
 
 const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpcActionError => {
-	if (error instanceof BackendDaemonControlRestartConfigurationError) {
-		switch (error.reason) {
-			case "missing-project-path":
-				return daemonRpcActionError({
-					action,
-					code: "missing-project-path",
-					message: "Daemon restart requires a project path because no sync runtime is active yet.",
-				})
-		}
-	}
-
 	if (error instanceof TrackerIssueDaemonError) {
 		switch (error.reason) {
 			case "unsupported-backend":
@@ -1146,7 +1133,6 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 		daemonRestart: (request: DaemonRestartRequest) =>
 			control
 				.restart({
-					projectPath: request.projectPath,
 					intervalMs: request.intervalMs,
 				})
 				.pipe(Effect.map(mapControlStatus), catchDaemonRpcError("restart")),
@@ -1730,5 +1716,5 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 })
 
 export const GlobalDaemonRpcHandlersLive = Layer.scopedContext(
-	DaemonAppRpcGroup.toHandlersContext(makeGlobalDaemonRpcHandlers),
+	DaemonGlobalRpcGroup.toHandlersContext(makeGlobalDaemonRpcHandlers),
 )

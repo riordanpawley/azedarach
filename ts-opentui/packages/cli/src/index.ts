@@ -1235,13 +1235,13 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 					}),
 				),
 			)
-			const alreadyRunningForPath =
+			const alreadyRunning =
 				currentStatus.sync.state === "running" &&
-				currentStatus.sync.projectPath === params.projectPath
-			if (alreadyRunningForPath) {
+				(intervalMs === undefined || currentStatus.sync.intervalMs === intervalMs)
+			if (alreadyRunning) {
 				if (params.verbose) {
 					yield* Console.log(
-						`Auto-daemonize: reusing running daemon for ${params.projectPath} (state=${currentStatus.sync.state}).`,
+						`Auto-daemonize: reusing running global daemon (state=${currentStatus.sync.state}).`,
 					)
 				}
 				return
@@ -1249,7 +1249,6 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 
 			yield* bootstrap.client
 				.restart({
-					projectPath: params.projectPath,
 					...(intervalMs === undefined ? {} : { intervalMs }),
 				})
 				.pipe(
@@ -1262,7 +1261,7 @@ const ensureDaemonAutoStartForCliCommand = (params: {
 					),
 				)
 			if (params.verbose) {
-				yield* Console.log(`Auto-daemonize: daemon ready for ${params.projectPath}.`)
+				yield* Console.log("Auto-daemonize: global daemon ready.")
 			}
 		})
 
@@ -1378,7 +1377,6 @@ const daemonSyncHandler = (args: {
 		})
 		const status = yield* bootstrap.client
 			.restart({
-				projectPath: cwd,
 				...(intervalMs === undefined ? {} : { intervalMs }),
 			})
 			.pipe(
@@ -1392,7 +1390,7 @@ const daemonSyncHandler = (args: {
 			)
 
 		yield* Console.log(
-			`Headless backend sync daemon started for ${cwd}${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}`,
+			`Headless backend sync daemon started${intervalMs === undefined ? "" : ` (interval=${intervalMs}ms)`}.`,
 		)
 		yield* Console.log(
 			formatDaemonControlStatusLine({
@@ -1416,12 +1414,11 @@ const formatDaemonControlStatusLine = (params: {
 		readonly sync: {
 			readonly state: string
 			readonly generation: number
-			readonly projectPath: string | null
 			readonly intervalMs: number | null
 		}
 	}
 }): string =>
-	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} projectPath=${params.status.sync.projectPath ?? "<none>"} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
+	`daemon ${params.mode}: sync=${params.status.sync.state} runtime=${params.status.runtime.runtimePhase} generation=${params.status.sync.generation} intervalMs=${params.status.sync.intervalMs ?? "<none>"} revision=${params.status.runtime.revision} lifecycleGeneration=${params.status.runtime.lifecycleGeneration}`
 
 export type DaemonSessionSnapshotSummary = {
 	readonly capturedAtMs: number
@@ -1607,7 +1604,7 @@ const daemonStatusHandler = (args: {
 		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
 			client: bootstrap.client,
 			socketUrl: bootstrap.socketUrl,
-			projectPath: status.sync.projectPath ?? process.cwd(),
+			projectPath: process.cwd(),
 		}).pipe(
 			Effect.catchAll((error) =>
 				Console.log(`daemon session snapshot unavailable: ${error.message}`).pipe(
@@ -1634,7 +1631,7 @@ const daemonStatusHandler = (args: {
 				client: bootstrap.client,
 				socketUrl: bootstrap.socketUrl,
 				clientId: `az-cli:daemon-status:${process.pid}`,
-				projectPath: status.sync.projectPath ?? process.cwd(),
+				projectPath: process.cwd(),
 				initialCursor: Option.getOrUndefined(args.cursor),
 				batchSize,
 				waitMs,
@@ -1686,7 +1683,7 @@ const daemonHealthHandler = (args: { readonly verbose: boolean }) =>
 			yield* Console.log("Suggested diagnostics:")
 			yield* Console.log("- az daemon status")
 			yield* Console.log("- az daemon logs --lines 100")
-			yield* Console.log("- az daemon restart --project-dir <path>")
+			yield* Console.log("- az daemon restart")
 		}
 	})
 
@@ -1719,7 +1716,6 @@ const daemonStopHandler = (args: { readonly verbose: boolean }) =>
 
 const daemonRestartHandler = (args: {
 	readonly intervalMs: Option.Option<number>
-	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
@@ -1744,7 +1740,6 @@ const daemonRestartHandler = (args: {
 		}
 		const status = yield* bootstrap.client
 			.restart({
-				projectPath: Option.getOrUndefined(args.projectDir),
 				intervalMs: Option.getOrUndefined(args.intervalMs),
 			})
 			.pipe(
@@ -6170,7 +6165,6 @@ const daemonRestartCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Sync loop interval in milliseconds"),
 		),
-		projectDir: projectDirArg,
 		verbose: verboseOption,
 	},
 	daemonRestartHandler,

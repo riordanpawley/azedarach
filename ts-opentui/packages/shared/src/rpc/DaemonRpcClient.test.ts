@@ -46,7 +46,6 @@ describe("DaemonRpc protocol version schemas", () => {
 			sync: {
 				state: "running",
 				generation: 1,
-				projectPath: null,
 				intervalMs: null,
 				startedAtMs: null,
 				runCount: 0,
