@@ -3,7 +3,7 @@
  *
  * Provides a central place to monitor:
  * - Long-running fibers (polling loops, watchers) and their status
- * - Service health (TmuxSessionMonitor, PTYMonitor, etc.)
+ * - Service health (TmuxSessionMonitor and package-local TUI services)
  * - Session states
  * - Recent activity
  *

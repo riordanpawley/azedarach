@@ -55,6 +55,5 @@ export {
 	PRWorkflow,
 	ProjectService,
 	ProjectStateService,
-	PTYMonitor,
 } from "./legacyRuntimeServices.js"
 export { buildTaskQueueKey } from "./queueKey.js"

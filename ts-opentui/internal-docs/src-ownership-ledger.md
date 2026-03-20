@@ -71,6 +71,7 @@ ts-opentui/packages/tui/src/utils/legacyRuntimeServices.ts:12:} from "../../../.
 - 2026-03-19 `yo` replaced CLI `ProjectService` usage with config-backed helpers; `packages/cli/src/runtimeServices.ts` now exports only `IssueTrackerClient` and `SpecService`.
 - 2026-03-20 `aam` moved TUI issue-editor ownership into `packages/tui`, added package-local markdown/editor utilities, and removed `IssueEditorService` from the legacy runtime seam.
 - 2026-03-20 `aap` removed dead TUI legacy runtime exports/layers for `BoardService`, `MutationQueue`, `SessionService`, and `SessionManager`.
+- 2026-03-20 `aat` removed `PTYMonitor` from TUI runtime wiring and session atoms; the remaining legacy runtime seam is now `KeyboardService`, `ProjectService`, `ProjectStateService`, `ImageAttachmentService`, `PlanningService`, and `PRWorkflow`.
 - Remaining runtime-facade package edges are TUI-only through `packages/tui/src/utils/legacyRuntimeServices.ts`.
 
 ## Classification Legend

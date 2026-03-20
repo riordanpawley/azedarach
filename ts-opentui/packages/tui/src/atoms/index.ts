@@ -188,7 +188,6 @@ export {
 	attachInlineAtom,
 	pauseSessionAtom,
 	resumeSessionAtom,
-	sessionMetricsAtom,
 	sessionMonitorStarterAtom,
 	startSessionAtom,
 	stopSessionAtom,

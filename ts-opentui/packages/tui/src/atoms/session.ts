@@ -8,7 +8,7 @@
 import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Effect } from "effect"
 import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
-import { AttachmentService, PTYMonitor, TmuxSessionMonitor } from "../utils/runtimeServices.js"
+import { AttachmentService, TmuxSessionMonitor } from "../utils/runtimeServices.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -69,7 +69,6 @@ export const buildSessionUpdateStateRequest = (
 export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
-		const ptyMonitor = yield* PTYMonitor
 		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const currentProjectPath = yield* projectContext.getCurrentPath()
@@ -78,17 +77,6 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 
 		yield* monitor.start((update) =>
 			Effect.gen(function* () {
-				// Ensure PTY monitor tracks sessions discovered via tmux (orphan recovery/startup).
-				yield* ptyMonitor.registerSession(update.issueId, update.sessionName)
-
-				if (!isSyntheticTmuxDisappearance(update)) {
-					// Hook/tmux status is authoritative; stamp hook recency for PTY priority window.
-					yield* ptyMonitor.recordHookSignal(
-						update.issueId,
-						mapTmuxStatusToSessionState(update.status),
-					)
-				}
-
 				if (sessionUpdateState === undefined) {
 					return
 				}
@@ -106,39 +94,17 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 )
 
 // ============================================================================
-// PTY Monitor (session metrics via PTY output pattern matching)
-// ============================================================================
-
-/**
- * Session metrics atom - subscribes to PTYMonitor metrics changes
- *
- * Provides reactive access to session metrics extracted from PTY output.
- * Metrics include: estimatedTokens, agentPhase, recentOutput
- *
- * Usage: const metrics = useAtomValue(sessionMetricsAtom)
- */
-export const sessionMetricsAtom = appRuntime.subscriptionRef(
-	Effect.gen(function* () {
-		const ptyMonitor = yield* PTYMonitor
-		return ptyMonitor.metrics
-	}),
-)
-
-// ============================================================================
 // Session Action Atoms
 // ============================================================================
 
 /**
  * Start a Claude session (creates worktree + tmux + launches Claude)
  *
- * Also registers the session with PTYMonitor for state detection.
- *
  * Usage: const startSession = useAtomSet(startSessionAtom, { mode: "promise" })
  *        await startSession(issueId)
  */
 export const startSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const ptyMonitor = yield* PTYMonitor
 		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
@@ -157,9 +123,7 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 				projectPath,
 			})
 			.pipe(Effect.map((result) => result.session))
-
-		// Register with PTYMonitor for state detection
-		yield* ptyMonitor.registerSession(issueId, session.tmuxSessionName)
+		return session
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -210,18 +174,13 @@ export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 /**
  * Stop a running session (kills tmux, marks as idle)
  *
- * Also unregisters the session from PTYMonitor.
  */
 export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const ptyMonitor = yield* PTYMonitor
 		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
-
-		// Unregister from PTYMonitor first (before session is stopped)
-		yield* ptyMonitor.unregisterSession(issueId)
 
 		if (sessionRpc === undefined || sessionRpc.sessionStop === undefined) {
 			yield* Effect.fail(new Error("Daemon RPC client unavailable for session stop"))

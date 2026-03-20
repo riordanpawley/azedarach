@@ -20,7 +20,7 @@ export type { DiagnosticsState }
  *
  * Provides reactive access to system health info including:
  * - Running fibers and their status
- * - Service health (TmuxSessionMonitor, PTYMonitor, etc.)
+ * - Service health (TmuxSessionMonitor and package-local TUI services)
  * - Last activity timestamps
  *
  * Usage: const diagnostics = useAtomValue(diagnosticsAtom)
