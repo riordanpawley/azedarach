@@ -67,14 +67,20 @@ import {
 	type DaemonPlanningRefineResult,
 	type DaemonPlanningReviewRequest,
 	type DaemonPlanningReviewResult,
+	type DaemonPrAbortMergeRequest,
+	type DaemonPrAbortMergeResult,
 	type DaemonPrCheckGhCliRequest,
 	type DaemonPrCheckGhCliResult,
 	type DaemonPrCleanupRequest,
 	type DaemonPrCleanupResult,
 	type DaemonPrCreateRequest,
 	type DaemonPrCreateResult,
+	type DaemonPrMergeBaseIntoBranchRequest,
+	type DaemonPrMergeBaseIntoBranchResult,
 	type DaemonPrMergeToMainRequest,
 	type DaemonPrMergeToMainResult,
+	type DaemonPrUpdateFromBaseRequest,
+	type DaemonPrUpdateFromBaseResult,
 	type DaemonQueueCancelRequest,
 	type DaemonQueueCancelResult,
 	type DaemonQueueEnqueueRequest,
@@ -427,6 +433,12 @@ const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpc
 				return daemonRpcActionError({
 					action,
 					code: "command-failed",
+					message: error.message,
+				})
+			case "merge-conflict":
+				return daemonRpcActionError({
+					action,
+					code: "merge-conflict",
 					message: error.message,
 				})
 		}
@@ -847,6 +859,52 @@ export const makeDaemonPrCheckGhCliRpcHandler =
 			catchDaemonRpcError("prCheckGhCli"),
 		)
 
+export const makeDaemonPrUpdateFromBaseRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "updateFromBase">) => (request: DaemonPrUpdateFromBaseRequest) =>
+		prs
+			.updateFromBase({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					updated: true,
+				} satisfies DaemonPrUpdateFromBaseResult),
+				catchDaemonRpcError("prUpdateFromBase"),
+			)
+
+export const makeDaemonPrMergeBaseIntoBranchRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "mergeBaseIntoBranch">) =>
+	(request: DaemonPrMergeBaseIntoBranchRequest) =>
+		prs
+			.mergeBaseIntoBranch({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					merged: true,
+				} satisfies DaemonPrMergeBaseIntoBranchResult),
+				catchDaemonRpcError("prMergeBaseIntoBranch"),
+			)
+
+export const makeDaemonPrAbortMergeRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "abortMerge">) => (request: DaemonPrAbortMergeRequest) =>
+		prs
+			.abortMerge({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					aborted: true,
+				} satisfies DaemonPrAbortMergeResult),
+				catchDaemonRpcError("prAbortMerge"),
+			)
+
 export const makeDaemonAttachmentListRpcHandler =
 	(attachments: Pick<DaemonAttachmentServiceApi, "list">) =>
 	(request: DaemonAttachmentListRequest) =>
@@ -1010,6 +1068,9 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 		daemonPrCleanup: makeDaemonPrCleanupRpcHandler(prs),
 		daemonPrMergeToMain: makeDaemonPrMergeToMainRpcHandler(prs),
 		daemonPrCheckGhCli: makeDaemonPrCheckGhCliRpcHandler(prs),
+		daemonPrUpdateFromBase: makeDaemonPrUpdateFromBaseRpcHandler(prs),
+		daemonPrMergeBaseIntoBranch: makeDaemonPrMergeBaseIntoBranchRpcHandler(prs),
+		daemonPrAbortMerge: makeDaemonPrAbortMergeRpcHandler(prs),
 		daemonDevServerStatus: (request: DaemonDevServerStatusRequest) =>
 			control
 				.devServerStatus({

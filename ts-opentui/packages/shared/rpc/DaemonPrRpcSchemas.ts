@@ -57,6 +57,53 @@ export const DaemonPrMergeToMainResultSchema = Schema.Struct({
 })
 export type DaemonPrMergeToMainResult = Schema.Schema.Type<typeof DaemonPrMergeToMainResultSchema>
 
+export const DaemonPrUpdateFromBaseRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrUpdateFromBaseRequest = Schema.Schema.Type<
+	typeof DaemonPrUpdateFromBaseRequestSchema
+>
+
+export const DaemonPrUpdateFromBaseResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	updated: Schema.Literal(true),
+})
+export type DaemonPrUpdateFromBaseResult = Schema.Schema.Type<
+	typeof DaemonPrUpdateFromBaseResultSchema
+>
+
+export const DaemonPrMergeBaseIntoBranchRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrMergeBaseIntoBranchRequest = Schema.Schema.Type<
+	typeof DaemonPrMergeBaseIntoBranchRequestSchema
+>
+
+export const DaemonPrMergeBaseIntoBranchResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	merged: Schema.Literal(true),
+})
+export type DaemonPrMergeBaseIntoBranchResult = Schema.Schema.Type<
+	typeof DaemonPrMergeBaseIntoBranchResultSchema
+>
+
+export const DaemonPrAbortMergeRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrAbortMergeRequest = Schema.Schema.Type<typeof DaemonPrAbortMergeRequestSchema>
+
+export const DaemonPrAbortMergeResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	aborted: Schema.Literal(true),
+})
+export type DaemonPrAbortMergeResult = Schema.Schema.Type<typeof DaemonPrAbortMergeResultSchema>
+
 export const DaemonPrCheckGhCliRequestSchema = Schema.Struct({
 	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 })

@@ -17,10 +17,13 @@ import {
 	makeDaemonAttachmentMaterializePathRpcHandler,
 	makeDaemonAttachmentRemoveRpcHandler,
 	makeDaemonBoardReadModelRpcHandler,
+	makeDaemonPrAbortMergeRpcHandler,
 	makeDaemonPrCheckGhCliRpcHandler,
 	makeDaemonPrCleanupRpcHandler,
 	makeDaemonPrCreateRpcHandler,
+	makeDaemonPrMergeBaseIntoBranchRpcHandler,
 	makeDaemonPrMergeToMainRpcHandler,
+	makeDaemonPrUpdateFromBaseRpcHandler,
 	makeDaemonSessionPauseRpcHandler,
 	makeDaemonSessionRecoverRpcHandler,
 	makeDaemonSessionResumeRpcHandler,
@@ -367,6 +370,27 @@ describe("PR rpc handlers", () => {
 				return Effect.void
 			},
 		})
+		const updateFromBaseHandler = makeDaemonPrUpdateFromBaseRpcHandler({
+			updateFromBase: ({ issueId, projectPath }) => {
+				expect(issueId).toBe("task-1")
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.void
+			},
+		})
+		const mergeBaseIntoBranchHandler = makeDaemonPrMergeBaseIntoBranchRpcHandler({
+			mergeBaseIntoBranch: ({ issueId, projectPath }) => {
+				expect(issueId).toBe("task-1")
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.void
+			},
+		})
+		const abortMergeHandler = makeDaemonPrAbortMergeRpcHandler({
+			abortMerge: ({ issueId, projectPath }) => {
+				expect(issueId).toBe("task-1")
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.void
+			},
+		})
 		const checkHandler = makeDaemonPrCheckGhCliRpcHandler({
 			checkGhCli: () => Effect.succeed(true),
 		})
@@ -398,11 +422,35 @@ describe("PR rpc handlers", () => {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 			}),
 		)
+		const updateFromBaseResult = await Effect.runPromise(
+			updateFromBaseHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const mergeBaseIntoBranchResult = await Effect.runPromise(
+			mergeBaseIntoBranchHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const abortMergeResult = await Effect.runPromise(
+			abortMergeHandler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
 
 		expect(createResult.pullRequest.number).toBe(42)
 		expect(cleanupResult.cleanedUp).toBe(true)
 		expect(mergeResult.merged).toBe(true)
 		expect(checkResult.available).toBe(true)
+		expect(updateFromBaseResult.updated).toBe(true)
+		expect(mergeBaseIntoBranchResult.merged).toBe(true)
+		expect(abortMergeResult.aborted).toBe(true)
 	})
 
 	it("maps PR workflow failures into daemon rpc action errors", async () => {
@@ -431,6 +479,36 @@ describe("PR rpc handlers", () => {
 				action: "prCreate",
 				code: "worktree-missing",
 				message: "No worktree found for task-1",
+			})
+		}
+	})
+
+	it("maps typed merge conflicts into daemon rpc action errors", async () => {
+		const handler = makeDaemonPrUpdateFromBaseRpcHandler({
+			updateFromBase: () =>
+				Effect.fail(
+					new DaemonPrError({
+						reason: "merge-conflict",
+						message: "Merge conflicts detected in: src/app.ts",
+					}),
+				),
+		})
+
+		const exit = await Effect.runPromiseExit(
+			handler({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "task-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+
+		expect(exit._tag).toBe("Failure")
+		if (exit._tag === "Failure" && exit.cause._tag === "Fail") {
+			expect(exit.cause.error).toEqual({
+				_tag: "DaemonRpcActionError",
+				action: "prUpdateFromBase",
+				code: "merge-conflict",
+				message: "Merge conflicts detected in: src/app.ts",
 			})
 		}
 	})

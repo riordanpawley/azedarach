@@ -16,6 +16,9 @@ const makeDaemonRpcClientStub = (options?: {
 	readonly prCleanup?: DaemonRpcClientApi["prCleanup"]
 	readonly prMergeToMain?: DaemonRpcClientApi["prMergeToMain"]
 	readonly prCheckGhCli?: DaemonRpcClientApi["prCheckGhCli"]
+	readonly prUpdateFromBase?: DaemonRpcClientApi["prUpdateFromBase"]
+	readonly prMergeBaseIntoBranch?: DaemonRpcClientApi["prMergeBaseIntoBranch"]
+	readonly prAbortMerge?: DaemonRpcClientApi["prAbortMerge"]
 }): DaemonRpcClientApi => ({
 	status: () => unexpectedDaemonRpcCall(),
 	health: () => unexpectedDaemonRpcCall(),
@@ -69,6 +72,9 @@ const makeDaemonRpcClientStub = (options?: {
 	prCleanup: options?.prCleanup ?? (() => unexpectedDaemonRpcCall()),
 	prMergeToMain: options?.prMergeToMain ?? (() => unexpectedDaemonRpcCall()),
 	prCheckGhCli: options?.prCheckGhCli ?? (() => unexpectedDaemonRpcCall()),
+	prUpdateFromBase: options?.prUpdateFromBase ?? (() => unexpectedDaemonRpcCall()),
+	prMergeBaseIntoBranch: options?.prMergeBaseIntoBranch ?? (() => unexpectedDaemonRpcCall()),
+	prAbortMerge: options?.prAbortMerge ?? (() => unexpectedDaemonRpcCall()),
 	specRequirementList: () => unexpectedDaemonRpcCall(),
 	specRequirementGet: () => unexpectedDaemonRpcCall(),
 	specRequirementCreate: () => unexpectedDaemonRpcCall(),
@@ -127,6 +133,27 @@ describe("PrWorkflowService", () => {
 					merged: true,
 				})
 			},
+			prUpdateFromBase: ({ issueId }) => {
+				expect(issueId).toBe("AZ-1")
+				return Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					updated: true,
+				})
+			},
+			prMergeBaseIntoBranch: ({ issueId }) => {
+				expect(issueId).toBe("AZ-1")
+				return Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					merged: true,
+				})
+			},
+			prAbortMerge: ({ issueId }) => {
+				expect(issueId).toBe("AZ-1")
+				return Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					aborted: true,
+				})
+			},
 		})
 
 		const result = await Effect.runPromise(
@@ -142,6 +169,18 @@ describe("PrWorkflowService", () => {
 					closeIssue: true,
 				})
 				yield* service.mergeToMain({
+					issueId: "AZ-1",
+					projectPath: "/tmp/project",
+				})
+				yield* service.updateFromBase({
+					issueId: "AZ-1",
+					projectPath: "/tmp/project",
+				})
+				yield* service.mergeBaseIntoBranch({
+					issueId: "AZ-1",
+					projectPath: "/tmp/project",
+				})
+				yield* service.abortMerge({
 					issueId: "AZ-1",
 					projectPath: "/tmp/project",
 				})

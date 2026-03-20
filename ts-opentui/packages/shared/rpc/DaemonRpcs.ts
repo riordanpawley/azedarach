@@ -55,14 +55,20 @@ import {
 	DaemonPlanningReviewResultSchema,
 } from "./DaemonPlanningRpcSchemas.js"
 import {
+	DaemonPrAbortMergeRequestSchema,
+	DaemonPrAbortMergeResultSchema,
 	DaemonPrCheckGhCliRequestSchema,
 	DaemonPrCheckGhCliResultSchema,
 	DaemonPrCleanupRequestSchema,
 	DaemonPrCleanupResultSchema,
 	DaemonPrCreateRequestSchema,
 	DaemonPrCreateResultSchema,
+	DaemonPrMergeBaseIntoBranchRequestSchema,
+	DaemonPrMergeBaseIntoBranchResultSchema,
 	DaemonPrMergeToMainRequestSchema,
 	DaemonPrMergeToMainResultSchema,
+	DaemonPrUpdateFromBaseRequestSchema,
+	DaemonPrUpdateFromBaseResultSchema,
 } from "./DaemonPrRpcSchemas.js"
 import {
 	DaemonAttachReconnectResultSchema,
@@ -648,11 +654,32 @@ export const DaemonPrCheckGhCliRpc = Rpc.make("daemonPrCheckGhCli", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonPrUpdateFromBaseRpc = Rpc.make("daemonPrUpdateFromBase", {
+	payload: DaemonPrUpdateFromBaseRequestSchema,
+	success: DaemonPrUpdateFromBaseResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrMergeBaseIntoBranchRpc = Rpc.make("daemonPrMergeBaseIntoBranch", {
+	payload: DaemonPrMergeBaseIntoBranchRequestSchema,
+	success: DaemonPrMergeBaseIntoBranchResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrAbortMergeRpc = Rpc.make("daemonPrAbortMerge", {
+	payload: DaemonPrAbortMergeRequestSchema,
+	success: DaemonPrAbortMergeResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonPrRpcGroup = RpcGroup.make(
 	DaemonPrCreateRpc,
 	DaemonPrCleanupRpc,
 	DaemonPrMergeToMainRpc,
 	DaemonPrCheckGhCliRpc,
+	DaemonPrUpdateFromBaseRpc,
+	DaemonPrMergeBaseIntoBranchRpc,
+	DaemonPrAbortMergeRpc,
 )
 
 export const DaemonSpecRequirementRpcGroup = RpcGroup.make(

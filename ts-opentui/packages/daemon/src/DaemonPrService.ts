@@ -23,6 +23,7 @@ export class DaemonPrError extends Data.TaggedError("DaemonPrError")<{
 		| "command-failed"
 		| "config"
 		| "issue-tracker"
+		| "merge-conflict"
 		| "pr-disabled"
 		| "validation-failed"
 		| "worktree-missing"
@@ -40,6 +41,18 @@ export interface DaemonPrServiceApi {
 		readonly closeIssue?: boolean
 	}) => Effect.Effect<void, DaemonPrError>
 	readonly mergeToMain: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<void, DaemonPrError>
+	readonly updateFromBase: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<void, DaemonPrError>
+	readonly mergeBaseIntoBranch: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<void, DaemonPrError>
+	readonly abortMerge: (params: {
 		readonly issueId: string
 		readonly projectPath: string
 	}) => Effect.Effect<void, DaemonPrError>
@@ -67,6 +80,12 @@ const mapIssueTrackerError = (message: string): DaemonPrError =>
 const mapPrDisabledError = (message: string): DaemonPrError =>
 	new DaemonPrError({
 		reason: "pr-disabled",
+		message,
+	})
+
+const mapMergeConflictError = (message: string): DaemonPrError =>
+	new DaemonPrError({
+		reason: "merge-conflict",
 		message,
 	})
 
@@ -351,6 +370,106 @@ export class DaemonPrService extends Effect.Service<DaemonPrService>()("DaemonPr
 				}
 			})
 
+		const maybeFetchBaseBranch = (projectPath: string, baseBranch: string) =>
+			Effect.gen(function* () {
+				const gitConfig = yield* appConfig
+					.getGitConfigForProjectPath(projectPath)
+					.pipe(Effect.mapError((error) => mapConfigError(error.message)))
+				if (!gitConfig.fetchEnabled) {
+					return
+				}
+
+				yield* runInDirectory(projectPath, "git", ["fetch", gitConfig.remote, baseBranch]).pipe(
+					Effect.catchAll(() => Effect.void),
+				)
+				yield* runInDirectory(projectPath, "git", [
+					"fetch",
+					gitConfig.remote,
+					`${baseBranch}:${baseBranch}`,
+				]).pipe(Effect.catchAll(() => Effect.void))
+			})
+
+		const listMergeConflictFiles = (cwd: string, baseBranch: string) =>
+			runInDirectory(cwd, "git", [
+				"merge-tree",
+				"--write-tree",
+				"--name-only",
+				"--no-messages",
+				baseBranch,
+				"HEAD",
+			]).pipe(
+				Effect.map((output) =>
+					output
+						.trim()
+						.split("\n")
+						.slice(1)
+						.map((line) => line.trim())
+						.filter((line) => line.length > 0 && !line.startsWith(".azedarach/")),
+				),
+				Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<string>)),
+			)
+
+		const maybeStartConflictResolutionSession = (params: {
+			readonly issueId: string
+			readonly projectPath: string
+			readonly conflictingFiles: ReadonlyArray<string>
+		}) =>
+			sessions
+				.start({
+					issueId: params.issueId,
+					projectPath: params.projectPath,
+					initialPrompt: `There are merge conflicts in: ${params.conflictingFiles.join(", ")}. Please resolve these conflicts, then stage and commit the resolution.`,
+				})
+				.pipe(
+					Effect.catchAll(() => Effect.void),
+					Effect.asVoid,
+				)
+
+		const failIfMergeConflict = (params: {
+			readonly issueId: string
+			readonly projectPath: string
+			readonly baseBranch: string
+			readonly worktreePath: string
+			readonly mergeCommitMessage: string
+			readonly retryHint: string
+		}) =>
+			Effect.gen(function* () {
+				const mergeTreeExitCode = yield* exitCodeInDirectory(params.worktreePath, "git", [
+					"merge-tree",
+					"--write-tree",
+					params.baseBranch,
+					"HEAD",
+				])
+				if (mergeTreeExitCode === 0) {
+					return
+				}
+
+				const conflictingFiles = yield* listMergeConflictFiles(
+					params.worktreePath,
+					params.baseBranch,
+				)
+				yield* runInDirectory(params.worktreePath, "git", [
+					"merge",
+					params.baseBranch,
+					"-m",
+					params.mergeCommitMessage,
+				]).pipe(Effect.catchAll(() => Effect.void))
+				if (conflictingFiles.length > 0) {
+					yield* maybeStartConflictResolutionSession({
+						issueId: params.issueId,
+						projectPath: params.projectPath,
+						conflictingFiles,
+					})
+				}
+				return yield* Effect.fail(
+					mapMergeConflictError(
+						conflictingFiles.length > 0
+							? `Merge conflicts detected in: ${conflictingFiles.join(", ")}. ${params.retryHint}`
+							: `Merge conflicts detected while merging ${params.baseBranch}. ${params.retryHint}`,
+					),
+				)
+			})
+
 		return {
 			create: (issueId, projectPath) =>
 				Effect.gen(function* () {
@@ -518,6 +637,103 @@ export class DaemonPrService extends Effect.Service<DaemonPrService>()("DaemonPr
 							baseBranch,
 						]).pipe(Effect.asVoid)
 					}
+				}),
+			updateFromBase: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const issue = yield* resolveIssue(issueId, projectPath)
+					const worktreePath = yield* resolveIssueWorktreePath(issueId, projectPath)
+					const baseBranch = yield* resolveBaseBranch(issue, projectPath)
+					const issueBranch = yield* getCurrentBranch(worktreePath)
+					const gitConfig = yield* appConfig
+						.getGitConfigForProjectPath(projectPath)
+						.pipe(Effect.mapError((error) => mapConfigError(error.message)))
+
+					yield* maybeFetchBaseBranch(projectPath, baseBranch)
+					yield* failIfMergeConflict({
+						issueId,
+						projectPath,
+						baseBranch,
+						worktreePath,
+						mergeCommitMessage: `Merge ${baseBranch} into ${issueBranch}`,
+						retryHint: "Resolve them in the session, then retry the operation.",
+					})
+					yield* runInDirectory(worktreePath, "git", ["merge", baseBranch, "--no-edit"]).pipe(
+						Effect.mapError((error) =>
+							mapCommandError(`Failed to merge ${baseBranch} into ${issueId}: ${error.message}`),
+						),
+					)
+					if (gitConfig.pushEnabled) {
+						yield* runInDirectory(worktreePath, "git", [
+							"push",
+							gitConfig.remote,
+							issueBranch,
+						]).pipe(Effect.catchAll(() => Effect.void))
+					}
+					yield* issues.sync(worktreePath).pipe(
+						Effect.mapError(mapTrackerError),
+						Effect.catchAll(() => Effect.void),
+					)
+				}),
+			mergeBaseIntoBranch: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const issue = yield* resolveIssue(issueId, projectPath)
+					const worktreePath = yield* resolveIssueWorktreePath(issueId, projectPath)
+					const baseBranch = yield* resolveBaseBranch(issue, projectPath)
+					const issueBranch = yield* getCurrentBranch(worktreePath)
+					const gitConfig = yield* appConfig
+						.getGitConfigForProjectPath(projectPath)
+						.pipe(Effect.mapError((error) => mapConfigError(error.message)))
+
+					yield* maybeFetchBaseBranch(projectPath, baseBranch)
+
+					const statusOutput = yield* runInDirectory(worktreePath, "git", [
+						"status",
+						"--porcelain",
+					]).pipe(Effect.orElseSucceed(() => ""))
+					const hasUncommittedChanges = statusOutput.trim().length > 0
+					if (hasUncommittedChanges) {
+						yield* runInDirectory(worktreePath, "git", [
+							"stash",
+							"push",
+							"-m",
+							"azedarach-merge-stash",
+						]).pipe(Effect.catchAll(() => Effect.void))
+					}
+
+					yield* failIfMergeConflict({
+						issueId,
+						projectPath,
+						baseBranch,
+						worktreePath,
+						mergeCommitMessage: `Merge ${baseBranch} into ${issueId}`,
+						retryHint: "Resolve them in the session, then retry attach.",
+					})
+					yield* runInDirectory(worktreePath, "git", ["merge", baseBranch, "--no-edit"]).pipe(
+						Effect.mapError((error) =>
+							mapCommandError(`Failed to merge ${baseBranch} into ${issueId}: ${error.message}`),
+						),
+					)
+					if (hasUncommittedChanges) {
+						yield* runInDirectory(worktreePath, "git", ["stash", "pop"]).pipe(
+							Effect.catchAll(() => Effect.void),
+						)
+					}
+					if (gitConfig.pushEnabled) {
+						yield* runInDirectory(worktreePath, "git", [
+							"push",
+							gitConfig.remote,
+							issueBranch,
+						]).pipe(Effect.catchAll(() => Effect.void))
+					}
+				}),
+			abortMerge: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const worktreePath = yield* resolveIssueWorktreePath(issueId, projectPath)
+					yield* runInDirectory(worktreePath, "git", ["merge", "--abort"]).pipe(
+						Effect.mapError((error) =>
+							mapCommandError(`Failed to abort merge for ${issueId}: ${error.message}`),
+						),
+					)
 				}),
 			checkGhCli: () =>
 				exitCodeInDirectory(process.cwd(), "gh", ["auth", "status"]).pipe(

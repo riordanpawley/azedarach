@@ -58,14 +58,20 @@ import type {
 	DaemonPlanningReviewResult,
 } from "./DaemonPlanningRpcSchemas.js"
 import type {
+	DaemonPrAbortMergeRequest,
+	DaemonPrAbortMergeResult,
 	DaemonPrCheckGhCliRequest,
 	DaemonPrCheckGhCliResult,
 	DaemonPrCleanupRequest,
 	DaemonPrCleanupResult,
 	DaemonPrCreateRequest,
 	DaemonPrCreateResult,
+	DaemonPrMergeBaseIntoBranchRequest,
+	DaemonPrMergeBaseIntoBranchResult,
 	DaemonPrMergeToMainRequest,
 	DaemonPrMergeToMainResult,
+	DaemonPrUpdateFromBaseRequest,
+	DaemonPrUpdateFromBaseResult,
 } from "./DaemonPrRpcSchemas.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
@@ -331,6 +337,15 @@ export interface DaemonRpcClientApi {
 	readonly prCheckGhCli: (
 		request?: Omit<DaemonPrCheckGhCliRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrCheckGhCliResult, DaemonRpcClientError>
+	readonly prUpdateFromBase: (
+		request: Omit<DaemonPrUpdateFromBaseRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrUpdateFromBaseResult, DaemonRpcClientError>
+	readonly prMergeBaseIntoBranch: (
+		request: Omit<DaemonPrMergeBaseIntoBranchRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrMergeBaseIntoBranchResult, DaemonRpcClientError>
+	readonly prAbortMerge: (
+		request: Omit<DaemonPrAbortMergeRequest, "rpcProtocolVersion">,
+	) => Effect.Effect<DaemonPrAbortMergeResult, DaemonRpcClientError>
 	readonly specRequirementList: (
 		request?: Omit<DaemonSpecRequirementListRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSpecRequirementListResult, DaemonRpcClientError>
@@ -662,6 +677,21 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
 					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
 			),
+		prUpdateFromBase: (request) =>
+			raw.daemonPrUpdateFromBase({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		prMergeBaseIntoBranch: (request) =>
+			raw.daemonPrMergeBaseIntoBranch({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
+		prAbortMerge: (request) =>
+			raw.daemonPrAbortMerge({
+				...request,
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+			}),
 		specRequirementList: (request) =>
 			raw.daemonSpecRequirementList(
 				request === undefined

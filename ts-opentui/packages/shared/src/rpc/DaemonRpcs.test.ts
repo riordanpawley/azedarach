@@ -32,14 +32,20 @@ import {
 	PlanningReviewFeedbackSchema,
 } from "./DaemonPlanningRpcSchemas.js"
 import {
+	DaemonPrAbortMergeRequestSchema,
+	DaemonPrAbortMergeResultSchema,
 	DaemonPrCheckGhCliRequestSchema,
 	DaemonPrCheckGhCliResultSchema,
 	DaemonPrCleanupRequestSchema,
 	DaemonPrCleanupResultSchema,
 	DaemonPrCreateRequestSchema,
 	DaemonPrCreateResultSchema,
+	DaemonPrMergeBaseIntoBranchRequestSchema,
+	DaemonPrMergeBaseIntoBranchResultSchema,
 	DaemonPrMergeToMainRequestSchema,
 	DaemonPrMergeToMainResultSchema,
+	DaemonPrUpdateFromBaseRequestSchema,
+	DaemonPrUpdateFromBaseResultSchema,
 } from "./DaemonPrRpcSchemas.js"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
@@ -183,10 +189,13 @@ describe("DaemonRpcs", () => {
 	it("registers PR rpc operations in a dedicated group", () => {
 		const keys = [...DaemonPrRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
+			"daemonPrAbortMerge",
 			"daemonPrCheckGhCli",
 			"daemonPrCleanup",
 			"daemonPrCreate",
+			"daemonPrMergeBaseIntoBranch",
 			"daemonPrMergeToMain",
+			"daemonPrUpdateFromBase",
 		])
 	})
 
@@ -1452,6 +1461,16 @@ describe("DaemonRpcs", () => {
 		const decodeMergeResult = Schema.decodeUnknown(DaemonPrMergeToMainResultSchema)
 		const decodeCheckRequest = Schema.decodeUnknown(DaemonPrCheckGhCliRequestSchema)
 		const decodeCheckResult = Schema.decodeUnknown(DaemonPrCheckGhCliResultSchema)
+		const decodeUpdateFromBaseRequest = Schema.decodeUnknown(DaemonPrUpdateFromBaseRequestSchema)
+		const decodeUpdateFromBaseResult = Schema.decodeUnknown(DaemonPrUpdateFromBaseResultSchema)
+		const decodeMergeBaseIntoBranchRequest = Schema.decodeUnknown(
+			DaemonPrMergeBaseIntoBranchRequestSchema,
+		)
+		const decodeMergeBaseIntoBranchResult = Schema.decodeUnknown(
+			DaemonPrMergeBaseIntoBranchResultSchema,
+		)
+		const decodeAbortMergeRequest = Schema.decodeUnknown(DaemonPrAbortMergeRequestSchema)
+		const decodeAbortMergeResult = Schema.decodeUnknown(DaemonPrAbortMergeResultSchema)
 
 		const createRequest = await Effect.runPromise(
 			decodeCreateRequest({
@@ -1511,6 +1530,45 @@ describe("DaemonRpcs", () => {
 				available: true,
 			}),
 		)
+		const updateFromBaseRequest = await Effect.runPromise(
+			decodeUpdateFromBaseRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const updateFromBaseResult = await Effect.runPromise(
+			decodeUpdateFromBaseResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				updated: true,
+			}),
+		)
+		const mergeBaseIntoBranchRequest = await Effect.runPromise(
+			decodeMergeBaseIntoBranchRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const mergeBaseIntoBranchResult = await Effect.runPromise(
+			decodeMergeBaseIntoBranchResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				merged: true,
+			}),
+		)
+		const abortMergeRequest = await Effect.runPromise(
+			decodeAbortMergeRequest({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				issueId: "te-1",
+				projectPath: "/tmp/project",
+			}),
+		)
+		const abortMergeResult = await Effect.runPromise(
+			decodeAbortMergeResult({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				aborted: true,
+			}),
+		)
 
 		expect(createRequest.issueId).toBe("te-1")
 		expect(createResult.pullRequest.number).toBe(42)
@@ -1520,5 +1578,11 @@ describe("DaemonRpcs", () => {
 		expect(mergeResult.merged).toBe(true)
 		expect(checkRequest.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
 		expect(checkResult.available).toBe(true)
+		expect(updateFromBaseRequest.issueId).toBe("te-1")
+		expect(updateFromBaseResult.updated).toBe(true)
+		expect(mergeBaseIntoBranchRequest.issueId).toBe("te-1")
+		expect(mergeBaseIntoBranchResult.merged).toBe(true)
+		expect(abortMergeRequest.issueId).toBe("te-1")
+		expect(abortMergeResult.aborted).toBe(true)
 	})
 })
