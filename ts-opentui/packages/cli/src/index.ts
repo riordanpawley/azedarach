@@ -1790,9 +1790,28 @@ const forceResetGlobalDaemonRuntime = Effect.gen(function* () {
 	const daemonDir = pathService.join(home, ".azedarach", "daemon")
 	const socketPath = pathService.join(daemonDir, "global.sock")
 	const lockDir = pathService.join(daemonDir, "global.lock")
+	const ownerPath = pathService.join(lockDir, "owner.json")
+
+	const daemonOwnerSchema = Schema.Struct({
+		pid: Schema.Number,
+	})
+	const ownerContent = yield* fs.readFileString(ownerPath).pipe(Effect.option)
+	if (Option.isSome(ownerContent)) {
+		const owner = yield* Schema.decode(Schema.parseJson(daemonOwnerSchema))(
+			ownerContent.value,
+		).pipe(Effect.option)
+		if (Option.isSome(owner) && Number.isFinite(owner.value.pid) && owner.value.pid > 1) {
+			yield* PlatformCommand.exitCode(
+				PlatformCommand.make("kill", "-9", String(Math.trunc(owner.value.pid))),
+			).pipe(Effect.orElseSucceed(() => 1))
+		}
+	}
 
 	yield* PlatformCommand.exitCode(
 		PlatformCommand.make("pkill", "-9", "-f", "packages/daemon/src/GlobalDaemonMain.ts"),
+	).pipe(Effect.orElseSucceed(() => 1))
+	yield* PlatformCommand.exitCode(
+		PlatformCommand.make("pkill", "-9", "-f", "GlobalDaemonMain.ts"),
 	).pipe(Effect.orElseSucceed(() => 1))
 
 	yield* fs
@@ -1816,6 +1835,46 @@ const daemonRestartHandler = (args: {
 				)
 			}
 			yield* forceResetGlobalDaemonRuntime
+			if (args.verbose) {
+				yield* Console.log("daemon_restart: force path bootstrap begin")
+			}
+			const forceBootstrap = yield* bootstrapDaemonRpcClient({
+				autoStart: true,
+				verifyReachable: true,
+				onAttachAttempt: args.verbose
+					? (observation) => {
+							console.error(
+								`daemon_restart(force): attach attempt=${observation.attempt} delayMs=${observation.delayMs} remainingMs=${observation.timeoutRemainingMs} socket=${observation.socketUrl ?? "<none>"}`,
+							)
+						}
+					: undefined,
+			})
+			if (args.verbose) {
+				yield* Console.log(
+					`daemon_restart: force bootstrap ready startedDaemon=${forceBootstrap.startedDaemon} attempts=${forceBootstrap.attachAttemptCount} socket=${forceBootstrap.socketUrl}`,
+				)
+			}
+			const status = yield* forceBootstrap.client.status().pipe(
+				Effect.mapError((error) =>
+					formatDaemonRpcClientFailure({
+						operation: "status",
+						socketUrl: forceBootstrap.socketUrl,
+						error,
+					}),
+				),
+				(effect) => withDaemonControlTimeout("status", effect),
+			)
+			yield* Console.log("Headless backend sync daemon restarted.")
+			yield* Console.log(
+				formatDaemonControlStatusLine({
+					mode: "restart",
+					status,
+				}),
+			)
+			if (args.verbose) {
+				yield* Console.log(JSON.stringify(status, null, 2))
+			}
+			return
 		}
 		if (args.verbose) {
 			yield* Console.log("daemon_restart: bootstrap begin")

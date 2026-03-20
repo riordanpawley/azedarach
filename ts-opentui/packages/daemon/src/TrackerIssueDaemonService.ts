@@ -526,7 +526,16 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					const sortDirection = options?.sortDirection ?? "desc"
 					const sorted = sortIssuesInMemory(visible, sortBy, sortDirection)
 					const limit = options?.limit
-					return limit === undefined ? sorted : sorted.slice(0, Math.max(0, limit))
+					const bounded = limit === undefined ? sorted : sorted.slice(0, Math.max(0, limit))
+					return yield* Schema.decodeUnknown(Schema.Array(TrackedIssueSchema))(bounded).pipe(
+						Effect.mapError(
+							() =>
+								new TrackerIssueDaemonError({
+									reason: "json-parse",
+									message: "local issue backend produced invalid issue payload",
+								}),
+						),
+					)
 				})
 
 			const rejectUnsupportedImplementations = (
