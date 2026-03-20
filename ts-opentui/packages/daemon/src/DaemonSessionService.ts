@@ -109,6 +109,10 @@ export class DaemonSessionError extends Data.TaggedError("DaemonSessionError")<{
 export interface DaemonSessionMutationRequest {
 	readonly issueId: string
 	readonly projectPath: string
+	readonly initialPrompt?: string
+	readonly imagePaths?: readonly string[]
+	readonly sessionEnv?: Readonly<Record<string, string>>
+	readonly dangerouslySkipPermissions?: boolean
 }
 
 export interface DaemonSessionServiceApi {
@@ -909,6 +913,9 @@ export class DaemonSessionService extends Effect.Service<DaemonSessionService>()
 				readonly sessionName: string
 				readonly cliTool: CliToolName
 				readonly model: string | undefined
+				readonly initialPrompt?: string
+				readonly imagePaths?: readonly string[]
+				readonly sessionEnv?: Readonly<Record<string, string>>
 				readonly dangerouslySkipPermissions: boolean
 				readonly autoCompact: boolean
 				readonly continueConversation: boolean
@@ -921,6 +928,9 @@ export class DaemonSessionService extends Effect.Service<DaemonSessionService>()
 					issueId: params.issueId,
 					sessionName: params.sessionName,
 					model: params.model,
+					initialPrompt: params.initialPrompt,
+					imagePaths: params.imagePaths,
+					sessionEnv: params.sessionEnv,
 					dangerouslySkipPermissions: params.dangerouslySkipPermissions,
 					sessionSettings,
 					continueConversation: params.continueConversation,
@@ -1010,7 +1020,11 @@ export class DaemonSessionService extends Effect.Service<DaemonSessionService>()
 							sessionName,
 							cliTool,
 							model: modelConfig[cliTool].default ?? modelConfig.default,
-							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+							initialPrompt: request.initialPrompt,
+							imagePaths: request.imagePaths,
+							sessionEnv: request.sessionEnv,
+							dangerouslySkipPermissions:
+								request.dangerouslySkipPermissions ?? sessionConfig.dangerouslySkipPermissions,
 							autoCompact: false,
 							continueConversation: false,
 						})

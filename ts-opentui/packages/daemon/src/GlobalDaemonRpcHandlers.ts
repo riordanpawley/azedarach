@@ -656,6 +656,10 @@ export const makeDaemonSessionStartRpcHandler =
 			.start({
 				issueId: request.issueId,
 				projectPath: request.projectPath,
+				initialPrompt: request.initialPrompt,
+				imagePaths: request.imagePaths,
+				sessionEnv: request.sessionEnv,
+				dangerouslySkipPermissions: request.dangerouslySkipPermissions,
 			})
 			.pipe(Effect.map(mapDaemonSessionMutationResult), catchDaemonRpcError("sessionStart"))
 

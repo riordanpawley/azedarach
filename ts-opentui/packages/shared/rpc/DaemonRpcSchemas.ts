@@ -239,6 +239,15 @@ export const DaemonSessionStartRequestSchema = Schema.Struct({
 	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
 	issueId: Schema.String,
 	projectPath: Schema.String,
+	initialPrompt: Schema.optional(Schema.String),
+	imagePaths: Schema.optional(Schema.Array(Schema.String)),
+	sessionEnv: Schema.optional(
+		Schema.Record({
+			key: Schema.String,
+			value: Schema.String,
+		}),
+	),
+	dangerouslySkipPermissions: Schema.optional(Schema.Boolean),
 })
 export type DaemonSessionStartRequest = Schema.Schema.Type<typeof DaemonSessionStartRequestSchema>
 

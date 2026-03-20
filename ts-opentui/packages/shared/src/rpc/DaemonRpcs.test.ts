@@ -307,6 +307,12 @@ describe("DaemonRpcs", () => {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "qc",
 				projectPath: "/tmp/project",
+				initialPrompt: "Continue the task",
+				imagePaths: ["/tmp/image-1.png", "/tmp/image-2.png"],
+				sessionEnv: {
+					FOO: "bar",
+				},
+				dangerouslySkipPermissions: true,
 			}),
 		)
 		const update = await Effect.runPromise(
@@ -323,6 +329,12 @@ describe("DaemonRpcs", () => {
 
 		expect(start.issueId).toBe("qc")
 		expect(start.projectPath).toBe("/tmp/project")
+		expect(start.initialPrompt).toBe("Continue the task")
+		expect(start.imagePaths).toEqual(["/tmp/image-1.png", "/tmp/image-2.png"])
+		expect(start.sessionEnv).toEqual({
+			FOO: "bar",
+		})
+		expect(start.dangerouslySkipPermissions).toBe(true)
 		expect(update.tmuxSessionName).toBe("az-qc")
 		expect(update.worktreePath).toBe("/tmp/project/.worktrees/qc")
 		expect(update.startedAt).toBe("2026-03-20T00:00:00.000Z")

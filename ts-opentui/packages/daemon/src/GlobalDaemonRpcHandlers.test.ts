@@ -155,6 +155,12 @@ describe("session mutation rpc handlers", () => {
 				expect(request).toEqual({
 					issueId: "task-1",
 					projectPath: "/tmp/project",
+					initialPrompt: "Start the work",
+					imagePaths: ["/tmp/image-1.png"],
+					sessionEnv: {
+						FOO: "bar",
+					},
+					dangerouslySkipPermissions: true,
 				})
 				return Effect.succeed(sessionSnapshot)
 			},
@@ -165,6 +171,12 @@ describe("session mutation rpc handlers", () => {
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				issueId: "task-1",
 				projectPath: "/tmp/project",
+				initialPrompt: "Start the work",
+				imagePaths: ["/tmp/image-1.png"],
+				sessionEnv: {
+					FOO: "bar",
+				},
+				dangerouslySkipPermissions: true,
 			}),
 		)
 
