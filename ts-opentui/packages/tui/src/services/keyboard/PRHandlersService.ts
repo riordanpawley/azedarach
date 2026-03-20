@@ -1,5 +1,5 @@
-import { Command } from "@effect/platform"
 import { AppConfig } from "@azedarach/config"
+import { Command } from "@effect/platform"
 import { Effect } from "effect"
 import { hasTaskWorktreeContext } from "../../types.js"
 import { formatForToast } from "../../utils/formatForToast.js"
@@ -8,8 +8,8 @@ import { EditorService } from "../EditorService.js"
 import { NavigationService } from "../NavigationService.js"
 import { OverlayService } from "../OverlayService.js"
 import { PrWorkflowService as PRWorkflow } from "../PrWorkflowService.js"
-import { ToastService } from "../ToastService.js"
 import { TmuxService } from "../TmuxService.js"
+import { ToastService } from "../ToastService.js"
 import { TuiBoardStoreService } from "../TuiBoardStoreService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
@@ -64,10 +64,7 @@ const GIT_OPERATION_IN_PROGRESS_CHECKS: readonly GitOperationInProgress[] = [
 	},
 ]
 
-const hasPseudoRef = (
-	cwd: string,
-	refName: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD",
-) =>
+const hasPseudoRef = (cwd: string, refName: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD") =>
 	Effect.gen(function* () {
 		const command = Command.make("git", "rev-parse", "-q", "--verify", refName).pipe(
 			Command.workingDirectory(cwd),
@@ -322,13 +319,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
-				const { targetBranch } = yield* prWorkflow.getTargetBranch(task.id, projectPath).pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(error).pipe(
-							Effect.zipRight(Effect.succeed({ targetBranch: "main", isEpicChild: false })),
+				const { targetBranch } = yield* prWorkflow
+					.getTargetBranch(task.id, projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(Effect.succeed({ targetBranch: "main", isEpicChild: false })),
+							),
 						),
-					),
-				)
+					)
 
 				const uncommittedResult = yield* prWorkflow
 					.checkUncommittedChanges({
@@ -611,14 +610,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						Effect.catchAll((error) =>
 							Effect.logWarning(error).pipe(
 								Effect.zipRight(
-									appConfig
-										.getEffectiveBaseBranch()
-										.pipe(
-											Effect.map((baseBranch) => ({
-												baseBranch,
-												parentEpicId: undefined,
-											})),
-										),
+									appConfig.getEffectiveBaseBranch().pipe(
+										Effect.map((baseBranch) => ({
+											baseBranch,
+											parentEpicId: undefined,
+										})),
+									),
 								),
 							),
 						),
@@ -727,6 +724,6 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			enterMergeSelect,
 			confirmMergeSelect,
 			cancelMergeSelect,
-		} satisfies PRHandlersServiceApi
+		}
 	}),
 }) {}

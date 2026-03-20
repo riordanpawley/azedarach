@@ -1,1 +1,1 @@
-export * from "../rpc/index.js"
+export * from "./rpc/index.js"

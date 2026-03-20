@@ -173,6 +173,14 @@ const deferredServicesLayer = Layer.mergeAll(
  * consumed by atoms that should be available before deferred hydration.
  */
 export const appCoreLayer = coreServicesLayer.pipe(
+	Layer.provideMerge(daemonRpcClientLayer),
+	Layer.provideMerge(appConfigProjectContextLayer),
+	Layer.provideMerge(AppConfig.Default),
+	Layer.provideMerge(EditorService.Default),
+	Layer.provideMerge(navigationLayer),
+	Layer.provideMerge(tuiBoardStoreLayer),
+	Layer.provideMerge(ViewService.Default),
+	Layer.provideMerge(TuiProjectContextService.Default),
 	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )
@@ -184,6 +192,14 @@ export const appCoreLayer = coreServicesLayer.pipe(
 const appFullServicesLayer = Layer.mergeAll(coreServicesLayer, deferredServicesLayer)
 
 export const appDeferredLayer = appFullServicesLayer.pipe(
+	Layer.provideMerge(daemonRpcClientLayer),
+	Layer.provideMerge(appConfigProjectContextLayer),
+	Layer.provideMerge(AppConfig.Default),
+	Layer.provideMerge(EditorService.Default),
+	Layer.provideMerge(navigationLayer),
+	Layer.provideMerge(tuiBoardStoreLayer),
+	Layer.provideMerge(ViewService.Default),
+	Layer.provideMerge(TuiProjectContextService.Default),
 	Layer.provide(loggerLayer),
 	Layer.provideMerge(platformLayer),
 )

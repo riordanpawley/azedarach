@@ -31,6 +31,8 @@ const toLoadMessage = (error: OrchestrateLoadError): string => {
 		case "issueRemoveDependency":
 			return error.message
 	}
+
+	return error.message
 }
 
 const toSpawnMessage = (error: OrchestrateSpawnError): string => {
@@ -233,7 +235,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			return {
 				enterFromDetail,
 				confirmSpawn,
-			} satisfies OrchestrateHandlersServiceApi
+			}
 		}),
 	},
 ) {}

@@ -78,9 +78,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 			const findAiSession = (issueId: string, projectPath: string) =>
 				Effect.gen(function* () {
-					const snapshots = yield* sessionAdapter.listActive({ projectPath }).pipe(
-						Effect.catchAll(() => Effect.succeed([])),
-					)
+					const snapshots = yield* sessionAdapter
+						.listActive({ projectPath })
+						.pipe(Effect.catchAll(() => Effect.succeed([])))
 					for (const snapshot of snapshots) {
 						if (issueIdsEqualForLookup(snapshot.issueId, issueId)) {
 							return snapshot.tmuxSessionName
@@ -160,9 +160,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const resolveSessionImagePaths = (taskId: string, projectPath: string) =>
 				Effect.gen(function* () {
 					const worktreePath = getWorktreePath(projectPath, taskId)
-					const attachments = yield* imageAttachment.list(taskId).pipe(
-						Effect.catchAll(() => Effect.succeed([])),
-					)
+					const attachments = yield* imageAttachment
+						.list(taskId)
+						.pipe(Effect.catchAll(() => Effect.succeed([])))
 					const resolved = yield* Effect.forEach(attachments, (currentAttachment) =>
 						resolveAttachmentPathWithFallback(taskId, currentAttachment.id, worktreePath),
 					)
@@ -501,14 +501,12 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						let worktreePath = getWorktreePath(projectPath, task.id)
 						if (sessionName === null) {
 							yield* toast.show("info", `Starting session for ${task.id}...`)
-							const started = yield* sessionAdapter
-								.start(task.id, { projectPath })
-								.pipe(
-									Effect.map((session) => session),
-									Effect.catchAll((error) =>
-										helpers.showErrorToast("Failed to start session")(error).pipe(Effect.as(null)),
-									),
-								)
+							const started = yield* sessionAdapter.start(task.id, { projectPath }).pipe(
+								Effect.map((session) => session),
+								Effect.catchAll((error) =>
+									helpers.showErrorToast("Failed to start session")(error).pipe(Effect.as(null)),
+								),
+							)
 							if (started === null) return
 							sessionName = started.tmuxSessionName
 							if (started.worktreePath !== null) {
@@ -574,7 +572,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 					yield* boardService.refresh()
 					yield* toast.show("success", `Recovered ${recovered}/${crashedTasks.length} sessions`)
-				})
+				}).pipe(Effect.catchAll(helpers.showErrorToast("Failed to recover crashed sessions")))
 
 			return {
 				startSession,
@@ -589,7 +587,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 				startHelixSession,
 				recoverCrashedSession,
 				recoverAllCrashedSessions,
-			} satisfies SessionHandlersServiceApi
+			}
 		}),
 	},
 ) {}

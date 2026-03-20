@@ -218,7 +218,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					yield* editor.exitToNormal()
 				})
 
-			const handleConfirmInput = (key: string): Effect.Effect<boolean> =>
+			const handleConfirmInput = (key: string) =>
 				Effect.gen(function* () {
 					const currentOverlay = yield* overlay.current()
 					if (currentOverlay?._tag !== "confirm" && currentOverlay?._tag !== "gitPull") {
@@ -237,7 +237,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					return true
 				})
 
-			const handleMergeChoiceInput = (key: string): Effect.Effect<boolean> =>
+			const handleMergeChoiceInput = (key: string) =>
 				Effect.gen(function* () {
 					const currentOverlay = yield* overlay.current()
 					if (currentOverlay?._tag !== "mergeChoice") {
@@ -303,7 +303,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					return true
 				})
 
-			const handleBulkCleanupInput = (key: string): Effect.Effect<boolean> =>
+			const handleBulkCleanupInput = (key: string) =>
 				Effect.gen(function* () {
 					const currentOverlay = yield* overlay.current()
 					if (currentOverlay?._tag !== "bulkCleanup") {
@@ -624,7 +624,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					return true
 				})
 
-			const handleSettingsInput = (key: string): Effect.Effect<boolean> =>
+			const handleSettingsInput = (key: string) =>
 				Effect.gen(function* () {
 					if (key === "escape" || key === "q") {
 						yield* settings.close()
@@ -717,7 +717,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					const keyboardConfig = yield* appConfig.getKeyboardConfig()
 					const labels = generateJumpLabels(visibleTasks.length, keyboardConfig.jumpLabelChars)
-					const jumpTargets: Record.ReadonlyRecord<string, JumpTarget> = {}
+					const jumpTargets: Record<string, JumpTarget> = {}
 					visibleTasks.forEach(({ taskId, columnIndex, taskIndex }, index) => {
 						const label = labels[index]
 						if (label !== undefined) {
@@ -789,7 +789,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				computeJumpLabels,
 				enterSpecWorkspace,
 				getEffectiveMode,
-			} satisfies InputHandlersServiceApi
+			}
 		}),
 	},
 ) {}

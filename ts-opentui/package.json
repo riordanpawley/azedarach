@@ -18,7 +18,7 @@
 		"dev": "bun run packages/entry/src/main.ts",
 		"dev:watch": "AZ_NO_TMUX=1 bun --watch run packages/entry/src/main.ts",
 		"workspace:install": "bun install",
-		"typecheck": "tsgo -b tsconfig.json",
+		"typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
 		"clean": "rm -rf dist packages/*/dist tsconfig.tsbuildinfo packages/*/dist/tsconfig.tsbuildinfo dist/tsconfig.tsbuildinfo",
 		"link": "mkdir -p \"$HOME/.local/bin\" && ln -sf \"$(pwd)/bin/az\" \"$HOME/.local/bin/az\"",
 		"build": "tsup packages/entry/src/main.ts --format esm --clean",

@@ -121,6 +121,15 @@ const mapRpcError = (error: DaemonRpcClientError): PrWorkflowError =>
 		message: error.message,
 	})
 
+const missingDaemonPrRpcMethodError = (methodName: string): PrWorkflowError =>
+	new PrWorkflowError({
+		reason: "unknown",
+		message: `Daemon RPC method is unavailable: ${methodName}`,
+	})
+
+const mapWorkflowError = (error: DaemonRpcClientError | PrWorkflowError): PrWorkflowError =>
+	error._tag === "PrWorkflowError" ? error : mapRpcError(error)
+
 export class PrWorkflowService extends Effect.Service<PrWorkflowService>()("PrWorkflowService", {
 	effect: Effect.gen(function* () {
 		const daemonRpcClient = yield* DaemonRpcClient
@@ -134,7 +143,7 @@ export class PrWorkflowService extends Effect.Service<PrWorkflowService>()("PrWo
 					})
 					.pipe(
 						Effect.map((result) => result.pullRequest),
-						Effect.mapError(mapRpcError),
+						Effect.mapError(mapWorkflowError),
 					),
 			cleanup: ({ issueId, projectPath, closeIssue }) =>
 				daemonRpcClient
@@ -143,115 +152,139 @@ export class PrWorkflowService extends Effect.Service<PrWorkflowService>()("PrWo
 						projectPath,
 						closeIssue,
 					})
-					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+					.pipe(Effect.asVoid, Effect.mapError(mapWorkflowError)),
 			mergeToMain: ({ issueId, projectPath }) =>
 				daemonRpcClient
 					.prMergeToMain({
 						issueId,
 						projectPath,
 					})
-					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+					.pipe(Effect.asVoid, Effect.mapError(mapWorkflowError)),
 			updateFromBase: ({ issueId, projectPath }) =>
 				daemonRpcClient
 					.prUpdateFromBase({
 						issueId,
 						projectPath,
 					})
-					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+					.pipe(Effect.asVoid, Effect.mapError(mapWorkflowError)),
 			mergeBaseIntoBranch: ({ issueId, projectPath }) =>
 				daemonRpcClient
 					.prMergeBaseIntoBranch({
 						issueId,
 						projectPath,
 					})
-					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+					.pipe(Effect.asVoid, Effect.mapError(mapWorkflowError)),
 			abortMerge: ({ issueId, projectPath }) =>
 				daemonRpcClient
 					.prAbortMerge({
 						issueId,
 						projectPath,
 					})
-					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+					.pipe(Effect.asVoid, Effect.mapError(mapWorkflowError)),
 			checkMergeConflicts: ({ issueId, projectPath }) =>
-				daemonRpcClient
-					.prCheckMergeConflicts({
+				Effect.gen(function* () {
+					const method = daemonRpcClient.prCheckMergeConflicts
+					if (method === undefined) {
+						return yield* Effect.fail(missingDaemonPrRpcMethodError("prCheckMergeConflicts"))
+					}
+					return yield* method({
 						issueId,
 						projectPath,
 					})
-					.pipe(
-						Effect.map((result) => ({
-							hasConflictRisk: result.hasConflictRisk,
-							conflictingFiles: result.conflictingFiles,
-							baseBranch: result.baseBranch,
-							issueBranch: result.issueBranch,
-						})),
-						Effect.mapError(mapRpcError),
-					),
+				}).pipe(
+					Effect.map((result) => ({
+						hasConflictRisk: result.hasConflictRisk,
+						conflictingFiles: result.conflictingFiles,
+						baseBranch: result.baseBranch,
+						issueBranch: result.issueBranch,
+					})),
+					Effect.mapError(mapWorkflowError),
+				),
 			checkUncommittedChanges: ({ issueId, projectPath }) =>
-				daemonRpcClient
-					.prCheckUncommittedChanges({
+				Effect.gen(function* () {
+					const method = daemonRpcClient.prCheckUncommittedChanges
+					if (method === undefined) {
+						return yield* Effect.fail(missingDaemonPrRpcMethodError("prCheckUncommittedChanges"))
+					}
+					return yield* method({
 						issueId,
 						projectPath,
 					})
-					.pipe(
-						Effect.map((result) => ({
-							hasUncommittedChanges: result.hasUncommittedChanges,
-							changedFiles: result.changedFiles,
-						})),
-						Effect.mapError(mapRpcError),
-					),
+				}).pipe(
+					Effect.map((result) => ({
+						hasUncommittedChanges: result.hasUncommittedChanges,
+						changedFiles: result.changedFiles,
+					})),
+					Effect.mapError(mapWorkflowError),
+				),
 			checkBranchBehindBase: ({ issueId, projectPath }) =>
-				daemonRpcClient
-					.prCheckBranchBehindBase({
+				Effect.gen(function* () {
+					const method = daemonRpcClient.prCheckBranchBehindBase
+					if (method === undefined) {
+						return yield* Effect.fail(missingDaemonPrRpcMethodError("prCheckBranchBehindBase"))
+					}
+					return yield* method({
 						issueId,
 						projectPath,
 					})
-					.pipe(
-						Effect.map((result) => ({
-							behind: result.behind,
-							ahead: result.ahead,
-							baseBranch: result.baseBranch,
-						})),
-						Effect.mapError(mapRpcError),
-					),
+				}).pipe(
+					Effect.map((result) => ({
+						behind: result.behind,
+						ahead: result.ahead,
+						baseBranch: result.baseBranch,
+					})),
+					Effect.mapError(mapWorkflowError),
+				),
 			getEffectiveBaseBranchForIssue: ({ issueId, projectPath }) =>
-				daemonRpcClient
-					.prGetEffectiveBaseBranch({
+				Effect.gen(function* () {
+					const method = daemonRpcClient.prGetEffectiveBaseBranch
+					if (method === undefined) {
+						return yield* Effect.fail(missingDaemonPrRpcMethodError("prGetEffectiveBaseBranch"))
+					}
+					return yield* method({
 						issueId,
 						projectPath,
 					})
-					.pipe(
-						Effect.map((result) => ({
-							baseBranch: result.baseBranch,
-							parentEpicId: result.parentEpicId,
-						})),
-						Effect.mapError(mapRpcError),
-					),
+				}).pipe(
+					Effect.map((result) => ({
+						baseBranch: result.baseBranch,
+						parentEpicId: result.parentEpicId,
+					})),
+					Effect.mapError(mapWorkflowError),
+				),
 			mergeIssueIntoIssue: ({ sourceIssueId, targetIssueId, projectPath }) =>
-				daemonRpcClient
-					.prMergeIssueIntoIssue({
+				Effect.gen(function* () {
+					const method = daemonRpcClient.prMergeIssueIntoIssue
+					if (method === undefined) {
+						return yield* Effect.fail(missingDaemonPrRpcMethodError("prMergeIssueIntoIssue"))
+					}
+					return yield* method({
 						sourceIssueId,
 						targetIssueId,
 						projectPath,
 					})
-					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+				}).pipe(Effect.asVoid, Effect.mapError(mapWorkflowError)),
 			getTargetBranch: (issueId, projectPath) =>
-				daemonRpcClient
-					.prGetTargetBranch({
+				Effect.gen(function* () {
+					const method = daemonRpcClient.prGetTargetBranch
+					if (method === undefined) {
+						return yield* Effect.fail(missingDaemonPrRpcMethodError("prGetTargetBranch"))
+					}
+					return yield* method({
 						issueId,
 						projectPath,
 					})
-					.pipe(
-						Effect.map((result) => ({
-							targetBranch: result.targetBranch,
-							isEpicChild: result.isEpicChild,
-						})),
-						Effect.mapError(mapRpcError),
-					),
+				}).pipe(
+					Effect.map((result) => ({
+						targetBranch: result.targetBranch,
+						isEpicChild: result.isEpicChild,
+					})),
+					Effect.mapError(mapWorkflowError),
+				),
 			checkGHCLI: () =>
 				daemonRpcClient.prCheckGhCli().pipe(
 					Effect.map((result) => result.available),
-					Effect.mapError(mapRpcError),
+					Effect.mapError(mapWorkflowError),
 				),
 		} satisfies PrWorkflowApi
 	}),

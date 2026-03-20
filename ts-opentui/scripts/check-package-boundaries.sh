@@ -250,6 +250,10 @@ check_legacy_shim_tree_absent() {
 }
 
 check_legacy_shim_core_files_absent() {
+	if [[ ! -d "src/core" ]]; then
+		return
+	fi
+
 	local files=()
 	while IFS= read -r hit; do
 		[[ -n "$hit" ]] && files+=("$hit")

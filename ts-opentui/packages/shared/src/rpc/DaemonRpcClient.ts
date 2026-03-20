@@ -358,22 +358,22 @@ export interface DaemonRpcClientApi {
 	readonly prAbortMerge: (
 		request: Omit<DaemonPrAbortMergeRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrAbortMergeResult, DaemonRpcClientError>
-	readonly prCheckMergeConflicts: (
+	readonly prCheckMergeConflicts?: (
 		request: Omit<DaemonPrCheckMergeConflictsRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrCheckMergeConflictsResult, DaemonRpcClientError>
-	readonly prCheckUncommittedChanges: (
+	readonly prCheckUncommittedChanges?: (
 		request: Omit<DaemonPrCheckUncommittedChangesRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrCheckUncommittedChangesResult, DaemonRpcClientError>
-	readonly prCheckBranchBehindBase: (
+	readonly prCheckBranchBehindBase?: (
 		request: Omit<DaemonPrCheckBranchBehindBaseRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrCheckBranchBehindBaseResult, DaemonRpcClientError>
-	readonly prGetEffectiveBaseBranch: (
+	readonly prGetEffectiveBaseBranch?: (
 		request: Omit<DaemonPrGetEffectiveBaseBranchRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrGetEffectiveBaseBranchResult, DaemonRpcClientError>
-	readonly prMergeIssueIntoIssue: (
+	readonly prMergeIssueIntoIssue?: (
 		request: Omit<DaemonPrMergeIssueIntoIssueRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrMergeIssueIntoIssueResult, DaemonRpcClientError>
-	readonly prGetTargetBranch: (
+	readonly prGetTargetBranch?: (
 		request: Omit<DaemonPrGetTargetBranchRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonPrGetTargetBranchResult, DaemonRpcClientError>
 	readonly specRequirementList: (
