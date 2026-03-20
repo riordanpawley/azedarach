@@ -69,14 +69,26 @@ import {
 	type DaemonPlanningReviewResult,
 	type DaemonPrAbortMergeRequest,
 	type DaemonPrAbortMergeResult,
+	type DaemonPrCheckBranchBehindBaseRequest,
+	type DaemonPrCheckBranchBehindBaseResult,
 	type DaemonPrCheckGhCliRequest,
 	type DaemonPrCheckGhCliResult,
+	type DaemonPrCheckMergeConflictsRequest,
+	type DaemonPrCheckMergeConflictsResult,
+	type DaemonPrCheckUncommittedChangesRequest,
+	type DaemonPrCheckUncommittedChangesResult,
 	type DaemonPrCleanupRequest,
 	type DaemonPrCleanupResult,
 	type DaemonPrCreateRequest,
 	type DaemonPrCreateResult,
+	type DaemonPrGetEffectiveBaseBranchRequest,
+	type DaemonPrGetEffectiveBaseBranchResult,
+	type DaemonPrGetTargetBranchRequest,
+	type DaemonPrGetTargetBranchResult,
 	type DaemonPrMergeBaseIntoBranchRequest,
 	type DaemonPrMergeBaseIntoBranchResult,
+	type DaemonPrMergeIssueIntoIssueRequest,
+	type DaemonPrMergeIssueIntoIssueResult,
 	type DaemonPrMergeToMainRequest,
 	type DaemonPrMergeToMainResult,
 	type DaemonPrUpdateFromBaseRequest,
@@ -905,6 +917,120 @@ export const makeDaemonPrAbortMergeRpcHandler =
 				catchDaemonRpcError("prAbortMerge"),
 			)
 
+export const makeDaemonPrCheckMergeConflictsRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "checkMergeConflicts">) =>
+	(request: DaemonPrCheckMergeConflictsRequest) =>
+		prs
+			.checkMergeConflicts({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(check): DaemonPrCheckMergeConflictsResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						hasConflictRisk: check.hasConflictRisk,
+						conflictingFiles: [...check.conflictingFiles],
+						baseBranch: check.baseBranch,
+						issueBranch: check.issueBranch,
+					}),
+				),
+				catchDaemonRpcError("prCheckMergeConflicts"),
+			)
+
+export const makeDaemonPrCheckUncommittedChangesRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "checkUncommittedChanges">) =>
+	(request: DaemonPrCheckUncommittedChangesRequest) =>
+		prs
+			.checkUncommittedChanges({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(result): DaemonPrCheckUncommittedChangesResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						hasUncommittedChanges: result.hasUncommittedChanges,
+						changedFiles: [...result.changedFiles],
+					}),
+				),
+				catchDaemonRpcError("prCheckUncommittedChanges"),
+			)
+
+export const makeDaemonPrCheckBranchBehindBaseRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "checkBranchBehindBase">) =>
+	(request: DaemonPrCheckBranchBehindBaseRequest) =>
+		prs
+			.checkBranchBehindBase({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(result): DaemonPrCheckBranchBehindBaseResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						behind: result.behind,
+						ahead: result.ahead,
+						baseBranch: result.baseBranch,
+					}),
+				),
+				catchDaemonRpcError("prCheckBranchBehindBase"),
+			)
+
+export const makeDaemonPrGetEffectiveBaseBranchRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "getEffectiveBaseBranch">) =>
+	(request: DaemonPrGetEffectiveBaseBranchRequest) =>
+		prs
+			.getEffectiveBaseBranch({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(result): DaemonPrGetEffectiveBaseBranchResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						baseBranch: result.baseBranch,
+						parentEpicId: result.parentEpicId,
+					}),
+				),
+				catchDaemonRpcError("prGetEffectiveBaseBranch"),
+			)
+
+export const makeDaemonPrMergeIssueIntoIssueRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "mergeIssueIntoIssue">) =>
+	(request: DaemonPrMergeIssueIntoIssueRequest) =>
+		prs
+			.mergeIssueIntoIssue({
+				sourceIssueId: request.sourceIssueId,
+				targetIssueId: request.targetIssueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.as({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					merged: true,
+				} satisfies DaemonPrMergeIssueIntoIssueResult),
+				catchDaemonRpcError("prMergeIssueIntoIssue"),
+			)
+
+export const makeDaemonPrGetTargetBranchRpcHandler =
+	(prs: Pick<DaemonPrServiceApi, "getTargetBranch">) => (request: DaemonPrGetTargetBranchRequest) =>
+		prs
+			.getTargetBranch({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(
+				Effect.map(
+					(result): DaemonPrGetTargetBranchResult => ({
+						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+						targetBranch: result.targetBranch,
+						isEpicChild: result.isEpicChild,
+					}),
+				),
+				catchDaemonRpcError("prGetTargetBranch"),
+			)
+
 export const makeDaemonAttachmentListRpcHandler =
 	(attachments: Pick<DaemonAttachmentServiceApi, "list">) =>
 	(request: DaemonAttachmentListRequest) =>
@@ -1071,6 +1197,12 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 		daemonPrUpdateFromBase: makeDaemonPrUpdateFromBaseRpcHandler(prs),
 		daemonPrMergeBaseIntoBranch: makeDaemonPrMergeBaseIntoBranchRpcHandler(prs),
 		daemonPrAbortMerge: makeDaemonPrAbortMergeRpcHandler(prs),
+		daemonPrCheckMergeConflicts: makeDaemonPrCheckMergeConflictsRpcHandler(prs),
+		daemonPrCheckUncommittedChanges: makeDaemonPrCheckUncommittedChangesRpcHandler(prs),
+		daemonPrCheckBranchBehindBase: makeDaemonPrCheckBranchBehindBaseRpcHandler(prs),
+		daemonPrGetEffectiveBaseBranch: makeDaemonPrGetEffectiveBaseBranchRpcHandler(prs),
+		daemonPrMergeIssueIntoIssue: makeDaemonPrMergeIssueIntoIssueRpcHandler(prs),
+		daemonPrGetTargetBranch: makeDaemonPrGetTargetBranchRpcHandler(prs),
 		daemonDevServerStatus: (request: DaemonDevServerStatusRequest) =>
 			control
 				.devServerStatus({

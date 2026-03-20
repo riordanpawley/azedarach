@@ -190,10 +190,16 @@ describe("DaemonRpcs", () => {
 		const keys = [...DaemonPrRpcGroup.requests.keys()].sort()
 		expect(keys).toEqual([
 			"daemonPrAbortMerge",
+			"daemonPrCheckBranchBehindBase",
 			"daemonPrCheckGhCli",
+			"daemonPrCheckMergeConflicts",
+			"daemonPrCheckUncommittedChanges",
 			"daemonPrCleanup",
 			"daemonPrCreate",
+			"daemonPrGetEffectiveBaseBranch",
+			"daemonPrGetTargetBranch",
 			"daemonPrMergeBaseIntoBranch",
+			"daemonPrMergeIssueIntoIssue",
 			"daemonPrMergeToMain",
 			"daemonPrUpdateFromBase",
 		])

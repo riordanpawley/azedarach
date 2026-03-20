@@ -57,14 +57,26 @@ import {
 import {
 	DaemonPrAbortMergeRequestSchema,
 	DaemonPrAbortMergeResultSchema,
+	DaemonPrCheckBranchBehindBaseRequestSchema,
+	DaemonPrCheckBranchBehindBaseResultSchema,
 	DaemonPrCheckGhCliRequestSchema,
 	DaemonPrCheckGhCliResultSchema,
+	DaemonPrCheckMergeConflictsRequestSchema,
+	DaemonPrCheckMergeConflictsResultSchema,
+	DaemonPrCheckUncommittedChangesRequestSchema,
+	DaemonPrCheckUncommittedChangesResultSchema,
 	DaemonPrCleanupRequestSchema,
 	DaemonPrCleanupResultSchema,
 	DaemonPrCreateRequestSchema,
 	DaemonPrCreateResultSchema,
+	DaemonPrGetEffectiveBaseBranchRequestSchema,
+	DaemonPrGetEffectiveBaseBranchResultSchema,
+	DaemonPrGetTargetBranchRequestSchema,
+	DaemonPrGetTargetBranchResultSchema,
 	DaemonPrMergeBaseIntoBranchRequestSchema,
 	DaemonPrMergeBaseIntoBranchResultSchema,
+	DaemonPrMergeIssueIntoIssueRequestSchema,
+	DaemonPrMergeIssueIntoIssueResultSchema,
 	DaemonPrMergeToMainRequestSchema,
 	DaemonPrMergeToMainResultSchema,
 	DaemonPrUpdateFromBaseRequestSchema,
@@ -672,6 +684,42 @@ export const DaemonPrAbortMergeRpc = Rpc.make("daemonPrAbortMerge", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonPrCheckMergeConflictsRpc = Rpc.make("daemonPrCheckMergeConflicts", {
+	payload: DaemonPrCheckMergeConflictsRequestSchema,
+	success: DaemonPrCheckMergeConflictsResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrCheckUncommittedChangesRpc = Rpc.make("daemonPrCheckUncommittedChanges", {
+	payload: DaemonPrCheckUncommittedChangesRequestSchema,
+	success: DaemonPrCheckUncommittedChangesResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrCheckBranchBehindBaseRpc = Rpc.make("daemonPrCheckBranchBehindBase", {
+	payload: DaemonPrCheckBranchBehindBaseRequestSchema,
+	success: DaemonPrCheckBranchBehindBaseResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrGetEffectiveBaseBranchRpc = Rpc.make("daemonPrGetEffectiveBaseBranch", {
+	payload: DaemonPrGetEffectiveBaseBranchRequestSchema,
+	success: DaemonPrGetEffectiveBaseBranchResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrMergeIssueIntoIssueRpc = Rpc.make("daemonPrMergeIssueIntoIssue", {
+	payload: DaemonPrMergeIssueIntoIssueRequestSchema,
+	success: DaemonPrMergeIssueIntoIssueResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
+export const DaemonPrGetTargetBranchRpc = Rpc.make("daemonPrGetTargetBranch", {
+	payload: DaemonPrGetTargetBranchRequestSchema,
+	success: DaemonPrGetTargetBranchResultSchema,
+	error: DaemonRpcActionErrorSchema,
+})
+
 export const DaemonPrRpcGroup = RpcGroup.make(
 	DaemonPrCreateRpc,
 	DaemonPrCleanupRpc,
@@ -680,6 +728,12 @@ export const DaemonPrRpcGroup = RpcGroup.make(
 	DaemonPrUpdateFromBaseRpc,
 	DaemonPrMergeBaseIntoBranchRpc,
 	DaemonPrAbortMergeRpc,
+	DaemonPrCheckMergeConflictsRpc,
+	DaemonPrCheckUncommittedChangesRpc,
+	DaemonPrCheckBranchBehindBaseRpc,
+	DaemonPrGetEffectiveBaseBranchRpc,
+	DaemonPrMergeIssueIntoIssueRpc,
+	DaemonPrGetTargetBranchRpc,
 )
 
 export const DaemonSpecRequirementRpcGroup = RpcGroup.make(

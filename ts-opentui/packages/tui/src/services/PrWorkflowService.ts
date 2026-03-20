@@ -44,6 +44,64 @@ export interface PrWorkflowApi {
 		readonly issueId: string
 		readonly projectPath: string
 	}) => Effect.Effect<void, PrWorkflowError>
+	readonly checkMergeConflicts: (options: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly hasConflictRisk: boolean
+			readonly conflictingFiles: ReadonlyArray<string>
+			readonly baseBranch: string
+			readonly issueBranch: string
+		},
+		PrWorkflowError
+	>
+	readonly checkUncommittedChanges: (options: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly hasUncommittedChanges: boolean
+			readonly changedFiles: ReadonlyArray<string>
+		},
+		PrWorkflowError
+	>
+	readonly checkBranchBehindBase: (options: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly behind: number
+			readonly ahead: number
+			readonly baseBranch: string
+		},
+		PrWorkflowError
+	>
+	readonly getEffectiveBaseBranchForIssue: (options: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly baseBranch: string
+			readonly parentEpicId: string | undefined
+		},
+		PrWorkflowError
+	>
+	readonly mergeIssueIntoIssue: (options: {
+		readonly sourceIssueId: string
+		readonly targetIssueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<void, PrWorkflowError>
+	readonly getTargetBranch: (
+		issueId: string,
+		projectPath: string,
+	) => Effect.Effect<
+		{
+			readonly targetBranch: string
+			readonly isEpicChild: boolean
+		},
+		PrWorkflowError
+	>
 	readonly checkGHCLI: () => Effect.Effect<boolean, PrWorkflowError>
 }
 
@@ -114,6 +172,82 @@ export class PrWorkflowService extends Effect.Service<PrWorkflowService>()("PrWo
 						projectPath,
 					})
 					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+			checkMergeConflicts: ({ issueId, projectPath }) =>
+				daemonRpcClient
+					.prCheckMergeConflicts({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((result) => ({
+							hasConflictRisk: result.hasConflictRisk,
+							conflictingFiles: result.conflictingFiles,
+							baseBranch: result.baseBranch,
+							issueBranch: result.issueBranch,
+						})),
+						Effect.mapError(mapRpcError),
+					),
+			checkUncommittedChanges: ({ issueId, projectPath }) =>
+				daemonRpcClient
+					.prCheckUncommittedChanges({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((result) => ({
+							hasUncommittedChanges: result.hasUncommittedChanges,
+							changedFiles: result.changedFiles,
+						})),
+						Effect.mapError(mapRpcError),
+					),
+			checkBranchBehindBase: ({ issueId, projectPath }) =>
+				daemonRpcClient
+					.prCheckBranchBehindBase({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((result) => ({
+							behind: result.behind,
+							ahead: result.ahead,
+							baseBranch: result.baseBranch,
+						})),
+						Effect.mapError(mapRpcError),
+					),
+			getEffectiveBaseBranchForIssue: ({ issueId, projectPath }) =>
+				daemonRpcClient
+					.prGetEffectiveBaseBranch({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((result) => ({
+							baseBranch: result.baseBranch,
+							parentEpicId: result.parentEpicId,
+						})),
+						Effect.mapError(mapRpcError),
+					),
+			mergeIssueIntoIssue: ({ sourceIssueId, targetIssueId, projectPath }) =>
+				daemonRpcClient
+					.prMergeIssueIntoIssue({
+						sourceIssueId,
+						targetIssueId,
+						projectPath,
+					})
+					.pipe(Effect.asVoid, Effect.mapError(mapRpcError)),
+			getTargetBranch: (issueId, projectPath) =>
+				daemonRpcClient
+					.prGetTargetBranch({
+						issueId,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((result) => ({
+							targetBranch: result.targetBranch,
+							isEpicChild: result.isEpicChild,
+						})),
+						Effect.mapError(mapRpcError),
+					),
 			checkGHCLI: () =>
 				daemonRpcClient.prCheckGhCli().pipe(
 					Effect.map((result) => result.available),

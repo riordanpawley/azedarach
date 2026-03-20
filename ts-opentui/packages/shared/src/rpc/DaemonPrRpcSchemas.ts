@@ -114,3 +114,114 @@ export const DaemonPrCheckGhCliResultSchema = Schema.Struct({
 	available: Schema.Boolean,
 })
 export type DaemonPrCheckGhCliResult = Schema.Schema.Type<typeof DaemonPrCheckGhCliResultSchema>
+
+export const DaemonPrCheckMergeConflictsRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrCheckMergeConflictsRequest = Schema.Schema.Type<
+	typeof DaemonPrCheckMergeConflictsRequestSchema
+>
+
+export const DaemonPrCheckMergeConflictsResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	hasConflictRisk: Schema.Boolean,
+	conflictingFiles: Schema.Array(Schema.String),
+	baseBranch: Schema.String,
+	issueBranch: Schema.String,
+})
+export type DaemonPrCheckMergeConflictsResult = Schema.Schema.Type<
+	typeof DaemonPrCheckMergeConflictsResultSchema
+>
+
+export const DaemonPrCheckUncommittedChangesRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrCheckUncommittedChangesRequest = Schema.Schema.Type<
+	typeof DaemonPrCheckUncommittedChangesRequestSchema
+>
+
+export const DaemonPrCheckUncommittedChangesResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	hasUncommittedChanges: Schema.Boolean,
+	changedFiles: Schema.Array(Schema.String),
+})
+export type DaemonPrCheckUncommittedChangesResult = Schema.Schema.Type<
+	typeof DaemonPrCheckUncommittedChangesResultSchema
+>
+
+export const DaemonPrCheckBranchBehindBaseRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrCheckBranchBehindBaseRequest = Schema.Schema.Type<
+	typeof DaemonPrCheckBranchBehindBaseRequestSchema
+>
+
+export const DaemonPrCheckBranchBehindBaseResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	behind: Schema.Number,
+	ahead: Schema.Number,
+	baseBranch: Schema.String,
+})
+export type DaemonPrCheckBranchBehindBaseResult = Schema.Schema.Type<
+	typeof DaemonPrCheckBranchBehindBaseResultSchema
+>
+
+export const DaemonPrGetEffectiveBaseBranchRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrGetEffectiveBaseBranchRequest = Schema.Schema.Type<
+	typeof DaemonPrGetEffectiveBaseBranchRequestSchema
+>
+
+export const DaemonPrGetEffectiveBaseBranchResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	baseBranch: Schema.String,
+	parentEpicId: Schema.optional(Schema.String),
+})
+export type DaemonPrGetEffectiveBaseBranchResult = Schema.Schema.Type<
+	typeof DaemonPrGetEffectiveBaseBranchResultSchema
+>
+
+export const DaemonPrMergeIssueIntoIssueRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	sourceIssueId: Schema.String,
+	targetIssueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrMergeIssueIntoIssueRequest = Schema.Schema.Type<
+	typeof DaemonPrMergeIssueIntoIssueRequestSchema
+>
+
+export const DaemonPrMergeIssueIntoIssueResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	merged: Schema.Literal(true),
+})
+export type DaemonPrMergeIssueIntoIssueResult = Schema.Schema.Type<
+	typeof DaemonPrMergeIssueIntoIssueResultSchema
+>
+
+export const DaemonPrGetTargetBranchRequestSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionRequestSchema,
+	issueId: Schema.String,
+	projectPath: Schema.String,
+})
+export type DaemonPrGetTargetBranchRequest = Schema.Schema.Type<
+	typeof DaemonPrGetTargetBranchRequestSchema
+>
+
+export const DaemonPrGetTargetBranchResultSchema = Schema.Struct({
+	rpcProtocolVersion: DaemonRpcProtocolVersionLiteralSchema,
+	targetBranch: Schema.String,
+	isEpicChild: Schema.Boolean,
+})
+export type DaemonPrGetTargetBranchResult = Schema.Schema.Type<
+	typeof DaemonPrGetTargetBranchResultSchema
+>

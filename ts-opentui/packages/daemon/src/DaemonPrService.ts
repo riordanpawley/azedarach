@@ -56,6 +56,64 @@ export interface DaemonPrServiceApi {
 		readonly issueId: string
 		readonly projectPath: string
 	}) => Effect.Effect<void, DaemonPrError>
+	readonly checkMergeConflicts: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly hasConflictRisk: boolean
+			readonly conflictingFiles: ReadonlyArray<string>
+			readonly baseBranch: string
+			readonly issueBranch: string
+		},
+		DaemonPrError
+	>
+	readonly checkUncommittedChanges: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly hasUncommittedChanges: boolean
+			readonly changedFiles: ReadonlyArray<string>
+		},
+		DaemonPrError
+	>
+	readonly checkBranchBehindBase: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly behind: number
+			readonly ahead: number
+			readonly baseBranch: string
+		},
+		DaemonPrError
+	>
+	readonly getEffectiveBaseBranch: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly baseBranch: string
+			readonly parentEpicId: string | undefined
+		},
+		DaemonPrError
+	>
+	readonly mergeIssueIntoIssue: (params: {
+		readonly sourceIssueId: string
+		readonly targetIssueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<void, DaemonPrError>
+	readonly getTargetBranch: (params: {
+		readonly issueId: string
+		readonly projectPath: string
+	}) => Effect.Effect<
+		{
+			readonly targetBranch: string
+			readonly isEpicChild: boolean
+		},
+		DaemonPrError
+	>
 	readonly checkGhCli: () => Effect.Effect<boolean, never>
 }
 
@@ -734,6 +792,158 @@ export class DaemonPrService extends Effect.Service<DaemonPrService>()("DaemonPr
 							mapCommandError(`Failed to abort merge for ${issueId}: ${error.message}`),
 						),
 					)
+				}),
+			checkMergeConflicts: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const issue = yield* resolveIssue(issueId, projectPath)
+					const worktreePath = yield* resolveIssueWorktreePath(issueId, projectPath)
+					const issueBranch = yield* getCurrentBranch(worktreePath)
+					const baseBranch = yield* resolveBaseBranch(issue, projectPath)
+					yield* maybeFetchBaseBranch(projectPath, baseBranch)
+
+					const mergeTreeExitCode = yield* exitCodeInDirectory(worktreePath, "git", [
+						"merge-tree",
+						"--write-tree",
+						baseBranch,
+						issueBranch,
+					])
+					const conflictingFiles =
+						mergeTreeExitCode === 0 ? [] : yield* listMergeConflictFiles(worktreePath, baseBranch)
+
+					return {
+						hasConflictRisk: mergeTreeExitCode !== 0,
+						conflictingFiles,
+						baseBranch,
+						issueBranch,
+					}
+				}),
+			checkUncommittedChanges: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const worktreePath = yield* resolveIssueWorktreePath(issueId, projectPath)
+					const statusOutput = yield* runInDirectory(worktreePath, "git", [
+						"status",
+						"--porcelain",
+					]).pipe(Effect.orElseSucceed(() => ""))
+					const changedFiles = statusOutput
+						.split("\n")
+						.map((line) => line.trim())
+						.filter((line) => line.length > 0)
+						.map((line) => line.slice(3))
+						.map((file) => {
+							const renameIndex = file.indexOf(" -> ")
+							return renameIndex >= 0 ? file.slice(renameIndex + 4).trim() : file.trim()
+						})
+						.filter((file) => file.length > 0)
+
+					return {
+						hasUncommittedChanges: changedFiles.length > 0,
+						changedFiles,
+					}
+				}),
+			checkBranchBehindBase: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const issue = yield* resolveIssue(issueId, projectPath)
+					const worktreePath = yield* resolveIssueWorktreePath(issueId, projectPath)
+					const baseBranch = yield* resolveBaseBranch(issue, projectPath)
+					yield* maybeFetchBaseBranch(projectPath, baseBranch)
+
+					const revListOutput = yield* runInDirectory(worktreePath, "git", [
+						"rev-list",
+						"--left-right",
+						"--count",
+						`${baseBranch}...HEAD`,
+					])
+					const counts = revListOutput.trim().split(/\s+/)
+					const behindCount = Number.parseInt(counts[0] ?? "0", 10)
+					const aheadCount = Number.parseInt(counts[1] ?? "0", 10)
+
+					return {
+						behind: Number.isNaN(behindCount) ? 0 : behindCount,
+						ahead: Number.isNaN(aheadCount) ? 0 : aheadCount,
+						baseBranch,
+					}
+				}),
+			getEffectiveBaseBranch: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const issue = yield* resolveIssue(issueId, projectPath)
+					const baseBranch = yield* resolveBaseBranch(issue, projectPath)
+					return {
+						baseBranch,
+						parentEpicId: readParentEpicId(issue),
+					}
+				}),
+			mergeIssueIntoIssue: ({ sourceIssueId, targetIssueId, projectPath }) =>
+				Effect.gen(function* () {
+					if (sourceIssueId === targetIssueId) {
+						return yield* Effect.fail(
+							mapValidationError("Cannot merge an issue branch into itself."),
+						)
+					}
+
+					const sourceIssue = yield* resolveIssue(sourceIssueId, projectPath)
+					const sourceWorktreePath = yield* resolveIssueWorktreePath(sourceIssueId, projectPath)
+					const sourceBranch = yield* getCurrentBranch(sourceWorktreePath)
+					const targetWorktreePath = yield* resolveIssueWorktreePath(targetIssueId, projectPath)
+					const targetBranch = yield* getCurrentBranch(targetWorktreePath)
+					const gitConfig = yield* appConfig
+						.getGitConfigForProjectPath(projectPath)
+						.pipe(Effect.mapError((error) => mapConfigError(error.message)))
+
+					yield* commitIfStaged(
+						sourceWorktreePath,
+						`Complete ${sourceIssueId}: ${sourceIssue.title}`,
+					)
+					yield* maybePushBranch(sourceWorktreePath, sourceBranch, gitConfig)
+
+					yield* failIfMergeConflict({
+						issueId: targetIssueId,
+						projectPath,
+						baseBranch: sourceBranch,
+						worktreePath: targetWorktreePath,
+						mergeCommitMessage: `Merge ${sourceIssueId} into ${targetIssueId}`,
+						retryHint: "Resolve them in the target session, then retry the merge operation.",
+					})
+
+					yield* runInDirectory(targetWorktreePath, "git", [
+						"merge",
+						"--no-ff",
+						sourceBranch,
+						"-m",
+						`Merge ${sourceIssueId} into ${targetIssueId}`,
+					]).pipe(
+						Effect.mapError((error) =>
+							mapCommandError(
+								`Failed to merge ${sourceIssueId} into ${targetIssueId}: ${error.message}`,
+							),
+						),
+					)
+
+					yield* runValidationCommands(targetWorktreePath)
+
+					if (gitConfig.pushEnabled) {
+						yield* runInDirectory(targetWorktreePath, "git", [
+							"push",
+							gitConfig.remote,
+							targetBranch,
+						]).pipe(Effect.catchAll(() => Effect.void))
+					}
+
+					yield* issues
+						.close(sourceIssueId, `Merged into ${targetIssueId}`, projectPath)
+						.pipe(Effect.mapError(mapTrackerError))
+					yield* issues.sync(projectPath).pipe(
+						Effect.mapError(mapTrackerError),
+						Effect.catchAll(() => Effect.void),
+					)
+				}),
+			getTargetBranch: ({ issueId, projectPath }) =>
+				Effect.gen(function* () {
+					const issue = yield* resolveIssue(issueId, projectPath)
+					const targetBranch = yield* resolveBaseBranch(issue, projectPath)
+					return {
+						targetBranch,
+						isEpicChild: readParentEpicId(issue) !== undefined,
+					}
 				}),
 			checkGhCli: () =>
 				exitCodeInDirectory(process.cwd(), "gh", ["auth", "status"]).pipe(
