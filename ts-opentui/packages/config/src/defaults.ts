@@ -145,6 +145,7 @@ export const DEFAULT_CONFIG = {
 		tmuxPrefix: "C-a",
 		dangerouslySkipPermissions: false,
 		backgroundTasks: [] satisfies string[],
+		maxSessions: 10,
 	},
 	patterns: {
 		waiting: [] satisfies string[],
@@ -299,6 +300,7 @@ export interface ResolvedConfig {
 		tmuxPrefix: string
 		dangerouslySkipPermissions: boolean
 		backgroundTasks: readonly string[]
+		maxSessions: number
 	}
 	patterns: {
 		waiting: readonly string[]
@@ -556,6 +558,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 				config.session?.dangerouslySkipPermissions ??
 				DEFAULT_CONFIG.session.dangerouslySkipPermissions,
 			backgroundTasks: config.session?.backgroundTasks ?? DEFAULT_CONFIG.session.backgroundTasks,
+			maxSessions: config.session?.maxSessions ?? DEFAULT_CONFIG.session.maxSessions,
 		},
 		git: {
 			pushBranchOnCreate: config.git?.pushBranchOnCreate ?? DEFAULT_CONFIG.git.pushBranchOnCreate,

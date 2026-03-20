@@ -146,6 +146,11 @@ import {
 	DaemonPlanningService,
 } from "./DaemonPlanningService.js"
 import {
+	DaemonSessionError,
+	DaemonSessionService,
+	type DaemonSessionServiceApi,
+} from "./DaemonSessionService.js"
+import {
 	ImplementationRegistryDaemonError,
 	ImplementationRegistryDaemonService,
 } from "./ImplementationRegistryDaemonService.js"
@@ -270,6 +275,7 @@ type DaemonRpcMappedError =
 	| BackendDaemonControlRestartConfigurationError
 	| ImplementationRegistryDaemonError
 	| DaemonPlanningError
+	| DaemonSessionError
 	| SpecDaemonError
 	| TrackerIssueDaemonError
 	| Error
@@ -352,6 +358,65 @@ const mapControlError = (action: string, error: DaemonRpcMappedError): DaemonRpc
 				return daemonRpcActionError({
 					action,
 					code: "issues-creation-failed",
+					message: error.message,
+				})
+		}
+	}
+
+	if (error instanceof DaemonSessionError) {
+		switch (error.reason) {
+			case "not-found":
+				return daemonRpcActionError({
+					action,
+					code: "not-found",
+					message: error.message,
+				})
+			case "invalid-state":
+				return daemonRpcActionError({
+					action,
+					code: "invalid-state",
+					message: error.message,
+				})
+			case "worktree-missing":
+				return daemonRpcActionError({
+					action,
+					code: "worktree-missing",
+					message: error.message,
+				})
+			case "session-limit":
+				return daemonRpcActionError({
+					action,
+					code: "session-limit",
+					message: error.message,
+				})
+			case "session-metadata":
+				return daemonRpcActionError({
+					action,
+					code: "session-metadata",
+					message: error.message,
+				})
+			case "tracker":
+				return daemonRpcActionError({
+					action,
+					code: "tracker",
+					message: error.message,
+				})
+			case "git":
+				return daemonRpcActionError({
+					action,
+					code: "git",
+					message: error.message,
+				})
+			case "tmux":
+				return daemonRpcActionError({
+					action,
+					code: "tmux",
+					message: error.message,
+				})
+			case "config":
+				return daemonRpcActionError({
+					action,
+					code: "config",
 					message: error.message,
 				})
 		}
@@ -464,6 +529,63 @@ const mapPlanningCreateIssuesResult = (
 	createdIssues: result.createdIssues,
 })
 
+const mapDaemonSessionMutationResult = (
+	session: BackendDaemonSessionSnapshot,
+): DaemonSessionMutationResult => ({
+	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+	capturedAtMs: Date.now(),
+	session: toDaemonSessionSnapshotEntry(session),
+})
+
+export const makeDaemonSessionStartRpcHandler =
+	(sessionService: Pick<DaemonSessionServiceApi, "start">) =>
+	(request: DaemonSessionStartRequest) =>
+		sessionService
+			.start({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(Effect.map(mapDaemonSessionMutationResult), catchDaemonRpcError("sessionStart"))
+
+export const makeDaemonSessionStopRpcHandler =
+	(sessionService: Pick<DaemonSessionServiceApi, "stop">) => (request: DaemonSessionStopRequest) =>
+		sessionService
+			.stop({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(Effect.map(mapDaemonSessionMutationResult), catchDaemonRpcError("sessionStop"))
+
+export const makeDaemonSessionPauseRpcHandler =
+	(sessionService: Pick<DaemonSessionServiceApi, "pause">) =>
+	(request: DaemonSessionPauseRequest) =>
+		sessionService
+			.pause({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(Effect.map(mapDaemonSessionMutationResult), catchDaemonRpcError("sessionPause"))
+
+export const makeDaemonSessionResumeRpcHandler =
+	(sessionService: Pick<DaemonSessionServiceApi, "resume">) =>
+	(request: DaemonSessionResumeRequest) =>
+		sessionService
+			.resume({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(Effect.map(mapDaemonSessionMutationResult), catchDaemonRpcError("sessionResume"))
+
+export const makeDaemonSessionRecoverRpcHandler =
+	(sessionService: Pick<DaemonSessionServiceApi, "recover">) =>
+	(request: DaemonSessionRecoverRequest) =>
+		sessionService
+			.recover({
+				issueId: request.issueId,
+				projectPath: request.projectPath,
+			})
+			.pipe(Effect.map(mapDaemonSessionMutationResult), catchDaemonRpcError("sessionRecover"))
+
 export const makeDaemonBoardReadModelRpcHandler =
 	(control: {
 		readonly boardReadModel: (
@@ -564,6 +686,7 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 	const runtime = yield* BackendDaemonService
 	const control = yield* BackendDaemonControlService
 	const sessionRecovery = yield* BackendDaemonSessionRecovery
+	const sessionService = yield* DaemonSessionService
 	const planning = yield* DaemonPlanningService
 	const implementations = yield* ImplementationRegistryDaemonService
 	const issues = yield* TrackerIssueDaemonService
@@ -614,16 +737,11 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 			),
 		daemonSessionSnapshot: makeDaemonSessionSnapshotRpcHandler(sessionRecovery),
 		daemonBoardReadModel: makeDaemonBoardReadModelRpcHandler(control),
-		daemonSessionStart: (_request: DaemonSessionStartRequest) =>
-			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionStart"),
-		daemonSessionStop: (_request: DaemonSessionStopRequest) =>
-			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionStop"),
-		daemonSessionPause: (_request: DaemonSessionPauseRequest) =>
-			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionPause"),
-		daemonSessionResume: (_request: DaemonSessionResumeRequest) =>
-			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionResume"),
-		daemonSessionRecover: (_request: DaemonSessionRecoverRequest) =>
-			unsupportedDaemonRpc<DaemonSessionMutationResult>("sessionRecover"),
+		daemonSessionStart: makeDaemonSessionStartRpcHandler(sessionService),
+		daemonSessionStop: makeDaemonSessionStopRpcHandler(sessionService),
+		daemonSessionPause: makeDaemonSessionPauseRpcHandler(sessionService),
+		daemonSessionResume: makeDaemonSessionResumeRpcHandler(sessionService),
+		daemonSessionRecover: makeDaemonSessionRecoverRpcHandler(sessionService),
 		daemonSessionUpdateState: makeDaemonSessionUpdateStateRpcHandler(sessionRecovery),
 		daemonPlanningGenerate: makeDaemonPlanningGenerateRpcHandler(planning),
 		daemonPlanningReview: makeDaemonPlanningReviewRpcHandler(planning),

@@ -8,6 +8,7 @@ import { BackendDaemonControlService } from "./BackendDaemonControlService.js"
 import { BackendDaemonService } from "./BackendDaemonService.js"
 import { BackendDaemonSessionRecovery } from "./BackendDaemonSessionRecovery.js"
 import { DaemonPlanningService } from "./DaemonPlanningService.js"
+import { DaemonSessionService } from "./DaemonSessionService.js"
 import { GlobalDaemonDiscovery, type GlobalDaemonLease } from "./GlobalDaemonDiscovery.js"
 import { GlobalDaemonRpcHandlersLive } from "./GlobalDaemonRpcHandlers.js"
 import { ImplementationRegistryDaemonService } from "./ImplementationRegistryDaemonService.js"
@@ -171,6 +172,7 @@ const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {
 		BackendDaemonControlService.Default,
 		BackendDaemonService.Default,
 		BackendDaemonSessionRecovery.Default,
+		DaemonSessionService.Default,
 		ImplementationRegistryDaemonService.Default,
 		SpecDaemonService.Default,
 		TrackerIssueDaemonService.Default,
