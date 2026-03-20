@@ -1,4 +1,8 @@
 import { Data, Effect } from "effect"
+import {
+	TrackerIssueDaemonService,
+	type TrackerIssueDaemonServiceApi,
+} from "./TrackerIssueDaemonService.js"
 
 export interface BackendFlushQueueOptions {
 	readonly hydrateRemote?: boolean
@@ -22,8 +26,23 @@ export interface BackendSyncResolverApi {
 export class BackendSyncResolver extends Effect.Service<BackendSyncResolver>()(
 	"BackendSyncResolver",
 	{
-		effect: Effect.succeed({
-			resolve: () => Effect.succeed(undefined),
-		} satisfies BackendSyncResolverApi),
+		dependencies: [TrackerIssueDaemonService.Default],
+		effect: Effect.gen(function* () {
+			const trackerIssues: TrackerIssueDaemonServiceApi = yield* TrackerIssueDaemonService
+			const runtime: BackendSyncRuntime = {
+				flushQueue: (projectPath) =>
+					trackerIssues.sync(projectPath).pipe(
+						Effect.mapError(
+							(error) =>
+								new BackendSyncRuntimeError({
+									message: error.message,
+								}),
+						),
+					),
+			}
+			return {
+				resolve: () => Effect.succeed(runtime),
+			} satisfies BackendSyncResolverApi
+		}),
 	},
 ) {}

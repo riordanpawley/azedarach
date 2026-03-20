@@ -1,4 +1,5 @@
 import { AppConfig } from "@azedarach/config"
+import { Command, CommandExecutor } from "@effect/platform"
 import { Duration, Effect, Ref, Schedule, SubscriptionRef } from "effect"
 import {
 	BackendDaemonBoardStore,
@@ -393,6 +394,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			const boardStore: BackendDaemonBoardStoreApi = yield* BackendDaemonBoardStore
 			const sessionRecovery: BackendDaemonSessionRecoveryApi = yield* BackendDaemonSessionRecovery
 			const appConfig = yield* AppConfig
+			const commandExecutor = yield* CommandExecutor.CommandExecutor
 			const recoveryInFlightRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 			const resolveDaemonProjectPaths = Effect.gen(function* () {
 				const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
@@ -486,13 +488,34 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 				const projectPaths = yield* resolveDaemonProjectPaths
 				for (const projectPath of projectPaths) {
 					const sessions = yield* sessionRecovery.listActive(projectPath)
-					const crashedIssueIds = Array.from(
-						new Set(
-							sessions
-								.filter((session) => session.state === "crashed")
-								.map((session) => session.issueId),
-						),
-					)
+					const crashedIssueIds = new Set<string>()
+					for (const session of sessions) {
+						const hasLiveTmuxSession = yield* commandExecutor
+							.exitCode(Command.make("tmux", "has-session", "-t", session.tmuxSessionName))
+							.pipe(
+								Effect.map((exitCode) => exitCode === 0),
+								Effect.orElseSucceed(() => false),
+							)
+						if (!hasLiveTmuxSession) {
+							crashedIssueIds.add(session.issueId)
+							if (session.state !== "crashed") {
+								yield* sessionRecovery
+									.updateState({
+										issueId: session.issueId,
+										state: "crashed",
+										projectPath,
+										tmuxSessionName: session.tmuxSessionName,
+										worktreePath: session.worktreePath,
+										startedAt: session.startedAt,
+									})
+									.pipe(Effect.catchAll(() => Effect.void))
+							}
+							continue
+						}
+						if (session.state === "crashed") {
+							crashedIssueIds.add(session.issueId)
+						}
+					}
 					for (const issueId of crashedIssueIds) {
 						yield* Effect.forkDaemon(recoverIssueFromDaemonWorker(issueId, projectPath))
 					}
