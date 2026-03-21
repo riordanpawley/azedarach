@@ -293,4 +293,32 @@ describe("TuiBoardStoreService", () => {
 		expect(tasks.map((task) => task.id)).toEqual(["az-fallback-1", "az-fallback-2"])
 		expect(tasks.map((task) => task.sessionState)).toEqual(["idle", "idle"])
 	})
+
+	it("falls back to issue list when board read model stream is empty", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: () => Stream.empty,
+			issueList: () =>
+				Effect.succeed({
+					rpcProtocolVersion: 2,
+					issues: [
+						makeIssue({ id: "az-empty-fallback-1", status: "open" }),
+						makeIssue({ id: "az-empty-fallback-2", status: "blocked" }),
+					],
+				}),
+		})
+
+		const tasks = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				yield* board.refresh()
+				return yield* SubscriptionRef.get(board.tasks)
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(tasks.map((task) => task.id)).toEqual(["az-empty-fallback-1", "az-empty-fallback-2"])
+	})
 })

@@ -366,16 +366,19 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 					yield* SubscriptionRef.set(currentProjectPath, projectPath)
 
 					const currentTasks = yield* SubscriptionRef.get(tasks)
-					const loadedTasks = yield* daemonRpcClient.boardReadModel({ projectPath }).pipe(
+					const streamedTasks = yield* daemonRpcClient.boardReadModel({ projectPath }).pipe(
 						Stream.map(toTaskFromDaemonBoardTask),
 						Stream.runCollect,
 						Effect.map((tasksChunk) => [...tasksChunk]),
-						Effect.catchAll(() =>
-							daemonRpcClient
-								.issueList({ projectPath })
-								.pipe(Effect.map((result) => result.issues.map(toTaskFromIssueListItem))),
-						),
+						Effect.catchAll(() => Effect.succeed([])),
 					)
+					const loadedTasks =
+						streamedTasks.length > 0
+							? streamedTasks
+							: yield* daemonRpcClient.issueList({ projectPath }).pipe(
+									Effect.map((result) => result.issues.map(toTaskFromIssueListItem)),
+									Effect.catchAll(() => Effect.succeed([])),
+								)
 					const graceExpiries = yield* Ref.get(localCreateGraceExpiries)
 					const { mergedTasks, nextLocalCreateGraceExpiries } =
 						mergeLoadedTasksWithLocalCreateGrace({
