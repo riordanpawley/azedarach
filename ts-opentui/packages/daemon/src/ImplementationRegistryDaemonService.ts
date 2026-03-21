@@ -354,17 +354,7 @@ export class ImplementationRegistryDaemonService extends Effect.Service<Implemen
 								),
 							),
 						)
-					const canonicalExists = yield* fs
-						.exists(storagePaths.canonicalDbPath)
-						.pipe(Effect.orElseSucceed(() => false))
-					const legacyExists = canonicalExists
-						? false
-						: yield* fs.exists(storagePaths.legacyDbPath).pipe(Effect.orElseSucceed(() => false))
-					return canonicalExists
-						? storagePaths.canonicalDbPath
-						: legacyExists
-							? storagePaths.legacyDbPath
-							: storagePaths.canonicalDbPath
+					return storagePaths.canonicalDbPath
 				})
 
 			const withDatabase = <A>(

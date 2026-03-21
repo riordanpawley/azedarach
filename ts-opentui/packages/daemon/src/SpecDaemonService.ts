@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { AppConfig, getProjectStoragePaths } from "@azedarach/config"
-import { Command, CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { LinearClient } from "@linear/sdk"
 import { Data, DateTime, Effect, Fiber, Ref, Schema } from "effect"
@@ -714,49 +714,15 @@ const ensureSpecSchema = (database: Database): void => {
 	)
 }
 
-const SqliteTableRowsSchema = Schema.Array(Schema.Struct({ name: Schema.String }))
-const SqliteCountRowsSchema = Schema.Array(Schema.Struct({ count: Schema.Number }))
-
 export class SpecDaemonService extends Effect.Service<SpecDaemonService>()("SpecDaemonService", {
 	dependencies: [BunContext.layer, AppConfig.Default],
 	effect: Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
-		const commandExecutor = yield* CommandExecutor.CommandExecutor
 		const pendingPublishFibers = yield* Ref.make(
 			new Map<string, Fiber.RuntimeFiber<void, SpecDaemonError>>(),
 		)
-
-		const runSqliteJson = <A, I>(
-			dbPath: string,
-			query: string,
-			schema: Schema.Schema<A, I>,
-		): Effect.Effect<A, SpecDaemonError> =>
-			commandExecutor.string(Command.make("sqlite3", "-json", dbPath, query)).pipe(
-				Effect.mapError(() => mapStorageError(`Failed to inspect sqlite database ${dbPath}`)),
-				Effect.flatMap((output) =>
-					Schema.decode(Schema.parseJson(schema))(output.trim().length === 0 ? "[]" : output).pipe(
-						Effect.mapError(() =>
-							mapStorageError(`Failed to parse sqlite inspection output for ${dbPath}`),
-						),
-					),
-				),
-			)
-
-		const dbHasSpecTables = (dbPath: string): Effect.Effect<boolean, SpecDaemonError> =>
-			runSqliteJson(
-				dbPath,
-				"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('spec_requirements','spec_issue_links');",
-				SqliteTableRowsSchema,
-			).pipe(Effect.map((rows) => rows.length === 2))
-
-		const readSpecContentCount = (dbPath: string): Effect.Effect<number, SpecDaemonError> =>
-			runSqliteJson(
-				dbPath,
-				"SELECT (SELECT COUNT(*) FROM spec_requirements WHERE deleted_at IS NULL) + (SELECT COUNT(*) FROM spec_issue_links WHERE deleted_at IS NULL) AS count;",
-				SqliteCountRowsSchema,
-			).pipe(Effect.map((rows) => rows[0]?.count ?? 0))
 
 		const resolveDbPath = (projectPath?: string) =>
 			Effect.gen(function* () {
@@ -771,48 +737,6 @@ export class SpecDaemonService extends Effect.Service<SpecDaemonService>()("Spec
 							),
 						),
 					)
-				const canonicalExists = yield* fs
-					.exists(storagePaths.canonicalDbPath)
-					.pipe(Effect.orElseSucceed(() => false))
-				const legacyExists = yield* fs
-					.exists(storagePaths.legacyDbPath)
-					.pipe(Effect.orElseSucceed(() => false))
-				if (!canonicalExists) {
-					return legacyExists ? storagePaths.legacyDbPath : storagePaths.canonicalDbPath
-				}
-
-				const canonicalHasSpecTables = yield* dbHasSpecTables(storagePaths.canonicalDbPath).pipe(
-					Effect.catchAll(() => Effect.succeed(false)),
-				)
-				const canonicalSpecContentCount = canonicalHasSpecTables
-					? yield* readSpecContentCount(storagePaths.canonicalDbPath).pipe(
-							Effect.catchAll(() => Effect.succeed(0)),
-						)
-					: 0
-				if (canonicalSpecContentCount > 0) {
-					return storagePaths.canonicalDbPath
-				}
-
-				if (!legacyExists) {
-					return storagePaths.canonicalDbPath
-				}
-
-				const legacyHasSpecTables = yield* dbHasSpecTables(storagePaths.legacyDbPath).pipe(
-					Effect.catchAll(() => Effect.succeed(false)),
-				)
-				const legacySpecContentCount = legacyHasSpecTables
-					? yield* readSpecContentCount(storagePaths.legacyDbPath).pipe(
-							Effect.catchAll(() => Effect.succeed(0)),
-						)
-					: 0
-				if (legacySpecContentCount > 0) {
-					return storagePaths.legacyDbPath
-				}
-
-				if (!canonicalHasSpecTables && legacyHasSpecTables) {
-					return storagePaths.legacyDbPath
-				}
-
 				return storagePaths.canonicalDbPath
 			})
 

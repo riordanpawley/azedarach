@@ -300,12 +300,7 @@ const resolveLocalIssueCount = (projectPath: string) =>
 		const fs = yield* FileSystem.FileSystem
 		const commandExecutor = yield* CommandExecutor.CommandExecutor
 		const storagePaths = getProjectStoragePaths(projectPath, pathService)
-		const legacyProjectDbPath = pathService.join(projectPath, ".azedarach", "issues.db")
-		const candidatePaths = [
-			legacyProjectDbPath,
-			storagePaths.canonicalDbPath,
-			storagePaths.legacyDbPath,
-		]
+		const candidatePaths = [storagePaths.canonicalDbPath]
 		let dbPath: string | undefined
 		for (const candidatePath of candidatePaths) {
 			const exists = yield* fs.exists(candidatePath).pipe(Effect.orElseSucceed(() => false))

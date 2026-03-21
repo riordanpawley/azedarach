@@ -9,7 +9,7 @@ import {
 	type TrackedIssue,
 	TrackedIssueSchema,
 } from "@azedarach/shared/rpc"
-import { Command, CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { Command, CommandExecutor, Path } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 
 /**
@@ -273,7 +273,6 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 		effect: Effect.gen(function* () {
 			const appConfig = yield* AppConfig
 			const commandExecutor = yield* CommandExecutor.CommandExecutor
-			const fs = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path
 
 			const getRuntimeConfig = (
@@ -404,52 +403,7 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 				Effect.gen(function* () {
 					const targetProjectPath = projectPath ?? process.cwd()
 					const storagePaths = getProjectStoragePaths(targetProjectPath, pathService)
-					const hasIssuesTable = (dbPath: string) =>
-						runSqliteJson(
-							dbPath,
-							"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'issues';",
-							Schema.Array(Schema.Struct({ name: Schema.String })),
-						).pipe(
-							Effect.map((rows) => rows.length > 0),
-							Effect.catchAll(() => Effect.succeed(false)),
-						)
-					const readIssueCount = (dbPath: string) =>
-						runSqliteJson(
-							dbPath,
-							"SELECT COUNT(*) AS count FROM issues WHERE deleted_at IS NULL;",
-							Schema.Array(Schema.Struct({ count: Schema.Number })),
-						).pipe(
-							Effect.map((rows) => rows[0]?.count ?? 0),
-							Effect.catchAll(() => Effect.succeed(0)),
-						)
-					const canonicalExists = yield* fs
-						.exists(storagePaths.canonicalDbPath)
-						.pipe(Effect.orElseSucceed(() => false))
-					const legacyExists = yield* fs
-						.exists(storagePaths.legacyDbPath)
-						.pipe(Effect.orElseSucceed(() => false))
-					const canonicalHasIssuesTable = canonicalExists
-						? yield* hasIssuesTable(storagePaths.canonicalDbPath)
-						: false
-					const legacyHasIssuesTable = legacyExists
-						? yield* hasIssuesTable(storagePaths.legacyDbPath)
-						: false
-					const canonicalIssueCount = canonicalHasIssuesTable
-						? yield* readIssueCount(storagePaths.canonicalDbPath)
-						: 0
-					const legacyIssueCount = legacyHasIssuesTable
-						? yield* readIssueCount(storagePaths.legacyDbPath)
-						: 0
-					const dbPath =
-						canonicalIssueCount > 0
-							? storagePaths.canonicalDbPath
-							: legacyIssueCount > 0
-								? storagePaths.legacyDbPath
-								: canonicalHasIssuesTable
-									? storagePaths.canonicalDbPath
-									: legacyHasIssuesTable
-										? storagePaths.legacyDbPath
-										: storagePaths.canonicalDbPath
+					const dbPath = storagePaths.canonicalDbPath
 					const issueRows = yield* runSqliteJson(
 						dbPath,
 						"SELECT id, title, description, status, priority, issue_type, created_at, updated_at, closed_at, assignee, labels_json, implementations_json, design, notes, acceptance, estimate FROM issues WHERE deleted_at IS NULL;",

@@ -2,7 +2,6 @@ import type { Path } from "@effect/platform"
 
 export const AZEDARACH_STORAGE_DIRECTORY = ".azedarach"
 export const AZEDARACH_DB_FILENAME = "azedarach.db"
-export const LEGACY_AZEDARACH_DB_FILENAME = "issues.db"
 export const AZEDARACH_CONFIG_FILENAME = "config.json"
 export const LEGACY_AZEDARACH_CONFIG_FILENAME = ".azedarach.json"
 export const AZEDARACH_CONFIG_SCHEMA_FILENAME = "config.schema.json"
@@ -16,7 +15,6 @@ type WorktreePathOps = Pick<Path.Path, "basename" | "dirname" | "normalize">
 export interface ProjectStoragePaths {
 	readonly storageDirectory: string
 	readonly canonicalDbPath: string
-	readonly legacyDbPath: string
 	readonly canonicalConfigPath: string
 	readonly legacyConfigPath: string
 	readonly canonicalConfigSchemaPath: string
@@ -32,7 +30,6 @@ export const getProjectStoragePaths = (
 	return {
 		storageDirectory,
 		canonicalDbPath: pathOps.join(storageDirectory, AZEDARACH_DB_FILENAME),
-		legacyDbPath: pathOps.join(storageDirectory, LEGACY_AZEDARACH_DB_FILENAME),
 		canonicalConfigPath: pathOps.join(storageDirectory, AZEDARACH_CONFIG_FILENAME),
 		legacyConfigPath: pathOps.join(projectPath, LEGACY_AZEDARACH_CONFIG_FILENAME),
 		canonicalConfigSchemaPath: pathOps.join(storageDirectory, AZEDARACH_CONFIG_SCHEMA_FILENAME),
