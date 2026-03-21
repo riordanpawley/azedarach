@@ -372,13 +372,51 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 						Effect.map((tasksChunk) => [...tasksChunk]),
 						Effect.catchAll(() => Effect.succeed([])),
 					)
+					const listedTasks = yield* daemonRpcClient
+						.issueList({
+							projectPath,
+							options: {
+								includeClosed: true,
+								sortBy: "updated_at",
+								sortDirection: "desc",
+								limit: 1000,
+							},
+						})
+						.pipe(
+							Effect.map((result) => result.issues.map(toTaskFromIssueListItem)),
+							Effect.catchAll(() => Effect.succeed([])),
+						)
+					const streamedById = new Map(streamedTasks.map((task) => [task.id, task] as const))
 					const loadedTasks =
-						streamedTasks.length > 0
-							? streamedTasks
-							: yield* daemonRpcClient.issueList({ projectPath }).pipe(
-									Effect.map((result) => result.issues.map(toTaskFromIssueListItem)),
-									Effect.catchAll(() => Effect.succeed([])),
-								)
+						listedTasks.length > 0
+							? listedTasks.map((listedTask) => {
+									const streamedTask = streamedById.get(listedTask.id)
+									if (streamedTask === undefined) {
+										return listedTask
+									}
+									return {
+										...listedTask,
+										sessionState: streamedTask.sessionState,
+										hasTmuxSession: streamedTask.hasTmuxSession,
+										hasWorktree: streamedTask.hasWorktree,
+										hasMergeConflict: streamedTask.hasMergeConflict,
+										hasDevServer: streamedTask.hasDevServer,
+										parentEpicId: streamedTask.parentEpicId,
+										gitBehindCount: streamedTask.gitBehindCount,
+										hasUncommittedChanges: streamedTask.hasUncommittedChanges,
+										gitAdditions: streamedTask.gitAdditions,
+										gitDeletions: streamedTask.gitDeletions,
+										sessionStartedAt: streamedTask.sessionStartedAt,
+										estimatedTokens: streamedTask.estimatedTokens,
+										recentOutput: streamedTask.recentOutput,
+										agentPhase: streamedTask.agentPhase,
+										hasPR: streamedTask.hasPR,
+										prUrl: streamedTask.prUrl,
+										prNumber: streamedTask.prNumber,
+										prState: streamedTask.prState,
+									} satisfies TaskWithSession
+								})
+							: streamedTasks
 					const graceExpiries = yield* Ref.get(localCreateGraceExpiries)
 					const { mergedTasks, nextLocalCreateGraceExpiries } =
 						mergeLoadedTasksWithLocalCreateGrace({

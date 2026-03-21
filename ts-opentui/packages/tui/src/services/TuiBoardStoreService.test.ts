@@ -76,7 +76,13 @@ const makeDaemonRpcClientStub = (options?: {
 	attachmentRemove: () => unexpectedDaemonRpcCall(),
 	attachmentMaterializePath: () => unexpectedDaemonRpcCall(),
 	issueGet: options?.issueGet ?? (() => unexpectedDaemonRpcCall()),
-	issueList: options?.issueList ?? (() => unexpectedDaemonRpcCall()),
+	issueList:
+		options?.issueList ??
+		(() =>
+			Effect.succeed({
+				rpcProtocolVersion: 2,
+				issues: [],
+			})),
 	issueCreate: () => unexpectedDaemonRpcCall(),
 	issueUpdate: () => unexpectedDaemonRpcCall(),
 	issueAddDependency: () => unexpectedDaemonRpcCall(),
@@ -320,5 +326,40 @@ describe("TuiBoardStoreService", () => {
 		)
 
 		expect(tasks.map((task) => task.id)).toEqual(["az-empty-fallback-1", "az-empty-fallback-2"])
+	})
+
+	it("uses issue list as baseline while preserving streamed session metadata", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: () =>
+				Stream.succeed(
+					makeBoardTask({
+						id: "az-merge-1",
+						status: "open",
+						sessionState: "busy",
+						hasTmuxSession: true,
+					}),
+				),
+			issueList: () =>
+				Effect.succeed({
+					rpcProtocolVersion: 2,
+					issues: [makeIssue({ id: "az-merge-1", status: "open" })],
+				}),
+		})
+
+		const tasks = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				yield* board.refresh()
+				return yield* SubscriptionRef.get(board.tasks)
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(tasks.map((task) => task.id)).toEqual(["az-merge-1"])
+		expect(tasks[0]?.sessionState).toBe("busy")
+		expect(tasks[0]?.hasTmuxSession).toBe(true)
 	})
 })
