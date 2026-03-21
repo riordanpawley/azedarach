@@ -1,6 +1,6 @@
 import { AppConfig } from "@azedarach/config"
 import type { CommandExecutor } from "@effect/platform"
-import { Effect, type Record, SubscriptionRef } from "effect"
+import { Cause, Effect, Queue, type Record, Stream, SubscriptionRef } from "effect"
 import {
 	deriveWaitingSessionOptions,
 	toWaitingSessionSourcesFromDaemonSnapshot,
@@ -80,6 +80,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const appConfig = yield* AppConfig
 			const taskHandlers = yield* TaskHandlersService
 			const sessionAdapter = yield* TuiSessionAdapterService
+			const backgroundActions = yield* Queue.unbounded<Effect.Effect<void>>()
+			yield* Effect.forkScoped(
+				Stream.fromQueue(backgroundActions).pipe(
+					Stream.runForEach((action) =>
+						action.pipe(
+							Effect.catchAllCause((cause) => Effect.logWarning(String(cause)).pipe(Effect.asVoid)),
+						),
+					),
+				),
+			)
+			const enqueueBackground = (action: Effect.Effect<void>) =>
+				Queue.offer(backgroundActions, action)
 
 			const switchToProject = (
 				projectName: string,
@@ -114,10 +126,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					}
 
 					yield* overlay.pop()
+					yield* Effect.logInfo(
+						`[project-switch] selected=${project.name} path=${project.path} before-board-switch`,
+					)
+					const { cacheHit, refreshFailed } = yield* board.switchToProject(
+						project.path,
+						Effect.void,
+					)
+					const taskCountAfterSwitch = (yield* board.getTasks()).length
+					yield* Effect.logInfo(
+						`[project-switch] selected=${project.name} path=${project.path} cacheHit=${String(cacheHit)} after-board-switch taskCount=${taskCountAfterSwitch}`,
+					)
 					yield* projectContext.switchProject(project.name)
-
-					const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
-					const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
 					yield* projectState.withPersistenceSuspended(
 						Effect.gen(function* () {
 							yield* projectState.restoreProjectState(project.path)
@@ -128,10 +148,15 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					)
 					yield* projectState.saveCurrentProjectState(project.path)
 
-					if (cacheHit) {
-						yield* toast.show("success", `Loaded: ${project.name}`)
+					if (refreshFailed) {
+						yield* toast.show("error", `Project switch refresh failed: ${project.name}`)
+					} else if (taskCountAfterSwitch > 0) {
+						yield* toast.show(
+							cacheHit ? "success" : "info",
+							`Loaded: ${project.name} (${taskCountAfterSwitch} tasks)`,
+						)
 					} else {
-						yield* toast.show("info", `Loading: ${project.name}...`)
+						yield* toast.show("warning", `Loaded: ${project.name} (0 tasks). Press r to refresh.`)
 					}
 
 					if (options?.openDetailTaskId !== undefined) {
@@ -527,7 +552,14 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project !== undefined) {
-								yield* switchToProject(project.name)
+								yield* enqueueBackground(
+									switchToProject(project.name).pipe(
+										Effect.asVoid,
+										Effect.catchAllCause((cause) =>
+											Effect.logWarning(String(cause)).pipe(Effect.asVoid),
+										),
+									),
+								)
 							}
 						} else {
 							yield* toast.show("error", `No project at position ${num}`)
@@ -567,10 +599,17 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return true
 						}
 
-						yield* switchToProject(waitingSession.projectName, {
-							focusTaskId: waitingSession.issueId,
-							openDetailTaskId: waitingSession.issueId,
-						})
+						yield* enqueueBackground(
+							switchToProject(waitingSession.projectName, {
+								focusTaskId: waitingSession.issueId,
+								openDetailTaskId: waitingSession.issueId,
+							}).pipe(
+								Effect.asVoid,
+								Effect.catchAllCause((cause) =>
+									Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid),
+								),
+							),
+						)
 						return true
 					}
 

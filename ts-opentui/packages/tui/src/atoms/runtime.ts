@@ -11,11 +11,16 @@ import {
 	AppConfigProjectContext,
 	type AppConfigProjectContextApi,
 } from "@azedarach/config"
-import { DaemonRpcClient, type DaemonRpcClientApi } from "@azedarach/shared/rpc"
+import {
+	DaemonRpcClient,
+	type DaemonRpcClientApi,
+	layerSocket as daemonRpcClientLayerSocket,
+} from "@azedarach/shared/rpc"
 import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
-import { Data, Effect, Layer, Logger, Stream } from "effect"
+import { Context, Data, Effect, Layer, Logger, Stream } from "effect"
+import { BoardRefreshDaemonRpcClient } from "../services/BoardRefreshDaemonRpcClient.js"
 import { ClockService } from "../services/ClockService.js"
 import { CommandQueueService } from "../services/CommandQueueService.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
@@ -59,9 +64,16 @@ class TuiDaemonRpcClientNotConfiguredError extends Data.TaggedError(
 }> {}
 
 let configuredTuiDaemonRpcClient: DaemonRpcClientApi | undefined
+let configuredTuiDaemonSocketUrl: string | undefined
 
-export const configureTuiDaemonRpcClient = (daemonRpcClient: DaemonRpcClientApi): void => {
+export const configureTuiDaemonRpcClient = (
+	daemonRpcClient: DaemonRpcClientApi,
+	options?: {
+		readonly socketUrl?: string
+	},
+): void => {
 	configuredTuiDaemonRpcClient = daemonRpcClient
+	configuredTuiDaemonSocketUrl = options?.socketUrl
 }
 
 export const resolveTuiRuntimeModeFromEnv = (
@@ -106,6 +118,27 @@ const daemonRpcClientLayer = Layer.effect(
 	}),
 )
 
+const boardRefreshDaemonRpcClientLayer = Layer.scoped(
+	BoardRefreshDaemonRpcClient,
+	Effect.gen(function* () {
+		const primaryDaemonRpcClient = configuredTuiDaemonRpcClient
+		if (primaryDaemonRpcClient === undefined) {
+			return yield* Effect.fail(
+				new TuiDaemonRpcClientNotConfiguredError({
+					message: "TUI daemon RPC client must be configured before launch",
+				}),
+			)
+		}
+		const socketUrl = configuredTuiDaemonSocketUrl
+		if (socketUrl === undefined) {
+			return primaryDaemonRpcClient
+		}
+		const scope = yield* Effect.scope
+		const context = yield* Layer.buildWithScope(scope)(daemonRpcClientLayerSocket(socketUrl))
+		return Context.get(context, DaemonRpcClient)
+	}),
+)
+
 const settingsLayer = SettingsService.Default.pipe(Layer.provide(appConfigProjectContextLayer))
 const imageAttachmentLayer = ImageAttachmentService.Default.pipe(
 	Layer.provideMerge(daemonRpcClientLayer),
@@ -115,6 +148,7 @@ const overlayLayer = OverlayService.Default.pipe(Layer.provideMerge(imageAttachm
 const tuiBoardStoreLayer = TuiBoardStoreService.Default.pipe(
 	Layer.provide(appConfigProjectContextLayer),
 	Layer.provideMerge(daemonRpcClientLayer),
+	Layer.provideMerge(boardRefreshDaemonRpcClientLayer),
 )
 const navigationLayer = NavigationService.Default.pipe(
 	Layer.provideMerge(tuiBoardStoreLayer),

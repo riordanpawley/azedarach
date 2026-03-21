@@ -289,8 +289,8 @@ export const activeSessionsCountAtom = Atom.readable((get) => {
 })
 
 export const totalTasksCountAtom = Atom.readable((get) => {
-	const allTasks = get(allTasksAtom)
-	return allTasks.length
+	const tasksResult = get(boardTasksAtom)
+	return Result.isSuccess(tasksResult) ? tasksResult.value.length : 0
 })
 
 export const maxVisibleTasksAtom = Atom.readable((get) => {

@@ -540,6 +540,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		 */
 		const loadConfigForPath = (
 			projectPath: string,
+			options?: { readonly allowCwdFallback?: boolean },
 		): Effect.Effect<
 			{ readonly config: ResolvedConfig; readonly loadedConfigPath: string | null },
 			ConfigParseError
@@ -574,21 +575,12 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					return { config: mergeWithDefaults(validated), loadedConfigPath: configPath }
 				}
 
+				const allowCwdFallback = options?.allowCwdFallback ?? true
 				const cwdPath = process.cwd()
 				const cwdStoragePaths = getProjectStoragePaths(cwdPath, pathService)
-				const cwdHasCanonicalConfig = yield* fs
-					.exists(cwdStoragePaths.canonicalConfigPath)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(false)),
-							),
-						),
-					)
-				const cwdHasLegacyConfig = cwdHasCanonicalConfig
-					? false
-					: yield* fs
-							.exists(cwdStoragePaths.legacyConfigPath)
+				const cwdHasCanonicalConfig = allowCwdFallback
+					? yield* fs
+							.exists(cwdStoragePaths.canonicalConfigPath)
 							.pipe(
 								Effect.catchAll((error) =>
 									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
@@ -596,6 +588,19 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 									),
 								),
 							)
+					: false
+				const cwdHasLegacyConfig =
+					allowCwdFallback && !cwdHasCanonicalConfig
+						? yield* fs
+								.exists(cwdStoragePaths.legacyConfigPath)
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.succeed(false)),
+										),
+									),
+								)
+						: false
 				const configBasePath = resolveConfigBasePath({
 					cwdPath,
 					projectPath,
@@ -774,7 +779,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getWorktreeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.worktree),
 			getGitConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git),
 			getGitConfigForProjectPath: (projectPath: string) =>
-				Effect.map(loadConfigForPath(projectPath), ({ config }) => config.git),
+				Effect.map(
+					loadConfigForPath(projectPath, { allowCwdFallback: false }),
+					({ config }) => config.git,
+				),
 			getSpecConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.spec),
 			getSessionConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.session),
 			getPatternsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.patterns),
@@ -789,12 +797,15 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					syncEnabled: getIssueBackendSyncEnabled(c),
 				})),
 			getIssueTrackerSyncConfigForProjectPath: (projectPath: string) =>
-				Effect.map(loadConfigForPath(projectPath), ({ config }) => ({
+				Effect.map(loadConfigForPath(projectPath, { allowCwdFallback: false }), ({ config }) => ({
 					issueTracker: config.issueTracker,
 					syncEnabled: getIssueBackendSyncEnabled(config),
 				})),
 			getSpecConfigForProjectPath: (projectPath: string) =>
-				Effect.map(loadConfigForPath(projectPath), ({ config }) => config.spec),
+				Effect.map(
+					loadConfigForPath(projectPath, { allowCwdFallback: false }),
+					({ config }) => config.spec,
+				),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
 			getKeyboardConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.keyboard),

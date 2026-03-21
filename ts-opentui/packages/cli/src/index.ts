@@ -56,6 +56,7 @@ import {
 	LogLevel,
 	Option,
 	Schema,
+	Stream,
 	SubscriptionRef,
 } from "effect"
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
@@ -2530,18 +2531,24 @@ const issueListHandler = (args: {
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: true,
 		})
-		const fetchIssues = (limit: number) =>
-			bootstrap.client.issueList({
+		const fetchIssues = (limit: number) => {
+			const request = {
 				projectPath,
 				filters: hasFilters ? filters : undefined,
 				options: {
 					limit,
-					sortBy: "updated_at",
-					sortDirection: "desc",
+					sortBy: "updated_at" as const,
+					sortDirection: "desc" as const,
 				},
-			})
+			}
+			return bootstrap.client.issueListStream === undefined
+				? bootstrap.client.issueList(request).pipe(Effect.map((response) => response.issues))
+				: bootstrap.client.issueListStream(request).pipe(
+						Stream.runCollect,
+						Effect.map((issues) => Array.from(issues)),
+					)
+		}
 		const issues = yield* fetchIssues(effectiveLimit).pipe(
-			Effect.map((response) => response.issues),
 			Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
 		)
 

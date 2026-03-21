@@ -46,6 +46,7 @@ import type {
 	DaemonIssueSyncResultEnvelope,
 	DaemonIssueUpdateRequest,
 	DaemonIssueUpdateResult,
+	TrackedIssue,
 } from "./DaemonIssueRpcSchemas.js"
 import type {
 	DaemonPlanningCreateIssuesRequest,
@@ -289,6 +290,9 @@ export interface DaemonRpcClientApi {
 	readonly issueList: (
 		request?: Omit<DaemonIssueListRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonIssueListResult, DaemonRpcClientError>
+	readonly issueListStream: (
+		request?: Omit<DaemonIssueListRequest, "rpcProtocolVersion">,
+	) => Stream.Stream<TrackedIssue, DaemonRpcClientError>
 	readonly issueCreate: (
 		request: Omit<DaemonIssueCreateRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonIssueCreateResult, DaemonRpcClientError>
@@ -600,6 +604,12 @@ const makeDaemonRpcClient = Effect.gen(function* () {
 			}),
 		issueList: (request) =>
 			raw.daemonIssueList(
+				request === undefined
+					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
+					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },
+			),
+		issueListStream: (request) =>
+			raw.daemonIssueListStream(
 				request === undefined
 					? { rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION }
 					: { ...request, rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION },

@@ -1381,6 +1381,12 @@ export const makeGlobalDaemonRpcHandlers = Effect.gen(function* () {
 				),
 				catchDaemonRpcError("issueList"),
 			),
+		daemonIssueListStream: (request: DaemonIssueListRequest) =>
+			issues.list(request.filters, request.projectPath, request.options).pipe(
+				Effect.map((issuesList) => Stream.fromIterable(issuesList)),
+				catchDaemonRpcError("issueListStream"),
+				Stream.unwrap,
+			),
 		daemonIssueCreate: (request: DaemonIssueCreateRequest) =>
 			issues.create(request.input, request.projectPath).pipe(
 				Effect.map(

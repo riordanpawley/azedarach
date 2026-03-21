@@ -4,10 +4,23 @@ import {
 	DaemonRpcClient,
 	type DaemonRpcClientError,
 } from "@azedarach/shared/rpc"
-import { Array as Arr, Cause, DateTime, Effect, Order, Ref, Stream, SubscriptionRef } from "effect"
+import {
+	Array as Arr,
+	Cause,
+	DateTime,
+	Deferred,
+	Effect,
+	Option,
+	Order,
+	Queue,
+	Ref,
+	Stream,
+	SubscriptionRef,
+} from "effect"
 import type { Issue } from "../contracts.js"
 import type { ColumnStatus, TaskWithSession } from "../types.js"
 import { COLUMNS, parsePRInfo } from "../types.js"
+import { BoardRefreshDaemonRpcClient } from "./BoardRefreshDaemonRpcClient.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 
 const LOCAL_CREATE_VISIBILITY_GRACE_MS = 15_000
@@ -61,7 +74,7 @@ export interface TuiBoardStoreServiceApi {
 	readonly switchToProject: <E>(
 		newProjectPath: string,
 		onRefreshComplete: Effect.Effect<void, E, never>,
-	) => Effect.Effect<{ readonly cacheHit: boolean }>
+	) => Effect.Effect<{ readonly cacheHit: boolean; readonly refreshFailed: boolean }>
 }
 
 const emptyTasksByColumn = (): TasksByColumn => ({
@@ -320,6 +333,9 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 		dependencies: [EditorService.Default],
 		scoped: Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
+			const boardRefreshRpcClient = yield* Effect.serviceOption(BoardRefreshDaemonRpcClient).pipe(
+				Effect.map((client) => Option.getOrElse(client, () => daemonRpcClient)),
+			)
 			const projectContext = yield* AppConfigProjectContext
 			const editorService = yield* EditorService
 			const serviceScope = yield* Effect.scope
@@ -335,6 +351,10 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 			const visibleTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set())
 			const localCreateGraceExpiries = yield* Ref.make<ReadonlyMap<string, number>>(new Map())
 			const boardCache = yield* Ref.make<ReadonlyMap<string, readonly TaskWithSession[]>>(new Map())
+			const switchRefreshQueue = yield* Queue.unbounded<{
+				readonly projectPath: string
+				readonly done: Deferred.Deferred<{ readonly refreshFailed: boolean }>
+			}>()
 
 			const updateFilteredTasks = () =>
 				Effect.gen(function* () {
@@ -358,34 +378,77 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 
 			const refreshForProjectPath = (projectPath: string) =>
 				Effect.gen(function* () {
-					if (daemonRpcClient.boardReadModel === undefined) {
-						return
-					}
-
 					yield* SubscriptionRef.set(isLoading, true)
-					yield* SubscriptionRef.set(currentProjectPath, projectPath)
 
 					const currentTasks = yield* SubscriptionRef.get(tasks)
-					const streamedTasks = yield* daemonRpcClient.boardReadModel({ projectPath }).pipe(
+					const loadStreamedTasks = boardRefreshRpcClient.boardReadModel({ projectPath }).pipe(
 						Stream.map(toTaskFromDaemonBoardTask),
 						Stream.runCollect,
-						Effect.map((tasksChunk) => [...tasksChunk]),
-						Effect.catchAll(() => Effect.succeed([])),
+						Effect.map((chunks) => Array.from(chunks)),
+						Effect.catchAllCause(() => Effect.succeed([])),
 					)
-					const listedTasks = yield* daemonRpcClient
-						.issueList({
-							projectPath,
-							options: {
-								includeClosed: true,
-								sortBy: "updated_at",
-								sortDirection: "desc",
-								limit: 1000,
-							},
-						})
-						.pipe(
-							Effect.map((result) => result.issues.map(toTaskFromIssueListItem)),
-							Effect.catchAll(() => Effect.succeed([])),
-						)
+					let streamedTasks = yield* loadStreamedTasks
+					if (streamedTasks.length === 0) {
+						yield* Effect.sleep("150 millis")
+						streamedTasks = yield* loadStreamedTasks
+					}
+					const toIssueListTasks = (result: {
+						readonly issues: ReadonlyArray<Issue>
+					}): ReadonlyArray<TaskWithSession> => result.issues.map(toTaskFromIssueListItem)
+					const listViaDaemon = (request: {
+						readonly projectPath: string
+						readonly options?: {
+							readonly includeClosed?: boolean
+							readonly sortBy?: "updated_at" | "created_at"
+							readonly sortDirection?: "asc" | "desc"
+							readonly limit?: number
+						}
+					}) =>
+						boardRefreshRpcClient.issueListStream === undefined
+							? boardRefreshRpcClient.issueList(request).pipe(Effect.map(toIssueListTasks))
+							: boardRefreshRpcClient.issueListStream(request).pipe(
+									Stream.map(toTaskFromIssueListItem),
+									Stream.runCollect,
+									Effect.map((chunks) => Array.from(chunks)),
+								)
+					const listWithOptions = listViaDaemon({
+						projectPath,
+						options: {
+							includeClosed: true,
+							sortBy: "updated_at",
+							sortDirection: "desc",
+							limit: 1000,
+						},
+					}).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(
+								`[board-refresh] issueList(options) project=${projectPath} cause=${Cause.pretty(cause)}`,
+							).pipe(Effect.zipRight(Effect.succeed([]))),
+						),
+					)
+					const listWithoutOptions = listViaDaemon({ projectPath }).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(
+								`[board-refresh] issueList(default) project=${projectPath} cause=${Cause.pretty(cause)}`,
+							).pipe(Effect.zipRight(Effect.succeed([]))),
+						),
+					)
+					const listedTasks =
+						streamedTasks.length > 0
+							? yield* listWithOptions.pipe(
+									Effect.flatMap((tasksFromOptions) =>
+										tasksFromOptions.length > 0
+											? Effect.succeed(tasksFromOptions)
+											: listWithoutOptions,
+									),
+								)
+							: yield* listWithoutOptions.pipe(
+									Effect.flatMap((tasksFromDefaultQuery) =>
+										tasksFromDefaultQuery.length > 0
+											? Effect.succeed(tasksFromDefaultQuery)
+											: listWithOptions,
+									),
+								)
 					const streamedById = new Map(streamedTasks.map((task) => [task.id, task] as const))
 					const loadedTasks =
 						listedTasks.length > 0
@@ -417,6 +480,9 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 									} satisfies TaskWithSession
 								})
 							: streamedTasks
+					yield* Effect.logInfo(
+						`[board-refresh] project=${projectPath} streamed=${streamedTasks.length} listed=${listedTasks.length} loaded=${loadedTasks.length}`,
+					)
 					const graceExpiries = yield* Ref.get(localCreateGraceExpiries)
 					const { mergedTasks, nextLocalCreateGraceExpiries } =
 						mergeLoadedTasksWithLocalCreateGrace({
@@ -427,6 +493,9 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 						})
 					yield* Ref.set(localCreateGraceExpiries, nextLocalCreateGraceExpiries)
 					yield* replaceTasks(mergedTasks)
+					yield* Effect.logInfo(
+						`[board-refresh] project=${projectPath} merged=${mergedTasks.length}`,
+					)
 				}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
 			const removeTaskFromMutation = (taskId: string) =>
@@ -558,10 +627,53 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 					yield* replaceTasks([])
 				})
 
+			const runProjectSwitchRefresh = (projectPath: string) =>
+				Effect.gen(function* () {
+					let refreshFailed = false
+					const refreshOnce = refreshForProjectPath(projectPath).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(Cause.pretty(cause)).pipe(
+								Effect.tap(() =>
+									Effect.sync(() => {
+										if (!Cause.isInterruptedOnly(cause)) {
+											refreshFailed = true
+										}
+									}),
+								),
+								Effect.asVoid,
+							),
+						),
+					)
+					const maxRefreshAttempts = 5
+					for (let attempt = 0; attempt < maxRefreshAttempts; attempt += 1) {
+						if (attempt > 0) {
+							yield* Effect.sleep("500 millis")
+						}
+						yield* refreshOnce
+						const refreshedTaskCount = (yield* SubscriptionRef.get(tasks)).length
+						if (refreshedTaskCount > 0) {
+							break
+						}
+					}
+					return { refreshFailed } as const
+				})
+
+			yield* Effect.forkScoped(
+				Stream.fromQueue(switchRefreshQueue).pipe(
+					Stream.runForEach((request) =>
+						runProjectSwitchRefresh(request.projectPath).pipe(
+							Effect.flatMap((result) => Deferred.succeed(request.done, result)),
+							Effect.catchAllCause((cause) => Deferred.failCause(request.done, cause)),
+						),
+					),
+				),
+			)
+
 			const refresh = () =>
 				Effect.gen(function* () {
 					const activeProjectPath = yield* SubscriptionRef.get(currentProjectPath)
 					const projectPath = yield* resolveProjectPath(activeProjectPath, projectContext)
+					yield* SubscriptionRef.set(currentProjectPath, projectPath)
 					yield* refreshForProjectPath(projectPath)
 				})
 
@@ -611,15 +723,28 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 						yield* clearBoard()
 					}
 
-					yield* refreshForProjectPath(newProjectPath).pipe(
-						Effect.zipRight(onRefreshComplete),
+					const done = yield* Deferred.make<{ readonly refreshFailed: boolean }>()
+					yield* Queue.offer(switchRefreshQueue, {
+						projectPath: newProjectPath,
+						done,
+					})
+					const { refreshFailed } = yield* Deferred.await(done).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(Cause.pretty(cause)).pipe(
+								Effect.as({
+									refreshFailed: true,
+								} as const),
+							),
+						),
+					)
+
+					yield* onRefreshComplete.pipe(
 						Effect.catchAllCause((cause) =>
 							Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid),
 						),
-						Effect.forkIn(serviceScope),
 					)
 
-					return { cacheHit }
+					return { cacheHit, refreshFailed }
 				})
 
 			const editorChanges = Stream.merge(
@@ -638,6 +763,7 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 			)
 
 			const initialProjectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+			yield* SubscriptionRef.set(currentProjectPath, initialProjectPath)
 			yield* refreshForProjectPath(initialProjectPath).pipe(
 				Effect.catchAllCause((cause) => Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid)),
 			)

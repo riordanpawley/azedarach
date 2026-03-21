@@ -362,4 +362,36 @@ describe("TuiBoardStoreService", () => {
 		expect(tasks[0]?.sessionState).toBe("busy")
 		expect(tasks[0]?.hasTmuxSession).toBe(true)
 	})
+
+	it("retries switch refresh when the first load for a project is empty", async () => {
+		let switchProjectLoadAttempts = 0
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: ({ projectPath }) => {
+				if (projectPath !== "/tmp/project-b") {
+					return Stream.succeed(makeBoardTask({ id: "az-a", status: "open" }))
+				}
+				switchProjectLoadAttempts += 1
+				if (switchProjectLoadAttempts === 1) {
+					return Stream.empty
+				}
+				return Stream.succeed(makeBoardTask({ id: "az-b", status: "open" }))
+			},
+		})
+
+		const result = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				yield* board.switchToProject("/tmp/project-b", Effect.void)
+				const switchedTasks = yield* board.getTasks()
+				return switchedTasks
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(switchProjectLoadAttempts).toBe(2)
+		expect(result.map((task) => task.id)).toEqual(["az-b"])
+	})
 })

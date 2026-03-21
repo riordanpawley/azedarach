@@ -43,6 +43,7 @@ import {
 	DaemonIssueSyncResultEnvelopeSchema,
 	DaemonIssueUpdateRequestSchema,
 	DaemonIssueUpdateResultSchema,
+	TrackedIssueSchema,
 } from "./DaemonIssueRpcSchemas.js"
 import {
 	DaemonPlanningCreateIssuesRequestSchema,
@@ -352,6 +353,13 @@ export const DaemonIssueListRpc = Rpc.make("daemonIssueList", {
 	error: DaemonRpcActionErrorSchema,
 })
 
+export const DaemonIssueListStreamRpc = Rpc.make("daemonIssueListStream", {
+	payload: DaemonIssueListRequestSchema,
+	success: TrackedIssueSchema,
+	error: DaemonRpcActionErrorSchema,
+	stream: true,
+})
+
 export const DaemonIssueCreateRpc = Rpc.make("daemonIssueCreate", {
 	payload: DaemonIssueCreateRequestSchema,
 	success: DaemonIssueCreateResultSchema,
@@ -595,6 +603,7 @@ export const DaemonAttachmentRpcGroup = RpcGroup.make(
 export const DaemonIssueRpcGroup = RpcGroup.make(
 	DaemonIssueGetRpc,
 	DaemonIssueListRpc,
+	DaemonIssueListStreamRpc,
 	DaemonIssueCreateRpc,
 	DaemonIssueUpdateRpc,
 	DaemonIssueAddDependencyRpc,

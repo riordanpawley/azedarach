@@ -38,7 +38,7 @@ export const runAz = (argv: ReadonlyArray<string>) => {
 			const bootstrap = yield* daemonBootstrap.bootstrapDaemonRpcClient({
 				autoStart: true,
 			})
-			configureTuiDaemonRpcClient(bootstrap.client)
+			configureTuiDaemonRpcClient(bootstrap.client, { socketUrl: bootstrap.socketUrl })
 			return yield* Effect.promise(() => launchTUI())
 		})
 	}

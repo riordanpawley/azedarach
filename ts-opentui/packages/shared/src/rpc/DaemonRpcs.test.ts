@@ -145,6 +145,7 @@ describe("DaemonRpcs", () => {
 			"daemonIssueDelete",
 			"daemonIssueGet",
 			"daemonIssueList",
+			"daemonIssueListStream",
 			"daemonIssueRemoveDependency",
 			"daemonIssueSync",
 			"daemonIssueUpdate",
