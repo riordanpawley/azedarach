@@ -286,6 +286,12 @@ const resolveBaseWorktreePath = (startPath: string) =>
 		}
 	})
 
+const resolveProjectBasePath = (projectDir: Option.Option<string>) =>
+	Effect.gen(function* () {
+		const inputPath = Option.getOrElse(projectDir, () => process.cwd())
+		return yield* resolveBaseWorktreePath(inputPath)
+	})
+
 const LocalIssueCountRowsSchema = Schema.Array(Schema.Struct({ count: Schema.Number }))
 
 const resolveLocalIssueCount = (projectPath: string) =>
@@ -2409,17 +2415,15 @@ const issueGetHandler = (args: {
 	readonly maxWaitMs: Option.Option<number>
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		if (args.verbose) {
 			yield* Console.error(`Loading issue: ${issueId}`)
-			yield* Console.error(`Project: ${explicitProjectDir ?? resolverCwd}`)
+			yield* Console.error(`Project: ${projectPath}`)
 		}
 
-		yield* validateIssueTrackerStore(resolverCwd)
+		yield* validateIssueTrackerStore(projectPath)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: true,
 		})
@@ -3963,10 +3967,9 @@ const specReqListHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 		const parsedKind = yield* parseSpecRequirementKindOption(args.kind)
 		const viewMode = yield* parseSpecRequirementViewMode(args.view)
 		const query = Option.getOrUndefined(args.query)?.trim()
@@ -4039,11 +4042,10 @@ const specReadHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 		const viewMode = yield* parseSpecRequirementViewMode(args.view)
 
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 		const [snapshot, publishConfig, lastOutcome] = yield* Effect.all([
 			readSpecViaDaemon(projectPath),
 			getSpecPublishConfigViaDaemon(projectPath),
@@ -4126,11 +4128,9 @@ const specLintHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
-		const projectPath = explicitProjectDir ?? resolverCwd
 		const lintResult = yield* lintSpecViaDaemon(projectPath)
 
 		if (args.json) {
@@ -4171,10 +4171,9 @@ const specSyncHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 		const target = yield* parseSpecSyncTarget(args.target)
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
 
 		if (args.check && target !== "md") {
 			return yield* Effect.fail(
@@ -4267,10 +4266,9 @@ const specReqGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
 			optionValue: args.requirementRefOption,
@@ -4347,10 +4345,9 @@ const specReqCreateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
 			optionValue: args.requirementRefOption,
@@ -4458,10 +4455,9 @@ const specReqUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
 			optionValue: args.requirementRefOption,
@@ -4547,10 +4543,9 @@ const specReqDeleteHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
 			optionValue: args.requirementRefOption,
@@ -4604,15 +4599,14 @@ const specLinkListHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const issueId = yield* Option.match(args.issueId, {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
 			onSome: (value) =>
-				resolveCliIssueId(value, resolverCwd).pipe(Effect.map((resolved) => resolved)),
+				resolveCliIssueId(value, projectPath).pipe(Effect.map((resolved) => resolved)),
 		})
 		const requirementLookup = yield* Option.match(args.requirementRef, {
 			onNone: () =>
@@ -4694,10 +4688,9 @@ const specLinkAddHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
 			positional: args.issueId,
@@ -4711,7 +4704,7 @@ const specLinkAddHandler = (args: {
 			positionalName: "requirement-ref",
 			optionName: "--req",
 		})
-		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
+		const issueId = yield* resolveCliIssueId(mergedIssueId, projectPath)
 		const lookup = yield* resolveSpecRequirementLookupInput({
 			reference: mergedRequirementRef,
 			id: args.requirementId,
@@ -4817,10 +4810,9 @@ const specLinkRemoveHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
 			positional: args.issueId,
@@ -4834,7 +4826,7 @@ const specLinkRemoveHandler = (args: {
 			positionalName: "requirement-ref",
 			optionName: "--req",
 		})
-		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
+		const issueId = yield* resolveCliIssueId(mergedIssueId, projectPath)
 		const lookup = yield* resolveSpecRequirementLookupInput({
 			reference: mergedRequirementRef,
 			id: args.requirementId,
@@ -4875,11 +4867,9 @@ const specParityHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
 		const implementation = yield* resolveParityImplementationForCli(args.implementation, registry)
@@ -4918,10 +4908,9 @@ const specLinkUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
 			positional: args.issueId,
@@ -4935,7 +4924,7 @@ const specLinkUpdateHandler = (args: {
 			positionalName: "requirement-ref",
 			optionName: "--req",
 		})
-		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
+		const issueId = yield* resolveCliIssueId(mergedIssueId, projectPath)
 		const lookup = yield* resolveSpecRequirementLookupInput({
 			reference: mergedRequirementRef,
 			id: args.requirementId,
@@ -5041,10 +5030,9 @@ const specPublishConfigGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const config = yield* getSpecPublishConfigViaDaemon(projectPath)
 		const lastOutcome = yield* getSpecPublishOutcomeViaDaemon(projectPath)
@@ -5086,10 +5074,9 @@ const specPublishConfigSetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = Option.getOrUndefined(args.projectDir) ?? resolverCwd
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* ensureSpecEnabled(projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const current = yield* getSpecPublishConfigViaDaemon(projectPath)
 
