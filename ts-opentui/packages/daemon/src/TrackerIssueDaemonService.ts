@@ -17,7 +17,7 @@ import { Data, Effect, Schema } from "effect"
  * Note: this is not the runtime read source-of-truth selector for board/list/get.
  * Daemon/TUI/CLI reads remain sqlite-local; issueSyncBackend controls sync flows.
  */
-type IssueBackendMode = "tracker" | "legacy" | "local" | "linear"
+type IssueSyncBackendOption = "tracker" | "legacy" | "local" | "linear"
 
 const LegacySyncResultSchema = Schema.Struct({
 	pushed: Schema.Number,
@@ -89,7 +89,7 @@ export interface TrackerIssueDaemonServiceApi {
 
 const resolveConfiguredIssueBackend = (
 	issueTracker: ResolvedConfig["issueTracker"],
-): IssueBackendMode => {
+): IssueSyncBackendOption => {
 	// Keep legacy shape compatibility while separating read behavior from issueSyncBackend.
 	if ("tracker" in issueTracker) return "tracker"
 	if ("legacy" in issueTracker) return "legacy"
