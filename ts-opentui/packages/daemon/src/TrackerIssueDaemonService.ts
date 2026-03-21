@@ -225,6 +225,10 @@ const parseJsonStringArray = (value: string | null): ReadonlyArray<string> => {
 	}
 }
 
+const escapeSqlString = (value: string): string => value.replaceAll("'", "''")
+
+const sqlStringLiteral = (value: string): string => `'${escapeSqlString(value)}'`
+
 const sortIssuesInMemory = (
 	issues: ReadonlyArray<TrackedIssue>,
 	sortBy: "updated_at" | "created_at",
@@ -392,6 +396,21 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					Effect.flatMap((output) =>
 						decodeJson(schema, output.trim().length === 0 ? "[]" : output),
 					),
+				)
+
+			const runSqliteExec = (
+				dbPath: string,
+				query: string,
+			): Effect.Effect<void, TrackerIssueDaemonError> =>
+				commandExecutor.string(Command.make("sqlite3", dbPath, query)).pipe(
+					Effect.mapError(
+						(error) =>
+							new TrackerIssueDaemonError({
+								reason: "command-failed",
+								message: "stderr" in error ? String(error.stderr) : String(error),
+							}),
+					),
+					Effect.asVoid,
 				)
 
 			const listFromLocalSqlite = (
@@ -621,6 +640,86 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					}),
 				update: (issueId, patch, projectPath) =>
 					Effect.gen(function* () {
+						const { issueTracker } = yield* getRuntimeConfig(projectPath)
+						const backend = resolveConfiguredIssueBackend(issueTracker)
+						if (backend === "local" || backend === "linear") {
+							if (patch.parent !== undefined) {
+								return yield* Effect.fail(
+									new TrackerIssueDaemonError({
+										reason: "unsupported-field",
+										message: "Issue parent updates are not supported via daemon local backend yet.",
+									}),
+								)
+							}
+
+							const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined, false)
+							const existing = issues.find((candidate) => candidate.id === issueId)
+							if (existing === undefined || existing.status === "tombstone") {
+								return yield* Effect.fail(
+									new TrackerIssueDaemonError({
+										reason: "not-found",
+										message: `Issue not found: ${issueId}`,
+									}),
+								)
+							}
+
+							const targetProjectPath = projectPath ?? process.cwd()
+							const storagePaths = getProjectStoragePaths(targetProjectPath, pathService)
+							const dbPath = storagePaths.canonicalDbPath
+							const nowIso = new Date().toISOString()
+							const updates: Array<string> = [`updated_at = ${sqlStringLiteral(nowIso)}`]
+
+							if (patch.status !== undefined) {
+								updates.push(`status = ${sqlStringLiteral(patch.status)}`)
+								updates.push(
+									`closed_at = ${patch.status === "closed" ? sqlStringLiteral(nowIso) : "NULL"}`,
+								)
+							}
+							if (patch.notes !== undefined) {
+								updates.push(`notes = ${sqlStringLiteral(patch.notes)}`)
+							}
+							if (patch.priority !== undefined) {
+								updates.push(`priority = ${String(patch.priority)}`)
+							}
+							if (patch.title !== undefined) {
+								updates.push(`title = ${sqlStringLiteral(patch.title)}`)
+							}
+							if (patch.type !== undefined) {
+								updates.push(`issue_type = ${sqlStringLiteral(patch.type)}`)
+							}
+							if (patch.description !== undefined) {
+								updates.push(`description = ${sqlStringLiteral(patch.description)}`)
+							}
+							if (patch.design !== undefined) {
+								updates.push(`design = ${sqlStringLiteral(patch.design)}`)
+							}
+							if (patch.acceptance !== undefined) {
+								updates.push(`acceptance = ${sqlStringLiteral(patch.acceptance)}`)
+							}
+							if (patch.assignee !== undefined) {
+								updates.push(`assignee = ${sqlStringLiteral(patch.assignee)}`)
+							}
+							if (patch.estimate !== undefined) {
+								updates.push(`estimate = ${String(patch.estimate)}`)
+							}
+							if (patch.labels !== undefined) {
+								updates.push(`labels_json = ${sqlStringLiteral(JSON.stringify(patch.labels))}`)
+							}
+							if (patch.implementations !== undefined) {
+								updates.push(
+									`implementations_json = ${sqlStringLiteral(
+										JSON.stringify(patch.implementations),
+									)}`,
+								)
+							}
+
+							yield* runSqliteExec(
+								dbPath,
+								`UPDATE issues SET ${updates.join(", ")} WHERE id = ${sqlStringLiteral(issueId)} AND deleted_at IS NULL;`,
+							)
+							return
+						}
+
 						yield* rejectUnsupportedImplementations(patch.implementations)
 						const { executable } = yield* resolveExecutable(projectPath)
 						const args = ["update", issueId]

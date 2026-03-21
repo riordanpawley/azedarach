@@ -2933,11 +2933,9 @@ const issueUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const labels = Option.match(args.labels, {
 			onNone: () => undefined,
@@ -2950,7 +2948,7 @@ const issueUpdateHandler = (args: {
 
 		const resolvedParent = yield* Option.match(args.parent, {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
-			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, projectPath),
 		})
 
 		const notes = Option.getOrUndefined(args.notes)
