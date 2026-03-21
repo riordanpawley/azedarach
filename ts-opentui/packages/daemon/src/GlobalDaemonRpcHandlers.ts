@@ -14,7 +14,6 @@ import {
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
 	type DaemonBoardReadModelRequest,
-	type DaemonBoardReadModelResult,
 	type DaemonControlStatusResult,
 	type DaemonDevServerListRequest,
 	type DaemonDevServerListResult,
@@ -154,7 +153,7 @@ import {
 	type DaemonStopRequest,
 	type ImageAttachment,
 } from "@azedarach/shared/rpc"
-import { DateTime, Effect, Layer } from "effect"
+import { DateTime, Effect, Layer, Stream } from "effect"
 import {
 	type BackendDaemonControlBoardReadModelRequest,
 	type BackendDaemonControlBoardReadModelResult,
@@ -720,21 +719,14 @@ export const makeDaemonBoardReadModelRpcHandler =
 		) => Effect.Effect<BackendDaemonControlBoardReadModelResult, DaemonRpcMappedError>
 	}) =>
 	(request: DaemonBoardReadModelRequest) =>
-		control
-			.boardReadModel({
+		Stream.fromEffect(
+			control.boardReadModel({
 				projectPath: request.projectPath,
-			})
-			.pipe(
-				Effect.map(
-					(result): DaemonBoardReadModelResult => ({
-						rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-						capturedAtMs: result.capturedAtMs,
-						projectPath: result.projectPath,
-						tasks: result.tasks,
-					}),
-				),
-				catchDaemonRpcError("boardReadModel"),
-			)
+			}),
+		).pipe(
+			Stream.mapError((error) => mapControlError("boardReadModel", error)),
+			Stream.flatMap((result) => Stream.fromIterable(result.tasks)),
+		)
 
 const toDaemonSessionSnapshotEntry = (
 	session: BackendDaemonSessionSnapshot,

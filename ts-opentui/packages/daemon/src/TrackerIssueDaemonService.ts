@@ -12,6 +12,11 @@ import {
 import { Command, CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 
+/**
+ * Configured sync-provider mode from issueTracker config.
+ * Note: this is not the runtime read source-of-truth selector for board/list/get.
+ * Daemon/TUI/CLI reads remain sqlite-local; provider mode controls sync flows.
+ */
 type IssueBackendMode = "tracker" | "legacy" | "local" | "linear"
 
 const LegacySyncResultSchema = Schema.Struct({
@@ -85,6 +90,7 @@ export interface TrackerIssueDaemonServiceApi {
 const resolveConfiguredIssueBackend = (
 	issueTracker: ResolvedConfig["issueTracker"],
 ): IssueBackendMode => {
+	// Keep legacy shape compatibility while separating read behavior from sync-provider mode.
 	if ("tracker" in issueTracker) return "tracker"
 	if ("legacy" in issueTracker) return "legacy"
 	if ("linear" in issueTracker) return "linear"
@@ -393,6 +399,7 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 				filters: IssueListFilters | undefined,
 				projectPath: string | undefined,
 				options: IssueListOptions | undefined,
+				compactPayload: boolean,
 			): Effect.Effect<ReadonlyArray<TrackedIssue>, TrackerIssueDaemonError> =>
 				Effect.gen(function* () {
 					const targetProjectPath = projectPath ?? process.cwd()
@@ -469,10 +476,12 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					const issues = issueRows.map((row): TrackedIssue => {
 						const dependencies = dependenciesByIssueId.get(row.id) ?? []
 						const dependents = dependentsByIssueId.get(row.id) ?? []
+						const compactDependencies = compactPayload ? undefined : dependencies
+						const compactDependents = compactPayload ? undefined : dependents
 						return {
 							id: row.id,
 							title: row.title,
-							description: row.description ?? undefined,
+							description: compactPayload ? undefined : (row.description ?? undefined),
 							status: toIssueStatus(row.status),
 							priority: row.priority,
 							issue_type: toIssueType(row.issue_type),
@@ -481,13 +490,13 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 							closed_at: row.closed_at,
 							assignee: row.assignee,
 							labels: [...parseJsonStringArray(row.labels_json)],
-							design: row.design ?? undefined,
-							notes: row.notes ?? undefined,
-							acceptance: row.acceptance ?? undefined,
+							design: compactPayload ? undefined : (row.design ?? undefined),
+							notes: compactPayload ? undefined : (row.notes ?? undefined),
+							acceptance: compactPayload ? undefined : (row.acceptance ?? undefined),
 							estimate: row.estimate ?? undefined,
 							implementations: [...parseJsonStringArray(row.implementations_json)],
-							dependencies,
-							dependents,
+							dependencies: compactDependencies,
+							dependents: compactDependents,
 							dependency_count: dependencies.length,
 							dependent_count: dependents.length,
 						}
@@ -555,8 +564,9 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 				get: (issueId, projectPath) =>
 					Effect.gen(function* () {
 						const { issueTracker } = yield* getRuntimeConfig(projectPath)
-						if (resolveConfiguredIssueBackend(issueTracker) === "local") {
-							const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined)
+						const backend = resolveConfiguredIssueBackend(issueTracker)
+						if (backend === "local" || backend === "linear") {
+							const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined, false)
 							const issue = issues.find((candidate) => candidate.id === issueId)
 							if (issue === undefined || issue.status === "tombstone") {
 								return yield* Effect.fail(
@@ -586,8 +596,9 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					Effect.gen(function* () {
 						yield* rejectUnsupportedImplementations(filters?.implementations)
 						const { issueTracker } = yield* getRuntimeConfig(projectPath)
-						if (resolveConfiguredIssueBackend(issueTracker) === "local") {
-							return yield* listFromLocalSqlite(filters, projectPath, options)
+						const backend = resolveConfiguredIssueBackend(issueTracker)
+						if (backend === "local" || backend === "linear") {
+							return yield* listFromLocalSqlite(filters, projectPath, options, true)
 						}
 						const { executable } = yield* resolveExecutable(projectPath)
 						const output = yield* runJson(executable, buildListArgs(filters, options), projectPath)

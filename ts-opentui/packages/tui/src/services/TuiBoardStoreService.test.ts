@@ -1,12 +1,12 @@
 import { describe, expect, it } from "bun:test"
 import { AppConfigProjectContext, type AppConfigProjectContextApi } from "@azedarach/config"
 import {
-	DAEMON_RPC_PROTOCOL_VERSION,
-	type DaemonBoardReadModelResult,
+	type DaemonBoardTask,
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
 } from "@azedarach/shared/rpc"
+import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Effect, Layer, type Scope, Stream, SubscriptionRef } from "effect"
 import type { Issue } from "../contracts.js"
 import { DEFAULT_FILTER_CONFIG, DEFAULT_SORT_CONFIG } from "./EditorService.js"
@@ -15,7 +15,7 @@ import { TuiBoardStoreService } from "./TuiBoardStoreService.js"
 const unexpectedDaemonRpcCall = <A>(): Effect.Effect<A, DaemonRpcClientError> =>
 	Effect.dieMessage("Unexpected daemon rpc call in TuiBoardStoreService test")
 
-const makeBoardTask = (overrides: Partial<DaemonBoardReadModelResult["tasks"][number]> = {}) => ({
+const makeBoardTask = (overrides: Partial<DaemonBoardTask> = {}): DaemonBoardTask => ({
 	id: "az-1",
 	title: "Task one",
 	status: "open" as const,
@@ -43,6 +43,7 @@ const makeIssue = (overrides: Partial<Issue> = {}): Issue => ({
 const makeDaemonRpcClientStub = (options?: {
 	readonly boardReadModel?: DaemonRpcClientApi["boardReadModel"]
 	readonly issueGet?: DaemonRpcClientApi["issueGet"]
+	readonly issueList?: DaemonRpcClientApi["issueList"]
 }): DaemonRpcClientApi => ({
 	status: () => unexpectedDaemonRpcCall(),
 	health: () => unexpectedDaemonRpcCall(),
@@ -75,7 +76,7 @@ const makeDaemonRpcClientStub = (options?: {
 	attachmentRemove: () => unexpectedDaemonRpcCall(),
 	attachmentMaterializePath: () => unexpectedDaemonRpcCall(),
 	issueGet: options?.issueGet ?? (() => unexpectedDaemonRpcCall()),
-	issueList: () => unexpectedDaemonRpcCall(),
+	issueList: options?.issueList ?? (() => unexpectedDaemonRpcCall()),
 	issueCreate: () => unexpectedDaemonRpcCall(),
 	issueUpdate: () => unexpectedDaemonRpcCall(),
 	issueAddDependency: () => unexpectedDaemonRpcCall(),
@@ -120,16 +121,6 @@ const makeDaemonRpcClientStub = (options?: {
 	specPublish: () => unexpectedDaemonRpcCall(),
 })
 
-const makeBoardReadModelResult = (
-	projectPath: string,
-	tasks: ReadonlyArray<DaemonBoardReadModelResult["tasks"][number]>,
-): DaemonBoardReadModelResult => ({
-	rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-	capturedAtMs: Date.now(),
-	projectPath,
-	tasks: [...tasks],
-})
-
 const makeProjectContext = (projectPath: string): AppConfigProjectContextApi => ({
 	getCurrentPath: () => Effect.succeed(projectPath),
 	currentProjectPathChanges: Stream.empty,
@@ -158,8 +149,8 @@ const runWithBoardStore = <A, E>(
 describe("TuiBoardStoreService", () => {
 	it("retains optimistic locally created tasks across a refresh grace window", async () => {
 		const daemonRpcClient = makeDaemonRpcClientStub({
-			boardReadModel: ({ projectPath }) =>
-				Effect.succeed(makeBoardReadModelResult(projectPath, [makeBoardTask({ id: "az-1" })])),
+			boardReadModel: ({ projectPath: _projectPath }) =>
+				Stream.succeed(makeBoardTask({ id: "az-1" })),
 		})
 
 		const tasks = await runWithBoardStore(
@@ -181,10 +172,10 @@ describe("TuiBoardStoreService", () => {
 	it("loads cached project data immediately when switching back to a prior project", async () => {
 		const daemonRpcClient = makeDaemonRpcClientStub({
 			boardReadModel: ({ projectPath }) =>
-				Effect.succeed(
+				Stream.fromIterable(
 					projectPath === "/tmp/project-a"
-						? makeBoardReadModelResult(projectPath, [makeBoardTask({ id: "az-a" })])
-						: makeBoardReadModelResult(projectPath, [makeBoardTask({ id: "az-b" })]),
+						? [makeBoardTask({ id: "az-a" })]
+						: [makeBoardTask({ id: "az-b" })],
 				),
 		})
 
@@ -209,13 +200,11 @@ describe("TuiBoardStoreService", () => {
 
 	it("exposes keyboard compatibility read/update APIs", async () => {
 		const daemonRpcClient = makeDaemonRpcClientStub({
-			boardReadModel: ({ projectPath }) =>
-				Effect.succeed(
-					makeBoardReadModelResult(projectPath, [
-						makeBoardTask({ id: "az-open", status: "open" }),
-						makeBoardTask({ id: "az-blocked", status: "blocked" }),
-					]),
-				),
+			boardReadModel: ({ projectPath: _projectPath }) =>
+				Stream.fromIterable([
+					makeBoardTask({ id: "az-open", status: "open" }),
+					makeBoardTask({ id: "az-blocked", status: "blocked" }),
+				]),
 		})
 
 		const result = await runWithBoardStore(
@@ -244,5 +233,64 @@ describe("TuiBoardStoreService", () => {
 		expect(result.filtered[0]?.length).toBe(0)
 		expect(result.filtered[2]?.length).toBe(0)
 		expect(result.filtered[3]?.length).toBe(0)
+	})
+
+	it("hydrates board tasks from streamed daemon chunks", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: () =>
+				Stream.concat(
+					Stream.succeed(makeBoardTask({ id: "az-stream-1", status: "open" })),
+					Stream.succeed(makeBoardTask({ id: "az-stream-2", status: "blocked" })),
+				),
+		})
+
+		const tasks = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				yield* board.refresh()
+				return yield* SubscriptionRef.get(board.tasks)
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(tasks.map((task) => task.id)).toEqual(["az-stream-1", "az-stream-2"])
+	})
+
+	it("falls back to issue list when board read model fails", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: () =>
+				Stream.fail(
+					new RpcClientError({
+						reason: "Protocol",
+						message: "decode",
+					}),
+				),
+			issueList: () =>
+				Effect.succeed({
+					rpcProtocolVersion: 2,
+					issues: [
+						makeIssue({ id: "az-fallback-1", status: "open" }),
+						makeIssue({ id: "az-fallback-2", status: "in_progress" }),
+					],
+				}),
+		})
+
+		const tasks = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				yield* board.refresh()
+				return yield* SubscriptionRef.get(board.tasks)
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(tasks.map((task) => task.id)).toEqual(["az-fallback-1", "az-fallback-2"])
+		expect(tasks.map((task) => task.sessionState)).toEqual(["idle", "idle"])
 	})
 })

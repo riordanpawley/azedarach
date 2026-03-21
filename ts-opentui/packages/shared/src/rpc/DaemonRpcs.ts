@@ -86,7 +86,7 @@ import {
 	DaemonAttachReconnectResultSchema,
 	DaemonAttachRequestSchema,
 	DaemonBoardReadModelRequestSchema,
-	DaemonBoardReadModelResultSchema,
+	DaemonBoardTaskSchema,
 	DaemonControlStatusResultSchema,
 	DaemonDevServerListRequestSchema,
 	DaemonDevServerListResultSchema,
@@ -221,8 +221,9 @@ export const DaemonSessionSnapshotRpc = Rpc.make("daemonSessionSnapshot", {
 
 export const DaemonBoardReadModelRpc = Rpc.make("daemonBoardReadModel", {
 	payload: DaemonBoardReadModelRequestSchema,
-	success: DaemonBoardReadModelResultSchema,
+	success: DaemonBoardTaskSchema,
 	error: DaemonRpcActionErrorSchema,
+	stream: true,
 })
 
 export const DaemonSessionStartRpc = Rpc.make("daemonSessionStart", {

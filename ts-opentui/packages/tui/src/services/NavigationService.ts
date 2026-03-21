@@ -614,6 +614,14 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					}
 
 					const restored = yield* loadPersistedDrillDownState(state.drillDownEpicId)
+					if (restored.childIds.size === 0) {
+						yield* SubscriptionRef.set(drillDownEpic, null)
+						yield* SubscriptionRef.set(drillDownChildIds, EMPTY_CHILD_IDS)
+						yield* SubscriptionRef.set(drillDownChildDetails, EMPTY_CHILD_DETAILS)
+						yield* SubscriptionRef.set(savedFocusedTaskId, null)
+						yield* SubscriptionRef.set(focusedTaskId, state.focusedTaskId)
+						return
+					}
 					yield* SubscriptionRef.set(drillDownChildIds, restored.childIds)
 					yield* SubscriptionRef.set(drillDownChildDetails, restored.childDetails)
 					yield* SubscriptionRef.set(drillDownEpic, state.drillDownEpicId)

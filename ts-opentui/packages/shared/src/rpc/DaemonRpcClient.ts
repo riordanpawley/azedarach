@@ -2,7 +2,7 @@ import * as BunSocket from "@effect/platform-bun/BunSocket"
 import * as RpcClient from "@effect/rpc/RpcClient"
 import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import * as RpcSerialization from "@effect/rpc/RpcSerialization"
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, type Stream } from "effect"
 import type {
 	DaemonAttachmentAttachClipboardRequest,
 	DaemonAttachmentAttachFileRequest,
@@ -90,7 +90,7 @@ import {
 	type DaemonAttachReconnectResult,
 	type DaemonAttachRequest,
 	type DaemonBoardReadModelRequest,
-	type DaemonBoardReadModelResult,
+	type DaemonBoardTask,
 	type DaemonControlStatusResult,
 	type DaemonDevServerListRequest,
 	type DaemonDevServerListResult,
@@ -225,7 +225,7 @@ export interface DaemonRpcClientApi {
 	) => Effect.Effect<DaemonSessionSnapshotResult, DaemonRpcClientError>
 	readonly boardReadModel?: (
 		request: Omit<DaemonBoardReadModelRequest, "rpcProtocolVersion">,
-	) => Effect.Effect<DaemonBoardReadModelResult, DaemonRpcClientError>
+	) => Stream.Stream<DaemonBoardTask, DaemonRpcClientError>
 	readonly sessionStart?: (
 		request: Omit<DaemonSessionStartRequest, "rpcProtocolVersion">,
 	) => Effect.Effect<DaemonSessionMutationResult, DaemonRpcClientError>
@@ -881,7 +881,7 @@ export const layerSocket = (url: string) =>
 						path: resolveUnixSocketPath(url),
 					}),
 				),
-				Layer.provideMerge(RpcSerialization.layerJson),
+				Layer.provideMerge(RpcSerialization.layerNdjson),
 			),
 		),
 	)

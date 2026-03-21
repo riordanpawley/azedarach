@@ -4,7 +4,7 @@ import {
 	type DaemonBoardTask,
 	type ImageAttachment,
 } from "@azedarach/shared/rpc"
-import { Effect } from "effect"
+import { Effect, Stream } from "effect"
 import type { BackendDaemonSessionSnapshot } from "./BackendDaemonSessionRecovery.js"
 import { DaemonAttachmentError } from "./DaemonAttachmentService.js"
 import { DaemonPrError } from "./DaemonPrService.js"
@@ -80,15 +80,10 @@ describe("makeDaemonBoardReadModelRpcHandler", () => {
 			handler({
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				projectPath: "/tmp/project",
-			}),
+			}).pipe(Stream.runCollect),
 		)
 
-		expect(result).toEqual({
-			rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-			capturedAtMs: 123,
-			projectPath: "/tmp/project",
-			tasks: [task],
-		})
+		expect([...result]).toEqual([task])
 	})
 
 	it("maps board read model failures into daemon rpc action errors", async () => {
@@ -100,7 +95,7 @@ describe("makeDaemonBoardReadModelRpcHandler", () => {
 			handler({
 				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
 				projectPath: "/tmp/project",
-			}),
+			}).pipe(Stream.runCollect),
 		)
 
 		expect(exit._tag).toBe("Failure")

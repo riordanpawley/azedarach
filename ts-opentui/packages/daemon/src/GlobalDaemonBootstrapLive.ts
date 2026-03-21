@@ -119,9 +119,16 @@ export const GlobalDaemonBootstrapLive = Layer.scoped(
 				)
 			})
 
-		const buildDaemonRpcClient = (socketUrl: string): Effect.Effect<DaemonRpcClientApi> =>
+		const buildDaemonRpcClient = (socketUrl: string) =>
 			Layer.buildWithScope(bootstrapScope)(layerSocket(socketUrl)).pipe(
 				Effect.map((context) => Context.get(context, DaemonRpcClient)),
+				Effect.mapError(
+					(error) =>
+						new GlobalDaemonBootstrapError({
+							message: `Failed to establish daemon RPC client at ${socketUrl}: ${String(error)}`,
+							reason: "rpc-transport",
+						}),
+				),
 			)
 
 		const bootstrapDaemonRpcClient: GlobalDaemonBootstrapApi["bootstrapDaemonRpcClient"] = (

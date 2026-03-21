@@ -33,9 +33,18 @@ const makeBackendDaemonBoardStore = (params: {
 	listBoardTasks: (projectPath) =>
 		Effect.gen(function* () {
 			const [issues, activeSessions, devServerList] = yield* Effect.all([
-				params.trackerIssues.list(undefined, projectPath),
-				params.sessionRecovery.listActive(projectPath),
-				params.devServers.list({ projectPath }),
+				params.trackerIssues.list(undefined, projectPath, {
+					sortBy: "updated_at",
+					sortDirection: "desc",
+				}),
+				params.sessionRecovery
+					.listActive(projectPath)
+					.pipe(Effect.catchAllCause(() => Effect.succeed([]))),
+				params.devServers
+					.list({ projectPath })
+					.pipe(
+						Effect.catchAllCause(() => Effect.succeed({ capturedAtMs: Date.now(), servers: [] })),
+					),
 			])
 
 			const sessionsByIssueId = new Map(

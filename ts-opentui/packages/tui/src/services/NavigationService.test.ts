@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test"
 import { AppConfigProjectContext, type AppConfigProjectContextApi } from "@azedarach/config"
 import {
 	DAEMON_RPC_PROTOCOL_VERSION,
-	type DaemonBoardReadModelResult,
+	type DaemonBoardTask,
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
@@ -96,9 +96,7 @@ const makeDaemonRpcClientStub = (options: {
 	specPublish: () => unexpectedDaemonRpcCall(),
 })
 
-const makeBoardTask = (
-	overrides: Partial<DaemonBoardReadModelResult["tasks"][number]> = {},
-): DaemonBoardReadModelResult["tasks"][number] => ({
+const makeBoardTask = (overrides: Partial<DaemonBoardTask> = {}): DaemonBoardTask => ({
 	id: "AZ-1",
 	title: "Task 1",
 	status: "open",
@@ -139,13 +137,7 @@ const makeLayer = (daemonRpcClient: DaemonRpcClientApi) => {
 describe("NavigationService", () => {
 	it("initializes focus from the board store", async () => {
 		const daemonRpcClient = makeDaemonRpcClientStub({
-			boardReadModel: () =>
-				Effect.succeed({
-					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-					capturedAtMs: 1,
-					projectPath: "/tmp/project",
-					tasks: [makeBoardTask()],
-				}),
+			boardReadModel: () => Stream.succeed(makeBoardTask()),
 			issueList: () =>
 				Effect.succeed({
 					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
@@ -170,23 +162,18 @@ describe("NavigationService", () => {
 	it("restores drill-down child details from daemon issue list", async () => {
 		const daemonRpcClient = makeDaemonRpcClientStub({
 			boardReadModel: () =>
-				Effect.succeed({
-					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
-					capturedAtMs: 1,
-					projectPath: "/tmp/project",
-					tasks: [
-						makeBoardTask({
-							id: "AZ-EPIC-1",
-							title: "Epic",
-							issue_type: "epic",
-						}),
-						makeBoardTask({
-							id: "AZ-2",
-							title: "Child",
-							parentEpicId: "AZ-EPIC-1",
-						}),
-					],
-				}),
+				Stream.fromIterable([
+					makeBoardTask({
+						id: "AZ-EPIC-1",
+						title: "Epic",
+						issue_type: "epic",
+					}),
+					makeBoardTask({
+						id: "AZ-2",
+						title: "Child",
+						parentEpicId: "AZ-EPIC-1",
+					}),
+				]),
 			issueList: () =>
 				Effect.succeed({
 					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
@@ -223,5 +210,42 @@ describe("NavigationService", () => {
 		const result = await Effect.runPromise(effect.pipe(Effect.provide(makeLayer(daemonRpcClient))))
 		expect([...result.childIds]).toEqual(["AZ-2"])
 		expect(result.childDetails.get("AZ-2")?.title).toBe("Child")
+	})
+
+	it("clears persisted drill-down when restored epic has no children", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: () =>
+				Stream.succeed(
+					makeBoardTask({
+						id: "AZ-2",
+						title: "Child",
+					}),
+				),
+			issueList: () =>
+				Effect.succeed({
+					rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+					issues: [],
+				}),
+		})
+
+		const effect = Effect.gen(function* () {
+			const board = yield* TuiBoardStoreService
+			const navigation = yield* NavigationService
+			yield* board.refresh()
+			yield* navigation.restorePersistedState({
+				focusedTaskId: "AZ-2",
+				drillDownEpicId: "AZ-EPIC-MISSING",
+			})
+			return {
+				drillDownEpic: yield* SubscriptionRef.get(navigation.drillDownEpic),
+				childIds: yield* SubscriptionRef.get(navigation.drillDownChildIds),
+				focusedTaskId: yield* navigation.getFocusedTaskId(),
+			}
+		})
+
+		const result = await Effect.runPromise(effect.pipe(Effect.provide(makeLayer(daemonRpcClient))))
+		expect(result.drillDownEpic).toBeNull()
+		expect([...result.childIds]).toEqual([])
+		expect(result.focusedTaskId).toBe("AZ-2")
 	})
 })

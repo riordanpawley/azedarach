@@ -52,6 +52,17 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
    - For behavior changes in `ts-opentui`, inspect relevant linked `az spec` requirements before implementation.
    - Update `az spec` requirement/link records in the same task when behavior scope changes.
    - If no spec record updates are needed, record `Spec impact: none` with file-specific rationale in issue notes.
+9. **Completion/Closure Discipline (ts-opentui)**:
+   - Do not mark work complete, close child issues, or close parent issues until evidence is captured in `az issue` notes.
+   - Required evidence for closure: exact commands run, pass/fail status, and any manual verification results relevant to changed surfaces.
+   - If any required validation is skipped, keep the issue open and record the explicit blocker.
+10. **Manual Runtime Verification Requires Fresh Daemon**:
+   - Before any manual verification that hits daemon-backed flows (for example `bun run dev`, `bun run dev issue ...`, board/TUI checks), restart daemon from current code first: `bun run dev daemon restart --force`.
+   - Treat manual checks as invalid if the daemon was not refreshed from the current branch/worktree immediately beforehand.
+11. **Issue Source-of-Truth vs Sync Provider**:
+   - Local sqlite state is the read source-of-truth for daemon, CLI, and TUI issue/board rendering.
+   - `linear` configuration is a sync transport mode, not a board/list read backend selector.
+   - Do not gate local issue reads on sync-provider type; provider choice affects sync behavior only.
 
 ## Quick Commands
 

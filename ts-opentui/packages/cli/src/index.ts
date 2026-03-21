@@ -38,6 +38,7 @@ import type {
 import { Args, Command, Options } from "@effect/cli"
 import { Otlp } from "@effect/opentelemetry"
 import {
+	CommandExecutor,
 	FetchHttpClient,
 	FileSystem,
 	Path,
@@ -259,6 +260,22 @@ const resolveBaseWorktreePath = (startPath: string) =>
 			const gitEntryPath = pathService.join(currentPath, ".git")
 			const hasGitEntry = yield* fs.exists(gitEntryPath).pipe(Effect.orElseSucceed(() => false))
 			if (hasGitEntry) {
+				const gitEntryContent = yield* fs.readFileString(gitEntryPath).pipe(Effect.option)
+				if (Option.isSome(gitEntryContent)) {
+					const trimmed = gitEntryContent.value.trim()
+					const gitdirPrefix = "gitdir:"
+					if (trimmed.startsWith(gitdirPrefix)) {
+						const rawGitDir = trimmed.slice(gitdirPrefix.length).trim()
+						const gitDirPath = rawGitDir.startsWith(pathService.sep)
+							? rawGitDir
+							: pathService.normalize(pathService.join(currentPath, rawGitDir))
+						const worktreeMarker = `${pathService.sep}.git${pathService.sep}worktrees${pathService.sep}`
+						const worktreeMarkerIndex = gitDirPath.indexOf(worktreeMarker)
+						if (worktreeMarkerIndex > 0) {
+							return gitDirPath.slice(0, worktreeMarkerIndex)
+						}
+					}
+				}
 				return currentPath
 			}
 			const parentPath = pathService.dirname(currentPath)
@@ -268,6 +285,57 @@ const resolveBaseWorktreePath = (startPath: string) =>
 			currentPath = parentPath
 		}
 	})
+
+const LocalIssueCountRowsSchema = Schema.Array(Schema.Struct({ count: Schema.Number }))
+
+const resolveLocalIssueCount = (projectPath: string) =>
+	Effect.gen(function* () {
+		const pathService = yield* Path.Path
+		const fs = yield* FileSystem.FileSystem
+		const commandExecutor = yield* CommandExecutor.CommandExecutor
+		const storagePaths = getProjectStoragePaths(projectPath, pathService)
+		const legacyProjectDbPath = pathService.join(projectPath, ".azedarach", "issues.db")
+		const candidatePaths = [
+			legacyProjectDbPath,
+			storagePaths.canonicalDbPath,
+			storagePaths.legacyDbPath,
+		]
+		let dbPath: string | undefined
+		for (const candidatePath of candidatePaths) {
+			const exists = yield* fs.exists(candidatePath).pipe(Effect.orElseSucceed(() => false))
+			if (exists) {
+				dbPath = candidatePath
+				break
+			}
+		}
+		if (dbPath === undefined) {
+			return Option.none<number>()
+		}
+
+		const output = yield* commandExecutor
+			.string(
+				PlatformCommand.make(
+					"sqlite3",
+					"-json",
+					dbPath,
+					"SELECT COUNT(*) AS count FROM issues WHERE deleted_at IS NULL;",
+				),
+			)
+			.pipe(Effect.option)
+		if (Option.isNone(output)) {
+			return Option.none<number>()
+		}
+
+		const decoded = yield* Schema.decode(Schema.parseJson(LocalIssueCountRowsSchema))(
+			output.value,
+		).pipe(Effect.option)
+		if (Option.isNone(decoded)) {
+			return Option.none<number>()
+		}
+
+		const count = decoded.value[0]?.count
+		return count === undefined ? Option.none<number>() : Option.some(count)
+	}).pipe(Effect.catchAll(() => Effect.succeed(Option.none<number>())))
 
 /**
  * Validate that spec workflows are enabled for the project before using az spec surfaces.
@@ -2436,12 +2504,16 @@ const issueListHandler = (args: {
 			explicitProjectDir === undefined
 				? yield* resolveBaseWorktreePath(resolverCwd)
 				: yield* resolveBaseWorktreePath(explicitProjectDir)
+		if (args.verbose) {
+			yield* Console.error(`Resolved project path: ${projectPath}`)
+		}
 		yield* validateIssueTrackerStore(projectPath)
 
 		const requestedLimit = Option.getOrUndefined(args.limit)
 		if (requestedLimit !== undefined && requestedLimit <= 0) {
 			return yield* Effect.fail(new Error("--limit must be a positive integer"))
 		}
+		const effectiveLimit = requestedLimit === undefined ? 23 : Math.floor(requestedLimit)
 
 		const filters = {
 			status: yield* parseIssueFilterStatus(Option.getOrUndefined(args.status), "--status"),
@@ -2451,24 +2523,28 @@ const issueListHandler = (args: {
 			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 		}
 		const hasFilters = Object.values(filters).some((value) => value !== undefined)
+		const totalCount =
+			requestedLimit === undefined && !hasFilters
+				? yield* resolveLocalIssueCount(projectPath)
+				: Option.none<number>()
 
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: true,
 		})
-		const issues = yield* bootstrap.client
-			.issueList({
+		const fetchIssues = (limit: number) =>
+			bootstrap.client.issueList({
 				projectPath,
 				filters: hasFilters ? filters : undefined,
 				options: {
-					limit: requestedLimit === undefined ? undefined : Math.floor(requestedLimit),
+					limit,
 					sortBy: "updated_at",
 					sortDirection: "desc",
 				},
 			})
-			.pipe(
-				Effect.map((response) => response.issues),
-				Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
-			)
+		const issues = yield* fetchIssues(effectiveLimit).pipe(
+			Effect.map((response) => response.issues),
+			Effect.mapError(mapBootstrappedDaemonRpcFailure(bootstrap, "issueList")),
+		)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issues, null, 2))
@@ -2483,6 +2559,16 @@ const issueListHandler = (args: {
 
 		for (const issue of issues) {
 			yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
+		}
+		if (
+			requestedLimit === undefined &&
+			Option.isSome(totalCount) &&
+			totalCount.value > issues.length
+		) {
+			const remaining = totalCount.value - issues.length
+			yield* Console.log(
+				`...and ${remaining} more issue(s) (showing ${issues.length} of ${totalCount.value}). Use --limit <n> to show more.`,
+			)
 		}
 
 		if (args.verbose) {

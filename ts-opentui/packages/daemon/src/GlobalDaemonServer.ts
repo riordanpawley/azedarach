@@ -165,7 +165,7 @@ export const makeGlobalDaemonTransportLayer = (
 > =>
 	Layer.provide(
 		RpcServer.layerProtocolSocketServer,
-		Layer.mergeAll(RpcSerialization.layerJson, BunSocketServer.layer({ path: socketPath })),
+		Layer.mergeAll(RpcSerialization.layerNdjson, BunSocketServer.layer({ path: socketPath })),
 	)
 
 const makeGlobalDaemonRpcServerLayer = (socketPath: string) => {

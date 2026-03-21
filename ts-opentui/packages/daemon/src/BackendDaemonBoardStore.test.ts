@@ -189,4 +189,34 @@ describe("BackendDaemonBoardStore", () => {
 			}
 		}
 	})
+
+	it("keeps board issue data when session enrichment fails", async () => {
+		const layer = makeBoardStoreTestLayer({
+			trackerIssues: makeTrackerIssuesStub((_filters, projectPath) => {
+				expect(projectPath).toBe("/tmp/project")
+				return Effect.succeed([issue])
+			}),
+			sessionRecovery: makeSessionRecoveryStub(() =>
+				Effect.dieMessage("session recovery unavailable"),
+			),
+			devServers: makeDevServerStub(() =>
+				Effect.succeed({
+					capturedAtMs: 1,
+					servers: [],
+				}),
+			),
+		})
+
+		const tasks = await Effect.runPromise(
+			Effect.gen(function* () {
+				const store = yield* BackendDaemonBoardStore
+				return yield* store.listBoardTasks("/tmp/project")
+			}).pipe(Effect.provide(layer)),
+		)
+
+		expect(tasks).toHaveLength(1)
+		expect(tasks[0]?.id).toBe("task-1")
+		expect(tasks[0]?.sessionState).toBe("idle")
+		expect(tasks[0]?.hasDevServer).toBeUndefined()
+	})
 })

@@ -291,6 +291,18 @@ const toTaskFromDaemonBoardTask = (task: DaemonBoardTask): TaskWithSession => ({
 	hasPR: task.hasPR === true ? true : undefined,
 })
 
+const toTaskFromIssueListItem = (issue: Issue): TaskWithSession => {
+	const prInfo = parsePRInfo(issue.notes)
+	return {
+		...issue,
+		issue_type: toBoardIssueType(issue),
+		sessionState: "idle",
+		hasPR: prInfo.hasPR === true ? true : undefined,
+		prUrl: prInfo.prUrl,
+		prNumber: prInfo.prNumber,
+	}
+}
+
 const resolveProjectPath = (
 	currentProjectPath: string | null,
 	projectContext: AppConfigProjectContextApi,
@@ -354,8 +366,16 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 					yield* SubscriptionRef.set(currentProjectPath, projectPath)
 
 					const currentTasks = yield* SubscriptionRef.get(tasks)
-					const result = yield* daemonRpcClient.boardReadModel({ projectPath })
-					const loadedTasks = result.tasks.map(toTaskFromDaemonBoardTask)
+					const loadedTasks = yield* daemonRpcClient.boardReadModel({ projectPath }).pipe(
+						Stream.map(toTaskFromDaemonBoardTask),
+						Stream.runCollect,
+						Effect.map((tasksChunk) => [...tasksChunk]),
+						Effect.catchAll(() =>
+							daemonRpcClient
+								.issueList({ projectPath })
+								.pipe(Effect.map((result) => result.issues.map(toTaskFromIssueListItem))),
+						),
+					)
 					const graceExpiries = yield* Ref.get(localCreateGraceExpiries)
 					const { mergedTasks, nextLocalCreateGraceExpiries } =
 						mergeLoadedTasksWithLocalCreateGrace({
