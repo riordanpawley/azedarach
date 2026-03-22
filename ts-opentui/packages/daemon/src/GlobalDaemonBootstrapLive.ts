@@ -16,20 +16,50 @@ import { GlobalDaemonDiscovery } from "./GlobalDaemonDiscovery.js"
 const GLOBAL_DAEMON_BOOTSTRAP_TIMEOUT_MS = 5_000
 const GLOBAL_DAEMON_POLL_INTERVAL_MS = 50
 const GLOBAL_DAEMON_ATTACH_RETRY_BACKOFF_MS: ReadonlyArray<number> = [25, 50, 100]
-const GLOBAL_DAEMON_MAIN_ENTRY_PATH = decodeURIComponent(
+const GLOBAL_DAEMON_MAIN_ENTRY_BUNDLED_PATH = decodeURIComponent(
 	new URL("./GlobalDaemonMain.ts", import.meta.url).pathname,
 )
+const GLOBAL_DAEMON_MAIN_ENTRY_REPO_PATH = "packages/daemon/src/GlobalDaemonMain.ts"
+const BUN_EXECUTABLE_PATH_PATTERN = /(^|[\\/])bun(\.exe)?$/i
+
+export const resolveGlobalDaemonSpawnCommand = (params: {
+	readonly execPath: string
+	readonly bundledEntryPath: string
+	readonly bunBinaryPath: string | undefined
+}): {
+	readonly bunExecutablePath: string
+	readonly daemonMainEntryPath: string
+} => {
+	const daemonMainEntryPath = params.bundledEntryPath.startsWith("/$bunfs/")
+		? GLOBAL_DAEMON_MAIN_ENTRY_REPO_PATH
+		: params.bundledEntryPath
+	const bunExecutablePath = BUN_EXECUTABLE_PATH_PATTERN.test(params.execPath)
+		? params.execPath
+		: (params.bunBinaryPath ?? "bun")
+	return {
+		bunExecutablePath,
+		daemonMainEntryPath,
+	}
+}
 
 const sleep = (ms: number): Effect.Effect<void> => Effect.sleep(`${ms} millis`)
 
 const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError> =>
 	Effect.try({
 		try: () => {
-			const child = Bun.spawn([process.execPath, "run", GLOBAL_DAEMON_MAIN_ENTRY_PATH], {
-				cwd: process.cwd(),
-				env: process.env,
-				stdio: ["ignore", "ignore", "ignore"],
+			const spawnCommand = resolveGlobalDaemonSpawnCommand({
+				execPath: process.execPath,
+				bundledEntryPath: GLOBAL_DAEMON_MAIN_ENTRY_BUNDLED_PATH,
+				bunBinaryPath: Bun.which("bun"),
 			})
+			const child = Bun.spawn(
+				[spawnCommand.bunExecutablePath, "run", spawnCommand.daemonMainEntryPath],
+				{
+					cwd: process.cwd(),
+					env: process.env,
+					stdio: ["ignore", "ignore", "ignore"],
+				},
+			)
 			child.unref()
 		},
 		catch: (error) =>
