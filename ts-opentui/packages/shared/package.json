@@ -6,6 +6,7 @@
 		".": "./src/index.ts",
 		"./rpc": "./src/rpc/index.ts",
 		"./project-path": "./src/project-path.ts",
+		"./session-lookup": "./src/session-lookup.ts",
 		"./session-names": "./src/session-names.ts"
 	}
 }

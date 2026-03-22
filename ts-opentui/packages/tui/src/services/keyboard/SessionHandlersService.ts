@@ -1,9 +1,10 @@
 import { AppConfig } from "@azedarach/config"
 import {
-	getIssueSessionName,
-	issueIdsEqualForLookup,
-	parseIssueSessionName,
-} from "@azedarach/shared/session-names"
+	buildIssueSessionCandidatesFromSessionNames,
+	buildIssueSessionCandidatesFromSnapshots,
+	findIssueSessionNameByIssueId,
+} from "@azedarach/shared/session-lookup"
+import { getIssueSessionName } from "@azedarach/shared/session-names"
 import type { CommandExecutor } from "@effect/platform"
 import { FileSystem } from "@effect/platform"
 import { Effect } from "effect"
@@ -78,30 +79,33 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 			const findAiSession = (issueId: string, projectPath: string) =>
 				Effect.gen(function* () {
-					const snapshots = yield* sessionAdapter
-						.listActive({ projectPath })
-						.pipe(Effect.catchAll(() => Effect.succeed([])))
-					for (const snapshot of snapshots) {
-						if (issueIdsEqualForLookup(snapshot.issueId, issueId)) {
-							return snapshot.tmuxSessionName
-						}
-					}
-
 					const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
 					if (hasCanonicalSession) {
 						return canonicalSessionName
 					}
 
-					const sessions = yield* tmux.listSessions()
-					for (const session of sessions) {
-						const parsed = parseIssueSessionName(session.name, projectPath)
-						if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
-							return session.name
-						}
+					const snapshots = yield* sessionAdapter
+						.listActive({ projectPath })
+						.pipe(Effect.catchAll(() => Effect.succeed([])))
+					const snapshotSessionName = findIssueSessionNameByIssueId(
+						issueId,
+						buildIssueSessionCandidatesFromSnapshots(snapshots),
+					)
+					if (snapshotSessionName !== null) {
+						return snapshotSessionName
 					}
 
-					return null
+					const sessions = yield* tmux.listSessions()
+					return (
+						findIssueSessionNameByIssueId(
+							issueId,
+							buildIssueSessionCandidatesFromSessionNames(
+								sessions.map((session) => session.name),
+								projectPath,
+							),
+						) ?? null
+					)
 				})
 
 			const validateSafeExistingImagePath = (

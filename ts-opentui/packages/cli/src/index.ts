@@ -37,6 +37,10 @@ import type {
 	DaemonSessionSnapshotResult,
 } from "@azedarach/shared/rpc"
 import {
+	buildIssueSessionCandidatesFromSessionNames,
+	findIssueSessionNameByIssueId,
+} from "@azedarach/shared/session-lookup"
+import {
 	getIssueSessionName,
 	issueIdsEqualForLookup,
 	parseIssueSessionName,
@@ -5825,14 +5829,12 @@ const findSessionByIssueId = (issueId: string, projectPath: string) =>
 		}
 
 		const sessionNames = yield* listTmuxSessionNames
-		for (const sessionName of sessionNames) {
-			const parsed = parseIssueSessionName(sessionName, projectPath)
-			if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
-				return sessionName
-			}
-		}
-
-		return null
+		return (
+			findIssueSessionNameByIssueId(
+				issueId,
+				buildIssueSessionCandidatesFromSessionNames(sessionNames, projectPath),
+			) ?? null
+		)
 	})
 
 const findAiSessionByIssueId = (issueId: string, projectPath: string) =>
