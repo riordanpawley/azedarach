@@ -36,6 +36,12 @@ export const resolveBaseProjectPath = (startPath: string) =>
 		}
 	})
 
+export const resolveProjectBasePath = (projectDir: Option.Option<string>) =>
+	Effect.gen(function* () {
+		const inputPath = Option.getOrElse(projectDir, () => process.cwd())
+		return yield* resolveBaseProjectPath(inputPath)
+	})
+
 export const resolveEffectiveProjectPath = (projectPath: string | null | undefined): string =>
 	projectPath ?? process.cwd()
 

@@ -6,7 +6,7 @@
  */
 
 import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
-import { resolveBaseProjectPath } from "@azedarach/shared/project-path"
+import { resolveProjectBasePath } from "@azedarach/shared/project-path"
 import type {
 	DaemonDevServerListRequest,
 	DaemonDevServerListResult,
@@ -91,9 +91,6 @@ const jsonOption = Options.boolean("json").pipe(
 // ============================================================================
 // Helper to get project path
 // ============================================================================
-
-const getProjectPath = (projectDir: Option.Option<string>) =>
-	resolveBaseProjectPath(Option.isSome(projectDir) ? projectDir.value : process.cwd())
 
 const parseStartedAt = (startedAt: string | null): Date | undefined => {
 	if (startedAt === null) return undefined
@@ -243,7 +240,7 @@ const devStartHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
-		const projectPath = yield* getProjectPath(args.projectDir)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
 		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const daemonClient = yield* getDaemonClient()
 		const currentStatus = yield* devServerStatus(daemonClient, {
@@ -305,7 +302,7 @@ const devStopHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
-		const projectPath = yield* getProjectPath(Option.none())
+		const projectPath = yield* resolveProjectBasePath(Option.none())
 		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const daemonClient = yield* getDaemonClient()
 		const currentStatus = yield* devServerStatus(daemonClient, {
@@ -348,7 +345,7 @@ const devRestartHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
-		const projectPath = yield* getProjectPath(args.projectDir)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
 		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const daemonClient = yield* getDaemonClient()
 
@@ -391,7 +388,7 @@ const devStatusHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const projectPath = yield* getProjectPath(Option.none())
+		const projectPath = yield* resolveProjectBasePath(Option.none())
 		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const daemonClient = yield* getDaemonClient()
 		const daemonServers = yield* devServerList(daemonClient, {
@@ -454,7 +451,7 @@ const devStatusHandler = (args: {
 
 const devListHandler = (args: { readonly verbose: boolean; readonly json: boolean }) =>
 	Effect.gen(function* () {
-		const projectPath = yield* getProjectPath(Option.none())
+		const projectPath = yield* resolveProjectBasePath(Option.none())
 		const daemonClient = yield* getDaemonClient()
 		const daemonServers = yield* devServerList(daemonClient, { projectPath })
 		const runningServers = daemonServers.servers

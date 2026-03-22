@@ -85,7 +85,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				Stream.fromQueue(backgroundActions).pipe(
 					Stream.runForEach((action) =>
 						action.pipe(
-							Effect.catchAllCause((cause) => Effect.logWarning(String(cause)).pipe(Effect.asVoid)),
+							Effect.catchAllCause((cause) =>
+								Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid),
+							),
 						),
 					),
 				),
@@ -556,7 +558,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									switchToProject(project.name).pipe(
 										Effect.asVoid,
 										Effect.catchAllCause((cause) =>
-											Effect.logWarning(String(cause)).pipe(Effect.asVoid),
+											Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid),
 										),
 									),
 								)

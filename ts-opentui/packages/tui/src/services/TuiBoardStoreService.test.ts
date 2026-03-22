@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test"
+import { mkdir, mkdtemp } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { AppConfigProjectContext, type AppConfigProjectContextApi } from "@azedarach/config"
 import {
 	type DaemonBoardTask,
@@ -6,6 +9,7 @@ import {
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
 } from "@azedarach/shared/rpc"
+import { BunContext } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Effect, Layer, type Scope, Stream, SubscriptionRef } from "effect"
 import type { Issue } from "../contracts.js"
@@ -132,6 +136,17 @@ const makeProjectContext = (projectPath: string): AppConfigProjectContextApi => 
 	currentProjectPathChanges: Stream.empty,
 })
 
+const makeProjectFixture = async (name: string) => {
+	const root = await mkdtemp(join(tmpdir(), `az-tui-board-${name}-`))
+	const worktreePath = join(root, "worktrees", "feature")
+	await mkdir(join(root, ".git"), { recursive: true })
+	await mkdir(worktreePath, { recursive: true })
+	return {
+		root,
+		worktreePath,
+	}
+}
+
 const runWithBoardStore = <A, E>(
 	program: Effect.Effect<A, E, TuiBoardStoreService | Scope.Scope>,
 	options: {
@@ -144,6 +159,7 @@ const runWithBoardStore = <A, E>(
 			program.pipe(
 				Effect.provide(
 					TuiBoardStoreService.Default.pipe(
+						Layer.provideMerge(BunContext.layer),
 						Layer.provideMerge(Layer.succeed(DaemonRpcClient, options.daemonRpcClient)),
 						Layer.provideMerge(Layer.succeed(AppConfigProjectContext, options.projectContext)),
 					),
@@ -393,5 +409,74 @@ describe("TuiBoardStoreService", () => {
 
 		expect(switchProjectLoadAttempts).toBe(2)
 		expect(result.map((task) => task.id)).toEqual(["az-b"])
+	})
+
+	it("hydrates switched project tasks before the project switch completes", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: ({ projectPath }) =>
+				Stream.fromIterable(
+					projectPath === "/tmp/project-b"
+						? [makeBoardTask({ id: "az-b", status: "open" })]
+						: [makeBoardTask({ id: "az-a", status: "open" })],
+				),
+		})
+
+		const result = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				yield* board.refresh()
+				let callbackTaskIds: ReadonlyArray<string> = []
+				const switchResult = yield* board.switchToProject(
+					"/tmp/project-b",
+					Effect.gen(function* () {
+						const tasks = yield* board.getTasks()
+						callbackTaskIds = tasks.map((task) => task.id)
+					}),
+				)
+				const tasks = yield* board.getTasks()
+				return { switchResult, callbackTaskIds, tasks }
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext("/tmp/project-a"),
+			},
+		)
+
+		expect(result.switchResult.cacheHit).toBe(false)
+		expect(result.switchResult.refreshFailed).toBe(false)
+		expect(result.callbackTaskIds).toEqual(["az-b"])
+		expect(result.tasks.map((task) => task.id)).toEqual(["az-b"])
+	})
+
+	it("normalizes worktree project paths before switch refresh", async () => {
+		const initialProject = await makeProjectFixture("initial")
+		const selectedProject = await makeProjectFixture("selected")
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			boardReadModel: () => Stream.empty,
+			issueList: ({ projectPath }) =>
+				Effect.succeed({
+					rpcProtocolVersion: 2,
+					issues:
+						projectPath === selectedProject.root
+							? [makeIssue({ id: "az-selected", status: "open" })]
+							: [],
+				}),
+		})
+
+		const result = await runWithBoardStore(
+			Effect.gen(function* () {
+				const board = yield* TuiBoardStoreService
+				const switchResult = yield* board.switchToProject(selectedProject.worktreePath, Effect.void)
+				const tasks = yield* board.getTasks()
+				return { switchResult, tasks }
+			}),
+			{
+				daemonRpcClient,
+				projectContext: makeProjectContext(initialProject.worktreePath),
+			},
+		)
+
+		expect(result.switchResult.refreshFailed).toBe(false)
+		expect(result.tasks.map((task) => task.id)).toEqual(["az-selected"])
 	})
 })

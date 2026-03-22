@@ -27,7 +27,7 @@ import {
 	type GlobalDaemonBootstrapApi,
 	isRetryableRpcClientError,
 } from "@azedarach/daemon-control"
-import { resolveBaseProjectPath } from "@azedarach/shared/project-path"
+import { resolveProjectBasePath } from "@azedarach/shared/project-path"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -255,12 +255,6 @@ const validateIssueTrackerStore = (projectDir: string) =>
 				),
 			)
 		}
-	})
-
-const resolveProjectBasePath = (projectDir: Option.Option<string>) =>
-	Effect.gen(function* () {
-		const inputPath = Option.getOrElse(projectDir, () => process.cwd())
-		return yield* resolveBaseProjectPath(inputPath)
 	})
 
 const LocalIssueCountRowsSchema = Schema.Array(Schema.Struct({ count: Schema.Number }))
@@ -1707,7 +1701,7 @@ const daemonStatusHandler = (args: {
 	readonly streamBatches: Option.Option<number>
 }) =>
 	Effect.gen(function* () {
-		const projectPath = yield* resolveBaseProjectPath(process.cwd())
+		const projectPath = yield* resolveProjectBasePath(Option.none())
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("status"),
 		})
@@ -2470,12 +2464,7 @@ const issueListHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath =
-			explicitProjectDir === undefined
-				? yield* resolveBaseProjectPath(resolverCwd)
-				: yield* resolveBaseProjectPath(explicitProjectDir)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
 		if (args.verbose) {
 			yield* Console.error(`Resolved project path: ${projectPath}`)
 		}
@@ -5737,7 +5726,7 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
-		const projectPath = yield* resolveBaseProjectPath(process.cwd())
+		const projectPath = yield* resolveProjectBasePath(Option.none())
 		const primeMode = resolvePrimeModeFromEnv(process.env)
 		const appConfig = yield* AppConfig
 		const specConfig = yield* appConfig.getSpecConfig()
@@ -7134,7 +7123,7 @@ const optionalSpecImplementationOption = Options.text("impl").pipe(
 
 const specUsageHandler = (usage: string) =>
 	Effect.gen(function* () {
-		const projectPath = yield* resolveBaseProjectPath(process.cwd())
+		const projectPath = yield* resolveProjectBasePath(Option.none())
 		yield* ensureSpecEnabled(projectPath)
 		yield* Console.log(usage)
 	})

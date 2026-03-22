@@ -1,5 +1,5 @@
-import { AppConfigProjectContext, type AppConfigProjectContextApi } from "@azedarach/config"
-import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
+import { AppConfigProjectContext } from "@azedarach/config"
+import { resolveBaseProjectPath, resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
 import {
 	type DaemonBoardTask,
 	DaemonRpcClient,
@@ -317,16 +317,8 @@ const toTaskFromIssueListItem = (issue: Issue): TaskWithSession => {
 	}
 }
 
-const resolveProjectPath = (
-	currentProjectPath: string | null,
-	projectContext: AppConfigProjectContextApi,
-): Effect.Effect<string> =>
-	Effect.gen(function* () {
-		if (currentProjectPath !== null) {
-			return currentProjectPath
-		}
-		return yield* resolveProjectPathFromContext(projectContext)
-	})
+const resolveBoardProjectPath = (projectPath: string | null | undefined): Effect.Effect<string> =>
+	resolveBaseProjectPath(resolveEffectiveProjectPath(projectPath))
 
 export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()(
 	"TuiBoardStoreService",
@@ -379,15 +371,20 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 
 			const refreshForProjectPath = (projectPath: string) =>
 				Effect.gen(function* () {
+					const resolvedProjectPath = yield* resolveBoardProjectPath(projectPath)
 					yield* SubscriptionRef.set(isLoading, true)
 
 					const currentTasks = yield* SubscriptionRef.get(tasks)
-					const loadStreamedTasks = boardRefreshRpcClient.boardReadModel({ projectPath }).pipe(
-						Stream.map(toTaskFromDaemonBoardTask),
-						Stream.runCollect,
-						Effect.map((chunks) => Array.from(chunks)),
-						Effect.catchAllCause(() => Effect.succeed([])),
-					)
+					const loadStreamedTasks = boardRefreshRpcClient
+						.boardReadModel({
+							projectPath: resolvedProjectPath,
+						})
+						.pipe(
+							Stream.map(toTaskFromDaemonBoardTask),
+							Stream.runCollect,
+							Effect.map((chunks) => Array.from(chunks)),
+							Effect.catchAllCause(() => Effect.succeed([])),
+						)
 					let streamedTasks = yield* loadStreamedTasks
 					if (streamedTasks.length === 0) {
 						yield* Effect.sleep("150 millis")
@@ -413,7 +410,7 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 									Effect.map((chunks) => Array.from(chunks)),
 								)
 					const listWithOptions = listViaDaemon({
-						projectPath,
+						projectPath: resolvedProjectPath,
 						options: {
 							includeClosed: true,
 							sortBy: "updated_at",
@@ -423,14 +420,14 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 					}).pipe(
 						Effect.catchAllCause((cause) =>
 							Effect.logWarning(
-								`[board-refresh] issueList(options) project=${projectPath} cause=${Cause.pretty(cause)}`,
+								`[board-refresh] issueList(options) project=${resolvedProjectPath} cause=${Cause.pretty(cause)}`,
 							).pipe(Effect.zipRight(Effect.succeed([]))),
 						),
 					)
-					const listWithoutOptions = listViaDaemon({ projectPath }).pipe(
+					const listWithoutOptions = listViaDaemon({ projectPath: resolvedProjectPath }).pipe(
 						Effect.catchAllCause((cause) =>
 							Effect.logWarning(
-								`[board-refresh] issueList(default) project=${projectPath} cause=${Cause.pretty(cause)}`,
+								`[board-refresh] issueList(default) project=${resolvedProjectPath} cause=${Cause.pretty(cause)}`,
 							).pipe(Effect.zipRight(Effect.succeed([]))),
 						),
 					)
@@ -482,7 +479,7 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 								})
 							: streamedTasks
 					yield* Effect.logInfo(
-						`[board-refresh] project=${projectPath} streamed=${streamedTasks.length} listed=${listedTasks.length} loaded=${loadedTasks.length}`,
+						`[board-refresh] project=${resolvedProjectPath} streamed=${streamedTasks.length} listed=${listedTasks.length} loaded=${loadedTasks.length}`,
 					)
 					const graceExpiries = yield* Ref.get(localCreateGraceExpiries)
 					const { mergedTasks, nextLocalCreateGraceExpiries } =
@@ -495,7 +492,7 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 					yield* Ref.set(localCreateGraceExpiries, nextLocalCreateGraceExpiries)
 					yield* replaceTasks(mergedTasks)
 					yield* Effect.logInfo(
-						`[board-refresh] project=${projectPath} merged=${mergedTasks.length}`,
+						`[board-refresh] project=${resolvedProjectPath} merged=${mergedTasks.length}`,
 					)
 				}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
@@ -595,27 +592,29 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 			const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
 				Effect.gen(function* () {
 					const activeProjectPath = yield* SubscriptionRef.get(currentProjectPath)
-					const projectPath = yield* resolveProjectPath(activeProjectPath, projectContext)
+					const projectPath = yield* resolveBoardProjectPath(activeProjectPath)
 					const result = yield* daemonRpcClient.issueGet({ issueId: taskId, projectPath })
 					yield* upsertIssueFromMutation(result.issue, options)
 				})
 
 			const saveToCache = (projectPath: string) =>
 				Effect.gen(function* () {
+					const resolvedProjectPath = yield* resolveBoardProjectPath(projectPath)
 					const currentTasksValue = yield* SubscriptionRef.get(tasks)
 					if (currentTasksValue.length === 0) {
 						return
 					}
 					yield* Ref.update(boardCache, (current) => {
 						const next = new Map(current)
-						next.set(projectPath, currentTasksValue)
+						next.set(resolvedProjectPath, currentTasksValue)
 						return next
 					})
 				})
 
 			const loadFromCache = (projectPath: string) =>
 				Effect.gen(function* () {
-					const cached = (yield* Ref.get(boardCache)).get(projectPath)
+					const resolvedProjectPath = yield* resolveBoardProjectPath(projectPath)
+					const cached = (yield* Ref.get(boardCache)).get(resolvedProjectPath)
 					if (cached === undefined || cached.length === 0) {
 						return false
 					}
@@ -673,7 +672,7 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 			const refresh = () =>
 				Effect.gen(function* () {
 					const activeProjectPath = yield* SubscriptionRef.get(currentProjectPath)
-					const projectPath = yield* resolveProjectPath(activeProjectPath, projectContext)
+					const projectPath = yield* resolveBoardProjectPath(activeProjectPath)
 					yield* SubscriptionRef.set(currentProjectPath, projectPath)
 					yield* refreshForProjectPath(projectPath)
 				})
@@ -713,20 +712,21 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 				onRefreshComplete: Effect.Effect<void, E, never>,
 			) =>
 				Effect.gen(function* () {
+					const resolvedProjectPath = yield* resolveBoardProjectPath(newProjectPath)
 					const previousProjectPath = yield* SubscriptionRef.get(currentProjectPath)
 					if (previousProjectPath !== null) {
 						yield* saveToCache(previousProjectPath)
 					}
 
-					yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
-					const cacheHit = yield* loadFromCache(newProjectPath)
+					yield* SubscriptionRef.set(currentProjectPath, resolvedProjectPath)
+					const cacheHit = yield* loadFromCache(resolvedProjectPath)
 					if (!cacheHit) {
 						yield* clearBoard()
 					}
 
 					const done = yield* Deferred.make<{ readonly refreshFailed: boolean }>()
 					yield* Queue.offer(switchRefreshQueue, {
-						projectPath: newProjectPath,
+						projectPath: resolvedProjectPath,
 						done,
 					})
 					const { refreshFailed } = yield* Deferred.await(done).pipe(
@@ -763,7 +763,9 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 				),
 			)
 
-			const initialProjectPath = yield* resolveProjectPathFromContext(projectContext)
+			const initialProjectPath = yield* resolveBoardProjectPath(
+				yield* projectContext.getCurrentPath(),
+			)
 			yield* SubscriptionRef.set(currentProjectPath, initialProjectPath)
 			yield* refreshForProjectPath(initialProjectPath).pipe(
 				Effect.catchAllCause((cause) => Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid)),

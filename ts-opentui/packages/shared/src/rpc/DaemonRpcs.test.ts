@@ -60,6 +60,7 @@ import {
 	DaemonQueueCancelResultSchema,
 	DaemonQueueEnqueueRequestSchema,
 	DaemonQueueQueryResultSchema,
+	DaemonRestartRequestSchema,
 	DaemonSessionSnapshotResultSchema,
 	DaemonSessionStartRequestSchema,
 	DaemonSessionUpdateStateRequestSchema,
@@ -1594,11 +1595,19 @@ describe("DaemonRpcs", () => {
 		expect(mergeResult.merged).toBe(true)
 		expect(checkRequest.rpcProtocolVersion).toBe(DAEMON_RPC_PROTOCOL_VERSION)
 		expect(checkResult.available).toBe(true)
+		const restartRequest = await Effect.runPromise(
+			Schema.decodeUnknown(DaemonRestartRequestSchema)({
+				rpcProtocolVersion: DAEMON_RPC_PROTOCOL_VERSION,
+				intervalMs: 250,
+			}),
+		)
 		expect(updateFromBaseRequest.issueId).toBe("te-1")
 		expect(updateFromBaseResult.updated).toBe(true)
 		expect(mergeBaseIntoBranchRequest.issueId).toBe("te-1")
 		expect(mergeBaseIntoBranchResult.merged).toBe(true)
 		expect(abortMergeRequest.issueId).toBe("te-1")
 		expect(abortMergeResult.aborted).toBe(true)
+		expect(restartRequest.intervalMs).toBe(250)
+		expect("projectPath" in restartRequest).toBe(false)
 	})
 })
