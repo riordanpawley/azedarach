@@ -5,6 +5,7 @@
  */
 
 import { AppConfig } from "@azedarach/config"
+import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
 import {
 	DaemonRpcClient,
 	type DaemonRpcClientApi,
@@ -192,7 +193,7 @@ export const refreshSpecWorkspaceAtom = appRuntime.fn((_: undefined, get) =>
 		}
 		const daemonRpcClient = yield* getDaemonRpcClient()
 		const selectedImplementation = yield* editor.getSpecSelectedImplementation()
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 
 		yield* loadSpecWorkspaceState({
 			stateRef,

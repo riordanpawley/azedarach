@@ -4,6 +4,8 @@
 	"type": "module",
 	"exports": {
 		".": "./src/index.ts",
-		"./rpc": "./src/rpc/index.ts"
+		"./rpc": "./src/rpc/index.ts",
+		"./project-path": "./src/project-path.ts",
+		"./session-names": "./src/session-names.ts"
 	}
 }

@@ -17,9 +17,12 @@
  * - "idle" → SessionState "idle" (Session ended)
  */
 
+import {
+	issueIdsEqualForLookup,
+	resolveIssueIdFromSessionName,
+} from "@azedarach/shared/session-names"
 import { Command } from "@effect/platform"
 import { Effect, type Fiber, Ref, Schedule, type Scope, SubscriptionRef } from "effect"
-import { issueIdsEqualForLookup, resolveIssueIdFromSessionName } from "../utils/sessionNames.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
 // ============================================================================

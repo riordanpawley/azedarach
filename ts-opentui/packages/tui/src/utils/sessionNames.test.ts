@@ -7,7 +7,7 @@ import {
 	normalizeIssueIdForLookup,
 	parseIssueSessionName,
 	resolveIssueIdFromSessionName,
-} from "./sessionNames.js"
+} from "@azedarach/shared/session-names"
 
 describe("sessionNames session naming", () => {
 	it("keeps already-safe issue IDs unchanged", () => {

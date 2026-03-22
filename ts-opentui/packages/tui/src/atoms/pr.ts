@@ -4,6 +4,7 @@
  * Handles PR creation, merge, and cleanup operations.
  */
 
+import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
 import { Effect } from "effect"
 import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
 import { PRWorkflow } from "../utils/runtimeServices.js"
@@ -25,7 +26,7 @@ export const createPRAtom = appRuntime.fn((issueId: string) =>
 		const projectContext = yield* getTuiProjectContextRead
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 
 		return yield* prWorkflow.createPR({
 			issueId,
@@ -46,7 +47,7 @@ export const cleanupAtom = appRuntime.fn((issueId: string) =>
 		const projectContext = yield* getTuiProjectContextRead
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 
 		yield* prWorkflow.cleanup({ issueId, projectPath, closeIssue: true })
 	}).pipe(Effect.catchAll(Effect.logError)),
@@ -67,7 +68,7 @@ export const mergeToMainAtom = appRuntime.fn((issueId: string) =>
 		const projectContext = yield* getTuiProjectContextRead
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 
 		yield* prWorkflow.mergeToMain({
 			issueId,

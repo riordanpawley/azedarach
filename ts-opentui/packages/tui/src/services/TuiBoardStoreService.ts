@@ -1,4 +1,5 @@
 import { AppConfigProjectContext, type AppConfigProjectContextApi } from "@azedarach/config"
+import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
 import {
 	type DaemonBoardTask,
 	DaemonRpcClient,
@@ -324,7 +325,7 @@ const resolveProjectPath = (
 		if (currentProjectPath !== null) {
 			return currentProjectPath
 		}
-		return (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		return yield* resolveProjectPathFromContext(projectContext)
 	})
 
 export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()(
@@ -762,7 +763,7 @@ export class TuiBoardStoreService extends Effect.Service<TuiBoardStoreService>()
 				),
 			)
 
-			const initialProjectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+			const initialProjectPath = yield* resolveProjectPathFromContext(projectContext)
 			yield* SubscriptionRef.set(currentProjectPath, initialProjectPath)
 			yield* refreshForProjectPath(initialProjectPath).pipe(
 				Effect.catchAllCause((cause) => Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid)),

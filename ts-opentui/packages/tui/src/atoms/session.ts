@@ -5,6 +5,10 @@
  * Also includes tmux session monitoring and PTY metrics.
  */
 
+import {
+	resolveEffectiveProjectPath,
+	resolveProjectPathFromContext,
+} from "@azedarach/shared/project-path"
 import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Effect } from "effect"
 import { getTuiProjectContextRead } from "../services/TuiProjectContextService.js"
@@ -60,7 +64,7 @@ export const buildSessionUpdateStateRequest = (
 } => ({
 	issueId: update.issueId,
 	state: update.status,
-	projectPath: update.projectPath ?? currentProjectPath ?? process.cwd(),
+	projectPath: resolveEffectiveProjectPath(update.projectPath ?? currentProjectPath),
 	tmuxSessionName: update.sessionName,
 	worktreePath: update.worktreePath,
 	startedAt: toStartedAtIso(update.createdAt),
@@ -109,7 +113,7 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionStart === undefined) {
@@ -134,7 +138,7 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionPause === undefined) {
@@ -156,7 +160,7 @@ export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionResume === undefined) {
@@ -179,7 +183,7 @@ export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const projectContext = yield* getTuiProjectContextRead
 		const daemonRpcClient = yield* Effect.serviceOption(DaemonRpcClient)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 		const sessionRpc = daemonRpcClient._tag === "Some" ? daemonRpcClient.value : undefined
 
 		if (sessionRpc === undefined || sessionRpc.sessionStop === undefined) {

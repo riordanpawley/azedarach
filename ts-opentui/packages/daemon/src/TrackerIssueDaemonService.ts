@@ -243,33 +243,6 @@ const sortIssuesInMemory = (
 	return sortDirection === "desc" ? sorted.reverse() : sorted
 }
 
-const buildListArgs = (
-	filters: IssueListFilters | undefined,
-	options: IssueListOptions | undefined,
-): Array<string> => {
-	const args = ["list"]
-	const limit = options?.limit
-	if (limit !== undefined) {
-		args.push("--limit", String(limit))
-	}
-	if (options?.includeClosed ?? true) {
-		args.push("--all")
-	}
-	if (filters?.status !== undefined) {
-		args.push("--status", filters.status)
-	}
-	if (filters?.priority !== undefined) {
-		args.push("--priority", String(filters.priority))
-	}
-	if (filters?.type !== undefined) {
-		args.push("--type", filters.type)
-	}
-	if (filters?.parent !== undefined) {
-		args.push("--parent", filters.parent)
-	}
-	return args
-}
-
 export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemonService>()(
 	"TrackerIssueDaemonService",
 	{
@@ -330,12 +303,14 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 						}
 						return legacyRuntime
 					}
-					return yield* Effect.fail(
-						new TrackerIssueDaemonError({
-							reason: "unsupported-backend",
-							message: "Daemon issue RPC currently supports tracker/legacy backends only.",
-						}),
-					)
+					const localRuntime: {
+						readonly executable: "tracker" | "legacy"
+						readonly syncEnabled: boolean
+					} = {
+						executable: "tracker",
+						syncEnabled,
+					}
+					return localRuntime
 				})
 
 			const runJson = (
@@ -344,27 +319,6 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 				projectPath?: string,
 			): Effect.Effect<string, TrackerIssueDaemonError> => {
 				const baseCommand = Command.make(executable, ...args, "--json")
-				const command =
-					projectPath === undefined
-						? baseCommand
-						: baseCommand.pipe(Command.workingDirectory(projectPath))
-				return commandExecutor.string(command).pipe(
-					Effect.mapError(
-						(error) =>
-							new TrackerIssueDaemonError({
-								reason: "command-failed",
-								message: "stderr" in error ? String(error.stderr) : String(error),
-							}),
-					),
-				)
-			}
-
-			const runDirect = (
-				executable: "tracker" | "legacy",
-				args: ReadonlyArray<string>,
-				projectPath?: string,
-			): Effect.Effect<string, TrackerIssueDaemonError> => {
-				const baseCommand = Command.make(executable, ...args)
 				const command =
 					projectPath === undefined
 						? baseCommand
@@ -412,6 +366,54 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					),
 					Effect.asVoid,
 				)
+
+			const resolveLocalDbPath = (projectPath: string | undefined): string => {
+				const targetProjectPath = projectPath ?? process.cwd()
+				const storagePaths = getProjectStoragePaths(targetProjectPath, pathService)
+				return storagePaths.canonicalDbPath
+			}
+
+			const parseAlphaIssueId = (issueId: string): number | undefined => {
+				if (!/^[a-z]+$/.test(issueId)) {
+					return undefined
+				}
+				let value = 0
+				for (const char of issueId) {
+					value = value * 26 + (char.charCodeAt(0) - 96)
+				}
+				return value
+			}
+
+			const formatAlphaIssueId = (value: number): string => {
+				let remaining = value
+				let output = ""
+				while (remaining > 0) {
+					const index = (remaining - 1) % 26
+					output = String.fromCharCode(97 + index) + output
+					remaining = Math.floor((remaining - 1) / 26)
+				}
+				return output.length === 0 ? "a" : output
+			}
+
+			const generateNextIssueId = (
+				projectPath: string | undefined,
+			): Effect.Effect<string, TrackerIssueDaemonError> =>
+				Effect.gen(function* () {
+					const dbPath = resolveLocalDbPath(projectPath)
+					const rows = yield* runSqliteJson(
+						dbPath,
+						"SELECT id FROM issues WHERE deleted_at IS NULL;",
+						Schema.Array(Schema.Struct({ id: Schema.String })),
+					)
+					let maxValue = 0
+					for (const row of rows) {
+						const parsed = parseAlphaIssueId(row.id)
+						if (parsed !== undefined && parsed > maxValue) {
+							maxValue = parsed
+						}
+					}
+					return formatAlphaIssueId(maxValue + 1)
+				})
 
 			const listFromLocalSqlite = (
 				filters: IssueListFilters | undefined,
@@ -545,41 +547,11 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					)
 				})
 
-			const rejectUnsupportedImplementations = (
-				implementations: ReadonlyArray<string> | undefined,
-			): Effect.Effect<void, TrackerIssueDaemonError> =>
-				implementations !== undefined && implementations.length > 0
-					? Effect.fail(
-							new TrackerIssueDaemonError({
-								reason: "unsupported-field",
-								message:
-									"Tracker/legacy issue RPC does not support implementation-scoped issue fields yet.",
-							}),
-						)
-					: Effect.void
-
 			return {
 				get: (issueId, projectPath) =>
 					Effect.gen(function* () {
-						const { issueTracker } = yield* getRuntimeConfig(projectPath)
-						const backend = resolveConfiguredIssueBackend(issueTracker)
-						if (backend === "local" || backend === "linear") {
-							const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined, false)
-							const issue = issues.find((candidate) => candidate.id === issueId)
-							if (issue === undefined || issue.status === "tombstone") {
-								return yield* Effect.fail(
-									new TrackerIssueDaemonError({
-										reason: "not-found",
-										message: `Issue not found: ${issueId}`,
-									}),
-								)
-							}
-							return issue
-						}
-						const { executable } = yield* resolveExecutable(projectPath)
-						const output = yield* runJson(executable, ["show", issueId], projectPath)
-						const issues = yield* decodeJson(Schema.Array(TrackedIssueSchema), output)
-						const issue = issues[0]
+						const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined, false)
+						const issue = issues.find((candidate) => candidate.id === issueId)
 						if (issue === undefined || issue.status === "tombstone") {
 							return yield* Effect.fail(
 								new TrackerIssueDaemonError({
@@ -592,186 +564,248 @@ export class TrackerIssueDaemonService extends Effect.Service<TrackerIssueDaemon
 					}),
 				list: (filters, projectPath, options) =>
 					Effect.gen(function* () {
-						yield* rejectUnsupportedImplementations(filters?.implementations)
-						const { issueTracker } = yield* getRuntimeConfig(projectPath)
-						const backend = resolveConfiguredIssueBackend(issueTracker)
-						if (backend === "local" || backend === "linear") {
-							return yield* listFromLocalSqlite(filters, projectPath, options, true)
-						}
-						const { executable } = yield* resolveExecutable(projectPath)
-						const output = yield* runJson(executable, buildListArgs(filters, options), projectPath)
-						const issues = yield* decodeJson(Schema.Array(TrackedIssueSchema), output)
-						const nonTombstones = issues.filter((issue) => issue.status !== "tombstone")
-						const sortBy = options?.sortBy ?? "updated_at"
-						const sortDirection = options?.sortDirection ?? "desc"
-						const sorted = sortIssuesInMemory(nonTombstones, sortBy, sortDirection)
-						if (options?.limit === undefined) {
-							return sorted
-						}
-						return sorted.slice(0, Math.max(0, options.limit))
+						return yield* listFromLocalSqlite(filters, projectPath, options, true)
 					}),
 				create: (input, projectPath) =>
 					Effect.gen(function* () {
-						yield* rejectUnsupportedImplementations(input.implementations)
-						const { executable } = yield* resolveExecutable(projectPath)
-						const args = ["create", input.title]
-						if (input.type !== undefined) args.push("--type", input.type)
-						if (input.priority !== undefined) args.push("--priority", String(input.priority))
-						if (input.description !== undefined) args.push("--description", input.description)
-						if (input.design !== undefined) args.push("--design", input.design)
-						if (input.acceptance !== undefined) args.push("--acceptance", input.acceptance)
-						if (input.assignee !== undefined) args.push("--assignee", input.assignee)
-						if (input.estimate !== undefined) args.push("--estimate", String(input.estimate))
-						if (input.labels !== undefined && input.labels.length > 0) {
-							args.push("--labels", input.labels.join(","))
-						}
-						if (input.parent !== undefined) args.push("--parent", input.parent)
-						const output = yield* runJson(executable, args, projectPath)
-						const created = yield* decodeJson(TrackedIssueSchema, output)
-						if (input.status === undefined || input.status === "open") {
-							return created
-						}
-						yield* runJson(
-							executable,
-							["update", created.id, "--status", input.status],
-							projectPath,
+						const dbPath = resolveLocalDbPath(projectPath)
+						const nowIso = new Date().toISOString()
+						const issueId = yield* generateNextIssueId(projectPath)
+						const status = input.status ?? "open"
+						const type = input.type ?? "task"
+						const priority = input.priority ?? 3
+						const labelsJson = JSON.stringify(input.labels ?? [])
+						const implementationsJson = JSON.stringify(input.implementations ?? [])
+						const closedAtLiteral = status === "closed" ? sqlStringLiteral(nowIso) : "NULL"
+						yield* runSqliteExec(
+							dbPath,
+							`INSERT INTO issues (
+                                id, title, description, status, priority, issue_type,
+                                created_at, updated_at, closed_at, assignee,
+                                labels_json, implementations_json, design, notes, acceptance, estimate, deleted_at
+                             ) VALUES (
+                                ${sqlStringLiteral(issueId)},
+                                ${sqlStringLiteral(input.title)},
+                                ${sqlStringLiteral(input.description ?? "")},
+                                ${sqlStringLiteral(status)},
+                                ${String(priority)},
+                                ${sqlStringLiteral(type)},
+                                ${sqlStringLiteral(nowIso)},
+                                ${sqlStringLiteral(nowIso)},
+                                ${closedAtLiteral},
+                                ${
+																	input.assignee === undefined
+																		? "NULL"
+																		: sqlStringLiteral(input.assignee)
+																},
+                                ${sqlStringLiteral(labelsJson)},
+                                ${sqlStringLiteral(implementationsJson)},
+                                ${
+																	input.design === undefined
+																		? "NULL"
+																		: sqlStringLiteral(input.design)
+																},
+                                NULL,
+                                ${
+																	input.acceptance === undefined
+																		? "NULL"
+																		: sqlStringLiteral(input.acceptance)
+																},
+                                ${input.estimate === undefined ? "NULL" : String(input.estimate)},
+                                NULL
+                             );`,
 						)
-						return { ...created, status: input.status }
+
+						if (input.parent !== undefined) {
+							yield* runSqliteExec(
+								dbPath,
+								`INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+                                 VALUES (
+                                    ${sqlStringLiteral(issueId)},
+                                    ${sqlStringLiteral(input.parent)},
+                                    'parent-child',
+                                    NULL
+                                 );`,
+							)
+						}
+
+						const refreshedIssues = yield* listFromLocalSqlite(
+							undefined,
+							projectPath,
+							undefined,
+							false,
+						)
+						const refreshed = refreshedIssues.find((issue) => issue.id === issueId)
+						if (refreshed === undefined) {
+							return yield* Effect.fail(
+								new TrackerIssueDaemonError({
+									reason: "not-found",
+									message: `Issue not found after create: ${issueId}`,
+								}),
+							)
+						}
+						return refreshed
 					}),
 				update: (issueId, patch, projectPath) =>
 					Effect.gen(function* () {
-						const { issueTracker } = yield* getRuntimeConfig(projectPath)
-						const backend = resolveConfiguredIssueBackend(issueTracker)
-						if (backend === "local" || backend === "linear") {
-							if (patch.parent !== undefined) {
-								return yield* Effect.fail(
-									new TrackerIssueDaemonError({
-										reason: "unsupported-field",
-										message: "Issue parent updates are not supported via daemon local backend yet.",
-									}),
-								)
-							}
-
-							const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined, false)
-							const existing = issues.find((candidate) => candidate.id === issueId)
-							if (existing === undefined || existing.status === "tombstone") {
-								return yield* Effect.fail(
-									new TrackerIssueDaemonError({
-										reason: "not-found",
-										message: `Issue not found: ${issueId}`,
-									}),
-								)
-							}
-
-							const targetProjectPath = projectPath ?? process.cwd()
-							const storagePaths = getProjectStoragePaths(targetProjectPath, pathService)
-							const dbPath = storagePaths.canonicalDbPath
-							const nowIso = new Date().toISOString()
-							const updates: Array<string> = [`updated_at = ${sqlStringLiteral(nowIso)}`]
-
-							if (patch.status !== undefined) {
-								updates.push(`status = ${sqlStringLiteral(patch.status)}`)
-								updates.push(
-									`closed_at = ${patch.status === "closed" ? sqlStringLiteral(nowIso) : "NULL"}`,
-								)
-							}
-							if (patch.notes !== undefined) {
-								updates.push(`notes = ${sqlStringLiteral(patch.notes)}`)
-							}
-							if (patch.priority !== undefined) {
-								updates.push(`priority = ${String(patch.priority)}`)
-							}
-							if (patch.title !== undefined) {
-								updates.push(`title = ${sqlStringLiteral(patch.title)}`)
-							}
-							if (patch.type !== undefined) {
-								updates.push(`issue_type = ${sqlStringLiteral(patch.type)}`)
-							}
-							if (patch.description !== undefined) {
-								updates.push(`description = ${sqlStringLiteral(patch.description)}`)
-							}
-							if (patch.design !== undefined) {
-								updates.push(`design = ${sqlStringLiteral(patch.design)}`)
-							}
-							if (patch.acceptance !== undefined) {
-								updates.push(`acceptance = ${sqlStringLiteral(patch.acceptance)}`)
-							}
-							if (patch.assignee !== undefined) {
-								updates.push(`assignee = ${sqlStringLiteral(patch.assignee)}`)
-							}
-							if (patch.estimate !== undefined) {
-								updates.push(`estimate = ${String(patch.estimate)}`)
-							}
-							if (patch.labels !== undefined) {
-								updates.push(`labels_json = ${sqlStringLiteral(JSON.stringify(patch.labels))}`)
-							}
-							if (patch.implementations !== undefined) {
-								updates.push(
-									`implementations_json = ${sqlStringLiteral(
-										JSON.stringify(patch.implementations),
-									)}`,
-								)
-							}
-
-							yield* runSqliteExec(
-								dbPath,
-								`UPDATE issues SET ${updates.join(", ")} WHERE id = ${sqlStringLiteral(issueId)} AND deleted_at IS NULL;`,
+						if (patch.parent !== undefined) {
+							return yield* Effect.fail(
+								new TrackerIssueDaemonError({
+									reason: "unsupported-field",
+									message: "Issue parent updates are not supported via daemon local backend yet.",
+								}),
 							)
-							return
 						}
 
-						yield* rejectUnsupportedImplementations(patch.implementations)
-						const { executable } = yield* resolveExecutable(projectPath)
-						const args = ["update", issueId]
-						if (patch.status !== undefined) args.push("--status", patch.status)
-						if (patch.notes !== undefined) args.push("--notes", patch.notes)
-						if (patch.priority !== undefined) args.push("--priority", String(patch.priority))
-						if (patch.title !== undefined) args.push("--title", patch.title)
-						if (patch.type !== undefined) args.push("--type", patch.type)
-						if (patch.description !== undefined) args.push("--description", patch.description)
-						if (patch.design !== undefined) args.push("--design", patch.design)
-						if (patch.acceptance !== undefined) args.push("--acceptance", patch.acceptance)
-						if (patch.assignee !== undefined) args.push("--assignee", patch.assignee)
-						if (patch.estimate !== undefined) args.push("--estimate", String(patch.estimate))
-						if (patch.labels !== undefined) {
-							for (const label of patch.labels) {
-								args.push("--set-labels", label)
-							}
+						const issues = yield* listFromLocalSqlite(undefined, projectPath, undefined, false)
+						const existing = issues.find((candidate) => candidate.id === issueId)
+						if (existing === undefined || existing.status === "tombstone") {
+							return yield* Effect.fail(
+								new TrackerIssueDaemonError({
+									reason: "not-found",
+									message: `Issue not found: ${issueId}`,
+								}),
+							)
 						}
-						if (patch.parent !== undefined) args.push("--parent", patch.parent)
-						yield* runJson(executable, args, projectPath)
+
+						const dbPath = resolveLocalDbPath(projectPath)
+						const nowIso = new Date().toISOString()
+						const updates: Array<string> = [`updated_at = ${sqlStringLiteral(nowIso)}`]
+
+						if (patch.status !== undefined) {
+							updates.push(`status = ${sqlStringLiteral(patch.status)}`)
+							updates.push(
+								`closed_at = ${patch.status === "closed" ? sqlStringLiteral(nowIso) : "NULL"}`,
+							)
+						}
+						if (patch.notes !== undefined) {
+							updates.push(`notes = ${sqlStringLiteral(patch.notes)}`)
+						}
+						if (patch.priority !== undefined) {
+							updates.push(`priority = ${String(patch.priority)}`)
+						}
+						if (patch.title !== undefined) {
+							updates.push(`title = ${sqlStringLiteral(patch.title)}`)
+						}
+						if (patch.type !== undefined) {
+							updates.push(`issue_type = ${sqlStringLiteral(patch.type)}`)
+						}
+						if (patch.description !== undefined) {
+							updates.push(`description = ${sqlStringLiteral(patch.description)}`)
+						}
+						if (patch.design !== undefined) {
+							updates.push(`design = ${sqlStringLiteral(patch.design)}`)
+						}
+						if (patch.acceptance !== undefined) {
+							updates.push(`acceptance = ${sqlStringLiteral(patch.acceptance)}`)
+						}
+						if (patch.assignee !== undefined) {
+							updates.push(`assignee = ${sqlStringLiteral(patch.assignee)}`)
+						}
+						if (patch.estimate !== undefined) {
+							updates.push(`estimate = ${String(patch.estimate)}`)
+						}
+						if (patch.labels !== undefined) {
+							updates.push(`labels_json = ${sqlStringLiteral(JSON.stringify(patch.labels))}`)
+						}
+						if (patch.implementations !== undefined) {
+							updates.push(
+								`implementations_json = ${sqlStringLiteral(JSON.stringify(patch.implementations))}`,
+							)
+						}
+
+						yield* runSqliteExec(
+							dbPath,
+							`UPDATE issues SET ${updates.join(", ")} WHERE id = ${sqlStringLiteral(issueId)} AND deleted_at IS NULL;`,
+						)
 					}),
 				addDependency: (issueId, dependsOnId, dependencyType, projectPath) =>
 					Effect.gen(function* () {
-						const { executable } = yield* resolveExecutable(projectPath)
-						yield* runJson(
-							executable,
-							["dep", "add", issueId, dependsOnId, "--type", dependencyType],
-							projectPath,
+						const dbPath = resolveLocalDbPath(projectPath)
+						const nowIso = new Date().toISOString()
+						yield* runSqliteExec(
+							dbPath,
+							`UPDATE issue_dependencies
+                             SET tombstoned_at = NULL
+                             WHERE issue_id = ${sqlStringLiteral(issueId)}
+                               AND depends_on_id = ${sqlStringLiteral(dependsOnId)}
+                               AND dependency_type = ${sqlStringLiteral(dependencyType)};`,
+						)
+						yield* runSqliteExec(
+							dbPath,
+							`INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, created_at, tombstoned_at)
+                             SELECT
+                                ${sqlStringLiteral(issueId)},
+                                ${sqlStringLiteral(dependsOnId)},
+                                ${sqlStringLiteral(dependencyType)},
+                                ${sqlStringLiteral(nowIso)},
+                                NULL
+                             WHERE NOT EXISTS (
+                                SELECT 1 FROM issue_dependencies
+                                WHERE issue_id = ${sqlStringLiteral(issueId)}
+                                  AND depends_on_id = ${sqlStringLiteral(dependsOnId)}
+                                  AND dependency_type = ${sqlStringLiteral(dependencyType)}
+                             );`,
 						)
 					}),
 				removeDependency: (issueId, dependsOnId, dependencyType, projectPath) =>
 					Effect.gen(function* () {
-						const { executable } = yield* resolveExecutable(projectPath)
-						const args = ["dep", "remove", issueId, dependsOnId]
+						const dbPath = resolveLocalDbPath(projectPath)
+						const nowIso = new Date().toISOString()
+						const filters = [
+							`issue_id = ${sqlStringLiteral(issueId)}`,
+							`depends_on_id = ${sqlStringLiteral(dependsOnId)}`,
+							"tombstoned_at IS NULL",
+						]
 						if (dependencyType !== undefined) {
-							args.push("--type", dependencyType)
+							filters.push(`dependency_type = ${sqlStringLiteral(dependencyType)}`)
 						}
-						yield* runJson(executable, args, projectPath)
+						yield* runSqliteExec(
+							dbPath,
+							`UPDATE issue_dependencies
+                             SET tombstoned_at = ${sqlStringLiteral(nowIso)}
+                             WHERE ${filters.join(" AND ")};`,
+						)
 					}),
 				close: (issueId, reason, projectPath) =>
 					Effect.gen(function* () {
-						const { executable } = yield* resolveExecutable(projectPath)
-						const args = ["close", issueId]
-						if (reason !== undefined) {
-							args.push("--reason", reason)
-						}
-						yield* runJson(executable, args, projectPath)
+						const dbPath = resolveLocalDbPath(projectPath)
+						const nowIso = new Date().toISOString()
+						const escapedReason =
+							reason === undefined ? undefined : reason.trim().length === 0 ? undefined : reason
+						const notesUpdate =
+							escapedReason === undefined ? "" : `, notes = ${sqlStringLiteral(escapedReason)}`
+						yield* runSqliteExec(
+							dbPath,
+							`UPDATE issues
+                             SET status = 'closed',
+                                 closed_at = ${sqlStringLiteral(nowIso)},
+                                 updated_at = ${sqlStringLiteral(nowIso)}
+                                 ${notesUpdate}
+                             WHERE id = ${sqlStringLiteral(issueId)} AND deleted_at IS NULL;`,
+						)
 					}),
 				delete: (issueId, projectPath) =>
 					Effect.gen(function* () {
-						const { executable } = yield* resolveExecutable(projectPath)
-						yield* runDirect(executable, ["delete", issueId, "--force"], projectPath)
+						const dbPath = resolveLocalDbPath(projectPath)
+						const nowIso = new Date().toISOString()
+						yield* runSqliteExec(
+							dbPath,
+							`UPDATE issues
+                             SET deleted_at = ${sqlStringLiteral(nowIso)},
+                                 updated_at = ${sqlStringLiteral(nowIso)}
+                             WHERE id = ${sqlStringLiteral(issueId)} AND deleted_at IS NULL;`,
+						)
+						yield* runSqliteExec(
+							dbPath,
+							`UPDATE issue_dependencies
+                             SET tombstoned_at = ${sqlStringLiteral(nowIso)}
+                             WHERE tombstoned_at IS NULL
+                               AND (
+                                   issue_id = ${sqlStringLiteral(issueId)}
+                                   OR depends_on_id = ${sqlStringLiteral(issueId)}
+                               );`,
+						)
 					}),
 				sync: (projectPath) =>
 					Effect.gen(function* () {

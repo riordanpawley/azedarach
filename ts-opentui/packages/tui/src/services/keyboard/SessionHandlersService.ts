@@ -1,14 +1,14 @@
 import { AppConfig } from "@azedarach/config"
+import {
+	getIssueSessionName,
+	issueIdsEqualForLookup,
+	parseIssueSessionName,
+} from "@azedarach/shared/session-names"
 import type { CommandExecutor } from "@effect/platform"
 import { FileSystem } from "@effect/platform"
 import { Effect } from "effect"
 import { hasTaskSessionPresence } from "../../types.js"
 import { formatForToast } from "../../utils/formatForToast.js"
-import {
-	getIssueSessionName,
-	issueIdsEqualForLookup,
-	parseIssueSessionName,
-} from "../../utils/sessionNames.js"
 import { getWorktreePath } from "../../utils/worktreePaths.js"
 import { AttachmentService } from "../AttachmentService.js"
 import { ImageAttachmentService } from "../ImageAttachmentService.js"

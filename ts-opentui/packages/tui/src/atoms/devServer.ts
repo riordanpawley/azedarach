@@ -1,3 +1,4 @@
+import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
 import {
 	type DaemonDevServerListRequest,
 	type DaemonDevServerListResult,
@@ -109,7 +110,7 @@ const updateServerInRef = (
 
 const getProjectPath = Effect.gen(function* () {
 	const projectContext = yield* getTuiProjectContextRead
-	return (yield* projectContext.getCurrentPath()) ?? process.cwd()
+	return yield* resolveProjectPathFromContext(projectContext)
 })
 
 const getDaemonRpcClient = (): Effect.Effect<DaemonRpcClientApi, TuiDevServerRpcUnavailableError> =>

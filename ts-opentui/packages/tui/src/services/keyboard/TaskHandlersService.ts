@@ -1,3 +1,4 @@
+import { resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, SubscriptionRef } from "effect"
 import { COLUMNS, hasTaskSessionPresence, type TaskWithSession } from "../../types.js"
@@ -9,6 +10,7 @@ import { PrWorkflowService as PRWorkflow } from "../PrWorkflowService.js"
 import { ToastService } from "../ToastService.js"
 import { TuiBoardStoreService } from "../TuiBoardStoreService.js"
 import { TuiIssueAdapterService } from "../TuiIssueAdapterService.js"
+import { TuiProjectContextService } from "../TuiProjectContextService.js"
 import { TuiSessionAdapterService } from "../TuiSessionAdapterService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
@@ -71,6 +73,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
 			const sessionAdapter = yield* TuiSessionAdapterService
+			const projectContext = yield* TuiProjectContextService
 
 			const getActiveProjectPath = (): Effect.Effect<string | undefined> =>
 				SubscriptionRef.get(board.currentProjectPath).pipe(
@@ -98,11 +101,14 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				Effect.gen(function* () {
 					const projectPath = yield* getActiveProjectPath()
 					if (hasSession) {
+						const effectiveProjectPath = resolveEffectiveProjectPath(
+							projectPath ?? (yield* projectContext.getCurrentPath()),
+						)
 						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
 						yield* prWorkflow
 							.cleanup({
 								issueId: taskId,
-								projectPath: process.cwd(),
+								projectPath: effectiveProjectPath,
 								closeIssue: false,
 							})
 							.pipe(

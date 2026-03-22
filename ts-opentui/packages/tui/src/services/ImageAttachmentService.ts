@@ -1,4 +1,5 @@
 import { AppConfigProjectContext } from "@azedarach/config"
+import { resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
 import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { Command, FileSystem, Path } from "@effect/platform"
 import * as CommandExecutor from "@effect/platform/CommandExecutor"
@@ -153,9 +154,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 			const executor = yield* CommandExecutor.CommandExecutor
 
 			const resolveProjectPath = (): Effect.Effect<string> =>
-				projectContext
-					.getCurrentPath()
-					.pipe(Effect.map((projectPath) => projectPath ?? process.cwd()))
+				projectContext.getCurrentPath().pipe(Effect.map(resolveEffectiveProjectPath))
 
 			const currentAttachments = yield* SubscriptionRef.make<CurrentAttachmentsState>(null)
 			const overlayState = yield* SubscriptionRef.make<OverlayState>({
@@ -238,7 +237,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						})
 						.pipe(
 							Effect.map((result) => result.attachments),
-							Effect.mapError((error) => mapRpcError(error.message)),
+							Effect.mapError((error) => mapDaemonRpcClientErrorMessage(error, mapRpcError)),
 						)
 				})
 
@@ -257,7 +256,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						})
 						.pipe(
 							Effect.map((result) => result.path),
-							Effect.mapError((error) => mapRpcError(error.message)),
+							Effect.mapError((error) => mapDaemonRpcClientErrorMessage(error, mapRpcError)),
 						)
 				})
 
@@ -301,7 +300,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							attachmentId,
 							projectPath,
 						})
-						.pipe(Effect.mapError((error) => mapRpcError(error.message)))
+						.pipe(Effect.mapError((error) => mapDaemonRpcClientErrorMessage(error, mapRpcError)))
 					const attachments = yield* list(taskId, projectPath)
 					yield* refreshCurrentTaskAttachments(taskId, attachments)
 				})
@@ -483,7 +482,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							})
 							.pipe(
 								Effect.map((result) => result.counts),
-								Effect.mapError((error) => mapRpcError(error.message)),
+								Effect.mapError((error) => mapDaemonRpcClientErrorMessage(error, mapRpcError)),
 							)
 					}),
 				attachFile: (taskId, filePath) =>
@@ -503,7 +502,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							})
 							.pipe(
 								Effect.map((result) => result.attachment),
-								Effect.mapError((error) => mapRpcError(error.message)),
+								Effect.mapError((error) => mapDaemonRpcClientErrorMessage(error, mapRpcError)),
 							)
 						const attachments = yield* list(taskId, projectPath)
 						yield* refreshCurrentTaskAttachments(taskId, attachments)
@@ -524,7 +523,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							})
 							.pipe(
 								Effect.map((result) => result.attachment),
-								Effect.mapError((error) => mapRpcError(error.message)),
+								Effect.mapError((error) => mapDaemonRpcClientErrorMessage(error, mapRpcError)),
 							)
 						const attachments = yield* list(taskId, projectPath)
 						yield* refreshCurrentTaskAttachments(taskId, attachments)

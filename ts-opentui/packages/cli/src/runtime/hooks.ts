@@ -1,4 +1,4 @@
-import { getIssueSessionName } from "./paths.js"
+import { getIssueSessionName } from "@azedarach/shared/session-names"
 
 const AZ_NOTIFY_PATH = decodeURIComponent(
 	new URL("../../../../bin/az-notify.sh", import.meta.url).pathname,

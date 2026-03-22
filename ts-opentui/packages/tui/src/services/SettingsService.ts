@@ -8,6 +8,7 @@ import {
 	resolveConfigBasePath,
 	resolveConfigSchemaPath,
 } from "@azedarach/config"
+import { resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { ToastService } from "./ToastService.js"
@@ -493,7 +494,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 		}> =>
 			Effect.gen(function* () {
 				const projectPath = yield* projectContext.getCurrentPath()
-				const effectiveProjectPath = projectPath ?? process.cwd()
+				const effectiveProjectPath = resolveEffectiveProjectPath(projectPath)
 				const cwdPath = process.cwd()
 				const cwdStoragePaths = getProjectStoragePaths(cwdPath, pathService)
 				const cwdHasCanonicalConfig = yield* fs.exists(cwdStoragePaths.canonicalConfigPath).pipe(

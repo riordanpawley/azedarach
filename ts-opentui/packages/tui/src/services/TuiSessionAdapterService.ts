@@ -1,9 +1,11 @@
+import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
 import {
 	DaemonRpcClient,
 	type DaemonSessionMutationResult,
 	type DaemonSessionSnapshotEntry,
 } from "@azedarach/shared/rpc"
 import { Data, Effect } from "effect"
+import { TuiProjectContextService } from "./TuiProjectContextService.js"
 
 export class TuiSessionAdapterServiceError extends Data.TaggedError(
 	"TuiSessionAdapterServiceError",
@@ -65,8 +67,6 @@ export interface TuiSessionAdapterServiceApi {
 	) => Effect.Effect<DaemonSessionSnapshotEntry, TuiSessionAdapterServiceError>
 }
 
-const resolveProjectPath = (projectPath: string | undefined): string => projectPath ?? process.cwd()
-
 const rpcFailure = (
 	operation: TuiSessionAdapterServiceError["operation"],
 	message: string,
@@ -83,8 +83,18 @@ const toSession = (result: DaemonSessionMutationResult): DaemonSessionSnapshotEn
 export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterService>()(
 	"TuiSessionAdapterService",
 	{
+		dependencies: [TuiProjectContextService.Default],
 		effect: Effect.gen(function* () {
 			const daemonRpcClient = yield* DaemonRpcClient
+			const projectContext = yield* TuiProjectContextService
+
+			const resolveProjectPath = (projectPath: string | undefined): Effect.Effect<string> =>
+				Effect.gen(function* () {
+					if (projectPath !== undefined) {
+						return projectPath
+					}
+					return yield* resolveProjectPathFromContext(projectContext)
+				})
 
 			const service: TuiSessionAdapterServiceApi = {
 				listActive: (options) => {
@@ -94,14 +104,15 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 						)
 					}
 
-					return daemonRpcClient
-						.sessionSnapshot({
-							projectPath: resolveProjectPath(options?.projectPath),
-						})
-						.pipe(
-							Effect.map((result) => result.sessions),
-							Effect.mapError((error) => rpcFailure("sessionListActive", error.message)),
-						)
+					return resolveProjectPath(options?.projectPath).pipe(
+						Effect.flatMap((projectPath) =>
+							daemonRpcClient.sessionSnapshot({
+								projectPath,
+							}),
+						),
+						Effect.map((result) => result.sessions),
+						Effect.mapError((error) => rpcFailure("sessionListActive", error.message)),
+					)
 				},
 				start: (issueId, options) => {
 					if (daemonRpcClient.sessionStart === undefined) {
@@ -110,23 +121,24 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 						)
 					}
 
-					return daemonRpcClient
-						.sessionStart({
-							issueId,
-							projectPath: resolveProjectPath(options?.projectPath),
-							...(options?.initialPrompt !== undefined
-								? { initialPrompt: options.initialPrompt }
-								: {}),
-							...(options?.imagePaths !== undefined ? { imagePaths: options.imagePaths } : {}),
-							...(options?.sessionEnv !== undefined ? { sessionEnv: options.sessionEnv } : {}),
-							...(options?.dangerouslySkipPermissions !== undefined
-								? { dangerouslySkipPermissions: options.dangerouslySkipPermissions }
-								: {}),
-						})
-						.pipe(
-							Effect.map(toSession),
-							Effect.mapError((error) => rpcFailure("sessionStart", error.message)),
-						)
+					return resolveProjectPath(options?.projectPath).pipe(
+						Effect.flatMap((projectPath) =>
+							daemonRpcClient.sessionStart({
+								issueId,
+								projectPath,
+								...(options?.initialPrompt !== undefined
+									? { initialPrompt: options.initialPrompt }
+									: {}),
+								...(options?.imagePaths !== undefined ? { imagePaths: options.imagePaths } : {}),
+								...(options?.sessionEnv !== undefined ? { sessionEnv: options.sessionEnv } : {}),
+								...(options?.dangerouslySkipPermissions !== undefined
+									? { dangerouslySkipPermissions: options.dangerouslySkipPermissions }
+									: {}),
+							}),
+						),
+						Effect.map(toSession),
+						Effect.mapError((error) => rpcFailure("sessionStart", error.message)),
+					)
 				},
 				stop: (issueId, options) => {
 					if (daemonRpcClient.sessionStop === undefined) {
@@ -135,15 +147,16 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 						)
 					}
 
-					return daemonRpcClient
-						.sessionStop({
-							issueId,
-							projectPath: resolveProjectPath(options?.projectPath),
-						})
-						.pipe(
-							Effect.map(toSession),
-							Effect.mapError((error) => rpcFailure("sessionStop", error.message)),
-						)
+					return resolveProjectPath(options?.projectPath).pipe(
+						Effect.flatMap((projectPath) =>
+							daemonRpcClient.sessionStop({
+								issueId,
+								projectPath,
+							}),
+						),
+						Effect.map(toSession),
+						Effect.mapError((error) => rpcFailure("sessionStop", error.message)),
+					)
 				},
 				pause: (issueId, options) => {
 					if (daemonRpcClient.sessionPause === undefined) {
@@ -152,15 +165,16 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 						)
 					}
 
-					return daemonRpcClient
-						.sessionPause({
-							issueId,
-							projectPath: resolveProjectPath(options?.projectPath),
-						})
-						.pipe(
-							Effect.map(toSession),
-							Effect.mapError((error) => rpcFailure("sessionPause", error.message)),
-						)
+					return resolveProjectPath(options?.projectPath).pipe(
+						Effect.flatMap((projectPath) =>
+							daemonRpcClient.sessionPause({
+								issueId,
+								projectPath,
+							}),
+						),
+						Effect.map(toSession),
+						Effect.mapError((error) => rpcFailure("sessionPause", error.message)),
+					)
 				},
 				resume: (issueId, options) => {
 					if (daemonRpcClient.sessionResume === undefined) {
@@ -169,15 +183,16 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 						)
 					}
 
-					return daemonRpcClient
-						.sessionResume({
-							issueId,
-							projectPath: resolveProjectPath(options?.projectPath),
-						})
-						.pipe(
-							Effect.map(toSession),
-							Effect.mapError((error) => rpcFailure("sessionResume", error.message)),
-						)
+					return resolveProjectPath(options?.projectPath).pipe(
+						Effect.flatMap((projectPath) =>
+							daemonRpcClient.sessionResume({
+								issueId,
+								projectPath,
+							}),
+						),
+						Effect.map(toSession),
+						Effect.mapError((error) => rpcFailure("sessionResume", error.message)),
+					)
 				},
 				recover: (issueId, options) => {
 					if (daemonRpcClient.sessionRecover === undefined) {
@@ -186,15 +201,16 @@ export class TuiSessionAdapterService extends Effect.Service<TuiSessionAdapterSe
 						)
 					}
 
-					return daemonRpcClient
-						.sessionRecover({
-							issueId,
-							projectPath: resolveProjectPath(options?.projectPath),
-						})
-						.pipe(
-							Effect.map(toSession),
-							Effect.mapError((error) => rpcFailure("sessionRecover", error.message)),
-						)
+					return resolveProjectPath(options?.projectPath).pipe(
+						Effect.flatMap((projectPath) =>
+							daemonRpcClient.sessionRecover({
+								issueId,
+								projectPath,
+							}),
+						),
+						Effect.map(toSession),
+						Effect.mapError((error) => rpcFailure("sessionRecover", error.message)),
+					)
 				},
 				recoverSession: (issueId, options) => service.recover(issueId, options),
 			}

@@ -27,6 +27,7 @@ import {
 	type GlobalDaemonBootstrapApi,
 	isRetryableRpcClientError,
 } from "@azedarach/daemon-control"
+import { resolveBaseProjectPath } from "@azedarach/shared/project-path"
 import type {
 	DaemonEventStreamEntry,
 	DaemonEventStreamResult,
@@ -35,6 +36,11 @@ import type {
 	DaemonSessionMutationResult,
 	DaemonSessionSnapshotResult,
 } from "@azedarach/shared/rpc"
+import {
+	getIssueSessionName,
+	issueIdsEqualForLookup,
+	parseIssueSessionName,
+} from "@azedarach/shared/session-names"
 import { Args, Command, Options } from "@effect/cli"
 import { Otlp } from "@effect/opentelemetry"
 import {
@@ -91,11 +97,6 @@ import {
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 import { resolveDaemonIntervalMsFromEnv } from "./runtime/daemonOperationsPolicy.js"
 import { deepMerge, generateHookConfig } from "./runtime/hooks.js"
-import {
-	getIssueSessionName,
-	issueIdsEqualForLookup,
-	parseIssueSessionName,
-} from "./runtime/paths.js"
 import {
 	applyNotifyStatusToTmux,
 	isValidHookEvent,
@@ -252,45 +253,10 @@ const validateIssueTrackerStore = (projectDir: string) =>
 		}
 	})
 
-const resolveBaseWorktreePath = (startPath: string) =>
-	Effect.gen(function* () {
-		const fs = yield* FileSystem.FileSystem
-		const pathService = yield* Path.Path
-		let currentPath = pathService.normalize(startPath)
-		while (true) {
-			const gitEntryPath = pathService.join(currentPath, ".git")
-			const hasGitEntry = yield* fs.exists(gitEntryPath).pipe(Effect.orElseSucceed(() => false))
-			if (hasGitEntry) {
-				const gitEntryContent = yield* fs.readFileString(gitEntryPath).pipe(Effect.option)
-				if (Option.isSome(gitEntryContent)) {
-					const trimmed = gitEntryContent.value.trim()
-					const gitdirPrefix = "gitdir:"
-					if (trimmed.startsWith(gitdirPrefix)) {
-						const rawGitDir = trimmed.slice(gitdirPrefix.length).trim()
-						const gitDirPath = rawGitDir.startsWith(pathService.sep)
-							? rawGitDir
-							: pathService.normalize(pathService.join(currentPath, rawGitDir))
-						const worktreeMarker = `${pathService.sep}.git${pathService.sep}worktrees${pathService.sep}`
-						const worktreeMarkerIndex = gitDirPath.indexOf(worktreeMarker)
-						if (worktreeMarkerIndex > 0) {
-							return gitDirPath.slice(0, worktreeMarkerIndex)
-						}
-					}
-				}
-				return currentPath
-			}
-			const parentPath = pathService.dirname(currentPath)
-			if (parentPath === currentPath) {
-				return pathService.normalize(startPath)
-			}
-			currentPath = parentPath
-		}
-	})
-
 const resolveProjectBasePath = (projectDir: Option.Option<string>) =>
 	Effect.gen(function* () {
 		const inputPath = Option.getOrElse(projectDir, () => process.cwd())
-		return yield* resolveBaseWorktreePath(inputPath)
+		return yield* resolveBaseProjectPath(inputPath)
 	})
 
 const LocalIssueCountRowsSchema = Schema.Array(Schema.Struct({ count: Schema.Number }))
@@ -1073,12 +1039,12 @@ const startHandler = (args: {
 	readonly config: Option.Option<string>
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const sessionRuntime = resolveStartSessionRuntimeMode()
 
 		yield* Console.log(`Starting Claude session for issue: ${issueId}`)
-		yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log(`Project: ${projectPath}`)
 
 		if (args.verbose) {
 			yield* Console.log("Verbose mode enabled")
@@ -1088,7 +1054,7 @@ const startHandler = (args: {
 		}
 
 		// Validate issue tracker store
-		yield* validateIssueTrackerStore(cwd)
+		yield* validateIssueTrackerStore(projectPath)
 
 		if (args.verbose) {
 			yield* Console.log(
@@ -1110,7 +1076,7 @@ const startHandler = (args: {
 			const mutation = yield* bootstrap.client
 				.sessionStart({
 					issueId,
-					projectPath: cwd,
+					projectPath,
 				})
 				.pipe(
 					Effect.mapError((error) =>
@@ -1131,7 +1097,7 @@ const startHandler = (args: {
 		yield* claimBootstrap.client
 			.issueUpdate({
 				issueId,
-				projectPath: cwd,
+				projectPath,
 				patch: {
 					status: "in_progress",
 					assignee: session.tmuxSessionName,
@@ -1171,15 +1137,15 @@ const attachHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		if (args.verbose) {
 			yield* Console.log(`Attaching to session for issue: ${issueId}`)
-			yield* Console.log(`Project: ${cwd}`)
+			yield* Console.log(`Project: ${projectPath}`)
 		}
 
-		const sessionName = yield* findSessionByIssueId(issueId)
+		const sessionName = yield* findSessionByIssueId(issueId, projectPath)
 		if (!sessionName) {
 			yield* Console.error(`No session found for ${issueId}`)
 			yield* Console.log(`Start a new session with: az start ${issueId}`)
@@ -1200,18 +1166,18 @@ const pauseHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		yield* Console.log(`Pausing session for issue: ${issueId}`)
-		yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log(`Project: ${projectPath}`)
 
 		if (args.verbose) {
 			yield* Console.log("Verbose mode enabled")
 		}
 
 		// Validate issue tracker store
-		yield* validateIssueTrackerStore(cwd)
+		yield* validateIssueTrackerStore(projectPath)
 
 		// TODO: Implement session pause
 		yield* Console.log("[Stub] Sending Ctrl+C to session...")
@@ -1227,12 +1193,12 @@ const killHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		yield* Console.log(`Killing session for issue: ${issueId}`)
 
-		const sessionName = yield* findSessionByIssueId(issueId)
+		const sessionName = yield* findSessionByIssueId(issueId, projectPath)
 		if (!sessionName) {
 			yield* Console.log(`No session found for ${issueId}`)
 			return
@@ -1251,7 +1217,7 @@ const killHandler = (args: {
 		yield* Console.log(`Session ${issueId} killed.`)
 
 		if (args.verbose) {
-			yield* Console.log(`Project: ${cwd}`)
+			yield* Console.log(`Project: ${projectPath}`)
 			yield* Console.log("Note: Worktree was not removed. Use git worktree remove if needed.")
 		}
 	})
@@ -1264,6 +1230,7 @@ const statusHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
 		yield* Console.log("Session Status")
 		yield* Console.log("")
 
@@ -1297,7 +1264,7 @@ const statusHandler = (args: {
 				continue
 			}
 
-			const parsed = parseIssueSessionName(name, process.cwd())
+			const parsed = parseIssueSessionName(name, projectPath)
 			if (parsed?.type === "issue") {
 				sessionCount++
 				const statusDisplay = status || "unknown"
@@ -1440,21 +1407,21 @@ const syncHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
 		yield* ensureDaemonAutoStartForCliCommand({
 			command: "sync",
-			projectPath: cwd,
+			projectPath,
 			verbose: args.verbose,
 		})
 
 		yield* Console.log("Syncing issue tracker state...")
-		yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log(`Project: ${projectPath}`)
 
 		if (args.verbose) {
 			yield* Console.log("Verbose mode enabled")
 		}
 
-		const targetPaths = yield* listSyncTargetPaths(cwd, args.all)
+		const targetPaths = yield* listSyncTargetPaths(projectPath, args.all)
 		if (args.all) {
 			yield* Console.log(`Targets: ${targetPaths.length} worktree(s)`)
 		}
@@ -1522,10 +1489,10 @@ const daemonSyncHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
 		const intervalMs = Option.getOrUndefined(args.intervalMs)
 
-		yield* validateIssueTrackerStore(cwd)
+		yield* validateIssueTrackerStore(projectPath)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("sync"),
 		})
@@ -1736,6 +1703,7 @@ const daemonStatusHandler = (args: {
 	readonly streamBatches: Option.Option<number>
 }) =>
 	Effect.gen(function* () {
+		const projectPath = yield* resolveBaseProjectPath(process.cwd())
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: daemonCommandShouldAutoStart("status"),
 		})
@@ -1758,7 +1726,7 @@ const daemonStatusHandler = (args: {
 		const snapshotSummary = yield* getDaemonSessionSnapshotSummary({
 			client: bootstrap.client,
 			socketUrl: bootstrap.socketUrl,
-			projectPath: process.cwd(),
+			projectPath,
 		}).pipe(
 			Effect.catchAll((error) =>
 				Console.log(`daemon session snapshot unavailable: ${error.message}`).pipe(
@@ -1785,7 +1753,7 @@ const daemonStatusHandler = (args: {
 				client: bootstrap.client,
 				socketUrl: bootstrap.socketUrl,
 				clientId: `az-cli:daemon-status:${process.pid}`,
-				projectPath: process.cwd(),
+				projectPath,
 				initialCursor: Option.getOrUndefined(args.cursor),
 				batchSize,
 				waitMs,
@@ -2502,8 +2470,8 @@ const issueListHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const projectPath =
 			explicitProjectDir === undefined
-				? yield* resolveBaseWorktreePath(resolverCwd)
-				: yield* resolveBaseWorktreePath(explicitProjectDir)
+				? yield* resolveBaseProjectPath(resolverCwd)
+				: yield* resolveBaseProjectPath(explicitProjectDir)
 		if (args.verbose) {
 			yield* Console.error(`Resolved project path: ${projectPath}`)
 		}
@@ -2605,13 +2573,11 @@ const issueCreateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 		const parentContext = yield* Option.match(args.parent, {
 			onSome: (parentIssueId) =>
-				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+				resolveCliIssueId(parentIssueId, projectPath).pipe(
 					Effect.map((issueId) =>
 						Option.some<ActiveParentContext>({
 							issueId,
@@ -2622,7 +2588,7 @@ const issueCreateHandler = (args: {
 			onNone: () =>
 				args.deferred || args.noDefaultParent
 					? Effect.succeed(Option.none<ActiveParentContext>())
-					: resolveActiveParentContext(resolverCwd),
+					: resolveActiveParentContext(projectPath),
 		})
 		const resolvedParent = Option.match(parentContext, {
 			onNone: () => undefined,
@@ -2702,14 +2668,12 @@ const issueChildHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const parentContext = yield* Option.match(args.parent, {
 			onSome: (parentIssueId) =>
-				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+				resolveCliIssueId(parentIssueId, projectPath).pipe(
 					Effect.map((issueId) =>
 						Option.some<ActiveParentContext>({
 							issueId,
@@ -2717,7 +2681,7 @@ const issueChildHandler = (args: {
 						}),
 					),
 				),
-			onNone: () => resolveActiveParentContext(resolverCwd),
+			onNone: () => resolveActiveParentContext(projectPath),
 		})
 		if (Option.isNone(parentContext)) {
 			return yield* Effect.fail(
@@ -2784,15 +2748,13 @@ const issueBulkCreateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const defaultParentContext =
 			args.deferred || args.noDefaultParent
 				? Option.none<ActiveParentContext>()
-				: yield* resolveActiveParentContext(resolverCwd)
+				: yield* resolveActiveParentContext(projectPath)
 		const defaultParent = Option.match(defaultParentContext, {
 			onNone: () => undefined,
 			onSome: (context) => context.issueId,
@@ -2820,7 +2782,7 @@ const issueBulkCreateHandler = (args: {
 							const resolvedParent =
 								decodedEntry.parent === undefined
 									? defaultParent
-									: yield* resolveCliIssueId(decodedEntry.parent, resolverCwd)
+									: yield* resolveCliIssueId(decodedEntry.parent, projectPath)
 							const issueType = yield* parseIssueType(
 								decodedEntry.type,
 								`bulk create type for "${decodedEntry.title}"`,
@@ -3027,10 +2989,8 @@ const issueBulkUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const inputContent = yield* readIssueBulkUpdateInput(args.input)
 		const updates = yield* decodeIssueBulkUpdatePayload(inputContent).pipe(
@@ -3058,7 +3018,7 @@ const issueBulkUpdateHandler = (args: {
 					} satisfies IssueBulkUpdateResult
 				}
 
-				return yield* resolveCliIssueId(entry.id, resolverCwd).pipe(
+				return yield* resolveCliIssueId(entry.id, projectPath).pipe(
 					Effect.flatMap((issueId) =>
 						bootstrap.client
 							.issueUpdate({
@@ -3119,10 +3079,8 @@ const implListHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const appConfig = yield* AppConfig
 		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
@@ -3161,10 +3119,8 @@ const implGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
 		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
@@ -3192,10 +3148,8 @@ const implAddHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
@@ -3237,10 +3191,8 @@ const implUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
 		const nextName = yield* Option.match(args.rename, {
@@ -3302,10 +3254,8 @@ const implDeleteHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
@@ -3332,10 +3282,8 @@ const implSetDefaultHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
 		const bootstrap = yield* bootstrapDaemonRpcClient({
@@ -3365,10 +3313,8 @@ const implSetEditorDefaultHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
 		const registry = yield* loadImplementationRegistryViaDaemon(projectPath)
@@ -3379,7 +3325,7 @@ const implSetEditorDefaultHandler = (args: {
 			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
 		}
 
-		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const configPath = yield* resolveWritableConfigPath(Option.some(projectPath))
 		const currentConfig = yield* loadWritableConfig(configPath)
 		const nextConfig = withIssueEditorDefaultImplementation(currentConfig, implementationName)
 		yield* saveWritableConfig(configPath, nextConfig)
@@ -3407,11 +3353,10 @@ const implClearEditorDefaultHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
-		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const configPath = yield* resolveWritableConfigPath(Option.some(projectPath))
 		const currentConfig = yield* loadWritableConfig(configPath)
 		const nextConfig = withIssueEditorDefaultImplementation(currentConfig, undefined)
 		yield* saveWritableConfig(configPath, nextConfig)
@@ -3446,12 +3391,10 @@ const issueDepAddHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
-		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const dependencyType = yield* Option.match(args.dependencyType, {
 			onNone: () => Effect.succeed<RelationshipDependencyType>("blocks"),
@@ -3514,12 +3457,10 @@ const issueDepRemoveHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
-		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const dependencyType = yield* Option.match(args.dependencyType, {
 			onNone: () => Effect.succeed<RelationshipDependencyType | undefined>(undefined),
@@ -3585,11 +3526,9 @@ const issueCloseHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: true,
@@ -3784,14 +3723,12 @@ const issueCheckHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const parentContext = yield* Option.match(args.issueId, {
 			onSome: (parentIssueId) =>
-				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+				resolveCliIssueId(parentIssueId, projectPath).pipe(
 					Effect.map((issueId) =>
 						Option.some<ActiveParentContext>({
 							issueId,
@@ -3799,7 +3736,7 @@ const issueCheckHandler = (args: {
 						}),
 					),
 				),
-			onNone: () => resolveActiveParentContext(resolverCwd),
+			onNone: () => resolveActiveParentContext(projectPath),
 		})
 
 		if (Option.isNone(parentContext)) {
@@ -3888,11 +3825,9 @@ const issueDeleteHandler = (args: {
 			)
 		}
 
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const projectPath = explicitProjectDir ?? resolverCwd
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+		yield* validateIssueTrackerStore(projectPath)
 
 		const bootstrap = yield* bootstrapDaemonRpcClient({
 			autoStart: true,
@@ -5201,13 +5136,13 @@ const gateHandler = (args: {
 	readonly fix: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		yield* Console.log(`Running quality gates for: ${issueId}`)
 
 		// Find the worktree path for this task
-		const sessionName = yield* findSessionByIssueId(issueId)
+		const sessionName = yield* findSessionByIssueId(issueId, projectPath)
 		let worktreePath = ""
 
 		if (sessionName) {
@@ -5234,8 +5169,8 @@ const gateHandler = (args: {
 		if (!worktreePath) {
 			const fs = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path
-			const parentDir = pathService.dirname(cwd)
-			const projectName = pathService.basename(cwd)
+			const parentDir = pathService.dirname(projectPath)
+			const projectName = pathService.basename(projectPath)
 			const expectedPath = pathService.join(parentDir, `${projectName}-${issueId}`)
 
 			const exists = yield* fs.exists(expectedPath)
@@ -5404,11 +5339,11 @@ interface ActiveParentContext {
 	readonly source: ParentContextSource
 }
 
-const resolveActiveParentContext = (resolverCwd: string) =>
+const resolveActiveParentContext = (projectPath: string) =>
 	Effect.gen(function* () {
 		const explicitParentFromEnv = normalizePrimeIssueId(process.env.AZEDARACH_PARENT_ISSUE_ID)
 		if (explicitParentFromEnv !== undefined) {
-			const issueId = yield* resolveCliIssueId(explicitParentFromEnv, resolverCwd)
+			const issueId = yield* resolveCliIssueId(explicitParentFromEnv, projectPath)
 			return Option.some<ActiveParentContext>({
 				issueId,
 				source: "explicit-parent-env",
@@ -5417,7 +5352,7 @@ const resolveActiveParentContext = (resolverCwd: string) =>
 
 		const issueIdFromSessionEnv = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
 		if (issueIdFromSessionEnv !== undefined) {
-			const issueId = yield* resolveCliIssueId(issueIdFromSessionEnv, resolverCwd)
+			const issueId = yield* resolveCliIssueId(issueIdFromSessionEnv, projectPath)
 			return Option.some<ActiveParentContext>({
 				issueId,
 				source: "session-issue-env",
@@ -5435,7 +5370,7 @@ const resolveActiveParentContext = (resolverCwd: string) =>
 			return Option.none<ActiveParentContext>()
 		}
 
-		const issueId = yield* resolveCliIssueId(issueIdFromBranch, resolverCwd)
+		const issueId = yield* resolveCliIssueId(issueIdFromBranch, projectPath)
 		return Option.some<ActiveParentContext>({
 			issueId,
 			source: "branch-name",
@@ -5798,7 +5733,7 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
-		const projectPath = process.cwd()
+		const projectPath = yield* resolveBaseProjectPath(process.cwd())
 		const primeMode = resolvePrimeModeFromEnv(process.env)
 		const appConfig = yield* AppConfig
 		const specConfig = yield* appConfig.getSpecConfig()
@@ -5873,7 +5808,7 @@ const listTmuxSessionNames = Effect.gen(function* () {
 		.filter((line) => line.length > 0)
 })
 
-const findSessionByIssueId = (issueId: string, projectPath: string = process.cwd()) =>
+const findSessionByIssueId = (issueId: string, projectPath: string) =>
 	Effect.gen(function* () {
 		const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", canonicalSessionName)
@@ -5900,11 +5835,11 @@ const findSessionByIssueId = (issueId: string, projectPath: string = process.cwd
 		return null
 	})
 
-const findAiSessionByIssueId = (issueId: string) =>
+const findAiSessionByIssueId = (issueId: string, projectPath: string) =>
 	Effect.gen(function* () {
 		yield* Console.log(`[DEBUG] findAiSessionByIssueId: issueId=${issueId}`)
 
-		const sessionName = yield* findSessionByIssueId(issueId)
+		const sessionName = yield* findSessionByIssueId(issueId, projectPath)
 		if (sessionName) {
 			yield* Console.log(`[DEBUG] Found session: ${sessionName}`)
 			return sessionName
@@ -5944,7 +5879,7 @@ const notifyHandler = (args: {
 		const status = mapHookEventToTmuxStatus(args.event)
 
 		// Find the session by issue ID (handles both new and legacy naming formats)
-		const sessionName = yield* findAiSessionByIssueId(issueId)
+		const sessionName = yield* findAiSessionByIssueId(issueId, projectPath)
 		if (!sessionName) {
 			if (args.verbose) {
 				yield* Console.log(`No session found for ${issueId}`)
@@ -5980,9 +5915,9 @@ const hooksInstallHandler = (args: {
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		const claudeDir = pathService.join(cwd, ".claude")
+		const projectPath = yield* resolveProjectBasePath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+		const claudeDir = pathService.join(projectPath, ".claude")
 		const settingsPath = pathService.join(claudeDir, "settings.local.json")
 
 		// Ensure .claude directory exists
@@ -6023,7 +5958,7 @@ const hooksInstallHandler = (args: {
 		}
 
 		// Generate and merge hook configuration
-		const hookConfig = generateHookConfig(issueId, { projectPath: process.cwd() })
+		const hookConfig = generateHookConfig(issueId, { projectPath })
 		const mergedSettings = deepMerge(existingSettings, hookConfig)
 
 		// Write merged settings
@@ -7197,7 +7132,8 @@ const optionalSpecImplementationOption = Options.text("impl").pipe(
 
 const specUsageHandler = (usage: string) =>
 	Effect.gen(function* () {
-		yield* ensureSpecEnabled(process.cwd())
+		const projectPath = yield* resolveBaseProjectPath(process.cwd())
+		yield* ensureSpecEnabled(projectPath)
 		yield* Console.log(usage)
 	})
 

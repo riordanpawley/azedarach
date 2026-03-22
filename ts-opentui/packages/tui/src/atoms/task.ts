@@ -5,6 +5,7 @@
  */
 
 import { AppConfig, type CliTool } from "@azedarach/config"
+import { resolveProjectPathFromContext } from "@azedarach/shared/project-path"
 import { DaemonRpcClient, type TrackedIssueRelationshipRef } from "@azedarach/shared/rpc"
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
@@ -137,7 +138,7 @@ export const buildAiCreateCommand = (params: {
 
 const getCurrentProjectPath = Effect.gen(function* () {
 	const projectContext = yield* getTuiProjectContextRead
-	return (yield* projectContext.getCurrentPath()) ?? process.cwd()
+	return yield* resolveProjectPathFromContext(projectContext)
 })
 
 const isIssueType = (value: string | undefined): value is IssueType =>
@@ -513,7 +514,7 @@ export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 		yield* toast.show("info", "Creating task with AI...")
 
 		// Get current project path (or cwd if no project selected)
-		const projectPath = (yield* projectContext.getCurrentPath()) ?? process.cwd()
+		const projectPath = yield* resolveProjectPathFromContext(projectContext)
 
 		// Phase 1: Ask the configured AI tool to extract structured task data
 		// Using JSON output format for deterministic parsing

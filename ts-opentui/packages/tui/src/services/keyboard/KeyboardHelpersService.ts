@@ -1,3 +1,4 @@
+import { resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
 import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
 import type { TaskWithSession } from "../../types.js"
@@ -117,9 +118,7 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 				})
 
 			const getProjectPath = (): Effect.Effect<string> =>
-				projectContext
-					.getCurrentPath()
-					.pipe(Effect.map((projectPath) => projectPath ?? process.cwd()))
+				projectContext.getCurrentPath().pipe(Effect.map(resolveEffectiveProjectPath))
 
 			const showErrorToast =
 				<E extends MessageError>(prefix: string) =>

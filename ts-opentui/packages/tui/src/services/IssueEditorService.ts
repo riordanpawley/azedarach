@@ -1,4 +1,5 @@
 import { AppConfig } from "@azedarach/config"
+import { resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
 import { DaemonRpcClient } from "@azedarach/shared/rpc"
 import { FileSystem } from "@effect/platform"
 import { Data, Effect } from "effect"
@@ -100,9 +101,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 		const fs = yield* FileSystem.FileSystem
 
 		const getProjectPath = (): Effect.Effect<string> =>
-			projectContext
-				.getCurrentPath()
-				.pipe(Effect.map((projectPath) => projectPath ?? process.cwd()))
+			projectContext.getCurrentPath().pipe(Effect.map(resolveEffectiveProjectPath))
 
 		const service: IssueEditorServiceApi = {
 			editIssue: (issue) =>

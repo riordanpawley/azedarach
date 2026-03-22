@@ -6,6 +6,7 @@
  */
 
 import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
+import { resolveBaseProjectPath } from "@azedarach/shared/project-path"
 import type {
 	DaemonDevServerListRequest,
 	DaemonDevServerListResult,
@@ -92,7 +93,7 @@ const jsonOption = Options.boolean("json").pipe(
 // ============================================================================
 
 const getProjectPath = (projectDir: Option.Option<string>) =>
-	Effect.sync(() => (Option.isSome(projectDir) ? projectDir.value : process.cwd()))
+	resolveBaseProjectPath(Option.isSome(projectDir) ? projectDir.value : process.cwd())
 
 const parseStartedAt = (startedAt: string | null): Date | undefined => {
 	if (startedAt === null) return undefined
