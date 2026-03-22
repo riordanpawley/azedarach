@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
@@ -9,6 +8,7 @@ import {
 	isRetryableRpcClientError,
 } from "@azedarach/daemon-control"
 import { DaemonRpcClient, type DaemonRpcClientApi, layerSocket } from "@azedarach/shared/rpc"
+import { FileSystem } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import type { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Context, Effect, Exit, Layer, Option, Scope } from "effect"
@@ -56,26 +56,32 @@ export const resolveGlobalDaemonSpawnCommand = (params: {
 const sleep = (ms: number): Effect.Effect<void> => Effect.sleep(`${ms} millis`)
 
 const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError> =>
-	Effect.try({
-		try: () => {
-			const spawnCommand = resolveGlobalDaemonSpawnCommand({
-				execPath: process.execPath,
-				bundledEntryPath: GLOBAL_DAEMON_MAIN_ENTRY_BUNDLED_PATH,
-				bunBinaryPath: Bun.which("bun"),
-				hasCompiledDaemonBinary: existsSync(COMPILED_GLOBAL_DAEMON_BINARY_RELATIVE_PATH),
-			})
-			const child = Bun.spawn([spawnCommand.command, ...spawnCommand.args], {
-				cwd: process.cwd(),
-				env: process.env,
-				stdio: ["ignore", "ignore", "ignore"],
-			})
-			child.unref()
-		},
-		catch: (error) =>
-			new GlobalDaemonBootstrapError({
-				message: `Failed to spawn global daemon runtime: ${error instanceof Error ? error.message : String(error)}`,
-				reason: "spawn-failed",
-			}),
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const hasCompiledDaemonBinary = yield* fs
+			.exists(COMPILED_GLOBAL_DAEMON_BINARY_RELATIVE_PATH)
+			.pipe(Effect.orElseSucceed(() => false))
+		yield* Effect.try({
+			try: () => {
+				const spawnCommand = resolveGlobalDaemonSpawnCommand({
+					execPath: process.execPath,
+					bundledEntryPath: GLOBAL_DAEMON_MAIN_ENTRY_BUNDLED_PATH,
+					bunBinaryPath: Bun.which("bun"),
+					hasCompiledDaemonBinary,
+				})
+				const child = Bun.spawn([spawnCommand.command, ...spawnCommand.args], {
+					cwd: process.cwd(),
+					env: process.env,
+					stdio: ["ignore", "ignore", "ignore"],
+				})
+				child.unref()
+			},
+			catch: (error) =>
+				new GlobalDaemonBootstrapError({
+					message: `Failed to spawn global daemon runtime: ${error instanceof Error ? error.message : String(error)}`,
+					reason: "spawn-failed",
+				}),
+		})
 	})
 
 const retryDelayForAttempt = (attempt: number, retryBackoffMs: ReadonlyArray<number>): number => {
