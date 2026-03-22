@@ -1,6 +1,6 @@
 import { AppConfigProjectContext } from "@azedarach/config"
 import { resolveEffectiveProjectPath } from "@azedarach/shared/project-path"
-import { DaemonRpcClient } from "@azedarach/shared/rpc"
+import { DaemonRpcClient, mapDaemonRpcClientErrorMessage } from "@azedarach/shared/rpc"
 import { Command, FileSystem, Path } from "@effect/platform"
 import * as CommandExecutor from "@effect/platform/CommandExecutor"
 import { BunContext } from "@effect/platform-bun"

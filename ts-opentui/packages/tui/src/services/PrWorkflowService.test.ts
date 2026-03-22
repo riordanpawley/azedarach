@@ -71,7 +71,6 @@ const makeDaemonRpcClientStub = (options?: {
 	prCreate: options?.prCreate ?? (() => unexpectedDaemonRpcCall()),
 	prCleanup: options?.prCleanup ?? (() => unexpectedDaemonRpcCall()),
 	prMergeToMain: options?.prMergeToMain ?? (() => unexpectedDaemonRpcCall()),
-	prCheckGhCli: options?.prCheckGhCli ?? (() => unexpectedDaemonRpcCall()),
 	prUpdateFromBase: options?.prUpdateFromBase ?? (() => unexpectedDaemonRpcCall()),
 	prMergeBaseIntoBranch: options?.prMergeBaseIntoBranch ?? (() => unexpectedDaemonRpcCall()),
 	prAbortMerge: options?.prAbortMerge ?? (() => unexpectedDaemonRpcCall()),
@@ -94,6 +93,7 @@ const makeDaemonRpcClientStub = (options?: {
 	specPublishOutcomeGet: () => unexpectedDaemonRpcCall(),
 	specSyncMarkdown: () => unexpectedDaemonRpcCall(),
 	specPublish: () => unexpectedDaemonRpcCall(),
+	...(options?.prCheckGhCli === undefined ? {} : { prCheckGhCli: options.prCheckGhCli }),
 })
 
 const makeLayer = (daemonRpcClient: DaemonRpcClientApi) =>
@@ -209,5 +209,26 @@ describe("PrWorkflowService", () => {
 		)
 
 		expect(available).toBe(true)
+	})
+
+	it("surfaces missing optional daemon rpc methods as typed errors", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub()
+
+		const exit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const service = yield* PrWorkflowService
+				return yield* service.checkGHCLI()
+			}).pipe(Effect.provide(makeLayer(daemonRpcClient))),
+		)
+
+		expect(exit._tag).toBe("Failure")
+		if (exit._tag === "Failure") {
+			expect(exit.cause._tag).toBe("Fail")
+			if (exit.cause._tag === "Fail") {
+				expect(exit.cause.error._tag).toBe("PrWorkflowError")
+				expect(exit.cause.error.reason).toBe("unknown")
+				expect(exit.cause.error.message).toBe("Daemon RPC method is unavailable: prCheckGhCli")
+			}
+		}
 	})
 })

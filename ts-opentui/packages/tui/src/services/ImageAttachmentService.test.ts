@@ -199,4 +199,32 @@ describe("ImageAttachmentService", () => {
 		})
 		expect(result.path).toBe("/tmp/project-root/.azedarach/tmp/attachments/AZ-1/att-1/one.png")
 	})
+
+	it("maps daemon rpc failures to image attachment errors", async () => {
+		const daemonRpcClient = makeDaemonRpcClientStub({
+			attachmentList: () =>
+				Effect.fail({
+					_tag: "DaemonRpcActionError",
+					action: "attachmentList",
+					code: "test-failure",
+					message: "attachment lookup failed",
+				} satisfies DaemonRpcClientError),
+		})
+
+		const exit = await Effect.runPromiseExit(
+			Effect.gen(function* () {
+				const service = yield* ImageAttachmentService
+				return yield* service.list("AZ-1")
+			}).pipe(Effect.provide(makeLayer(daemonRpcClient))),
+		)
+
+		expect(exit._tag).toBe("Failure")
+		if (exit._tag === "Failure") {
+			expect(exit.cause._tag).toBe("Fail")
+			if (exit.cause._tag === "Fail") {
+				expect(exit.cause.error._tag).toBe("ImageAttachmentError")
+				expect(exit.cause.error.message).toBe("attachment lookup failed")
+			}
+		}
+	})
 })
