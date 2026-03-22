@@ -9,7 +9,7 @@ import {
 	type DaemonRpcClientApi,
 	type DaemonRpcClientError,
 } from "@azedarach/shared/rpc"
-import { BunContext } from "@effect/platform-bun"
+import { BunContext, BunFileSystem, BunPath } from "@effect/platform-bun"
 import { RpcClientError } from "@effect/rpc/RpcClientError"
 import { Effect, Layer, type Scope, Stream, SubscriptionRef } from "effect"
 import type { Issue } from "../contracts.js"
@@ -136,6 +136,8 @@ const makeProjectContext = (projectPath: string): AppConfigProjectContextApi => 
 	currentProjectPathChanges: Stream.empty,
 })
 
+const platformLayer = Layer.mergeAll(BunContext.layer, BunFileSystem.layer, BunPath.layer)
+
 const makeProjectFixture = async (name: string) => {
 	const root = await mkdtemp(join(tmpdir(), `az-tui-board-${name}-`))
 	const worktreePath = join(root, "worktrees", "feature")
@@ -159,7 +161,7 @@ const runWithBoardStore = <A, E>(
 			program.pipe(
 				Effect.provide(
 					TuiBoardStoreService.Default.pipe(
-						Layer.provideMerge(BunContext.layer),
+						Layer.provideMerge(platformLayer),
 						Layer.provideMerge(Layer.succeed(DaemonRpcClient, options.daemonRpcClient)),
 						Layer.provideMerge(Layer.succeed(AppConfigProjectContext, options.projectContext)),
 					),
