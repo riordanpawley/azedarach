@@ -104,10 +104,10 @@ check_forbidden_imports "packages/entry/src" "packages/entry" \
 	'\.\./\.\./(tui|cli|daemon|daemon-control|shared)/src/:::Import sibling package source through public package exports instead of direct source paths.'
 
 check_forbidden_imports "packages/shared/src" "packages/shared" \
-	'packages/(tui|cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
-	'@azedarach/(tui|cli|daemon)(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.' \
-	'GlobalDaemon(Bootstrap|Discovery):::Shared must not own daemon lifecycle or discovery wiring. Keep lifecycle contracts in daemon-control and live implementation in daemon.' \
-	'src/(cli|core|daemon|rpc|services)/:::Import legacy src tree from @azedarach/shared. Shared must stay RPC-only.'
+    'packages/(tui|cli|daemon)/:::Import sibling package source through the shared package or the public facade instead of a direct sibling package path.' \
+    '@azedarach/(tui|cli|daemon)(["/]):::Import sibling package source through the shared package or the public facade instead of a direct sibling package alias.' \
+    'GlobalDaemon(Bootstrap|Discovery):::Shared must not own daemon lifecycle or discovery wiring. Keep lifecycle contracts in daemon-control and live implementation in daemon.' \
+    'src/(cli|core|daemon|rpc|services)/:::Import legacy src tree from @azedarach/shared. Shared may host package-safe utilities and contracts only.'
 
 check_forbidden_imports "packages/cli/src" "packages/cli" \
 	'src/(cli|core|daemon|rpc)/:::Import legacy src tree from a package module. Use package-local modules or dedicated runtime facades instead.'
@@ -208,7 +208,7 @@ check_tsconfig_paths_absent() {
     fi
 }
 
-check_shared_surface_is_rpc_only() {
+check_shared_surface_allowlist() {
 	local hits=()
 	while IFS= read -r hit; do
 		[[ -n "$hit" ]] && hits+=("$hit")
@@ -220,13 +220,31 @@ check_shared_surface_is_rpc_only() {
 			--glob "${scan_globs[3]}" \
 			--glob "${scan_globs[4]}" \
 			--glob "${scan_globs[5]}" \
-			"(import|export).*@azedarach/shared(?!/rpc)" \
-			packages/cli/src packages/tui/src packages/daemon/src packages/entry/src packages/daemon-control/src || true
+            "(import|export).*@azedarach/shared(?!/(rpc|project-path)\b)" \
+            packages/cli/src packages/tui/src packages/daemon/src packages/entry/src packages/daemon-control/src || true
+    )
+
+    if ((${#hits[@]} > 0)); then
+        printf 'Boundary violations (shared surface allowlist):\n' >&2
+        printf '  Import only allowlisted shared surfaces (@azedarach/shared/rpc, @azedarach/shared/project-path).\n' >&2
+        printf '  %s\n' "${hits[@]}" >&2
+		fail=1
+	fi
+}
+
+check_duplicate_helper_modules_absent() {
+	local hits=()
+	while IFS= read -r hit; do
+		[[ -n "$hit" ]] && hits+=("$hit")
+	done < <(
+		fd -t f . packages/cli/src packages/tui/src \
+			| rg '/(path|paths|sessionNames)\.ts$' \
+			| rg -v '^(packages/cli/src/runtime/paths\.ts|packages/tui/src/utils/sessionNames\.ts)$' || true
 	)
 
 	if ((${#hits[@]} > 0)); then
-		printf 'Boundary violations (shared rpc-only surface):\n' >&2
-		printf '  Import @azedarach/shared/rpc for shared package access; do not import non-rpc shared surfaces.\n' >&2
+		printf 'Boundary violations (duplicate helper modules reintroduced):\n' >&2
+		printf '  Keep path/session helper logic centralized in @azedarach/shared/project-path and do not add new local CLI/TUI copies.\n' >&2
 		printf '  %s\n' "${hits[@]}" >&2
 		fail=1
 	fi
@@ -271,7 +289,8 @@ check_legacy_service_imports
 check_workspace_effect_declarations
 check_root_effect_versions_pinned
 check_tsconfig_paths_absent
-check_shared_surface_is_rpc_only
+check_shared_surface_allowlist
+check_duplicate_helper_modules_absent
 check_legacy_shim_tree_absent "src/cli"
 check_legacy_shim_tree_absent "src/rpc"
 check_legacy_shim_tree_absent "src/daemon"

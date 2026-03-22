@@ -85,7 +85,7 @@ fd "filename" -t f src docs
 ```text
 ts-opentui/
 ├── packages/
-│   ├── shared/         # RPC contracts/client primitives only
+│   ├── shared/         # shared contracts + package-safe runtime utilities
 │   ├── daemon-control/ # Lifecycle service contract only
 │   ├── daemon/         # Live daemon lifecycle/discovery implementation
 │   ├── cli/            # CLI runtime/commands (depends on daemon-control contract)
@@ -101,7 +101,8 @@ ts-opentui/
 
 ## Boundary Contributor Guide
 
-- Keep `@azedarach/shared` RPC-only; import shared contracts from `@azedarach/shared/rpc`.
+- Keep `@azedarach/shared` package-safe and allowlisted; import shared contracts from `@azedarach/shared/rpc` and project base-path helpers from `@azedarach/shared/project-path`.
+- Keep path/session helper logic centralized in `@azedarach/shared/project-path`; do not introduce new local CLI/TUI copies alongside the existing package-owned consumers.
 - Keep daemon lifecycle contracts in `@azedarach/daemon-control` and live implementation in `@azedarach/daemon`.
 - Do not import `@azedarach/daemon` from `packages/cli` or `packages/tui`.
 - Do not add package imports to legacy `src/cli`, `src/core`, `src/daemon`, `src/rpc`, or `src/services`.
