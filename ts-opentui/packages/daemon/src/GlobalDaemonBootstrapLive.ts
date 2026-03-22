@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import {
 	buildGlobalDaemonSocketUrl,
 	formatDaemonRpcClientFailure,
@@ -21,24 +22,34 @@ const GLOBAL_DAEMON_MAIN_ENTRY_BUNDLED_PATH = decodeURIComponent(
 )
 const GLOBAL_DAEMON_MAIN_ENTRY_REPO_PATH = "packages/daemon/src/GlobalDaemonMain.ts"
 const BUN_EXECUTABLE_PATH_PATTERN = /(^|[\\/])bun(\.exe)?$/i
+const COMPILED_GLOBAL_DAEMON_BINARY_RELATIVE_PATH = "./bin/az-daemon"
 
 export const resolveGlobalDaemonSpawnCommand = (params: {
 	readonly execPath: string
 	readonly bundledEntryPath: string
 	readonly bunBinaryPath: string | undefined
+	readonly hasCompiledDaemonBinary: boolean
 }): {
-	readonly bunExecutablePath: string
-	readonly daemonMainEntryPath: string
+	readonly command: string
+	readonly args: ReadonlyArray<string>
 } => {
+	const compiledExecutable = !BUN_EXECUTABLE_PATH_PATTERN.test(params.execPath)
+	if (compiledExecutable && params.hasCompiledDaemonBinary) {
+		return {
+			command: COMPILED_GLOBAL_DAEMON_BINARY_RELATIVE_PATH,
+			args: [],
+		}
+	}
+
 	const daemonMainEntryPath = params.bundledEntryPath.startsWith("/$bunfs/")
 		? GLOBAL_DAEMON_MAIN_ENTRY_REPO_PATH
 		: params.bundledEntryPath
-	const bunExecutablePath = BUN_EXECUTABLE_PATH_PATTERN.test(params.execPath)
+	const command = BUN_EXECUTABLE_PATH_PATTERN.test(params.execPath)
 		? params.execPath
 		: (params.bunBinaryPath ?? "bun")
 	return {
-		bunExecutablePath,
-		daemonMainEntryPath,
+		command,
+		args: ["run", daemonMainEntryPath],
 	}
 }
 
@@ -51,15 +62,13 @@ const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError
 				execPath: process.execPath,
 				bundledEntryPath: GLOBAL_DAEMON_MAIN_ENTRY_BUNDLED_PATH,
 				bunBinaryPath: Bun.which("bun"),
+				hasCompiledDaemonBinary: existsSync(COMPILED_GLOBAL_DAEMON_BINARY_RELATIVE_PATH),
 			})
-			const child = Bun.spawn(
-				[spawnCommand.bunExecutablePath, "run", spawnCommand.daemonMainEntryPath],
-				{
-					cwd: process.cwd(),
-					env: process.env,
-					stdio: ["ignore", "ignore", "ignore"],
-				},
-			)
+			const child = Bun.spawn([spawnCommand.command, ...spawnCommand.args], {
+				cwd: process.cwd(),
+				env: process.env,
+				stdio: ["ignore", "ignore", "ignore"],
+			})
 			child.unref()
 		},
 		catch: (error) =>
