@@ -554,6 +554,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project !== undefined) {
+								// Keep background switch failures structured and readable.
 								yield* enqueueBackground(
 									switchToProject(project.name).pipe(
 										Effect.asVoid,

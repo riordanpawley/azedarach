@@ -317,6 +317,7 @@ const toTaskFromIssueListItem = (issue: Issue): TaskWithSession => {
 	}
 }
 
+// Normalize worktree/subdir selections to the repository root before cache and daemon lookups.
 const resolveBoardProjectPath = (projectPath: string | null | undefined): Effect.Effect<string> =>
 	resolveBaseProjectPath(resolveEffectiveProjectPath(projectPath))
 

@@ -479,6 +479,7 @@ describe("TuiBoardStoreService", () => {
 		)
 
 		expect(result.switchResult.refreshFailed).toBe(false)
+		expect(result.switchResult.cacheHit).toBe(false)
 		expect(result.tasks.map((task) => task.id)).toEqual(["az-selected"])
 	})
 })
