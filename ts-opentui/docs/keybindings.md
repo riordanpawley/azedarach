@@ -152,8 +152,8 @@ The settings overlay shows all editable configuration options:
 - **Auto Detect Network**: Enable/disable automatic network connectivity detection
 
 #### Linear Settings
-- **Linear Sync**: Enable/disable automatic synchronization with linear backend
-- **Linear Webhooks**: Enable/disable webhook-driven board refresh for the linear backend
+- **Linear Sync**: Enable/disable automatic synchronization with the Linear sync overlay
+- **Linear Webhooks**: Enable/disable webhook-driven board refresh for the Linear sync overlay
 
 #### State Detection Settings
 - **Pattern Matching**: Enable/disable AI pattern-based state detection for sessions
@@ -1261,7 +1261,7 @@ The current project is highlighted with "(current)". When you switch projects:
 1. The board refreshes to show tasks from the new project
 2. All session operations (start, attach, etc.) use the new project's path
 3. PR and merge operations target the new project's repository
-4. Azedarach loads cached board state immediately, then for Linear projects runs an explicit SDK sync plus a forced refresh so webhook updates missed while another project was active are reconciled from the backend
+4. Azedarach loads cached board state immediately, then for Linear projects runs an explicit SDK sync plus a forced refresh so webhook updates missed while another project was active are reconciled from the sync overlay
 
 ### Auto-Detection
 

@@ -7,8 +7,8 @@
  * ## Version History
  * - Version 1: Original schema (no version field) - legacy format
  * - Version 2: Adds numeric schema-version field (legacy `$schema`), moves pr.baseBranch → git.baseBranch
- * - Version 3: Adds top-level issueTracker selector + backend-specific config blocks
- * - Version 4: Nests backend config under top-level issueTracker object
+ * - Version 3: Adds top-level issueTracker selector + sync-specific config blocks
+ * - Version 4: Nests sync config under top-level issueTracker object
  * - Version 5: Renames merge.startClaudeOnFailure → merge.startAiSessionOnFailure
  * - Version 6: Normalizes git.pr/git.merge aliases to canonical workflow config
  * - Version 7: Adds spec.enabled feature gating for optional spec workflows
@@ -49,12 +49,12 @@ export const CliToolSchema = Schema.Literal("claude", "opencode", "codex")
 export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
 
 /**
- * Supported issue tracker backend selectors (legacy / internal).
+ * Supported issue sync selectors (legacy / internal).
  *
- * - tracker: legacy tracker backend
- * - legacy: rust tracker backend
- * - linear: Linear backend through linear-cli
- * - local: local-first sqlite backend (no external tracker required)
+ * - tracker: legacy tracker sync overlay
+ * - legacy: rust tracker sync overlay
+ * - linear: Linear sync overlay through linear-cli
+ * - local: local sqlite source-of-truth (no external tracker required)
  */
 export const IssueTrackerSchema = Schema.Literal("tracker", "legacy", "linear", "local")
 export type IssueTracker = Schema.Schema.Type<typeof IssueTrackerSchema>
@@ -538,7 +538,7 @@ const LocalConfigSchema = Schema.Struct({
  */
 const LinearWebhookConfigSchema = Schema.Struct({
 	/**
-	 * Enable webhook-driven board refresh for linear backend (default: true)
+	 * Enable webhook-driven board refresh for the Linear sync overlay (default: true)
 	 */
 	enabled: Schema.optional(Schema.Boolean),
 
@@ -634,9 +634,9 @@ const LinearConfigSchema = Schema.Struct({
 })
 
 /**
- * Canonical issue tracker configuration (v4+)
+ * Canonical issue sync configuration (v4+)
  *
- * Exactly one backend block must be set.
+ * Exactly one sync block must be set.
  */
 const IssueTrackerConfigSchema = Schema.Struct({
 	tracker: Schema.optional(LegacyBdConfigSchema),
@@ -657,7 +657,7 @@ const IssueTrackerConfigSchema = Schema.Struct({
 /**
  * Legacy tracker schema used for migration.
  *
- * v1/v2 had backend selection nested under `tracker.issueTracker`.
+ * v1/v2 had sync selection nested under `tracker.issueTracker`.
  */
 const LegacyLegacyBdConfigSchema = Schema.Struct({
 	syncEnabled: Schema.optional(Schema.Boolean),
@@ -905,7 +905,7 @@ const migrations: readonly Migration[] = [
 	},
 	{
 		toVersion: 3,
-		description: "Move backend selection to top-level issueTracker + backend blocks",
+		description: "Move sync selection to top-level issueTracker + sync blocks",
 		migrate: (config) => {
 			type BackendKey = "tracker" | "legacy" | "linear" | "local"
 
@@ -989,7 +989,7 @@ const migrations: readonly Migration[] = [
 
 			if (configuredBackends.length > 1) {
 				throw new Error(
-					"Invalid config: only one issue backend block is allowed (tracker, legacy, linear, or local)",
+					"Invalid config: only one issue sync block is allowed (tracker, legacy, linear, or local)",
 				)
 			}
 
@@ -1003,7 +1003,7 @@ const migrations: readonly Migration[] = [
 				explicitTracker !== inferredTracker
 			) {
 				throw new Error(
-					`Invalid config: issueTracker='${explicitTracker}' does not match backend block '${configuredBackends[0]}'`,
+					`Invalid config: issueTracker='${explicitTracker}' does not match sync block '${configuredBackends[0]}'`,
 				)
 			}
 
@@ -1052,7 +1052,7 @@ const migrations: readonly Migration[] = [
 	},
 	{
 		toVersion: 4,
-		description: "Nest backend config under top-level issueTracker object",
+		description: "Nest sync config under top-level issueTracker object",
 		migrate: (config) => {
 			const explicitTracker: IssueTracker | undefined =
 				config.issueTracker === "tracker" ||
@@ -1267,7 +1267,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 
 	if (current.issueTracker !== undefined && issueTrackerConfig === undefined) {
 		throw new Error(
-			"Invalid config: issueTracker must be an object with exactly one backend block (tracker, legacy, linear, or local)",
+			"Invalid config: issueTracker must be an object with exactly one sync block (tracker, legacy, linear, or local)",
 		)
 	}
 
@@ -1386,11 +1386,11 @@ const RawConfigSchema = Schema.Struct({
 
 	/** Legacy tracker config (supports nested issueTracker for migration) */
 	tracker: Schema.optional(LegacyLegacyBdConfigSchema),
-	/** IssueTracker rust backend config */
+	/** IssueTracker rust sync overlay config */
 	legacy: Schema.optional(LegacyBrConfigSchema),
-	/** Linear backend config */
+	/** Linear sync overlay config */
 	linear: Schema.optional(LinearConfigSchema),
-	/** Local backend config */
+	/** Local sqlite source-of-truth config */
 	local: Schema.optional(LocalConfigSchema),
 
 	/** Network connectivity configuration */

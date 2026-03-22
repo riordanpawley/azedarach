@@ -27,7 +27,7 @@
 | [tmux Config](tmux-config.md) | Recommended tmux configuration + cheatsheet |
 | [Install Guide](install.md) | Fast coworker install path + brew tap feasibility notes |
 | [Services Architecture](services.md) | Effect services and architecture |
-| [External Sync Backend Internals](external-sync-backend-internals.md) | Full linear local-first sync backend internals with Mermaid diagrams |
+| [External Sync Overlay Internals](external-sync-backend-internals.md) | Full Linear local-first sync overlay internals with Mermaid diagrams |
 | [Testing Guide](testing.md) | How to test each feature |
 
 ---
@@ -296,7 +296,7 @@ Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an
 │         └───────────┬───────────┘                                │
 │                     ▼                                            │
 │            ┌─────────────────┐                                   │
-│            │  Linear API     │  ◄── Shared issue backend          │
+│            │  Linear API     │  ◄── Optional sync overlay         │
 │            │  (cloud)        │                                   │
 │            └─────────────────┘                                   │
 └─────────────────────────────────────────────────────────────────┘

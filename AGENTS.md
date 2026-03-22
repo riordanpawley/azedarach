@@ -57,7 +57,7 @@ Select the implementation based on user request or current working directory.
 13. **Issue Sync Naming Contract (ts-opentui)**:
     - Use `issueSyncBackend` for configurable issue synchronization behavior (`linear`, `tracker`, etc.).
     - Local sqlite issue data remains the read source-of-truth for daemon, CLI, and TUI board/list rendering.
-    - Do not use sync backend choice as a read backend selector.
+    - Do not use sync backend choice as a read source selector.
 
 ## Quick Commands
 
@@ -113,7 +113,7 @@ Sync behavior:
 ```
 ts-opentui/
 ├── packages/
-│   ├── shared/         # RPC contracts/client primitives only
+│   ├── shared/         # shared contracts + package-safe runtime utilities
 │   ├── daemon-control/ # lifecycle contract only
 │   ├── daemon/         # live daemon implementation
 │   ├── cli/            # CLI runtime

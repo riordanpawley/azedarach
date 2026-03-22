@@ -61,7 +61,7 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
    - Treat manual checks as invalid if the daemon was not refreshed from the current branch/worktree immediately beforehand.
 11. **Issue Source-of-Truth vs Sync Provider**:
    - Local sqlite state is the read source-of-truth for daemon, CLI, and TUI issue/board rendering.
-   - The configurable sync option is `issueSyncBackend` (for example `linear`, `tracker`), not a board/list read backend selector.
+   - The configurable sync option is `issueSyncBackend` (for example `linear`, `tracker`), not a board/list read source selector.
    - Do not gate local issue reads on `issueSyncBackend`; this option affects sync behavior only.
 
 ## Quick Commands

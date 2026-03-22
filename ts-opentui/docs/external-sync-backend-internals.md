@@ -1,10 +1,10 @@
-# External Sync Backend Internals (Linear, Local-First)
+# External Sync Overlay Internals (Linear, Local-First)
 
-This document describes how the external sync backend works now, including all key internals in the `ts-opentui` path.
+This document describes how the external sync overlay works now, including all key internals in the `ts-opentui` path.
 
 ## Scope
 
-- Local-first issue backend behavior for `issueTracker: linear`
+- Local-first issue sync behavior for `issueTracker: linear`
 - Mutation write path (`create`/`update`/`close`/`delete`) and sync queue processing
 - Read path behavior (`list`/`show`/`showMultiple`/`ready`/`search`) with read-sync + fallback
 - Board refresh triggers (background polling, SDK/CLI webhooks, PTY-triggered local refresh)
@@ -170,11 +170,11 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-  [*] --> NonLinearPolling: backend != linear
+  [*] --> NonLinearPolling: sync target != linear
 
-  NonLinearPolling --> LinearDisabledPolling: backend=linear, webhooks disabled
-  NonLinearPolling --> CliListener: backend=linear, transport=cli, listener config ok
-  NonLinearPolling --> CliPollingFallback: backend=linear, transport=cli, config missing
+  NonLinearPolling --> LinearDisabledPolling: sync target=linear, webhooks disabled
+  NonLinearPolling --> CliListener: sync target=linear, transport=cli, listener config ok
+  NonLinearPolling --> CliPollingFallback: sync target=linear, transport=cli, config missing
 
   NonLinearPolling --> SdkEventsLocalRefresh: transport=sdk, mode=sdk, healthy=true
   NonLinearPolling --> SdkCliFallbackListener: transport=sdk, mode!=sdk or unhealthy, listener config ok
