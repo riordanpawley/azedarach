@@ -133,8 +133,7 @@ const boardRefreshDaemonRpcClientLayer = Layer.scoped(
 		if (socketUrl === undefined) {
 			return primaryDaemonRpcClient
 		}
-		const scope = yield* Effect.scope
-		const context = yield* Layer.buildWithScope(scope)(daemonRpcClientLayerSocket(socketUrl))
+		const context = yield* Layer.build(daemonRpcClientLayerSocket(socketUrl))
 		return Context.get(context, DaemonRpcClient)
 	}),
 )
