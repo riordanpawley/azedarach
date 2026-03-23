@@ -5979,6 +5979,11 @@ const projectAddHandler = (args: {
 
 		// Resolve absolute path
 		const absolutePath = pathService.resolve(args.path)
+		const normalizedAbsolutePath = pathService.normalize(absolutePath)
+		const resolvedBaseProjectPath = yield* resolveBaseProjectPath(normalizedAbsolutePath).pipe(
+			Effect.orElseSucceed(() => normalizedAbsolutePath),
+		)
+		const normalizedBaseProjectPath = pathService.normalize(resolvedBaseProjectPath)
 
 		// Validate path exists
 		const exists = yield* fs.exists(absolutePath)
@@ -6069,10 +6074,27 @@ const projectAddHandler = (args: {
 
 		if (
 			currentProjects.some(
-				(project) => pathService.normalize(project.path) === pathService.normalize(absolutePath),
+				(project) =>
+					pathService.normalize(project.path) === normalizedAbsolutePath ||
+					pathService.normalize(project.path) === normalizedBaseProjectPath,
 			)
 		) {
 			return yield* Effect.fail(new Error(`Project with path '${absolutePath}' already exists`))
+		}
+
+		const conflictingProject = currentProjects.find((project) => {
+			const normalizedProjectPath = pathService.normalize(project.path)
+			const projectPathPrefix = normalizedProjectPath.endsWith(pathService.sep)
+				? normalizedProjectPath
+				: `${normalizedProjectPath}${pathService.sep}`
+			return normalizedAbsolutePath.startsWith(projectPathPrefix)
+		})
+		if (conflictingProject !== undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Path '${absolutePath}' belongs to existing project '${conflictingProject.name}' (${conflictingProject.path}).`,
+				),
+			)
 		}
 
 		yield* saveProjectRegistryConfig(configPath, {
