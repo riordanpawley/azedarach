@@ -78,7 +78,7 @@ const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError
 			},
 			catch: (error) =>
 				new GlobalDaemonBootstrapError({
-					message: `Failed to spawn global daemon runtime: ${error instanceof Error ? error.message : String(error)}`,
+					message: `Failed to spawn global daemon runtime: ${String(error)}`,
 					reason: "spawn-failed",
 				}),
 		})
