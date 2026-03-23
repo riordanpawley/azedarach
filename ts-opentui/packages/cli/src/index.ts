@@ -250,7 +250,7 @@ const validateIssueTrackerStore = (projectDir: string) =>
 		const exists = yield* fs.exists(issueStoreDir)
 		if (!exists) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`No .azedarach directory found in ${projectDir}. Initialize issue tracking for this project, then retry your \`az issue\` command.`,
 				),
 			)
@@ -315,7 +315,7 @@ const ensureSpecEnabled = (projectDir: string) =>
 		}
 
 		return yield* Effect.fail(
-			new Error(
+			cliError(
 				"Spec workflows are disabled for this project. Run `az config set spec.enabled true` or set `spec.enabled` to true in `.azedarach/config.json` to use `az spec` and spec-aware guidance.",
 			),
 		)
@@ -331,7 +331,7 @@ const loadConfigIfExists = (configPath: string) =>
 			.exists(configPath)
 			.pipe(
 				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 						Effect.zipRight(Effect.succeed(false)),
 					),
 				),
@@ -359,7 +359,7 @@ const loadProjectRegistryConfig = Effect.gen(function* () {
 		.exists(projectRegistryPath)
 		.pipe(
 			Effect.catchAll((error) =>
-				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+				Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 					Effect.zipRight(Effect.succeed(false)),
 				),
 			),
@@ -368,8 +368,8 @@ const loadProjectRegistryConfig = Effect.gen(function* () {
 		return {
 			configPath: projectRegistryPath,
 			config: yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
-				Effect.mapError(
-					(error) => new Error(`Failed to create default registry snapshot: ${String(error)}`),
+				Effect.mapError((error) =>
+					cliError(`Failed to create default registry snapshot: ${error}`),
 				),
 			),
 		}
@@ -385,25 +385,20 @@ const saveProjectRegistryConfig = (configPath: string, config: AzedarachConfig) 
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 		const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config).pipe(
-			Effect.mapError((error) => new Error(`Failed to encode config: ${String(error)}`)),
+			Effect.mapError((error) => cliError(`Failed to encode config: ${error}`)),
 		)
 		yield* fs
 			.makeDirectory(pathService.dirname(configPath), { recursive: true })
 			.pipe(
-				Effect.mapError(
-					(error) =>
-						new Error(
-							`Failed to create config directory ${pathService.dirname(configPath)}: ${String(error)}`,
-						),
+				Effect.mapError((error) =>
+					cliError(
+						`Failed to create config directory ${pathService.dirname(configPath)}: ${error}`,
+					),
 				),
 			)
-		yield* fs
-			.writeFileString(configPath, json)
-			.pipe(
-				Effect.mapError(
-					(error) => new Error(`Failed to write config file ${configPath}: ${String(error)}`),
-				),
-			)
+		yield* fs.writeFile`${(configPath, json)}`.pipe(
+			Effect.mapError((error) => cliError(`Failed to write config file ${configPath}: ${error}`)),
+		)
 	})
 
 const resolveSelectedProjectPathFromWorkspaceConfig = (cwdPath: string) =>
@@ -436,7 +431,7 @@ const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
 			.exists(cwdConfigPath)
 			.pipe(
 				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 						Effect.zipRight(Effect.succeed(false)),
 					),
 				),
@@ -457,30 +452,24 @@ const loadWritableConfig = (configPath: string) =>
 			.exists(configPath)
 			.pipe(
 				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 						Effect.zipRight(Effect.succeed(false)),
 					),
 				),
 			)
 		if (!exists) {
 			return yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
-				Effect.mapError(
-					(error) => new Error(`Failed to create default config snapshot: ${String(error)}`),
-				),
+				Effect.mapError((error) => cliError(`Failed to create default config snapshot: ${error}`)),
 			)
 		}
 
-		const content = yield* fs
-			.readFileString(configPath)
-			.pipe(
-				Effect.mapError(
-					(error) => new Error(`Failed to read config file ${configPath}: ${String(error)}`),
-				),
-			)
+		const content = yield* fs.readFile`${configPath}`.pipe(
+			Effect.mapError((error) => cliError(`Failed to read config file ${configPath}: ${error}`)),
+		)
 
 		return yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
-			Effect.mapError(
-				(error) => new Error(`Config parse/validation failed for ${configPath}: ${String(error)}`),
+			Effect.mapError((error) =>
+				cliError(`Config parse/validation failed for ${configPath}: ${error}`),
 			),
 		)
 	})
@@ -490,25 +479,17 @@ const saveWritableConfig = (configPath: string, config: AzedarachConfig) =>
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 		const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config).pipe(
-			Effect.mapError((error) => new Error(`Failed to encode config: ${String(error)}`)),
+			Effect.mapError((error) => cliError(`Failed to encode config: ${error}`)),
 		)
-		yield* fs
-			.writeFileString(configPath, json)
-			.pipe(
-				Effect.mapError(
-					(error) => new Error(`Failed to write config file ${configPath}: ${String(error)}`),
-				),
-			)
+		yield* fs.writeFile`${(configPath, json)}`.pipe(
+			Effect.mapError((error) => cliError(`Failed to write config file ${configPath}: ${error}`)),
+		)
 		const schemaPath = pathService.join(pathService.dirname(configPath), ".azedarach.schema.json")
-		yield* fs
-			.writeFileString(schemaPath, configJsonSchemaString)
-			.pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(
-						`Failed to write config JSON schema at ${schemaPath}: ${String(error)}`,
-					),
-				),
-			)
+		yield* fs.writeFile`${(schemaPath, configJsonSchemaString)}`.pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Failed to write config JSON schema at ${schemaPath}: ${error}`),
+			),
+		)
 	})
 
 const parseBooleanConfigValue = (value: string): boolean | undefined => {
@@ -541,7 +522,7 @@ const setConfigValue = (
 		const parsed = parseBooleanConfigValue(value)
 		if (parsed === undefined) {
 			return Effect.fail(
-				new Error(
+				cliError(
 					`Invalid boolean value '${value}' for spec.enabled. Use true/false, on/off, yes/no, or 1/0.`,
 				),
 			)
@@ -554,11 +535,11 @@ const setConfigValue = (
 					enabled: parsed,
 				},
 			},
-			renderedValue: String(parsed),
+			renderedValue: `${parsed}`,
 		})
 	}
 
-	return Effect.fail(new Error(`Unsupported config key '${key}'. Supported keys: spec.enabled`))
+	return Effect.fail(cliError(`Unsupported config key '${key}'. Supported keys: spec.enabled`))
 }
 
 // ============================================================================
@@ -1066,7 +1047,7 @@ const startHandler = (args: {
 			})
 			if (bootstrap.client.sessionStart === undefined) {
 				return yield* Effect.fail(
-					new Error(
+					cliError(
 						"Connected daemon does not support sessionStart RPC yet. Update daemon/runtime.",
 					),
 				)
@@ -1147,7 +1128,7 @@ const attachHandler = (args: {
 		if (!sessionName) {
 			yield* Console.error(`No session found for ${issueId}`)
 			yield* Console.log(`Start a new session with: az start ${issueId}`)
-			return yield* Effect.fail(new Error(`Session not found: ${issueId}`))
+			return yield* Effect.fail(cliError(`Session not found: ${issueId}`))
 		}
 
 		// Attach to tmux session (this replaces current process)
@@ -1242,7 +1223,7 @@ const statusHandler = (args: {
 
 		const output = yield* PlatformCommand.string(listCommand).pipe(
 			Effect.catchAll((error) =>
-				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+				Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 					Effect.zipRight(Effect.succeed("")),
 				),
 			),
@@ -1286,7 +1267,7 @@ const statusHandler = (args: {
 					const wtPath = yield* PlatformCommand.string(wtCommand).pipe(
 						Effect.map((s) => s.trim()),
 						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 								Effect.zipRight(Effect.succeed("")),
 							),
 						),
@@ -1325,7 +1306,7 @@ const listSyncTargetPaths = (cwd: string, includeAllWorktrees: boolean) =>
 
 		const output = yield* PlatformCommand.string(
 			PlatformCommand.make("git", "-C", cwd, "worktree", "list", "--porcelain"),
-		).pipe(Effect.mapError((error) => new Error(`Failed to list git worktrees: ${String(error)}`)))
+		).pipe(Effect.mapError((error) => cliError(`Failed to list git worktrees: ${error}`)))
 		const parsedPaths = parseGitWorktreeListPaths(output)
 		return parsedPaths.length > 0 ? parsedPaths : [cwd]
 	})
@@ -1474,7 +1455,7 @@ const syncHandler = (args: {
 				yield* Console.error(`  ${failure.path}: ${failure.message}`)
 			}
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Sync failed for ${failures.length} target(s). Successful targets: ${syncedCount}/${targetPaths.length}.`,
 				),
 			)
@@ -1643,7 +1624,7 @@ export const consumeDaemonStatusStreamBatches = (params: {
 	Effect.gen(function* () {
 		if (params.client.eventStream === undefined) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"Connected daemon does not support eventStream RPC yet. Update daemon/runtime and rerun `az daemon status --watch`.",
 				),
 			)
@@ -1742,7 +1723,7 @@ const daemonStatusHandler = (args: {
 			const maxBatches = Option.getOrUndefined(args.streamBatches)
 			const startCursorLabel = Option.match(args.cursor, {
 				onNone: () => "<start>",
-				onSome: (cursor) => String(cursor),
+				onSome: (cursor) => `${cursor}`,
 			})
 			yield* Console.log(
 				`daemon status watch: streaming event batches from cursor=${startCursorLabel} batchSize=${batchSize} waitMs=${waitMs}`,
@@ -1850,14 +1831,14 @@ const forceResetGlobalDaemonRuntime = Effect.gen(function* () {
 	const daemonOwnerSchema = Schema.Struct({
 		pid: Schema.Number,
 	})
-	const ownerContent = yield* fs.readFileString(ownerPath).pipe(Effect.option)
+	const ownerContent = yield* fs.readFile`${ownerPath}`.pipe(Effect.option)
 	if (Option.isSome(ownerContent)) {
 		const owner = yield* Schema.decode(Schema.parseJson(daemonOwnerSchema))(
 			ownerContent.value,
 		).pipe(Effect.option)
 		if (Option.isSome(owner) && Number.isFinite(owner.value.pid) && owner.value.pid > 1) {
 			yield* PlatformCommand.exitCode(
-				PlatformCommand.make("kill", "-9", String(Math.trunc(owner.value.pid))),
+				PlatformCommand.make("kill", "-9", `${Math.trunc(owner.value.pid)}`),
 			).pipe(Effect.orElseSucceed(() => 1))
 		}
 	}
@@ -2043,7 +2024,7 @@ const parseSpecImplementationForCli = (value: string): Effect.Effect<string, Err
 	const normalized = normalizeSpecImplementationForCli(value)
 	if (!SPEC_IMPLEMENTATION_PATTERN.test(normalized)) {
 		return Effect.fail(
-			new Error(
+			cliError(
 				`Invalid implementation '${value}'. Expected lowercase letters, digits, and hyphens, starting with a letter.`,
 			),
 		)
@@ -2170,28 +2151,28 @@ const resolveSpecRequirementLookupInput = (args: {
 
 		if (explicitSelectors.length > 1) {
 			return yield* Effect.fail(
-				new Error("Use only one selector flag: --id, --local-id, or --external-code."),
+				cliError("Use only one selector flag: --id, --local-id, or --external-code."),
 			)
 		}
 
 		if (explicitSelectors.length === 1) {
 			if (positionalRef !== undefined && positionalRef.length > 0) {
 				return yield* Effect.fail(
-					new Error(
+					cliError(
 						"Provide either a positional requirement reference OR one selector flag (--id/--local-id/--external-code), not both.",
 					),
 				)
 			}
 			const selected = explicitSelectors[0]
 			if (selected === undefined) {
-				return yield* Effect.fail(new Error("Invalid selector input"))
+				return yield* Effect.fail(cliError("Invalid selector input"))
 			}
 			return selected
 		}
 
 		if (positionalRef === undefined || positionalRef.length === 0) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"Missing spec requirement reference. Provide a positional ref or use one selector flag (--id/--local-id/--external-code).",
 				),
 			)
@@ -2234,7 +2215,7 @@ const resolveOptionalAliasedTextInput = (args: {
 
 		if (positional?.toLowerCase() !== optionValue?.toLowerCase()) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Conflicting values for ${args.positionalName} and ${args.optionName}. Provide one source or matching values.`,
 				),
 			)
@@ -2257,9 +2238,7 @@ const resolveRequiredAliasedTextInput = (args: {
 		const value = Option.getOrUndefined(merged)
 		if (value === undefined || value.length === 0) {
 			return yield* Effect.fail(
-				new Error(
-					`Missing ${args.positionalName}. Provide ${args.optionName} or positional input.`,
-				),
+				cliError(`Missing ${args.positionalName}. Provide ${args.optionName} or positional input.`),
 			)
 		}
 		return value
@@ -2331,7 +2310,7 @@ const parseSpecLinkFulfillmentPercent = (
 		const rounded = Math.round(value.value)
 		if (!Number.isFinite(rounded) || rounded < 0 || rounded > 100) {
 			return yield* Effect.fail(
-				new Error("Invalid --fulfillment-percent. Expected an integer 0-100."),
+				cliError("Invalid --fulfillment-percent. Expected an integer 0-100."),
 			)
 		}
 		return rounded
@@ -2472,7 +2451,7 @@ const issueListHandler = (args: {
 
 		const requestedLimit = Option.getOrUndefined(args.limit)
 		if (requestedLimit !== undefined && requestedLimit <= 0) {
-			return yield* Effect.fail(new Error("--limit must be a positive integer"))
+			return yield* Effect.fail(cliError("--limit must be a positive integer"))
 		}
 		const effectiveLimit = requestedLimit === undefined ? 23 : Math.floor(requestedLimit)
 
@@ -2678,7 +2657,7 @@ const issueChildHandler = (args: {
 		})
 		if (Option.isNone(parentContext)) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"No active parent context found. Provide --parent <issue-id> or set AZEDARACH_PARENT_ISSUE_ID/AZEDARACH_ISSUE_ID.",
 				),
 			)
@@ -2755,11 +2734,8 @@ const issueBulkCreateHandler = (args: {
 
 		const inputContent = yield* readIssueBulkCreateInput(args.input)
 		const entries = yield* decodeIssueBulkCreatePayload(inputContent).pipe(
-			Effect.mapError(
-				(error) =>
-					new Error(
-						`Bulk create JSON parse/validation failed: ${formatIssueBulkCreateError(error)}`,
-					),
+			Effect.mapError((error) =>
+				cliError(`Bulk create JSON parse/validation failed: ${formatIssueBulkCreateError(error)}`),
 			),
 		)
 
@@ -2910,7 +2886,7 @@ const issueUpdateHandler = (args: {
 		const appendNotes = Option.getOrUndefined(args.appendNotes)
 		if (notes !== undefined && appendNotes !== undefined) {
 			return yield* Effect.fail(
-				new Error("Cannot combine --notes with --append-notes; choose one note update mode."),
+				cliError("Cannot combine --notes with --append-notes; choose one note update mode."),
 			)
 		}
 
@@ -2952,7 +2928,7 @@ const issueUpdateHandler = (args: {
 		const hasChanges = Object.values(fields).some((value) => value !== undefined)
 		if (!hasChanges) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"No fields provided. Use at least one --status/--notes/--append-notes/--design/--description/... option.",
 				),
 			)
@@ -2987,11 +2963,8 @@ const issueBulkUpdateHandler = (args: {
 
 		const inputContent = yield* readIssueBulkUpdateInput(args.input)
 		const updates = yield* decodeIssueBulkUpdatePayload(inputContent).pipe(
-			Effect.mapError(
-				(error) =>
-					new Error(
-						`Bulk update JSON parse/validation failed: ${formatIssueBulkUpdateError(error)}`,
-					),
+			Effect.mapError((error) =>
+				cliError(`Bulk update JSON parse/validation failed: ${formatIssueBulkUpdateError(error)}`),
 			),
 		)
 
@@ -3121,7 +3094,7 @@ const implGetHandler = (args: {
 			(entry) => entry.name === implementationName,
 		)
 		if (implementation === undefined) {
-			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+			return yield* Effect.fail(cliError(`Implementation not found: ${implementationName}`))
 		}
 
 		if (args.json) {
@@ -3207,7 +3180,7 @@ const implUpdateHandler = (args: {
 			!args.setDefault
 		) {
 			return yield* Effect.fail(
-				new Error("No changes provided. Use --rename, --description, --dir, or --default."),
+				cliError("No changes provided. Use --rename, --description, --dir, or --default."),
 			)
 		}
 
@@ -3315,7 +3288,7 @@ const implSetEditorDefaultHandler = (args: {
 			(entry) => entry.name === implementationName,
 		)
 		if (!implementationExists) {
-			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+			return yield* Effect.fail(cliError(`Implementation not found: ${implementationName}`))
 		}
 
 		const configPath = yield* resolveWritableConfigPath(Option.some(projectPath))
@@ -3395,7 +3368,7 @@ const issueDepAddHandler = (args: {
 				const parsed = parseRelationshipDependencyType(value)
 				if (parsed === undefined) {
 					return Effect.fail(
-						new Error(
+						cliError(
 							`Invalid dependency type '${value}'. Expected one of: blocks, related, parent-child, discovered-from.`,
 						),
 					)
@@ -3461,7 +3434,7 @@ const issueDepRemoveHandler = (args: {
 				const parsed = parseRelationshipDependencyType(value)
 				if (parsed === undefined) {
 					return Effect.fail(
-						new Error(
+						cliError(
 							`Invalid dependency type '${value}'. Expected one of: blocks, related, parent-child, discovered-from.`,
 						),
 					)
@@ -3563,7 +3536,7 @@ const issueCloseHandler = (args: {
 		}
 		if (openChildren.length > 0) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					formatCloseGuardMessage(issueId, openChildren, Option.getOrUndefined(args.reason)),
 				),
 			)
@@ -3734,7 +3707,7 @@ const issueCheckHandler = (args: {
 
 		if (Option.isNone(parentContext)) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"No active parent context found. Provide [issue-id] or set AZEDARACH_PARENT_ISSUE_ID/AZEDARACH_ISSUE_ID.",
 				),
 			)
@@ -3814,7 +3787,7 @@ const issueDeleteHandler = (args: {
 	Effect.gen(function* () {
 		if (!args.force) {
 			return yield* Effect.fail(
-				new Error("Refusing to delete without --force. This operation is irreversible."),
+				cliError("Refusing to delete without --force. This operation is irreversible."),
 			)
 		}
 
@@ -3863,7 +3836,7 @@ const parseSpecRequirementKindOption = (
 			if (normalized === "acceptance") return Effect.succeed("acceptance")
 			if (normalized === "other") return Effect.succeed("other")
 			return Effect.fail(
-				new Error(`Invalid kind '${raw}'. Expected: functional, acceptance, other.`),
+				cliError(`Invalid kind '${raw}'. Expected: functional, acceptance, other.`),
 			)
 		},
 	})
@@ -3877,7 +3850,7 @@ const parseSpecRequirementViewMode = (
 			const normalized = raw.trim().toLowerCase()
 			if (normalized === "compact") return Effect.succeed("compact")
 			if (normalized === "verbose") return Effect.succeed("verbose")
-			return Effect.fail(new Error(`Invalid view '${raw}'. Expected: compact, verbose.`))
+			return Effect.fail(cliError(`Invalid view '${raw}'. Expected: compact, verbose.`))
 		},
 	})
 
@@ -4073,7 +4046,7 @@ const specLintHandler = (args: {
 		}
 
 		if (args.strict && !lintResult.ok) {
-			return yield* Effect.fail(new Error("Spec lint failed in strict mode."))
+			return yield* Effect.fail(cliError("Spec lint failed in strict mode."))
 		}
 	})
 
@@ -4087,7 +4060,7 @@ const parseSpecSyncTarget = (target: Option.Option<string>) =>
 		if (normalized === "linear") return "linear" as const
 		if (normalized === "all") return "all" as const
 		return yield* Effect.fail(
-			new Error(`Invalid sync target '${normalized}'. Expected one of: md, linear, all.`),
+			cliError(`Invalid sync target '${normalized}'. Expected one of: md, linear, all.`),
 		)
 	})
 
@@ -4105,7 +4078,7 @@ const specSyncHandler = (args: {
 
 		if (args.check && target !== "md") {
 			return yield* Effect.fail(
-				new Error("--check is supported only for --target md (or default target)."),
+				cliError("--check is supported only for --target md (or default target)."),
 			)
 		}
 
@@ -4144,7 +4117,7 @@ const specSyncHandler = (args: {
 			}
 
 			if (syncResult.check && !syncResult.ok) {
-				return yield* Effect.fail(new Error("Spec markdown snapshots are out of sync."))
+				return yield* Effect.fail(cliError("Spec markdown snapshots are out of sync."))
 			}
 			return
 		}
@@ -4216,7 +4189,7 @@ const specReqGetHandler = (args: {
 			selector: lookup.selector,
 		})
 		if (requirement === undefined) {
-			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
+			return yield* Effect.fail(cliError(`Spec requirement not found: ${lookup.reference}`))
 		}
 		const linkedIssues = yield* listRequirementIssuesViaDaemon({
 			projectPath,
@@ -4292,7 +4265,7 @@ const specReqCreateHandler = (args: {
 
 		if (optionExternalCode !== undefined && !SPEC_EXTERNAL_CODE_PATTERN.test(optionExternalCode)) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Invalid external code '${optionExternalCodeRaw}'. Expected AZ-FR-####[a-z]? or AZ-AT-####[a-z]?.`,
 				),
 			)
@@ -4303,7 +4276,7 @@ const specReqCreateHandler = (args: {
 		if (positionalRef !== undefined && positionalRef.length > 0) {
 			if (optionLocalId !== undefined || optionExternalCode !== undefined) {
 				return yield* Effect.fail(
-					new Error(
+					cliError(
 						"Provide either positional requirement ref OR --local-id/--external-code options, not both.",
 					),
 				)
@@ -4320,7 +4293,7 @@ const specReqCreateHandler = (args: {
 			(externalCode === undefined || externalCode.length === 0)
 		) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"Missing requirement identifier. Provide a positional ref, --local-id, or --external-code.",
 				),
 			)
@@ -4341,7 +4314,7 @@ const specReqCreateHandler = (args: {
 		})
 		if (Option.isSome(args.kind) && kind === undefined) {
 			return yield* Effect.fail(
-				new Error(`Invalid kind '${args.kind.value}'. Expected: functional, acceptance, other.`),
+				cliError(`Invalid kind '${args.kind.value}'. Expected: functional, acceptance, other.`),
 			)
 		}
 
@@ -4411,7 +4384,7 @@ const specReqUpdateHandler = (args: {
 		})
 		if (Option.isSome(args.kind) && parsedKind === undefined) {
 			return yield* Effect.fail(
-				new Error(`Invalid kind '${args.kind.value}'. Expected: functional, acceptance, other.`),
+				cliError(`Invalid kind '${args.kind.value}'. Expected: functional, acceptance, other.`),
 			)
 		}
 
@@ -4425,9 +4398,7 @@ const specReqUpdateHandler = (args: {
 		const hasChanges = Object.values(fields).some((value) => value !== undefined)
 		if (!hasChanges) {
 			return yield* Effect.fail(
-				new Error(
-					"No fields provided. Use at least one --title/--body/--kind/--status/--priority.",
-				),
+				cliError("No fields provided. Use at least one --title/--body/--kind/--status/--priority."),
 			)
 		}
 
@@ -4438,7 +4409,7 @@ const specReqUpdateHandler = (args: {
 			fields,
 		})
 		if (!updated) {
-			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
+			return yield* Effect.fail(cliError(`Spec requirement not found: ${lookup.reference}`))
 		}
 
 		if (args.json) {
@@ -4493,7 +4464,7 @@ const specReqDeleteHandler = (args: {
 			selector: lookup.selector,
 		})
 		if (!deleted) {
-			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
+			return yield* Effect.fail(cliError(`Spec requirement not found: ${lookup.reference}`))
 		}
 
 		if (args.json) {
@@ -4645,7 +4616,7 @@ const specLinkAddHandler = (args: {
 				const parsed = parseRelationshipSpecLinkType(value)
 				if (parsed === undefined) {
 					return Effect.fail(
-						new Error(
+						cliError(
 							`Invalid link type '${value}'. Expected one of: implements, tests, blocks, relates.`,
 						),
 					)
@@ -4660,7 +4631,7 @@ const specLinkAddHandler = (args: {
 				const parsed = parseSpecLinkFulfillmentStatus(value)
 				if (parsed === undefined) {
 					return Effect.fail(
-						new Error(
+						cliError(
 							`Invalid fulfillment status '${value}'. Expected one of: planned, partial, complete, verified.`,
 						),
 					)
@@ -4767,7 +4738,7 @@ const specLinkRemoveHandler = (args: {
 		})
 		if (Option.isSome(args.linkType) && linkType === undefined) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Invalid link type '${args.linkType.value}'. Expected one of: implements, tests, blocks, relates.`,
 				),
 			)
@@ -4865,7 +4836,7 @@ const specLinkUpdateHandler = (args: {
 		})
 		if (Option.isSome(args.linkType) && linkType === undefined) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Invalid link type '${args.linkType.value}'. Expected one of: implements, tests, blocks, relates.`,
 				),
 			)
@@ -4877,7 +4848,7 @@ const specLinkUpdateHandler = (args: {
 		})
 		if (Option.isSome(args.fulfillmentStatus) && fulfillmentStatus === undefined) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Invalid fulfillment status '${args.fulfillmentStatus.value}'. Expected one of: planned, partial, complete, verified.`,
 				),
 			)
@@ -4890,7 +4861,7 @@ const specLinkUpdateHandler = (args: {
 			evidenceNote === undefined
 		) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					"No fields provided. Use at least one --fulfillment-status/--fulfillment-percent/--evidence-note.",
 				),
 			)
@@ -5020,7 +4991,7 @@ const specPublishConfigSetHandler = (args: {
 			},
 		}
 		if (nextConfig.debounce_ms < 0) {
-			return yield* Effect.fail(new Error("--debounce-ms must be >= 0"))
+			return yield* Effect.fail(cliError("--debounce-ms must be >= 0"))
 		}
 
 		yield* setSpecPublishConfigViaDaemon(projectPath, nextConfig)
@@ -5061,7 +5032,7 @@ const specPublishConfigHandler = (args: {
 
 		if (requestedAction !== "get" && requestedAction !== "set") {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Invalid config action '${requestedAction}'. Use 'get' or 'set' (for example: az spec publish config get).`,
 				),
 			)
@@ -5070,7 +5041,7 @@ const specPublishConfigHandler = (args: {
 		if (requestedAction === "get") {
 			if (hasSetOptions) {
 				return yield* Effect.fail(
-					new Error(
+					cliError(
 						"Config update flags cannot be used with 'get'. Use `az spec publish config` or `az spec publish config set ...`.",
 					),
 				)
@@ -5151,7 +5122,7 @@ const gateHandler = (args: {
 			worktreePath = yield* PlatformCommand.string(wtCommand).pipe(
 				Effect.map((s) => s.trim()),
 				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 						Effect.zipRight(Effect.succeed("")),
 					),
 				),
@@ -5173,7 +5144,7 @@ const gateHandler = (args: {
 				yield* Console.error(`Could not find worktree for ${issueId}`)
 				yield* Console.log(`Checked: ${expectedPath}`)
 				yield* Console.log("Try running from within the worktree directory.")
-				return yield* Effect.fail(new Error("Worktree not found"))
+				return yield* Effect.fail(cliError("Worktree not found"))
 			}
 		}
 
@@ -5192,7 +5163,7 @@ const gateHandler = (args: {
 			Effect.map((output) => ({ passed: true, output })),
 			Effect.catchAll((e) =>
 				Effect.logWarning(e).pipe(
-					Effect.zipRight(Effect.succeed({ passed: false, output: String(e) })),
+					Effect.zipRight(Effect.succeed({ passed: false, output: `${e}` })),
 				),
 			),
 		)
@@ -5209,7 +5180,7 @@ const gateHandler = (args: {
 			Effect.map((output) => ({ passed: true, output })),
 			Effect.catchAll((e) =>
 				Effect.logWarning(e).pipe(
-					Effect.zipRight(Effect.succeed({ passed: false, output: String(e) })),
+					Effect.zipRight(Effect.succeed({ passed: false, output: `${e}` })),
 				),
 			),
 		)
@@ -5224,14 +5195,14 @@ const gateHandler = (args: {
 		const testResult = yield* PlatformCommand.string(testCommand).pipe(
 			Effect.map((output) => ({ passed: true, output })),
 			Effect.catchAll((e) => {
-				const output = String(e)
+				const output = `${e}`
 				// "test" script not found is not a failure
 				if (output.includes("not found") || output.includes("missing script")) {
 					return Effect.logWarning(e).pipe(
 						Effect.zipRight(Effect.succeed({ passed: true, output: "No test script" })),
 					)
 				}
-				return Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+				return Effect.logWarning(`Recovering after caught error: ${e}`).pipe(
 					Effect.zipRight(Effect.succeed({ passed: false, output })),
 				)
 			}),
@@ -5247,13 +5218,13 @@ const gateHandler = (args: {
 		const buildResult = yield* PlatformCommand.string(buildCommand).pipe(
 			Effect.map((output) => ({ passed: true, output })),
 			Effect.catchAll((e) => {
-				const output = String(e)
+				const output = `${e}`
 				if (output.includes("not found") || output.includes("missing script")) {
 					return Effect.logWarning(e).pipe(
 						Effect.zipRight(Effect.succeed({ passed: true, output: "No build script" })),
 					)
 				}
-				return Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+				return Effect.logWarning(`Recovering after caught error: ${e}`).pipe(
 					Effect.zipRight(Effect.succeed({ passed: false, output })),
 				)
 			}),
@@ -5284,7 +5255,7 @@ const gateHandler = (args: {
 
 		// Return exit code based on critical gates
 		if (!typeCheckResult.passed) {
-			return yield* Effect.fail(new Error("Type-check failed"))
+			return yield* Effect.fail(cliError("Type-check failed"))
 		}
 	})
 
@@ -5402,7 +5373,7 @@ const parseIssueMutationStatus = (
 			return Effect.succeed(value)
 		default:
 			return Effect.fail(
-				new Error(
+				cliError(
 					`Invalid ${context} value '${value}'. Expected one of: open, in_progress, blocked, closed.`,
 				),
 			)
@@ -5424,7 +5395,7 @@ const parseIssueFilterStatus = (
 			return Effect.succeed(value)
 		default:
 			return Effect.fail(
-				new Error(
+				cliError(
 					`Invalid ${context} value '${value}'. Expected one of: open, in_progress, blocked, closed, tombstone.`,
 				),
 			)
@@ -5446,7 +5417,7 @@ const parseIssueType = (
 			return Effect.succeed(value)
 		default:
 			return Effect.fail(
-				new Error(
+				cliError(
 					`Invalid ${context} value '${value}'. Expected one of: bug, feature, task, epic, chore.`,
 				),
 			)
@@ -5558,7 +5529,7 @@ const decodeIssueBulkCreatePayload = (content: string) =>
 			const entries = isIssueBulkCreateEntryArray(payload) ? payload : payload.issues
 			return entries.length > 0
 				? Effect.succeed(entries)
-				: Effect.fail(new Error("Bulk create input must contain at least one issue item."))
+				: Effect.fail(cliError("Bulk create input must contain at least one issue item."))
 		}),
 	)
 
@@ -5581,12 +5552,12 @@ const decodeIssueBulkUpdatePayload = (content: string) =>
 			if (isIssueBulkUpdateEntryArray(payload)) {
 				return payload.length > 0
 					? Effect.succeed(payload)
-					: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+					: Effect.fail(cliError("Bulk update input must contain at least one update item."))
 			}
 
 			return payload.updates.length > 0
 				? Effect.succeed(payload.updates)
-				: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+				: Effect.fail(cliError("Bulk update input must contain at least one update item."))
 		}),
 	)
 
@@ -5657,11 +5628,9 @@ const summarizeIssueBulkCreateResults = (
 	}
 }
 
-const formatIssueBulkCreateError = (error: unknown): string =>
-	error instanceof Error ? error.message : String(error)
+const formatIssueBulkCreateError = (error: unknown): string => `${error}`
 
-const formatIssueBulkUpdateError = (error: unknown): string =>
-	error instanceof Error ? error.message : String(error)
+const formatIssueBulkUpdateError = (error: unknown): string => `${error}`
 
 const readIssueBulkInput = (inputPath: string, mode: "create" | "update") =>
 	Effect.gen(function* () {
@@ -5669,7 +5638,7 @@ const readIssueBulkInput = (inputPath: string, mode: "create" | "update") =>
 			return yield* Effect.tryPromise({
 				try: () => Bun.file("/dev/stdin").text(),
 				catch: (error) =>
-					new Error(
+					cliError(
 						`Failed to read bulk ${mode} JSON from stdin: ${
 							mode === "create"
 								? formatIssueBulkCreateError(error)
@@ -5682,16 +5651,11 @@ const readIssueBulkInput = (inputPath: string, mode: "create" | "update") =>
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 		const resolvedInputPath = pathService.resolve(inputPath)
-		return yield* fs
-			.readFileString(resolvedInputPath)
-			.pipe(
-				Effect.mapError(
-					(error) =>
-						new Error(
-							`Failed to read bulk ${mode} JSON from ${resolvedInputPath}: ${String(error)}`,
-						),
-				),
-			)
+		return yield* fs.readFile`${resolvedInputPath}`.pipe(
+			Effect.mapError((error) =>
+				cliError(`Failed to read bulk ${mode} JSON from ${resolvedInputPath}: ${error}`),
+			),
+		)
 	})
 
 const readIssueBulkCreateInput = (inputPath: string) => readIssueBulkInput(inputPath, "create")
@@ -5789,7 +5753,7 @@ const listTmuxSessionNames = Effect.gen(function* () {
 	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
 	const output = yield* PlatformCommand.string(listCommand).pipe(
 		Effect.catchAll((error) =>
-			Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+			Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 				Effect.zipRight(Effect.succeed("")),
 			),
 		),
@@ -5807,7 +5771,7 @@ const findSessionByIssueId = (issueId: string, projectPath: string) =>
 		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", canonicalSessionName)
 		const canonicalExitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
 			Effect.catchAll((error) =>
-				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+				Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 					Effect.zipRight(Effect.succeed(1)),
 				),
 			),
@@ -5864,7 +5828,7 @@ const notifyHandler = (args: {
 		if (!isValidHookEvent(args.event)) {
 			yield* Console.error(`Invalid event type: ${args.event}`)
 			yield* Console.error(`Valid events: ${VALID_HOOK_EVENTS.join(", ")}`)
-			return yield* Effect.fail(new Error(`Invalid event: ${args.event}`))
+			return yield* Effect.fail(cliError(`Invalid event: ${args.event}`))
 		}
 
 		const status = mapHookEventToTmuxStatus(args.event)
@@ -5924,20 +5888,18 @@ const hooksInstallHandler = (args: {
 		let existingSettings: Record<string, unknown> = {}
 		const settingsExist = yield* fs.exists(settingsPath)
 		if (settingsExist) {
-			const content = yield* fs
-				.readFileString(settingsPath)
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-							Effect.zipRight(Effect.succeed("{}")),
-						),
+			const content = yield* fs.readFile`${settingsPath}`.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
+						Effect.zipRight(Effect.succeed("{}")),
 					),
-				)
+				),
+			)
 			existingSettings = yield* Schema.decode(
 				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
 			)(content).pipe(
 				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 						Effect.zipRight(Effect.succeed({})),
 					),
 				),
@@ -5988,7 +5950,7 @@ const projectAddHandler = (args: {
 		// Validate path exists
 		const exists = yield* fs.exists(absolutePath)
 		if (!exists) {
-			return yield* Effect.fail(new Error(`Path does not exist: ${absolutePath}`))
+			return yield* Effect.fail(cliError(`Path does not exist: ${absolutePath}`))
 		}
 
 		let tracker: "tracker" | "legacy" | "linear" | "local" = "local"
@@ -6003,7 +5965,7 @@ const projectAddHandler = (args: {
 				.exists(candidatePath)
 				.pipe(
 					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
 							Effect.zipRight(Effect.succeed(false)),
 						),
 					),
@@ -6014,15 +5976,13 @@ const projectAddHandler = (args: {
 			}
 		}
 		if (localConfigPath !== null) {
-			const localConfigRaw = yield* fs
-				.readFileString(localConfigPath)
-				.pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-							Effect.zipRight(Effect.succeed("")),
-						),
+			const localConfigRaw = yield* fs.readFile`${localConfigPath}`.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${error}`).pipe(
+						Effect.zipRight(Effect.succeed("")),
 					),
-				)
+				),
+			)
 			const decodedConfig = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
 				localConfigRaw,
 			).pipe(Effect.option)
@@ -6040,7 +6000,7 @@ const projectAddHandler = (args: {
 			const issueStoreExists = yield* fs.exists(issueStorePath)
 			if (!issueStoreExists) {
 				return yield* Effect.fail(
-					new Error(
+					cliError(
 						`No .azedarach directory found in ${absolutePath}. Initialize issue tracking for this project, then retry with \`az issue\`.`,
 					),
 				)
@@ -6069,7 +6029,7 @@ const projectAddHandler = (args: {
 		const currentProjects = getConfiguredProjects(currentConfig)
 
 		if (currentProjects.some((project) => project.name === projectName)) {
-			return yield* Effect.fail(new Error(`Project with name '${projectName}' already exists`))
+			return yield* Effect.fail(cliError(`Project with name '${projectName}' already exists`))
 		}
 
 		if (
@@ -6079,7 +6039,7 @@ const projectAddHandler = (args: {
 					pathService.normalize(project.path) === normalizedBaseProjectPath,
 			)
 		) {
-			return yield* Effect.fail(new Error(`Project with path '${absolutePath}' already exists`))
+			return yield* Effect.fail(cliError(`Project with path '${absolutePath}' already exists`))
 		}
 
 		const conflictingProject = currentProjects.find((project) => {
@@ -6091,7 +6051,7 @@ const projectAddHandler = (args: {
 		})
 		if (conflictingProject !== undefined) {
 			return yield* Effect.fail(
-				new Error(
+				cliError(
 					`Path '${absolutePath}' belongs to existing project '${conflictingProject.name}' (${conflictingProject.path}).`,
 				),
 			)
@@ -6163,7 +6123,7 @@ const projectRemoveHandler = (args: { readonly name: string; readonly verbose: b
 		const { configPath, config: currentConfig } = yield* loadProjectRegistryConfig
 		const currentProjects = getConfiguredProjects(currentConfig)
 		if (!currentProjects.some((project) => project.name === args.name)) {
-			return yield* Effect.fail(new Error(`Project not found: ${args.name}`))
+			return yield* Effect.fail(cliError(`Project not found: ${args.name}`))
 		}
 
 		yield* saveProjectRegistryConfig(configPath, {
@@ -6188,7 +6148,7 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
 		const { configPath, config: currentConfig } = yield* loadProjectRegistryConfig
 		const currentProjects = getConfiguredProjects(currentConfig)
 		if (!currentProjects.some((project) => project.name === args.name)) {
-			return yield* Effect.fail(new Error(`Project not found: ${args.name}`))
+			return yield* Effect.fail(cliError(`Project not found: ${args.name}`))
 		}
 
 		yield* saveProjectRegistryConfig(configPath, {
@@ -7794,7 +7754,7 @@ const opencodeInitHandler = (args: {
 		let config = { ...DEFAULT_OPENCODE_CONFIG }
 		const configExists = yield* fs.exists(opencodeJsonPath)
 		if (configExists) {
-			const existingContent = yield* fs.readFileString(opencodeJsonPath)
+			const existingContent = yield* fs.readFile`${opencodeJsonPath}`
 			const existingConfig: Readonly<Record<string, unknown>> = yield* Schema.decode(
 				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
 			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
@@ -7873,11 +7833,11 @@ const opencodePluginInstallHandler = (args: {
 
 		const existingGlobalPlugin = yield* fs.exists(globalPluginPath)
 		const needsGlobalWrite = existingGlobalPlugin
-			? (yield* fs.readFileString(globalPluginPath)) !== OPENCODE_AZ_PLUGIN_SOURCE
+			? (yield* fs.readFile`${globalPluginPath}`) !== OPENCODE_AZ_PLUGIN_SOURCE
 			: true
 
 		if (needsGlobalWrite) {
-			yield* fs.writeFileString(globalPluginPath, OPENCODE_AZ_PLUGIN_SOURCE)
+			yield* fs.writeFile`${(globalPluginPath, OPENCODE_AZ_PLUGIN_SOURCE)}`
 			yield* Console.log(`✓ Installed global plugin: ${globalPluginPath}`)
 		} else {
 			yield* Console.log(`✓ Global plugin already up to date: ${globalPluginPath}`)
@@ -7897,11 +7857,11 @@ const opencodePluginInstallHandler = (args: {
 
 			const existingProjectPlugin = yield* fs.exists(projectPluginPath)
 			const needsProjectWrite = existingProjectPlugin
-				? (yield* fs.readFileString(projectPluginPath)) !== OPENCODE_AZ_PLUGIN_SOURCE
+				? (yield* fs.readFile`${projectPluginPath}`) !== OPENCODE_AZ_PLUGIN_SOURCE
 				: true
 
 			if (needsProjectWrite) {
-				yield* fs.writeFileString(projectPluginPath, OPENCODE_AZ_PLUGIN_SOURCE)
+				yield* fs.writeFile`${(projectPluginPath, OPENCODE_AZ_PLUGIN_SOURCE)}`
 				yield* Console.log(`✓ Installed project plugin: ${projectPluginPath}`)
 			} else {
 				yield* Console.log(`✓ Project plugin already up to date: ${projectPluginPath}`)
@@ -8203,6 +8163,9 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 	})()
 }
 
+const CliRuntimeLayer = (argv: ReadonlyArray<string>) =>
+	Layer.scopedDiscard(cliRunner(argv).pipe(Effect.asVoid))
+
 export { cli }
 export { commandCli }
 
@@ -8218,6 +8181,7 @@ export { cliLayer, commandCliLayer }
 export {
 	buildPrimeOutput,
 	buildCommandCliLayerForArgv,
+	CliRuntimeLayer,
 	cliRunner,
 	decodeIssueBulkCreatePayload,
 	decodeIssueBulkUpdatePayload,

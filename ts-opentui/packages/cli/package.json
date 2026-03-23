@@ -2,6 +2,7 @@
 	"name": "@azedarach/cli",
 	"version": "0.0.0",
 	"private": true,
+	"sideEffects": false,
 	"type": "module",
 	"dependencies": {
 		"@azedarach/config": "workspace:*",

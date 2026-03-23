@@ -110,7 +110,7 @@ ts-opentui/
 - Keep daemon lifecycle contracts in `@azedarach/daemon-control` and live implementation in `@azedarach/daemon`.
 - Do not import `@azedarach/daemon` from `packages/cli` or `packages/tui`.
 - Do not add package imports to legacy `src/cli`, `src/core`, `src/daemon`, `src/rpc`, or `src/services`.
-- Compose runtime layers in `packages/entry` (CLI + TUI launch paths), not in package internals.
+- Keep package exports side-effect-free; expose runnable Effect surfaces/layers from `packages/cli` and `packages/tui`, and launch/compose them in `packages/entry`.
 
 ## Skills
 

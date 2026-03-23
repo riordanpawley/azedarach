@@ -4,9 +4,8 @@ import {
 	normalizeIssueOptionOrder,
 	resolveCliExecutionMode,
 } from "@azedarach/cli"
-import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
-import { configureTuiDaemonRpcClient, launchTUI } from "@azedarach/tui"
-import { Effect } from "effect"
+import { TuiRuntimeLayer } from "@azedarach/tui"
+import { Effect, Layer } from "effect"
 
 export type AzEntrypointMode = "cli" | "tui"
 
@@ -33,14 +32,7 @@ export const resolveAzEntrypointMode = (argv: ReadonlyArray<string>): AzEntrypoi
 
 export const runAz = (argv: ReadonlyArray<string>) => {
 	if (resolveAzEntrypointMode(argv) === "tui") {
-		return Effect.gen(function* () {
-			const daemonBootstrap = yield* GlobalDaemonBootstrap
-			const bootstrap = yield* daemonBootstrap.bootstrapDaemonRpcClient({
-				autoStart: true,
-			})
-			configureTuiDaemonRpcClient(bootstrap.client, { socketUrl: bootstrap.socketUrl })
-			return yield* Effect.promise(() => launchTUI())
-		})
+		return Effect.scoped(Layer.launch(TuiRuntimeLayer))
 	}
 
 	return cliRunner(argv)

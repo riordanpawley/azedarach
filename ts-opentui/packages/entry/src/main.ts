@@ -8,7 +8,7 @@ import { runAz } from "./index.js"
 const EntryRuntimeLayer = Layer.mergeAll(BunContext.layer, DaemonControlLive)
 
 export const runAzMain = (argv: ReadonlyArray<string>) =>
-	BunRuntime.runMain(runAz(argv).pipe(Effect.provide(EntryRuntimeLayer)))
+	BunRuntime.runMain(Effect.scoped(runAz(argv)).pipe(Effect.provide(EntryRuntimeLayer)))
 
 if (import.meta.main) {
 	runAzMain(process.argv)

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { Effect } from "effect"
 import {
 	runBoundedTeardownPhase,
 	TUI_QUIT_PRESERVES_DAEMON,
@@ -57,30 +58,30 @@ describe("launch teardown helpers", () => {
 		expect(events.length).toBe(1)
 		expect(events[0]?.level).toBe("warn")
 		expect(events[0]?.phase).toBe("throwing-phase")
-		expect(events[0]?.message).toContain("boom")
+		expect(events[0]?.message).toContain("teardown phase threw")
 	})
 
 	it("returns completed when completion resolves within timeout", async () => {
-		const completion = Promise.resolve()
-		const result = await waitForShutdownCompletion({
-			completion,
-			timeoutMs: 25,
-		})
+		const result = await Effect.runPromise(
+			waitForShutdownCompletion({
+				completion: Effect.void,
+				timeoutMs: 25,
+			}),
+		)
 		expect(result).toBe("completed")
 	})
 
 	it("returns timed_out and emits warning when completion does not resolve in time", async () => {
 		const events: Array<{ level: string; phase: string; message: string; elapsedMs?: number }> = []
-		const completion = new Promise<void>(() => {
-			// intentionally unresolved in test scope
-		})
-		const result = await waitForShutdownCompletion({
-			completion,
-			timeoutMs: 5,
-			diagnostics: (event) => {
-				events.push(event)
-			},
-		})
+		const result = await Effect.runPromise(
+			waitForShutdownCompletion({
+				completion: Effect.never,
+				timeoutMs: 5,
+				diagnostics: (event) => {
+					events.push(event)
+				},
+			}),
+		)
 		expect(result).toBe("timed_out")
 		expect(
 			events.some((event) => event.level === "warn" && event.phase === "shutdown-wait"),

@@ -1,9 +1,12 @@
 /**
  * TUI launcher - initializes OpenTUI and renders the app
  */
+import { GlobalDaemonBootstrap } from "@azedarach/daemon-control"
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
+import { Cause, Duration, Effect, Layer } from "effect"
 import { App } from "./App.js"
+import { configureTuiDaemonRpcClient } from "./atoms/runtime.js"
 import { AZ_SESSION_NAME } from "./lib/tmux-wrap.js"
 import { truncateAzLogOnStartup } from "./logMaintenance.js"
 import { clearShutdownHandler, registerShutdownHandler, requestShutdown } from "./runtimeControl.js"
@@ -65,39 +68,36 @@ export const runBoundedTeardownPhase = (params: {
 			message: "teardown phase completed",
 			elapsedMs,
 		})
-	} catch (error) {
+	} catch {
 		diagnostics({
 			level: "warn",
 			phase: params.phase,
-			message: `teardown phase threw: ${String(error)}`,
+			message: "teardown phase threw",
 		})
 	}
 }
 
-export const waitForShutdownCompletion = async (params: {
-	readonly completion: Promise<void>
+export const waitForShutdownCompletion = (params: {
+	readonly completion: Effect.Effect<void>
 	readonly timeoutMs?: number
 	readonly diagnostics?: TeardownDiagnosticSink
-}): Promise<"completed" | "timed_out"> => {
+}): Effect.Effect<"completed" | "timed_out"> => {
 	const diagnostics = params.diagnostics ?? defaultTeardownDiagnosticSink
 	const timeoutMs = params.timeoutMs ?? SHUTDOWN_COMPLETE_TIMEOUT_MS
-	const timeoutResult = Symbol("shutdown-timeout")
-	const result = await Promise.race([
-		params.completion.then(() => "completed" as const),
-		new Promise<typeof timeoutResult>((resolve) => {
-			setTimeout(() => resolve(timeoutResult), timeoutMs)
-		}),
-	])
-	if (result === timeoutResult) {
-		diagnostics({
-			level: "warn",
-			phase: "shutdown-wait",
-			message: `shutdown did not complete within ${timeoutMs}ms`,
-			elapsedMs: timeoutMs,
-		})
-		return "timed_out"
-	}
-	return "completed"
+	return Effect.raceFirst(
+		params.completion.pipe(Effect.as("completed" as const)),
+		Effect.sleep(Duration.millis(timeoutMs)).pipe(
+			Effect.map(() => {
+				diagnostics({
+					level: "warn",
+					phase: "shutdown-wait",
+					message: `shutdown did not complete within ${timeoutMs}ms`,
+					elapsedMs: timeoutMs,
+				})
+				return "timed_out" as const
+			}),
+		),
+	)
 }
 
 function resetTerminalModesOnExit(): void {
@@ -114,41 +114,32 @@ function resetTerminalModesOnExit(): void {
  * Binds Ctrl-a g (by default) to switch back to the main az TUI session.
  * This works from any Claude session spawned by az.
  */
-async function registerReturnBinding(): Promise<void> {
-	// Only register if we're inside tmux
+const registerReturnBinding = Effect.gen(function* () {
 	if (!process.env.TMUX) return
 
-	try {
-		// Preserve native double-prefix behavior for users who rely on send-prefix.
-		const prefixProc = Bun.spawn(["tmux", "bind-key", "C-a", "send-prefix"], {
+	yield* Effect.promise(() =>
+		Bun.spawn(["tmux", "bind-key", "C-a", "send-prefix"], {
 			stdout: "ignore",
 			stderr: "ignore",
-		})
-		await prefixProc.exited
+		}).exited.then(() => undefined),
+	)
+	yield* Effect.promise(() =>
+		Bun.spawn(["tmux", "bind-key", AZ_RETURN_KEY, "switch-client", "-t", AZ_SESSION_NAME], {
+			stdout: "ignore",
+			stderr: "ignore",
+		}).exited.then(() => undefined),
+	)
+}).pipe(Effect.catchAll(() => Effect.void))
 
-		// Bind a dedicated key for "return to board" navigation.
-		const proc = Bun.spawn(
-			["tmux", "bind-key", AZ_RETURN_KEY, "switch-client", "-t", AZ_SESSION_NAME],
-			{
-				stdout: "ignore",
-				stderr: "ignore",
-			},
-		)
-		await proc.exited
-	} catch {
-		// Silently ignore - binding is nice-to-have, not critical
-	}
-}
+export const launchTUI = Effect.gen(function* () {
+	const daemonBootstrap = yield* GlobalDaemonBootstrap
+	const bootstrap = yield* daemonBootstrap.bootstrapDaemonRpcClient({
+		autoStart: true,
+	})
+	configureTuiDaemonRpcClient(bootstrap.client, { socketUrl: bootstrap.socketUrl })
 
-/**
- * Launch the TUI application
- *
- * Initializes the OpenTUI renderer and starts the application.
- * Uses React's createRoot pattern for rendering.
- */
-export async function launchTUI(): Promise<void> {
 	const launchStartedAtMs = Date.now()
-	await truncateAzLogOnStartup()
+	yield* Effect.promise(() => truncateAzLogOnStartup())
 	const diagnostics: TeardownDiagnosticSink = defaultTeardownDiagnosticSink
 
 	const handleSigint = () => {
@@ -162,11 +153,13 @@ export async function launchTUI(): Promise<void> {
 	process.on("SIGINT", handleSigint)
 
 	// Register return-to-board tmux keybinding (fire-and-forget)
-	registerReturnBinding()
+	yield* Effect.forkScoped(registerReturnBinding)
 
-	const renderer = await createCliRenderer({
-		useMouse: true,
-	})
+	const renderer = yield* Effect.promise(() =>
+		createCliRenderer({
+			useMouse: true,
+		}),
+	)
 	const root = createRoot(renderer)
 	let shuttingDown = false
 	let resolveShutdown: (() => void) | null = null
@@ -183,6 +176,11 @@ export async function launchTUI(): Promise<void> {
 		const resolve = resolveShutdown
 		resolveShutdown = null
 		resolve?.()
+	}
+
+	const clearResources = () => {
+		clearShutdownHandler()
+		process.off("SIGINT", handleSigint)
 	}
 
 	const shutdown = () => {
@@ -223,8 +221,7 @@ export async function launchTUI(): Promise<void> {
 				diagnostics,
 			})
 		} finally {
-			clearShutdownHandler()
-			process.off("SIGINT", handleSigint)
+			clearResources()
 			finalizeShutdown()
 		}
 	}
@@ -232,15 +229,24 @@ export async function launchTUI(): Promise<void> {
 	registerShutdownHandler(shutdown)
 	renderer.once("destroy", () => {
 		resetTerminalModesOnExit()
-		clearShutdownHandler()
-		process.off("SIGINT", handleSigint)
+		clearResources()
 		finalizeShutdown()
 	})
 
+	yield* Effect.addFinalizer(() =>
+		Effect.sync(() => {
+			shutdown()
+		}),
+	)
+
 	root.render(<App launchStartedAtMs={launchStartedAtMs} />)
-	void (await waitForShutdownCompletion({
-		completion: shutdownComplete,
+	yield* waitForShutdownCompletion({
+		completion: Effect.promise(() => shutdownComplete),
 		timeoutMs: SHUTDOWN_COMPLETE_TIMEOUT_MS,
 		diagnostics,
-	}))
-}
+	}).pipe(
+		Effect.catchAllCause((cause) => Effect.logWarning(Cause.pretty(cause)).pipe(Effect.asVoid)),
+	)
+})
+
+export const TuiRuntimeLayer = Layer.scopedDiscard(launchTUI)

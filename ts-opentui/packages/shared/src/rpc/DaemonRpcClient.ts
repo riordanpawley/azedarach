@@ -883,7 +883,7 @@ const resolveUnixSocketPath = (url: string): string => {
 }
 
 export const layerSocket = (url: string) =>
-	Layer.scoped(DaemonRpcClient, makeDaemonRpcClient).pipe(
+	Layer.effect(DaemonRpcClient, makeDaemonRpcClient).pipe(
 		Layer.provide(
 			RpcClient.layerProtocolSocket().pipe(
 				Layer.provideMerge(
