@@ -76,9 +76,9 @@ const spawnGlobalDaemonMain = (): Effect.Effect<void, GlobalDaemonBootstrapError
 				})
 				child.unref()
 			},
-			catch: (error) =>
+			catch: (_error) =>
 				new GlobalDaemonBootstrapError({
-					message: `Failed to spawn global daemon runtime: ${String(error)}`,
+					message: "Failed to spawn global daemon runtime.",
 					reason: "spawn-failed",
 				}),
 		})
@@ -170,7 +170,7 @@ export const GlobalDaemonBootstrapLive = Layer.scoped(
 				Effect.mapError(
 					(error) =>
 						new GlobalDaemonBootstrapError({
-							message: `Failed to establish daemon RPC client at ${socketUrl}: ${String(error)}`,
+							message: `Failed to establish daemon RPC client at ${socketUrl}.`,
 							reason: "rpc-transport",
 						}),
 				),

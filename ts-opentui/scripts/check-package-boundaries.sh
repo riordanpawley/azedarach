@@ -213,23 +213,23 @@ check_shared_surface_allowlist() {
 	while IFS= read -r hit; do
 		[[ -n "$hit" ]] && hits+=("$hit")
 	done < <(
-		rg -n --pcre2 --no-heading --glob '!**/node_modules/**' \
-			--glob "${scan_globs[0]}" \
-			--glob "${scan_globs[1]}" \
-			--glob "${scan_globs[2]}" \
-			--glob "${scan_globs[3]}" \
-			--glob "${scan_globs[4]}" \
-			--glob "${scan_globs[5]}" \
-            "(import|export).*@azedarach/shared(?!/(rpc|project-path)\b)" \
+        rg -n --pcre2 --no-heading --glob '!**/node_modules/**' \
+            --glob "${scan_globs[0]}" \
+            --glob "${scan_globs[1]}" \
+            --glob "${scan_globs[2]}" \
+            --glob "${scan_globs[3]}" \
+            --glob "${scan_globs[4]}" \
+            --glob "${scan_globs[5]}" \
+            "(import|export).*@azedarach/shared(?!/(rpc|project-path|session-lookup|session-names)\b)" \
             packages/cli/src packages/tui/src packages/daemon/src packages/entry/src packages/daemon-control/src || true
     )
 
     if ((${#hits[@]} > 0)); then
         printf 'Boundary violations (shared surface allowlist):\n' >&2
-        printf '  Import only allowlisted shared surfaces (@azedarach/shared/rpc, @azedarach/shared/project-path).\n' >&2
+        printf '  Import only allowlisted shared surfaces (@azedarach/shared/rpc, @azedarach/shared/project-path, @azedarach/shared/session-lookup, @azedarach/shared/session-names).\n' >&2
         printf '  %s\n' "${hits[@]}" >&2
-		fail=1
-	fi
+        fail=1
+    fi
 }
 
 check_duplicate_helper_modules_absent() {

@@ -57,12 +57,16 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
    - Required evidence for closure: exact commands run, pass/fail status, and any manual verification results relevant to changed surfaces.
    - If any required validation is skipped, keep the issue open and record the explicit blocker.
 10. **Manual Runtime Verification Requires Fresh Daemon**:
-   - Before any manual verification that hits daemon-backed flows (for example `bun run dev`, `bun run dev issue ...`, board/TUI checks), restart daemon from current code first: `bun run dev daemon restart --force`.
-   - Treat manual checks as invalid if the daemon was not refreshed from the current branch/worktree immediately beforehand.
+    - Before any manual verification that hits daemon-backed flows (for example `bun run dev`, `bun run dev issue ...`, board/TUI checks), restart daemon from current code first: `bun run dev daemon restart --force`.
+    - Treat manual checks as invalid if the daemon was not refreshed from the current branch/worktree immediately beforehand.
 11. **Issue Source-of-Truth vs Sync Provider**:
-   - Local sqlite state is the read source-of-truth for daemon, CLI, and TUI issue/board rendering.
-   - The configurable sync option is `issueSyncBackend` (for example `linear`, `tracker`), not a board/list read source selector.
-   - Do not gate local issue reads on `issueSyncBackend`; this option affects sync behavior only.
+    - Local sqlite state is the read source-of-truth for daemon, CLI, and TUI issue/board rendering.
+    - The configurable sync option is `issueSyncBackend` (for example `linear`, `tracker`), not a board/list read source selector.
+    - Do not gate local issue reads on `issueSyncBackend`; this option affects sync behavior only.
+12. **Typed Error Policy**:
+   - In non-test app code, all runtime failures must be typed/tagged classes (`Data.TaggedError` or `Schema.TaggedClass`).
+   - `Data.TaggedError` is the default for internal runtime/service errors; reserve `Schema.TaggedClass` for schema/codec boundary errors.
+   - Do not use `new Error`, `throw new Error`, `Effect.fail(new Error(...))`, `instanceof Error`, or `String(error)` in non-test app code.
 
 ## Quick Commands
 
@@ -101,7 +105,7 @@ ts-opentui/
 
 ## Boundary Contributor Guide
 
-- Keep `@azedarach/shared` package-safe and allowlisted; import shared contracts from `@azedarach/shared/rpc` and project base-path helpers from `@azedarach/shared/project-path`.
+- Keep `@azedarach/shared` package-safe and allowlisted; import shared contracts/helpers only from allowlisted surfaces (`@azedarach/shared/rpc`, `@azedarach/shared/project-path`, `@azedarach/shared/session-lookup`, `@azedarach/shared/session-names`).
 - Keep path/session helper logic centralized in `@azedarach/shared/project-path`; do not introduce new local CLI/TUI copies alongside the existing package-owned consumers.
 - Keep daemon lifecycle contracts in `@azedarach/daemon-control` and live implementation in `@azedarach/daemon`.
 - Do not import `@azedarach/daemon` from `packages/cli` or `packages/tui`.

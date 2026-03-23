@@ -54,6 +54,10 @@ Select the implementation based on user request or current working directory.
     - Do not export top-level effectful helper functions from service modules.
     - Capture infra dependencies at service construction (`effect`/`scoped`), then close over concrete values in methods.
     - Keep `Effect.run*` at runtime entrypoints and test harnesses only.
+13. **Typed Error Policy (ts-opentui)**:
+    - In non-test app code, runtime failures must be strongly typed/tagged classes (`Data.TaggedError` or `Schema.TaggedClass`), not raw JS `Error`.
+    - Prefer `Data.TaggedError` for internal runtime/service errors; use `Schema.TaggedClass` at schema/codec boundaries.
+    - Do not use `new Error`, `throw new Error`, `Effect.fail(new Error(...))`, `instanceof Error`, or `String(error)` in non-test app code.
 13. **Issue Sync Naming Contract (ts-opentui)**:
     - Use `issueSyncBackend` for configurable issue synchronization behavior (`linear`, `tracker`, etc.).
     - Local sqlite issue data remains the read source-of-truth for daemon, CLI, and TUI board/list rendering.
