@@ -69,7 +69,7 @@ export const runBoundedTeardownPhase = (params: {
 		diagnostics({
 			level: "warn",
 			phase: params.phase,
-			message: `teardown phase threw: ${error instanceof Error ? error.message : String(error)}`,
+			message: `teardown phase threw: ${String(error)}`,
 		})
 	}
 }
@@ -243,4 +243,5 @@ export async function launchTUI(): Promise<void> {
 		timeoutMs: SHUTDOWN_COMPLETE_TIMEOUT_MS,
 		diagnostics,
 	}))
+	process.exit(0)
 }
