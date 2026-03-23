@@ -1,0 +1,19 @@
+[language-server.tsgo-ts-opentui]
+command = "./ts-opentui/node_modules/.bin/tsgo"
+args = ["--lsp", "--stdio"]
+
+[[language]]
+name = "typescript"
+language-servers = ["tsgo-ts-opentui"]
+
+[[language]]
+name = "tsx"
+language-servers = ["tsgo-ts-opentui"]
+
+[[language]]
+name = "javascript"
+language-servers = ["tsgo-ts-opentui"]
+
+[[language]]
+name = "jsx"
+language-servers = ["tsgo-ts-opentui"]

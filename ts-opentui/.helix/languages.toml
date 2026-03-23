@@ -1,0 +1,19 @@
+[language-server.tsgo]
+command = "./node_modules/.bin/tsgo"
+args = ["--lsp", "--stdio"]
+
+[[language]]
+name = "typescript"
+language-servers = ["tsgo"]
+
+[[language]]
+name = "tsx"
+language-servers = ["tsgo"]
+
+[[language]]
+name = "javascript"
+language-servers = ["tsgo"]
+
+[[language]]
+name = "jsx"
+language-servers = ["tsgo"]
