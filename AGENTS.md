@@ -167,6 +167,62 @@ When user requests work, use this matrix to decide which implementation to work 
 - ✅ For `ts-opentui` behavior changes, update `az spec` requirement/link records or document `Spec impact: none` with concrete file-based rationale
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
 
+## Large Epic Orchestration (Anti-Drift Protocol)
+
+Use this protocol for any epic that spans multiple sessions, subagents, or major architecture boundaries.
+
+### 1) Mandatory Epic Structure
+
+- Create one parent epic with explicit child issues for each lane.
+- Child issues MUST be independently completable and reviewable.
+- Set dependency edges so merge order is machine-readable (`az issue dep add ... --type blocks`).
+- Mark every issue that has children as `type=epic`.
+
+### 2) Three-Layer Acceptance Criteria (Required)
+
+Each implementation issue must include all three AC layers:
+
+- **Runtime AC**: proves active entrypoint wiring (real binaries/commands, not isolated packages).
+- **Integration AC**: proves cross-boundary behavior end-to-end (IPC/reconnect/streaming/etc).
+- **Regression AC**: proves existing user-facing semantics still hold unless explicitly changed.
+
+Use optional **Drift Guard AC** for explicit anti-regression checks (forbidden imports, placeholder detectors, path guards).
+
+### 3) Evidence Bundle Required Before Close
+
+An issue cannot close without notes containing:
+
+1. commands run
+2. key outputs or summarized assertions
+3. files changed
+4. explicit pass/fail verdict for each AC line item
+
+If any item is missing, move/keep the issue in `in_progress`.
+
+### 4) Placeholder and Shim Policy
+
+- Do not close architecture migration issues while active runtime paths still use placeholders or local shims.
+- Placeholders/shims may exist only behind explicit TODO scope with non-migration issue status.
+- For migration epics, closure requires active-path replacement, not just test coverage around scaffolding.
+
+### 5) Closure Gate Issue
+
+For large epics, add one final child gate issue that:
+
+- blocks on all implementation children
+- re-runs the integrated test matrix
+- verifies no active-path placeholders/shims remain
+- performs final evidence-based checklist
+
+Only close the parent epic after that gate issue closes.
+
+### 6) Parallel Subagent Execution Rules
+
+- Assign each subagent one issue lane with a disjoint file budget.
+- Prefer git worktrees per subagent lane for isolation; merge only when that lane AC is green.
+- Do not accept “temporary red” mainline merges for incomplete lanes.
+- If cross-lane changes are unavoidable, land prerequisite lane first and rebase dependent lanes.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below.
