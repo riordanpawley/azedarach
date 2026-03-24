@@ -1122,11 +1122,16 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 	case "w":
 		// Jump mode - quick navigation with labels for VISIBLE tasks only
-		// Calculate visible tasks per column based on screen height
-		// Card height is 6 lines (border + content), minus header and status bar
-		cardHeight := 6
+		// Calculate visible tasks per column based on screen height/card footprint.
+		columnCount := len(columns)
+		if columnCount < 1 {
+			columnCount = 4
+		}
+		columnWidth := m.width / columnCount
+		cardWidth := columnWidth - 2
+		linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
 		availableHeight := m.height - 2 // status bar + column header
-		visiblePerColumn := availableHeight / cardHeight
+		visiblePerColumn := availableHeight / linesPerCard
 		if visiblePerColumn < 1 {
 			visiblePerColumn = 1
 		}

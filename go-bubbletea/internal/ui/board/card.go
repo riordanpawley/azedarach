@@ -12,7 +12,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-const cardContentHeight = 5
+// CardContentHeight is the single source of truth for rendered card content height.
+const CardContentHeight = 5
 
 // renderCard renders a task card
 func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
@@ -25,7 +26,7 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 	}
 
 	// Apply fixed size to keep all cards same height regardless of content.
-	cardStyle = cardStyle.Width(width).Height(cardContentHeight)
+	cardStyle = cardStyle.Width(width).Height(CardContentHeight)
 
 	// Priority badge (e.g., "P0", "P1", etc.)
 	priorityText := task.Priority.String()
