@@ -230,7 +230,7 @@ func New(cfg *config.Config) Model {
 	// Initialize diagnostics service
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
 
-	return Model{
+	m := Model{
 		tasks:              []domain.Task{},
 		sessions:           make(map[string]*domain.Session),
 		nav:                navigation.NewService(),
@@ -259,6 +259,8 @@ func New(cfg *config.Config) Model {
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from beads
 	}
+	m.daemonClient.WithProjectID(m.daemonProjectID())
+	return m
 }
 
 // Init returns the initial command for the application
@@ -583,6 +585,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Switch to selected project
 		m.currentProject = msg.Project.Name
+		if m.daemonClient != nil {
+			m.daemonClient.WithProjectID(m.daemonProjectID())
+		}
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Switched to project: %s", msg.Project.Name),

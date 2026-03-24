@@ -15,6 +15,13 @@ type taskRecordingTransport struct {
 	replyFn func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 }
 
+func assertTaskProjectID(t *testing.T, req protocol.RequestEnvelope, want string) {
+	t.Helper()
+	if req.Meta.ProjectID != want {
+		t.Fatalf("project_id = %q, want %q", req.Meta.ProjectID, want)
+	}
+}
+
 func (t *taskRecordingTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
 	return protocol.HelloAck{Accepted: true}, nil
 }
@@ -38,9 +45,12 @@ func (t *taskRecordingTransport) Subscribe(context.Context, string, uint64) (<-c
 }
 
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
+	const wantProjectID = "proj-task"
+
 	t.Run("list", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
 				if req.Command != CommandTaskList {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
 				}
@@ -59,7 +69,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport)
+		client := New(transport).WithProjectID(wantProjectID)
 		tasks, err := client.ListTasks(context.Background())
 		if err != nil {
 			t.Fatalf("ListTasks error: %v", err)
@@ -72,6 +82,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	t.Run("list snapshot", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
 				if req.Command != CommandTaskList {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
 				}
@@ -91,7 +102,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport)
+		client := New(transport).WithProjectID(wantProjectID)
 		snapshot, err := client.ListTasksSnapshot(context.Background())
 		if err != nil {
 			t.Fatalf("ListTasksSnapshot error: %v", err)
@@ -108,6 +119,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		parentID := "epic-1"
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
 				if req.Command != CommandTaskCreate {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskCreate)
 				}
@@ -132,7 +144,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport)
+		client := New(transport).WithProjectID(wantProjectID)
 		id, err := client.CreateTask(context.Background(), TaskCreateParams{
 			Title:    "Task 2",
 			Type:     domain.TypeTask,
@@ -150,6 +162,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	t.Run("status update", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
 				if req.Command != CommandTaskUpdateStatus {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskUpdateStatus)
 				}
@@ -169,7 +182,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport)
+		client := New(transport).WithProjectID(wantProjectID)
 		if err := client.UpdateTaskStatus(context.Background(), "az-3", domain.StatusDone); err != nil {
 			t.Fatalf("UpdateTaskStatus error: %v", err)
 		}
@@ -178,6 +191,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	t.Run("details update", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
 				if req.Command != CommandTaskUpdate {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskUpdate)
 				}
@@ -200,7 +214,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport)
+		client := New(transport).WithProjectID(wantProjectID)
 		if err := client.UpdateTaskDetails(context.Background(), "az-4", TaskUpdateParams{
 			Title:    "Updated",
 			Type:     domain.TypeBug,
@@ -214,6 +228,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		commands := make([]string, 0, 2)
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
 				commands = append(commands, req.Command)
 				var body TaskIDRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -231,7 +246,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			},
 		}
 
-		client := New(transport)
+		client := New(transport).WithProjectID(wantProjectID)
 		if err := client.DeleteTask(context.Background(), "az-5"); err != nil {
 			t.Fatalf("DeleteTask error: %v", err)
 		}
@@ -246,7 +261,8 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 
 func TestTaskCommandErrors(t *testing.T) {
 	transport := &taskRecordingTransport{
-		replyFn: func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			assertTaskProjectID(t, req, "proj-task")
 			return protocol.ResponseEnvelope{
 				OK: false,
 				Error: &protocol.ErrorEnvelope{
@@ -258,7 +274,7 @@ func TestTaskCommandErrors(t *testing.T) {
 		},
 	}
 
-	client := New(transport)
+	client := New(transport).WithProjectID("proj-task")
 	err := client.DeleteTask(context.Background(), "az-1")
 	var cmdErr *CommandError
 	if !errors.As(err, &cmdErr) {

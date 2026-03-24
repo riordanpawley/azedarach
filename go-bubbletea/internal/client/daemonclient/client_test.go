@@ -103,3 +103,57 @@ func TestClientSubscribeRetry(t *testing.T) {
 		t.Fatalf("event revision = %d, want 7", evt.Revision)
 	}
 }
+
+func TestClientProjectRouting(t *testing.T) {
+	var gotCommandProjectID string
+	var gotSubscribeProjectID string
+
+	c := New(&fakeTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotCommandProjectID = req.Meta.ProjectID
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+		subscribeFn: func(_ context.Context, projectID string, _ uint64) (<-chan protocol.EventEnvelope, error) {
+			gotSubscribeProjectID = projectID
+			ch := make(chan protocol.EventEnvelope, 1)
+			return ch, nil
+		},
+	}).WithProjectID("proj-a")
+
+	if _, err := c.Command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		Command:         "task.list",
+	}); err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if gotCommandProjectID != "proj-a" {
+		t.Fatalf("command project_id = %q, want proj-a", gotCommandProjectID)
+	}
+
+	if _, err := c.Command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		Meta: protocol.Metadata{
+			ProjectID: "proj-explicit",
+		},
+		Command: "task.list",
+	}); err != nil {
+		t.Fatalf("Command with explicit metadata error: %v", err)
+	}
+	if gotCommandProjectID != "proj-explicit" {
+		t.Fatalf("explicit command project_id = %q, want proj-explicit", gotCommandProjectID)
+	}
+
+	if _, err := c.Subscribe(context.Background(), "", 0); err != nil {
+		t.Fatalf("Subscribe fallback error: %v", err)
+	}
+	if gotSubscribeProjectID != "proj-a" {
+		t.Fatalf("subscribe project_id = %q, want proj-a", gotSubscribeProjectID)
+	}
+
+	if _, err := c.Subscribe(context.Background(), "proj-b", 0); err != nil {
+		t.Fatalf("Subscribe explicit error: %v", err)
+	}
+	if gotSubscribeProjectID != "proj-b" {
+		t.Fatalf("explicit subscribe project_id = %q, want proj-b", gotSubscribeProjectID)
+	}
+}

@@ -83,9 +83,12 @@ func (c *Client) commandJSONResponse(ctx context.Context, command string, body a
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       fmt.Sprintf("%s-%d", command, time.Now().UTC().UnixNano()),
 		Kind:            protocol.EnvelopeKindCommand,
-		Command:         command,
-		SentAt:          time.Now().UTC(),
-		Body:            payload,
+		Meta: protocol.Metadata{
+			ProjectID: c.projectID,
+		},
+		Command: command,
+		SentAt:  time.Now().UTC(),
+		Body:    payload,
 	})
 	if err != nil {
 		return protocol.ResponseEnvelope{}, err
