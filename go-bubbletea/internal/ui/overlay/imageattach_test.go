@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,8 +22,8 @@ func TestNewImageAttachOverlay(t *testing.T) {
 		t.Fatal("expected overlay to be created")
 	}
 
-	if overlay.beadID != "az-123" {
-		t.Errorf("expected bead_id to be az-123, got %s", overlay.beadID)
+	if overlay.issueID != "az-123" {
+		t.Errorf("expected issue_id to be az-123, got %s", overlay.issueID)
 	}
 
 	if overlay.mode != imageAttachModeList {
@@ -77,9 +78,9 @@ func TestImageAttachOverlay_NavigationKeys(t *testing.T) {
 
 	// Set up some mock files
 	overlay.files = []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
-		{ID: "2", BeadID: "az-123", Filename: "file2.png"},
-		{ID: "3", BeadID: "az-123", Filename: "file3.png"},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png"},
+		{ID: "2", IssueID: "az-123", Filename: "file2.png"},
+		{ID: "3", IssueID: "az-123", Filename: "file3.png"},
 	}
 
 	// Test down key
@@ -143,6 +144,55 @@ func TestImageAttachOverlay_EscapeKey(t *testing.T) {
 	}
 }
 
+func TestImageAttachOverlay_DeleteKeyAliasX(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := attachment.NewService(tmpDir, logger)
+
+	overlay := NewImageAttachOverlay("az-123", service)
+
+	testFile := filepath.Join(tmpDir, "test.png")
+	testData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	if err := os.WriteFile(testFile, testData, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	ctx := context.Background()
+	attached, err := service.Attach(ctx, "az-123", testFile)
+	if err != nil {
+		t.Fatalf("failed to attach file: %v", err)
+	}
+
+	files, err := service.List(ctx, "az-123")
+	if err != nil {
+		t.Fatalf("failed to list attachments: %v", err)
+	}
+	overlay.files = files
+
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}}
+	_, cmd := overlay.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected delete command from x key")
+	}
+
+	result := cmd()
+	if _, ok := result.(attachmentDeletedMsg); !ok {
+		t.Fatalf("expected attachmentDeletedMsg, got %T", result)
+	}
+
+	remaining, err := service.List(ctx, "az-123")
+	if err != nil {
+		t.Fatalf("failed to list attachments after delete: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected attachment to be deleted, still found %d attachments", len(remaining))
+	}
+
+	if attached.ID == "" {
+		t.Fatal("expected attached image to have an ID")
+	}
+}
+
 func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -152,7 +202,7 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 
 	// Set up some mock files
 	overlay.files = []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png"},
 	}
 
 	// Test enter sends OpenImagePreviewMsg
@@ -201,8 +251,8 @@ func TestImageAttachOverlay_AttachmentsLoadedMsg(t *testing.T) {
 
 	// Simulate attachments loaded message
 	files := []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
-		{ID: "2", BeadID: "az-123", Filename: "file2.png"},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png"},
+		{ID: "2", IssueID: "az-123", Filename: "file2.png"},
 	}
 
 	msg := attachmentsLoadedMsg{attachments: files}
@@ -248,7 +298,7 @@ func TestImageAttachOverlay_View(t *testing.T) {
 
 	// Test view with files
 	overlay.files = []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png", Size: 1024},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png", Size: 1024},
 	}
 	view = overlay.View()
 	if view == "" {
@@ -322,10 +372,10 @@ func TestTruncate(t *testing.T) {
 func TestImageAttachOverlay_Integration(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "issues")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := attachment.NewService(beadsPath, logger)
+	service := attachment.NewService(issuesPath, logger)
 
 	overlay := NewImageAttachOverlay("az-123", service)
 

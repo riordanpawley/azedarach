@@ -23,7 +23,7 @@ const (
 
 // ImageAttachOverlay manages image attachments for a task
 type ImageAttachOverlay struct {
-	beadID      string
+	issueID     string
 	service     *attachment.Service
 	mode        imageAttachMode
 	files       []attachment.Attachment
@@ -42,19 +42,19 @@ type AttachmentActionMsg struct {
 
 // OpenImagePreviewMsg is sent to open the image preview overlay
 type OpenImagePreviewMsg struct {
-	BeadID       string
+	IssueID      string
 	InitialIndex int
 }
 
 // NewImageAttachOverlay creates a new image attachment overlay
-func NewImageAttachOverlay(beadID string, service *attachment.Service) *ImageAttachOverlay {
+func NewImageAttachOverlay(issueID string, service *attachment.Service) *ImageAttachOverlay {
 	ti := textinput.New()
 	ti.Placeholder = "Enter file path..."
 	ti.CharLimit = 500
 	ti.Width = 60
 
 	return &ImageAttachOverlay{
-		beadID:      beadID,
+		issueID:     issueID,
 		service:     service,
 		mode:        imageAttachModeList,
 		cursor:      0,
@@ -116,19 +116,19 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "d":
-			// Delete attachment
-			if i.mode == imageAttachModeList && len(i.files) > 0 {
-				return i, i.deleteAttachment()
-			}
-			return i, nil
+        case "d", "x":
+            // Delete attachment
+            if i.mode == imageAttachModeList && len(i.files) > 0 {
+                return i, i.deleteAttachment()
+            }
+            return i, nil
 
 		case "enter", "p":
 			// Open full image preview overlay
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				return i, func() tea.Msg {
 					return OpenImagePreviewMsg{
-						BeadID:       i.beadID,
+						IssueID:      i.issueID,
 						InitialIndex: i.cursor,
 					}
 				}
@@ -223,7 +223,7 @@ func (i *ImageAttachOverlay) renderList() string {
 		Foreground(lipgloss.Color("#89b4fa")).
 		Bold(true)
 
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.beadID)))
+	b.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.issueID)))
 	b.WriteString("\n\n")
 
 	if len(i.files) == 0 {
@@ -268,16 +268,16 @@ func (i *ImageAttachOverlay) renderList() string {
 		i.styles.MenuKey.Render("p/v") + " " + i.styles.Footer.Render("Paste from clipboard"),
 		i.styles.MenuKey.Render("f") + " " + i.styles.Footer.Render("Attach from file"),
 	}
-	if len(i.files) > 0 {
-		hints = append(hints,
-			i.styles.MenuKey.Render("o") + " " + i.styles.Footer.Render("Open"),
-			i.styles.MenuKey.Render("d") + " " + i.styles.Footer.Render("Delete"),
-			i.styles.MenuKey.Render("Enter") + " " + i.styles.Footer.Render("Preview"),
-		)
-	}
+    if len(i.files) > 0 {
+        hints = append(hints,
+            i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
+            i.styles.MenuKey.Render("d/x")+" "+i.styles.Footer.Render("Delete"),
+            i.styles.MenuKey.Render("Enter")+" "+i.styles.Footer.Render("Preview"),
+        )
+    }
 	hints = append(hints,
-		i.styles.MenuKey.Render("r") + " " + i.styles.Footer.Render("Refresh"),
-		i.styles.MenuKey.Render("Esc") + " " + i.styles.Footer.Render("Close"),
+		i.styles.MenuKey.Render("r")+" "+i.styles.Footer.Render("Refresh"),
+		i.styles.MenuKey.Render("Esc")+" "+i.styles.Footer.Render("Close"),
 	)
 
 	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
@@ -406,7 +406,7 @@ type errorMsg struct {
 func (i *ImageAttachOverlay) loadAttachments() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		files, err := i.service.List(ctx, i.beadID)
+		files, err := i.service.List(ctx, i.issueID)
 		if err != nil {
 			return errorMsg{err}
 		}
@@ -417,7 +417,7 @@ func (i *ImageAttachOverlay) loadAttachments() tea.Cmd {
 func (i *ImageAttachOverlay) pasteFromClipboard() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		attachment, err := i.service.AttachFromClipboard(ctx, i.beadID)
+		attachment, err := i.service.AttachFromClipboard(ctx, i.issueID)
 		if err != nil {
 			return errorMsg{err}
 		}
@@ -428,7 +428,7 @@ func (i *ImageAttachOverlay) pasteFromClipboard() tea.Cmd {
 func (i *ImageAttachOverlay) attachFromFile(path string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		attachment, err := i.service.Attach(ctx, i.beadID, path)
+		attachment, err := i.service.Attach(ctx, i.issueID, path)
 		if err != nil {
 			return errorMsg{err}
 		}
@@ -444,7 +444,7 @@ func (i *ImageAttachOverlay) deleteAttachment() tea.Cmd {
 	file := i.files[i.cursor]
 	return func() tea.Msg {
 		ctx := context.Background()
-		err := i.service.Delete(ctx, i.beadID, file.ID)
+		err := i.service.Delete(ctx, i.issueID, file.ID)
 		if err != nil {
 			return errorMsg{err}
 		}
