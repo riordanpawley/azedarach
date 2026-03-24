@@ -218,6 +218,17 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	if _, ok := resultMsg.(OpenImagePreviewMsg); !ok {
 		t.Errorf("expected OpenImagePreviewMsg, got %T", resultMsg)
 	}
+
+	overlay.mode = imageAttachModePreview
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatal("expected command to close overlay from preview, got nil")
+	}
+
+	closeMsg := cmd()
+	if _, ok := closeMsg.(CloseOverlayMsg); !ok {
+		t.Errorf("expected CloseOverlayMsg from preview q, got %T", closeMsg)
+	}
 }
 
 func TestImageAttachOverlay_FileInputMode(t *testing.T) {

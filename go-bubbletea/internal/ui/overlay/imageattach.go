@@ -81,8 +81,10 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q":
 			if i.mode == imageAttachModePreview {
-				i.mode = imageAttachModeList
-				return i, nil
+				if msg.String() == "esc" {
+					i.mode = imageAttachModeList
+					return i, nil
+				}
 			}
 			return i, func() tea.Msg { return CloseOverlayMsg{} }
 
