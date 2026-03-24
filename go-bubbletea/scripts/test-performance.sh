@@ -7,7 +7,9 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Ensure we're in the right directory
-cd /Users/riordan/prog/azedarach-az-r883/go-bubbletea
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 # Build the binary
 echo "Building az binary..."
@@ -63,10 +65,10 @@ func BenchmarkUpdateLoop(b *testing.B) {
 		m = newTickM.(Model)
 		
 		// Simulate a session monitor message
-		sessionMsg := monitor.SessionStateMsg{
-			BeadID: "az-1",
-			State:  domain.SessionBusy,
-		}
+        sessionMsg := monitor.SessionStateMsg{
+            IssueID: "az-1",
+            State:   domain.SessionBusy,
+        }
 		newSessionM, _ := m.Update(sessionMsg)
 		m = newSessionM.(Model)
 	}
@@ -120,7 +122,7 @@ func TestPerformanceRamp(t *testing.T) {
 GOEOF
 
 echo "Running Go performance test..."
-go test -v internal/app/perf_test.go internal/app/model.go internal/app/model_additions.go || true
+go test -v ./internal/app -run TestPerformanceRamp -bench BenchmarkUpdateLoop || true
 
 # Cleanup
 rm internal/app/perf_test.go
