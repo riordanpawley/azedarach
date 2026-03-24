@@ -18,12 +18,21 @@ type fakeTransport struct {
 }
 
 func (f *fakeTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	if f.handshakeFn == nil {
+		return protocol.HelloAck{}, nil
+	}
 	return f.handshakeFn(ctx, hello)
 }
 func (f *fakeTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if f.commandFn == nil {
+		return protocol.ResponseEnvelope{OK: true}, nil
+	}
 	return f.commandFn(ctx, req)
 }
 func (f *fakeTransport) Subscribe(ctx context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+	if f.subscribeFn == nil {
+		return nil, nil
+	}
 	return f.subscribeFn(ctx, projectID, fromRevision)
 }
 

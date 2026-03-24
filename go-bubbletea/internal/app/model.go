@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -119,8 +120,8 @@ type Model struct {
 	lastRefresh    time.Time
 	hasRefreshLoop bool
 
-	// Beads client
-	beadsClient *beads.Client
+	// Shared daemon client for task-domain operations
+	daemonClient *daemonclient.Client
 
 	// Session management services
 	tmuxClient      *tmux.Client
@@ -166,9 +167,11 @@ func New(cfg *config.Config) Model {
 	// Initialize logger
 	logger := slog.Default()
 
-	// Initialize beads client
+	// Initialize beads client for the local daemon transport shim
 	beadsRunner := &beads.ExecRunner{}
 	beadsClient := beads.NewClient(beadsRunner, logger)
+
+	daemonClient := daemonclient.New(newLocalDaemonTransport(beadsClient))
 
 	// Initialize tmux client
 	tmuxRunner := &tmux.ExecRunner{}
@@ -236,7 +239,7 @@ func New(cfg *config.Config) Model {
 		config:             cfg,
 		loading:            true, // Start with loading state
 		spinner:            s,
-		beadsClient:        beadsClient,
+		daemonClient:       daemonClient,
 		tmuxClient:         tmuxClient,
 		worktreeManager:    worktreeManager,
 		sessionMonitor:     sessionMonitor,
@@ -1245,7 +1248,11 @@ func (m Model) loadBeadsCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		tasks, err := m.beadsClient.List(ctx)
+		if m.daemonClient == nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		tasks, err := m.daemonClient.ListTasks(ctx)
 		if err != nil {
 			return beadsErrorMsg{err: err}
 		}
@@ -1677,7 +1684,11 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.beadsClient.Delete(ctx, taskID)
+		if m.daemonClient == nil {
+			return taskDeletedResultMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		err := m.daemonClient.DeleteTask(ctx, taskID)
 		return taskDeletedResultMsg{taskID: taskID, err: err}
 	}
 }
@@ -2016,8 +2027,12 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			// Update via beads client
-			err := m.beadsClient.Update(ctx, taskID, newStatus)
+			// Update via daemon client
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
 			if err != nil {
 				failed++
 				continue
@@ -2039,7 +2054,11 @@ func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Delete(ctx, taskID)
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.DeleteTask(ctx, taskID)
 			if err != nil {
 				failed++
 				continue
@@ -2060,7 +2079,11 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Archive(ctx, taskID)
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.ArchiveTask(ctx, taskID)
 			if err != nil {
 				failed++
 				continue
@@ -2082,7 +2105,11 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Update(ctx, taskID, status)
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, status)
 			if err != nil {
 				failed++
 				continue
@@ -2100,7 +2127,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 		defer cancel()
 
 		if msg.ID != "" {
-			err := m.beadsClient.UpdateDetails(ctx, msg.ID, beads.UpdateTaskParams{
+			if m.daemonClient == nil {
+				return taskCreatedResultMsg{taskID: msg.ID, err: fmt.Errorf("daemon client unavailable"), isUpdate: true}
+			}
+			err := m.daemonClient.UpdateTaskDetails(ctx, msg.ID, daemonclient.TaskUpdateParams{
 				Title:       msg.Title,
 				Description: msg.Description,
 				Type:        msg.Type,
@@ -2109,7 +2139,11 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
 		}
 
-		taskID, err := m.beadsClient.Create(ctx, beads.CreateTaskParams{
+		if m.daemonClient == nil {
+			return taskCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
 			Title:       msg.Title,
 			Description: msg.Description,
 			Type:        msg.Type,
@@ -2174,8 +2208,11 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 
 		newStatus := statusOrder[newIdx]
 
-		// Update via beads client
-		err := m.beadsClient.Update(ctx, taskID, newStatus)
+		// Update via daemon client
+		if m.daemonClient == nil {
+			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
 		if err != nil {
 			return taskStatusResultMsg{taskID: taskID, err: err}
 		}
@@ -2499,7 +2536,11 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			deleted := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone && task.UpdatedAt.Before(cutoff) {
-					err := m.beadsClient.Delete(ctx, task.ID)
+					if m.daemonClient == nil {
+						m.logger.Warn("daemon client unavailable for delete", "id", task.ID)
+						continue
+					}
+					err := m.daemonClient.DeleteTask(ctx, task.ID)
 					if err != nil {
 						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
 						continue
@@ -2513,7 +2554,11 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			archived := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone {
-					err := m.beadsClient.Archive(ctx, task.ID)
+					if m.daemonClient == nil {
+						m.logger.Warn("daemon client unavailable for archive", "id", task.ID)
+						continue
+					}
+					err := m.daemonClient.ArchiveTask(ctx, task.ID)
 					if err != nil {
 						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
 						continue
