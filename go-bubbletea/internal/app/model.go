@@ -99,7 +99,7 @@ type Model struct {
 	// UI state
 	overlayStack *overlay.Stack
 	viewMode     ViewMode
-	verticalBias int
+	viewportStarts [4]int
 
 	// Project
 	currentProject string
@@ -559,6 +559,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Jump to selected task by flat index
 		columns := m.buildColumns()
 		m.nav.JumpToTaskByIndex(columns, msg.TaskIndex)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case overlay.ProjectSelectedMsg:
@@ -970,33 +971,35 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Vertical navigation
 	case "j", "down":
-		m.verticalBias = 1
 		m.nav.MoveDown(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case "k", "up":
-		m.verticalBias = -1
 		m.nav.MoveUp(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Horizontal navigation
 	case "h", "left":
 		m.nav.MoveLeft(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case "l", "right":
 		m.nav.MoveRight(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Half-page scroll
 	case "ctrl+d":
-		m.verticalBias = 1
 		m.nav.HalfPageDown(columns, m.halfPage())
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case "ctrl+u":
-		m.verticalBias = -1
 		m.nav.HalfPageUp(columns, m.halfPage())
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Mode switches
@@ -1104,15 +1107,19 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		// Go to top of column
 		m.nav.GotoTop(columns)
+		m.ensureCursorVisible(columns)
 	case "e":
 		// Go to end of column
 		m.nav.GotoBottom(columns)
+		m.ensureCursorVisible(columns)
 	case "h":
 		// Go to first column
 		m.nav.GotoFirstColumn(columns)
+		m.ensureCursorVisible(columns)
 	case "l":
 		// Go to last column
 		m.nav.GotoLastColumn(columns)
+		m.ensureCursorVisible(columns)
 	case "w":
 		// Jump mode - quick navigation with labels for VISIBLE tasks only
 		// Calculate visible tasks per column based on screen height
@@ -1170,8 +1177,8 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
-		m.verticalBias = 1
 		m.nav.MoveDown(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case "k", "up":
@@ -1179,17 +1186,19 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
-		m.verticalBias = -1
 		m.nav.MoveUp(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Horizontal movement (no selection toggle)
 	case "h", "left":
 		m.nav.MoveLeft(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case "l", "right":
 		m.nav.MoveRight(columns)
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Half-page movement with selection toggle
@@ -1197,16 +1206,16 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
-		m.verticalBias = 1
 		m.nav.HalfPageDown(columns, m.halfPage())
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case "ctrl+u":
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
-		m.verticalBias = -1
 		m.nav.HalfPageUp(columns, m.halfPage())
+		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Toggle selection without moving
@@ -1653,6 +1662,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			// Jump to the child task by ID
 			columns := m.buildColumns()
 			m.nav.JumpToTaskByID(columns, childID)
+			m.ensureCursorVisible(columns)
 		}
 		return m, nil
 	case "set-default-success", "remove-success", "detect-success":
@@ -1893,6 +1903,57 @@ func (m Model) halfPage() int {
 		return 1
 	}
 	return half
+}
+
+func (m Model) boardVisibleCards() int {
+	// Board render height is m.height-1, then column body is -2 (header + spacing).
+	availableHeight := (m.height - 1) - 2
+	if availableHeight < 1 {
+		return 1
+	}
+	linesPerCard := 6 // cardHeight(5) + newline(1) in board renderer
+	visibleCards := availableHeight / linesPerCard
+	if availableHeight%linesPerCard != 0 {
+		visibleCards++
+	}
+	if visibleCards < 1 {
+		return 1
+	}
+	return visibleCards
+}
+
+func clampInt(v int, low int, high int) int {
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
+}
+
+func (m *Model) ensureCursorVisible(columns []board.Column) {
+	pos := m.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) || pos.Column >= len(m.viewportStarts) {
+		return
+	}
+	visibleCards := m.boardVisibleCards()
+	start := m.viewportStarts[pos.Column]
+	taskCount := len(columns[pos.Column].Tasks)
+	maxStart := taskCount - visibleCards
+	if maxStart < 0 {
+		maxStart = 0
+	}
+	start = clampInt(start, 0, maxStart)
+
+	if pos.Task < start {
+		start = pos.Task
+	} else if pos.Task >= start+visibleCards {
+		start = pos.Task - visibleCards + 1
+	}
+
+	start = clampInt(start, 0, maxStart)
+	m.viewportStarts[pos.Column] = start
 }
 
 // renderLoading renders a centered loading spinner with message
@@ -2595,22 +2656,7 @@ func (m Model) toggleDevServer(serverID string) tea.Cmd {
 }
 
 func (m Model) viewDevServer(serverID string) tea.Cmd {
-	return func() tea.Msg {
-		if !m.tmuxAvailable {
-			return Toast{
-				Level:   ToastWarning,
-				Message: fmt.Sprintf("tmux attach-session -t devserver-%s is unavailable outside tmux; launch az inside tmux to use tmux actions", serverID),
-				Expires: time.Now().Add(8 * time.Second),
-			}
-		}
-
-		// For now, show a toast with instructions
-		return Toast{
-			Level:   ToastInfo,
-			Message: fmt.Sprintf("Run: tmux attach-session -t devserver-%s", serverID),
-			Expires: time.Now().Add(5 * time.Second),
-		}
-	}
+	return m.attachSessionCmd("devserver-" + serverID)
 }
 
 func (m Model) restartDevServer(serverID string) tea.Cmd {
@@ -2672,6 +2718,10 @@ func (m Model) renderBoardView() string {
 		Column: pos.Column,
 		Task:   pos.Task,
 	}
+	activeViewportStart := 0
+	if pos.Column >= 0 && pos.Column < len(m.viewportStarts) {
+		activeViewportStart = m.viewportStarts[pos.Column]
+	}
 
 	// Compute phase data if showPhases is enabled
 	phaseData := make(map[string]phases.TaskPhaseInfo)
@@ -2686,7 +2736,7 @@ func (m Model) renderBoardView() string {
 		m.editor.GetSelectedTasks(),
 		phaseData,
 		m.editor.GetShowPhases(),
-		m.verticalBias,
+		activeViewportStart,
 		m.styles,
 		m.width,
 		m.height-1,

@@ -6,63 +6,56 @@ func TestVisibleTaskRange(t *testing.T) {
 	tests := []struct {
 		name            string
 		taskCount       int
-		cursorTask      int
+		viewportStart   int
 		availableHeight int
-		verticalBias    int
 		wantStart       int
 		wantEnd         int
 	}{
 		{
 			name:            "empty_tasks",
 			taskCount:       0,
-			cursorTask:      0,
+			viewportStart:   0,
 			availableHeight: 20,
-			verticalBias:    0,
 			wantStart:       0,
 			wantEnd:         0,
 		},
 		{
 			name:            "fits_all_tasks",
 			taskCount:       3,
-			cursorTask:      2,
+			viewportStart:   2,
 			availableHeight: 24,
-			verticalBias:    0,
 			wantStart:       0,
 			wantEnd:         3,
 		},
 		{
-			name:            "cursor_near_top",
+			name:            "viewport_start_at_top",
 			taskCount:       10,
-			cursorTask:      1,
+			viewportStart:   0,
 			availableHeight: 12,
-			verticalBias:    0,
 			wantStart:       0,
 			wantEnd:         2,
 		},
 		{
-			name:            "cursor_near_bottom",
+			name:            "viewport_start_near_bottom",
 			taskCount:       10,
-			cursorTask:      9,
+			viewportStart:   8,
 			availableHeight: 12,
-			verticalBias:    1,
 			wantStart:       8,
 			wantEnd:         10,
 		},
 		{
-			name:            "up_bias_from_bottom_keeps_window",
+			name:            "viewport_start_clamped_high",
 			taskCount:       10,
-			cursorTask:      8,
+			viewportStart:   99,
 			availableHeight: 12,
-			verticalBias:    -1,
 			wantStart:       8,
 			wantEnd:         10,
 		},
 		{
-			name:            "invalid_cursor_defaults_top_window",
+			name:            "viewport_start_clamped_low",
 			taskCount:       10,
-			cursorTask:      -1,
+			viewportStart:   -5,
 			availableHeight: 12,
-			verticalBias:    0,
 			wantStart:       0,
 			wantEnd:         2,
 		},
@@ -70,7 +63,7 @@ func TestVisibleTaskRange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start, end := visibleTaskRange(tt.taskCount, tt.cursorTask, tt.availableHeight, tt.verticalBias)
+			start, end := visibleTaskRange(tt.taskCount, tt.viewportStart, tt.availableHeight)
 			if start != tt.wantStart || end != tt.wantEnd {
 				t.Fatalf("visibleTaskRange() = (%d,%d), want (%d,%d)", start, end, tt.wantStart, tt.wantEnd)
 			}

@@ -15,7 +15,7 @@ func Render(
 	selectedTasks map[string]bool,
 	phaseData map[string]phases.TaskPhaseInfo,
 	showPhases bool,
-	verticalBias int,
+	activeViewportStart int,
 	s *styles.Styles,
 	width int,
 	height int,
@@ -30,8 +30,10 @@ func Render(
 	for i, col := range columns {
 		isActive := i == cursor.Column
 		cursorTask := -1
+		viewportStart := 0
 		if isActive {
 			cursorTask = cursor.Task
+			viewportStart = activeViewportStart
 		}
 
 		columnStrings[i] = renderColumn(
@@ -39,7 +41,7 @@ func Render(
 			col.Tasks,
 			cursorTask,
 			isActive,
-			verticalBias,
+			viewportStart,
 			selectedTasks,
 			phaseData,
 			showPhases,

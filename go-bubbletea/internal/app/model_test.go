@@ -1,11 +1,13 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
 // Helper to create a test model with tasks
@@ -343,6 +345,36 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 	})
 }
 
+func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
+	m := newTestModel()
+
+	for i := 0; i < 10; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       string(rune('a' + i)),
+			Title:    "Extra Task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P3,
+			Type:     domain.TypeTask,
+		})
+	}
+
+	// With this height, board window shows 4 cards per column.
+	m.height = 24
+	// Simulate being at bottom of Open column with visible window [8..11].
+	m.viewportStarts[0] = 8
+	m.nav.SelectTask("j", 0)
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyUp})
+	newModel := result.(Model)
+
+	if got := newModel.nav.GetCursor().TaskID; got != "i" {
+		t.Fatalf("expected cursor to move up one task to i, got %s", got)
+	}
+	if newModel.viewportStarts[0] != 8 {
+		t.Fatalf("expected viewport start to remain 8 after first up from bottom, got %d", newModel.viewportStarts[0])
+	}
+}
+
 func TestGotoMode(t *testing.T) {
 	m := newTestModel()
 
@@ -525,5 +557,51 @@ func TestIssuesLoadedReconcilesSelection(t *testing.T) {
 	}
 	if newModel.editor.IsSelected("ghost") {
 		t.Fatal("expected ghost selection to be pruned after refresh")
+	}
+}
+
+func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
+	t.Setenv("TMUX", "")
+
+	m := newTestModel()
+
+	msg := m.attachSessionCmd("az-1")()
+	toast, ok := msg.(Toast)
+	if !ok {
+		t.Fatalf("attachSessionCmd() returned %T, want Toast", msg)
+	}
+	if toast.Level != ToastWarning {
+		t.Fatalf("attachSessionCmd() toast level = %v, want warning", toast.Level)
+	}
+	if !strings.Contains(toast.Message, "unavailable outside tmux") {
+		t.Fatalf("attachSessionCmd() toast message = %q, want tmux-unavailable guidance", toast.Message)
+	}
+
+	msg = m.viewDevServer("devserver-1")()
+	toast, ok = msg.(Toast)
+	if !ok {
+		t.Fatalf("viewDevServer() returned %T, want Toast", msg)
+	}
+	if toast.Level != ToastWarning {
+		t.Fatalf("viewDevServer() toast level = %v, want warning", toast.Level)
+	}
+	if !strings.Contains(toast.Message, "unavailable outside tmux") {
+		t.Fatalf("viewDevServer() toast message = %q, want tmux-unavailable guidance", toast.Message)
+	}
+
+	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	newModel := result.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatal("expected tmux-unavailable toast from conflict resolution")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if lastToast.Level != ToastWarning {
+		t.Fatalf("conflict resolution toast level = %v, want warning", lastToast.Level)
+	}
+	if !strings.Contains(lastToast.Message, "unavailable outside tmux") {
+		t.Fatalf("conflict resolution toast message = %q, want tmux-unavailable guidance", lastToast.Message)
 	}
 }
