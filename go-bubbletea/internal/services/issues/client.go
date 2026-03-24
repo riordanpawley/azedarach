@@ -319,6 +319,87 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 	return issueID, nil
 }
 
+// AddDependency creates or restores a dependency edge between two issues.
+func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+
+	issueID = strings.TrimSpace(issueID)
+	dependsOnID = strings.TrimSpace(dependsOnID)
+	dependencyType = strings.TrimSpace(dependencyType)
+	if issueID == "" || dependsOnID == "" || dependencyType == "" {
+		return c.wrapError("add-dependency", issueID, errors.New("issue id, dependency id, and dependency type are required"))
+	}
+
+	canonicalType, err := canonicalDependencyType(dependencyType)
+	if err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+
+	if dependencyIsAcyclic(canonicalType) {
+		if issueID == dependsOnID {
+			return c.wrapError("add-dependency", issueID, domain.ErrConflict)
+		}
+
+		cycle, err := c.wouldCreateDependencyCycle(ctx, db, issueID, dependsOnID)
+		if err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+		if cycle {
+			return c.wrapError("add-dependency", issueID, domain.ErrConflict)
+		}
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES (?, ?, ?, NULL)
+		ON CONFLICT(issue_id, depends_on_id, dependency_type)
+		DO UPDATE SET tombstoned_at = NULL
+	`, issueID, dependsOnID, canonicalType); err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+
+	return nil
+}
+
+// RemoveDependency tombstones a dependency edge between two issues.
+func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dependencyType string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+
+	issueID = strings.TrimSpace(issueID)
+	dependsOnID = strings.TrimSpace(dependsOnID)
+	dependencyType = strings.TrimSpace(dependencyType)
+	if issueID == "" || dependsOnID == "" || dependencyType == "" {
+		return c.wrapError("remove-dependency", issueID, errors.New("issue id, dependency id, and dependency type are required"))
+	}
+
+	canonicalType, err := canonicalDependencyType(dependencyType)
+	if err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
+
+	res, err := db.ExecContext(ctx, `
+		UPDATE issue_dependencies
+		SET tombstoned_at = ?
+		WHERE issue_id = ? AND depends_on_id = ? AND dependency_type = ? AND tombstoned_at IS NULL
+	`, time.Now().UTC().Format(time.RFC3339Nano), issueID, dependsOnID, canonicalType)
+	if err != nil {
+		return c.wrapError("remove-dependency", issueID, err)
+	}
+
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return c.wrapError("remove-dependency", issueID, domain.ErrNotFound)
+	}
+
+	return nil
+}
+
 // Close marks an issue as closed.
 func (c *Client) Close(ctx context.Context, id string, _ string) error {
 	return c.Update(ctx, id, domain.StatusDone)
@@ -515,6 +596,56 @@ func normalizeDependencyType(value string) string {
 	}
 }
 
+func canonicalDependencyType(value string) (string, error) {
+	switch normalizeDependencyType(strings.TrimSpace(value)) {
+	case string(domain.DependencyBlocks), string(domain.DependencyBlockedBy):
+		return string(domain.DependencyBlocks), nil
+	case string(domain.DependencyParentChild):
+		return string(domain.DependencyParentChild), nil
+	case string(domain.DependencyRelatedTo):
+		return string(domain.DependencyRelatedTo), nil
+	default:
+		return "", fmt.Errorf("unsupported dependency type %q", strings.TrimSpace(value))
+	}
+}
+
+func dependencyIsAcyclic(dependencyType string) bool {
+	switch dependencyType {
+	case string(domain.DependencyBlocks), string(domain.DependencyParentChild):
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) wouldCreateDependencyCycle(ctx context.Context, db *sql.DB, issueID, dependsOnID string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH RECURSIVE reachable(id) AS (
+			SELECT depends_on_id
+			FROM issue_dependencies
+			WHERE issue_id = ?
+				AND tombstoned_at IS NULL
+				AND dependency_type IN ('blocks', 'parent-child')
+			UNION
+			SELECT d.depends_on_id
+			FROM issue_dependencies d
+			JOIN reachable r ON d.issue_id = r.id
+			WHERE d.tombstoned_at IS NULL
+				AND d.dependency_type IN ('blocks', 'parent-child')
+		)
+		SELECT 1
+		FROM reachable
+		WHERE id = ?
+		LIMIT 1
+	`, dependsOnID, issueID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	return rows.Next(), rows.Err()
+}
+
 func parseTimestamp(raw string) time.Time {
 	if raw == "" {
 		return time.Time{}
@@ -605,18 +736,86 @@ func resolveDBPath(repoDir string) (string, error) {
 	}
 
 	baseRoot, err := resolveBaseGitRoot(absStart)
-	if err != nil {
-		return "", err
+	if err == nil {
+		return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
 	}
-	return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
+
+	// Fallback path search keeps existing repositories usable even when git
+	// common-dir discovery is unavailable in constrained runtime environments.
+	if fallbackPath, fallbackErr := resolveDBPathBySearch(absStart); fallbackErr == nil {
+		return fallbackPath, nil
+	}
+	return "", fmt.Errorf("resolve base git root: %w", err)
 }
 
 func resolveBaseGitRoot(startDir string) (string, error) {
+	if root, err := resolveBaseGitRootWithGitExec(startDir); err == nil {
+		return root, nil
+	}
+	if root, err := resolveBaseGitRootFromGitMarker(startDir); err == nil {
+		return root, nil
+	}
+	return "", fmt.Errorf("unable to resolve git root from %s", startDir)
+}
+
+func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
 	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
 	return baseGitRootFromCommonDir(startDir, strings.TrimSpace(string(out)))
+}
+
+func resolveBaseGitRootFromGitMarker(startDir string) (string, error) {
+	absStart, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", err
+	}
+
+	for dir := absStart; ; dir = filepath.Dir(dir) {
+		marker := filepath.Join(dir, ".git")
+		info, statErr := os.Stat(marker)
+		if statErr == nil {
+			if info.IsDir() {
+				return dir, nil
+			}
+
+			content, readErr := os.ReadFile(marker)
+			if readErr != nil {
+				return "", fmt.Errorf("read git marker %s: %w", marker, readErr)
+			}
+			gitDir, parseErr := parseGitDirPointer(string(content))
+			if parseErr != nil {
+				return "", fmt.Errorf("parse git marker %s: %w", marker, parseErr)
+			}
+			if !filepath.IsAbs(gitDir) {
+				gitDir = filepath.Clean(filepath.Join(dir, gitDir))
+			}
+			return baseGitRootFromCommonDir(dir, gitDir)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+
+	return "", fmt.Errorf("no .git marker found for %s", absStart)
+}
+
+func parseGitDirPointer(content string) (string, error) {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "gitdir:") {
+			continue
+		}
+		target := strings.TrimSpace(strings.TrimPrefix(trimmed, "gitdir:"))
+		if target == "" {
+			return "", fmt.Errorf("empty gitdir target")
+		}
+		return target, nil
+	}
+	return "", fmt.Errorf("missing gitdir pointer")
 }
 
 func resolveDBPathFromGitCommonDir(startDir, gitCommonDir string) (string, error) {
@@ -635,10 +834,51 @@ func baseGitRootFromCommonDir(startDir, commonDir string) (string, error) {
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Clean(filepath.Join(startDir, commonDir))
 	}
-	if filepath.Base(commonDir) != ".git" {
-		return "", fmt.Errorf("resolve git common dir: expected .git path, got %s", commonDir)
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Dir(commonDir), nil
 	}
-	return filepath.Dir(commonDir), nil
+
+	// Worktree forms may return nested paths like:
+	//   /path/to/repo/.git/worktrees/<name>
+	// Normalize by locating the `.git` segment and deriving repo root from it.
+	segments := strings.Split(filepath.ToSlash(commonDir), "/")
+	for i, seg := range segments {
+		if seg != ".git" {
+			continue
+		}
+		gitDir := filepath.FromSlash(strings.Join(segments[:i+1], "/"))
+		return filepath.Dir(gitDir), nil
+	}
+
+	return "", fmt.Errorf("resolve git common dir: expected .git path, got %s", commonDir)
+}
+
+func resolveDBPathBySearch(startDir string) (string, error) {
+	absStart, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", err
+	}
+
+	for dir := absStart; ; dir = filepath.Dir(dir) {
+		candidate := filepath.Join(dir, ".azedarach", "azedarach.db")
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err == nil && homeDir != "" {
+		candidate := filepath.Join(homeDir, ".azedarach", "azedarach.db")
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("unable to locate .azedarach/azedarach.db starting at %s", absStart)
 }
 
 func (c *Client) wrapError(op string, issueID string, err error) error {
