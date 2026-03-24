@@ -326,6 +326,7 @@ See [LICENSE](./LICENSE) for details.
 ## References
 
 - `az issue --help` - Task tracking command reference
+- `scripts/afv-drift-sentinel.sh` - Repo-local boundary drift check for AFV ownership markers
 - [CCManager](https://github.com/kbwo/ccmanager) - Session management inspiration
 - [Claude Squad](https://github.com/smtg-ai/claude-squad) - Parallel Claude orchestration
 - [OpenTUI](https://github.com/sst/opentui) - React for CLI (ts-opentui)

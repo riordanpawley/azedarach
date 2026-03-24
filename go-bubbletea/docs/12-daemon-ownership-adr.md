@@ -24,6 +24,11 @@ Adopt a daemon-authoritative architecture with explicit ownership boundaries:
 - background orchestration and lifecycle transitions
 - revision sequencing and event publication
 
+Drift sentinel markers:
+- `worktree.cleanup_orphaned`
+- `task.snapshot.export`
+- `task.bulk.apply`
+
 2. Frontends own:
 - rendering, keyboard/input handling, local UI projection state
 - intent construction and response presentation
