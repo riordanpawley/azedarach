@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -40,6 +41,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Type:")
 	assert.Contains(t, view, "Priority:")
 	assert.Contains(t, view, "Create Task")
+	assert.Contains(t, view, "Ctrl+E")
 }
 
 func TestCreateTaskOverlayEscapeCloses(t *testing.T) {
@@ -411,4 +413,75 @@ func TestCreateTaskOverlayViewContainsSelectors(t *testing.T) {
 	// The view should contain the active markers
 	assert.True(t, strings.Contains(view, "●") || strings.Contains(view, "Type:"))
 	assert.True(t, strings.Contains(view, "●") || strings.Contains(view, "Priority:"))
+}
+
+func TestParseTaskTemplate(t *testing.T) {
+	markdown := strings.Join([]string{
+		"# My Task",
+		"---------------------------------------------------",
+		"",
+		"Type: bug",
+		"Priority: P1",
+		"",
+		"## Description",
+		"",
+		"Fix this now",
+		"",
+	}, "\n")
+
+	msg, err := parseTaskTemplate(markdown, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "My Task", msg.Title)
+	assert.Equal(t, "Fix this now", msg.Description)
+	assert.Equal(t, domain.TypeBug, msg.Type)
+	assert.Equal(t, domain.P1, msg.Priority)
+}
+
+func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.editorFlow = func(_ string) (string, error) {
+		return strings.Join([]string{
+			"# Edited Task",
+			"---------------------------------------------------",
+			"",
+			"Type: feature",
+			"Priority: P0",
+			"",
+			"## Description",
+			"",
+			"Edited from helix",
+			"",
+		}, "\n"), nil
+	}
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	require.NotNil(t, cmd)
+
+	editorMsg := cmd()
+	model, cmd = model.(*CreateTaskOverlay).Update(editorMsg)
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+	created, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "Edited Task", created.Title)
+	assert.Equal(t, "Edited from helix", created.Description)
+	assert.Equal(t, domain.TypeFeature, created.Type)
+	assert.Equal(t, domain.P0, created.Priority)
+}
+
+func TestCreateTaskOverlayCtrlESetsError(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.editorFlow = func(_ string) (string, error) {
+		return "", errors.New("helix missing")
+	}
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	require.NotNil(t, cmd)
+
+	editorMsg := cmd()
+	model, _ = model.(*CreateTaskOverlay).Update(editorMsg)
+	updated := model.(*CreateTaskOverlay)
+	assert.Contains(t, updated.editorError, "helix missing")
 }
