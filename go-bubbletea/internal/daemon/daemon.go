@@ -41,6 +41,7 @@ type Daemon struct {
 	hub    *publish.Hub
 	serve  *transport.Server
 	router *daemonhandlers.Dispatcher
+	apply  *daemonhandlers.ApplyHandler
 
 	beads    *beads.Client
 	tmux     *tmux.Client
@@ -94,6 +95,7 @@ func New(cfg Config) *Daemon {
 		daemonhandlers.NewWorktreeHandler(worktreeServiceAdapter{manager: d.worktree}),
 		daemonhandlers.NewDevServerHandler(devServerManager),
 	)
+	d.apply = daemonhandlers.NewApplyHandler(d.beads, applyRevisionAdapter{daemon: d})
 
 	d.serve = transport.NewServer(cfg.SocketPath, transport.Handlers{
 		Handshake: d.handshake,
@@ -142,6 +144,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleTaskDelete(ctx, req)
 	case "task.archive":
 		return d.handleTaskArchive(ctx, req)
+	case protocol.CommandTaskBulkApply:
+		return d.apply.Handle(ctx, req), nil
 	case "session.start":
 		return d.handleSessionStart(ctx, req)
 	case "session.attach":
@@ -217,4 +221,20 @@ func (d *Daemon) commandOutput(req protocol.RequestEnvelope, output string) prot
 	}{Output: output})
 	resp.Body = payload
 	return resp
+}
+
+type applyRevisionAdapter struct {
+	daemon *Daemon
+}
+
+func (a applyRevisionAdapter) CurrentRevision(projectID string) uint64 {
+	return a.daemon.currentRevision(projectID)
+}
+
+func (a applyRevisionAdapter) NextRevision(projectID string) uint64 {
+	return a.daemon.nextRevision(projectID)
+}
+
+func (a applyRevisionAdapter) PublishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64) {
+	a.daemon.publishTaskEvent(req, eventName, rev)
 }
