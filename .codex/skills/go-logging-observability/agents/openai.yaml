@@ -1,0 +1,4 @@
+interface:
+  display_name: "Go Logging & Observability"
+  short_description: "Safe, correlated Go logging with slog + OTel"
+  default_prompt: "Use this skill to design or review Go logging and observability with structured events, trace/log correlation, redaction, and cardinality controls."

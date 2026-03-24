@@ -14,6 +14,7 @@ build/
 .vscode/
 *.swp
 *.swo
+*.orig
 
 # OS
 .DS_Store
@@ -80,6 +81,8 @@ ts-opentui/.codanna/
 # bv (beads viewer) local config and caches
 .bv/
 /ts-opentui/bin/az
+/go-bubbletea/bin/
+/go-bubbletea/azd
 /.beads
 /ts-opentui/az
 /.agents/memories/overview.md

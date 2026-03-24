@@ -13,11 +13,15 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	autoclient "github.com/riordanpawley/azedarach/internal/client"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
@@ -99,6 +103,7 @@ type Model struct {
 	// Project
 	currentProject string
 	projects       []domain.Project
+	repoDir        string
 
 	// Toasts
 	toasts []Toast
@@ -119,14 +124,13 @@ type Model struct {
 	lastRefresh    time.Time
 	hasRefreshLoop bool
 
-	// Beads client
-	beadsClient *beads.Client
+	// Shared daemon client for task-domain operations
+	daemonClient   *daemonclient.Client
+	daemonEvents   <-chan protocol.EventEnvelope
+	daemonRevision uint64
 
 	// Session management services
-	tmuxClient      *tmux.Client
-	worktreeManager *git.WorktreeManager
-	sessionMonitor  *monitor.SessionMonitor
-	portAllocator   *devserver.PortAllocator
+	sessionMonitor *monitor.SessionMonitor
 
 	// Git services
 	gitClient      *git.Client
@@ -142,9 +146,6 @@ type Model struct {
 
 	// PR workflow service
 	prWorkflow *pr.PRWorkflow
-
-	// Dev server manager
-	devServerManager *devserver.Manager
 
 	// Diagnostics service
 	diagnosticsService *diagnostics.Service
@@ -166,29 +167,26 @@ func New(cfg *config.Config) Model {
 	// Initialize logger
 	logger := slog.Default()
 
-	// Initialize beads client
-	beadsRunner := &beads.ExecRunner{}
-	beadsClient := beads.NewClient(beadsRunner, logger)
-
-	// Initialize tmux client
-	tmuxRunner := &tmux.ExecRunner{}
-	tmuxClient := tmux.NewClient(tmuxRunner, logger)
-
-	// Initialize git worktree manager
-	// Get current working directory as repo directory
+	// Resolve repository directory for local services and daemon routing.
 	repoDir, err := os.Getwd()
 	if err != nil {
 		logger.Error("failed to get current directory", "error", err)
 		repoDir = "."
 	}
+	socketPath := filepath.Join(repoDir, ".beads", "azd.sock")
+	daemonClient := daemonclient.New(transport.NewClient(socketPath))
+
+	// Initialize tmux client
+	tmuxRunner := &tmux.ExecRunner{}
+	tmuxClient := tmux.NewClient(tmuxRunner, logger)
+
 	gitRunner := git.NewExecRunner(repoDir)
-	worktreeManager := git.NewWorktreeManager(gitRunner, repoDir, logger)
 
 	// Initialize session monitor with tmux adapter
 	adapter := &tmuxAdapter{client: tmuxClient}
 	sessionMonitor := monitor.NewSessionMonitor(adapter)
 
-	// Initialize port allocator (base port 3000)
+	// Local allocator remains for diagnostics context only; lifecycle authority is daemon-owned.
 	portAllocator := devserver.NewPortAllocator(3000)
 
 	// Initialize network checker
@@ -218,13 +216,10 @@ func New(cfg *config.Config) Model {
 	prRunner := &pr.ExecRunner{}
 	prWorkflow := pr.NewPRWorkflow(prRunner, logger)
 
-	// Initialize dev server manager
-	devServerMgr := devserver.NewManager(portAllocator, logger)
-
 	// Initialize diagnostics service
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
 
-	return Model{
+	m := Model{
 		tasks:              []domain.Task{},
 		sessions:           make(map[string]*domain.Session),
 		nav:                navigation.NewService(),
@@ -236,11 +231,8 @@ func New(cfg *config.Config) Model {
 		config:             cfg,
 		loading:            true, // Start with loading state
 		spinner:            s,
-		beadsClient:        beadsClient,
-		tmuxClient:         tmuxClient,
-		worktreeManager:    worktreeManager,
+		daemonClient:       daemonClient,
 		sessionMonitor:     sessionMonitor,
-		portAllocator:      portAllocator,
 		gitClient:          gitClient,
 		gitSyncService:     gitSyncService,
 		networkChecker:     networkChecker,
@@ -248,18 +240,20 @@ func New(cfg *config.Config) Model {
 		isOnline:           true, // Optimistically assume online
 		attachmentService:  attachmentSvc,
 		prWorkflow:         prWorkflow,
-		devServerManager:   devServerMgr,
 		diagnosticsService: diagService,
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from beads
+		repoDir:            repoDir,
 	}
+	m.daemonClient.WithProjectID(m.daemonProjectID())
+	return m
 }
 
 // Init returns the initial command for the application
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
-		m.loadBeadsCmd(),
+		m.attachDaemonCmd(),
 		m.gitSyncService.FetchAndCheck(),
 	)
 }
@@ -328,6 +322,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case beadsLoadedMsg:
 		wasLoading := m.loading
 		m.tasks = msg.tasks
+		if msg.revision > m.daemonRevision {
+			m.daemonRevision = msg.revision
+		}
 		m.loading = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
@@ -338,12 +335,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
-		// Start periodic refresh only if not already running
+		var cmds []tea.Cmd
 		if !m.hasRefreshLoop {
 			m.hasRefreshLoop = true
-			return m, tickEvery(2 * time.Second)
+			cmds = append(cmds, tickEvery(2*time.Second))
 		}
-		return m, nil
+		if msg.events != nil {
+			m.daemonEvents = msg.events
+			cmds = append(cmds, m.waitForDaemonEventCmd())
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
 
 	case beadsErrorMsg:
 		m.toasts = append(m.toasts, Toast{
@@ -394,6 +398,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Session error: %s - %v", msg.beadID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
 		})
+		return m, nil
+
+	case daemonStreamEventMsg:
+		if m.daemonEvents == nil {
+			return m, nil
+		}
+		switch m.reduceDaemonEvent(msg.event) {
+		case daemonEventIgnore:
+			return m, m.waitForDaemonEventCmd()
+		case daemonEventRefreshSnapshot:
+			m.daemonRevision = msg.event.Revision
+			return m, tea.Batch(m.loadBeadsCmd(), m.waitForDaemonEventCmd())
+		case daemonEventRehydrate:
+			return m, m.attachDaemonCmd()
+		default:
+			return m, m.waitForDaemonEventCmd()
+		}
+
+	case daemonStreamClosedMsg:
+		m.daemonEvents = nil
 		return m, nil
 
 	case network.StatusMsg:
@@ -547,6 +571,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Switch to selected project
 		m.currentProject = msg.Project.Name
+		if m.daemonClient != nil {
+			m.daemonClient.WithProjectID(m.daemonProjectID())
+		}
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Switched to project: %s", msg.Project.Name),
@@ -1218,14 +1245,30 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type beadsLoadedMsg struct {
-	tasks []domain.Task
+	tasks    []domain.Task
+	revision uint64
+	events   <-chan protocol.EventEnvelope
 }
 
 type beadsErrorMsg struct {
 	err error
 }
 
+type daemonStreamEventMsg struct {
+	event protocol.EventEnvelope
+}
+
+type daemonStreamClosedMsg struct{}
+
 type tickMsg time.Time
+
+type daemonEventDecision int
+
+const (
+	daemonEventIgnore daemonEventDecision = iota
+	daemonEventRefreshSnapshot
+	daemonEventRehydrate
+)
 
 type sessionStartedMsg struct {
 	beadID       string
@@ -1245,12 +1288,102 @@ func (m Model) loadBeadsCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		tasks, err := m.beadsClient.List(ctx)
+		if m.daemonClient == nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return beadsErrorMsg{err: err}
 		}
-		return beadsLoadedMsg{tasks: tasks}
+		return beadsLoadedMsg{
+			tasks:    snapshot.Tasks,
+			revision: snapshot.Revision,
+		}
 	}
+}
+
+func (m Model) attachDaemonCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		launcher := daemonprocess.NewLauncher(m.repoDir, filepath.Join(m.repoDir, ".beads", "azd.sock"))
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      "tui",
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if err != nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon attach: %w", err)}
+		}
+		if !ack.Accepted {
+			return beadsErrorMsg{err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
+		}
+
+		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		if err != nil {
+			return beadsErrorMsg{err: err}
+		}
+
+		events, err := m.daemonClient.Subscribe(context.Background(), m.daemonProjectID(), snapshot.Revision)
+		if err != nil {
+			return beadsErrorMsg{err: err}
+		}
+
+		return beadsLoadedMsg{
+			tasks:    snapshot.Tasks,
+			revision: snapshot.Revision,
+			events:   events,
+		}
+	}
+}
+
+func (m Model) waitForDaemonEventCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonEvents == nil {
+			return nil
+		}
+
+		evt, ok := <-m.daemonEvents
+		if !ok {
+			return daemonStreamClosedMsg{}
+		}
+
+		return daemonStreamEventMsg{event: evt}
+	}
+}
+
+func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
+	switch {
+	case evt.Revision <= m.daemonRevision:
+		return daemonEventIgnore
+	case evt.Revision > m.daemonRevision+1:
+		return daemonEventRehydrate
+	default:
+		return daemonEventRefreshSnapshot
+	}
+}
+
+func (m Model) daemonProjectID() string {
+	if m.currentProject != "" {
+		return m.currentProject
+	}
+	if m.projectRegistry != nil {
+		if project := m.projectRegistry.GetDefault(); project != nil && project.Name != "" {
+			return project.Name
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Base(cwd)
+	}
+	return "default"
 }
 
 func tickEvery(d time.Duration) tea.Cmd {
@@ -1259,29 +1392,33 @@ func tickEvery(d time.Duration) tea.Cmd {
 	})
 }
 
-// startSessionCmd creates a worktree, tmux session, and starts monitoring
+// startSessionCmd requests daemon-owned lifecycle start and refreshes local session projection.
 func (m Model) startSessionCmd(beadID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-		// Create worktree for the task
-		baseBranch := "main" // TODO: Make configurable
-		worktree, err := m.worktreeManager.Create(ctx, beadID, baseBranch)
-		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create worktree: %w", err)}
+		baseBranch := m.config.Git.BaseBranch
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.StartSession(ctx, beadID, baseBranch); err != nil {
+			return sessionErrorMsg{beadID: beadID, err: err}
 		}
 
-		// Create tmux session
-		err = m.tmuxClient.NewSession(ctx, beadID, worktree.Path)
+		worktrees, err := m.daemonClient.ListWorktrees(ctx)
 		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create tmux session: %w", err)}
+			return sessionErrorMsg{beadID: beadID, err: err}
 		}
-
-		// Send Claude command to session
-		claudeCmd := "claude" // TODO: Make configurable or add more context
-		err = m.tmuxClient.SendKeys(ctx, beadID, claudeCmd)
-		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to send keys: %w", err)}
+		worktreePath := ""
+		for _, wt := range worktrees {
+			if wt.BeadID == beadID {
+				worktreePath = wt.Path
+				break
+			}
 		}
 
 		// Create session record
@@ -1290,7 +1427,7 @@ func (m Model) startSessionCmd(beadID string) tea.Cmd {
 			BeadID:    beadID,
 			State:     domain.SessionBusy,
 			StartedAt: &now,
-			Worktree:  worktree.Path,
+			Worktree:  worktreePath,
 		}
 		m.sessions[beadID] = session
 
@@ -1299,32 +1436,28 @@ func (m Model) startSessionCmd(beadID string) tea.Cmd {
 		// For now, we'll skip this and implement it properly later
 		// m.sessionMonitor.Start(ctx, beadID, program)
 
-		return sessionStartedMsg{beadID: beadID, worktreePath: worktree.Path}
+		return sessionStartedMsg{beadID: beadID, worktreePath: worktreePath}
 	}
 }
 
-// stopSessionCmd stops the tmux session, monitoring, and optionally cleans up worktree
+// stopSessionCmd requests daemon-owned lifecycle stop and refreshes local session projection.
 func (m Model) stopSessionCmd(beadID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("daemon client unavailable")}
+		}
 
 		// Stop monitoring
 		m.sessionMonitor.Stop(beadID)
 
-		// Kill tmux session
-		err := m.tmuxClient.KillSession(ctx, beadID)
-		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to kill tmux session: %w", err)}
+		if _, err := m.daemonClient.StopSession(ctx, beadID); err != nil {
+			return sessionErrorMsg{beadID: beadID, err: err}
 		}
 
 		// Remove session record
 		delete(m.sessions, beadID)
-
-		// Release port if allocated
-		m.portAllocator.Release(beadID)
-
-		// TODO: Optionally delete worktree (should probably ask user first)
-		// err = m.worktreeManager.Delete(ctx, beadID)
 
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
@@ -1602,7 +1735,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		// Dev server menu
-		servers := m.getDevServerInfo()
+		servers := m.getDevServerInfo(task.ID)
 		devOverlay := overlay.NewDevServerOverlay(
 			servers,
 			task.ID,
@@ -1677,7 +1810,11 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.beadsClient.Delete(ctx, taskID)
+		if m.daemonClient == nil {
+			return taskDeletedResultMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		err := m.daemonClient.DeleteTask(ctx, taskID)
 		return taskDeletedResultMsg{taskID: taskID, err: err}
 	}
 }
@@ -2016,8 +2153,12 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			// Update via beads client
-			err := m.beadsClient.Update(ctx, taskID, newStatus)
+			// Update via daemon client
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
 			if err != nil {
 				failed++
 				continue
@@ -2039,7 +2180,11 @@ func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Delete(ctx, taskID)
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.DeleteTask(ctx, taskID)
 			if err != nil {
 				failed++
 				continue
@@ -2060,7 +2205,11 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Archive(ctx, taskID)
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.ArchiveTask(ctx, taskID)
 			if err != nil {
 				failed++
 				continue
@@ -2082,7 +2231,11 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Update(ctx, taskID, status)
+			if m.daemonClient == nil {
+				failed++
+				continue
+			}
+			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, status)
 			if err != nil {
 				failed++
 				continue
@@ -2100,7 +2253,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 		defer cancel()
 
 		if msg.ID != "" {
-			err := m.beadsClient.UpdateDetails(ctx, msg.ID, beads.UpdateTaskParams{
+			if m.daemonClient == nil {
+				return taskCreatedResultMsg{taskID: msg.ID, err: fmt.Errorf("daemon client unavailable"), isUpdate: true}
+			}
+			err := m.daemonClient.UpdateTaskDetails(ctx, msg.ID, daemonclient.TaskUpdateParams{
 				Title:       msg.Title,
 				Description: msg.Description,
 				Type:        msg.Type,
@@ -2109,7 +2265,11 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
 		}
 
-		taskID, err := m.beadsClient.Create(ctx, beads.CreateTaskParams{
+		if m.daemonClient == nil {
+			return taskCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
 			Title:       msg.Title,
 			Description: msg.Description,
 			Type:        msg.Type,
@@ -2174,8 +2334,11 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 
 		newStatus := statusOrder[newIdx]
 
-		// Update via beads client
-		err := m.beadsClient.Update(ctx, taskID, newStatus)
+		// Update via daemon client
+		if m.daemonClient == nil {
+			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
 		if err != nil {
 			return taskStatusResultMsg{taskID: taskID, err: err}
 		}
@@ -2295,29 +2458,34 @@ func (m Model) checkBranchBehindCmd(worktree, beadID string) tea.Cmd {
 	}
 }
 
-func (m Model) getDevServerInfo() []overlay.DevServerInfo {
-	if m.devServerManager == nil {
+func (m Model) getDevServerInfo(beadID string) []overlay.DevServerInfo {
+	if m.daemonClient == nil {
 		return nil
 	}
 
-	servers := m.devServerManager.List()
-	info := make([]overlay.DevServerInfo, 0, len(servers))
-	for _, srv := range servers {
-		info = append(info, overlay.DevServerInfo{
-			ID:     srv.ID,
-			Name:   srv.Name,
-			Port:   srv.Port,
-			Status: srv.Status,
-			Uptime: srv.Uptime,
-		})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv, err := m.daemonClient.DevServerStatus(ctx, beadID)
+	if err != nil {
+		return nil
 	}
-	return info
+	return []overlay.DevServerInfo{{
+		ID:     srv.ID,
+		Name:   srv.Name,
+		Port:   srv.Port,
+		Status: srv.Status,
+		Uptime: srv.Uptime,
+	}}
 }
 
 func (m Model) toggleDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		if err := m.devServerManager.Toggle(ctx, serverID); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: serverID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.ToggleDevServer(ctx, serverID); err != nil {
 			return sessionErrorMsg{beadID: serverID, err: err}
 		}
 		return nil
@@ -2337,8 +2505,12 @@ func (m Model) viewDevServer(serverID string) tea.Cmd {
 
 func (m Model) restartDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		if err := m.devServerManager.Restart(ctx, serverID); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: serverID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.RestartDevServer(ctx, serverID); err != nil {
 			return sessionErrorMsg{beadID: serverID, err: err}
 		}
 		return nil
@@ -2499,7 +2671,11 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			deleted := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone && task.UpdatedAt.Before(cutoff) {
-					err := m.beadsClient.Delete(ctx, task.ID)
+					if m.daemonClient == nil {
+						m.logger.Warn("daemon client unavailable for delete", "id", task.ID)
+						continue
+					}
+					err := m.daemonClient.DeleteTask(ctx, task.ID)
 					if err != nil {
 						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
 						continue
@@ -2513,7 +2689,11 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			archived := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone {
-					err := m.beadsClient.Archive(ctx, task.ID)
+					if m.daemonClient == nil {
+						m.logger.Warn("daemon client unavailable for archive", "id", task.ID)
+						continue
+					}
+					err := m.daemonClient.ArchiveTask(ctx, task.ID)
 					if err != nil {
 						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
 						continue
@@ -2526,17 +2706,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 		case "remove_orphaned_worktrees":
 			// Remove worktrees with no active sessions
 			removed := 0
-			// TODO: Implement worktree cleanup
-			// List all worktrees, check if they have sessions, delete orphaned ones
-			// worktrees, err := m.worktreeManager.List(ctx)
-			// for _, wt := range worktrees {
-			//     if _, hasSession := m.sessions[wt.BeadID]; !hasSession {
-			//         err := m.worktreeManager.Delete(ctx, wt.BeadID)
-			//         if err == nil {
-			//             removed++
-			//         }
-			//     }
-			// }
+			// TODO: Implement orphan cleanup through daemon-owned worktree commands.
 			result.WorktreesRemoved = removed
 
 		case "clean_stale_sessions":
@@ -2548,9 +2718,10 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 					if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
 						// Stop and clean up stale session
 						m.sessionMonitor.Stop(beadID)
-						_ = m.tmuxClient.KillSession(ctx, beadID)
+						if m.daemonClient != nil {
+							_, _ = m.daemonClient.StopSession(ctx, beadID)
+						}
 						delete(m.sessions, beadID)
-						m.portAllocator.Release(beadID)
 						cleaned++
 					}
 				}

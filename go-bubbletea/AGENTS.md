@@ -48,6 +48,15 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
 9. **Concurrency**:
    - Prefer context cancellation for goroutine lifecycle.
    - Use buffered channels when bounded capacity is known.
+10. **Architecture Migration Gates**:
+   - Do not mark a migration complete while active entrypoints still depend on transitional adapters or legacy execution paths.
+   - Runtime AC must prove the intended production path is wired on active entrypoints, not only in isolated packages/tests.
+   - Cross-process boundaries must use typed protocol/domain payloads rather than UI-framework message types.
+11. **Active-Path Placeholder Policy**:
+   - Placeholder implementations are allowed only when they are off active runtime paths or explicitly tracked as incomplete follow-up work.
+   - If an active-path placeholder remains, the issue must stay partial/in-progress with linked follow-up issue IDs.
+12. **Closure Evidence (Required)**:
+   - For architecture issues, close only after notes include commands run, key outputs, files changed, and explicit AC pass/fail checklist.
 
 ## Quick Commands
 

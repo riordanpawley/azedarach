@@ -42,6 +42,9 @@
     },
     "packages/daemon": {
       "name": "@azedarach/daemon",
+      "dependencies": {
+        "@azedarach/shared": "workspace:*",
+      },
     },
     "packages/shared": {
       "name": "@azedarach/shared",
