@@ -98,7 +98,7 @@ func TestRenderCard_WithSession(t *testing.T) {
 		Priority: domain.P0,
 		Type:     domain.TypeFeature,
 		Session: &domain.Session{
-			BeadID:    "az-456",
+			IssueID:   "az-456",
 			State:     domain.SessionBusy,
 			StartedAt: &startedAt,
 			Worktree:  "/tmp/az-456",
@@ -117,6 +117,47 @@ func TestRenderCard_WithSession(t *testing.T) {
 	// Note: exact time will vary slightly, so we just check for "h" and "m"
 	if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
 		t.Errorf("Card should contain elapsed time for busy session, got: %s", stripped)
+	}
+}
+
+func TestRenderCard_FixedHeightAcrossTypes(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	normal := domain.Task{
+		ID:       "az-normal",
+		Title:    "Normal",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	}
+	epic := domain.Task{
+		ID:       "az-epic",
+		Title:    "Epic",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P1,
+		Type:     domain.TypeEpic,
+	}
+	epicWithSession := domain.Task{
+		ID:       "az-epic-session",
+		Title:    "Epic Session",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P0,
+		Type:     domain.TypeEpic,
+		Session: &domain.Session{
+			IssueID:   "az-epic-session",
+			State:     domain.SessionBusy,
+			StartedAt: &startedAt,
+		},
+	}
+
+	h := func(rendered string) int { return len(strings.Split(rendered, "\n")) }
+	h1 := h(RenderCard(normal, false, false, 35, s))
+	h2 := h(RenderCard(epic, false, false, 35, s))
+	h3 := h(RenderCard(epicWithSession, false, false, 35, s))
+
+	if h1 != h2 || h2 != h3 {
+		t.Fatalf("card heights must match: normal=%d epic=%d epic+session=%d", h1, h2, h3)
 	}
 }
 
@@ -159,8 +200,8 @@ func TestRenderCard_WithSessionNoElapsed(t *testing.T) {
 				Priority: domain.P2,
 				Type:     domain.TypeBug,
 				Session: &domain.Session{
-					BeadID: "az-789",
-					State:  tt.state,
+					IssueID: "az-789",
+					State:   tt.state,
 					// No StartedAt for these states
 				},
 			}
@@ -222,7 +263,7 @@ func TestRenderCard_EpicWithSession(t *testing.T) {
 		Priority: domain.P0,
 		Type:     domain.TypeEpic,
 		Session: &domain.Session{
-			BeadID:    "az-epic-2",
+			IssueID:   "az-epic-2",
 			State:     domain.SessionBusy,
 			StartedAt: &startedAt,
 		},
@@ -342,7 +383,7 @@ func TestRenderSessionStatus(t *testing.T) {
 	t.Run("busy with elapsed time", func(t *testing.T) {
 		startedAt := time.Now().Add(-1*time.Hour - 30*time.Minute)
 		session := &domain.Session{
-			BeadID:    "test",
+			IssueID:   "test",
 			State:     domain.SessionBusy,
 			StartedAt: &startedAt,
 		}
@@ -361,8 +402,8 @@ func TestRenderSessionStatus(t *testing.T) {
 
 	t.Run("done without elapsed time", func(t *testing.T) {
 		session := &domain.Session{
-			BeadID: "test",
-			State:  domain.SessionDone,
+			IssueID: "test",
+			State:   domain.SessionDone,
 		}
 
 		result := renderSessionStatus(session, s)
@@ -380,8 +421,8 @@ func TestRenderSessionStatus(t *testing.T) {
 
 	t.Run("error session", func(t *testing.T) {
 		session := &domain.Session{
-			BeadID: "test",
-			State:  domain.SessionError,
+			IssueID: "test",
+			State:   domain.SessionError,
 		}
 
 		result := renderSessionStatus(session, s)

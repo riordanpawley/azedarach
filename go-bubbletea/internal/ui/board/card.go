@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -21,8 +22,8 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 		cardStyle = s.CardActive
 	}
 
-	// Apply width
-	cardStyle = cardStyle.Width(width)
+	// Apply fixed size to keep all cards same height regardless of content.
+	cardStyle = cardStyle.Width(width).Height(cardHeight)
 
 	// Priority badge (e.g., "P0", "P1", etc.)
 	priorityText := task.Priority.String()
@@ -48,11 +49,11 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 	}
 
 	// Title - truncate if needed
-	// Account for padding (2), border (2), and some space for badges
-	maxTitleLen := width - 4
+	// Account for border + padding.
+	maxLineLen := width - 4
 	title := task.Title
-	if len(title) > maxTitleLen {
-		title = title[:maxTitleLen-1] + "…"
+	if len(title) > maxLineLen {
+		title = title[:maxLineLen-1] + "…"
 	}
 
 	// Cursor indicator (▶ symbol when cursor is on this card)
@@ -82,15 +83,22 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 		epicProgress = renderEpicProgress(task, width, s)
 	}
 
-	// Compose card content
-	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, badgeLine)
-
+	auxParts := make([]string, 0, 2)
 	if sessionRow != "" {
-		content = lipgloss.JoinVertical(lipgloss.Left, content, sessionRow)
+		auxParts = append(auxParts, sessionRow)
 	}
 	if epicProgress != "" {
-		content = lipgloss.JoinVertical(lipgloss.Left, content, epicProgress)
+		auxParts = append(auxParts, epicProgress)
 	}
+	auxLine := strings.Join(auxParts, " • ")
+
+	// Compose fixed content rows to guarantee stable card height.
+	lines := []string{
+		ansi.Truncate(titleLine, maxLineLen, "…"),
+		ansi.Truncate(badgeLine, maxLineLen, "…"),
+		ansi.Truncate(auxLine, maxLineLen, "…"),
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Render(content)
 }
