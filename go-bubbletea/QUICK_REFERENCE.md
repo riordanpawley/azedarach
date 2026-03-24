@@ -334,6 +334,44 @@ func beadsList() ([]Task, error) {
 }
 ```
 
+## Command Reference
+
+### `az export`
+
+User-facing CLI command for snapshot export.
+
+- Usage: `az export --format json [--out <path>]`
+- Flags:
+  - `--format json` is the only supported format.
+  - `--out <path>` writes the raw JSON response body to a file instead of stdout.
+- Output:
+  - Without `--out`, the command writes the daemon response body directly to stdout.
+  - With `--out`, the command writes the same raw body bytes to the target file.
+  - No wrapper object or pretty-printing is added by the CLI.
+- Exit codes:
+  - `0` on success.
+  - `1` on hard failure: bad flags or arguments, daemon attach/transport errors,
+    daemon non-OK responses, or response/file-write failures.
+
+### `task.bulk.apply`
+
+Daemon command used by thin clients to validate and apply a JSON batch mutation payload.
+There is no standalone `az apply` CLI subcommand in the current command surface.
+
+- Request body:
+  - `schema_version: 1`
+  - `snapshot_revision`
+  - `dry_run`
+  - `operations`
+- Output:
+  - On success, the daemon returns a JSON body with a `summary` object containing
+    `total`, `succeeded`, and `failed`.
+  - Partial failures are represented in the response body, not by changing the transport contract.
+- Exit codes:
+  - `0` when the response is OK and `summary.failed == 0`.
+  - `2` when the response is OK but `summary.failed > 0`.
+  - `1` on hard failure: non-OK response or invalid apply response body.
+
 ## Key Handling
 
 ```go
