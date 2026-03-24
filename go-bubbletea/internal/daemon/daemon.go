@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
@@ -70,10 +70,10 @@ func New(cfg Config) *Daemon {
 		cfg.CLITool = "claude"
 	}
 	if cfg.SocketPath == "" {
-		cfg.SocketPath = filepath.Join(cfg.RepoDir, ".beads", "azd.sock")
+		cfg.SocketPath = appconfig.GlobalDaemonSocketPath()
 	}
 	if cfg.LockPath == "" {
-		cfg.LockPath = filepath.Join(cfg.RepoDir, ".beads", "daemon.lock")
+		cfg.LockPath = appconfig.GlobalDaemonLockPath()
 	}
 
 	beadsRunner := &beads.ExecRunner{}

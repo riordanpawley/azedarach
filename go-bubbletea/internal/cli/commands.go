@@ -53,7 +53,7 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	}
 
 	projectID := filepath.Base(repoDir)
-	socketPath := filepath.Join(repoDir, ".beads", "azd.sock")
+	socketPath := config.GlobalDaemonSocketPath()
 	daemonTransport := transport.NewClient(socketPath)
 
 	return &Dependencies{
@@ -314,7 +314,7 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
-	launcher := daemonprocess.NewLauncher(deps.RepoDir, filepath.Join(deps.RepoDir, ".beads", "azd.sock"))
+	launcher := daemonprocess.NewLauncher(deps.RepoDir, config.GlobalDaemonSocketPath())
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,

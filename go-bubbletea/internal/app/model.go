@@ -173,7 +173,7 @@ func New(cfg *config.Config) Model {
 		logger.Error("failed to get current directory", "error", err)
 		repoDir = "."
 	}
-	socketPath := filepath.Join(repoDir, ".beads", "azd.sock")
+	socketPath := config.GlobalDaemonSocketPath()
 	daemonClient := daemonclient.New(transport.NewClient(socketPath))
 
 	// Initialize tmux client
@@ -1312,7 +1312,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(m.repoDir, filepath.Join(m.repoDir, ".beads", "azd.sock"))
+		launcher := daemonprocess.NewLauncher(m.repoDir, config.GlobalDaemonSocketPath())
 		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,

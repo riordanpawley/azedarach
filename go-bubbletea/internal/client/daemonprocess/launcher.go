@@ -10,9 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/riordanpawley/azedarach/internal/config"
 )
 
-// Launcher starts/replaces the daemon process for a repo-scoped socket.
+// Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
 	RepoDir    string
 	SocketPath string
@@ -22,7 +24,7 @@ type Launcher struct {
 
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
-	lockPath := filepath.Join(repoDir, ".beads", "daemon.lock")
+	lockPath := config.GlobalDaemonLockPath()
 	return &Launcher{
 		RepoDir:    repoDir,
 		SocketPath: socketPath,

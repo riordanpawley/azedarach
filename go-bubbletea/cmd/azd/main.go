@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -37,9 +36,9 @@ func main() {
 	}
 
 	if socketPath == "" {
-		socketPath = filepath.Join(repoDir, ".beads", "azd.sock")
+		socketPath = config.GlobalDaemonSocketPath()
 	}
-	lockPath := filepath.Join(repoDir, ".beads", "daemon.lock")
+	lockPath := config.GlobalDaemonLockPath()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

@@ -6,6 +6,7 @@ build:
     go build -o bin/az ./cmd/az
 
 run:
+    go build -o bin/azd ./cmd/azd
     go run ./cmd/az
 
 test:
