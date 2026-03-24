@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -177,6 +178,23 @@ func TestView_CanonicalProfiles(t *testing.T) {
 				t.Fatalf("expected full hints for %s profile, got: %s", profile.Name, view)
 			}
 		})
+	}
+}
+
+func TestView_ShowsHiddenSelectionCount(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.viewMode = ViewModeBoard
+	m.editor.Select("az-1")
+	m.editor.Select("az-2")
+	m.editor.ToggleStatusFilter(domain.StatusDone)
+
+	view := m.View()
+	if !strings.Contains(view, "Selected: 2 (2 hidden)") {
+		t.Fatalf("view = %q, want hidden selection count", view)
+	}
+	if !strings.Contains(view, "NORMAL") {
+		t.Fatalf("view = %q, want normal mode badge", view)
 	}
 }
 
@@ -419,6 +437,10 @@ func TestSearchOverlayLiveFilteringAndModeTransitions(t *testing.T) {
 	searchOverlay, ok := searchModel.overlayStack.Current().(*overlay.SearchOverlay)
 	if !ok {
 		t.Fatalf("expected SearchOverlay on stack, got %T", searchModel.overlayStack.Current())
+	}
+
+	for _, r := range []rune{'a', 'z', '-', '1'} {
+		_, _ = searchOverlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 
 	updated, _ = searchModel.Update(overlay.SearchMsg{Query: "az-1"})
@@ -665,6 +687,166 @@ func TestGotoMode(t *testing.T) {
 			t.Errorf("Expected column 3, got %d", pos.Column)
 		}
 	})
+
+	t.Run("g boundary keys jump to expected positions", func(t *testing.T) {
+		boundaryModel := newTestModel()
+		for i := 0; i < 5; i++ {
+			boundaryModel.tasks = append(boundaryModel.tasks, domain.Task{
+				ID:       fmt.Sprintf("boundary-%d", i),
+				Title:    "Boundary Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P3,
+				Type:     domain.TypeTask,
+			})
+		}
+
+		boundaryModel.nav.SelectTask("az-1", 0)
+		boundaryModel.editor.EnterGoto()
+		result, _ := boundaryModel.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+		next := result.(Model)
+		pos := getCursorPosition(next)
+		if pos.Column != 0 || pos.Task != len(boundaryModel.currentColumn())-1 {
+			t.Fatalf("g e position = (%d,%d), want bottom of current column", pos.Column, pos.Task)
+		}
+
+		boundaryModel.nav.SelectTask("az-4", 2)
+		boundaryModel.editor.EnterGoto()
+		result, _ = boundaryModel.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+		next = result.(Model)
+		pos = getCursorPosition(next)
+		if pos.Column != 0 {
+			t.Fatalf("g h column = %d, want 0", pos.Column)
+		}
+
+		boundaryModel.nav.SelectTask("az-1", 0)
+		boundaryModel.editor.EnterGoto()
+		result, _ = boundaryModel.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+		next = result.(Model)
+		pos = getCursorPosition(next)
+		if pos.Column != 3 {
+			t.Fatalf("g l column = %d, want 3", pos.Column)
+		}
+	})
+
+	t.Run("gw opens jump labels and selects a double-char target", func(t *testing.T) {
+		jumpModel := newTestModel()
+		jumpModel.width = 120
+		jumpModel.height = 120
+		jumpModel.editor.EnterGoto()
+		jumpModel.nav.SelectTask("az-1", 0)
+
+		for i := 0; i < 9; i++ {
+			jumpModel.tasks = append(jumpModel.tasks, domain.Task{
+				ID:       fmt.Sprintf("jump-%02d", i),
+				Title:    fmt.Sprintf("Jump Task %02d", i),
+				Status:   domain.StatusOpen,
+				Priority: domain.P3,
+				Type:     domain.TypeTask,
+			})
+		}
+
+		result, _ := jumpModel.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+		newModel := result.(Model)
+
+		current := newModel.overlayStack.Current()
+		if current == nil {
+			t.Fatal("expected jump overlay to be pushed")
+		}
+		jump, ok := current.(*overlay.JumpMode)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *overlay.JumpMode", current)
+		}
+		if got, want := jump.GetLabel(0), "a"; got != want {
+			t.Fatalf("label 0 = %q, want %q", got, want)
+		}
+		if got, want := jump.GetLabel(10), "aa"; got != want {
+			t.Fatalf("label 10 = %q, want %q", got, want)
+		}
+
+		seen := make(map[string]int, 11)
+		for i := 0; i < 11; i++ {
+			label := jump.GetLabel(i)
+			if label == "" {
+				t.Fatalf("label %d is empty", i)
+			}
+			if prev, ok := seen[label]; ok {
+				t.Fatalf("label %q reused for indexes %d and %d", label, prev, i)
+			}
+			seen[label] = i
+		}
+		if got := len(seen); got != 11 {
+			t.Fatalf("unique label count = %d, want 11", got)
+		}
+
+		if cmd := newModel.overlayStack.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); cmd != nil {
+			t.Fatal("expected first jump key to wait for a two-char label")
+		}
+		cmd := newModel.overlayStack.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		if cmd == nil {
+			t.Fatal("expected second jump key to emit a selection command")
+		}
+		msg := cmd()
+		selected, ok := msg.(overlay.JumpSelectedMsg)
+		if !ok {
+			t.Fatalf("jump command emitted %T, want overlay.JumpSelectedMsg", msg)
+		}
+		if got, want := selected.TaskIndex, 10; got != want {
+			t.Fatalf("selected task index = %d, want %d", got, want)
+		}
+
+		result, _ = newModel.Update(msg)
+		finalModel := result.(Model)
+		pos := getCursorPosition(finalModel)
+		if pos.Column != 0 || pos.Task != 10 {
+			t.Fatalf("expected cursor on jump target at (0,10), got (%d,%d)", pos.Column, pos.Task)
+		}
+		if !finalModel.overlayStack.IsEmpty() {
+			t.Fatal("expected jump overlay to close after selection")
+		}
+	})
+
+	t.Run("gs opens spec workspace", func(t *testing.T) {
+		m.editor.EnterGoto()
+		m.nav.SelectTask("az-2", 0)
+		before := getCursorPosition(m)
+
+		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsNormal() {
+			t.Fatalf("expected goto mode to return to normal after opening spec workspace, got %v", newModel.editor.GetMode())
+		}
+		current := newModel.overlayStack.Current()
+		if current == nil {
+			t.Fatal("expected spec workspace overlay to be pushed")
+		}
+		if got := current.Title(); got != "Spec Workspace" {
+			t.Fatalf("overlay title = %q, want Spec Workspace", got)
+		}
+
+		updated, _ := newModel.handleOverlayKey(tea.KeyMsg{Type: tea.KeyTab})
+		cycled := updated.(Model)
+		if got := cycled.overlayStack.Current().View(); got == "" {
+			t.Fatal("expected spec workspace overlay to continue rendering after tab cycle")
+		}
+
+		_, closeCmd := cycled.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if closeCmd == nil {
+			t.Fatal("expected escape to emit a close command")
+		}
+		closeMsg := closeCmd()
+		if _, ok := closeMsg.(overlay.CloseOverlayMsg); !ok {
+			t.Fatalf("escape command emitted %T, want CloseOverlayMsg", closeMsg)
+		}
+		cycled.overlayStack.Update(closeMsg)
+		finalModel := cycled
+		if !finalModel.overlayStack.IsEmpty() {
+			t.Fatal("expected spec workspace overlay to close on escape")
+		}
+		if finalPos := getCursorPosition(finalModel); finalPos != before {
+			t.Fatalf("cursor position changed across spec workspace flow: before=%+v after=%+v", before, finalPos)
+		}
+	})
 }
 
 func TestSelectModeEntry(t *testing.T) {
@@ -682,11 +864,29 @@ func TestSelectModeEntry(t *testing.T) {
 
 	t.Run("escape exits select mode back to normal", func(t *testing.T) {
 		m.editor.EnterSelect()
+		m.editor.Select("az-1")
 		result, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 		newModel := result.(Model)
 
 		if !newModel.editor.IsNormal() {
 			t.Errorf("Expected ModeNormal after escape from select, got %v", newModel.editor.GetMode())
+		}
+		if newModel.editor.HasSelection() {
+			t.Fatal("expected selection to be cleared after escape from select")
+		}
+	})
+
+	t.Run("v exits select mode and clears selection", func(t *testing.T) {
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsNormal() {
+			t.Errorf("Expected ModeNormal after v from select, got %v", newModel.editor.GetMode())
+		}
+		if newModel.editor.HasSelection() {
+			t.Fatal("expected selection to be cleared after v from select")
 		}
 	})
 }
@@ -723,6 +923,178 @@ func TestModeTransitions(t *testing.T) {
 			t.Error("Expected clear screen command, got nil")
 		}
 	})
+
+	t.Run("tab still toggles board view in normal mode", func(t *testing.T) {
+		m.editor.EnterNormal()
+		m.viewMode = ViewModeBoard
+
+		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+		newModel := result.(Model)
+
+		if newModel.viewMode != ViewModeCompact {
+			t.Fatalf("expected tab to toggle to compact view, got %v", newModel.viewMode)
+		}
+	})
+}
+
+func TestLoadingStateAcceptsImmediateInteraction(t *testing.T) {
+	m := newTestModel()
+	m.loading = true
+	m.editor.EnterNormal()
+	m.nav.SelectTask("az-1", 0)
+
+	if got := m.View(); !strings.Contains(got, "Loading issues") {
+		t.Fatalf("expected loading view while hydrated state is pending, got %q", got)
+	}
+
+	t.Run("navigation works while loading", func(t *testing.T) {
+		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+		newModel := result.(Model)
+
+		if !newModel.loading {
+			t.Fatal("expected loading state to remain active during immediate interaction")
+		}
+		pos := getCursorPosition(newModel)
+		if pos.Column != 1 {
+			t.Fatalf("expected cursor to move while loading, got column %d", pos.Column)
+		}
+	})
+
+	t.Run("mode changes work while loading", func(t *testing.T) {
+		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+		newModel := result.(Model)
+
+		if !newModel.loading {
+			t.Fatal("expected loading state to remain active during mode change")
+		}
+		if !newModel.editor.IsSelect() {
+			t.Fatalf("expected select mode while loading, got %v", newModel.editor.GetMode())
+		}
+	})
+}
+
+func TestEpicDrillDownFlow(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+
+	epicID := "az-epic"
+	childID := "az-epic-child"
+	m.tasks = append(m.tasks,
+		domain.Task{
+			ID:       epicID,
+			Title:    "Parent Epic",
+			Status:   domain.StatusOpen,
+			Priority: domain.P1,
+			Type:     domain.TypeEpic,
+		},
+		domain.Task{
+			ID:       childID,
+			Title:    "Epic Child",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			ParentID: &epicID,
+		},
+	)
+
+	m.nav.SelectTask(epicID, 0)
+	before := getCursorPosition(m)
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	drillDown, ok := current.(*overlay.EpicDrillDown)
+	if !ok {
+		t.Fatalf("expected EpicDrillDown overlay, got %T", current)
+	}
+	if got := drillDown.Title(); got != "Epic: az-epic" {
+		t.Fatalf("epic drill-down title = %q, want Epic: az-epic", got)
+	}
+	if got := drillDown.View(); !strings.Contains(got, "Parent Epic") || !strings.Contains(got, "Epic Child") {
+		t.Fatalf("epic drill-down view does not render expected content: %q", got)
+	}
+
+	updated, closeCmd := newModel.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if closeCmd == nil {
+		t.Fatal("expected escape to emit a close command")
+	}
+	closeMsg := closeCmd()
+	if _, ok := closeMsg.(overlay.CloseOverlayMsg); !ok {
+		t.Fatalf("escape command emitted %T, want CloseOverlayMsg", closeMsg)
+	}
+
+	closed := updated.(Model)
+	closed.overlayStack.Update(closeMsg)
+	if !closed.overlayStack.IsEmpty() {
+		t.Fatal("expected epic drill-down overlay to close on escape")
+	}
+	if finalPos := getCursorPosition(closed); finalPos != before {
+		t.Fatalf("cursor position changed across epic drill-down flow: before=%+v after=%+v", before, finalPos)
+	}
+}
+
+func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+
+	currentID := "az-current"
+	upstreamID := "az-upstream"
+	downstreamID := "az-downstream"
+
+	m.tasks = append(m.tasks,
+		domain.Task{
+			ID:       currentID,
+			Title:    "Current task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: downstreamID, Type: domain.DependencyBlocks},
+			},
+		},
+		domain.Task{
+			ID:       upstreamID,
+			Title:    "Upstream task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: currentID, Type: domain.DependencyRelatedTo},
+			},
+		},
+		domain.Task{
+			ID:       downstreamID,
+			Title:    "Downstream task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		},
+	)
+
+	m.nav.SelectTask(currentID, 0)
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	detail, ok := current.(*overlay.DetailPanel)
+	if !ok {
+		t.Fatalf("expected DetailPanel overlay, got %T", current)
+	}
+	view := detail.View()
+	if !strings.Contains(view, "Dependencies") {
+		t.Fatalf("expected dependency section in view, got %q", view)
+	}
+	if !strings.Contains(view, "Outgoing") || !strings.Contains(view, "blocks -> az-downstream") {
+		t.Fatalf("expected outgoing dependency edge in view, got %q", view)
+	}
+	if !strings.Contains(view, "Incoming") || !strings.Contains(view, "related_to <- az-upstream") {
+		t.Fatalf("expected incoming dependency edge in view, got %q", view)
+	}
+	if strings.Index(view, "Outgoing") > strings.Index(view, "Incoming") {
+		t.Fatalf("expected outgoing dependencies to render before incoming dependencies, got %q", view)
+	}
 }
 
 func TestModeStrings(t *testing.T) {
