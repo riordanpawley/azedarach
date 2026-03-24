@@ -18,7 +18,7 @@ func TestRenderColumn_DoesNotScrollImmediatelyOnNextTask(t *testing.T) {
 
 	// Height allows ~2 cards. Cursor on second task should stay in view without
 	// snapping the viewport to the second card at the top.
-	out := renderColumn("Open", tasks, 1, true, map[string]bool{}, nil, false, 36, 16, s)
+	out := renderColumn("Open", tasks, 1, true, 0, map[string]bool{}, nil, false, 36, 16, s)
 
 	if !strings.Contains(out, "Task One") {
 		t.Fatalf("expected first task to remain visible when cursor moves to second task")
@@ -27,4 +27,3 @@ func TestRenderColumn_DoesNotScrollImmediatelyOnNextTask(t *testing.T) {
 		t.Fatalf("expected second task to be visible")
 	}
 }
-

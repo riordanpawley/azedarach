@@ -17,6 +17,7 @@ func renderColumn(
 	tasks []domain.Task,
 	cursorTask int,
 	isActive bool,
+	verticalBias int,
 	selectedTasks map[string]bool,
 	phaseData map[string]phases.TaskPhaseInfo,
 	showPhases bool,
@@ -36,7 +37,7 @@ func renderColumn(
 	if availableHeight < 0 {
 		availableHeight = 0
 	}
-	start, end := visibleTaskRange(len(tasks), cursorTask, availableHeight)
+	start, end := visibleTaskRange(len(tasks), cursorTask, availableHeight, verticalBias)
 
 	var cardContent strings.Builder
 	cardWidth := width - 2
@@ -64,7 +65,7 @@ func renderColumn(
 	return lipgloss.JoinVertical(lipgloss.Left, header, columnBody)
 }
 
-func visibleTaskRange(taskCount int, cursorTask int, availableHeight int) (int, int) {
+func visibleTaskRange(taskCount int, cursorTask int, availableHeight int, verticalBias int) (int, int) {
 	if taskCount <= 0 {
 		return 0, 0
 	}
@@ -86,6 +87,9 @@ func visibleTaskRange(taskCount int, cursorTask int, availableHeight int) (int, 
 	}
 
 	start := cursorTask - visibleCards + 1
+	if verticalBias < 0 {
+		start = cursorTask
+	}
 	if start < 0 {
 		start = 0
 	}

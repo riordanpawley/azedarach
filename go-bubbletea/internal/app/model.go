@@ -99,6 +99,7 @@ type Model struct {
 	// UI state
 	overlayStack *overlay.Stack
 	viewMode     ViewMode
+	verticalBias int
 
 	// Project
 	currentProject string
@@ -132,6 +133,7 @@ type Model struct {
 	// Session management services
 	sessionMonitor *monitor.SessionMonitor
 	tmuxClient     *tmux.Client
+	tmuxAvailable  bool
 
 	// Git services
 	gitClient      *git.Client
@@ -221,32 +223,33 @@ func New(cfg *config.Config) Model {
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
 
 	m := Model{
-		tasks:                []domain.Task{},
-		sessions:             make(map[string]*domain.Session),
-		nav:                  navigation.NewService(),
-		editor:               editor.NewService(),
-		overlayStack:         overlay.NewStack(),
-		viewMode:             ViewModeBoard, // Start with board view
-		toasts:               []Toast{},
-		styles:               styles.New(),
-		config:               cfg,
-		loading:              true, // Start with loading state
-		spinner:              s,
-		daemonClient:         daemonClient,
-		sessionMonitor:       sessionMonitor,
-		tmuxClient:           tmuxClient,
-		gitClient:            gitClient,
-		gitSyncService:       gitSyncService,
-		networkChecker:       networkChecker,
-		projectRegistry:      registry,
-		isOnline:             true, // Optimistically assume online
-		attachmentService:    attachmentSvc,
-		prWorkflow:           prWorkflow,
-		diagnosticsService:   diagService,
-		logger:               logger,
-		usePlaceholder:       false, // Use real data from local issue store
-		repoDir:              repoDir,
-		currentProject:       resolveInitialProjectName(registry, repoDir),
+		tasks:              []domain.Task{},
+		sessions:           make(map[string]*domain.Session),
+		nav:                navigation.NewService(),
+		editor:             editor.NewService(),
+		overlayStack:       overlay.NewStack(),
+		viewMode:           ViewModeBoard, // Start with board view
+		toasts:             []Toast{},
+		styles:             styles.New(),
+		config:             cfg,
+		loading:            true, // Start with loading state
+		spinner:            s,
+		daemonClient:       daemonClient,
+		sessionMonitor:     sessionMonitor,
+		tmuxClient:         tmuxClient,
+		gitClient:          gitClient,
+		gitSyncService:     gitSyncService,
+		networkChecker:     networkChecker,
+		projectRegistry:    registry,
+		isOnline:           true, // Optimistically assume online
+		attachmentService:  attachmentSvc,
+		prWorkflow:         prWorkflow,
+		diagnosticsService: diagService,
+		logger:             logger,
+		usePlaceholder:     false, // Use real data from local issue store
+		tmuxAvailable:      os.Getenv("TMUX") != "",
+		repoDir:            repoDir,
+		currentProject:     resolveInitialProjectName(registry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
@@ -967,10 +970,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Vertical navigation
 	case "j", "down":
+		m.verticalBias = 1
 		m.nav.MoveDown(columns)
 		return m, nil
 
 	case "k", "up":
+		m.verticalBias = -1
 		m.nav.MoveUp(columns)
 		return m, nil
 
@@ -985,10 +990,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Half-page scroll
 	case "ctrl+d":
+		m.verticalBias = 1
 		m.nav.HalfPageDown(columns, m.halfPage())
 		return m, nil
 
 	case "ctrl+u":
+		m.verticalBias = -1
 		m.nav.HalfPageUp(columns, m.halfPage())
 		return m, nil
 
@@ -1163,6 +1170,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
+		m.verticalBias = 1
 		m.nav.MoveDown(columns)
 		return m, nil
 
@@ -1171,6 +1179,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
+		m.verticalBias = -1
 		m.nav.MoveUp(columns)
 		return m, nil
 
@@ -1188,6 +1197,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
+		m.verticalBias = 1
 		m.nav.HalfPageDown(columns, m.halfPage())
 		return m, nil
 
@@ -1195,6 +1205,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
+		m.verticalBias = -1
 		m.nav.HalfPageUp(columns, m.halfPage())
 		return m, nil
 
@@ -1977,6 +1988,13 @@ type sessionAttachedMsg struct {
 
 func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 	return func() tea.Msg {
+		if !m.tmuxAvailable {
+			return Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
+				Expires: time.Now().Add(8 * time.Second),
+			}
+		}
 		if m.tmuxClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("tmux client unavailable")}
 		}
@@ -2062,6 +2080,14 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 
 	case resolution.ResolveWithClaude:
 		// Attach to tmux session for Claude to resolve
+		if !m.tmuxAvailable {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", task.ID),
+				Expires: time.Now().Add(8 * time.Second),
+			})
+			return m, nil
+		}
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastInfo,
 			Message: fmt.Sprintf("Run: tmux attach-session -t %s (Claude can help resolve)", task.ID),
@@ -2570,6 +2596,14 @@ func (m Model) toggleDevServer(serverID string) tea.Cmd {
 
 func (m Model) viewDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
+		if !m.tmuxAvailable {
+			return Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("tmux attach-session -t devserver-%s is unavailable outside tmux; launch az inside tmux to use tmux actions", serverID),
+				Expires: time.Now().Add(8 * time.Second),
+			}
+		}
+
 		// For now, show a toast with instructions
 		return Toast{
 			Level:   ToastInfo,
@@ -2652,6 +2686,7 @@ func (m Model) renderBoardView() string {
 		m.editor.GetSelectedTasks(),
 		phaseData,
 		m.editor.GetShowPhases(),
+		m.verticalBias,
 		m.styles,
 		m.width,
 		m.height-1,
@@ -2715,6 +2750,14 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		// onAttach
 		func(issueID string) tea.Cmd {
 			return func() tea.Msg {
+				if !m.tmuxAvailable {
+					return Toast{
+						Level:   ToastWarning,
+						Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
+						Expires: time.Now().Add(8 * time.Second),
+					}
+				}
+
 				// Show attach instructions
 				return Toast{
 					Level:   ToastInfo,
