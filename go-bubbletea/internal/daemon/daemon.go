@@ -15,9 +15,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -43,7 +43,7 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	beads    *beads.Client
+	issues   *issues.Client
 	tmux     *tmux.Client
 	worktree *git.WorktreeManager
 
@@ -76,7 +76,6 @@ func New(cfg Config) *Daemon {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
 	}
 
-	beadsRunner := &beads.ExecRunner{}
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
@@ -85,7 +84,7 @@ func New(cfg Config) *Daemon {
 		cfg:      cfg,
 		lock:     lifecycle.NewLockManager(cfg.LockPath),
 		hub:      publish.NewHub(512, 64, cfg.Logger),
-		beads:    beads.NewClient(beadsRunner, cfg.Logger),
+		issues:   issues.NewClient(cfg.RepoDir, cfg.Logger),
 		tmux:     tmux.NewClient(tmuxRunner, cfg.Logger),
 		worktree: git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
 		revision: map[string]uint64{},
@@ -95,7 +94,7 @@ func New(cfg Config) *Daemon {
 		daemonhandlers.NewWorktreeHandler(worktreeServiceAdapter{manager: d.worktree}),
 		daemonhandlers.NewDevServerHandler(devServerManager),
 	)
-	d.apply = daemonhandlers.NewApplyHandler(d.beads, applyRevisionAdapter{daemon: d})
+	d.apply = daemonhandlers.NewApplyHandler(d.issues, applyRevisionAdapter{daemon: d})
 
 	d.serve = transport.NewServer(cfg.SocketPath, transport.Handlers{
 		Handshake: d.handshake,
@@ -144,6 +143,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleTaskDelete(ctx, req)
 	case "task.archive":
 		return d.handleTaskArchive(ctx, req)
+	case "task.snapshot.export":
+		return d.handleTaskSnapshotExport(ctx, req)
 	case protocol.CommandTaskBulkApply:
 		return d.apply.Handle(ctx, req), nil
 	case "session.start":
