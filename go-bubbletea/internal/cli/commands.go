@@ -10,9 +10,13 @@ import (
 	"path/filepath"
 	"time"
 
+	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 const (
@@ -27,6 +31,8 @@ type Dependencies struct {
 	DaemonClient *daemonclient.Client
 	Logger       *slog.Logger
 	ProjectID    string
+	RepoDir      string
+	TmuxClient   *tmux.Client
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
@@ -38,21 +44,26 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	}
 
 	projectID := filepath.Base(repoDir)
-	transport, err := newLocalDaemonTransport(cfg, repoDir, projectID, logger)
-	if err != nil {
-		return nil, err
-	}
+	socketPath := filepath.Join(repoDir, ".beads", "azd.sock")
+	daemonTransport := transport.NewClient(socketPath)
+	tmuxRunner := &tmux.ExecRunner{}
+	tmuxClient := tmux.NewClient(tmuxRunner, logger)
 
 	return &Dependencies{
 		Config:       cfg,
-		DaemonClient: daemonclient.New(transport),
+		DaemonClient: daemonclient.New(daemonTransport).WithProjectID(projectID),
 		Logger:       logger,
 		ProjectID:    projectID,
+		RepoDir:      repoDir,
+		TmuxClient:   tmuxClient,
 	}, nil
 }
 
 func StartCommand(deps *Dependencies, beadID string) error {
 	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
 
 	deps.Logger.Info("starting session", "bead_id", beadID)
 
@@ -69,6 +80,9 @@ func StartCommand(deps *Dependencies, beadID string) error {
 
 func AttachCommand(deps *Dependencies, beadID string) error {
 	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
 
 	deps.Logger.Info("attaching to session", "bead_id", beadID)
 
@@ -80,11 +94,20 @@ func AttachCommand(deps *Dependencies, beadID string) error {
 		return err
 	}
 
-	return printCommandOutput(resp)
+	if err := printCommandOutput(resp); err != nil {
+		return err
+	}
+	if deps.TmuxClient != nil {
+		return deps.TmuxClient.AttachSession(ctx, beadID)
+	}
+	return nil
 }
 
 func KillCommand(deps *Dependencies, beadID string) error {
 	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
 
 	deps.Logger.Info("killing session", "bead_id", beadID)
 
@@ -102,6 +125,9 @@ func KillCommand(deps *Dependencies, beadID string) error {
 func StatusCommand(deps *Dependencies, beadID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
 
 	deps.Logger.Info("checking session status", "bead_id", beadID)
 
@@ -195,5 +221,23 @@ func printCommandOutput(resp protocol.ResponseEnvelope) error {
 		fmt.Print(out.Output)
 	}
 
+	return nil
+}
+
+func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
+	launcher := daemonprocess.NewLauncher(deps.RepoDir, filepath.Join(deps.RepoDir, ".beads", "azd.sock"))
+	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
+	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      clientName,
+		ClientVersion:   "dev",
+		Capabilities:    []string{"snapshot", "subscribe"},
+	})
+	if err != nil {
+		return fmt.Errorf("daemon attach failed: %w", err)
+	}
+	if !ack.Accepted {
+		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
+	}
 	return nil
 }

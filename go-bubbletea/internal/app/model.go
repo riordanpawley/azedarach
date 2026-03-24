@@ -13,13 +13,15 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
@@ -101,6 +103,7 @@ type Model struct {
 	// Project
 	currentProject string
 	projects       []domain.Project
+	repoDir        string
 
 	// Toasts
 	toasts []Toast
@@ -170,23 +173,20 @@ func New(cfg *config.Config) Model {
 	// Initialize logger
 	logger := slog.Default()
 
-	// Initialize beads client for the local daemon transport shim
-	beadsRunner := &beads.ExecRunner{}
-	beadsClient := beads.NewClient(beadsRunner, logger)
-
-	daemonClient := daemonclient.New(newLocalDaemonTransport(beadsClient))
+	// Resolve repository directory for local services and daemon routing.
+	repoDir, err := os.Getwd()
+	if err != nil {
+		logger.Error("failed to get current directory", "error", err)
+		repoDir = "."
+	}
+	socketPath := filepath.Join(repoDir, ".beads", "azd.sock")
+	daemonClient := daemonclient.New(transport.NewClient(socketPath))
 
 	// Initialize tmux client
 	tmuxRunner := &tmux.ExecRunner{}
 	tmuxClient := tmux.NewClient(tmuxRunner, logger)
 
 	// Initialize git worktree manager
-	// Get current working directory as repo directory
-	repoDir, err := os.Getwd()
-	if err != nil {
-		logger.Error("failed to get current directory", "error", err)
-		repoDir = "."
-	}
 	gitRunner := git.NewExecRunner(repoDir)
 	worktreeManager := git.NewWorktreeManager(gitRunner, repoDir, logger)
 
@@ -258,6 +258,7 @@ func New(cfg *config.Config) Model {
 		diagnosticsService: diagService,
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from beads
+		repoDir:            repoDir,
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
@@ -1326,15 +1327,17 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ack, diag := m.daemonClient.Handshake(ctx, protocol.Hello{
-			ProtocolVersion: protocol.CurrentVersion,
-			ClientName:      "tui",
-			ClientVersion:   "dev",
-			Capabilities:    []string{"snapshot", "subscribe"},
-		})
-		if diag != nil {
-			return beadsErrorMsg{err: fmt.Errorf("daemon handshake: %s: %w", diag.Message, diag.Err)}
-		}
+			launcher := daemonprocess.NewLauncher(m.repoDir, filepath.Join(m.repoDir, ".beads", "azd.sock"))
+			orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+			ack, err := orch.EnsureAttached(ctx, protocol.Hello{
+				ProtocolVersion: protocol.CurrentVersion,
+				ClientName:      "tui",
+				ClientVersion:   "dev",
+				Capabilities:    []string{"snapshot", "subscribe"},
+			})
+			if err != nil {
+				return beadsErrorMsg{err: fmt.Errorf("daemon attach: %w", err)}
+			}
 		if !ack.Accepted {
 			return beadsErrorMsg{err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
