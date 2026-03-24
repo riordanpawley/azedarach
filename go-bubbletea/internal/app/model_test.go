@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -227,6 +228,42 @@ func TestNormalModeNavigation(t *testing.T) {
 	})
 }
 
+func TestNormalModeNavigation_CoalescesFastRepeatedNavKeys(t *testing.T) {
+	m := newTestModel()
+	m.tasks = append(m.tasks, domain.Task{
+		ID:       "az-6",
+		Title:    "Task 6",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	})
+
+	now := time.Date(2026, time.March, 25, 1, 0, 0, 0, time.UTC)
+	m.clockNow = func() time.Time { return now }
+	m.navRepeatMinInterval = 16 * time.Millisecond
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+	afterFirst := result.(Model)
+	if got := afterFirst.nav.GetCursor().TaskID; got != "az-2" {
+		t.Fatalf("first down should move to az-2, got %s", got)
+	}
+
+	now = now.Add(5 * time.Millisecond)
+	result, _ = afterFirst.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+	afterSecond := result.(Model)
+	if got := afterSecond.nav.GetCursor().TaskID; got != "az-2" {
+		t.Fatalf("second down within coalesce window should be ignored, got %s", got)
+	}
+
+	now = now.Add(20 * time.Millisecond)
+	result, _ = afterSecond.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+	afterThird := result.(Model)
+	if got := afterThird.nav.GetCursor().TaskID; got != "az-6" {
+		t.Fatalf("third down after coalesce window should move to az-6, got %s", got)
+	}
+}
+
 func TestHalfPageScroll(t *testing.T) {
 	m := newTestModel()
 
@@ -441,5 +478,30 @@ func TestModeStrings(t *testing.T) {
 				t.Errorf("Expected %s, got %s", tt.expected, tt.mode.String())
 			}
 		})
+	}
+}
+
+func TestIssuesLoadedReconcilesSelection(t *testing.T) {
+	m := newTestModel()
+	m.editor.Select("az-1")
+	m.editor.Select("ghost")
+
+	result, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug},
+		},
+		revision: 9,
+	})
+	newModel := result.(Model)
+
+	if got := newModel.editor.SelectionCount(); got != 1 {
+		t.Fatalf("selection count = %d, want 1", got)
+	}
+	if !newModel.editor.IsSelected("az-1") {
+		t.Fatal("expected az-1 to remain selected after refresh")
+	}
+	if newModel.editor.IsSelected("ghost") {
+		t.Fatal("expected ghost selection to be pruned after refresh")
 	}
 }
