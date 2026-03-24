@@ -250,3 +250,54 @@ func TestMapWorktreeError(t *testing.T) {
 		t.Fatalf("mapWorktreeError internal = %+v", got)
 	}
 }
+
+func TestMapCleanupOrphanedError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantCode  protocol.ErrorCode
+		retryable bool
+	}{
+		{
+			name:     "invalid request",
+			err:      ErrCleanupOrphanedInvalidRequest,
+			wantCode: protocol.ErrorCodeInvalidRequest,
+		},
+		{
+			name:     "not found",
+			err:      ErrCleanupOrphanedNotFound,
+			wantCode: protocol.ErrorCodeInvalidRequest,
+		},
+		{
+			name:     "conflict",
+			err:      ErrCleanupOrphanedConflict,
+			wantCode: protocol.ErrorCodeConflict,
+		},
+		{
+			name:      "timeout",
+			err:       context.DeadlineExceeded,
+			wantCode:  protocol.ErrorCodeTimeout,
+			retryable: true,
+		},
+		{
+			name:     "internal",
+			err:      errors.New("boom"),
+			wantCode: protocol.ErrorCodeInternal,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapCleanupOrphanedError(tc.err)
+			if got == nil {
+				t.Fatal("expected error envelope")
+			}
+			if got.Code != tc.wantCode {
+				t.Fatalf("Code = %q, want %q", got.Code, tc.wantCode)
+			}
+			if got.Retryable != tc.retryable {
+				t.Fatalf("Retryable = %v, want %v", got.Retryable, tc.retryable)
+			}
+		})
+	}
+}

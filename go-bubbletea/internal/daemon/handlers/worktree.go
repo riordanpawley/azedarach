@@ -12,15 +12,20 @@ import (
 )
 
 const (
-	CommandWorktreeList   = "worktree.list"
-	CommandWorktreeCreate = "worktree.create"
-	CommandWorktreeRemove = "worktree.remove"
+	CommandWorktreeList            = "worktree.list"
+	CommandWorktreeCreate          = "worktree.create"
+	CommandWorktreeRemove          = "worktree.remove"
+	CommandWorktreeCleanupOrphaned = "worktree.cleanup_orphaned"
 )
 
 var (
 	ErrWorktreeNotFound       = errors.New("worktree not found")
 	ErrWorktreeAlreadyExists  = errors.New("worktree already exists")
 	ErrWorktreeInvalidRequest = errors.New("invalid worktree request")
+
+	ErrCleanupOrphanedNotFound       = errors.New("cleanup orphaned worktree not found")
+	ErrCleanupOrphanedConflict       = errors.New("cleanup orphaned conflict")
+	ErrCleanupOrphanedInvalidRequest = errors.New("invalid cleanup orphaned request")
 )
 
 // WorktreeHandler routes daemon worktree commands.
@@ -226,6 +231,37 @@ func mapWorktreeError(err error) *protocol.ErrorEnvelope {
 			Retryable: false,
 		}
 	case errors.Is(err, ErrWorktreeAlreadyExists):
+		return &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeConflict,
+			Message:   err.Error(),
+			Retryable: false,
+		}
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeTimeout,
+			Message:   err.Error(),
+			Retryable: true,
+		}
+	default:
+		return &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   err.Error(),
+			Retryable: false,
+		}
+	}
+}
+
+func mapCleanupOrphanedError(err error) *protocol.ErrorEnvelope {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrCleanupOrphanedInvalidRequest), errors.Is(err, ErrCleanupOrphanedNotFound):
+		return &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   err.Error(),
+			Retryable: false,
+		}
+	case errors.Is(err, ErrCleanupOrphanedConflict):
 		return &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeConflict,
 			Message:   err.Error(),
