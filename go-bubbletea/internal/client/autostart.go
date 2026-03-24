@@ -26,30 +26,45 @@ type Starter interface {
 	Start(ctx context.Context) error
 }
 
+// Replacer performs controlled daemon replacement on compatibility mismatch.
+type Replacer interface {
+	Replace(ctx context.Context) error
+}
+
 // AutostartOrchestrator coordinates attach/start/reattach with singleflight.
 type AutostartOrchestrator struct {
 	handshaker  Handshaker
 	starter     Starter
+	replacer    Replacer
 	group       singleflight.Group
 	maxRetries  int
 	backoffFn   func(attempt int) time.Duration
 	sleepFn     func(time.Duration)
 	onceMu      sync.Mutex
 	spawned     bool
+	replaced    bool
 	startKey    string
+	replaceKey  string
 }
 
 // NewAutostartOrchestrator returns a default autostart orchestrator.
 func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *AutostartOrchestrator {
+	var replacer Replacer
+	if r, ok := starter.(Replacer); ok {
+		replacer = r
+	}
+
 	return &AutostartOrchestrator{
 		handshaker: handshaker,
 		starter:    starter,
+		replacer:   replacer,
 		maxRetries: 3,
 		backoffFn: func(attempt int) time.Duration {
 			return time.Duration(attempt+1) * 50 * time.Millisecond
 		},
-		sleepFn:  time.Sleep,
-		startKey: "daemon-autostart",
+		sleepFn:    time.Sleep,
+		startKey:   "daemon-autostart",
+		replaceKey: "daemon-replace",
 	}
 }
 
@@ -63,17 +78,14 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 		return ack, ErrUpgradeRequired
 	}
 
-	if _, startErr, _ := o.group.Do(o.startKey, func() (any, error) {
-		if o.isSpawned() {
-			return nil, nil
+	if err == nil && ack.ErrorCode.IsCompatibilityFailure() && ack.RetryAfterRestart {
+		if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
+			return protocol.HelloAck{}, fmt.Errorf("%w: replace daemon: %v", ErrUpgradeRequired, replaceErr)
 		}
-		if err := o.starter.Start(ctx); err != nil {
-			return nil, err
+	} else {
+		if startErr := o.startDaemon(ctx); startErr != nil {
+			return protocol.HelloAck{}, fmt.Errorf("autostart daemon: %w", startErr)
 		}
-		o.markSpawned()
-		return nil, nil
-	}); startErr != nil {
-		return protocol.HelloAck{}, fmt.Errorf("autostart daemon: %w", startErr)
 	}
 
 	for attempt := 0; attempt <= o.maxRetries; attempt++ {
@@ -81,7 +93,10 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 		if err == nil && ack.Accepted {
 			return ack, nil
 		}
-		if err == nil && ack.ErrorCode.IsCompatibilityFailure() && !ack.RetryAfterRestart {
+		if err == nil && ack.ErrorCode.IsCompatibilityFailure() {
+			if ack.RetryAfterRestart {
+				return ack, fmt.Errorf("%w: compatibility mismatch persisted after replacement", ErrUpgradeRequired)
+			}
 			return ack, ErrUpgradeRequired
 		}
 		if attempt < o.maxRetries {
@@ -98,6 +113,41 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 	return ack, fmt.Errorf("attach rejected after autostart: %s", ack.ErrorCode)
 }
 
+func (o *AutostartOrchestrator) startDaemon(ctx context.Context) error {
+	_, startErr, _ := o.group.Do(o.startKey, func() (any, error) {
+		if o.isSpawned() {
+			return nil, nil
+		}
+		if err := o.starter.Start(ctx); err != nil {
+			return nil, err
+		}
+		o.markSpawned()
+		return nil, nil
+	})
+	return startErr
+}
+
+func (o *AutostartOrchestrator) replaceDaemon(ctx context.Context) error {
+	_, replaceErr, _ := o.group.Do(o.replaceKey, func() (any, error) {
+		if o.isReplaced() {
+			return nil, nil
+		}
+		if o.replacer != nil {
+			if err := o.replacer.Replace(ctx); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := o.starter.Start(ctx); err != nil {
+				return nil, err
+			}
+		}
+		o.markReplaced()
+		o.markSpawned()
+		return nil, nil
+	})
+	return replaceErr
+}
+
 func (o *AutostartOrchestrator) isSpawned() bool {
 	o.onceMu.Lock()
 	defer o.onceMu.Unlock()
@@ -108,4 +158,16 @@ func (o *AutostartOrchestrator) markSpawned() {
 	o.onceMu.Lock()
 	defer o.onceMu.Unlock()
 	o.spawned = true
+}
+
+func (o *AutostartOrchestrator) isReplaced() bool {
+	o.onceMu.Lock()
+	defer o.onceMu.Unlock()
+	return o.replaced
+}
+
+func (o *AutostartOrchestrator) markReplaced() {
+	o.onceMu.Lock()
+	defer o.onceMu.Unlock()
+	o.replaced = true
 }
