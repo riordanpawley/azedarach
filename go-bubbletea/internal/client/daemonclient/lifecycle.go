@@ -64,6 +64,13 @@ func (c *Client) commandOutput(ctx context.Context, command string, body any) (s
 	return out.Output, nil
 }
 
+func (c *Client) projectRoute() string {
+	if c.projectID != "" {
+		return c.projectID
+	}
+	return "default"
+}
+
 // StartSession asks the daemon to start one session for bead/task id.
 func (c *Client) StartSession(ctx context.Context, beadID string, baseBranch string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
@@ -138,15 +145,10 @@ func (c *Client) RestartDevServer(ctx context.Context, beadID string) (devserver
 
 // ListWorktrees returns daemon-owned worktrees for the current project route.
 func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
-	projectID := c.projectID
-	if projectID == "" {
-		projectID = "default"
-	}
-
 	var out worktreeListBody
 	if err := c.commandJSON(ctx, CommandWorktreeList, struct {
 		ProjectID string `json:"project_id"`
-	}{ProjectID: projectID}, &out); err != nil {
+	}{ProjectID: c.projectRoute()}, &out); err != nil {
 		return nil, err
 	}
 
@@ -159,4 +161,15 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 		})
 	}
 	return worktrees, nil
+}
+
+// CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.
+func (c *Client) CleanupOrphanedWorktrees(ctx context.Context) (int, error) {
+	var out protocol.CleanupOrphanedResponseBody
+	if err := c.commandJSON(ctx, protocol.CommandWorktreeCleanupOrphaned, protocol.CleanupOrphanedRequestBody{
+		ProjectID: c.projectRoute(),
+	}, &out); err != nil {
+		return 0, err
+	}
+	return out.WorktreesRemoved, nil
 }
