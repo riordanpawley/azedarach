@@ -234,3 +234,37 @@ func TestEnsureAttachedReplacementSingleflight(t *testing.T) {
 		t.Fatalf("start calls = %d, want 0", got)
 	}
 }
+
+func TestEnsureAttachedReplacementCancellationDeterministic(t *testing.T) {
+	h := &fakeHandshaker{
+		fn: func() (protocol.HelloAck, error) {
+			return protocol.HelloAck{
+				Accepted:          false,
+				ErrorCode:         protocol.ErrorCodeIncompatible,
+				RetryAfterRestart: true,
+			}, nil
+		},
+	}
+	s := &fakeStarter{
+		replace: func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	o := NewAutostartOrchestrator(h, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := o.EnsureAttached(ctx, protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "tui",
+		ClientVersion:   "dev",
+	})
+	if !errors.Is(err, ErrUpgradeRequired) {
+		t.Fatalf("err = %v, want ErrUpgradeRequired", err)
+	}
+	if got := s.replaceCalls.Load(); got != 1 {
+		t.Fatalf("replace calls = %d, want 1", got)
+	}
+}
