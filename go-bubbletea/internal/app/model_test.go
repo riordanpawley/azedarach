@@ -246,6 +246,7 @@ func TestHalfPageScroll(t *testing.T) {
 		m.nav.SelectTask("az-1", 0)
 		m.height = 24
 		initialPos := getCursorPosition(m)
+		initialTaskID := m.nav.GetCursor().TaskID
 
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyCtrlD})
 		newModel := result.(Model)
@@ -254,6 +255,9 @@ func TestHalfPageScroll(t *testing.T) {
 		if newPos.Task <= initialPos.Task {
 			t.Errorf("Expected task index to increase, got %d (was %d)", newPos.Task, initialPos.Task)
 		}
+		if newModel.nav.GetCursor().TaskID == initialTaskID {
+			t.Errorf("Expected selected task to change after ctrl+d, still on %s", initialTaskID)
+		}
 	})
 
 	t.Run("ctrl+u scrolls up", func(t *testing.T) {
@@ -261,6 +265,7 @@ func TestHalfPageScroll(t *testing.T) {
 		m.nav.SelectTask("e", 0)
 		m.height = 24
 		initialPos := getCursorPosition(m)
+		initialTaskID := m.nav.GetCursor().TaskID
 
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyCtrlU})
 		newModel := result.(Model)
@@ -268,6 +273,9 @@ func TestHalfPageScroll(t *testing.T) {
 		newPos := getCursorPosition(newModel)
 		if newPos.Task >= initialPos.Task {
 			t.Errorf("Expected task index to decrease, got %d (was %d)", newPos.Task, initialPos.Task)
+		}
+		if newModel.nav.GetCursor().TaskID == initialTaskID {
+			t.Errorf("Expected selected task to change after ctrl+u, still on %s", initialTaskID)
 		}
 	})
 
@@ -280,6 +288,57 @@ func TestHalfPageScroll(t *testing.T) {
 		newPos := getCursorPosition(newModel)
 		if newPos.Task != 0 {
 			t.Errorf("Expected task index to stay at 0, got %d", newPos.Task)
+		}
+	})
+}
+
+func TestSelectModeHalfPageNavigation(t *testing.T) {
+	m := newTestModel()
+
+	for i := 0; i < 10; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       string(rune('a' + i)),
+			Title:    "Extra Task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P3,
+			Type:     domain.TypeTask,
+		})
+	}
+
+	m.height = 24
+	m.editor.EnterSelect()
+
+	t.Run("ctrl+d moves selection in select mode", func(t *testing.T) {
+		m.nav.SelectTask("az-1", 0)
+		initialTaskID := m.nav.GetCursor().TaskID
+		initialPos := getCursorPosition(m)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyCtrlD})
+		newModel := result.(Model)
+		newPos := getCursorPosition(newModel)
+
+		if newPos.Task <= initialPos.Task {
+			t.Errorf("Expected task index to increase, got %d (was %d)", newPos.Task, initialPos.Task)
+		}
+		if newModel.nav.GetCursor().TaskID == initialTaskID {
+			t.Errorf("Expected selected task to change after ctrl+d in select mode, still on %s", initialTaskID)
+		}
+	})
+
+	t.Run("ctrl+u moves selection in select mode", func(t *testing.T) {
+		m.nav.SelectTask("e", 0)
+		initialTaskID := m.nav.GetCursor().TaskID
+		initialPos := getCursorPosition(m)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyCtrlU})
+		newModel := result.(Model)
+		newPos := getCursorPosition(newModel)
+
+		if newPos.Task >= initialPos.Task {
+			t.Errorf("Expected task index to decrease, got %d (was %d)", newPos.Task, initialPos.Task)
+		}
+		if newModel.nav.GetCursor().TaskID == initialTaskID {
+			t.Errorf("Expected selected task to change after ctrl+u in select mode, still on %s", initialTaskID)
 		}
 	})
 }

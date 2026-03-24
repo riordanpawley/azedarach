@@ -1183,6 +1183,21 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.nav.MoveRight(columns)
 		return m, nil
 
+	// Half-page movement with selection toggle
+	case "ctrl+d":
+		if task != nil {
+			m.editor.ToggleSelection(task.ID)
+		}
+		m.nav.HalfPageDown(columns, m.halfPage())
+		return m, nil
+
+	case "ctrl+u":
+		if task != nil {
+			m.editor.ToggleSelection(task.ID)
+		}
+		m.nav.HalfPageUp(columns, m.halfPage())
+		return m, nil
+
 	// Toggle selection without moving
 	case " ":
 		if task != nil {
