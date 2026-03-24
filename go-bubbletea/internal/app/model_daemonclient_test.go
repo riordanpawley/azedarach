@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -279,6 +280,123 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 	if evt.event.Revision != 9 || evt.event.Event != "task.updated" {
 		t.Fatalf("event = %+v", evt.event)
+	}
+}
+
+func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
+	base := time.Date(2026, time.March, 24, 12, 0, 0, 0, time.UTC)
+	oldSessionStart := base.Add(-48 * time.Hour)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskDelete:
+				var body daemonclient.TaskIDRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal delete request: %v", err)
+				}
+				if body.TaskID != "az-old" {
+					t.Fatalf("delete body = %+v", body)
+				}
+			case daemonclient.CommandTaskArchive:
+				var body daemonclient.TaskIDRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal archive request: %v", err)
+				}
+				if body.TaskID != "az-old" && body.TaskID != "az-recent" {
+					t.Fatalf("archive body = %+v", body)
+				}
+			case protocol.CommandWorktreeCleanupOrphaned:
+				var body protocol.CleanupOrphanedRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal cleanup request: %v", err)
+				}
+				if body.ProjectID != "proj-1" {
+					t.Fatalf("cleanup body = %+v", body)
+				}
+				respBody, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+					ProjectID:        body.ProjectID,
+					WorktreesRemoved: 2,
+				})
+				if err != nil {
+					t.Fatalf("marshal cleanup response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandSessionStop:
+				var body struct {
+					ProjectID string `json:"project_id"`
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session stop request: %v", err)
+				}
+				if body.SessionID != "bead-1" {
+					t.Fatalf("session stop body = %+v", body)
+				}
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj-1"
+	m.daemonClient.WithProjectID(m.daemonProjectID())
+	m.tasks = []domain.Task{
+		{ID: "az-old", Status: domain.StatusDone, UpdatedAt: base.AddDate(0, 0, -31)},
+		{ID: "az-recent", Status: domain.StatusDone, UpdatedAt: base},
+		{ID: "az-open", Status: domain.StatusOpen, UpdatedAt: base},
+	}
+	m.sessions = map[string]*domain.Session{
+		"bead-1": &domain.Session{BeadID: "bead-1", State: domain.SessionPaused, StartedAt: &oldSessionStart},
+		"bead-2": &domain.Session{BeadID: "bead-2", State: domain.SessionBusy, StartedAt: &oldSessionStart},
+	}
+
+	result, err := m.performCleanup(context.Background(), []string{
+		"delete_old_done",
+		"archive_done",
+		"remove_orphaned_worktrees",
+		"clean_stale_sessions",
+	})
+	if err != nil {
+		t.Fatalf("performCleanup error: %v", err)
+	}
+
+	if result.Deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", result.Deleted)
+	}
+	if result.Archived != 2 {
+		t.Fatalf("archived = %d, want 2", result.Archived)
+	}
+	if result.WorktreesRemoved != 2 {
+		t.Fatalf("worktrees removed = %d, want 2", result.WorktreesRemoved)
+	}
+	if result.SessionsCleaned != 1 {
+		t.Fatalf("sessions cleaned = %d, want 1", result.SessionsCleaned)
+	}
+
+	if got := transport.requests; len(got) != 5 {
+		t.Fatalf("requests = %v", got)
+	}
+	if transport.requests[0] != daemonclient.CommandTaskDelete ||
+		transport.requests[1] != daemonclient.CommandTaskArchive ||
+		transport.requests[2] != daemonclient.CommandTaskArchive ||
+		transport.requests[3] != protocol.CommandWorktreeCleanupOrphaned ||
+		transport.requests[4] != daemonclient.CommandSessionStop {
+		t.Fatalf("requests = %v", transport.requests)
 	}
 }
 

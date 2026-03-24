@@ -2704,9 +2704,15 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			result.Archived = archived
 
 		case "remove_orphaned_worktrees":
-			// Remove worktrees with no active sessions
-			removed := 0
-			// TODO: Implement orphan cleanup through daemon-owned worktree commands.
+			if m.daemonClient == nil {
+				m.logger.Warn("daemon client unavailable for orphaned worktree cleanup")
+				continue
+			}
+			removed, err := m.daemonClient.CleanupOrphanedWorktrees(ctx)
+			if err != nil {
+				m.logger.Warn("failed to clean orphaned worktrees", "error", err)
+				continue
+			}
 			result.WorktreesRemoved = removed
 
 		case "clean_stale_sessions":
