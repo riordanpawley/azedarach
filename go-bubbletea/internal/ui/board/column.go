@@ -64,10 +64,14 @@ func renderColumn(
 		if maxTop < 0 {
 			maxTop = 0
 		}
-		vp.GotoTop()
-		for i := 0; i < maxTop; i++ {
-			vp.LineDown(1)
+		maxYOffset := len(tasks)*linesPerCard - availableHeight
+		if maxYOffset < 0 {
+			maxYOffset = 0
 		}
+		if maxTop > maxYOffset {
+			maxTop = maxYOffset
+		}
+		vp.YOffset = maxTop
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, vp.View())
