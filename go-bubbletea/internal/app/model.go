@@ -130,10 +130,7 @@ type Model struct {
 	daemonRevision uint64
 
 	// Session management services
-	tmuxClient      *tmux.Client
-	worktreeManager *git.WorktreeManager
-	sessionMonitor  *monitor.SessionMonitor
-	portAllocator   *devserver.PortAllocator
+	sessionMonitor *monitor.SessionMonitor
 
 	// Git services
 	gitClient      *git.Client
@@ -149,9 +146,6 @@ type Model struct {
 
 	// PR workflow service
 	prWorkflow *pr.PRWorkflow
-
-	// Dev server manager
-	devServerManager *devserver.Manager
 
 	// Diagnostics service
 	diagnosticsService *diagnostics.Service
@@ -186,15 +180,13 @@ func New(cfg *config.Config) Model {
 	tmuxRunner := &tmux.ExecRunner{}
 	tmuxClient := tmux.NewClient(tmuxRunner, logger)
 
-	// Initialize git worktree manager
 	gitRunner := git.NewExecRunner(repoDir)
-	worktreeManager := git.NewWorktreeManager(gitRunner, repoDir, logger)
 
 	// Initialize session monitor with tmux adapter
 	adapter := &tmuxAdapter{client: tmuxClient}
 	sessionMonitor := monitor.NewSessionMonitor(adapter)
 
-	// Initialize port allocator (base port 3000)
+	// Local allocator remains for diagnostics context only; lifecycle authority is daemon-owned.
 	portAllocator := devserver.NewPortAllocator(3000)
 
 	// Initialize network checker
@@ -224,9 +216,6 @@ func New(cfg *config.Config) Model {
 	prRunner := &pr.ExecRunner{}
 	prWorkflow := pr.NewPRWorkflow(prRunner, logger)
 
-	// Initialize dev server manager
-	devServerMgr := devserver.NewManager(portAllocator, logger)
-
 	// Initialize diagnostics service
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
 
@@ -243,10 +232,7 @@ func New(cfg *config.Config) Model {
 		loading:            true, // Start with loading state
 		spinner:            s,
 		daemonClient:       daemonClient,
-		tmuxClient:         tmuxClient,
-		worktreeManager:    worktreeManager,
 		sessionMonitor:     sessionMonitor,
-		portAllocator:      portAllocator,
 		gitClient:          gitClient,
 		gitSyncService:     gitSyncService,
 		networkChecker:     networkChecker,
@@ -254,7 +240,6 @@ func New(cfg *config.Config) Model {
 		isOnline:           true, // Optimistically assume online
 		attachmentService:  attachmentSvc,
 		prWorkflow:         prWorkflow,
-		devServerManager:   devServerMgr,
 		diagnosticsService: diagService,
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from beads
@@ -1327,17 +1312,17 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-			launcher := daemonprocess.NewLauncher(m.repoDir, filepath.Join(m.repoDir, ".beads", "azd.sock"))
-			orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
-			ack, err := orch.EnsureAttached(ctx, protocol.Hello{
-				ProtocolVersion: protocol.CurrentVersion,
-				ClientName:      "tui",
-				ClientVersion:   "dev",
-				Capabilities:    []string{"snapshot", "subscribe"},
-			})
-			if err != nil {
-				return beadsErrorMsg{err: fmt.Errorf("daemon attach: %w", err)}
-			}
+		launcher := daemonprocess.NewLauncher(m.repoDir, filepath.Join(m.repoDir, ".beads", "azd.sock"))
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      "tui",
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if err != nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon attach: %w", err)}
+		}
 		if !ack.Accepted {
 			return beadsErrorMsg{err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
@@ -1407,29 +1392,33 @@ func tickEvery(d time.Duration) tea.Cmd {
 	})
 }
 
-// startSessionCmd creates a worktree, tmux session, and starts monitoring
+// startSessionCmd requests daemon-owned lifecycle start and refreshes local session projection.
 func (m Model) startSessionCmd(beadID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-		// Create worktree for the task
-		baseBranch := "main" // TODO: Make configurable
-		worktree, err := m.worktreeManager.Create(ctx, beadID, baseBranch)
-		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create worktree: %w", err)}
+		baseBranch := m.config.Git.BaseBranch
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.StartSession(ctx, beadID, baseBranch); err != nil {
+			return sessionErrorMsg{beadID: beadID, err: err}
 		}
 
-		// Create tmux session
-		err = m.tmuxClient.NewSession(ctx, beadID, worktree.Path)
+		worktrees, err := m.daemonClient.ListWorktrees(ctx)
 		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create tmux session: %w", err)}
+			return sessionErrorMsg{beadID: beadID, err: err}
 		}
-
-		// Send Claude command to session
-		claudeCmd := "claude" // TODO: Make configurable or add more context
-		err = m.tmuxClient.SendKeys(ctx, beadID, claudeCmd)
-		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to send keys: %w", err)}
+		worktreePath := ""
+		for _, wt := range worktrees {
+			if wt.BeadID == beadID {
+				worktreePath = wt.Path
+				break
+			}
 		}
 
 		// Create session record
@@ -1438,7 +1427,7 @@ func (m Model) startSessionCmd(beadID string) tea.Cmd {
 			BeadID:    beadID,
 			State:     domain.SessionBusy,
 			StartedAt: &now,
-			Worktree:  worktree.Path,
+			Worktree:  worktreePath,
 		}
 		m.sessions[beadID] = session
 
@@ -1447,32 +1436,28 @@ func (m Model) startSessionCmd(beadID string) tea.Cmd {
 		// For now, we'll skip this and implement it properly later
 		// m.sessionMonitor.Start(ctx, beadID, program)
 
-		return sessionStartedMsg{beadID: beadID, worktreePath: worktree.Path}
+		return sessionStartedMsg{beadID: beadID, worktreePath: worktreePath}
 	}
 }
 
-// stopSessionCmd stops the tmux session, monitoring, and optionally cleans up worktree
+// stopSessionCmd requests daemon-owned lifecycle stop and refreshes local session projection.
 func (m Model) stopSessionCmd(beadID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("daemon client unavailable")}
+		}
 
 		// Stop monitoring
 		m.sessionMonitor.Stop(beadID)
 
-		// Kill tmux session
-		err := m.tmuxClient.KillSession(ctx, beadID)
-		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to kill tmux session: %w", err)}
+		if _, err := m.daemonClient.StopSession(ctx, beadID); err != nil {
+			return sessionErrorMsg{beadID: beadID, err: err}
 		}
 
 		// Remove session record
 		delete(m.sessions, beadID)
-
-		// Release port if allocated
-		m.portAllocator.Release(beadID)
-
-		// TODO: Optionally delete worktree (should probably ask user first)
-		// err = m.worktreeManager.Delete(ctx, beadID)
 
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
@@ -1750,7 +1735,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		// Dev server menu
-		servers := m.getDevServerInfo()
+		servers := m.getDevServerInfo(task.ID)
 		devOverlay := overlay.NewDevServerOverlay(
 			servers,
 			task.ID,
@@ -2473,29 +2458,34 @@ func (m Model) checkBranchBehindCmd(worktree, beadID string) tea.Cmd {
 	}
 }
 
-func (m Model) getDevServerInfo() []overlay.DevServerInfo {
-	if m.devServerManager == nil {
+func (m Model) getDevServerInfo(beadID string) []overlay.DevServerInfo {
+	if m.daemonClient == nil {
 		return nil
 	}
 
-	servers := m.devServerManager.List()
-	info := make([]overlay.DevServerInfo, 0, len(servers))
-	for _, srv := range servers {
-		info = append(info, overlay.DevServerInfo{
-			ID:     srv.ID,
-			Name:   srv.Name,
-			Port:   srv.Port,
-			Status: srv.Status,
-			Uptime: srv.Uptime,
-		})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv, err := m.daemonClient.DevServerStatus(ctx, beadID)
+	if err != nil {
+		return nil
 	}
-	return info
+	return []overlay.DevServerInfo{{
+		ID:     srv.ID,
+		Name:   srv.Name,
+		Port:   srv.Port,
+		Status: srv.Status,
+		Uptime: srv.Uptime,
+	}}
 }
 
 func (m Model) toggleDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		if err := m.devServerManager.Toggle(ctx, serverID); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: serverID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.ToggleDevServer(ctx, serverID); err != nil {
 			return sessionErrorMsg{beadID: serverID, err: err}
 		}
 		return nil
@@ -2515,8 +2505,12 @@ func (m Model) viewDevServer(serverID string) tea.Cmd {
 
 func (m Model) restartDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		if err := m.devServerManager.Restart(ctx, serverID); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if m.daemonClient == nil {
+			return sessionErrorMsg{beadID: serverID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		if _, err := m.daemonClient.RestartDevServer(ctx, serverID); err != nil {
 			return sessionErrorMsg{beadID: serverID, err: err}
 		}
 		return nil
@@ -2734,9 +2728,10 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 					if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
 						// Stop and clean up stale session
 						m.sessionMonitor.Stop(beadID)
-						_ = m.tmuxClient.KillSession(ctx, beadID)
+						if m.daemonClient != nil {
+							_, _ = m.daemonClient.StopSession(ctx, beadID)
+						}
 						delete(m.sessions, beadID)
-						m.portAllocator.Release(beadID)
 						cleaned++
 					}
 				}
