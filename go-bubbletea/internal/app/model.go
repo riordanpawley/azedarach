@@ -53,6 +53,12 @@ const (
 	ModeAction = types.ModeAction
 )
 
+const (
+	defaultPaneCaptureLines  = 100
+	defaultDevserverBasePort = 3000
+	diffPreviewMaxCharacters = 200
+)
+
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
 type ToastLevel = types.ToastLevel
@@ -70,8 +76,7 @@ type tmuxAdapter struct {
 }
 
 func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (string, error) {
-	// Capture last 100 lines by default
-	return a.client.CapturePane(ctx, sessionName, 100)
+	return a.client.CapturePane(ctx, sessionName, defaultPaneCaptureLines)
 }
 
 // Re-export navigation types for compatibility
@@ -100,7 +105,7 @@ type Model struct {
 	// UI state
 	overlayStack *overlay.Stack
 	viewMode     ViewMode
-	viewportStarts [4]int
+	viewportStarts [board.DefaultColumnCount]int
 
 	// Project
 	currentProject string
@@ -191,7 +196,7 @@ func New(cfg *config.Config) Model {
 	sessionMonitor := monitor.NewSessionMonitor(adapter)
 
 	// Local allocator remains for diagnostics context only; lifecycle authority is daemon-owned.
-	portAllocator := devserver.NewPortAllocator(3000)
+	portAllocator := devserver.NewPortAllocator(defaultDevserverBasePort)
 
 	// Initialize network checker
 	networkChecker := network.NewStatusChecker()
@@ -521,8 +526,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Show abbreviated diff in toast
 		diff := msg.diff
-		if len(diff) > 200 {
-			diff = diff[:200] + "..."
+		if len(diff) > diffPreviewMaxCharacters {
+			diff = diff[:diffPreviewMaxCharacters] + "..."
 		}
 		if diff == "" {
 			diff = "No changes"
@@ -1126,7 +1131,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Calculate visible tasks per column based on screen height/card footprint.
 		columnCount := len(columns)
 		if columnCount < 1 {
-			columnCount = 4
+			columnCount = board.DefaultColumnCount
 		}
 		columnWidth := m.width / columnCount
 		cardWidth := board.CardContentWidth(columnWidth)
@@ -1917,7 +1922,7 @@ func (m Model) boardVisibleCards(columns []board.Column) int {
 	}
 	columnCount := len(columns)
 	if columnCount < 1 {
-		columnCount = 4
+		columnCount = board.DefaultColumnCount
 	}
 	columnWidth := m.width / columnCount
 	cardWidth := board.CardContentWidth(columnWidth)

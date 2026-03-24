@@ -1,9 +1,10 @@
 package board
 
 const (
-	BoardStatusBarLines  = 1
-	ColumnHeaderLines    = 2
-	ColumnContentInsetX  = 2
+	BoardStatusBarLines = 1
+	ColumnHeaderLines   = 2
+	ColumnContentInsetX = 2
+	DefaultColumnCount  = 4
 )
 
 func BoardContentHeight(totalHeight int) int {
@@ -29,4 +30,3 @@ func CardContentWidth(columnWidth int) int {
 	}
 	return w
 }
-
