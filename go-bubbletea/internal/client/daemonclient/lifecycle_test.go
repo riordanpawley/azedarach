@@ -147,3 +147,47 @@ func TestListWorktreesUsesProjectRoute(t *testing.T) {
 		t.Fatalf("worktrees = %+v", worktrees)
 	}
 }
+
+func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+				ProjectID:        "proj-a",
+				WorktreesRemoved: 2,
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	removed, err := client.CleanupOrphanedWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("CleanupOrphanedWorktrees error: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if transport.lastReq.Command != protocol.CommandWorktreeCleanupOrphaned {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, protocol.CommandWorktreeCleanupOrphaned)
+	}
+	if transport.lastReq.Meta.ProjectID != "proj-a" {
+		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+	}
+
+	var body protocol.CleanupOrphanedRequestBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.ProjectID != "proj-a" {
+		t.Fatalf("request project_id = %q, want proj-a", body.ProjectID)
+	}
+}
