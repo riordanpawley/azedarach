@@ -27,6 +27,8 @@ const (
 	commandSessionStatus      = "session.status"
 	commandTaskSnapshotExport = "task.snapshot.export"
 	defaultExportFormat       = "json"
+	exitCodeHardFailure       = 1
+	exitCodePartialFailure    = 2
 )
 
 type Dependencies struct {
@@ -234,6 +236,16 @@ type commandOutputBody struct {
 	Output string `json:"output"`
 }
 
+type applyExecutionResultBody struct {
+	Summary applyExecutionSummaryBody `json:"summary"`
+}
+
+type applyExecutionSummaryBody struct {
+	Total     int `json:"total"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+}
+
 func newSessionRequest(command, projectID, sessionID, baseBranch string) protocol.RequestEnvelope {
 	body, _ := json.Marshal(sessionRequestBody{
 		ProjectID:  projectID,
@@ -280,6 +292,25 @@ func printCommandOutput(resp protocol.ResponseEnvelope) error {
 	}
 
 	return nil
+}
+
+func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
+	if !resp.OK {
+		return exitCodeHardFailure
+	}
+	if len(resp.Body) == 0 {
+		return 0
+	}
+
+	var applyResult applyExecutionResultBody
+	if err := json.Unmarshal(resp.Body, &applyResult); err != nil {
+		return exitCodeHardFailure
+	}
+	if applyResult.Summary.Failed > 0 {
+		return exitCodePartialFailure
+	}
+
+	return 0
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {

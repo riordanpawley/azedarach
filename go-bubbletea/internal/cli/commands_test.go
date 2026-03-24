@@ -164,6 +164,53 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 	}
 }
 
+func TestResponseExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		resp protocol.ResponseEnvelope
+		want int
+	}{
+		{
+			name: "success response",
+			resp: protocol.ResponseEnvelope{OK: true},
+			want: 0,
+		},
+		{
+			name: "partial failure response",
+			resp: protocol.ResponseEnvelope{
+				OK: true,
+				Body: mustApplyResultBody(t, applyExecutionSummaryBody{
+					Total:     3,
+					Succeeded: 2,
+					Failed:    1,
+				}),
+			},
+			want: 2,
+		},
+		{
+			name: "contract failure",
+			resp: protocol.ResponseEnvelope{
+				OK:   true,
+				Body: []byte(`{"summary":`),
+			},
+			want: 1,
+		},
+		{
+			name: "transport failure",
+			resp: protocol.ResponseEnvelope{OK: false},
+			want: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := applyResponseExitCode(tt.resp); got != tt.want {
+				t.Fatalf("applyResponseExitCode() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseExportArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -382,6 +429,16 @@ func mustSnapshotPayloadJSON(t *testing.T, payload protocol.SnapshotPayload) []b
 	data, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal snapshot payload: %v", err)
+	}
+	return data
+}
+
+func mustApplyResultBody(t *testing.T, summary applyExecutionSummaryBody) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(applyExecutionResultBody{Summary: summary})
+	if err != nil {
+		t.Fatalf("marshal apply result body: %v", err)
 	}
 	return data
 }

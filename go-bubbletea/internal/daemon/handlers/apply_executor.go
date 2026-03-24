@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,28 @@ type ApplyExecutionOperation struct {
 	Revision uint64 `json:"revision,omitempty"`
 }
 
+const (
+	applyExecutionOutcomeStatusSuccess = "success"
+	applyExecutionOutcomeStatusFailure = "failure"
+)
+
+// ApplyExecutionOutcome captures the reported outcome for one requested operation.
+type ApplyExecutionOutcome struct {
+	Index    int    `json:"index"`
+	Command  string `json:"command"`
+	Status   string `json:"status"`
+	TaskID   string `json:"task_id,omitempty"`
+	Revision uint64 `json:"revision,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ApplyExecutionSummary captures the aggregate execution result across all requested operations.
+type ApplyExecutionSummary struct {
+	Total     int `json:"total"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+}
+
 // ApplyExecutionResult captures the ordered outcome of a non-dry-run apply request.
 type ApplyExecutionResult struct {
 	ProjectID        string                    `json:"project_id"`
@@ -44,6 +67,8 @@ type ApplyExecutionResult struct {
 	Revision         uint64                    `json:"revision"`
 	DryRun           bool                      `json:"dry_run"`
 	Operations       []ApplyExecutionOperation `json:"operations"`
+	Outcomes         []ApplyExecutionOutcome   `json:"outcomes"`
+	Summary          ApplyExecutionSummary     `json:"summary"`
 }
 
 // ApplyHandler executes bulk apply requests against the authoritative task service.
@@ -130,12 +155,20 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 		SnapshotRevision: applyReq.SnapshotRevision,
 		DryRun:           false,
 		Operations:       make([]ApplyExecutionOperation, 0, len(applyReq.Operations)),
+		Outcomes:         make([]ApplyExecutionOutcome, 0, len(applyReq.Operations)),
 	}
 
 	for i, op := range applyReq.Operations {
 		executed, err := h.executeOperation(ctx, i, op)
+		outcome := ApplyExecutionOutcome{
+			Index:   i,
+			Command: op.Command,
+		}
 		if err != nil {
-			return ApplyExecutionResult{}, err
+			outcome.Status = applyExecutionOutcomeStatusFailure
+			outcome.Error = err.Error()
+			result.Outcomes = append(result.Outcomes, outcome)
+			continue
 		}
 
 		if h.revisions != nil {
@@ -143,9 +176,22 @@ func (h *ApplyHandler) execute(ctx context.Context, req protocol.RequestEnvelope
 			h.revisions.PublishTaskEvent(req, applyEventName(op.Command), rev)
 			executed.Revision = rev
 			result.Revision = rev
+			outcome.Revision = rev
 		}
 
 		result.Operations = append(result.Operations, executed)
+		outcome.Status = applyExecutionOutcomeStatusSuccess
+		outcome.TaskID = executed.TaskID
+		result.Outcomes = append(result.Outcomes, outcome)
+	}
+
+	sort.SliceStable(result.Outcomes, func(i, j int) bool {
+		return result.Outcomes[i].Index < result.Outcomes[j].Index
+	})
+	result.Summary = ApplyExecutionSummary{
+		Total:     len(applyReq.Operations),
+		Succeeded: len(result.Operations),
+		Failed:    len(result.Outcomes) - len(result.Operations),
 	}
 
 	return result, nil
