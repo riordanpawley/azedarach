@@ -2,7 +2,6 @@ package app
 
 import (
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -226,42 +225,6 @@ func TestNormalModeNavigation(t *testing.T) {
 			t.Errorf("Expected column to stay at 3, got %d", pos.Column)
 		}
 	})
-}
-
-func TestNormalModeNavigation_CoalescesFastRepeatedNavKeys(t *testing.T) {
-	m := newTestModel()
-	m.tasks = append(m.tasks, domain.Task{
-		ID:       "az-6",
-		Title:    "Task 6",
-		Status:   domain.StatusOpen,
-		Priority: domain.P2,
-		Type:     domain.TypeTask,
-	})
-
-	now := time.Date(2026, time.March, 25, 1, 0, 0, 0, time.UTC)
-	m.clockNow = func() time.Time { return now }
-	m.navRepeatMinInterval = 16 * time.Millisecond
-	m.nav.SelectTask("az-1", 0)
-
-	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
-	afterFirst := result.(Model)
-	if got := afterFirst.nav.GetCursor().TaskID; got != "az-2" {
-		t.Fatalf("first down should move to az-2, got %s", got)
-	}
-
-	now = now.Add(5 * time.Millisecond)
-	result, _ = afterFirst.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
-	afterSecond := result.(Model)
-	if got := afterSecond.nav.GetCursor().TaskID; got != "az-2" {
-		t.Fatalf("second down within coalesce window should be ignored, got %s", got)
-	}
-
-	now = now.Add(20 * time.Millisecond)
-	result, _ = afterSecond.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
-	afterThird := result.(Model)
-	if got := afterThird.nav.GetCursor().TaskID; got != "az-6" {
-		t.Fatalf("third down after coalesce window should move to az-6, got %s", got)
-	}
 }
 
 func TestHalfPageScroll(t *testing.T) {

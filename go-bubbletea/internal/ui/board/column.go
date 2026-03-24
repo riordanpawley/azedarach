@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -34,11 +33,16 @@ func renderColumn(
 	header := headerStyle.Width(width).Render(headerText)
 
 	availableHeight := height - 2
+	if availableHeight < 0 {
+		availableHeight = 0
+	}
+	start, end := visibleTaskRange(len(tasks), cursorTask, availableHeight)
 
 	var cardContent strings.Builder
 	cardWidth := width - 2
 
-	for i, task := range tasks {
+	for i := start; i < end; i++ {
+		task := tasks[i]
 		isCursor := isActive && i == cursorTask
 		isSelected := selectedTasks[task.ID]
 
@@ -51,28 +55,43 @@ func renderColumn(
 		cardContent.WriteString("\n")
 	}
 
-	vp := viewport.New(width, availableHeight)
-	vp.SetContent(cardContent.String())
+	content := strings.TrimSuffix(cardContent.String(), "\n")
+	columnBody := lipgloss.NewStyle().
+		Width(width).
+		Height(availableHeight).
+		Render(content)
 
-	// Calculate viewport offset to keep cursor visible
-	// Each card is roughly cardHeight tall + 1 for newline.
-	// Scroll only when cursor would move outside the visible window.
-	if cursorTask >= 0 && cursorTask < len(tasks) {
-		linesPerCard := cardHeight + 1
-		cursorTopLine := cursorTask * linesPerCard
-		maxTop := cursorTopLine - (availableHeight - linesPerCard)
-		if maxTop < 0 {
-			maxTop = 0
-		}
-		maxYOffset := len(tasks)*linesPerCard - availableHeight
-		if maxYOffset < 0 {
-			maxYOffset = 0
-		}
-		if maxTop > maxYOffset {
-			maxTop = maxYOffset
-		}
-		vp.YOffset = maxTop
+	return lipgloss.JoinVertical(lipgloss.Left, header, columnBody)
+}
+
+func visibleTaskRange(taskCount int, cursorTask int, availableHeight int) (int, int) {
+	if taskCount <= 0 {
+		return 0, 0
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, vp.View())
+	linesPerCard := cardHeight + 1
+	visibleCards := availableHeight / linesPerCard
+	if availableHeight%linesPerCard != 0 {
+		visibleCards++
+	}
+	if visibleCards < 1 {
+		visibleCards = 1
+	}
+	if visibleCards >= taskCount {
+		return 0, taskCount
+	}
+
+	if cursorTask < 0 || cursorTask >= taskCount {
+		return 0, visibleCards
+	}
+
+	start := cursorTask - visibleCards + 1
+	if start < 0 {
+		start = 0
+	}
+	maxStart := taskCount - visibleCards
+	if start > maxStart {
+		start = maxStart
+	}
+	return start, start + visibleCards
 }

@@ -123,7 +123,6 @@ type Model struct {
 	spinner        spinner.Model
 	lastRefresh    time.Time
 	hasRefreshLoop bool
-	clockNow       func() time.Time
 
 	// Shared daemon client for task-domain operations
 	daemonClient   *daemonclient.Client
@@ -157,11 +156,6 @@ type Model struct {
 
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
-
-	// Navigation input coalescing to prevent key-repeat backlog.
-	lastNavKey           string
-	lastNavKeyAt         time.Time
-	navRepeatMinInterval time.Duration
 }
 
 // New creates a new application model with the given config
@@ -227,33 +221,32 @@ func New(cfg *config.Config) Model {
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
 
 	m := Model{
-		tasks:              []domain.Task{},
-		sessions:           make(map[string]*domain.Session),
-		nav:                navigation.NewService(),
-		editor:             editor.NewService(),
-		overlayStack:       overlay.NewStack(),
-		viewMode:           ViewModeBoard, // Start with board view
-		toasts:             []Toast{},
-		styles:             styles.New(),
-		config:             cfg,
-		loading:            true, // Start with loading state
-		spinner:            s,
-		clockNow:           time.Now,
-		daemonClient:       daemonClient,
-		sessionMonitor:     sessionMonitor,
-		tmuxClient:         tmuxClient,
-		gitClient:          gitClient,
-		gitSyncService:     gitSyncService,
-		networkChecker:     networkChecker,
-		projectRegistry:    registry,
-		isOnline:           true, // Optimistically assume online
-		attachmentService:  attachmentSvc,
-		prWorkflow:         prWorkflow,
-		diagnosticsService: diagService,
-		logger:             logger,
-		usePlaceholder:     false, // Use real data from local issue store
-		repoDir:            repoDir,
-		navRepeatMinInterval: 16 * time.Millisecond,
+		tasks:                []domain.Task{},
+		sessions:             make(map[string]*domain.Session),
+		nav:                  navigation.NewService(),
+		editor:               editor.NewService(),
+		overlayStack:         overlay.NewStack(),
+		viewMode:             ViewModeBoard, // Start with board view
+		toasts:               []Toast{},
+		styles:               styles.New(),
+		config:               cfg,
+		loading:              true, // Start with loading state
+		spinner:              s,
+		daemonClient:         daemonClient,
+		sessionMonitor:       sessionMonitor,
+		tmuxClient:           tmuxClient,
+		gitClient:            gitClient,
+		gitSyncService:       gitSyncService,
+		networkChecker:       networkChecker,
+		projectRegistry:      registry,
+		isOnline:             true, // Optimistically assume online
+		attachmentService:    attachmentSvc,
+		prWorkflow:           prWorkflow,
+		diagnosticsService:   diagService,
+		logger:               logger,
+		usePlaceholder:       false, // Use real data from local issue store
+		repoDir:              repoDir,
+		currentProject:       resolveInitialProjectName(registry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
@@ -963,44 +956,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func isNavRepeatKey(key string) bool {
-	switch key {
-	case "j", "down", "k", "up", "h", "left", "l", "right":
-		return true
-	default:
-		return false
-	}
-}
-
-func (m *Model) shouldCoalesceNavKey(key string) bool {
-	if !isNavRepeatKey(key) {
-		return false
-	}
-	if m.navRepeatMinInterval <= 0 {
-		return false
-	}
-	nowFn := m.clockNow
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	now := nowFn()
-	if m.lastNavKey == key && !m.lastNavKeyAt.IsZero() && now.Sub(m.lastNavKeyAt) < m.navRepeatMinInterval {
-		return true
-	}
-	m.lastNavKey = key
-	m.lastNavKeyAt = now
-	return false
-}
-
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
-	key := msg.String()
-	if m.shouldCoalesceNavKey(key) {
-		return m, nil
-	}
-
-	switch key {
+	switch msg.String() {
 	case "q":
 		// Cleanup before quitting
 		m.sessionMonitor.StopAll()
@@ -1170,7 +1129,10 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewJumpMode(visibleCount))
 	case "p":
 		// Project selector
-		return m, m.overlayStack.Push(overlay.NewProjectSelector(m.projectRegistry))
+		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
+			m.projectRegistry,
+			overlay.WithInitialCursor(m.projectSelectorCursor()),
+		))
 	}
 
 	return m, nil
@@ -1194,12 +1156,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	task, _ := m.getCurrentTaskAndSession()
-	key := msg.String()
-	if m.shouldCoalesceNavKey(key) {
-		return m, nil
-	}
-
-	switch key {
+	switch msg.String() {
 	// Navigation with selection toggle
 	case "j", "down":
 		// Toggle current task selection, then move down
@@ -1421,6 +1378,42 @@ func (m Model) daemonProjectID() string {
 	return "default"
 }
 
+func resolveInitialProjectName(registry *config.ProjectsRegistry, cwd string) string {
+	if registry != nil && cwd != "" {
+		if project := registry.FindByPath(cwd); project != nil && project.Name != "" {
+			return project.Name
+		}
+	}
+	if registry != nil {
+		if project := registry.GetDefault(); project != nil && project.Name != "" {
+			return project.Name
+		}
+	}
+	if cwd != "" {
+		return filepath.Base(cwd)
+	}
+	return "default"
+}
+
+func (m Model) projectSelectorCursor() int {
+	if m.projectRegistry == nil || len(m.projectRegistry.Projects) == 0 {
+		return 0
+	}
+
+	target := m.currentProject
+	if target == "" {
+		target = resolveInitialProjectName(m.projectRegistry, m.repoDir)
+	}
+
+	for i, project := range m.projectRegistry.Projects {
+		if project.Name == target {
+			return i
+		}
+	}
+
+	return 0
+}
+
 func tickEvery(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -1608,7 +1601,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
-		return m, m.overlayStack.Push(overlay.NewProjectSelector(m.projectRegistry))
+		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
+			m.projectRegistry,
+			overlay.WithInitialCursor(m.projectSelectorCursor()),
+		))
 	case "editor-error":
 		// Editor open error
 		m.overlayStack.Pop()
