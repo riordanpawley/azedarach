@@ -300,6 +300,25 @@ func TestNormalModeNavigation(t *testing.T) {
 			t.Errorf("Expected column to stay at 3, got %d", pos.Column)
 		}
 	})
+
+	t.Run("navigation works while loading", func(t *testing.T) {
+		m := newTestModel()
+		m.loading = true
+		m.nav.SelectTask("az-1", 0)
+
+		result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		newModel := result.(Model)
+
+		if cmd != nil {
+			t.Fatalf("expected no command while navigating during loading, got %T", cmd)
+		}
+		if !newModel.loading {
+			t.Fatal("expected loading state to remain true before hydration completes")
+		}
+		if newModel.nav.GetCursor().TaskID != "az-2" {
+			t.Fatalf("expected navigation to advance to az-2 while loading, got %s", newModel.nav.GetCursor().TaskID)
+		}
+	})
 }
 
 func TestHalfPageScroll(t *testing.T) {
