@@ -135,5 +135,5 @@ func (t *localDaemonTransport) Subscribe(ctx context.Context, projectID string, 
 	_ = ctx
 	_ = projectID
 	_ = fromRevision
-	return nil, fmt.Errorf("subscribe not implemented by local daemon transport")
+	return make(chan protocol.EventEnvelope), nil
 }

@@ -12,16 +12,24 @@ import (
 )
 
 type recordingDaemonTransport struct {
-	requests []string
-	replyFn  func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	calls            []string
+	requests         []string
+	lastHello        protocol.Hello
+	subscribeProject string
+	subscribeFrom    uint64
+	replyFn          func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	subscribeFn      func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error)
 }
 
-func (r *recordingDaemonTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+func (r *recordingDaemonTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	r.calls = append(r.calls, "handshake")
+	r.lastHello = hello
 	return protocol.HelloAck{Accepted: true}, nil
 }
 
 func (r *recordingDaemonTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	_ = ctx
+	r.calls = append(r.calls, req.Command)
 	r.requests = append(r.requests, req.Command)
 	if r.replyFn != nil {
 		return r.replyFn(req)
@@ -34,8 +42,15 @@ func (r *recordingDaemonTransport) Command(ctx context.Context, req protocol.Req
 	}, nil
 }
 
-func (r *recordingDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
-	return nil, nil
+func (r *recordingDaemonTransport) Subscribe(ctx context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+	_ = ctx
+	r.calls = append(r.calls, "subscribe")
+	r.subscribeProject = projectID
+	r.subscribeFrom = fromRevision
+	if r.subscribeFn != nil {
+		return r.subscribeFn(ctx, projectID, fromRevision)
+	}
+	return make(chan protocol.EventEnvelope), nil
 }
 
 func newDaemonTestModel(transport *recordingDaemonTransport) Model {
@@ -199,6 +214,68 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
+}
+
+func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			ch := make(chan protocol.EventEnvelope, 1)
+			ch <- protocol.EventEnvelope{Revision: 9, Event: "task.updated"}
+			return ch, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj"
+
+	msg := m.attachDaemonCmd()()
+	loaded, ok := msg.(beadsLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want beadsLoadedMsg", msg)
+	}
+	if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
+		t.Fatalf("loaded tasks = %+v", loaded.tasks)
+	}
+	if loaded.events == nil {
+		t.Fatal("expected daemon event subscription channel")
+	}
+	if got := transport.calls; len(got) != 3 || got[0] != "handshake" || got[1] != daemonclient.CommandTaskList || got[2] != "subscribe" {
+		t.Fatalf("calls = %v", got)
+	}
+	if transport.lastHello.ClientName != "tui" || transport.lastHello.ClientVersion != "dev" || transport.lastHello.ProtocolVersion != protocol.CurrentVersion {
+		t.Fatalf("hello = %+v", transport.lastHello)
+	}
+	if transport.subscribeProject != "proj" {
+		t.Fatalf("subscribe project = %q, want proj", transport.subscribeProject)
+	}
+	if transport.subscribeFrom != 0 {
+		t.Fatalf("subscribe from revision = %d, want 0", transport.subscribeFrom)
+	}
+
+	m.daemonEvents = loaded.events
+	eventMsg := m.waitForDaemonEventCmd()()
+	evt, ok := eventMsg.(daemonStreamEventMsg)
+	if !ok {
+		t.Fatalf("event message type = %T, want daemonStreamEventMsg", eventMsg)
+	}
+	if evt.event.Revision != 9 || evt.event.Event != "task.updated" {
+		t.Fatalf("event = %+v", evt.event)
+	}
 }
 
 func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {

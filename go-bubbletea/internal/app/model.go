@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
@@ -122,6 +123,7 @@ type Model struct {
 
 	// Shared daemon client for task-domain operations
 	daemonClient *daemonclient.Client
+	daemonEvents <-chan protocol.EventEnvelope
 
 	// Session management services
 	tmuxClient      *tmux.Client
@@ -262,7 +264,7 @@ func New(cfg *config.Config) Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
-		m.loadBeadsCmd(),
+		m.attachDaemonCmd(),
 		m.gitSyncService.FetchAndCheck(),
 	)
 }
@@ -341,12 +343,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
-		// Start periodic refresh only if not already running
+		var cmds []tea.Cmd
 		if !m.hasRefreshLoop {
 			m.hasRefreshLoop = true
-			return m, tickEvery(2 * time.Second)
+			cmds = append(cmds, tickEvery(2*time.Second))
 		}
-		return m, nil
+		if msg.events != nil {
+			m.daemonEvents = msg.events
+			cmds = append(cmds, m.waitForDaemonEventCmd())
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
 
 	case beadsErrorMsg:
 		m.toasts = append(m.toasts, Toast{
@@ -397,6 +406,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Session error: %s - %v", msg.beadID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
 		})
+		return m, nil
+
+	case daemonStreamEventMsg:
+		if m.daemonEvents == nil {
+			return m, nil
+		}
+		return m, tea.Batch(m.loadBeadsCmd(), m.waitForDaemonEventCmd())
+
+	case daemonStreamClosedMsg:
+		m.daemonEvents = nil
 		return m, nil
 
 	case network.StatusMsg:
@@ -1221,12 +1240,19 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type beadsLoadedMsg struct {
-	tasks []domain.Task
+	tasks  []domain.Task
+	events <-chan protocol.EventEnvelope
 }
 
 type beadsErrorMsg struct {
 	err error
 }
+
+type daemonStreamEventMsg struct {
+	event protocol.EventEnvelope
+}
+
+type daemonStreamClosedMsg struct{}
 
 type tickMsg time.Time
 
@@ -1258,6 +1284,75 @@ func (m Model) loadBeadsCmd() tea.Cmd {
 		}
 		return beadsLoadedMsg{tasks: tasks}
 	}
+}
+
+func (m Model) attachDaemonCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		ack, diag := m.daemonClient.Handshake(ctx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      "tui",
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if diag != nil {
+			return beadsErrorMsg{err: fmt.Errorf("daemon handshake: %s: %w", diag.Message, diag.Err)}
+		}
+		if !ack.Accepted {
+			return beadsErrorMsg{err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
+		}
+
+		tasks, err := m.daemonClient.ListTasks(ctx)
+		if err != nil {
+			return beadsErrorMsg{err: err}
+		}
+
+		events, err := m.daemonClient.Subscribe(context.Background(), m.daemonProjectID(), 0)
+		if err != nil {
+			return beadsErrorMsg{err: err}
+		}
+
+		return beadsLoadedMsg{
+			tasks:  tasks,
+			events: events,
+		}
+	}
+}
+
+func (m Model) waitForDaemonEventCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonEvents == nil {
+			return nil
+		}
+
+		evt, ok := <-m.daemonEvents
+		if !ok {
+			return daemonStreamClosedMsg{}
+		}
+
+		return daemonStreamEventMsg{event: evt}
+	}
+}
+
+func (m Model) daemonProjectID() string {
+	if m.currentProject != "" {
+		return m.currentProject
+	}
+	if m.projectRegistry != nil {
+		if project := m.projectRegistry.GetDefault(); project != nil && project.Name != "" {
+			return project.Name
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Base(cwd)
+	}
+	return "default"
 }
 
 func tickEvery(d time.Duration) tea.Cmd {
