@@ -163,6 +163,78 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 	}
 }
 
+func TestParseExportArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        ExportOptions
+		errContains string
+	}{
+		{
+			name: "defaults",
+			want: ExportOptions{
+				Format: "json",
+				Out:    "",
+			},
+		},
+		{
+			name: "explicit out path",
+			args: []string{"--format", "json", "--out", "snapshot.json"},
+			want: ExportOptions{
+				Format: "json",
+				Out:    "snapshot.json",
+			},
+		},
+		{
+			name:        "rejects unsupported format",
+			args:        []string{"--format", "yaml"},
+			errContains: "unsupported export format: yaml",
+		},
+		{
+			name:        "rejects extra arguments",
+			args:        []string{"unexpected"},
+			errContains: "unexpected argument: unexpected",
+		},
+		{
+			name:        "rejects unknown flag",
+			args:        []string{"--bogus"},
+			errContains: "flag provided but not defined: -bogus",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseExportArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseExportArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseExportArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrintUsageIncludesExport(t *testing.T) {
+	output := captureStdout(t, func() error {
+		PrintUsage()
+		return nil
+	})
+
+	if !strings.Contains(output, "export") {
+		t.Fatalf("usage missing export command: %q", output)
+	}
+	if !strings.Contains(output, "az export --format json --out snapshot.json") {
+		t.Fatalf("usage missing export example: %q", output)
+	}
+}
+
 func responseWithOutput(req protocol.RequestEnvelope, output string) protocol.ResponseEnvelope {
 	payload, err := json.Marshal(commandOutputBody{Output: output})
 	if err != nil {

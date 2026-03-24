@@ -83,6 +83,20 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "export":
+		exportOpts, err := cli.ParseExportArgs(commandArgs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Usage: az export --format json [--out <path>]\n")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.ExportCommand(deps, exportOpts)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "help", "-h", "--help":
 		cli.PrintUsage()
 

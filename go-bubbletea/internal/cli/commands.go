@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,6 +25,7 @@ const (
 	commandSessionAttach = "session.attach"
 	commandSessionStop   = "session.stop"
 	commandSessionStatus = "session.status"
+	defaultExportFormat  = "json"
 )
 
 type Dependencies struct {
@@ -31,6 +34,11 @@ type Dependencies struct {
 	Logger       *slog.Logger
 	ProjectID    string
 	RepoDir      string
+}
+
+type ExportOptions struct {
+	Format string
+	Out    string
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
@@ -131,6 +139,31 @@ func StatusCommand(deps *Dependencies, beadID string) error {
 	return printCommandOutput(resp)
 }
 
+func ParseExportArgs(args []string) (ExportOptions, error) {
+	opts := ExportOptions{Format: defaultExportFormat}
+
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Format, "format", defaultExportFormat, "export format")
+	fs.StringVar(&opts.Out, "out", "", "write export output to a file")
+
+	if err := fs.Parse(args); err != nil {
+		return ExportOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return ExportOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Format != defaultExportFormat {
+		return ExportOptions{}, fmt.Errorf("unsupported export format: %s", opts.Format)
+	}
+
+	return opts, nil
+}
+
+func ExportCommand(_ *Dependencies, _ ExportOptions) error {
+	return errors.New("export output handling is not implemented yet")
+}
+
 func PrintUsage() {
 	usage := `Usage: az [command] [arguments]
 
@@ -140,6 +173,7 @@ Commands:
   attach <bead-id>     Attach to an existing session
   kill <bead-id>       Kill a session
   status [bead-id]     Show session status (all or specific bead)
+  export               Export a snapshot (use --format json [--out <path>])
   help                 Show this help message
 
 Examples:
@@ -149,6 +183,8 @@ Examples:
   az kill az-123       # Kill az-123's session
   az status            # Show all active sessions
   az status az-123     # Show status for az-123
+  az export --format json
+  az export --format json --out snapshot.json
 
 For more information, see: https://github.com/riordanpawley/azedarach
 `
