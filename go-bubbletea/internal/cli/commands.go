@@ -16,7 +16,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
-	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 const (
@@ -32,7 +31,6 @@ type Dependencies struct {
 	Logger       *slog.Logger
 	ProjectID    string
 	RepoDir      string
-	TmuxClient   *tmux.Client
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
@@ -46,8 +44,6 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	projectID := filepath.Base(repoDir)
 	socketPath := filepath.Join(repoDir, ".beads", "azd.sock")
 	daemonTransport := transport.NewClient(socketPath)
-	tmuxRunner := &tmux.ExecRunner{}
-	tmuxClient := tmux.NewClient(tmuxRunner, logger)
 
 	return &Dependencies{
 		Config:       cfg,
@@ -55,7 +51,6 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 		Logger:       logger,
 		ProjectID:    projectID,
 		RepoDir:      repoDir,
-		TmuxClient:   tmuxClient,
 	}, nil
 }
 
@@ -94,13 +89,7 @@ func AttachCommand(deps *Dependencies, beadID string) error {
 		return err
 	}
 
-	if err := printCommandOutput(resp); err != nil {
-		return err
-	}
-	if deps.TmuxClient != nil {
-		return deps.TmuxClient.AttachSession(ctx, beadID)
-	}
-	return nil
+	return printCommandOutput(resp)
 }
 
 func KillCommand(deps *Dependencies, beadID string) error {
