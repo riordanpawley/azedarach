@@ -26,15 +26,15 @@ func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	return m.response, m.err
 }
 
-// mockBeadsClient mocks beads operations
-type mockBeadsClient struct {
+// mockIssuesClient mocks issues operations
+type mockIssuesClient struct {
 	createdTasks []domain.Task
 	nextID       int
 	createErr    error
 	depErr       error
 }
 
-func (m *mockBeadsClient) Create(ctx context.Context, title, description string, taskType domain.TaskType, priority int, design, acceptance string, estimate *int) (*domain.Task, error) {
+func (m *mockIssuesClient) Create(ctx context.Context, title, description string, taskType domain.TaskType, priority int, design, acceptance string, estimate *int) (*domain.Task, error) {
 	if m.createErr != nil {
 		return nil, m.createErr
 	}
@@ -52,7 +52,7 @@ func (m *mockBeadsClient) Create(ctx context.Context, title, description string,
 	return task, nil
 }
 
-func (m *mockBeadsClient) AddDependency(ctx context.Context, childID, parentID, depType string) error {
+func (m *mockIssuesClient) AddDependency(ctx context.Context, childID, parentID, depType string) error {
 	return m.depErr
 }
 
@@ -97,7 +97,7 @@ func TestNewService(t *testing.T) {
 				os.Unsetenv("ANTHROPIC_API_KEY")
 			}
 
-			svc, err := NewService(&mockHTTPClient{}, &mockBeadsClient{}, slog.Default())
+			svc, err := NewService(&mockHTTPClient{}, &mockIssuesClient{}, slog.Default())
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -179,7 +179,7 @@ func TestService_GeneratePlan(t *testing.T) {
 				err:      tt.httpErr,
 			}
 
-			svc, err := NewService(httpClient, &mockBeadsClient{}, slog.Default())
+			svc, err := NewService(httpClient, &mockIssuesClient{}, slog.Default())
 			require.NoError(t, err)
 
 			plan, err := svc.GeneratePlan(context.Background(), tt.description)
@@ -240,7 +240,7 @@ func TestService_ReviewPlan(t *testing.T) {
 				err:      tt.httpErr,
 			}
 
-			svc, err := NewService(httpClient, &mockBeadsClient{}, slog.Default())
+			svc, err := NewService(httpClient, &mockIssuesClient{}, slog.Default())
 			require.NoError(t, err)
 
 			plan := &domain.Plan{
@@ -292,7 +292,7 @@ func TestService_RefinePlan(t *testing.T) {
 		response: createMockAPIResponse(response),
 	}
 
-	svc, err := NewService(httpClient, &mockBeadsClient{}, slog.Default())
+	svc, err := NewService(httpClient, &mockIssuesClient{}, slog.Default())
 	require.NoError(t, err)
 
 	plan := &domain.Plan{
@@ -317,13 +317,14 @@ func TestService_RefinePlan(t *testing.T) {
 	assert.Equal(t, domain.PlanningRefining, svc.state.Status)
 }
 
-func TestService_CreateBeadsFromPlan(t *testing.T) {
+func TestService_CreateIssuesFromPlan(t *testing.T) {
 	tests := []struct {
-		name       string
-		plan       *domain.Plan
-		createErr  error
-		wantBeads  int
-		wantErr    bool
+		name        string
+		plan        *domain.Plan
+		createErr   error
+		wantIssues  int
+		wantCreated int
+		wantErr     bool
 	}{
 		{
 			name: "simple plan with no dependencies",
@@ -356,7 +357,8 @@ func TestService_CreateBeadsFromPlan(t *testing.T) {
 					},
 				},
 			},
-			wantBeads: 3, // 1 epic + 2 tasks
+			wantIssues:  3, // 1 epic + 2 tasks
+			wantCreated: 3,
 		},
 		{
 			name: "plan with dependencies",
@@ -389,7 +391,31 @@ func TestService_CreateBeadsFromPlan(t *testing.T) {
 					},
 				},
 			},
-			wantBeads: 3, // 1 epic + 2 tasks
+			wantIssues:  3, // 1 epic + 2 tasks
+			wantCreated: 3,
+		},
+		{
+			name: "plan with unresolved dependency",
+			plan: &domain.Plan{
+				EpicTitle:       "Test Epic",
+				EpicDescription: "Description",
+				Summary:         "Summary",
+				Tasks: []domain.PlannedTask{
+					{
+						ID:             "task-1",
+						Title:          "Task 1",
+						Description:    "Desc 1",
+						Type:           domain.TypeTask,
+						Priority:       1,
+						DependsOn:      []string{"missing-task"},
+						CanParallelize: false,
+						Design:         "Design 1",
+						Acceptance:     "Accept 1",
+					},
+				},
+			},
+			wantErr:     true,
+			wantCreated: 0,
 		},
 		{
 			name: "epic creation error",
@@ -409,24 +435,26 @@ func TestService_CreateBeadsFromPlan(t *testing.T) {
 			os.Setenv("ANTHROPIC_API_KEY", "test-key")
 			defer os.Unsetenv("ANTHROPIC_API_KEY")
 
-			beadsClient := &mockBeadsClient{
+			issuesClient := &mockIssuesClient{
 				createdTasks: []domain.Task{},
 				createErr:    tt.createErr,
 			}
 
-			svc, err := NewService(&mockHTTPClient{}, beadsClient, slog.Default())
+			svc, err := NewService(&mockHTTPClient{}, issuesClient, slog.Default())
 			require.NoError(t, err)
 
-			beads, err := svc.CreateBeadsFromPlan(context.Background(), tt.plan)
+			issues, err := svc.CreateIssuesFromPlan(context.Background(), tt.plan)
 
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Nil(t, beads)
+				assert.Nil(t, issues)
 				assert.Equal(t, domain.PlanningErrorStatus, svc.state.Status)
+				assert.Len(t, issuesClient.createdTasks, tt.wantCreated)
 			} else {
 				require.NoError(t, err)
-				assert.Len(t, beads, tt.wantBeads)
+				assert.Len(t, issues, tt.wantIssues)
 				assert.Equal(t, domain.PlanningComplete, svc.state.Status)
+				assert.Len(t, issuesClient.createdTasks, tt.wantCreated)
 			}
 		})
 	}
@@ -475,17 +503,17 @@ func TestService_RunPlanningWorkflow(t *testing.T) {
 		responses: responses,
 	}
 
-	beadsClient := &mockBeadsClient{
+	issuesClient := &mockIssuesClient{
 		createdTasks: []domain.Task{},
 	}
 
-	svc, err := NewService(httpClient, beadsClient, slog.Default())
+	svc, err := NewService(httpClient, issuesClient, slog.Default())
 	require.NoError(t, err)
 
-	beads, err := svc.RunPlanningWorkflow(context.Background(), "Add test feature")
+	issues, err := svc.RunPlanningWorkflow(context.Background(), "Add test feature")
 
 	require.NoError(t, err)
-	assert.NotNil(t, beads)
+	assert.NotNil(t, issues)
 	assert.Equal(t, domain.PlanningComplete, svc.state.Status)
 	assert.Len(t, svc.state.ReviewHistory, 1)
 	assert.True(t, svc.state.ReviewHistory[0].IsApproved)
@@ -514,7 +542,7 @@ func TestService_Reset(t *testing.T) {
 	os.Setenv("ANTHROPIC_API_KEY", "test-key")
 	defer os.Unsetenv("ANTHROPIC_API_KEY")
 
-	svc, err := NewService(&mockHTTPClient{}, &mockBeadsClient{}, slog.Default())
+	svc, err := NewService(&mockHTTPClient{}, &mockIssuesClient{}, slog.Default())
 	require.NoError(t, err)
 
 	// Modify state

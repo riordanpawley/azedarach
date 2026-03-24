@@ -106,38 +106,38 @@ type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// BeadsClient interface for creating beads
-type BeadsClient interface {
+// IssuesClient interface for creating issues
+type IssuesClient interface {
 	Create(ctx context.Context, title, description string, taskType domain.TaskType, priority int, design, acceptance string, estimate *int) (*domain.Task, error)
 	AddDependency(ctx context.Context, childID, parentID, depType string) error
 }
 
 // Service provides AI-powered task planning
 type Service struct {
-	httpClient  HTTPClient
-	beadsClient BeadsClient
-	logger      *slog.Logger
-	apiKey      string
-	state       *domain.PlanningState
+	httpClient   HTTPClient
+	issuesClient IssuesClient
+	logger       *slog.Logger
+	apiKey       string
+	state        *domain.PlanningState
 }
 
 // NewService creates a new planning service
-func NewService(httpClient HTTPClient, beadsClient BeadsClient, logger *slog.Logger) (*Service, error) {
+func NewService(httpClient HTTPClient, issuesClient IssuesClient, logger *slog.Logger) (*Service, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("ANTHROPIC_API_KEY environment variable not set")
 	}
 
 	return &Service{
-		httpClient:  httpClient,
-		beadsClient: beadsClient,
-		logger:      logger,
-		apiKey:      apiKey,
+		httpClient:   httpClient,
+		issuesClient: issuesClient,
+		logger:       logger,
+		apiKey:       apiKey,
 		state: &domain.PlanningState{
 			Status:          domain.PlanningIdle,
 			MaxReviewPasses: 5,
 			ReviewHistory:   []domain.ReviewFeedback{},
-			CreatedBeads:    []domain.Task{},
+			CreatedIssues:   []domain.Task{},
 			UpdatedAt:       time.Now(),
 		},
 	}, nil
@@ -154,7 +154,7 @@ func (s *Service) Reset() {
 		Status:          domain.PlanningIdle,
 		MaxReviewPasses: 5,
 		ReviewHistory:   []domain.ReviewFeedback{},
-		CreatedBeads:    []domain.Task{},
+		CreatedIssues:   []domain.Task{},
 		UpdatedAt:       time.Now(),
 	}
 }
@@ -251,6 +251,65 @@ func parseJSONResponse(text string, target interface{}) error {
 	// Parse JSON
 	if err := json.Unmarshal([]byte(jsonStr), target); err != nil {
 		return fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	return nil
+}
+
+// validateTaskDependencyGraph rejects missing references, duplicates, and cycles before issue creation.
+func validateTaskDependencyGraph(tasks []domain.PlannedTask) error {
+	taskIDs := make(map[string]struct{}, len(tasks))
+	dependencyGraph := make(map[string][]string, len(tasks))
+
+	for _, task := range tasks {
+		if task.ID == "" {
+			return errors.New("task graph contains an empty task ID")
+		}
+		if _, exists := taskIDs[task.ID]; exists {
+			return fmt.Errorf("duplicate task id %q", task.ID)
+		}
+
+		taskIDs[task.ID] = struct{}{}
+		dependencyGraph[task.ID] = append([]string(nil), task.DependsOn...)
+	}
+
+	for _, task := range tasks {
+		for _, depID := range task.DependsOn {
+			if _, ok := taskIDs[depID]; !ok {
+				return fmt.Errorf("task %q depends on unknown task %q", task.ID, depID)
+			}
+		}
+	}
+
+	const (
+		taskVisiting = 1
+		taskDone     = 2
+	)
+
+	visitState := make(map[string]int, len(tasks))
+	var visit func(string) error
+	visit = func(taskID string) error {
+		switch visitState[taskID] {
+		case taskVisiting:
+			return fmt.Errorf("task dependency cycle detected at %q", taskID)
+		case taskDone:
+			return nil
+		}
+
+		visitState[taskID] = taskVisiting
+		for _, depID := range dependencyGraph[taskID] {
+			if err := visit(depID); err != nil {
+				return err
+			}
+		}
+		visitState[taskID] = taskDone
+		return nil
+	}
+
+	for _, task := range tasks {
+		if err := visit(task.ID); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -371,19 +430,30 @@ func (s *Service) RefinePlan(ctx context.Context, plan *domain.Plan, feedback *d
 	return &refinedPlan, nil
 }
 
-// CreateBeadsFromPlan creates beads from a finalized plan
-func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([]domain.Task, error) {
-	s.logger.Info("creating beads from plan")
+// CreateIssuesFromPlan creates issues from a finalized plan
+func (s *Service) CreateIssuesFromPlan(ctx context.Context, plan *domain.Plan) ([]domain.Task, error) {
+	s.logger.Info("creating issues from plan")
 
-	s.state.Status = domain.PlanningCreatingBeads
+	s.state.Status = domain.PlanningCreatingIssues
 	s.state.UpdatedAt = time.Now()
 
-	createdBeads := []domain.Task{}
-	idMapping := make(map[string]string) // Map temp IDs to real bead IDs
+	if err := validateTaskDependencyGraph(plan.Tasks); err != nil {
+		s.state.Status = domain.PlanningErrorStatus
+		s.state.Error = err.Error()
+		s.state.UpdatedAt = time.Now()
+		return nil, &domain.PlanningError{
+			Phase:   "issues_creation",
+			Message: "invalid task dependency graph",
+			Err:     err,
+		}
+	}
+
+	createdIssues := []domain.Task{}
+	idMapping := make(map[string]string) // Map temp IDs to real issue IDs
 
 	// 1. Create the epic first
 	s.logger.Debug("creating epic", "title", plan.EpicTitle)
-	epic, err := s.beadsClient.Create(
+	epic, err := s.issuesClient.Create(
 		ctx,
 		plan.EpicTitle,
 		plan.EpicDescription,
@@ -398,13 +468,13 @@ func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([
 		s.state.Error = err.Error()
 		s.state.UpdatedAt = time.Now()
 		return nil, &domain.PlanningError{
-			Phase:   "beads_creation",
+			Phase:   "issues_creation",
 			Message: "failed to create epic",
 			Err:     err,
 		}
 	}
 
-	createdBeads = append(createdBeads, *epic)
+	createdIssues = append(createdIssues, *epic)
 
 	// 2. Create tasks in dependency order
 	// First, create tasks with no dependencies
@@ -420,7 +490,7 @@ func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([
 	// Create tasks without dependencies
 	for _, task := range noDeps {
 		s.logger.Debug("creating task", "title", task.Title)
-		bead, err := s.beadsClient.Create(
+		issue, err := s.issuesClient.Create(
 			ctx,
 			task.Title,
 			task.Description,
@@ -435,12 +505,12 @@ func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([
 			continue
 		}
 
-		idMapping[task.ID] = bead.ID
-		createdBeads = append(createdBeads, *bead)
+		idMapping[task.ID] = issue.ID
+		createdIssues = append(createdIssues, *issue)
 
 		// Link to epic as child
-		if err := s.beadsClient.AddDependency(ctx, bead.ID, epic.ID, "parent-child"); err != nil {
-			s.logger.Warn("failed to link task to epic", "task", bead.ID, "error", err)
+		if err := s.issuesClient.AddDependency(ctx, issue.ID, epic.ID, "parent-child"); err != nil {
+			s.logger.Warn("failed to link task to epic", "task", issue.ID, "error", err)
 		}
 	}
 
@@ -470,7 +540,7 @@ func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([
 
 		for _, task := range canCreate {
 			s.logger.Debug("creating task with dependencies", "title", task.Title)
-			bead, err := s.beadsClient.Create(
+			issue, err := s.issuesClient.Create(
 				ctx,
 				task.Title,
 				task.Description,
@@ -485,19 +555,19 @@ func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([
 				continue
 			}
 
-			idMapping[task.ID] = bead.ID
-			createdBeads = append(createdBeads, *bead)
+			idMapping[task.ID] = issue.ID
+			createdIssues = append(createdIssues, *issue)
 
 			// Link to epic as child
-			if err := s.beadsClient.AddDependency(ctx, bead.ID, epic.ID, "parent-child"); err != nil {
-				s.logger.Warn("failed to link task to epic", "task", bead.ID, "error", err)
+			if err := s.issuesClient.AddDependency(ctx, issue.ID, epic.ID, "parent-child"); err != nil {
+				s.logger.Warn("failed to link task to epic", "task", issue.ID, "error", err)
 			}
 
 			// Add task dependencies (blocks relationship)
 			for _, depID := range task.DependsOn {
 				if realDepID, ok := idMapping[depID]; ok {
-					if err := s.beadsClient.AddDependency(ctx, bead.ID, realDepID, "blocks"); err != nil {
-						s.logger.Warn("failed to add dependency", "task", bead.ID, "dep", realDepID, "error", err)
+					if err := s.issuesClient.AddDependency(ctx, issue.ID, realDepID, "blocks"); err != nil {
+						s.logger.Warn("failed to add dependency", "task", issue.ID, "dep", realDepID, "error", err)
 					}
 				}
 			}
@@ -511,11 +581,11 @@ func (s *Service) CreateBeadsFromPlan(ctx context.Context, plan *domain.Plan) ([
 	}
 
 	s.state.Status = domain.PlanningComplete
-	s.state.CreatedBeads = createdBeads
+	s.state.CreatedIssues = createdIssues
 	s.state.UpdatedAt = time.Now()
 
-	s.logger.Info("beads created", "count", len(createdBeads))
-	return createdBeads, nil
+	s.logger.Info("issues created", "count", len(createdIssues))
+	return createdIssues, nil
 }
 
 // RunPlanningWorkflow runs the complete planning workflow
@@ -562,6 +632,6 @@ func (s *Service) RunPlanningWorkflow(ctx context.Context, featureDescription st
 		}
 	}
 
-	// 3. Create beads from the final plan
-	return s.CreateBeadsFromPlan(ctx, plan)
+	// 3. Create issues from the final plan
+	return s.CreateIssuesFromPlan(ctx, plan)
 }
