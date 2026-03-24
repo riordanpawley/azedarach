@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -11,9 +12,10 @@ import (
 )
 
 type mockWorktreeService struct {
-	listFn   func(context.Context, string) ([]git.Worktree, error)
-	createFn func(context.Context, string, string, string) (*git.Worktree, error)
-	deleteFn func(context.Context, string, string) error
+	listFn            func(context.Context, string) ([]git.Worktree, error)
+	createFn          func(context.Context, string, string, string) (*git.Worktree, error)
+	deleteFn          func(context.Context, string, string) error
+	cleanupOrphanedFn func(context.Context, string) (*CleanupOrphanedResult, error)
 }
 
 func (m mockWorktreeService) List(ctx context.Context, projectID string) ([]git.Worktree, error) {
@@ -26,6 +28,10 @@ func (m mockWorktreeService) Create(ctx context.Context, projectID, beadID, base
 
 func (m mockWorktreeService) Delete(ctx context.Context, projectID, beadID string) error {
 	return m.deleteFn(ctx, projectID, beadID)
+}
+
+func (m mockWorktreeService) CleanupOrphaned(ctx context.Context, projectID string) (*CleanupOrphanedResult, error) {
+	return m.cleanupOrphanedFn(ctx, projectID)
 }
 
 func TestWorktreeHandlerHappyPath(t *testing.T) {
@@ -41,6 +47,19 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 		},
 		deleteFn: func(context.Context, string, string) error {
 			return nil
+		},
+		cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
+			return &CleanupOrphanedResult{
+				ProjectID: "proj",
+				Removed: []git.Worktree{
+					{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"},
+					{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
+				},
+				Skipped: []git.Worktree{
+					{Path: "/tmp/repo-d", Branch: "az/bead-d", BeadID: "bead-d"},
+					{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
+				},
+			}, nil
 		},
 	})
 
@@ -117,6 +136,29 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:    "cleanup orphaned",
+			command: CommandWorktreeCleanupOrphaned,
+			body: map[string]string{
+				"project_id": "proj",
+			},
+			check: func(t *testing.T, resp protocol.ResponseEnvelope) {
+				t.Helper()
+				if !resp.OK {
+					t.Fatalf("response = %+v", resp)
+				}
+				var body protocol.CleanupOrphanedResponseBody
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal cleanup body: %v", err)
+				}
+				if body.ProjectID != "proj" {
+					t.Fatalf("project_id = %q, want proj", body.ProjectID)
+				}
+				if body.WorktreesRemoved != 2 {
+					t.Fatalf("worktrees_removed = %d, want 2", body.WorktreesRemoved)
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -174,6 +216,27 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 			err:  context.DeadlineExceeded,
 			code: protocol.ErrorCodeTimeout,
 		},
+		{
+			name:    "cleanup invalid request",
+			command: CommandWorktreeCleanupOrphaned,
+			body:    map[string]string{"project_id": "proj"},
+			err:     ErrCleanupOrphanedInvalidRequest,
+			code:    protocol.ErrorCodeInvalidRequest,
+		},
+		{
+			name:    "cleanup conflict",
+			command: CommandWorktreeCleanupOrphaned,
+			body:    map[string]string{"project_id": "proj"},
+			err:     ErrCleanupOrphanedConflict,
+			code:    protocol.ErrorCodeConflict,
+		},
+		{
+			name:    "cleanup timeout",
+			command: CommandWorktreeCleanupOrphaned,
+			body:    map[string]string{"project_id": "proj"},
+			err:     context.DeadlineExceeded,
+			code:    protocol.ErrorCodeTimeout,
+		},
 	}
 
 	for _, tc := range tests {
@@ -187,6 +250,9 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 				},
 				deleteFn: func(context.Context, string, string) error {
 					return tc.err
+				},
+				cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
+					return nil, tc.err
 				},
 			}
 			h := NewWorktreeHandler(service)
@@ -222,6 +288,9 @@ func TestWorktreeHandlerUnsupportedCommand(t *testing.T) {
 		listFn:   func(context.Context, string) ([]git.Worktree, error) { return nil, nil },
 		createFn: func(context.Context, string, string, string) (*git.Worktree, error) { return nil, nil },
 		deleteFn: func(context.Context, string, string) error { return nil },
+		cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
+			return nil, nil
+		},
 	})
 
 	body, err := json.Marshal(map[string]string{"project_id": "proj"})
@@ -299,5 +368,36 @@ func TestMapCleanupOrphanedError(t *testing.T) {
 				t.Fatalf("Retryable = %v, want %v", got.Retryable, tc.retryable)
 			}
 		})
+	}
+}
+
+func TestNormalizeCleanupOrphanedResult(t *testing.T) {
+	result := &CleanupOrphanedResult{
+		Removed: []git.Worktree{
+			{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"},
+			{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
+			{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-a"},
+		},
+		Skipped: []git.Worktree{
+			{Path: "/tmp/repo-d", Branch: "az/bead-d", BeadID: "bead-d"},
+			{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
+		},
+	}
+
+	normalizeCleanupOrphanedResult(result)
+
+	if got, want := result.Removed, []git.Worktree{
+		{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
+		{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-a"},
+		{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Removed = %+v, want %+v", got, want)
+	}
+
+	if got, want := result.Skipped, []git.Worktree{
+		{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
+		{Path: "/tmp/repo-d", Branch: "az/bead-d", BeadID: "bead-d"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Skipped = %+v, want %+v", got, want)
 	}
 }

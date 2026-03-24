@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -20,4 +22,24 @@ func (a worktreeServiceAdapter) Create(ctx context.Context, _ string, beadID str
 
 func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, beadID string) error {
 	return a.manager.Delete(ctx, beadID)
+}
+
+func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
+	worktrees, err := a.manager.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &daemonhandlers.CleanupOrphanedResult{
+		ProjectID: projectID,
+	}
+	for _, wt := range worktrees {
+		if err := a.manager.Delete(ctx, wt.BeadID); err != nil {
+			result.Skipped = append(result.Skipped, wt)
+			continue
+		}
+		result.Removed = append(result.Removed, wt)
+	}
+
+	return result, nil
 }

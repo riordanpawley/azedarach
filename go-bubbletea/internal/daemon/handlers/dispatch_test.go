@@ -20,6 +20,9 @@ func (f *fakeWorktreeService) Create(context.Context, string, string, string) (*
 	return &git.Worktree{Path: "/tmp/wt", Branch: "main", BeadID: "afk"}, nil
 }
 func (f *fakeWorktreeService) Delete(context.Context, string, string) error { return nil }
+func (f *fakeWorktreeService) CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error) {
+	return &CleanupOrphanedResult{ProjectID: "proj"}, nil
+}
 
 type routeDevServerManager struct {
 	servers map[string]*devserver.Server
@@ -87,6 +90,13 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	}))
 	if !r3.OK {
 		t.Fatalf("devserver route failed: %+v", r3.Error)
+	}
+
+	r4 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
+		"project_id": "proj",
+	}))
+	if !r4.OK {
+		t.Fatalf("cleanup route failed: %+v", r4.Error)
 	}
 }
 

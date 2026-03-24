@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -37,6 +38,14 @@ type worktreeService interface {
 	List(context.Context, string) ([]git.Worktree, error)
 	Create(context.Context, string, string, string) (*git.Worktree, error)
 	Delete(context.Context, string, string) error
+	CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error)
+}
+
+// CleanupOrphanedResult captures the deterministic cleanup outcome used by the handler.
+type CleanupOrphanedResult struct {
+	ProjectID string
+	Removed   []git.Worktree
+	Skipped   []git.Worktree
 }
 
 // NewWorktreeHandler returns a daemon worktree command handler.
@@ -190,6 +199,49 @@ func (h *WorktreeHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		resp.Body = body
 		return resp
 
+	case CommandWorktreeCleanupOrphaned:
+		if cmd.ProjectID == "" {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   "missing required fields: project_id",
+				Retryable: false,
+			}
+			return resp
+		}
+
+		result, err := h.service.CleanupOrphaned(ctx, cmd.ProjectID)
+		if err != nil {
+			resp.Error = mapCleanupOrphanedError(err)
+			return resp
+		}
+		if result == nil {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   "cleanup orphaned returned no result",
+				Retryable: false,
+			}
+			return resp
+		}
+
+		normalizeCleanupOrphanedResult(result)
+
+		body, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+			ProjectID:        cmd.ProjectID,
+			WorktreesRemoved: len(result.Removed),
+		})
+		if err != nil {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInternal,
+				Message:   fmt.Sprintf("marshal response body: %v", err),
+				Retryable: false,
+			}
+			return resp
+		}
+
+		resp.OK = true
+		resp.Body = body
+		return resp
+
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,
@@ -280,4 +332,25 @@ func mapCleanupOrphanedError(err error) *protocol.ErrorEnvelope {
 			Retryable: false,
 		}
 	}
+}
+
+func normalizeCleanupOrphanedResult(result *CleanupOrphanedResult) {
+	if result == nil {
+		return
+	}
+
+	sortWorktrees := func(worktrees []git.Worktree) {
+		sort.SliceStable(worktrees, func(i, j int) bool {
+			if worktrees[i].BeadID != worktrees[j].BeadID {
+				return worktrees[i].BeadID < worktrees[j].BeadID
+			}
+			if worktrees[i].Path != worktrees[j].Path {
+				return worktrees[i].Path < worktrees[j].Path
+			}
+			return worktrees[i].Branch < worktrees[j].Branch
+		})
+	}
+
+	sortWorktrees(result.Removed)
+	sortWorktrees(result.Skipped)
 }
