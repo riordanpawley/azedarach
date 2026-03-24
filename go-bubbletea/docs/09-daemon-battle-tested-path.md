@@ -71,6 +71,8 @@ Move go-bubbletea to a production-safe split architecture:
   - all daemon calls wrapped as `tea.Cmd` returning typed `tea.Msg`
   - no direct tmux/git/worktree mutations in model layer
   - event stream converted into typed update messages
+  - keep Bubble Tea model local; do not stream raw `tea.Msg` from daemon
+  - daemon streams domain events; client maps events to local UI state transitions
 - CLI:
   - thin command handlers that call daemon client methods only
   - no direct ownership of backend lifecycle resources
