@@ -142,6 +142,10 @@ func TestClient_AddAndRemoveDependency(t *testing.T) {
 	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
 
 	err = client.RemoveDependency(ctx, blockedID, blockerID, "blocks")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDependencyRemovalConfirmationRequired)
+
+	err = client.RemoveDependency(WithDependencyRemovalConfirmation(ctx), blockedID, blockerID, "blocks")
 	require.NoError(t, err)
 
 	tasks, err = client.List(ctx)
@@ -157,6 +161,166 @@ func TestClient_AddAndRemoveDependency(t *testing.T) {
 		t.Fatalf("blocked task %s not found after remove", blockedID)
 	}
 	assert.Empty(t, blockedTask.Dependencies)
+}
+
+func TestClient_RemoveDependencyConfirmationIsNotRequiredForRelatedEdges(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	sourceID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Source",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	relatedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Related",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, relatedID, sourceID, "related"))
+	require.NoError(t, client.RemoveDependency(ctx, relatedID, sourceID, "related"))
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+
+	var relatedTask *domain.Task
+	for i := range tasks {
+		if tasks[i].ID == relatedID {
+			relatedTask = &tasks[i]
+			break
+		}
+	}
+	if relatedTask == nil {
+		t.Fatalf("related task %s not found after remove", relatedID)
+	}
+	assert.Empty(t, relatedTask.Dependencies)
+}
+
+func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	sourceID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Source",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	blockedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Blocked",
+		Type:     domain.TypeFeature,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	relatedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Related",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, blockedID, sourceID, "blocked_by"))
+	require.NoError(t, client.AddDependency(ctx, relatedID, sourceID, "related"))
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+
+	var blockedTask, relatedTask *domain.Task
+	for i := range tasks {
+		switch tasks[i].ID {
+		case blockedID:
+			blockedTask = &tasks[i]
+		case relatedID:
+			relatedTask = &tasks[i]
+		}
+	}
+
+	if blockedTask == nil {
+		t.Fatalf("blocked task %s not found", blockedID)
+	}
+	if relatedTask == nil {
+		t.Fatalf("related task %s not found", relatedID)
+	}
+
+	require.Len(t, blockedTask.Dependencies, 1)
+	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID)
+	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
+
+	require.Len(t, relatedTask.Dependencies, 1)
+	assert.Equal(t, sourceID, relatedTask.Dependencies[0].ID)
+	assert.Equal(t, domain.DependencyRelatedTo, relatedTask.Dependencies[0].Type)
+}
+
+func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	sourceID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Source",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	blockedID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Blocked",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, blockedID, sourceID, "blocks"))
+	require.NoError(t, client.AddDependency(ctx, blockedID, sourceID, "blocks"))
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+
+	var blockedTask *domain.Task
+	for i := range tasks {
+		if tasks[i].ID == blockedID {
+			blockedTask = &tasks[i]
+			break
+		}
+	}
+	if blockedTask == nil {
+		t.Fatalf("blocked task %s not found", blockedID)
+	}
+
+	require.Len(t, blockedTask.Dependencies, 1)
+	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID)
+	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
+}
+
+func TestClient_AddDependencyRequiresExistingTargetIssue(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	sourceID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Source",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	err = client.AddDependency(ctx, sourceID, "missing-target", "blocks")
+	require.Error(t, err)
+
+	var storeErr *domain.TaskStoreError
+	require.ErrorAs(t, err, &storeErr)
+	assert.Equal(t, "add-dependency", storeErr.Op)
+	assert.Equal(t, sourceID, storeErr.TaskID)
+	assert.ErrorIs(t, storeErr.Err, domain.ErrNotFound)
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Empty(t, tasks[0].Dependencies)
 }
 
 func TestClient_AddDependencyRejectsCycle(t *testing.T) {

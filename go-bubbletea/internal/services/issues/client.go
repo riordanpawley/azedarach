@@ -19,6 +19,23 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
+type dependencyRemovalConfirmationKey struct{}
+
+// ErrDependencyRemovalConfirmationRequired is returned when a removal that can
+// unblock or retarget workflow is attempted without explicit confirmation.
+var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation required")
+
+// WithDependencyRemovalConfirmation marks a context as explicitly confirming a
+// dependency removal that can unblock or retarget workflow.
+func WithDependencyRemovalConfirmation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dependencyRemovalConfirmationKey{}, true)
+}
+
+func hasDependencyRemovalConfirmation(ctx context.Context) bool {
+	confirmed, _ := ctx.Value(dependencyRemovalConfirmationKey{}).(bool)
+	return confirmed
+}
+
 const (
 	nextAlphaIssueIndexMetaKey = "issue:id_next_alpha_index"
 )
@@ -352,6 +369,22 @@ func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, depend
 		}
 	}
 
+	sourceExists, err := c.issueExists(ctx, db, issueID)
+	if err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+	if !sourceExists {
+		return c.wrapError("add-dependency", issueID, domain.ErrNotFound)
+	}
+
+	targetExists, err := c.issueExists(ctx, db, dependsOnID)
+	if err != nil {
+		return c.wrapError("add-dependency", issueID, err)
+	}
+	if !targetExists {
+		return c.wrapError("add-dependency", issueID, domain.ErrNotFound)
+	}
+
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
 		VALUES (?, ?, ?, NULL)
@@ -362,6 +395,20 @@ func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, depend
 	}
 
 	return nil
+}
+
+func (c *Client) issueExists(ctx context.Context, db *sql.DB, id string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM issues
+			WHERE id = ? AND deleted_at IS NULL
+		)
+	`, id).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 // RemoveDependency tombstones a dependency edge between two issues.
@@ -383,6 +430,10 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 		return c.wrapError("remove-dependency", issueID, err)
 	}
 
+	if dependencyTypeRequiresConfirmation(canonicalType) && !hasDependencyRemovalConfirmation(ctx) {
+		return c.wrapError("remove-dependency", issueID, ErrDependencyRemovalConfirmationRequired)
+	}
+
 	res, err := db.ExecContext(ctx, `
 		UPDATE issue_dependencies
 		SET tombstoned_at = ?
@@ -398,6 +449,15 @@ func (c *Client) RemoveDependency(ctx context.Context, issueID, dependsOnID, dep
 	}
 
 	return nil
+}
+
+func dependencyTypeRequiresConfirmation(dependencyType string) bool {
+	switch dependencyType {
+	case string(domain.DependencyBlocks), string(domain.DependencyParentChild):
+		return true
+	default:
+		return false
+	}
 }
 
 // Close marks an issue as closed.
