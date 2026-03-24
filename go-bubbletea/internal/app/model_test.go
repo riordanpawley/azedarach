@@ -384,6 +384,46 @@ func TestHalfPageScroll(t *testing.T) {
 			t.Errorf("Expected task index to stay at 0, got %d", newPos.Task)
 		}
 	})
+
+	t.Run("sustained down input stays responsive on large lists", func(t *testing.T) {
+		m := newTestModel()
+		for i := 0; i < 50; i++ {
+			m.tasks = append(m.tasks, domain.Task{
+				ID:       string(rune('a' + i%26)) + string(rune('A'+i/26)),
+				Title:    "Extra Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P3,
+				Type:     domain.TypeTask,
+			})
+		}
+		m.height = 24
+		m.nav.SelectTask("az-1", 0)
+
+		seen := map[string]struct{}{"az-1": {}}
+		for i := 0; i < 20; i++ {
+			result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+			if cmd != nil {
+				t.Fatalf("expected no command during sustained scroll input, got %T", cmd)
+			}
+			nextModel, ok := result.(Model)
+			if !ok {
+				t.Fatalf("updated model type = %T, want Model", result)
+			}
+			m = nextModel
+			got := m.nav.GetCursor().TaskID
+			if got == "" {
+				t.Fatal("expected cursor to remain on a task while scrolling")
+			}
+			seen[got] = struct{}{}
+		}
+
+		if len(seen) < 5 {
+			t.Fatalf("expected cursor to advance across multiple tasks, saw %d distinct ids", len(seen))
+		}
+		if view := m.View(); view == "" {
+			t.Fatal("expected view to remain renderable during sustained scroll input")
+		}
+	})
 }
 
 func TestSelectModeHalfPageNavigation(t *testing.T) {
