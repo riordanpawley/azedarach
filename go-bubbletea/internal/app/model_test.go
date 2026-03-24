@@ -365,6 +365,30 @@ func TestGotoMode(t *testing.T) {
 	})
 }
 
+func TestSelectModeEntry(t *testing.T) {
+	m := newTestModel()
+
+	t.Run("v enters select mode from normal", func(t *testing.T) {
+		m.editor.EnterNormal()
+		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+		newModel := result.(Model)
+
+		if newModel.editor.GetMode() != ModeSelect {
+			t.Errorf("Expected ModeSelect, got %v", newModel.editor.GetMode())
+		}
+	})
+
+	t.Run("escape exits select mode back to normal", func(t *testing.T) {
+		m.editor.EnterSelect()
+		result, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsNormal() {
+			t.Errorf("Expected ModeNormal after escape from select, got %v", newModel.editor.GetMode())
+		}
+	})
+}
+
 func TestModeTransitions(t *testing.T) {
 	m := newTestModel()
 
