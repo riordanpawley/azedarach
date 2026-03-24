@@ -102,3 +102,4 @@ func LogRequestComplete(ctx context.Context, logger *slog.Logger, reqID string, 
 
 - Schema and naming rules: `references/schema.md`
 - Rollout and migration checklist: `references/rollout-checklist.md`
+- go-bubbletea event catalog: `references/go-bubbletea-event-catalog.md`
