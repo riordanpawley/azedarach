@@ -176,6 +176,25 @@ func TestResponseExitCode(t *testing.T) {
 			want: 0,
 		},
 		{
+			name: "dry-run preview response",
+			resp: protocol.ResponseEnvelope{
+				OK: true,
+				Body: mustApplyDryRunPreviewBody(t, applyDryRunPreviewBody{
+					SchemaVersion:    protocol.ApplySchemaVersion,
+					SnapshotRevision: 7,
+					DryRun:           true,
+					Operations: []applyDryRunPreviewOperationBody{
+						{
+							Index:   0,
+							Command: "task.create",
+							Body:    json.RawMessage(`{"title":"First task","description":"Draft","type":"task","priority":"high"}`),
+						},
+					},
+				}),
+			},
+			want: 0,
+		},
+		{
 			name: "partial failure response",
 			resp: protocol.ResponseEnvelope{
 				OK: true,
@@ -439,6 +458,29 @@ func mustApplyResultBody(t *testing.T, summary applyExecutionSummaryBody) []byte
 	data, err := json.Marshal(applyExecutionResultBody{Summary: summary})
 	if err != nil {
 		t.Fatalf("marshal apply result body: %v", err)
+	}
+	return data
+}
+
+type applyDryRunPreviewBody struct {
+	SchemaVersion    uint16                            `json:"schema_version"`
+	SnapshotRevision uint64                            `json:"snapshot_revision"`
+	DryRun           bool                              `json:"dry_run"`
+	Operations       []applyDryRunPreviewOperationBody `json:"operations"`
+}
+
+type applyDryRunPreviewOperationBody struct {
+	Index   int             `json:"index"`
+	Command string          `json:"command"`
+	Body    json.RawMessage `json:"body,omitempty"`
+}
+
+func mustApplyDryRunPreviewBody(t *testing.T, preview applyDryRunPreviewBody) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatalf("marshal dry-run preview body: %v", err)
 	}
 	return data
 }
