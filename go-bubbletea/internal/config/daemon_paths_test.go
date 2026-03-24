@@ -31,6 +31,21 @@ func TestGlobalDaemonRuntimeDirFallsBackToHome(t *testing.T) {
 	}
 }
 
+func TestGlobalDaemonRuntimeDirSkipsUnwritableCandidates(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(string(os.PathSeparator), "dev", "null"))
+	fakeHome := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatalf("mkdir fake home: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+
+	got := GlobalDaemonRuntimeDir()
+	want := filepath.Join(fakeHome, ".azedarach", "run")
+	if got != want {
+		t.Fatalf("GlobalDaemonRuntimeDir() = %q, want %q", got, want)
+	}
+}
+
 func TestGlobalDaemonPaths(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 
