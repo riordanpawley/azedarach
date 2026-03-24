@@ -52,6 +52,12 @@ type TaskIDResponse struct {
 	TaskID string `json:"task_id"`
 }
 
+// TaskSnapshot captures a task list snapshot and the revision it was read at.
+type TaskSnapshot struct {
+	Tasks    []domain.Task
+	Revision uint64
+}
+
 // CommandError wraps typed daemon command failures.
 type CommandError struct {
 	Code      protocol.ErrorCode
@@ -63,13 +69,13 @@ func (e *CommandError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }
 
-func (c *Client) commandJSON(ctx context.Context, command string, body any, out any) error {
+func (c *Client) commandJSONResponse(ctx context.Context, command string, body any) (protocol.ResponseEnvelope, error) {
 	var payload []byte
 	var err error
 	if body != nil {
 		payload, err = json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("marshal %s request: %w", command, err)
+			return protocol.ResponseEnvelope{}, fmt.Errorf("marshal %s request: %w", command, err)
 		}
 	}
 
@@ -82,12 +88,19 @@ func (c *Client) commandJSON(ctx context.Context, command string, body any, out 
 		Body:            payload,
 	})
 	if err != nil {
-		return err
+		return protocol.ResponseEnvelope{}, err
 	}
 	if !resp.OK {
-		return commandResponseError(command, resp.Error)
+		return protocol.ResponseEnvelope{}, commandResponseError(command, resp.Error)
 	}
+	return resp, nil
+}
 
+func (c *Client) commandJSON(ctx context.Context, command string, body any, out any) error {
+	resp, err := c.commandJSONResponse(ctx, command, body)
+	if err != nil {
+		return err
+	}
 	if out != nil && len(resp.Body) > 0 {
 		if err := json.Unmarshal(resp.Body, out); err != nil {
 			return fmt.Errorf("decode %s response: %w", command, err)
@@ -109,11 +122,31 @@ func commandResponseError(command string, env *protocol.ErrorEnvelope) error {
 
 // ListTasks fetches the current task set through the daemon client boundary.
 func (c *Client) ListTasks(ctx context.Context) ([]domain.Task, error) {
-	var tasks []domain.Task
-	if err := c.commandJSON(ctx, CommandTaskList, nil, &tasks); err != nil {
+	snapshot, err := c.ListTasksSnapshot(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return tasks, nil
+	return snapshot.Tasks, nil
+}
+
+// ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.
+func (c *Client) ListTasksSnapshot(ctx context.Context) (TaskSnapshot, error) {
+	resp, err := c.commandJSONResponse(ctx, CommandTaskList, nil)
+	if err != nil {
+		return TaskSnapshot{}, err
+	}
+
+	var tasks []domain.Task
+	if len(resp.Body) > 0 {
+		if err := json.Unmarshal(resp.Body, &tasks); err != nil {
+			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w", CommandTaskList, err)
+		}
+	}
+
+	return TaskSnapshot{
+		Tasks:    tasks,
+		Revision: resp.Revision,
+	}, nil
 }
 
 // CreateTask creates a task through the daemon client boundary.

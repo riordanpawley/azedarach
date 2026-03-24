@@ -122,8 +122,9 @@ type Model struct {
 	hasRefreshLoop bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient *daemonclient.Client
-	daemonEvents <-chan protocol.EventEnvelope
+	daemonClient   *daemonclient.Client
+	daemonEvents   <-chan protocol.EventEnvelope
+	daemonRevision uint64
 
 	// Session management services
 	tmuxClient      *tmux.Client
@@ -333,6 +334,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case beadsLoadedMsg:
 		wasLoading := m.loading
 		m.tasks = msg.tasks
+		if msg.revision > m.daemonRevision {
+			m.daemonRevision = msg.revision
+		}
 		m.loading = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
@@ -412,7 +416,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonEvents == nil {
 			return m, nil
 		}
-		return m, tea.Batch(m.loadBeadsCmd(), m.waitForDaemonEventCmd())
+		switch m.reduceDaemonEvent(msg.event) {
+		case daemonEventIgnore:
+			return m, m.waitForDaemonEventCmd()
+		case daemonEventRefreshSnapshot:
+			m.daemonRevision = msg.event.Revision
+			return m, tea.Batch(m.loadBeadsCmd(), m.waitForDaemonEventCmd())
+		case daemonEventRehydrate:
+			return m, m.attachDaemonCmd()
+		default:
+			return m, m.waitForDaemonEventCmd()
+		}
 
 	case daemonStreamClosedMsg:
 		m.daemonEvents = nil
@@ -1240,8 +1254,9 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type beadsLoadedMsg struct {
-	tasks  []domain.Task
-	events <-chan protocol.EventEnvelope
+	tasks    []domain.Task
+	revision uint64
+	events   <-chan protocol.EventEnvelope
 }
 
 type beadsErrorMsg struct {
@@ -1255,6 +1270,14 @@ type daemonStreamEventMsg struct {
 type daemonStreamClosedMsg struct{}
 
 type tickMsg time.Time
+
+type daemonEventDecision int
+
+const (
+	daemonEventIgnore daemonEventDecision = iota
+	daemonEventRefreshSnapshot
+	daemonEventRehydrate
+)
 
 type sessionStartedMsg struct {
 	beadID       string
@@ -1278,11 +1301,14 @@ func (m Model) loadBeadsCmd() tea.Cmd {
 			return beadsErrorMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		tasks, err := m.daemonClient.ListTasks(ctx)
+		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return beadsErrorMsg{err: err}
 		}
-		return beadsLoadedMsg{tasks: tasks}
+		return beadsLoadedMsg{
+			tasks:    snapshot.Tasks,
+			revision: snapshot.Revision,
+		}
 	}
 }
 
@@ -1308,19 +1334,20 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			return beadsErrorMsg{err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
 
-		tasks, err := m.daemonClient.ListTasks(ctx)
+		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return beadsErrorMsg{err: err}
 		}
 
-		events, err := m.daemonClient.Subscribe(context.Background(), m.daemonProjectID(), 0)
+		events, err := m.daemonClient.Subscribe(context.Background(), m.daemonProjectID(), snapshot.Revision)
 		if err != nil {
 			return beadsErrorMsg{err: err}
 		}
 
 		return beadsLoadedMsg{
-			tasks:  tasks,
-			events: events,
+			tasks:    snapshot.Tasks,
+			revision: snapshot.Revision,
+			events:   events,
 		}
 	}
 }
@@ -1337,6 +1364,17 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 		}
 
 		return daemonStreamEventMsg{event: evt}
+	}
+}
+
+func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
+	switch {
+	case evt.Revision <= m.daemonRevision:
+		return daemonEventIgnore
+	case evt.Revision > m.daemonRevision+1:
+		return daemonEventRehydrate
+	default:
+		return daemonEventRefreshSnapshot
 	}
 }
 

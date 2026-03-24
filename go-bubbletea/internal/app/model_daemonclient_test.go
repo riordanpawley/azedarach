@@ -230,6 +230,7 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        8,
 				OK:              true,
 				Body:            body,
 			}, nil
@@ -251,6 +252,9 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
 		t.Fatalf("loaded tasks = %+v", loaded.tasks)
 	}
+	if loaded.revision != 8 {
+		t.Fatalf("loaded revision = %d, want 8", loaded.revision)
+	}
 	if loaded.events == nil {
 		t.Fatal("expected daemon event subscription channel")
 	}
@@ -263,8 +267,8 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	if transport.subscribeProject != "proj" {
 		t.Fatalf("subscribe project = %q, want proj", transport.subscribeProject)
 	}
-	if transport.subscribeFrom != 0 {
-		t.Fatalf("subscribe from revision = %d, want 0", transport.subscribeFrom)
+	if transport.subscribeFrom != 8 {
+		t.Fatalf("subscribe from revision = %d, want 8", transport.subscribeFrom)
 	}
 
 	m.daemonEvents = loaded.events
@@ -275,6 +279,67 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 	if evt.event.Revision != 9 || evt.event.Event != "task.updated" {
 		t.Fatalf("event = %+v", evt.event)
+	}
+}
+
+func TestDaemonEventRevisionReducer(t *testing.T) {
+	tests := []struct {
+		name         string
+		current      uint64
+		revision     uint64
+		wantAction   daemonEventDecision
+		wantRevision uint64
+	}{
+		{
+			name:         "duplicate",
+			current:      4,
+			revision:     4,
+			wantAction:   daemonEventIgnore,
+			wantRevision: 4,
+		},
+		{
+			name:         "out_of_order",
+			current:      4,
+			revision:     3,
+			wantAction:   daemonEventIgnore,
+			wantRevision: 4,
+		},
+		{
+			name:         "sequential",
+			current:      4,
+			revision:     5,
+			wantAction:   daemonEventRefreshSnapshot,
+			wantRevision: 5,
+		},
+		{
+			name:         "gap",
+			current:      4,
+			revision:     7,
+			wantAction:   daemonEventRehydrate,
+			wantRevision: 4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.daemonRevision = tt.current
+			m.daemonEvents = make(chan protocol.EventEnvelope)
+
+			gotAction := m.reduceDaemonEvent(protocol.EventEnvelope{Revision: tt.revision})
+			if gotAction != tt.wantAction {
+				t.Fatalf("action = %v, want %v", gotAction, tt.wantAction)
+			}
+
+			updated, _ := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{Revision: tt.revision}})
+			next, ok := updated.(Model)
+			if !ok {
+				t.Fatalf("updated model type = %T, want Model", updated)
+			}
+			if next.daemonRevision != tt.wantRevision {
+				t.Fatalf("model revision = %d, want %d", next.daemonRevision, tt.wantRevision)
+			}
+		})
 	}
 }
 

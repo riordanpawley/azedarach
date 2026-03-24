@@ -69,6 +69,41 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("list snapshot", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandTaskList {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
+				}
+				tasks := []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusBlocked}}
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        17,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}
+
+		client := New(transport)
+		snapshot, err := client.ListTasksSnapshot(context.Background())
+		if err != nil {
+			t.Fatalf("ListTasksSnapshot error: %v", err)
+		}
+		if snapshot.Revision != 17 {
+			t.Fatalf("revision = %d, want 17", snapshot.Revision)
+		}
+		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
+			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
 	t.Run("create", func(t *testing.T) {
 		parentID := "epic-1"
 		transport := &taskRecordingTransport{
