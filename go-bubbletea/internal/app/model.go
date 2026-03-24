@@ -2706,17 +2706,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 		case "remove_orphaned_worktrees":
 			// Remove worktrees with no active sessions
 			removed := 0
-			// TODO: Implement worktree cleanup
-			// List all worktrees, check if they have sessions, delete orphaned ones
-			// worktrees, err := m.worktreeManager.List(ctx)
-			// for _, wt := range worktrees {
-			//     if _, hasSession := m.sessions[wt.BeadID]; !hasSession {
-			//         err := m.worktreeManager.Delete(ctx, wt.BeadID)
-			//         if err == nil {
-			//             removed++
-			//         }
-			//     }
-			// }
+			// TODO: Implement orphan cleanup through daemon-owned worktree commands.
 			result.WorktreesRemoved = removed
 
 		case "clean_stale_sessions":
