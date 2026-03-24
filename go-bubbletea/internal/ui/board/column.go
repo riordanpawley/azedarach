@@ -10,8 +10,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-const cardHeight = 5
-
 func renderColumn(
 	title string,
 	tasks []domain.Task,
@@ -37,10 +35,10 @@ func renderColumn(
 	if availableHeight < 0 {
 		availableHeight = 0
 	}
-	start, end := visibleTaskRange(len(tasks), viewportStart, availableHeight)
-
 	var cardContent strings.Builder
 	cardWidth := width - 2
+	linesPerCard := CardLineFootprint(s, cardWidth)
+	start, end := visibleTaskRange(len(tasks), viewportStart, availableHeight, linesPerCard)
 
 	for i := start; i < end; i++ {
 		task := tasks[i]
@@ -65,12 +63,14 @@ func renderColumn(
 	return lipgloss.JoinVertical(lipgloss.Left, header, columnBody)
 }
 
-func visibleTaskRange(taskCount int, viewportStart int, availableHeight int) (int, int) {
+func visibleTaskRange(taskCount int, viewportStart int, availableHeight int, linesPerCard int) (int, int) {
 	if taskCount <= 0 {
 		return 0, 0
 	}
 
-	linesPerCard := cardHeight + 1
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
 	visibleCards := availableHeight / linesPerCard
 	if availableHeight%linesPerCard != 0 {
 		visibleCards++

@@ -8,6 +8,7 @@ func TestVisibleTaskRange(t *testing.T) {
 		taskCount       int
 		viewportStart   int
 		availableHeight int
+		linesPerCard    int
 		wantStart       int
 		wantEnd         int
 	}{
@@ -16,6 +17,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			taskCount:       0,
 			viewportStart:   0,
 			availableHeight: 20,
+			linesPerCard:    6,
 			wantStart:       0,
 			wantEnd:         0,
 		},
@@ -24,6 +26,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			taskCount:       3,
 			viewportStart:   2,
 			availableHeight: 24,
+			linesPerCard:    6,
 			wantStart:       0,
 			wantEnd:         3,
 		},
@@ -32,6 +35,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			taskCount:       10,
 			viewportStart:   0,
 			availableHeight: 12,
+			linesPerCard:    6,
 			wantStart:       0,
 			wantEnd:         2,
 		},
@@ -40,6 +44,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			taskCount:       10,
 			viewportStart:   8,
 			availableHeight: 12,
+			linesPerCard:    6,
 			wantStart:       8,
 			wantEnd:         10,
 		},
@@ -48,6 +53,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			taskCount:       10,
 			viewportStart:   99,
 			availableHeight: 12,
+			linesPerCard:    6,
 			wantStart:       8,
 			wantEnd:         10,
 		},
@@ -56,6 +62,7 @@ func TestVisibleTaskRange(t *testing.T) {
 			taskCount:       10,
 			viewportStart:   -5,
 			availableHeight: 12,
+			linesPerCard:    6,
 			wantStart:       0,
 			wantEnd:         2,
 		},
@@ -63,7 +70,7 @@ func TestVisibleTaskRange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			start, end := visibleTaskRange(tt.taskCount, tt.viewportStart, tt.availableHeight)
+			start, end := visibleTaskRange(tt.taskCount, tt.viewportStart, tt.availableHeight, tt.linesPerCard)
 			if start != tt.wantStart || end != tt.wantEnd {
 				t.Fatalf("visibleTaskRange() = (%d,%d), want (%d,%d)", start, end, tt.wantStart, tt.wantEnd)
 			}

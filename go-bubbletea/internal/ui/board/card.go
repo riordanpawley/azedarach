@@ -12,6 +12,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
+const cardContentHeight = 5
+
 // renderCard renders a task card
 func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
 	// Choose card style based on state
@@ -23,7 +25,7 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 	}
 
 	// Apply fixed size to keep all cards same height regardless of content.
-	cardStyle = cardStyle.Width(width).Height(cardHeight)
+	cardStyle = cardStyle.Width(width).Height(cardContentHeight)
 
 	// Priority badge (e.g., "P0", "P1", etc.)
 	priorityText := task.Priority.String()
@@ -155,4 +157,24 @@ func renderEpicProgress(task domain.Task, width int, s *styles.Styles) string {
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
 	return renderCard(task, isCursor, isSelected, width, nil, false, s)
+}
+
+// CardLineFootprint returns the number of terminal lines consumed by one card
+// plus the inter-card separator newline used by column rendering.
+func CardLineFootprint(s *styles.Styles, width int) int {
+	if width < 1 {
+		width = 1
+	}
+	sample := domain.Task{
+		ID:       "sample",
+		Title:    "sample",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	}
+	cardLines := lipgloss.Height(renderCard(sample, false, false, width, nil, false, s))
+	if cardLines < 1 {
+		cardLines = 1
+	}
+	return cardLines + 1
 }

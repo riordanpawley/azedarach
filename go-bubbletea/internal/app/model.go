@@ -1892,12 +1892,7 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 
 // halfPage calculates half-page scroll distance based on terminal height
 func (m Model) halfPage() int {
-	// Approximate: subtract status bar (1) and header (2), divide by card height (~4 lines)
-	visibleRows := m.height - 3
-	if visibleRows < 4 {
-		return 1
-	}
-	cardsPerColumn := visibleRows / 4
+	cardsPerColumn := m.boardVisibleCards(m.buildColumns())
 	half := cardsPerColumn / 2
 	if half < 1 {
 		return 1
@@ -1905,13 +1900,22 @@ func (m Model) halfPage() int {
 	return half
 }
 
-func (m Model) boardVisibleCards() int {
+func (m Model) boardVisibleCards(columns []board.Column) int {
 	// Board render height is m.height-1, then column body is -2 (header + spacing).
 	availableHeight := (m.height - 1) - 2
 	if availableHeight < 1 {
 		return 1
 	}
-	linesPerCard := 6 // cardHeight(5) + newline(1) in board renderer
+	columnCount := len(columns)
+	if columnCount < 1 {
+		columnCount = 4
+	}
+	columnWidth := m.width / columnCount
+	cardWidth := columnWidth - 2
+	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
 	visibleCards := availableHeight / linesPerCard
 	if availableHeight%linesPerCard != 0 {
 		visibleCards++
@@ -1937,7 +1941,7 @@ func (m *Model) ensureCursorVisible(columns []board.Column) {
 	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) || pos.Column >= len(m.viewportStarts) {
 		return
 	}
-	visibleCards := m.boardVisibleCards()
+	visibleCards := m.boardVisibleCards(columns)
 	start := m.viewportStarts[pos.Column]
 	taskCount := len(columns[pos.Column].Tasks)
 	maxStart := taskCount - visibleCards

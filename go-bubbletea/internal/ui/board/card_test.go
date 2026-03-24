@@ -161,6 +161,23 @@ func TestRenderCard_FixedHeightAcrossTypes(t *testing.T) {
 	}
 }
 
+func TestCardLineFootprintMatchesRenderedCard(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "az-footprint",
+		Title:    "Footprint",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	}
+	rendered := RenderCard(task, false, false, 35, s)
+	want := len(strings.Split(rendered, "\n")) + 1
+	got := CardLineFootprint(s, 35)
+	if got != want {
+		t.Fatalf("CardLineFootprint()=%d want=%d", got, want)
+	}
+}
+
 func TestRenderCard_WithSessionNoElapsed(t *testing.T) {
 	s := styles.New()
 
