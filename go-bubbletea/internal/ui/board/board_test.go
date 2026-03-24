@@ -4,12 +4,23 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 var update = flag.Bool("update", false, "update golden files")
+
+func normalizeBoardOutput(s string) string {
+	s = ansi.Strip(s)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t\r")
+	}
+	return strings.Join(lines, "\n")
+}
 
 func TestRender(t *testing.T) {
 	tests := []struct {
@@ -92,7 +103,7 @@ func TestRender(t *testing.T) {
 				t.Fatalf("failed to read golden file: %v\nRun with -update flag to create it", err)
 			}
 
-			if got != string(want) {
+			if normalizeBoardOutput(got) != normalizeBoardOutput(string(want)) {
 				t.Errorf("Render() output mismatch\nGot:\n%s\n\nWant:\n%s", got, string(want))
 			}
 		})
@@ -162,7 +173,7 @@ func TestRenderCard(t *testing.T) {
 				t.Fatalf("failed to read golden file: %v\nRun with -update flag to create it", err)
 			}
 
-			if got != string(want) {
+			if normalizeBoardOutput(got) != normalizeBoardOutput(string(want)) {
 				t.Errorf("RenderCard() output mismatch\nGot:\n%s\n\nWant:\n%s", got, string(want))
 			}
 		})

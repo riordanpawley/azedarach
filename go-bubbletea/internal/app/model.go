@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -1128,9 +1129,9 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			columnCount = 4
 		}
 		columnWidth := m.width / columnCount
-		cardWidth := columnWidth - 2
+		cardWidth := board.CardContentWidth(columnWidth)
 		linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
-		availableHeight := m.height - 2 // status bar + column header
+		availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
 		visiblePerColumn := availableHeight / linesPerCard
 		if visiblePerColumn < 1 {
 			visiblePerColumn = 1
@@ -1765,12 +1766,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.fetchAndMergeCmd(session.Worktree, "main", task.ID, false)
 
 	case "m":
-		// TODO: Merge to main (Phase 6)
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Merge to main (TODO - Phase 6)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Follow-on merge from dependency-aware context.
+		if session == nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.followOnMergeSelectionCmd(task, session)
 
 	case "P":
 		// Create PR (with overlay)
@@ -1906,8 +1911,7 @@ func (m Model) halfPage() int {
 }
 
 func (m Model) boardVisibleCards(columns []board.Column) int {
-	// Board render height is m.height-1, then column body is -2 (header + spacing).
-	availableHeight := (m.height - 1) - 2
+	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
 	if availableHeight < 1 {
 		return 1
 	}
@@ -1916,7 +1920,7 @@ func (m Model) boardVisibleCards(columns []board.Column) int {
 		columnCount = 4
 	}
 	columnWidth := m.width / columnCount
-	cardWidth := columnWidth - 2
+	cardWidth := board.CardContentWidth(columnWidth)
 	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
 	if linesPerCard < 1 {
 		linesPerCard = 1
@@ -2218,6 +2222,12 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
+		m.logger.Info("merging upstream source into main",
+			"sourceID", sourceID,
+			"sourceBranch", branch,
+			"targetBranch", baseBranch,
+		)
+
 		if err := m.gitClient.Fetch(ctx, ".", "origin"); err != nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
@@ -2240,8 +2250,145 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: err}
 		}
 
+		m.logger.Info("merging upstream source into target issue branch",
+			"sourceID", sourceID,
+			"targetID", targetID,
+			"sourceBranch", sourceBranch,
+			"targetWorktree", targetWorktree,
+		)
+
 		result, err := m.gitClient.Merge(ctx, targetWorktree, sourceBranch)
 		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: result, err: err}
+	}
+}
+
+type followOnMergeCandidate struct {
+	target   overlay.MergeTarget
+	relation string
+	order    int
+}
+
+func (m Model) followOnMergeSelectionCmd(target *domain.Task, session *domain.Session) tea.Cmd {
+	return func() tea.Msg {
+		candidates := m.getFollowOnMergeCandidates(target)
+		if len(candidates) == 0 {
+			return Toast{
+				Level:   ToastWarning,
+				Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
+				Expires: time.Now().Add(5 * time.Second),
+			}
+		}
+
+		if len(candidates) == 1 {
+			sourceSession, ok := m.sessions[candidates[0].target.ID]
+			if !ok || sourceSession == nil || sourceSession.Worktree == "" {
+				return Toast{
+					Level:   ToastWarning,
+					Message: "Selected upstream source has no active worktree",
+					Expires: time.Now().Add(5 * time.Second),
+				}
+			}
+			return mergeResultMsg{
+				sourceID: candidates[0].target.ID,
+				targetID: target.ID,
+			}
+		}
+
+		return overlay.SelectionMsg{
+			Key: "merge",
+			Value: overlay.MergeTargetSelectedMsg{
+				SourceID: target.ID,
+				TargetID: session.IssueID,
+			},
+		}
+	}
+}
+
+func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCandidate {
+	if target == nil {
+		return nil
+	}
+
+	candidates := make([]followOnMergeCandidate, 0, 4)
+	seen := make(map[string]struct{}, 4)
+
+	addCandidate := func(taskID, relation string, order int) {
+		if taskID == "" {
+			return
+		}
+		if _, ok := seen[taskID]; ok {
+			return
+		}
+		for _, task := range m.tasks {
+			if task.ID != taskID {
+				continue
+			}
+			if !isEligibleUpstreamSource(task, relation) {
+				return
+			}
+			hasWorktree := false
+			if session, ok := m.sessions[task.ID]; ok && session != nil && session.Worktree != "" {
+				hasWorktree = true
+			}
+			candidates = append(candidates, followOnMergeCandidate{
+				target: overlay.MergeTarget{
+					ID:          task.ID,
+					Label:       task.Title,
+					IsMain:      false,
+					Status:      task.Status,
+					HasWorktree: hasWorktree,
+				},
+				relation: relation,
+				order:    order,
+			})
+			seen[taskID] = struct{}{}
+			return
+		}
+	}
+
+	if target.ParentID != nil {
+		addCandidate(*target.ParentID, string(domain.DependencyParentChild), 0)
+	}
+	for _, dep := range target.Dependencies {
+		switch dep.Type {
+		case domain.DependencyBlocks, domain.DependencyBlockedBy:
+			addCandidate(dep.ID, string(domain.DependencyBlocks), 1)
+		}
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].order != candidates[j].order {
+			return candidates[i].order < candidates[j].order
+		}
+		if statusPriority(candidates[i].target.Status) != statusPriority(candidates[j].target.Status) {
+			return statusPriority(candidates[i].target.Status) < statusPriority(candidates[j].target.Status)
+		}
+		if candidates[i].target.Label != candidates[j].target.Label {
+			return candidates[i].target.Label < candidates[j].target.Label
+		}
+		return candidates[i].target.ID < candidates[j].target.ID
+	})
+
+	return candidates
+}
+
+func isEligibleUpstreamSource(task domain.Task, relation string) bool {
+	switch relation {
+	case string(domain.DependencyParentChild), string(domain.DependencyBlocks):
+		return task.Status == domain.StatusInProgress || task.Status == domain.StatusDone
+	default:
+		return false
+	}
+}
+
+func statusPriority(status domain.Status) int {
+	switch status {
+	case domain.StatusInProgress:
+		return 0
+	case domain.StatusDone:
+		return 1
+	default:
+		return 2
 	}
 }
 
@@ -2748,7 +2895,7 @@ func (m Model) renderBoardView() string {
 		activeViewportStart,
 		m.styles,
 		m.width,
-		m.height-1,
+		board.BoardContentHeight(m.height),
 	)
 }
 
@@ -2759,7 +2906,7 @@ func (m Model) renderCompactView() string {
 	sortedTasks := m.editor.ApplySort(filteredTasks)
 
 	// Create compact view
-	compactView := compact.NewCompactView(sortedTasks, m.width, m.height-1)
+	compactView := compact.NewCompactView(sortedTasks, m.width, board.BoardContentHeight(m.height))
 
 	// Set cursor position based on current navigation
 	// In compact mode, we use the flat task index

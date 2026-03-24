@@ -171,7 +171,7 @@ func TestCardLineFootprintMatchesRenderedCard(t *testing.T) {
 		Type:     domain.TypeTask,
 	}
 	rendered := RenderCard(task, false, false, 35, s)
-	want := len(strings.Split(rendered, "\n")) + 1
+	want := len(strings.Split(rendered, "\n"))
 	got := CardLineFootprint(s, 35)
 	if got != want {
 		t.Fatalf("CardLineFootprint()=%d want=%d", got, want)

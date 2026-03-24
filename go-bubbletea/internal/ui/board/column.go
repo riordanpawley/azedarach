@@ -31,12 +31,9 @@ func renderColumn(
 	headerText := fmt.Sprintf("%s (%d)", title, len(tasks))
 	header := headerStyle.Width(width).Render(headerText)
 
-	availableHeight := height - 2
-	if availableHeight < 0 {
-		availableHeight = 0
-	}
+	availableHeight := ColumnBodyHeight(height)
 	var cardContent strings.Builder
-	cardWidth := width - 2
+	cardWidth := CardContentWidth(width)
 	linesPerCard := CardLineFootprint(s, cardWidth)
 	start, end := visibleTaskRange(len(tasks), viewportStart, availableHeight, linesPerCard)
 

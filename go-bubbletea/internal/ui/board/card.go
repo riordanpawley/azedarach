@@ -17,6 +17,10 @@ const CardContentHeight = 5
 
 // renderCard renders a task card
 func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
+	if width < 1 {
+		width = 1
+	}
+
 	// Choose card style based on state
 	cardStyle := s.Card
 	if isSelected {
@@ -54,9 +58,8 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 	// Title - truncate if needed
 	// Account for border + padding.
 	maxLineLen := width - 4
-	title := task.Title
-	if len(title) > maxLineLen {
-		title = title[:maxLineLen-1] + "…"
+	if maxLineLen < 1 {
+		maxLineLen = 1
 	}
 
 	// Cursor indicator (▶ symbol when cursor is on this card)
@@ -66,6 +69,10 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 	}
 
 	// Build the card content
+	title := task.Title
+	if len(title) > maxLineLen {
+		title = title[:maxLineLen-1] + "…"
+	}
 	titleLine := cursor + title
 
 	// Badge line: priority • type [• phase]
@@ -160,8 +167,9 @@ func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *
 	return renderCard(task, isCursor, isSelected, width, nil, false, s)
 }
 
-// CardLineFootprint returns the number of terminal lines consumed by one card
-// plus the inter-card separator newline used by column rendering.
+// CardLineFootprint returns the number of terminal lines consumed by one card.
+// Column rendering stacks cards with newline separators and uses this value as
+// the row stride for cursor/viewport math.
 func CardLineFootprint(s *styles.Styles, width int) int {
 	if width < 1 {
 		width = 1
@@ -177,5 +185,5 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 	if cardLines < 1 {
 		cardLines = 1
 	}
-	return cardLines + 1
+	return cardLines
 }
