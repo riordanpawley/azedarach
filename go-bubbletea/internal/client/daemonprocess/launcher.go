@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,38 +17,48 @@ import (
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
-	RepoDir    string
-	SocketPath string
-	LockPath   string
-	BinPath    string
+	RepoDir     string
+	SocketPath  string
+	LockPath    string
+	BinPath     string
+	openLogFile func(path string) (io.WriteCloser, error)
 }
 
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
 	lockPath := config.GlobalDaemonLockPath()
 	return &Launcher{
-		RepoDir:    repoDir,
-		SocketPath: socketPath,
-		LockPath:   lockPath,
+		RepoDir:     repoDir,
+		SocketPath:  socketPath,
+		LockPath:    lockPath,
+		openLogFile: openDaemonLog,
 	}
 }
 
 // Start spawns daemon process in background.
 func (l *Launcher) Start(ctx context.Context) error {
+	_ = ctx
 	bin := l.resolveBinary()
-	if err := os.MkdirAll(filepath.Join(l.RepoDir, ".beads"), 0o755); err != nil {
-		return fmt.Errorf("create .beads dir: %w", err)
+	if err := os.MkdirAll(filepath.Join(l.RepoDir, ".azedarach"), 0o755); err != nil {
+		return fmt.Errorf("create .azedarach dir: %w", err)
 	}
-	logFile, err := os.OpenFile(filepath.Join(l.RepoDir, ".beads", "daemon.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	openLogFile := l.openLogFile
+	if openLogFile == nil {
+		openLogFile = openDaemonLog
+	}
+	logFile, err := openLogFile(filepath.Join(l.RepoDir, ".azedarach", "daemon.log"))
 	if err != nil {
 		return fmt.Errorf("open daemon log: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, bin, "--repo", l.RepoDir, "--socket", l.SocketPath)
+	defer func() {
+		_ = logFile.Close()
+	}()
+	// Do not bind daemon lifetime to the caller context. Attach contexts are short-lived.
+	cmd := exec.Command(bin, "--repo", l.RepoDir, "--socket", l.SocketPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
 		return fmt.Errorf("start daemon %s: %w", bin, err)
 	}
 	return nil
@@ -97,4 +108,8 @@ func (l *Launcher) readLockedPID() (int, bool) {
 		return 0, false
 	}
 	return pid, true
+}
+
+func openDaemonLog(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 }

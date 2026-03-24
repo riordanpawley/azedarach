@@ -3,12 +3,17 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -20,6 +25,17 @@ type recordingDaemonTransport struct {
 	subscribeFrom    uint64
 	replyFn          func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	subscribeFn      func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error)
+}
+
+type recordingCommandRunner struct {
+	calls  [][]string
+	output string
+	err    error
+}
+
+func (r *recordingCommandRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	return r.output, r.err
 }
 
 func (r *recordingDaemonTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
@@ -82,10 +98,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		m := newDaemonTestModel(transport)
 
-		msg := m.loadBeadsCmd()()
-		loaded, ok := msg.(beadsLoadedMsg)
+		msg := m.loadIssuesCmd()()
+		loaded, ok := msg.(issuesLoadedMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want beadsLoadedMsg", msg)
+			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
 		}
 		if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
 			t.Fatalf("loaded tasks = %+v", loaded.tasks)
@@ -217,6 +233,27 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 	})
 }
 
+func TestDaemonCommandsReportMissingDaemonClient(t *testing.T) {
+	m := newTestModel()
+	m.daemonClient = nil
+
+	if msg := m.loadIssuesCmd()(); msg == nil {
+		t.Fatal("loadIssuesCmd returned nil message")
+	} else if errMsg, ok := msg.(issuesErrorMsg); !ok {
+		t.Fatalf("loadIssuesCmd message type = %T, want issuesErrorMsg", msg)
+	} else if errMsg.err == nil || errMsg.err.Error() != "daemon client unavailable" {
+		t.Fatalf("loadIssuesCmd error = %v, want daemon client unavailable", errMsg.err)
+	}
+
+	if msg := m.attachDaemonCmd()(); msg == nil {
+		t.Fatal("attachDaemonCmd returned nil message")
+	} else if errMsg, ok := msg.(issuesErrorMsg); !ok {
+		t.Fatalf("attachDaemonCmd message type = %T, want issuesErrorMsg", msg)
+	} else if errMsg.err == nil || errMsg.err.Error() != "daemon client unavailable" {
+		t.Fatalf("attachDaemonCmd error = %v, want daemon client unavailable", errMsg.err)
+	}
+}
+
 func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -246,9 +283,9 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	m.currentProject = "proj"
 
 	msg := m.attachDaemonCmd()()
-	loaded, ok := msg.(beadsLoadedMsg)
+	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
-		t.Fatalf("message type = %T, want beadsLoadedMsg", msg)
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
 	}
 	if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
 		t.Fatalf("loaded tasks = %+v", loaded.tasks)
@@ -280,6 +317,89 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 	if evt.event.Revision != 9 || evt.event.Event != "task.updated" {
 		t.Fatalf("event = %+v", evt.event)
+	}
+}
+
+func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
+	runner := &recordingCommandRunner{}
+	m := newTestModel()
+	m.tmuxClient = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	updated, cmd := m.Update(branchBehindMsg{
+		issueID:       "az-1",
+		worktree:      "/tmp/az-1",
+		commitsBehind: 0,
+	})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+
+	msg := cmd()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want sessionAttachedMsg", msg)
+	}
+	if attached.issueID != "az-1" {
+		t.Fatalf("attached issue = %q, want az-1", attached.issueID)
+	}
+	if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0], []string{"attach-session", "-t", "az-1"}) {
+		t.Fatalf("tmux calls = %v", runner.calls)
+	}
+}
+
+func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
+	gitRunner := &recordingCommandRunner{}
+	tmuxRunner := &recordingCommandRunner{}
+
+	m := newTestModel()
+	m.gitClient = git.NewClient(gitRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
+
+	updated, cmd := m.Update(overlay.SelectionMsg{
+		Key:   "merge_attach",
+		Value: "az-1",
+	})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected merge command")
+	}
+
+	msg := cmd()
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	nextModel, cmd2 := next.Update(msg)
+	if _, ok := nextModel.(Model); !ok {
+		t.Fatalf("next model type = %T, want Model", nextModel)
+	}
+	if cmd2 == nil {
+		t.Fatal("expected attach command after merge")
+	}
+
+	attached := cmd2()
+	attachedMsg, ok := attached.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attached message type = %T, want sessionAttachedMsg", attached)
+	}
+	if attachedMsg.issueID != "az-1" {
+		t.Fatalf("attached issue = %q, want az-1", attachedMsg.issueID)
+	}
+	if len(gitRunner.calls) != 2 || !reflect.DeepEqual(gitRunner.calls[0], []string{"fetch", "origin"}) || !reflect.DeepEqual(gitRunner.calls[1], []string{"merge", "origin/main"}) {
+		t.Fatalf("git calls = %v", gitRunner.calls)
+	}
+	if len(tmuxRunner.calls) != 1 || !reflect.DeepEqual(tmuxRunner.calls[0], []string{"attach-session", "-t", "az-1"}) {
+		t.Fatalf("tmux calls = %v", tmuxRunner.calls)
 	}
 }
 
@@ -336,7 +456,7 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session stop request: %v", err)
 				}
-				if body.SessionID != "bead-1" {
+				if body.SessionID != "issue-1" {
 					t.Fatalf("session stop body = %+v", body)
 				}
 			default:
@@ -361,8 +481,8 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 		{ID: "az-open", Status: domain.StatusOpen, UpdatedAt: base},
 	}
 	m.sessions = map[string]*domain.Session{
-		"bead-1": &domain.Session{BeadID: "bead-1", State: domain.SessionPaused, StartedAt: &oldSessionStart},
-		"bead-2": &domain.Session{BeadID: "bead-2", State: domain.SessionBusy, StartedAt: &oldSessionStart},
+		"issue-1": &domain.Session{IssueID: "issue-1", State: domain.SessionPaused, StartedAt: &oldSessionStart},
+		"issue-2": &domain.Session{IssueID: "issue-2", State: domain.SessionBusy, StartedAt: &oldSessionStart},
 	}
 
 	result, err := m.performCleanup(context.Background(), []string{
