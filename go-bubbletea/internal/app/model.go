@@ -103,9 +103,10 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack *overlay.Stack
-	viewMode     ViewMode
-	viewportStarts [board.DefaultColumnCount]int
+	overlayStack        *overlay.Stack
+	viewMode            ViewMode
+	viewportStarts      [board.DefaultColumnCount]int
+	columnViewportStart int
 
 	// Project
 	currentProject string
@@ -276,6 +277,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.ensureCursorVisible(m.buildColumns())
 		return m, nil
 
 	case spinner.TickMsg:
@@ -292,7 +294,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Overlay messages
 	case overlay.CloseOverlayMsg:
+		isSearchOverlay := false
+		if current := m.overlayStack.Current(); current != nil {
+			_, isSearchOverlay = current.(*overlay.SearchOverlay)
+		}
 		m.overlayStack.Pop()
+		if isSearchOverlay {
+			m.editor.EnterNormal()
+		}
 		return m, nil
 
 	case overlay.SelectionMsg:
@@ -315,6 +324,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overlay.SearchMsg:
 		m.editor.SetSearchQuery(msg.Query)
+		if current := m.overlayStack.Current(); current != nil {
+			if searchOverlay, ok := current.(*overlay.SearchOverlay); ok {
+				searchOverlay.SetMatchCount(len(m.editor.ApplyFilter(m.tasks)))
+			}
+		}
 		return m, nil
 
 	case issuesLoadedMsg:
@@ -1021,6 +1035,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "/": // Search
+		m.editor.EnterSearch()
 		return m, m.overlayStack.Push(overlay.NewSearchOverlay())
 
 	case "f": // Filter menu
@@ -1129,7 +1144,9 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "w":
 		// Jump mode - quick navigation with labels for VISIBLE tasks only
 		// Calculate visible tasks per column based on screen height/card footprint.
-		columnCount := len(columns)
+		visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
+		visibleColumns := columns[visibleStart:visibleEnd]
+		columnCount := len(visibleColumns)
 		if columnCount < 1 {
 			columnCount = board.DefaultColumnCount
 		}
@@ -1144,7 +1161,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		// Count visible tasks (capped by actual task count per column)
 		visibleCount := 0
-		for _, col := range columns {
+		for _, col := range visibleColumns {
 			colVisible := len(col.Tasks)
 			if colVisible > visiblePerColumn {
 				colVisible = visiblePerColumn
@@ -1165,8 +1182,14 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleSearchMode processes keyboard input in search mode
 func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// TODO: Implement search mode handling
-	// For now, just allow escape to exit
+	switch msg.String() {
+	case "esc":
+		m.editor.ClearSearch()
+		m.editor.EnterNormal()
+	case "enter":
+		m.editor.EnterNormal()
+	}
+
 	return m, nil
 }
 
@@ -1644,6 +1667,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if mergeMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
 			return m.handleMergeTargetSelection(mergeMsg)
 		}
+	case "m":
+		task, session := m.getCurrentTaskAndSession()
+		return m, m.followOnMergeSelectionCmd(task, session)
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
@@ -1772,14 +1798,6 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
-		if session == nil {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
-		}
 		return m, m.followOnMergeSelectionCmd(task, session)
 
 	case "P":
@@ -1920,7 +1938,7 @@ func (m Model) boardVisibleCards(columns []board.Column) int {
 	if availableHeight < 1 {
 		return 1
 	}
-	columnCount := len(columns)
+	columnCount := m.boardVisibleColumnCount(len(columns))
 	if columnCount < 1 {
 		columnCount = board.DefaultColumnCount
 	}
@@ -1952,6 +1970,7 @@ func clampInt(v int, low int, high int) int {
 
 func (m *Model) ensureCursorVisible(columns []board.Column) {
 	pos := m.nav.GetPosition(columns)
+	m.ensureColumnVisible(pos, len(columns))
 	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) || pos.Column >= len(m.viewportStarts) {
 		return
 	}
@@ -1972,6 +1991,60 @@ func (m *Model) ensureCursorVisible(columns []board.Column) {
 
 	start = clampInt(start, 0, maxStart)
 	m.viewportStarts[pos.Column] = start
+}
+
+func (m Model) boardVisibleColumnCount(totalColumns int) int {
+	return board.VisibleColumnCount(totalColumns, m.width)
+}
+
+func (m Model) boardVisibleColumnRange(columns []board.Column) (int, int) {
+	totalColumns := len(columns)
+	if totalColumns == 0 {
+		return 0, 0
+	}
+	visibleColumns := m.boardVisibleColumnCount(totalColumns)
+	if visibleColumns < 1 {
+		visibleColumns = 1
+	}
+	start := m.columnViewportStart
+	maxStart := totalColumns - visibleColumns
+	if maxStart < 0 {
+		maxStart = 0
+	}
+	start = clampInt(start, 0, maxStart)
+	end := start + visibleColumns
+	if end > totalColumns {
+		end = totalColumns
+	}
+	return start, end
+}
+
+func (m *Model) ensureColumnVisible(pos navigation.Position, totalColumns int) {
+	if totalColumns <= 0 {
+		m.columnViewportStart = 0
+		return
+	}
+
+	visibleColumns := m.boardVisibleColumnCount(totalColumns)
+	if visibleColumns < 1 {
+		visibleColumns = 1
+	}
+	maxStart := totalColumns - visibleColumns
+	if maxStart < 0 {
+		maxStart = 0
+	}
+	start := clampInt(m.columnViewportStart, 0, maxStart)
+	if !pos.Valid || pos.Column < 0 || pos.Column >= totalColumns {
+		m.columnViewportStart = start
+		return
+	}
+
+	if pos.Column < start {
+		start = pos.Column
+	} else if pos.Column >= start+visibleColumns {
+		start = pos.Column - visibleColumns + 1
+	}
+	m.columnViewportStart = clampInt(start, 0, maxStart)
 }
 
 // renderLoading renders a centered loading spinner with message
@@ -2267,46 +2340,70 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 	}
 }
 
+func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
+	if task == nil {
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: "No focused issue to merge",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return nil
+	}
+	if session == nil {
+		if fallbackSession, ok := m.sessions[task.ID]; ok {
+			session = fallbackSession
+		}
+	}
+	if session == nil || session.Worktree == "" {
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: "No active session - start session first",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return nil
+	}
+
+	candidates := m.getFollowOnMergeCandidates(task)
+	if len(candidates) == 0 {
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return nil
+	}
+
+	if len(candidates) == 1 {
+		sourceSession, ok := m.sessions[candidates[0].target.ID]
+		if !ok || sourceSession == nil || sourceSession.Worktree == "" {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "Selected upstream source has no active worktree",
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return nil
+		}
+
+		m.logger.Info("follow-on merge selected",
+			"sourceID", candidates[0].target.ID,
+			"targetID", task.ID,
+			"relation", candidates[0].relation,
+		)
+		return m.mergeFeatureIntoFeatureCmd(sourceSession.Worktree, session.Worktree, candidates[0].target.ID, task.ID)
+	}
+
+	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
+	for _, candidate := range candidates {
+		upstreamTargets = append(upstreamTargets, candidate.target)
+	}
+	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
+	return m.overlayStack.Push(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+}
+
 type followOnMergeCandidate struct {
 	target   overlay.MergeTarget
 	relation string
 	order    int
-}
-
-func (m Model) followOnMergeSelectionCmd(target *domain.Task, session *domain.Session) tea.Cmd {
-	return func() tea.Msg {
-		candidates := m.getFollowOnMergeCandidates(target)
-		if len(candidates) == 0 {
-			return Toast{
-				Level:   ToastWarning,
-				Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
-				Expires: time.Now().Add(5 * time.Second),
-			}
-		}
-
-		if len(candidates) == 1 {
-			sourceSession, ok := m.sessions[candidates[0].target.ID]
-			if !ok || sourceSession == nil || sourceSession.Worktree == "" {
-				return Toast{
-					Level:   ToastWarning,
-					Message: "Selected upstream source has no active worktree",
-					Expires: time.Now().Add(5 * time.Second),
-				}
-			}
-			return mergeResultMsg{
-				sourceID: candidates[0].target.ID,
-				targetID: target.ID,
-			}
-		}
-
-		return overlay.SelectionMsg{
-			Key: "merge",
-			Value: overlay.MergeTargetSelectedMsg{
-				SourceID: target.ID,
-				TargetID: session.IssueID,
-			},
-		}
-	}
 }
 
 func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCandidate {
@@ -2333,6 +2430,8 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			}
 			hasWorktree := false
 			if session, ok := m.sessions[task.ID]; ok && session != nil && session.Worktree != "" {
+				hasWorktree = true
+			} else if task.Session != nil && task.Session.Worktree != "" {
 				hasWorktree = true
 			}
 			candidates = append(candidates, followOnMergeCandidate{
@@ -2872,12 +2971,21 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 func (m Model) renderBoardView() string {
 	// Build columns for the board
 	columns := m.buildColumns()
+	if len(columns) == 0 {
+		return ""
+	}
+	visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
+	visibleColumns := columns[visibleStart:visibleEnd]
 
 	// Create cursor for board package using computed position
 	pos := m.nav.GetPosition(columns)
+	localColumn := pos.Column - visibleStart
 	cursor := board.Cursor{
-		Column: pos.Column,
+		Column: localColumn,
 		Task:   pos.Task,
+	}
+	if localColumn < 0 || localColumn >= len(visibleColumns) {
+		cursor.Column = -1
 	}
 	activeViewportStart := 0
 	if pos.Column >= 0 && pos.Column < len(m.viewportStarts) {
@@ -2892,7 +3000,7 @@ func (m Model) renderBoardView() string {
 
 	// Render board (takes full height minus 1 for statusbar)
 	return board.Render(
-		columns,
+		visibleColumns,
 		cursor,
 		m.editor.GetSelectedTasks(),
 		phaseData,

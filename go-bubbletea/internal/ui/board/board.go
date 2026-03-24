@@ -8,7 +8,7 @@ import (
 
 const statusBarHeight = 1
 
-// Render renders the entire kanban board with 4 columns
+// Render renders the visible kanban board columns.
 func Render(
 	columns []Column,
 	cursor Cursor,

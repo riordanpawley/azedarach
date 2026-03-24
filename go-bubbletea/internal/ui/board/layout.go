@@ -5,6 +5,8 @@ const (
 	ColumnHeaderLines   = 2
 	ColumnContentInsetX = 2
 	DefaultColumnCount  = 4
+	MinVisibleColumns   = 2
+	MinColumnWidth      = 30
 )
 
 func BoardContentHeight(totalHeight int) int {
@@ -29,4 +31,22 @@ func CardContentWidth(columnWidth int) int {
 		return 1
 	}
 	return w
+}
+
+func VisibleColumnCount(totalColumns int, boardWidth int) int {
+	if totalColumns <= 0 {
+		return 0
+	}
+	if totalColumns <= MinVisibleColumns {
+		return totalColumns
+	}
+
+	visible := boardWidth / MinColumnWidth
+	if visible < MinVisibleColumns {
+		visible = MinVisibleColumns
+	}
+	if visible > totalColumns {
+		visible = totalColumns
+	}
+	return visible
 }

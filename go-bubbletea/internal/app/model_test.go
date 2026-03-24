@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -123,6 +124,60 @@ func TestHelperMethods(t *testing.T) {
 			t.Errorf("Expected minimum of 1, got %d", half)
 		}
 	})
+}
+
+func TestView_CanonicalProfiles(t *testing.T) {
+	profiles := []testprofile.Profile{
+		testprofile.Smoke,
+		testprofile.Integration,
+		testprofile.Scale,
+	}
+
+	for _, profile := range profiles {
+		t.Run(profile.Name, func(t *testing.T) {
+			m := newTestModel()
+			m.tasks = append([]domain.Task(nil), profile.Tasks...)
+			m.config.Git.BaseBranch = profile.BaseBranch
+			m.width = profile.Width
+			m.height = profile.Height
+			m.loading = false
+			m.viewMode = ViewModeBoard
+			m.editor.EnterNormal()
+
+			phases := m.computePhases()
+			switch profile.Name {
+			case testprofile.Smoke.Name:
+				phase, ok := phases["az-smoke-child"]
+				if !ok || phase.Phase != 1 {
+					t.Fatalf("expected smoke dependency chain to produce phase 1 child, got: %+v", phases)
+				}
+			case testprofile.Integration.Name:
+				phase, ok := phases["az-int-child"]
+				if !ok || phase.Phase != 1 {
+					t.Fatalf("expected integration dependency graph to produce phase 1 child, got: %+v", phases)
+				}
+			case testprofile.Scale.Name:
+				phase, ok := phases["az-scale-hierarchy"]
+				if !ok || phase.Phase != 2 {
+					t.Fatalf("expected scale dependency graph to produce deeper phase chain, got: %+v", phases)
+				}
+			}
+
+			view := m.View()
+			if view == "" {
+				t.Fatalf("expected %s profile view to render", profile.Name)
+			}
+			if !strings.Contains(view, "NORMAL") {
+				t.Fatalf("expected status bar mode badge to remain visible, got: %s", view)
+			}
+			if profile.Width < 80 && strings.Contains(view, "h/l: columns") {
+				t.Fatalf("expected compact status bar without full hints for %s profile, got: %s", profile.Name, view)
+			}
+			if profile.Width >= 80 && !strings.Contains(view, "h/l: columns") {
+				t.Fatalf("expected full hints for %s profile, got: %s", profile.Name, view)
+			}
+		})
+	}
 }
 
 func TestNormalModeNavigation(t *testing.T) {
@@ -345,6 +400,75 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 	})
 }
 
+func TestSearchOverlayLiveFilteringAndModeTransitions(t *testing.T) {
+	m := newTestModel()
+
+	updated, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if cmd == nil {
+		t.Fatal("expected search overlay push command")
+	}
+
+	searchModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model, got %T", updated)
+	}
+	if !searchModel.editor.IsSearch() {
+		t.Fatalf("expected search mode after '/'")
+	}
+
+	searchOverlay, ok := searchModel.overlayStack.Current().(*overlay.SearchOverlay)
+	if !ok {
+		t.Fatalf("expected SearchOverlay on stack, got %T", searchModel.overlayStack.Current())
+	}
+
+	updated, _ = searchModel.Update(overlay.SearchMsg{Query: "az-1"})
+	searchModel, ok = updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model, got %T", updated)
+	}
+	if got := searchModel.editor.GetFilter().SearchQuery; got != "az-1" {
+		t.Fatalf("search query = %q, want az-1", got)
+	}
+
+	searchOverlay, ok = searchModel.overlayStack.Current().(*overlay.SearchOverlay)
+	if !ok {
+		t.Fatalf("expected SearchOverlay on stack, got %T", searchModel.overlayStack.Current())
+	}
+	if got := searchOverlay.View(); !strings.Contains(got, "1 matches") {
+		t.Fatalf("expected live match count in search overlay view, got %q", got)
+	}
+
+	updated, _ = searchModel.Update(overlay.CloseOverlayMsg{})
+	searchModel, ok = updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model, got %T", updated)
+	}
+	if !searchModel.editor.IsNormal() {
+		t.Fatalf("expected normal mode after closing search overlay")
+	}
+	if !searchModel.overlayStack.IsEmpty() {
+		t.Fatal("expected search overlay stack to be empty after close")
+	}
+}
+
+func TestSearchModeEscClearsQuery(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterSearch()
+	m.editor.SetSearchQuery("az-1")
+
+	updated, _ := m.handleSearchMode(tea.KeyMsg{Type: tea.KeyEsc})
+	searchModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model, got %T", updated)
+	}
+	if !searchModel.editor.IsNormal() {
+		t.Fatalf("expected normal mode after Esc in search mode")
+	}
+	if got := searchModel.editor.GetFilter().SearchQuery; got != "" {
+		t.Fatalf("search query = %q, want empty", got)
+	}
+}
+
 func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 	m := newTestModel()
 
@@ -372,6 +496,93 @@ func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 	}
 	if newModel.viewportStarts[0] != 8 {
 		t.Fatalf("expected viewport start to remain 8 after first up from bottom, got %d", newModel.viewportStarts[0])
+	}
+}
+
+func TestHorizontalColumnViewportFollowsCursorOnNarrowWidth(t *testing.T) {
+	m := newTestModel()
+	m.width = 80
+
+	columns := m.buildColumns()
+	m.nav.SelectTask("az-1", 0)
+	m.ensureCursorVisible(columns)
+	if m.columnViewportStart != 0 {
+		t.Fatalf("expected initial column viewport start 0, got %d", m.columnViewportStart)
+	}
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
+	m1 := result.(Model)
+	if got := getCursorPosition(m1).Column; got != 1 {
+		t.Fatalf("expected cursor column 1 after first right, got %d", got)
+	}
+	if m1.columnViewportStart != 0 {
+		t.Fatalf("expected viewport to stay at 0 while cursor remains visible, got %d", m1.columnViewportStart)
+	}
+
+	result, _ = m1.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
+	m2 := result.(Model)
+	if got := getCursorPosition(m2).Column; got != 2 {
+		t.Fatalf("expected cursor column 2 after second right, got %d", got)
+	}
+	if m2.columnViewportStart != 1 {
+		t.Fatalf("expected viewport to advance to 1 at right edge, got %d", m2.columnViewportStart)
+	}
+
+	result, _ = m2.handleNormalMode(tea.KeyMsg{Type: tea.KeyRight})
+	m3 := result.(Model)
+	if got := getCursorPosition(m3).Column; got != 3 {
+		t.Fatalf("expected cursor column 3 after third right, got %d", got)
+	}
+	if m3.columnViewportStart != 2 {
+		t.Fatalf("expected viewport to advance to 2 at right edge, got %d", m3.columnViewportStart)
+	}
+
+	result, _ = m3.handleNormalMode(tea.KeyMsg{Type: tea.KeyLeft})
+	m4 := result.(Model)
+	if got := getCursorPosition(m4).Column; got != 2 {
+		t.Fatalf("expected cursor column 2 after first left, got %d", got)
+	}
+	if m4.columnViewportStart != 2 {
+		t.Fatalf("expected viewport to stay at 2 while cursor remains visible, got %d", m4.columnViewportStart)
+	}
+
+	result, _ = m4.handleNormalMode(tea.KeyMsg{Type: tea.KeyLeft})
+	m5 := result.(Model)
+	if got := getCursorPosition(m5).Column; got != 1 {
+		t.Fatalf("expected cursor column 1 after second left, got %d", got)
+	}
+	if m5.columnViewportStart != 1 {
+		t.Fatalf("expected viewport to move back to 1 when crossing left edge, got %d", m5.columnViewportStart)
+	}
+}
+
+func TestRenderBoardView_NarrowWidthShowsVisibleColumnWindow(t *testing.T) {
+	m := newTestModel()
+	m.width = 80
+	m.height = 24
+	m.loading = false
+
+	m.nav.SelectTask("az-1", 0)
+	m.ensureCursorVisible(m.buildColumns())
+	view := m.renderBoardView()
+	if !strings.Contains(view, "Open (2)") {
+		t.Fatalf("expected open column header in narrow view")
+	}
+	if !strings.Contains(view, "In Progress (1)") {
+		t.Fatalf("expected in progress column header in narrow view")
+	}
+	if strings.Contains(view, "Blocked (1)") {
+		t.Fatalf("expected blocked column to be out of view when window is on first two columns")
+	}
+
+	m.nav.SelectTask("az-4", 2)
+	m.ensureCursorVisible(m.buildColumns())
+	view = m.renderBoardView()
+	if !strings.Contains(view, "In Progress (1)") || !strings.Contains(view, "Blocked (1)") {
+		t.Fatalf("expected in progress and blocked columns in shifted narrow view")
+	}
+	if strings.Contains(view, "Open (2)") {
+		t.Fatalf("expected open column to be out of view after horizontal shift")
 	}
 }
 
