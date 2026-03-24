@@ -372,6 +372,10 @@ There is no standalone `az apply` CLI subcommand in the current command surface.
   - `2` when the response is OK but `summary.failed > 0`.
   - `1` on hard failure: non-OK response or invalid apply response body.
 
+Recovery playbook:
+
+- [Revision mismatch and partial failures](docs/13-recovery-playbook.md)
+
 ## Key Handling
 
 ```go
