@@ -21,11 +21,12 @@ import (
 )
 
 const (
-	commandSessionStart  = "session.start"
-	commandSessionAttach = "session.attach"
-	commandSessionStop   = "session.stop"
-	commandSessionStatus = "session.status"
-	defaultExportFormat  = "json"
+	commandSessionStart       = "session.start"
+	commandSessionAttach      = "session.attach"
+	commandSessionStop        = "session.stop"
+	commandSessionStatus      = "session.status"
+	commandTaskSnapshotExport = "task.snapshot.export"
+	defaultExportFormat       = "json"
 )
 
 type Dependencies struct {
@@ -160,8 +161,40 @@ func ParseExportArgs(args []string) (ExportOptions, error) {
 	return opts, nil
 }
 
-func ExportCommand(_ *Dependencies, _ ExportOptions) error {
-	return errors.New("export output handling is not implemented yet")
+func ExportCommand(deps *Dependencies, opts ExportOptions) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       fmt.Sprintf("%s-%d", commandTaskSnapshotExport, time.Now().UTC().UnixNano()),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta: protocol.Metadata{
+			ProjectID: deps.ProjectID,
+		},
+		Command: commandTaskSnapshotExport,
+		SentAt:  time.Now().UTC(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to export snapshot: %w", err)
+	}
+	if err := responseError(resp, "failed to export snapshot"); err != nil {
+		return err
+	}
+
+	if opts.Out == "" {
+		if _, err := os.Stdout.Write(resp.Body); err != nil {
+			return fmt.Errorf("write export output to stdout: %w", err)
+		}
+		return nil
+	}
+
+	if err := os.WriteFile(opts.Out, resp.Body, 0644); err != nil {
+		return fmt.Errorf("write export output to %s: %w", opts.Out, err)
+	}
+	return nil
 }
 
 func PrintUsage() {

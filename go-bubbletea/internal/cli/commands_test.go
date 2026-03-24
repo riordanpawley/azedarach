@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -221,6 +222,130 @@ func TestParseExportArgs(t *testing.T) {
 	}
 }
 
+func TestExportCommandWritesStdoutByDefault(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
+		SchemaVersion:    protocol.SnapshotSchemaVersion,
+		ProtocolVersion:  protocol.CurrentVersion,
+		SnapshotRevision: 7,
+	})
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotReq = req
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	output := captureStdout(t, func() error {
+		return ExportCommand(deps, ExportOptions{Format: "json"})
+	})
+
+	if gotReq.Command != commandTaskSnapshotExport {
+		t.Fatalf("command = %q, want %q", gotReq.Command, commandTaskSnapshotExport)
+	}
+	if gotReq.Meta.ProjectID != "proj" {
+		t.Fatalf("meta project_id = %q, want proj", gotReq.Meta.ProjectID)
+	}
+	if output != string(payload) {
+		t.Fatalf("stdout = %q, want %q", output, string(payload))
+	}
+}
+
+func TestExportCommandWritesFileWhenOutIsSet(t *testing.T) {
+	var gotReq protocol.RequestEnvelope
+	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
+		SchemaVersion:    protocol.SnapshotSchemaVersion,
+		ProtocolVersion:  protocol.CurrentVersion,
+		SnapshotRevision: 11,
+	})
+	outPath := filepath.Join(t.TempDir(), "snapshot.json")
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotReq = req
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := ExportCommand(deps, ExportOptions{Format: "json", Out: outPath}); err != nil {
+		t.Fatalf("ExportCommand() error = %v", err)
+	}
+	if gotReq.Command != commandTaskSnapshotExport {
+		t.Fatalf("command = %q, want %q", gotReq.Command, commandTaskSnapshotExport)
+	}
+
+	written, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(written) != string(payload) {
+		t.Fatalf("file = %q, want %q", string(written), string(payload))
+	}
+}
+
+func TestExportCommandSurfacesFileWriteErrors(t *testing.T) {
+	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
+		SchemaVersion:    protocol.SnapshotSchemaVersion,
+		ProtocolVersion:  protocol.CurrentVersion,
+		SnapshotRevision: 23,
+	})
+	outPath := filepath.Join(t.TempDir(), "missing", "snapshot.json")
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	err := ExportCommand(deps, ExportOptions{Format: "json", Out: outPath})
+	if err == nil || !strings.Contains(err.Error(), "write export output to") {
+		t.Fatalf("error = %v, want write failure", err)
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -249,6 +374,16 @@ func responseWithOutput(req protocol.RequestEnvelope, output string) protocol.Re
 		OK:              true,
 		Body:            payload,
 	}
+}
+
+func mustSnapshotPayloadJSON(t *testing.T, payload protocol.SnapshotPayload) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal snapshot payload: %v", err)
+	}
+	return data
 }
 
 func captureStdout(t *testing.T, fn func() error) string {
