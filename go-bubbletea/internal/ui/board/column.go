@@ -55,15 +55,17 @@ func renderColumn(
 	vp.SetContent(cardContent.String())
 
 	// Calculate viewport offset to keep cursor visible
-	// Each card is roughly cardHeight tall + 1 for newline
-	// But let's just use LineDown based on index for now
+	// Each card is roughly cardHeight tall + 1 for newline.
+	// Scroll only when cursor would move outside the visible window.
 	if cursorTask >= 0 && cursorTask < len(tasks) {
 		linesPerCard := cardHeight + 1
-		scrollLine := cursorTask * linesPerCard
-
-		// Ensure we don't scroll past content
+		cursorTopLine := cursorTask * linesPerCard
+		maxTop := cursorTopLine - (availableHeight - linesPerCard)
+		if maxTop < 0 {
+			maxTop = 0
+		}
 		vp.GotoTop()
-		for i := 0; i < scrollLine; i++ {
+		for i := 0; i < maxTop; i++ {
 			vp.LineDown(1)
 		}
 	}
