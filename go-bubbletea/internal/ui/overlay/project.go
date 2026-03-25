@@ -2,10 +2,13 @@ package overlay
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/config"
+	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 // ProjectSelectedMsg is sent when a project is selected
@@ -26,10 +29,11 @@ const (
 
 // ProjectSelector is an overlay for selecting and managing projects
 type ProjectSelector struct {
-	registry *config.ProjectsRegistry
-	cursor   int
-	mode     projectSelectorMode
-	styles   *Styles
+	registry           *config.ProjectsRegistry
+	cursor             int
+	mode               projectSelectorMode
+	styles             *Styles
+	currentProjectName string
 }
 
 type projectSelectorMode int
@@ -111,6 +115,15 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Detect from cwd
 				return m, m.detectAndAdd()
 			}
+
+		default:
+			if m.mode == projectModeList {
+				index, ok := parseOneBasedProjectIndex(msg.String())
+				if ok && index < len(m.registry.Projects) {
+					m.cursor = index
+					return m, m.selectProject()
+				}
+			}
 		}
 	}
 
@@ -129,33 +142,59 @@ func (m *ProjectSelector) View() string {
 func (m *ProjectSelector) viewList() string {
 	var b strings.Builder
 
+	headerLine := m.styles.Separator.Copy().
+		Foreground(uistyles.Blue).
+		Bold(true).
+		Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	headerTitle := m.styles.MenuItemActive.Copy().
+		Foreground(uistyles.Blue).
+		Render("  PROJECT SELECTOR")
+
+	b.WriteString(headerLine)
+	b.WriteString("\n")
+	b.WriteString(headerTitle)
+	b.WriteString("\n")
+	b.WriteString(headerLine)
+	b.WriteString("\n\n")
+
 	if len(m.registry.Projects) == 0 {
 		b.WriteString(m.styles.MenuItem.Render("No projects registered"))
 		b.WriteString("\n\n")
-		b.WriteString(m.styles.Footer.Render("a: add project • D: detect from cwd • esc: close"))
+		b.WriteString(m.styles.Footer.Render("Press Escape to close • a: add • D: detect"))
 		return b.String()
 	}
 
 	for i, project := range m.registry.Projects {
-		var style = m.styles.MenuItem
+		number := i + 1
+
+		style := m.styles.MenuItem
 		if i == m.cursor {
 			style = m.styles.MenuItemActive
 		}
 
-		// Format: name (path) [default]
-		line := fmt.Sprintf("%s", project.Name)
+		isCurrent := project.Name == m.currentProjectName
+		if isCurrent {
+			style = lipgloss.NewStyle().
+				Foreground(uistyles.Green).
+				Bold(true)
+		}
+
+		line := fmt.Sprintf("%d. %s", number, project.Name)
+		if isCurrent {
+			line += " " + lipgloss.NewStyle().Foreground(uistyles.Green).Render("(current)")
+		}
 		if project.Name == m.registry.DefaultProject {
 			line += " " + m.styles.MenuKey.Render("[default]")
 		}
 
 		b.WriteString(style.Render(line))
 		b.WriteString("\n")
-		b.WriteString(m.styles.Footer.Render(fmt.Sprintf("  %s", project.Path)))
+		b.WriteString(m.styles.Footer.Copy().MarginTop(0).Render(fmt.Sprintf("   %s", project.Path)))
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(m.styles.Footer.Render("enter: switch • d: set default • x: remove • a: add • D: detect • esc: close"))
+	b.WriteString(m.styles.Footer.Render("Press 1-9 to switch • Enter: switch • d: default • x: remove • a: add • D: detect • Esc: close"))
 
 	return b.String()
 }
@@ -193,9 +232,9 @@ func (m *ProjectSelector) viewActions() string {
 // Title returns the overlay title
 func (m *ProjectSelector) Title() string {
 	if m.mode == projectModeActions {
-		return "Add Project"
+		return "Project Selector"
 	}
-	return "Projects"
+	return ""
 }
 
 // Size returns the overlay dimensions
@@ -388,6 +427,13 @@ func WithInitialCursor(cursor int) ProjectSelectorOption {
 	}
 }
 
+// WithCurrentProjectName sets the project currently active in the app.
+func WithCurrentProjectName(name string) ProjectSelectorOption {
+	return func(p *ProjectSelector) {
+		p.currentProjectName = name
+	}
+}
+
 // NewProjectSelectorWithOptions creates a new project selector with options
 func NewProjectSelectorWithOptions(registry *config.ProjectsRegistry, opts ...ProjectSelectorOption) *ProjectSelector {
 	p := NewProjectSelector(registry)
@@ -395,4 +441,15 @@ func NewProjectSelectorWithOptions(registry *config.ProjectsRegistry, opts ...Pr
 		opt(p)
 	}
 	return p
+}
+
+func parseOneBasedProjectIndex(key string) (int, bool) {
+	if len(key) != 1 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(key)
+	if err != nil || n < 1 || n > 9 {
+		return 0, false
+	}
+	return n - 1, true
 }

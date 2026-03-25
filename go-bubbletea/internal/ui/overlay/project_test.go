@@ -41,15 +41,15 @@ func TestProjectSelector_Title(t *testing.T) {
 
 	// Test list mode
 	title := selector.Title()
-	if title != "Projects" {
-		t.Errorf("expected title 'Projects', got %s", title)
+	if title != "" {
+		t.Errorf("expected empty title in list mode, got %q", title)
 	}
 
 	// Test actions mode
 	selector.mode = projectModeActions
 	title = selector.Title()
-	if title != "Add Project" {
-		t.Errorf("expected title 'Add Project', got %s", title)
+	if title != "Project Selector" {
+		t.Errorf("expected title 'Project Selector', got %s", title)
 	}
 }
 
@@ -287,6 +287,35 @@ func TestProjectSelector_KeyboardNavigation(t *testing.T) {
 	}
 }
 
+func TestProjectSelector_NumberHotkeySelectsProject(t *testing.T) {
+	registry := &config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "test1", Path: "/tmp/test1"},
+			{Name: "test2", Path: "/tmp/test2"},
+			{Name: "test3", Path: "/tmp/test3"},
+		},
+	}
+
+	selector := NewProjectSelector(registry)
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}}
+	_, cmd := selector.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected selection command for numeric hotkey")
+	}
+
+	got := cmd()
+	selected, ok := got.(ProjectSelectedMsg)
+	if !ok {
+		t.Fatalf("expected ProjectSelectedMsg, got %T", got)
+	}
+	if selected.Project.Name != "test2" {
+		t.Fatalf("expected test2, got %s", selected.Project.Name)
+	}
+	if selector.cursor != 1 {
+		t.Fatalf("expected cursor set to index 1, got %d", selector.cursor)
+	}
+}
+
 func TestProjectSelector_EscapeKey(t *testing.T) {
 	registry := &config.ProjectsRegistry{}
 	selector := NewProjectSelector(registry)
@@ -441,6 +470,11 @@ func TestNewProjectSelectorWithOptions(t *testing.T) {
 
 	if selector.cursor != 1 {
 		t.Errorf("expected cursor at 1, got %d", selector.cursor)
+	}
+
+	selector = NewProjectSelectorWithOptions(registry, WithCurrentProjectName("test2"))
+	if selector.currentProjectName != "test2" {
+		t.Errorf("expected current project name test2, got %q", selector.currentProjectName)
 	}
 }
 

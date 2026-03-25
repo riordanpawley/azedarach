@@ -1262,6 +1262,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
+			overlay.WithCurrentProjectName(m.currentProject),
 		))
 	case "s":
 		// Dedicated Spec workspace
