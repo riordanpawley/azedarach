@@ -1741,9 +1741,15 @@ func resolveDaemonBinaryForRepo(repoDir string) string {
 	if strings.TrimSpace(repoDir) == "" {
 		return ""
 	}
-	bin := filepath.Join(repoDir, "bin", "azd")
-	if _, err := os.Stat(bin); err == nil {
-		return bin
+	candidates := []string{
+		filepath.Join(repoDir, "bin", "azd"),
+		// Monorepo root launch path: repo contains go-bubbletea implementation subdir.
+		filepath.Join(repoDir, "go-bubbletea", "bin", "azd"),
+	}
+	for _, bin := range candidates {
+		if _, err := os.Stat(bin); err == nil {
+			return bin
+		}
 	}
 	return ""
 }

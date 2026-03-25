@@ -220,6 +220,35 @@ func TestResolveDaemonBinaryForRepo(t *testing.T) {
 		}
 	})
 
+	t.Run("falls back to nested go-bubbletea bin azd from monorepo root", func(t *testing.T) {
+		repoDir := t.TempDir()
+		nestedBin := filepath.Join(repoDir, "go-bubbletea", "bin")
+		if err := os.MkdirAll(nestedBin, 0o755); err != nil {
+			t.Fatalf("mkdir nested bin dir: %v", err)
+		}
+		azdPath := filepath.Join(nestedBin, "azd")
+		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write nested azd fixture: %v", err)
+		}
+
+		origExecutablePath := executablePath
+		origProcessArgs := processArgs
+		origLookupPath := lookupPath
+		origWorkingDir := workingDir
+		t.Cleanup(func() { executablePath = origExecutablePath })
+		t.Cleanup(func() { processArgs = origProcessArgs })
+		t.Cleanup(func() { lookupPath = origLookupPath })
+		t.Cleanup(func() { workingDir = origWorkingDir })
+		processArgs = func() []string { return []string{"az"} }
+		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
+		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
+		workingDir = func() (string, error) { return t.TempDir(), nil }
+
+		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
+			t.Fatalf("expected %q, got %q", azdPath, got)
+		}
+	})
+
 	t.Run("returns empty when neither source has azd", func(t *testing.T) {
 		repoDir := t.TempDir()
 		origExecutablePath := executablePath
