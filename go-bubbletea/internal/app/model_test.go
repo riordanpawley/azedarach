@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -1259,6 +1260,70 @@ func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
 	}
 	if _, ok := validTaskIDs[cursor.TaskID]; !ok {
 		t.Fatalf("cursor task %q not present in refreshed task set", cursor.TaskID)
+	}
+}
+
+func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
+	startedAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
+	devServer := &domain.DevServer{Port: 4242, Command: "npm run dev", Running: true}
+	sourceSession := &domain.Session{
+		IssueID:   "az-1",
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+		Worktree:  "/tmp/az-1",
+		DevServer: devServer,
+	}
+
+	m := newTestModel()
+	m.sessions["stale"] = &domain.Session{
+		IssueID:  "stale",
+		State:    domain.SessionPaused,
+		Worktree: "/tmp/stale",
+	}
+
+	result, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{
+				ID:       "az-1",
+				Title:    "Task 1",
+				Status:   domain.StatusInProgress,
+				Priority: domain.P1,
+				Type:     domain.TypeTask,
+				Session:  sourceSession,
+			},
+			{
+				ID:       "az-2",
+				Title:    "Task 2",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeBug,
+			},
+		},
+		revision: 12,
+	})
+	newModel := result.(Model)
+
+	got, ok := newModel.sessions["az-1"]
+	if !ok || got == nil {
+		t.Fatalf("session projection = %+v, want az-1 session", got)
+	}
+	if got == sourceSession {
+		t.Fatal("session projection should clone daemon snapshot data, not alias it")
+	}
+	if got.IssueID != sourceSession.IssueID || got.State != sourceSession.State || got.Worktree != sourceSession.Worktree {
+		t.Fatalf("session projection = %+v, want %+v", got, sourceSession)
+	}
+	if got.StartedAt == nil || !got.StartedAt.Equal(startedAt) {
+		t.Fatalf("startedAt = %+v, want %v", got.StartedAt, startedAt)
+	}
+	if got.DevServer == nil || got.DevServer == devServer {
+		t.Fatalf("dev server projection = %+v, want cloned dev server", got.DevServer)
+	}
+	if got.DevServer.Port != devServer.Port || got.DevServer.Command != devServer.Command || got.DevServer.Running != devServer.Running {
+		t.Fatalf("dev server projection = %+v, want %+v", got.DevServer, devServer)
+	}
+	if _, ok := newModel.sessions["stale"]; ok {
+		t.Fatal("expected stale projection entry to be cleared by daemon snapshot refresh")
 	}
 }
 

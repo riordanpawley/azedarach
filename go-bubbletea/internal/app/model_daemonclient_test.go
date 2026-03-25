@@ -903,31 +903,6 @@ func TestStartSessionPlusWorkUsesSelectedOriginBranch(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandWorktreeList:
-				respBody, _ := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "default",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: childID},
-					},
-				})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -1028,10 +1003,10 @@ func TestStartSessionPlusWorkUsesSelectedOriginBranch(t *testing.T) {
 	if !ok {
 		t.Fatalf("final model type = %T, want Model", finalModel)
 	}
-	if session, ok := finalModelValue.sessions[childID]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
-		t.Fatalf("session record = %+v, want worktree /tmp/az-child", session)
+	if _, ok := finalModelValue.sessions[childID]; ok {
+		t.Fatalf("session projection unexpectedly populated from start command: %+v", finalModelValue.sessions[childID])
 	}
-	if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandSessionStart || transport.requests[1] != daemonclient.CommandWorktreeList {
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -1061,31 +1036,6 @@ func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
 				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case daemonclient.CommandWorktreeList:
-				respBody, _ := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "default",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: childID},
-					},
-				})
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -1171,10 +1121,10 @@ func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
 	if !ok {
 		t.Fatalf("final model type = %T, want Model", finalModel)
 	}
-	if session, ok := finalModelValue.sessions[childID]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
-		t.Fatalf("session record = %+v, want worktree /tmp/az-child", session)
+	if _, ok := finalModelValue.sessions[childID]; ok {
+		t.Fatalf("session projection unexpectedly populated from start command: %+v", finalModelValue.sessions[childID])
 	}
-	if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandSessionStart || transport.requests[1] != daemonclient.CommandWorktreeList {
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -1258,31 +1208,6 @@ func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *t
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
 				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case daemonclient.CommandWorktreeList:
-				respBody, _ := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "default",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: childID},
-					},
-				})
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -1405,10 +1330,73 @@ func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *t
 	if !ok {
 		t.Fatalf("final model type = %T, want Model", finalModel)
 	}
-	if session, ok := finalModelValue.sessions[childID]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
-		t.Fatalf("session record = %+v, want worktree /tmp/az-child", session)
+	if _, ok := finalModelValue.sessions[childID]; ok {
+		t.Fatalf("session projection unexpectedly populated from start command: %+v", finalModelValue.sessions[childID])
 	}
-	if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandSessionStart || transport.requests[1] != daemonclient.CommandWorktreeList {
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestStopSessionCommandPreservesDaemonProjection(t *testing.T) {
+	startedAt := time.Date(2026, time.March, 25, 11, 0, 0, 0, time.UTC)
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionStop {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStop)
+			}
+			var body struct {
+				ProjectID string `json:"project_id"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal stop request: %v", err)
+			}
+			if body.SessionID != "az-child" {
+				t.Fatalf("stop body = %+v, want az-child", body)
+			}
+			respBody, _ := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "stopped"})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.sessions["az-child"] = &domain.Session{
+		IssueID:   "az-child",
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+		Worktree:  "/tmp/az-child",
+	}
+
+	msg := m.stopSessionCmd("az-child")()
+	stopped, ok := msg.(sessionStoppedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want sessionStoppedMsg", msg)
+	}
+	if stopped.issueID != "az-child" {
+		t.Fatalf("stopped issue = %q, want az-child", stopped.issueID)
+	}
+
+	updated, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Fatalf("update command = %T, want nil", cmd)
+	}
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if session, ok := updatedModel.sessions["az-child"]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
+		t.Fatalf("session projection = %+v, want preserved worktree /tmp/az-child", session)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStop {
 		t.Fatalf("requests = %v", transport.requests)
 	}
 }
@@ -1516,6 +1504,12 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	}
 	if result.SessionsCleaned != 1 {
 		t.Fatalf("sessions cleaned = %d, want 1", result.SessionsCleaned)
+	}
+	if _, ok := m.sessions["issue-1"]; !ok {
+		t.Fatal("expected stale session issue-1 to remain in projection until daemon refresh")
+	}
+	if _, ok := m.sessions["issue-2"]; !ok {
+		t.Fatal("expected stale session issue-2 to remain in projection until daemon refresh")
 	}
 
 	if got := transport.requests; len(got) != 5 {
