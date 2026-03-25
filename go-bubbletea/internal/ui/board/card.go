@@ -13,7 +13,7 @@ import (
 )
 
 // CardContentHeight is the single source of truth for rendered card content height.
-const CardContentHeight = 5
+const CardContentHeight = 3
 
 // renderCard renders a task card
 func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
