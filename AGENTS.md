@@ -29,12 +29,9 @@ Nested `AGENTS.md` overlays are maintained directly in-repo for path-scoped guid
 
 ## Instructions Reference
 
-**This repository has multiple implementations:**
-
-- **ts-opentui/** -> [AGENTS.md](./ts-opentui/AGENTS.md) (TypeScript, Bun, OpenTUI, Effect)
-- **go-bubbletea/** -> [AGENTS.md](./go-bubbletea/AGENTS.md) (Go, Bubbletea)
-
-Select the implementation based on user request or current working directory.
+Implementation-specific overlays:
+- [ts-opentui/AGENTS.md](./ts-opentui/AGENTS.md)
+- [go-bubbletea/AGENTS.md](./go-bubbletea/AGENTS.md)
 
 ## Critical Rules (Quick Reference)
 
@@ -57,9 +54,8 @@ fd "filename" -t f                # Find files (NOT find)
 
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide
-az impl list                      # Show project implementations/default
-az issue create "Title" --impl ts-opentui
-az issue create "Shared task" --impl ts-opentui --impl go-bubbletea
+az impl list                      # Show available implementations
+az issue create "Title" --impl <impl>
 
 # Codex Context
 fd . .codex/skills -td            # List installed local skills
@@ -84,24 +80,11 @@ Sync behavior:
 - Edit Codex-native files directly and keep root + nested AGENTS aligned in the same change.
 - OpenCode plugin files remain intentionally unmanaged by Codex context files.
 
-## Decision Matrix
+## Implementation Selection
 
-When user requests work, use this matrix to decide which implementation to work on:
-
-| Request | Implementation | Rationale |
-|---------|---------------|------------|
-| Default / unspecified | ts-opentui/ | Primary, most mature |
-| "TypeScript", "Bun", "Effect" | ts-opentui/ | Tech-specific match |
-| "Go", "Bubbletea" | go-bubbletea/ | Tech-specific match |
-| "Gleam", "Erlang", "BEAM" | gleam/ | Experimental match |
-| Explicit app folder mentioned | That folder | User-specified |
-
-## Implementation Registry
-
-- This project registers `ts-opentui` and `go-bubbletea` in `az impl`.
-- Treat `ts-opentui` as the project default implementation when a single default is needed.
-- Once multiple implementations are configured, new `az issue` and `az spec link` writes MUST include one or more explicit `--impl <impl>` selections.
-- Repeat `--impl` flags only for intentionally shared work spanning both implementations.
+- Root guidance is implementation-agnostic.
+- Use the nested overlay for whichever implementation directory you are changing.
+- Include explicit `--impl <impl>` on `az issue` and `az spec` writes when required by project configuration.
 
 ## Task Management
 
@@ -127,7 +110,6 @@ When user requests work, use this matrix to decide which implementation to work 
 - ✅ Subagents must create, maintain, and close child issues linked to the active parent issue
 - ✅ Keep issue status updated as work progresses
 - ✅ Keep the issue tracker as the single source of truth for issue state
-- ✅ For `ts-opentui` behavior changes, update `az spec` requirement/link records or document `Spec impact: none` with concrete file-based rationale
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
 
 ## Large Epic Orchestration (Anti-Drift Protocol)
@@ -215,8 +197,6 @@ This repository has shared skills in `.codex/skills/` that apply to all implemen
 
 - **Skill Loading Policy**: Skills are task-scoped references, not mandatory bootstrap. Only load a skill when the current task explicitly needs it.
 - **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
-- **Effect Skills** (`effect/`): Effect patterns (ts-opentui only)
-- **Gleam Skills** (`gleam/`): Gleam patterns (gleam only)
 
 See `.codex/skills/` for available skill docs.
 
