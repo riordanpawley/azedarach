@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -58,6 +59,8 @@ const (
 	defaultDevserverBasePort = 3000
 	diffPreviewMaxCharacters = 200
 )
+
+var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -334,6 +337,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case issuesLoadedMsg:
 		wasLoading := m.loading
 		m.tasks = msg.tasks
+		m.sessions = m.projectSessionProjection(msg.tasks)
 		m.editor.ReconcileSelection(msg.tasks)
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
@@ -384,7 +388,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case monitor.SessionStateMsg:
 		if session, ok := m.sessions[msg.IssueID]; ok {
 			oldState := session.State
-			session.State = msg.State
 			m.logger.Debug("session state updated", "issueID", msg.IssueID, "state", msg.State)
 
 			if oldState != msg.State && msg.State == domain.SessionWaiting {
@@ -402,6 +405,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session started: %s", msg.issueID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case sessionStoppedMsg:
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
@@ -866,7 +877,11 @@ func (m Model) View() string {
 				lipgloss.Bottom,
 				toastView,
 			)
-			mainView = m.layerWithinHeight(mainView, toastOverlay, board.BoardContentHeight(m.height))
+			mainView = m.layerWithinHeightTransparent(
+				mainView,
+				toastOverlay,
+				board.BoardContentHeight(m.height),
+			)
 		}
 	}
 
@@ -958,6 +973,39 @@ func (m Model) layerWithinHeight(bottom, top string, height int) string {
 	}
 
 	return strings.Join(res, "\n")
+}
+
+func (m Model) layerWithinHeightTransparent(bottom, top string, height int) string {
+	if height < 1 {
+		height = 1
+	}
+
+	bLines := strings.Split(lipgloss.NewStyle().Height(height).MaxHeight(height).Render(bottom), "\n")
+	tLines := strings.Split(lipgloss.NewStyle().Height(height).MaxHeight(height).Render(top), "\n")
+
+	res := make([]string, height)
+	for i := 0; i < height; i++ {
+		var b, t string
+		if i < len(bLines) {
+			b = bLines[i]
+		}
+		if i < len(tLines) {
+			t = tLines[i]
+		}
+
+		if lineIsVisuallyEmpty(t) {
+			res[i] = b
+		} else {
+			res[i] = t
+		}
+	}
+
+	return strings.Join(res, "\n")
+}
+
+func lineIsVisuallyEmpty(line string) bool {
+	withoutANSI := ansiEscapeLinePattern.ReplaceAllString(line, "")
+	return strings.TrimSpace(withoutANSI) == ""
 }
 
 // buildColumns converts tasks into board columns, applying filter and sort
@@ -1414,8 +1462,11 @@ const (
 )
 
 type sessionStartedMsg struct {
-	issueID      string
-	worktreePath string
+	issueID string
+}
+
+type sessionStoppedMsg struct {
+	issueID string
 }
 
 type sessionErrorMsg struct {
@@ -1618,7 +1669,7 @@ func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget
 	return candidates, upstreamCount
 }
 
-// startSessionCmd requests daemon-owned lifecycle start and refreshes local session projection.
+// startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
 func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1634,38 +1685,16 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
-		worktrees, err := m.daemonClient.ListWorktrees(ctx)
-		if err != nil {
-			return sessionErrorMsg{issueID: issueID, err: err}
-		}
-		worktreePath := ""
-		for _, wt := range worktrees {
-			if wt.IssueID == issueID {
-				worktreePath = wt.Path
-				break
-			}
-		}
-
-		// Create session record
-		now := time.Now()
-		session := &domain.Session{
-			IssueID:   issueID,
-			State:     domain.SessionBusy,
-			StartedAt: &now,
-			Worktree:  worktreePath,
-		}
-		m.sessions[issueID] = session
-
 		// Start monitoring the session
 		// Note: We need a way to pass the tea.Program to the monitor
 		// For now, we'll skip this and implement it properly later
 		// m.sessionMonitor.Start(ctx, issueID, program)
 
-		return sessionStartedMsg{issueID: issueID, worktreePath: worktreePath}
+		return sessionStartedMsg{issueID: issueID}
 	}
 }
 
-// stopSessionCmd requests daemon-owned lifecycle stop and refreshes local session projection.
+// stopSessionCmd requests daemon-owned lifecycle stop and lets daemon snapshots rebuild the local projection.
 func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1681,17 +1710,36 @@ func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
-		// Remove session record
-		delete(m.sessions, issueID)
+		return sessionStoppedMsg{issueID: issueID}
+	}
+}
 
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Session stopped: %s", issueID),
-			Expires: time.Now().Add(3 * time.Second),
-		})
+func (m Model) projectSessionProjection(tasks []domain.Task) map[string]*domain.Session {
+	sessions := make(map[string]*domain.Session)
+	for _, task := range tasks {
+		if task.Session == nil {
+			continue
+		}
+		sessions[task.ID] = cloneSession(task.Session)
+	}
+	return sessions
+}
 
+func cloneSession(session *domain.Session) *domain.Session {
+	if session == nil {
 		return nil
 	}
+
+	cloned := *session
+	if session.StartedAt != nil {
+		startedAt := *session.StartedAt
+		cloned.StartedAt = &startedAt
+	}
+	if session.DevServer != nil {
+		devServer := *session.DevServer
+		cloned.DevServer = &devServer
+	}
+	return &cloned
 }
 
 // Helper methods
@@ -3453,7 +3501,6 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 						if m.daemonClient != nil {
 							_, _ = m.daemonClient.StopSession(ctx, issueID)
 						}
-						delete(m.sessions, issueID)
 						cleaned++
 					}
 				}
