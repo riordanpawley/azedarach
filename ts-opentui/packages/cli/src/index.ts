@@ -1901,6 +1901,7 @@ const issueListHandler = (args: {
 		if (requestedLimit !== undefined && requestedLimit <= 0) {
 			return yield* Effect.fail(new Error("--limit must be a positive integer"))
 		}
+		const effectiveLimit = requestedLimit === undefined ? 200 : Math.floor(requestedLimit)
 
 		const filters = {
 			status: Option.getOrUndefined(args.status),
@@ -1916,7 +1917,7 @@ const issueListHandler = (args: {
 			hasFilters ? filters : undefined,
 			explicitProjectDir,
 			{
-				limit: requestedLimit === undefined ? undefined : Math.floor(requestedLimit),
+				limit: effectiveLimit,
 				sortBy: "updated_at",
 				sortDirection: "desc",
 			},
@@ -1938,8 +1939,21 @@ const issueListHandler = (args: {
 			yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
 		}
 
+		const listedCount = issues.length
+		if (listedCount < effectiveLimit) {
+			yield* Console.log(
+				`Listed ${listedCount} issue(s); all matching issues are shown (limit=${effectiveLimit}).`,
+			)
+		} else {
+			yield* Console.log(
+				`Listed ${listedCount} issue(s) at limit=${effectiveLimit}; additional matching issues may exist. Use --limit to widen.`,
+			)
+		}
+
 		if (args.verbose) {
-			yield* Console.error(`Listed ${issues.length} issue(s) sorted by updated_at desc.`)
+			yield* Console.error(
+				`Listed ${issues.length} issue(s) sorted by updated_at desc (limit=${effectiveLimit}).`,
+			)
 		}
 	})
 
