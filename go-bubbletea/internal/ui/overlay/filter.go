@@ -302,13 +302,13 @@ func (m *FilterMenu) View() string {
 	b.WriteString(m.styles.Separator.Render("───────────────────────────────────────"))
 	b.WriteString("\n")
 
-	// Hide epic children checkbox
+	// Hide child issues checkbox
 	checkbox := "[ ]"
 	if m.filter.HideEpicChildren {
 		checkbox = "[●]"
 	}
 	line := m.styles.MenuKey.Render("[e]") + " " +
-		m.styles.MenuItem.Render(checkbox+" Hide epic children")
+		m.styles.MenuItem.Render(checkbox+" Hide child issues")
 	b.WriteString(line)
 	b.WriteString("\n")
 

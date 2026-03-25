@@ -89,9 +89,9 @@ func TestFilterMenuView_DisplaysFilterState(t *testing.T) {
 		t.Error("View should show active filter indicators (●)")
 	}
 
-	// Should show hide epic children option
-	if !strings.Contains(view, "Hide epic children") {
-		t.Error("View should contain 'Hide epic children'")
+	// Should show hide child issues option
+	if !strings.Contains(view, "Hide child issues") {
+		t.Error("View should contain 'Hide child issues'")
 	}
 
 	// Should show age filter
@@ -305,22 +305,22 @@ func TestFilterMenu_HideEpicChildrenToggle(t *testing.T) {
 	filter := domain.NewFilter()
 	menu := NewFilterMenu(filter)
 
-	if filter.HideEpicChildren {
-		t.Error("Should start with HideEpicChildren false")
-	}
-
-	// Toggle on
-	model, _ := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	menu = model.(*FilterMenu)
 	if !filter.HideEpicChildren {
-		t.Error("Should toggle HideEpicChildren to true")
+		t.Error("Should start with HideEpicChildren true")
 	}
 
 	// Toggle off
-	model, _ = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	model, _ := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	menu = model.(*FilterMenu)
 	if filter.HideEpicChildren {
 		t.Error("Should toggle HideEpicChildren to false")
+	}
+
+	// Toggle on
+	model, _ = menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	menu = model.(*FilterMenu)
+	if !filter.HideEpicChildren {
+		t.Error("Should toggle HideEpicChildren to true")
 	}
 }
 
@@ -370,7 +370,7 @@ func TestFilterMenu_ClearAll(t *testing.T) {
 	filter.TogglePriority(domain.P0)
 	filter.ToggleType(domain.TypeTask)
 	filter.ToggleSessionState(domain.SessionIdle)
-	filter.HideEpicChildren = true
+	filter.HideEpicChildren = false
 	days := 7
 	filter.AgeMaxDays = &days
 
@@ -399,8 +399,8 @@ func TestFilterMenu_ClearAll(t *testing.T) {
 	if len(filter.SessionState) > 0 {
 		t.Error("Session state filters should be cleared")
 	}
-	if filter.HideEpicChildren {
-		t.Error("HideEpicChildren should be false")
+	if !filter.HideEpicChildren {
+		t.Error("HideEpicChildren should reset to default true")
 	}
 	if filter.AgeMaxDays != nil {
 		t.Error("AgeMaxDays should be nil")

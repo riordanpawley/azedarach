@@ -16,13 +16,16 @@ type Filter struct {
 	SearchQuery      string
 }
 
+const defaultHideChildIssues = true
+
 // NewFilter creates a new empty filter
 func NewFilter() *Filter {
 	return &Filter{
-		Status:       make(map[Status]bool),
-		Priority:     make(map[Priority]bool),
-		Type:         make(map[TaskType]bool),
-		SessionState: make(map[SessionState]bool),
+		Status:           make(map[Status]bool),
+		Priority:         make(map[Priority]bool),
+		Type:             make(map[TaskType]bool),
+		SessionState:     make(map[SessionState]bool),
+		HideEpicChildren: defaultHideChildIssues,
 	}
 }
 
@@ -32,7 +35,7 @@ func (f *Filter) IsActive() bool {
 		len(f.Priority) > 0 ||
 		len(f.Type) > 0 ||
 		len(f.SessionState) > 0 ||
-		f.HideEpicChildren ||
+		f.HideEpicChildren != defaultHideChildIssues ||
 		f.AgeMaxDays != nil ||
 		f.SearchQuery != ""
 }
@@ -86,9 +89,9 @@ func (f *Filter) Matches(t Task) bool {
 		}
 	}
 
-	// Hide epic children
+	// Hide child issues from board-level views.
 	if f.HideEpicChildren {
-		if t.ParentID != nil {
+		if taskIsChildIssue(t) {
 			return false
 		}
 	}
@@ -125,7 +128,7 @@ func (f *Filter) Clear() {
 	f.Priority = make(map[Priority]bool)
 	f.Type = make(map[TaskType]bool)
 	f.SessionState = make(map[SessionState]bool)
-	f.HideEpicChildren = false
+	f.HideEpicChildren = defaultHideChildIssues
 	f.AgeMaxDays = nil
 	f.SearchQuery = ""
 }
@@ -164,4 +167,16 @@ func (f *Filter) ToggleSessionState(s SessionState) {
 	} else {
 		f.SessionState[s] = true
 	}
+}
+
+func taskIsChildIssue(t Task) bool {
+	if t.ParentID != nil {
+		return true
+	}
+	for _, dep := range t.Dependencies {
+		if dep.Type == DependencyParentChild && dep.ID != "" {
+			return true
+		}
+	}
+	return false
 }

@@ -168,7 +168,7 @@ func (s *Service) ToggleSessionFilter(state domain.SessionState) {
 	}
 }
 
-// ToggleHideEpicChildren toggles the hide epic children setting
+// ToggleHideEpicChildren toggles the hide child issues setting.
 func (s *Service) ToggleHideEpicChildren() {
 	s.filter.HideEpicChildren = !s.filter.HideEpicChildren
 }

@@ -59,9 +59,9 @@ func TestFilter_IsActive(t *testing.T) {
 			active: true,
 		},
 		{
-			name: "hide epic children is active",
+			name: "non-default child visibility is active",
 			setup: func(f *Filter) {
-				f.HideEpicChildren = true
+				f.HideEpicChildren = false
 			},
 			active: true,
 		},
@@ -291,14 +291,22 @@ func TestFilter_Matches_HideEpicChildren(t *testing.T) {
 
 	parentID := "az-epic"
 	tests := []struct {
-		name     string
-		parentID *string
-		matches  bool
+		name         string
+		parentID     *string
+		dependencies []Dependency
+		matches      bool
 	}{
 		{
 			name:     "task with parent is hidden",
 			parentID: &parentID,
 			matches:  false,
+		},
+		{
+			name: "task with parent-child dependency is hidden",
+			dependencies: []Dependency{
+				{ID: parentID, Type: DependencyParentChild},
+			},
+			matches: false,
 		},
 		{
 			name:     "task without parent is shown",
@@ -309,7 +317,7 @@ func TestFilter_Matches_HideEpicChildren(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			task := Task{ParentID: tt.parentID}
+			task := Task{ParentID: tt.parentID, Dependencies: tt.dependencies}
 			if got := f.Matches(task); got != tt.matches {
 				t.Errorf("Matches() = %v, want %v", got, tt.matches)
 			}
@@ -474,7 +482,7 @@ func TestFilter_Clear(t *testing.T) {
 	f.TogglePriority(P0)
 	f.ToggleType(TypeBug)
 	f.SearchQuery = "test"
-	f.HideEpicChildren = true
+	f.HideEpicChildren = false
 	days := 7
 	f.AgeMaxDays = &days
 
@@ -495,8 +503,8 @@ func TestFilter_Clear(t *testing.T) {
 	if f.SearchQuery != "" {
 		t.Error("Clear() should clear search query")
 	}
-	if f.HideEpicChildren {
-		t.Error("Clear() should reset HideEpicChildren")
+	if !f.HideEpicChildren {
+		t.Error("Clear() should reset HideEpicChildren to default true")
 	}
 	if f.AgeMaxDays != nil {
 		t.Error("Clear() should clear AgeMaxDays")

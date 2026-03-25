@@ -120,12 +120,12 @@ func TestService_ToggleFilters(t *testing.T) {
 
 	// Toggle hide epic children
 	svc.ToggleHideEpicChildren()
-	if !svc.GetFilter().HideEpicChildren {
-		t.Error("Expected HideEpicChildren to be true")
+	if svc.GetFilter().HideEpicChildren {
+		t.Error("Expected HideEpicChildren to toggle to false")
 	}
 	svc.ToggleHideEpicChildren()
-	if svc.GetFilter().HideEpicChildren {
-		t.Error("Expected HideEpicChildren to be false")
+	if !svc.GetFilter().HideEpicChildren {
+		t.Error("Expected HideEpicChildren to toggle back to true")
 	}
 }
 
@@ -151,7 +151,7 @@ func TestService_ClearFilters(t *testing.T) {
 	svc.ToggleStatusFilter(domain.StatusOpen)
 	svc.TogglePriorityFilter(domain.P0)
 	svc.SetSearchQuery("test")
-	svc.ToggleHideEpicChildren()
+	svc.ToggleHideEpicChildren() // moves to non-default false
 
 	if !svc.IsFilterActive() {
 		t.Error("Expected filter to be active")
