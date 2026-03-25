@@ -1149,10 +1149,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editor.EnterGoto()
 		return m, nil
 
-	case " ": // Space - open action menu
+	case " ": // Space - open details + action menu
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
-			return m, m.overlayStack.Push(overlay.NewActionMenu(*task, session))
+			detail := overlay.NewDetailPanel(*task, session).WithRelatedTasks(m.tasks)
+			return m, tea.Batch(
+				m.overlayStack.Push(detail),
+				m.overlayStack.Push(overlay.NewActionMenu(*task, session)),
+			)
 		}
 		return m, nil
 
@@ -1176,17 +1180,19 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case overlay.EventLogHotkey:
 		return m, m.overlayStack.Push(overlay.NewEventLogOverlay(m.runtimeEvents))
 
-	case "enter": // View task details or drill into epic
-		task, session := m.getCurrentTaskAndSession()
+	case "enter": // Drill into children
+		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
 			children := m.getTaskChildren(task.ID)
 			if len(children) > 0 {
 				// Child drill-down for any issue type with children.
 				return m, m.overlayStack.Push(overlay.NewEpicDrillDown(*task, children))
-			} else {
-				// Regular task detail panel
-				return m, m.overlayStack.Push(overlay.NewDetailPanel(*task, session).WithRelatedTasks(m.tasks))
 			}
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "No children to drill into (use Space for details/actions)",
+				Expires: time.Now().Add(2 * time.Second),
+			})
 		}
 		return m, nil
 

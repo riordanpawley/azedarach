@@ -28,8 +28,11 @@ func TestStatusBar_RenderNormalMode(t *testing.T) {
 	if !strings.Contains(result, "j/k: tasks") {
 		t.Errorf("Expected status bar to contain task navigation hints, got: %s", result)
 	}
-	if !strings.Contains(result, "Space: action") {
-		t.Errorf("Expected status bar to contain action hint, got: %s", result)
+	if !strings.Contains(result, "Enter: drill") {
+		t.Errorf("Expected status bar to contain drill hint, got: %s", result)
+	}
+	if !strings.Contains(result, "Space: details+actions") {
+		t.Errorf("Expected status bar to contain details+actions hint, got: %s", result)
 	}
 }
 
@@ -198,7 +201,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "h/l: columns  j/k: tasks  Space: action  ?: help  q: quit"},
+		{types.ModeNormal, "h/l: columns  j/k: tasks  Enter: drill  Space: details+actions  ?: help  q: quit"},
 		{types.ModeSelect, "Space: toggle  a: all  n: none  Esc: cancel"},
 		{types.ModeSearch, "Type to search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g: top  e: end  h: first col  l: last col  Esc: cancel"},

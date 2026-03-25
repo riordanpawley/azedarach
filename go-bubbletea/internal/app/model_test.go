@@ -1426,13 +1426,29 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 
 	m.nav.SelectTask(currentID, 0)
 
-	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	newModel := result.(Model)
 
 	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.ActionMenu); !ok {
+		t.Fatalf("expected ActionMenu overlay on top, got %T", current)
+	}
+
+	updated, closeCmd := newModel.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if closeCmd == nil {
+		t.Fatal("expected escape to emit a close command")
+	}
+	closeMsg := closeCmd()
+	if _, ok := closeMsg.(overlay.CloseOverlayMsg); !ok {
+		t.Fatalf("escape command emitted %T, want CloseOverlayMsg", closeMsg)
+	}
+
+	afterClose := updated.(Model)
+	afterClose.overlayStack.Update(closeMsg)
+	current = afterClose.overlayStack.Current()
 	detail, ok := current.(*overlay.DetailPanel)
 	if !ok {
-		t.Fatalf("expected DetailPanel overlay, got %T", current)
+		t.Fatalf("expected DetailPanel overlay beneath action menu, got %T", current)
 	}
 	view := detail.View()
 	if !strings.Contains(view, "Dependencies") {
@@ -1446,6 +1462,27 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	}
 	if strings.Index(view, "Outgoing") > strings.Index(view, "Incoming") {
 		t.Fatalf("expected outgoing dependencies to render before incoming dependencies, got %q", view)
+	}
+}
+
+func TestEnterOnLeafTaskShowsDrillDownGuidanceToast(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.nav.SelectTask("az-1", 0)
+
+	beforeToasts := len(m.toasts)
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel := result.(Model)
+
+	if !newModel.overlayStack.IsEmpty() {
+		t.Fatalf("expected no overlay for leaf drill-down enter, got %T", newModel.overlayStack.Current())
+	}
+	if len(newModel.toasts) != beforeToasts+1 {
+		t.Fatalf("expected one guidance toast, got %d new toasts", len(newModel.toasts)-beforeToasts)
+	}
+	last := newModel.toasts[len(newModel.toasts)-1]
+	if !strings.Contains(last.Message, "No children to drill into") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
 	}
 }
 

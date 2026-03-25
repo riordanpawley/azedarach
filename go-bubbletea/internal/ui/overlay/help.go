@@ -163,8 +163,8 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		{
 			Name: "Actions",
 			Bindings: []KeyBinding{
-				{Key: "Space", Description: "Open action menu"},
-				{Key: "Enter", Description: "Show task details"},
+				{Key: "Space", Description: "Open details + action menu"},
+				{Key: "Enter", Description: "Drill into children"},
 			},
 		},
 		{

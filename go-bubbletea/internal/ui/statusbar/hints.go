@@ -6,7 +6,7 @@ import "github.com/riordanpawley/azedarach/internal/types"
 func GetHints(mode types.Mode) string {
 	switch mode {
 	case types.ModeNormal:
-		return "h/l: columns  j/k: tasks  Space: action  ?: help  q: quit"
+		return "h/l: columns  j/k: tasks  Enter: drill  Space: details+actions  ?: help  q: quit"
 	case types.ModeGoto:
 		return "g: top  e: end  h: first col  l: last col  Esc: cancel"
 	case types.ModeSelect:
