@@ -591,7 +591,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 
 	tasks := make([]domain.Task, 0, 32)
 	taskIDs := make([]string, 0, 32)
-	taskByID := map[string]*domain.Task{}
+	taskIndexByID := map[string]int{}
 
 	for rows.Next() {
 		task := domain.Task{}
@@ -620,7 +620,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 
 		tasks = append(tasks, task)
 		taskIDs = append(taskIDs, task.ID)
-		taskByID[task.ID] = &tasks[len(tasks)-1]
+		taskIndexByID[task.ID] = len(tasks) - 1
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -646,10 +646,11 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		if err := dependencyRows.Scan(&issueID, &dependsOnID, &dependencyType); err != nil {
 			return nil, err
 		}
-		task := taskByID[issueID]
-		if task == nil {
+		taskIndex, ok := taskIndexByID[issueID]
+		if !ok {
 			continue
 		}
+		task := &tasks[taskIndex]
 		if normalizeDependencyType(dependencyType) == string(domain.DependencyParentChild) {
 			parentID := dependsOnID
 			task.ParentID = &parentID

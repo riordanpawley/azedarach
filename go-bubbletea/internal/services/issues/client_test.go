@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -295,6 +296,55 @@ func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
 	require.Len(t, blockedTask.Dependencies, 1)
 	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID)
 	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
+}
+
+func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Hydration parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	// Create enough tasks to exceed the initial query slice capacity (32),
+	// which previously exposed pointer invalidation when hydrating deps.
+	var earlyChildID string
+	for i := 0; i < 40; i++ {
+		title := "Hydration task " + strconv.Itoa(i)
+		params := CreateTaskParams{
+			Title:    title,
+			Type:     domain.TypeTask,
+			Priority: domain.P2,
+		}
+		if i == 0 {
+			params.Title = "Hydration early child"
+			params.ParentID = &parentID
+		}
+		id, createErr := client.Create(ctx, params)
+		require.NoError(t, createErr)
+		if i == 0 {
+			earlyChildID = id
+		}
+	}
+
+	tasks, err := client.List(ctx)
+	require.NoError(t, err)
+
+	var earlyChild *domain.Task
+	for i := range tasks {
+		if tasks[i].ID == earlyChildID {
+			earlyChild = &tasks[i]
+			break
+		}
+	}
+	if earlyChild == nil {
+		t.Fatalf("early child task %s not found", earlyChildID)
+	}
+	require.NotNil(t, earlyChild.ParentID)
+	assert.Equal(t, parentID, *earlyChild.ParentID)
 }
 
 func TestClient_AddDependencyRequiresExistingTargetIssue(t *testing.T) {
