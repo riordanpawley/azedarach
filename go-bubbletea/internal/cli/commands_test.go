@@ -608,6 +608,94 @@ func TestParseIssueCloseArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueUpdateArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueUpdateOptions
+		errContains string
+	}{
+		{
+			name: "update title",
+			args: []string{"--title", "Renamed", "az-1"},
+			want: IssueUpdateOptions{
+				IssueID: "az-1",
+				Title:   "Renamed",
+			},
+		},
+		{
+			name: "update type and priority",
+			args: []string{"--type", "epic", "--priority", "P0", "az-1"},
+			want: func() IssueUpdateOptions {
+				tt := domain.TypeEpic
+				p := domain.P0
+				return IssueUpdateOptions{
+					IssueID:  "az-1",
+					Type:     &tt,
+					Priority: &p,
+				}
+			}(),
+		},
+		{
+			name:        "no update fields",
+			args:        []string{"az-1"},
+			errContains: "no update fields provided",
+		},
+		{
+			name:        "invalid status arg count",
+			args:        []string{},
+			errContains: "usage: az issue update <issue-id>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueUpdateArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueUpdateArgs() error = %v", err)
+			}
+			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description {
+				t.Fatalf("ParseIssueUpdateArgs() = %+v, want %+v", got, tt.want)
+			}
+			if (got.Type == nil) != (tt.want.Type == nil) {
+				t.Fatalf("type presence mismatch: got=%v want=%v", got.Type, tt.want.Type)
+			}
+			if got.Type != nil && *got.Type != *tt.want.Type {
+				t.Fatalf("type mismatch: got=%v want=%v", *got.Type, *tt.want.Type)
+			}
+			if (got.Priority == nil) != (tt.want.Priority == nil) {
+				t.Fatalf("priority presence mismatch: got=%v want=%v", got.Priority, tt.want.Priority)
+			}
+			if got.Priority != nil && *got.Priority != *tt.want.Priority {
+				t.Fatalf("priority mismatch: got=%v want=%v", *got.Priority, *tt.want.Priority)
+			}
+		})
+	}
+}
+
+func TestParseIssueStatusArgs(t *testing.T) {
+	got, err := ParseIssueStatusArgs([]string{"az-1", "blocked"})
+	if err != nil {
+		t.Fatalf("ParseIssueStatusArgs() error = %v", err)
+	}
+	if got.IssueID != "az-1" || got.Status != domain.StatusBlocked {
+		t.Fatalf("ParseIssueStatusArgs() = %+v", got)
+	}
+	_, err = ParseIssueStatusArgs([]string{"az-1"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue status <issue-id> <open|in_progress|blocked|closed>") {
+		t.Fatalf("expected usage error, got %v", err)
+	}
+	_, err = ParseIssueStatusArgs([]string{"az-1", "done"})
+	if err == nil || !strings.Contains(err.Error(), "invalid status: done") {
+		t.Fatalf("expected invalid status error, got %v", err)
+	}
+}
+
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
@@ -820,6 +908,104 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotUpdateReq protocol.RequestEnvelope
+	var gotStatusReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					gotUpdateReq = req
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				case daemonclient.CommandTaskUpdateStatus:
+					gotStatusReq = req
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	updateOut := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID: "az-1",
+			Title:   "New",
+		})
+	})
+	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
+		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	if !strings.Contains(updateOut, "Updated issue: az-1") {
+		t.Fatalf("update output = %q", updateOut)
+	}
+
+	statusOut := captureStdout(t, func() error {
+		return IssueStatusCommand(deps, IssueStatusOptions{
+			IssueID: "az-1",
+			Status:  domain.StatusBlocked,
+		})
+	})
+	if gotStatusReq.Command != daemonclient.CommandTaskUpdateStatus {
+		t.Fatalf("status command = %q, want %q", gotStatusReq.Command, daemonclient.CommandTaskUpdateStatus)
+	}
+	if !strings.Contains(statusOut, "Updated status: az-1 -> blocked") {
+		t.Fatalf("status output = %q", statusOut)
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -840,6 +1026,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue create <title>") {
 		t.Fatalf("usage missing issue create command: %q", output)
+	}
+	if !strings.Contains(output, "issue update <id>") {
+		t.Fatalf("usage missing issue update command: %q", output)
+	}
+	if !strings.Contains(output, "issue status <id>") {
+		t.Fatalf("usage missing issue status command: %q", output)
 	}
 	if !strings.Contains(output, "issue close <id>") {
 		t.Fatalf("usage missing issue close command: %q", output)

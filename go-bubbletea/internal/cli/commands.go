@@ -76,6 +76,19 @@ type IssueCloseOptions struct {
 	IssueID string
 }
 
+type IssueUpdateOptions struct {
+	IssueID     string
+	Title       string
+	Description string
+	Type        *domain.TaskType
+	Priority    *domain.Priority
+}
+
+type IssueStatusOptions struct {
+	IssueID string
+	Status  domain.Status
+}
+
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
@@ -264,6 +277,57 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	return IssueCloseOptions{IssueID: args[0]}, nil
 }
 
+func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
+	opts := IssueUpdateOptions{}
+	var typeRaw string
+	var priorityRaw string
+	fs := flag.NewFlagSet("issue update", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Title, "title", "", "updated issue title")
+	fs.StringVar(&opts.Description, "description", "", "updated issue description")
+	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
+	fs.StringVar(&priorityRaw, "priority", "", "updated priority (P0-P4)")
+	if err := fs.Parse(args); err != nil {
+		return IssueUpdateOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update <issue-id> [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+	}
+	opts.IssueID = fs.Arg(0)
+	if typeRaw != "" {
+		tt, err := parseTaskType(typeRaw)
+		if err != nil {
+			return IssueUpdateOptions{}, err
+		}
+		opts.Type = &tt
+	}
+	if priorityRaw != "" {
+		p, err := parsePriority(priorityRaw)
+		if err != nil {
+			return IssueUpdateOptions{}, err
+		}
+		opts.Priority = &p
+	}
+	if opts.Title == "" && opts.Description == "" && opts.Type == nil && opts.Priority == nil {
+		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
+	}
+	return opts, nil
+}
+
+func ParseIssueStatusArgs(args []string) (IssueStatusOptions, error) {
+	if len(args) != 2 {
+		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status <issue-id> <open|in_progress|blocked|closed>")
+	}
+	status, err := parseStatus(args[1])
+	if err != nil {
+		return IssueStatusOptions{}, err
+	}
+	return IssueStatusOptions{
+		IssueID: args[0],
+		Status:  status,
+	}, nil
+}
+
 func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -421,6 +485,62 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	return nil
 }
 
+func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load issue %s for update: %w", opts.IssueID, err)
+	}
+	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	update := daemonclient.TaskUpdateParams{
+		Title:       task.Title,
+		Description: task.Description,
+		Type:        task.Type,
+		Priority:    task.Priority,
+	}
+	if opts.Title != "" {
+		update.Title = opts.Title
+	}
+	if opts.Description != "" {
+		update.Description = opts.Description
+	}
+	if opts.Type != nil {
+		update.Type = *opts.Type
+	}
+	if opts.Priority != nil {
+		update.Priority = *opts.Priority
+	}
+
+	if err := deps.DaemonClient.UpdateTaskDetails(ctx, opts.IssueID, update); err != nil {
+		return fmt.Errorf("failed to update issue %s: %w", opts.IssueID, err)
+	}
+	fmt.Printf("Updated issue: %s\n", opts.IssueID)
+	return nil
+}
+
+func IssueStatusCommand(deps *Dependencies, opts IssueStatusOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, opts.Status); err != nil {
+		return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
+	}
+	fmt.Printf("Updated status: %s -> %s\n", opts.IssueID, opts.Status)
+	return nil
+}
+
 func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 	for _, task := range tasks {
 		if task.ID == id {
@@ -457,6 +577,21 @@ func parsePriority(raw string) (domain.Priority, error) {
 	}
 }
 
+func parseStatus(raw string) (domain.Status, error) {
+	switch raw {
+	case "open":
+		return domain.StatusOpen, nil
+	case "in_progress":
+		return domain.StatusInProgress, nil
+	case "blocked":
+		return domain.StatusBlocked, nil
+	case "closed":
+		return domain.StatusDone, nil
+	default:
+		return "", fmt.Errorf("invalid status: %s", raw)
+	}
+}
+
 // RestartDaemonCommand forces daemon replacement and verifies client re-attach.
 func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -486,6 +621,8 @@ Commands:
   issue list [--json]  List issues from daemon-backed store
   issue get <id> [--json]  Show a single issue from daemon-backed store
   issue create <title> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue update <id> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
+  issue status <id> <open|in_progress|blocked|closed>  Set issue status
   issue close <id>      Close an issue (sets status=closed)
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
@@ -501,6 +638,8 @@ Examples:
   az issue list
   az issue get az-123 --json
   az issue create "New task" --type task --priority P2
+  az issue update az-123 --title "Renamed task" --priority P1
+  az issue status az-123 in_progress
   az issue close az-123
   az export --format json
   az export --format json --out snapshot.json
