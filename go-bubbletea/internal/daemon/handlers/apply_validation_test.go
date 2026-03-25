@@ -158,6 +158,70 @@ func TestValidateApplyRequest_PerItemDiagnostics(t *testing.T) {
 	}
 }
 
+func TestValidateApplyRequest_CommandBodyDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		req    protocol.ApplyRequestBody
+		fields []string
+	}{
+		{
+			name: "task create",
+			req: protocol.ApplyRequestBody{
+				SchemaVersion:    protocol.ApplySchemaVersion,
+				SnapshotRevision: 8,
+				Operations: []protocol.ApplyOperationBody{{
+					Command: applyCommandTaskCreate,
+					Body:    mustApplyJSON(t, map[string]string{}),
+				}},
+			},
+			fields: []string{"title", "description", "type", "priority"},
+		},
+		{
+			name: "task update",
+			req: protocol.ApplyRequestBody{
+				SchemaVersion:    protocol.ApplySchemaVersion,
+				SnapshotRevision: 8,
+				Operations: []protocol.ApplyOperationBody{{
+					Command: applyCommandTaskUpdate,
+					Body:    mustApplyJSON(t, map[string]string{}),
+				}},
+			},
+			fields: []string{"task_id", "title", "description", "type", "priority"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateApplyRequest(tc.req)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+
+			vErr, ok := err.(*protocol.ApplyValidationError)
+			if !ok {
+				t.Fatalf("error type = %T, want *protocol.ApplyValidationError", err)
+			}
+			if len(vErr.Diagnostics) != len(tc.fields) {
+				t.Fatalf("Diagnostics len = %d, want %d", len(vErr.Diagnostics), len(tc.fields))
+			}
+			for i, field := range tc.fields {
+				if vErr.Diagnostics[i].Index != 0 {
+					t.Fatalf("diag[%d].Index = %d, want 0", i, vErr.Diagnostics[i].Index)
+				}
+				if vErr.Diagnostics[i].Code != protocol.ApplyValidationCodeMissingField {
+					t.Fatalf("diag[%d].Code = %q, want %q", i, vErr.Diagnostics[i].Code, protocol.ApplyValidationCodeMissingField)
+				}
+				if vErr.Diagnostics[i].Field != field {
+					t.Fatalf("diag[%d].Field = %q, want %q", i, vErr.Diagnostics[i].Field, field)
+				}
+				if vErr.Diagnostics[i].Message != "missing required field: "+field {
+					t.Fatalf("diag[%d].Message = %q, want missing required field: %s", i, vErr.Diagnostics[i].Message, field)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateApplyRequestBody_InvalidJSON(t *testing.T) {
 	_, err := ValidateApplyRequestBody([]byte(`{"schema_version":1,"snapshot_revision":1,"dry_run":false,"operations":[`))
 	if err == nil {

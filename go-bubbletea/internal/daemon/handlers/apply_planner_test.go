@@ -107,6 +107,37 @@ func TestEvaluateApplyRevisionGate(t *testing.T) {
 	})
 }
 
+func TestBuildApplyDryRunPreview_ClonesNilBodies(t *testing.T) {
+	req := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 3,
+		DryRun:           true,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: applyCommandTaskDelete,
+				Body:    nil,
+			},
+			{
+				Command: applyCommandTaskArchive,
+				Body:    mustApplyPreviewJSON(t, map[string]string{"task_id": "T-7"}),
+			},
+		},
+	}
+
+	preview := BuildApplyDryRunPreview(req)
+	if len(preview.Operations) != 2 {
+		t.Fatalf("Operations len = %d, want 2", len(preview.Operations))
+	}
+	if preview.Operations[0].Body != nil {
+		t.Fatalf("Operations[0].Body = %v, want nil", preview.Operations[0].Body)
+	}
+	original := append([]byte(nil), req.Operations[1].Body...)
+	req.Operations[1].Body[0] = '!'
+	if string(preview.Operations[1].Body) != string(original) {
+		t.Fatalf("preview body mutated when request body changed: got %s, want %s", string(preview.Operations[1].Body), string(original))
+	}
+}
+
 func mustApplyPreviewJSON(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 

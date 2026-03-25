@@ -53,12 +53,14 @@ func (r *recordingApplyService) Archive(_ context.Context, id string) error {
 }
 
 type recordingApplyRevisions struct {
-	current   uint64
-	next      []uint64
-	published []string
+	current      uint64
+	currentCalls int
+	next         []uint64
+	published    []string
 }
 
 func (r *recordingApplyRevisions) CurrentRevision(string) uint64 {
+	r.currentCalls++
 	return r.current
 }
 
@@ -343,6 +345,91 @@ func TestApplyHandlerRevisionMismatchStopsBeforeExecution(t *testing.T) {
 	}
 	if len(service.calls) != 0 {
 		t.Fatalf("service calls = %v, want none", service.calls)
+	}
+	if len(revisions.published) != 0 {
+		t.Fatalf("published events = %v, want none", revisions.published)
+	}
+}
+
+func TestApplyHandlerDryRunReturnsPreviewWithoutExecuting(t *testing.T) {
+	service := &recordingApplyService{}
+	revisions := &recordingApplyRevisions{current: 11}
+	h := NewApplyHandler(service, revisions)
+
+	reqBody := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 11,
+		DryRun:           true,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: applyCommandTaskCreate,
+				Body: mustApplyJSON(t, map[string]any{
+					"title":       "Draft task",
+					"description": "Preview only",
+					"type":        "task",
+					"priority":    "high",
+				}),
+			},
+			{
+				Command: applyCommandTaskDelete,
+				Body: mustApplyJSON(t, map[string]any{
+					"task_id": "az-9",
+				}),
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-dry-run",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandTaskBulkApply,
+		Meta: protocol.Metadata{
+			ProjectID: "proj",
+		},
+		Body: body,
+	})
+
+	if !resp.OK {
+		t.Fatalf("Handle() error = %+v", resp.Error)
+	}
+	if resp.Revision != 0 {
+		t.Fatalf("Revision = %d, want 0 for dry run", resp.Revision)
+	}
+	var preview ApplyDryRunPreview
+	if err := json.Unmarshal(resp.Body, &preview); err != nil {
+		t.Fatalf("unmarshal preview: %v", err)
+	}
+	if !preview.DryRun {
+		t.Fatal("DryRun = false, want true")
+	}
+	if preview.SnapshotRevision != 11 {
+		t.Fatalf("SnapshotRevision = %d, want 11", preview.SnapshotRevision)
+	}
+	if got, want := len(preview.Operations), 2; got != want {
+		t.Fatalf("Operations len = %d, want %d", got, want)
+	}
+	if preview.Operations[0].Index != 0 || preview.Operations[1].Index != 1 {
+		t.Fatalf("unexpected preview indexes: %+v", preview.Operations)
+	}
+	if preview.Operations[0].Command != applyCommandTaskCreate {
+		t.Fatalf("Operations[0].Command = %q, want %q", preview.Operations[0].Command, applyCommandTaskCreate)
+	}
+	if preview.Operations[1].Command != applyCommandTaskDelete {
+		t.Fatalf("Operations[1].Command = %q, want %q", preview.Operations[1].Command, applyCommandTaskDelete)
+	}
+	if got := service.calls; len(got) != 0 {
+		t.Fatalf("service calls = %v, want none", got)
+	}
+	if revisions.currentCalls != 0 {
+		t.Fatalf("CurrentRevision calls = %d, want 0", revisions.currentCalls)
+	}
+	if len(revisions.next) != 0 {
+		t.Fatalf("NextRevision calls = %v, want none", revisions.next)
 	}
 	if len(revisions.published) != 0 {
 		t.Fatalf("published events = %v, want none", revisions.published)
