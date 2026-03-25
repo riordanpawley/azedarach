@@ -11,9 +11,11 @@ import (
 )
 
 type fakeGitService struct {
-	fetchFn    func(context.Context, string, string) error
-	mergeFn    func(context.Context, string, string) (*git.MergeResult, error)
-	checkoutFn func(context.Context, string, string) error
+	fetchFn      func(context.Context, string, string) error
+	mergeFn      func(context.Context, string, string) (*git.MergeResult, error)
+	checkoutFn   func(context.Context, string, string) error
+	abortMergeFn func(context.Context, string) error
+	diffStatFn   func(context.Context, string) (string, error)
 }
 
 func (f *fakeGitService) Fetch(ctx context.Context, worktree, remote string) error {
@@ -35,6 +37,20 @@ func (f *fakeGitService) Checkout(ctx context.Context, worktree, branch string) 
 		return f.checkoutFn(ctx, worktree, branch)
 	}
 	return nil
+}
+
+func (f *fakeGitService) AbortMerge(ctx context.Context, worktree string) error {
+	if f.abortMergeFn != nil {
+		return f.abortMergeFn(ctx, worktree)
+	}
+	return nil
+}
+
+func (f *fakeGitService) DiffStat(ctx context.Context, worktree string) (string, error) {
+	if f.diffStatFn != nil {
+		return f.diffStatFn(ctx, worktree)
+	}
+	return "", nil
 }
 
 func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope {
@@ -77,6 +93,18 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			}
 			return nil
 		},
+		abortMergeFn: func(_ context.Context, worktree string) error {
+			if worktree != "/tmp/az-1" {
+				t.Fatalf("abort merge args = %q", worktree)
+			}
+			return nil
+		},
+		diffStatFn: func(_ context.Context, worktree string) (string, error) {
+			if worktree != "/tmp/az-1" {
+				t.Fatalf("diff stat args = %q", worktree)
+			}
+			return " README.md | 2 ++\n 1 file changed, 2 insertions(+)", nil
+		},
 	})
 
 	for _, tc := range []struct {
@@ -98,6 +126,16 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			name:    "checkout",
 			req:     gitRequest(t, CommandGitCheckout, gitCommandBody{Worktree: "/tmp/az-1", Branch: "feature/one"}),
 			wantCmd: CommandGitCheckout,
+		},
+		{
+			name:    "abort merge",
+			req:     gitRequest(t, CommandGitAbortMerge, gitCommandBody{Worktree: "/tmp/az-1"}),
+			wantCmd: CommandGitAbortMerge,
+		},
+		{
+			name:    "diff stat",
+			req:     gitRequest(t, CommandGitDiffStat, gitCommandBody{Worktree: "/tmp/az-1"}),
+			wantCmd: CommandGitDiffStat,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +171,22 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				if body.Worktree != "/tmp/az-1" || body.Branch != "feature/one" {
 					t.Fatalf("response body = %+v", body)
 				}
+			case CommandGitAbortMerge:
+				var body gitActionResultBody
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" {
+					t.Fatalf("response body = %+v", body)
+				}
+			case CommandGitDiffStat:
+				var body gitOutputResultBody
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" || body.Output == "" {
+					t.Fatalf("response body = %+v", body)
+				}
 			}
 		})
 	}
@@ -148,6 +202,12 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 		},
 		checkoutFn: func(context.Context, string, string) error {
 			return nil
+		},
+		abortMergeFn: func(context.Context, string) error {
+			return context.DeadlineExceeded
+		},
+		diffStatFn: func(context.Context, string) (string, error) {
+			return "", context.DeadlineExceeded
 		},
 	})
 
@@ -173,5 +233,29 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal {
 		t.Fatalf("unexpected merge mapping: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitAbortMerge, gitCommandBody{Worktree: "/tmp/az-1"}))
+	if resp.OK {
+		t.Fatal("expected abort merge failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeTimeout || !resp.Error.Retryable {
+		t.Fatalf("unexpected abort merge timeout mapping: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitDiffStat, gitCommandBody{Worktree: "/tmp/az-1"}))
+	if resp.OK {
+		t.Fatal("expected diff stat failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeTimeout || !resp.Error.Retryable {
+		t.Fatalf("unexpected diff stat timeout mapping: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitDiffStat, gitCommandBody{}))
+	if resp.OK {
+		t.Fatal("expected diff stat validation failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected diff stat validation error: %+v", resp.Error)
 	}
 }

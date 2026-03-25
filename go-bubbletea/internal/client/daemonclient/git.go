@@ -7,19 +7,21 @@ import (
 )
 
 const (
-	CommandGitFetch    = "git.fetch"
-	CommandGitMerge    = "git.merge"
-	CommandGitCheckout = "git.checkout"
+	CommandGitFetch      = "git.fetch"
+	CommandGitMerge      = "git.merge"
+	CommandGitCheckout   = "git.checkout"
+	CommandGitAbortMerge = "git.abort_merge"
+	CommandGitDiffStat   = "git.diff_stat"
 )
 
-// GitCommandRequest captures the daemon request body for git fetch and checkout commands.
+// GitCommandRequest captures the daemon request body for git workflow commands.
 type GitCommandRequest struct {
 	Worktree string `json:"worktree"`
 	Remote   string `json:"remote,omitempty"`
 	Branch   string `json:"branch,omitempty"`
 }
 
-// GitCommandResponse captures the daemon response body for git fetch and checkout commands.
+// GitCommandResponse captures the daemon response body for git workflow commands.
 type GitCommandResponse struct {
 	Worktree string `json:"worktree"`
 	Remote   string `json:"remote,omitempty"`
@@ -31,6 +33,10 @@ type GitMergeCommandResponse struct {
 	Worktree string          `json:"worktree"`
 	Branch   string          `json:"branch"`
 	Result   git.MergeResult `json:"result"`
+}
+
+type gitOutputBody struct {
+	Output string `json:"output"`
 }
 
 // GitFetch asks the daemon to fetch updates for a worktree from the requested remote.
@@ -67,4 +73,26 @@ func (c *Client) GitCheckout(ctx context.Context, worktree, branch string) (GitC
 		return GitCommandResponse{}, err
 	}
 	return resp, nil
+}
+
+// GitAbortMerge asks the daemon to abort an ongoing merge in the requested worktree.
+func (c *Client) GitAbortMerge(ctx context.Context, worktree string) (GitCommandResponse, error) {
+	var resp GitCommandResponse
+	if err := c.commandJSON(ctx, CommandGitAbortMerge, GitCommandRequest{
+		Worktree: worktree,
+	}, &resp); err != nil {
+		return GitCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitDiffStat asks the daemon to get the diff stat output for the requested worktree.
+func (c *Client) GitDiffStat(ctx context.Context, worktree string) (string, error) {
+	var resp gitOutputBody
+	if err := c.commandJSON(ctx, CommandGitDiffStat, GitCommandRequest{
+		Worktree: worktree,
+	}, &resp); err != nil {
+		return "", err
+	}
+	return resp.Output, nil
 }

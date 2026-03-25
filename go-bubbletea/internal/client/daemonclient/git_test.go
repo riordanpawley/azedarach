@@ -176,4 +176,88 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
 		}
 	})
+
+	t.Run("diff stat", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitDiffStat {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitDiffStat)
+				}
+				var body GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Worktree != worktree {
+					t.Fatalf("request body = %+v", body)
+				}
+				respBody, err := json.Marshal(gitOutputBody{
+					Output: " README.md | 2 ++\n 1 file changed, 2 insertions(+)",
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		output, err := client.GitDiffStat(context.Background(), worktree)
+		if err != nil {
+			t.Fatalf("GitDiffStat error: %v", err)
+		}
+		if output == "" {
+			t.Fatal("expected diff stat output")
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+
+	t.Run("abort merge", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitAbortMerge {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitAbortMerge)
+				}
+				var body GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Worktree != worktree {
+					t.Fatalf("request body = %+v", body)
+				}
+				respBody, err := json.Marshal(GitCommandResponse{
+					Worktree: worktree,
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		resp, err := client.GitAbortMerge(context.Background(), worktree)
+		if err != nil {
+			t.Fatalf("GitAbortMerge error: %v", err)
+		}
+		if resp.Worktree != worktree {
+			t.Fatalf("response = %+v", resp)
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
 }

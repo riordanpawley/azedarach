@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	CommandGitFetch    = "git.fetch"
-	CommandGitMerge    = "git.merge"
-	CommandGitCheckout = "git.checkout"
+	CommandGitFetch      = "git.fetch"
+	CommandGitMerge      = "git.merge"
+	CommandGitCheckout   = "git.checkout"
+	CommandGitAbortMerge = "git.abort_merge"
+	CommandGitDiffStat   = "git.diff_stat"
 )
 
 // GitService captures the daemon-owned git operations needed by client workflows.
@@ -22,6 +24,8 @@ type GitService interface {
 	Fetch(ctx context.Context, worktree, remote string) error
 	Merge(ctx context.Context, worktree, branch string) (*git.MergeResult, error)
 	Checkout(ctx context.Context, worktree, branch string) error
+	AbortMerge(ctx context.Context, worktree string) error
+	DiffStat(ctx context.Context, worktree string) (string, error)
 }
 
 // GitHandler routes daemon git workflow commands.
@@ -44,6 +48,11 @@ type gitActionResultBody struct {
 	Worktree string `json:"worktree"`
 	Remote   string `json:"remote,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+}
+
+type gitOutputResultBody struct {
+	Worktree string `json:"worktree"`
+	Output   string `json:"output"`
 }
 
 type gitMergeResultBody struct {
@@ -79,6 +88,10 @@ func (h *GitHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 		return h.handleMerge(ctx, resp, cmd)
 	case CommandGitCheckout:
 		return h.handleCheckout(ctx, resp, cmd)
+	case CommandGitAbortMerge:
+		return h.handleAbortMerge(ctx, resp, cmd)
+	case CommandGitDiffStat:
+		return h.handleDiffStat(ctx, resp, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,
@@ -183,6 +196,72 @@ func (h *GitHandler) handleCheckout(ctx context.Context, resp protocol.ResponseE
 	body, err := json.Marshal(gitActionResultBody{
 		Worktree: cmd.Worktree,
 		Branch:   cmd.Branch,
+	})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+
+	resp.OK = true
+	resp.Body = body
+	return resp
+}
+
+func (h *GitHandler) handleAbortMerge(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	if cmd.Worktree == "" {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   "missing required fields: worktree",
+			Retryable: false,
+		}
+		return resp
+	}
+
+	if err := h.service.AbortMerge(ctx, cmd.Worktree); err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+
+	body, err := json.Marshal(gitActionResultBody{
+		Worktree: cmd.Worktree,
+	})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+
+	resp.OK = true
+	resp.Body = body
+	return resp
+}
+
+func (h *GitHandler) handleDiffStat(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	if cmd.Worktree == "" {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   "missing required fields: worktree",
+			Retryable: false,
+		}
+		return resp
+	}
+
+	output, err := h.service.DiffStat(ctx, cmd.Worktree)
+	if err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+
+	body, err := json.Marshal(gitOutputResultBody{
+		Worktree: cmd.Worktree,
+		Output:   output,
 	})
 	if err != nil {
 		resp.Error = &protocol.ErrorEnvelope{
