@@ -93,20 +93,23 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep|bulk-create|bulk-update> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
 		issueArgs := commandArgs[1:]
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
-			fmt.Printf("Usage: az issue <list|get|create|update|status|close|dep|bulk-create|bulk-update> [arguments]\n\n")
+			fmt.Printf("Usage: az issue <list|get|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n\n")
 			fmt.Printf("Commands:\n")
 			fmt.Printf("  list [--json] [--deps]  List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json] [--deps]  Show a single issue by ID\n")
+			fmt.Printf("  check <issue-id> [--json] [--deps]  Alias for get\n")
+			fmt.Printf("  doctor <issue-id>  Run integrity checks for one issue\n")
 			fmt.Printf("  create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue\n")
 			fmt.Printf("  update <issue-id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
 			fmt.Printf("  status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status\n")
 			fmt.Printf("  close <issue-id> --impl <implementation>       Close an issue (sets status=closed)\n")
+			fmt.Printf("  delete <issue-id> --impl <implementation> --confirm  Permanently delete an issue\n")
 			fmt.Printf("  dep add <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from]  Add a dependency edge\n")
 			fmt.Printf("  dep remove <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from] [--confirm]  Remove a dependency edge\n")
 			fmt.Printf("  bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations\n")
@@ -137,6 +140,34 @@ func main() {
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueGetCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "check":
+			opts, err := cli.ParseIssueCheckArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue check <issue-id> [--json] [--deps]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueCheckCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "doctor":
+			opts, err := cli.ParseIssueDoctorArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue doctor <issue-id>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueDoctorCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -193,6 +224,20 @@ func main() {
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueCloseCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "delete":
+			opts, err := cli.ParseIssueDeleteArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue delete <issue-id> --impl <implementation> --confirm\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueDeleteCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -268,7 +313,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep|bulk-create|bulk-update> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
 			os.Exit(1)
 		}
 

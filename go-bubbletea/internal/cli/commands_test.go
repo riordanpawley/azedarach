@@ -518,6 +518,32 @@ func TestParseIssueGetArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
+	check, err := ParseIssueCheckArgs([]string{"--deps", "az-1"})
+	if err != nil {
+		t.Fatalf("ParseIssueCheckArgs() error = %v", err)
+	}
+	if check.IssueID != "az-1" || !check.Deps || check.JSON {
+		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
+	}
+	_, err = ParseIssueCheckArgs([]string{})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue check <issue-id> [--json] [--deps]") {
+		t.Fatalf("expected check usage error, got %v", err)
+	}
+
+	doctor, err := ParseIssueDoctorArgs([]string{"az-2"})
+	if err != nil {
+		t.Fatalf("ParseIssueDoctorArgs() error = %v", err)
+	}
+	if doctor.IssueID != "az-2" {
+		t.Fatalf("ParseIssueDoctorArgs() = %+v", doctor)
+	}
+	_, err = ParseIssueDoctorArgs([]string{})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor <issue-id>") {
+		t.Fatalf("expected doctor usage error, got %v", err)
+	}
+}
+
 func TestParseIssueCreateArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -627,6 +653,20 @@ func TestParseIssueCloseArgs(t *testing.T) {
 				t.Fatalf("ParseIssueCloseArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseIssueDeleteArgs(t *testing.T) {
+	got, err := ParseIssueDeleteArgs([]string{"--impl", "go-bubbletea", "--confirm", "az-1"})
+	if err != nil {
+		t.Fatalf("ParseIssueDeleteArgs() error = %v", err)
+	}
+	if got.Implementation != "go-bubbletea" || got.IssueID != "az-1" || !got.Confirm {
+		t.Fatalf("ParseIssueDeleteArgs() = %+v", got)
+	}
+	_, err = ParseIssueDeleteArgs([]string{"--impl", "go-bubbletea", "az-1"})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --confirm") {
+		t.Fatalf("expected missing confirm error, got %v", err)
 	}
 }
 
@@ -1105,6 +1145,95 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotDeleteReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Check target",
+							Description: "Desc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskDelete:
+					gotDeleteReq = req
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	checkOut := captureStdout(t, func() error {
+		return IssueCheckCommand(deps, IssueCheckOptions{IssueID: "az-1", Deps: true})
+	})
+	if !strings.Contains(checkOut, "ID: az-1") {
+		t.Fatalf("check output = %q", checkOut)
+	}
+
+	doctorOut := captureStdout(t, func() error {
+		return IssueDoctorCommand(deps, IssueDoctorOptions{IssueID: "az-1"})
+	})
+	if !strings.Contains(doctorOut, "Doctor: OK az-1") {
+		t.Fatalf("doctor output = %q", doctorOut)
+	}
+
+	deleteOut := captureStdout(t, func() error {
+		return IssueDeleteCommand(deps, IssueDeleteOptions{
+			Implementation: "go-bubbletea",
+			IssueID:        "az-1",
+			Confirm:        true,
+		})
+	})
+	if gotDeleteReq.Command != daemonclient.CommandTaskDelete {
+		t.Fatalf("delete command = %q, want %q", gotDeleteReq.Command, daemonclient.CommandTaskDelete)
+	}
+	if !strings.Contains(deleteOut, "Deleted issue: az-1") {
+		t.Fatalf("delete output = %q", deleteOut)
+	}
+}
+
 func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotUpdateReq protocol.RequestEnvelope
@@ -1417,6 +1546,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue get <id> [--json] [--deps]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
+	if !strings.Contains(output, "issue check <id> [--json] [--deps]") {
+		t.Fatalf("usage missing issue check command: %q", output)
+	}
+	if !strings.Contains(output, "issue doctor <id>") {
+		t.Fatalf("usage missing issue doctor command: %q", output)
+	}
 	if !strings.Contains(output, "issue create <title>") {
 		t.Fatalf("usage missing issue create command: %q", output)
 	}
@@ -1428,6 +1563,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue close <id>") {
 		t.Fatalf("usage missing issue close command: %q", output)
+	}
+	if !strings.Contains(output, "issue delete <id> --impl <implementation> --confirm") {
+		t.Fatalf("usage missing issue delete command: %q", output)
 	}
 	if !strings.Contains(output, "issue dep add <issue-id> <depends-on-id>") {
 		t.Fatalf("usage missing issue dep add command: %q", output)

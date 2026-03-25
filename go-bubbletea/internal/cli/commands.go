@@ -68,6 +68,12 @@ type IssueGetOptions struct {
 	Deps    bool
 }
 
+type IssueCheckOptions struct {
+	IssueID string
+	JSON    bool
+	Deps    bool
+}
+
 type IssueCreateOptions struct {
 	Implementation string
 	Title          string
@@ -94,6 +100,16 @@ type IssueStatusOptions struct {
 	Implementation string
 	IssueID        string
 	Status         domain.Status
+}
+
+type IssueDoctorOptions struct {
+	IssueID string
+}
+
+type IssueDeleteOptions struct {
+	Implementation string
+	IssueID        string
+	Confirm        bool
 }
 
 type IssueDependencyAddOptions struct {
@@ -310,6 +326,30 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
+	getOpts, err := ParseIssueGetArgs(args)
+	if err != nil {
+		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check <issue-id> [--json] [--deps]")
+	}
+	return IssueCheckOptions{
+		IssueID: getOpts.IssueID,
+		JSON:    getOpts.JSON,
+		Deps:    getOpts.Deps,
+	}, nil
+}
+
+func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
+	fs := flag.NewFlagSet("issue doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return IssueDoctorOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor <issue-id>")
+	}
+	return IssueDoctorOptions{IssueID: fs.Arg(0)}, nil
+}
+
 func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	opts := IssueCloseOptions{}
 	fs := flag.NewFlagSet("issue close", flag.ContinueOnError)
@@ -323,6 +363,28 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	}
 	if opts.Implementation == "" {
 		return IssueCloseOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	opts.IssueID = fs.Arg(0)
+	return opts, nil
+}
+
+func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
+	opts := IssueDeleteOptions{}
+	fs := flag.NewFlagSet("issue delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm permanent issue deletion")
+	if err := fs.Parse(args); err != nil {
+		return IssueDeleteOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete <issue-id> --impl <implementation> --confirm")
+	}
+	if opts.Implementation == "" {
+		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	if !opts.Confirm {
+		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")
 	}
 	opts.IssueID = fs.Arg(0)
 	return opts, nil
@@ -613,6 +675,53 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	return nil
 }
 
+func IssueCheckCommand(deps *Dependencies, opts IssueCheckOptions) error {
+	return IssueGetCommand(deps, IssueGetOptions{
+		IssueID: opts.IssueID,
+		JSON:    opts.JSON,
+		Deps:    opts.Deps,
+	})
+}
+
+func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to inspect issue %s: %w", opts.IssueID, err)
+	}
+	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	diagnostics := make([]string, 0, 4)
+	if strings.TrimSpace(task.Title) == "" {
+		diagnostics = append(diagnostics, "missing title")
+	}
+	if strings.TrimSpace(task.Type.String()) == "" {
+		diagnostics = append(diagnostics, "missing type")
+	}
+	if strings.TrimSpace(task.Status.String()) == "" {
+		diagnostics = append(diagnostics, "missing status")
+	}
+
+	if len(diagnostics) == 0 {
+		fmt.Printf("Doctor: OK %s\n", task.ID)
+		fmt.Printf("Dependencies: %s\n", formatDependencySummary(task.Dependencies))
+		return nil
+	}
+	fmt.Printf("Doctor: WARN %s\n", task.ID)
+	for _, diagnostic := range diagnostics {
+		fmt.Printf("- %s\n", diagnostic)
+	}
+	return nil
+}
+
 func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -645,6 +754,20 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
+	return nil
+}
+
+func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
+		return fmt.Errorf("failed to delete issue %s: %w", opts.IssueID, err)
+	}
+	fmt.Printf("Deleted issue: %s\n", opts.IssueID)
 	return nil
 }
 
@@ -1066,10 +1189,13 @@ Commands:
   status [issue-id]     Alias for 'az session status [issue-id]'
   issue list [--json] [--deps]  List issues from daemon-backed store
   issue get <id> [--json] [--deps]  Show a single issue from daemon-backed store
+  issue check <id> [--json] [--deps]  Alias for issue get
+  issue doctor <id>  Run integrity checks for one issue
   issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
   issue update <id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
   issue status <id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status
   issue close <id> --impl <implementation>      Close an issue (sets status=closed)
+  issue delete <id> --impl <implementation> --confirm  Permanently delete an issue
   issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type ...]  Add a dependency edge
   issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type ...] [--confirm]  Remove a dependency edge
   issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
@@ -1089,10 +1215,13 @@ Examples:
   az issue list --deps
   az issue get az-123 --json
   az issue get az-123 --deps
+  az issue check az-123 --deps
+  az issue doctor az-123
   az issue create "New task" --impl go-bubbletea --type task --priority P2
   az issue update az-123 --impl go-bubbletea --title "Renamed task" --priority P1
   az issue status az-123 in_progress --impl go-bubbletea
   az issue close az-123 --impl go-bubbletea
+  az issue delete az-123 --impl go-bubbletea --confirm
   az issue dep add az-456 az-123 --impl go-bubbletea --type blocks
   az issue dep remove az-456 az-123 --impl go-bubbletea --type blocks --confirm
   az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
