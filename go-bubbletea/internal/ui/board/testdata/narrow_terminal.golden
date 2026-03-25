@@ -1,5 +1,4 @@
  Open (3)            In Progress (2)     Blocked (1)         Done (2)           
-                                                                                
 ╭──────────────────╮╭──────────────────╮╭──────────────────╮╭──────────────────╮
 │ ▶Implement us…   ││ API endpoint …   ││ Deploy to pro…   ││ Setup CI/CD p…   │
 │  P2  •  T        ││  P1  •  B        ││  P0  •  T        ││  P3  •  T        │

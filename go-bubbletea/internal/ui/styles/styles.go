@@ -71,14 +71,12 @@ func New() *Styles {
 		ColumnHeader: lipgloss.NewStyle().
 			Foreground(Subtext0).
 			Bold(true).
-			Padding(0, 1).
-			MarginBottom(1),
+			Padding(0, 1),
 
 		ColumnHeaderActive: lipgloss.NewStyle().
 			Foreground(Blue).
 			Bold(true).
-			Padding(0, 1).
-			MarginBottom(1),
+			Padding(0, 1),
 
 		Card: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).

@@ -1,5 +1,4 @@
  Open (3)                      In Progress (2)               Blocked (1)                   Done (2)                     
-                                                                                                                        
 ╭────────────────────────────╮╭────────────────────────────╮╭────────────────────────────╮╭────────────────────────────╮
 │ ▶Implement user authent…   ││ API endpoint refactor      ││ Deploy to production       ││ Setup CI/CD pipeline       │
 │  P2  •  T                  ││  P1  •  B                  ││  P0  •  T                  ││  P3  •  T                  │

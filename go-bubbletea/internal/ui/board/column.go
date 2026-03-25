@@ -31,13 +31,44 @@ func renderColumn(
 	headerText := fmt.Sprintf("%s (%d)", title, len(tasks))
 	header := headerStyle.Width(width).Render(headerText)
 
-	availableHeight := ColumnBodyHeight(height)
-	var cardContent strings.Builder
+	bodyHeight := ColumnBodyHeight(height)
 	cardWidth := CardContentWidth(width)
 	linesPerCard := CardLineFootprint(s, cardWidth)
-	start, end := visibleTaskRange(len(tasks), viewportStart, availableHeight, linesPerCard)
+
+	topIndicator := false
+	bottomIndicator := false
+	start, end := 0, 0
+	for range 4 {
+		reservedLines := 0
+		if topIndicator {
+			reservedLines++
+		}
+		if bottomIndicator {
+			reservedLines++
+		}
+
+		cardHeight := bodyHeight - reservedLines
+		start, end = visibleTaskRange(len(tasks), viewportStart, cardHeight, linesPerCard)
+
+		nextTop := start > 0
+		nextBottom := end < len(tasks)
+		if nextTop == topIndicator && nextBottom == bottomIndicator {
+			break
+		}
+		topIndicator = nextTop
+		bottomIndicator = nextBottom
+	}
+
+	var cardContent strings.Builder
+	if topIndicator {
+		cardContent.WriteString(renderScrollIndicator(start, true, width, s))
+	}
 
 	for i := start; i < end; i++ {
+		if cardContent.Len() > 0 {
+			cardContent.WriteString("\n")
+		}
+
 		task := tasks[i]
 		isCursor := isActive && i == cursorTask
 		isSelected := selectedTasks[task.ID]
@@ -48,13 +79,19 @@ func renderColumn(
 		}
 
 		cardContent.WriteString(renderCard(task, isCursor, isSelected, cardWidth, phaseInfo, showPhases, s))
-		cardContent.WriteString("\n")
 	}
 
-	content := strings.TrimSuffix(cardContent.String(), "\n")
+	if bottomIndicator {
+		if cardContent.Len() > 0 {
+			cardContent.WriteString("\n")
+		}
+		cardContent.WriteString(renderScrollIndicator(len(tasks)-end, false, width, s))
+	}
+
+	content := cardContent.String()
 	columnBody := lipgloss.NewStyle().
 		Width(width).
-		Height(availableHeight).
+		Height(bodyHeight).
 		Render(content)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, columnBody)
@@ -68,10 +105,8 @@ func visibleTaskRange(taskCount int, viewportStart int, availableHeight int, lin
 	if linesPerCard < 1 {
 		linesPerCard = 1
 	}
+
 	visibleCards := availableHeight / linesPerCard
-	if availableHeight%linesPerCard != 0 {
-		visibleCards++
-	}
 	if visibleCards < 1 {
 		visibleCards = 1
 	}
@@ -87,4 +122,17 @@ func visibleTaskRange(taskCount int, viewportStart int, availableHeight int, lin
 		start = maxStart
 	}
 	return start, start + visibleCards
+}
+
+func renderScrollIndicator(count int, up bool, width int, s *styles.Styles) string {
+	if count < 1 {
+		return ""
+	}
+
+	arrow := "v"
+	if up {
+		arrow = "^"
+	}
+	text := fmt.Sprintf("%d more %s", count, arrow)
+	return s.Separator.Width(width).Render(text)
 }
