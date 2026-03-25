@@ -744,13 +744,29 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 }
 
 func TestParseIssueStatusArgs(t *testing.T) {
-	got, err := ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", "blocked"})
-	if err != nil {
-		t.Fatalf("ParseIssueStatusArgs() error = %v", err)
+	tests := []struct {
+		name   string
+		status string
+		want   domain.Status
+	}{
+		{name: "open", status: "open", want: domain.StatusOpen},
+		{name: "in progress", status: "in_progress", want: domain.StatusInProgress},
+		{name: "blocked", status: "blocked", want: domain.StatusBlocked},
+		{name: "closed", status: "closed", want: domain.StatusDone},
 	}
-	if got.Implementation != "go-bubbletea" || got.IssueID != "az-1" || got.Status != domain.StatusBlocked {
-		t.Fatalf("ParseIssueStatusArgs() = %+v", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", tt.status})
+			if err != nil {
+				t.Fatalf("ParseIssueStatusArgs() error = %v", err)
+			}
+			if got.Implementation != "go-bubbletea" || got.IssueID != "az-1" || got.Status != tt.want {
+				t.Fatalf("ParseIssueStatusArgs() = %+v, want status=%s", got, tt.want)
+			}
+		})
 	}
+	var err error
 	_, err = ParseIssueStatusArgs([]string{"az-1", "blocked"})
 	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
 		t.Fatalf("expected missing impl error, got %v", err)
@@ -1134,6 +1150,24 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 			if gotReq.Command != tt.wantCommand {
 				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
 			}
+			switch tt.name {
+			case "create":
+				var createReq daemonclient.TaskCreateParams
+				if err := json.Unmarshal(gotReq.Body, &createReq); err != nil {
+					t.Fatalf("unmarshal create body: %v", err)
+				}
+				if createReq.Title != "New issue" || createReq.Description != "Context" || createReq.Type != domain.TypeFeature || createReq.Priority != domain.P1 {
+					t.Fatalf("create body = %+v", createReq)
+				}
+			case "close":
+				var statusReq daemonclient.TaskStatusRequest
+				if err := json.Unmarshal(gotReq.Body, &statusReq); err != nil {
+					t.Fatalf("unmarshal request body: %v", err)
+				}
+				if statusReq.TaskID != "az-9" || statusReq.Status != domain.StatusDone {
+					t.Fatalf("close body = %+v, want task_id=az-9 status=closed", statusReq)
+				}
+			}
 			if !strings.Contains(output, tt.wantText) {
 				t.Fatalf("output missing %q: %q", tt.wantText, output)
 			}
@@ -1324,6 +1358,13 @@ func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 	})
 	if gotStatusReq.Command != daemonclient.CommandTaskUpdateStatus {
 		t.Fatalf("status command = %q, want %q", gotStatusReq.Command, daemonclient.CommandTaskUpdateStatus)
+	}
+	var statusBody daemonclient.TaskStatusRequest
+	if err := json.Unmarshal(gotStatusReq.Body, &statusBody); err != nil {
+		t.Fatalf("unmarshal status body: %v", err)
+	}
+	if statusBody.TaskID != "az-1" || statusBody.Status != domain.StatusBlocked {
+		t.Fatalf("status body = %+v, want task_id=az-1 status=blocked", statusBody)
 	}
 	if !strings.Contains(statusOut, "Updated status: az-1 -> blocked") {
 		t.Fatalf("status output = %q", statusOut)

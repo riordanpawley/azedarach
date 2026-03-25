@@ -197,6 +197,101 @@ func TestApplyPartialFailureIntegrationPreservesOutcomeOrderAndExitCode(t *testi
 	}
 }
 
+func TestApplyStatusMutationIntegrationPropagatesStatusAndWorkflowEvents(t *testing.T) {
+	service := &applyIntegrationService{}
+	revisions := &applyIntegrationRevisions{current: 8}
+	transport := &applyIntegrationTransport{
+		handler: daemonhandlers.NewApplyHandler(service, revisions),
+	}
+
+	client := daemonclient.New(transport).WithProjectID("proj-status")
+	reqBody := protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: 8,
+		DryRun:           false,
+		Operations: []protocol.ApplyOperationBody{
+			{
+				Command: "task.update_status",
+				Body: mustApplyJSON(t, map[string]any{
+					"task_id": "az-11",
+					"status":  "closed",
+				}),
+			},
+			{
+				Command: "task.archive",
+				Body: mustApplyJSON(t, map[string]any{
+					"task_id": "az-12",
+				}),
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resp, err := client.Command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-status",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandTaskBulkApply,
+		SentAt:          time.Now().UTC(),
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("client command: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response error = %+v", resp.Error)
+	}
+
+	var result daemonhandlers.ApplyExecutionResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if result.ProjectID != "proj-status" {
+		t.Fatalf("ProjectID = %q, want proj-status", result.ProjectID)
+	}
+	if result.SnapshotRevision != 8 {
+		t.Fatalf("SnapshotRevision = %d, want 8", result.SnapshotRevision)
+	}
+	if result.Revision != 10 {
+		t.Fatalf("Revision = %d, want 10", result.Revision)
+	}
+	if got, want := result.Summary, (daemonhandlers.ApplyExecutionSummary{Total: 2, Succeeded: 2, Failed: 0}); got != want {
+		t.Fatalf("Summary = %+v, want %+v", got, want)
+	}
+	if got, want := len(result.Operations), 2; got != want {
+		t.Fatalf("Operations len = %d, want %d", got, want)
+	}
+	if got, want := len(result.Outcomes), 2; got != want {
+		t.Fatalf("Outcomes len = %d, want %d", got, want)
+	}
+	if result.Outcomes[0].Command != "task.update_status" || result.Outcomes[0].Status != "success" || result.Outcomes[0].Revision != 9 {
+		t.Fatalf("Outcomes[0] = %+v, want success/revision 9", result.Outcomes[0])
+	}
+	if result.Outcomes[1].Command != "task.archive" || result.Outcomes[1].Status != "success" || result.Outcomes[1].Revision != 10 {
+		t.Fatalf("Outcomes[1] = %+v, want success/revision 10", result.Outcomes[1])
+	}
+
+	if got, want := service.calls, []string{
+		"status:az-11:closed",
+		"archive:az-12",
+	}; !equalStrings(got, want) {
+		t.Fatalf("service calls = %v, want %v", got, want)
+	}
+	if got, want := revisions.published, []string{
+		"task.updated:9",
+		"task.archived:10",
+	}; !equalStrings(got, want) {
+		t.Fatalf("published events = %v, want %v", got, want)
+	}
+	if got := applyResponseExitCode(resp); got != 0 {
+		t.Fatalf("applyResponseExitCode() = %d, want 0", got)
+	}
+}
+
 func mustApplyJSON(t *testing.T, v any) []byte {
 	t.Helper()
 

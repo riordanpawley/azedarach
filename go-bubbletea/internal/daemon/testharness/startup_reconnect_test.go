@@ -18,6 +18,7 @@ type scenarioDaemon struct {
 	harness     *Harness
 	startCalls  atomic.Int32
 	handshakeOK atomic.Int32
+	snapshotRev atomic.Uint64
 	startedCh   chan struct{}
 	releaseCh   chan struct{}
 	once        sync.Once
@@ -83,6 +84,7 @@ func (s *scenarioDaemon) attachClient(ctx context.Context, orch *autoclient.Auto
 		"client_name":      hello.ClientName,
 		"protocol_version": ack.DaemonProtocolVersion,
 		"daemon_version":   ack.DaemonVersion,
+		"revision":         s.snapshotRev.Load(),
 	}); err != nil {
 		return protocol.HelloAck{}, err
 	}
@@ -90,7 +92,8 @@ func (s *scenarioDaemon) attachClient(ctx context.Context, orch *autoclient.Auto
 }
 
 type harnessEvent struct {
-	Event string `json:"event"`
+	Event    string `json:"event"`
+	Revision uint64 `json:"revision"`
 }
 
 func readHarnessEvents(t *testing.T, path string) []harnessEvent {
@@ -216,6 +219,8 @@ func TestStartupReconnectScenarioAC(t *testing.T) {
 		t.Fatalf("starter calls after initial attach = %d, want 1", got)
 	}
 
+	scenario.snapshotRev.Store(1)
+
 	if err := h.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
@@ -255,5 +260,18 @@ func TestStartupReconnectScenarioAC(t *testing.T) {
 	}
 	if countEvent(events, "daemon.snapshot.attach.success") < 3 {
 		t.Fatalf("snapshot attach success events = %d, want at least 3", countEvent(events, "daemon.snapshot.attach.success"))
+	}
+
+	var attachRevisions []uint64
+	for _, evt := range events {
+		if evt.Event == "daemon.snapshot.attach.success" {
+			attachRevisions = append(attachRevisions, evt.Revision)
+		}
+	}
+	if len(attachRevisions) != 3 {
+		t.Fatalf("snapshot attach revisions = %v, want 3 entries", attachRevisions)
+	}
+	if attachRevisions[0] != 0 || attachRevisions[1] != 0 || attachRevisions[2] != 1 {
+		t.Fatalf("snapshot attach revisions = %v, want [0 0 1]", attachRevisions)
 	}
 }

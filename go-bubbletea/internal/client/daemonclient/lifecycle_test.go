@@ -3,15 +3,22 @@ package daemonclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
 type lifecycleRecordingTransport struct {
-	lastReq protocol.RequestEnvelope
-	replyFn func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	lastReq                   protocol.RequestEnvelope
+	subscribeCalls            int
+	lastSubscribeProjectID    string
+	lastSubscribeFromRevision uint64
+	replyFn                   func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	subscribeFn               func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error)
 }
 
 func (t *lifecycleRecordingTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
@@ -31,7 +38,13 @@ func (t *lifecycleRecordingTransport) Command(_ context.Context, req protocol.Re
 	}, nil
 }
 
-func (t *lifecycleRecordingTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+func (t *lifecycleRecordingTransport) Subscribe(ctx context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+	t.subscribeCalls++
+	t.lastSubscribeProjectID = projectID
+	t.lastSubscribeFromRevision = fromRevision
+	if t.subscribeFn != nil {
+		return t.subscribeFn(ctx, projectID, fromRevision)
+	}
 	return nil, nil
 }
 
@@ -277,5 +290,49 @@ func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
 	}
 	if body.ProjectID != "proj-a" {
 		t.Fatalf("request project_id = %q, want proj-a", body.ProjectID)
+	}
+}
+
+func TestSubscribeRetriesUseProjectFallbackAndFromRevision(t *testing.T) {
+	transport := &lifecycleRecordingTransport{}
+	transport.subscribeFn = func(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+		if transport.subscribeCalls < 3 {
+			return nil, errors.New("not ready")
+		}
+		ch := make(chan protocol.EventEnvelope, 1)
+		ch <- protocol.EventEnvelope{
+			Revision: 23,
+			Event:    "daemon.event.publish",
+			Kind:     protocol.EnvelopeKindEvent,
+		}
+		return ch, nil
+	}
+
+	client := New(transport).WithProjectID("proj-a").WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 5,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ch, err := client.Subscribe(ctx, "", 17)
+	if err != nil {
+		t.Fatalf("Subscribe error: %v", err)
+	}
+
+	evt := <-ch
+	if evt.Revision != 23 {
+		t.Fatalf("event revision = %d, want 23", evt.Revision)
+	}
+	if transport.subscribeCalls != 3 {
+		t.Fatalf("subscribe calls = %d, want 3", transport.subscribeCalls)
+	}
+	if transport.lastSubscribeProjectID != "proj-a" {
+		t.Fatalf("subscribe project_id = %q, want proj-a", transport.lastSubscribeProjectID)
+	}
+	if transport.lastSubscribeFromRevision != 17 {
+		t.Fatalf("subscribe from_revision = %d, want 17", transport.lastSubscribeFromRevision)
 	}
 }
