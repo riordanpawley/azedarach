@@ -239,63 +239,63 @@ func TestRenderCard_WithSessionNoElapsed(t *testing.T) {
 	}
 }
 
-func TestRenderCard_Epic(t *testing.T) {
+func TestRenderCard_WithChildProgress(t *testing.T) {
 	s := styles.New()
 
 	task := domain.Task{
-		ID:       "az-epic-1",
-		Title:    "Epic task",
+		ID:       "az-parent-1",
+		Title:    "Parent task",
 		Status:   domain.StatusInProgress,
 		Priority: domain.P1,
-		Type:     domain.TypeEpic,
+		Type:     domain.TypeTask,
 	}
 
-	result := RenderCard(task, false, false, 30, s)
+	result := renderCard(task, false, false, 30, &ChildProgress{Total: 5, Done: 3}, nil, false, s)
 	stripped := stripANSI(result)
 
 	// Should contain epic progress bar
 	if !strings.Contains(stripped, "[") || !strings.Contains(stripped, "]") {
-		t.Errorf("Epic card should contain progress brackets, got: %s", stripped)
+		t.Errorf("Card should contain progress brackets, got: %s", stripped)
 	}
 
 	// Should contain progress bar characters
 	if !strings.Contains(stripped, "█") && !strings.Contains(stripped, "░") {
-		t.Errorf("Epic card should contain progress bar, got: %s", stripped)
+		t.Errorf("Card should contain progress bar, got: %s", stripped)
 	}
 
 	// Should contain ratio (from placeholder values)
 	if !strings.Contains(stripped, "/") {
-		t.Errorf("Epic card should contain completion ratio, got: %s", stripped)
+		t.Errorf("Card should contain completion ratio, got: %s", stripped)
 	}
 }
 
-func TestRenderCard_EpicWithSession(t *testing.T) {
+func TestRenderCard_WithChildProgressAndSession(t *testing.T) {
 	s := styles.New()
 	startedAt := time.Now().Add(-1 * time.Hour)
 
 	task := domain.Task{
-		ID:       "az-epic-2",
-		Title:    "Epic with session",
+		ID:       "az-parent-2",
+		Title:    "Parent with session",
 		Status:   domain.StatusInProgress,
 		Priority: domain.P0,
-		Type:     domain.TypeEpic,
+		Type:     domain.TypeTask,
 		Session: &domain.Session{
-			IssueID:   "az-epic-2",
+			IssueID:   "az-parent-2",
 			State:     domain.SessionBusy,
 			StartedAt: &startedAt,
 		},
 	}
 
-	result := RenderCard(task, false, false, 35, s)
+	result := renderCard(task, false, false, 35, &ChildProgress{Total: 2, Done: 1}, nil, false, s)
 	stripped := stripANSI(result)
 
-	// Should contain both session status and epic progress
+	// Should contain both session status and child progress
 	if !strings.Contains(stripped, domain.SessionBusy.Icon()) {
-		t.Errorf("Epic card with session should contain session icon, got: %s", stripped)
+		t.Errorf("Card with session should contain session icon, got: %s", stripped)
 	}
 
 	if !strings.Contains(stripped, "[") || !strings.Contains(stripped, "]") {
-		t.Errorf("Epic card with session should contain progress, got: %s", stripped)
+		t.Errorf("Card with session should contain progress, got: %s", stripped)
 	}
 }
 
@@ -366,31 +366,23 @@ func TestRenderCard_TitleTruncation(t *testing.T) {
 	}
 }
 
-func TestRenderEpicProgress(t *testing.T) {
+func TestRenderChildProgress(t *testing.T) {
 	s := styles.New()
-	task := domain.Task{
-		ID:       "az-epic-test",
-		Title:    "Test epic",
-		Status:   domain.StatusInProgress,
-		Priority: domain.P1,
-		Type:     domain.TypeEpic,
-	}
+	result := renderChildProgress(ChildProgress{Total: 5, Done: 3}, s)
 
-	result := renderEpicProgress(task, 40, s)
-
-	// Should contain progress ratio (placeholder: 3/5)
+	// Should contain progress ratio (3/5).
 	if !strings.Contains(result, "3") || !strings.Contains(result, "5") {
-		t.Error("Epic progress should contain completion counts")
+		t.Error("Child progress should contain completion counts")
 	}
 
 	// Should contain filled blocks
 	if !strings.Contains(result, "█") {
-		t.Error("Epic progress should contain filled blocks")
+		t.Error("Child progress should contain filled blocks")
 	}
 
 	// Should contain empty blocks
 	if !strings.Contains(result, "░") {
-		t.Error("Epic progress should contain empty blocks")
+		t.Error("Child progress should contain empty blocks")
 	}
 }
 
@@ -449,4 +441,22 @@ func TestRenderSessionStatus(t *testing.T) {
 			t.Errorf("Error session should contain error icon, got: %s", stripped)
 		}
 	})
+}
+
+func TestBuildChildProgress(t *testing.T) {
+	parentID := "az-parent"
+	tasks := []domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusOpen},
+		{ID: "az-c1", Title: "Child 1", Status: domain.StatusDone, ParentID: &parentID},
+		{ID: "az-c2", Title: "Child 2", Status: domain.StatusInProgress, ParentID: &parentID},
+	}
+
+	progress := BuildChildProgress(tasks)
+	got, ok := progress[parentID]
+	if !ok {
+		t.Fatalf("expected child progress for %s", parentID)
+	}
+	if got.Total != 2 || got.Done != 1 {
+		t.Fatalf("progress = %+v, want total=2 done=1", got)
+	}
 }

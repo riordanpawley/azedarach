@@ -1179,9 +1179,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter": // View task details or drill into epic
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
-			if m.isCurrentTaskEpic() {
-				// Epic drill-down
-				children := m.getEpicChildren(task.ID)
+			children := m.getTaskChildren(task.ID)
+			if len(children) > 0 {
+				// Child drill-down for any issue type with children.
 				return m, m.overlayStack.Push(overlay.NewEpicDrillDown(*task, children))
 			} else {
 				// Regular task detail panel
@@ -1193,7 +1193,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c": // Create task
 		task, _ := m.getCurrentTaskAndSession()
 		var parentID *string
-		if task != nil && task.Type == domain.TypeEpic {
+		if task != nil {
 			parentID = &task.ID
 		}
 		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlayWithParent(parentID))
@@ -3425,21 +3425,22 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 
 // Phase 6 helper methods
 
-// isCurrentTaskEpic returns true if the currently selected task is an epic
-func (m Model) isCurrentTaskEpic() bool {
-	task, _ := m.getCurrentTaskAndSession()
-	if task == nil {
-		return false
-	}
-	return task.Type == domain.TypeEpic
-}
-
-// getEpicChildren returns all tasks that are children of the given epic
-func (m Model) getEpicChildren(epicID string) []domain.Task {
+// getTaskChildren returns all tasks that are children of the given parent issue.
+func (m Model) getTaskChildren(parentID string) []domain.Task {
 	var children []domain.Task
 	for _, task := range m.tasks {
-		if task.ParentID != nil && *task.ParentID == epicID {
+		if task.ID == parentID {
+			continue
+		}
+		if task.ParentID != nil && *task.ParentID == parentID {
 			children = append(children, task)
+			continue
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild && dep.ID == parentID {
+				children = append(children, task)
+				break
+			}
 		}
 	}
 	return children
@@ -3707,6 +3708,7 @@ func (m Model) renderBoardView() string {
 		visibleColumns,
 		cursor,
 		m.editor.GetSelectedTasks(),
+		board.BuildChildProgress(m.tasks),
 		phaseData,
 		m.editor.GetShowPhases(),
 		activeViewportStart,

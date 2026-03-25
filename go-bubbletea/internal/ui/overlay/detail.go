@@ -129,6 +129,12 @@ func (d *DetailPanel) View() string {
 		b.WriteString(valueStyle.Render(*d.task.ParentID))
 		b.WriteString("\n")
 	}
+	if total, done := d.childProgress(); total > 0 {
+		b.WriteString(labelStyle.Render("Children:"))
+		b.WriteString("  ")
+		b.WriteString(valueStyle.Render(fmt.Sprintf("%d total (%d done)", total, done)))
+		b.WriteString("\n")
+	}
 
 	if deps := d.renderDependencies(); deps != "" {
 		b.WriteString("\n")
@@ -272,6 +278,34 @@ func (d *DetailPanel) incomingDependencies() []domain.Dependency {
 	}
 
 	return incoming
+}
+
+func (d *DetailPanel) childProgress() (total int, done int) {
+	if len(d.relatedTasks) == 0 {
+		return 0, 0
+	}
+	for _, task := range d.relatedTasks {
+		if task.ID == d.task.ID {
+			continue
+		}
+		if task.ParentID != nil && *task.ParentID == d.task.ID {
+			total++
+			if task.Status == domain.StatusDone {
+				done++
+			}
+			continue
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild && dep.ID == d.task.ID {
+				total++
+				if task.Status == domain.StatusDone {
+					done++
+				}
+				break
+			}
+		}
+	}
+	return total, done
 }
 
 // Title returns the overlay title

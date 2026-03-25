@@ -15,6 +15,14 @@ import (
 
 var update = flag.Bool("update", false, "update golden files")
 
+func columnsToTasks(columns []Column) []domain.Task {
+	tasks := make([]domain.Task, 0)
+	for _, col := range columns {
+		tasks = append(tasks, col.Tasks...)
+	}
+	return tasks
+}
+
 func normalizeBoardOutput(s string) string {
 	s = ansi.Strip(s)
 	lines := strings.Split(s, "\n")
@@ -84,7 +92,7 @@ func TestRender(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Render(columns, tt.cursor, tt.selectedTasks, nil, false, 0, s, tt.width, tt.height)
+			got := Render(columns, tt.cursor, tt.selectedTasks, BuildChildProgress(columnsToTasks(columns)), nil, false, 0, s, tt.width, tt.height)
 
 			goldenFile := filepath.Join("testdata", tt.name+".golden")
 
@@ -216,8 +224,8 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 	blockerPhase := phaseInfo.Phases[blocker.ID]
 	blockedPhase := phaseInfo.Phases[blocked.ID]
 
-	blockerView := normalizeBoardOutput(renderCard(blocker, false, false, 80, &blockerPhase, true, s))
-	blockedView := normalizeBoardOutput(renderCard(blocked, false, false, 80, &blockedPhase, true, s))
+	blockerView := normalizeBoardOutput(renderCard(blocker, false, false, 80, nil, &blockerPhase, true, s))
+	blockedView := normalizeBoardOutput(renderCard(blocked, false, false, 80, nil, &blockedPhase, true, s))
 
 	if !strings.Contains(blockerView, "Φ0") {
 		t.Fatalf("expected ready blocker chip in view, got %q", blockerView)
@@ -229,7 +237,7 @@ func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
 
 func TestRenderEmptyBoard(t *testing.T) {
 	s := styles.New()
-	got := Render([]Column{}, Cursor{}, make(map[string]bool), nil, false, 0, s, 120, 30)
+	got := Render([]Column{}, Cursor{}, make(map[string]bool), nil, nil, false, 0, s, 120, 30)
 
 	if got != "" {
 		t.Errorf("Render() with empty columns should return empty string, got: %q", got)
@@ -258,7 +266,7 @@ func TestCursorBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Should not panic
-			_ = Render(columns, tt.cursor, make(map[string]bool), nil, false, 0, s, 120, 30)
+			_ = Render(columns, tt.cursor, make(map[string]bool), BuildChildProgress(columnsToTasks(columns)), nil, false, 0, s, 120, 30)
 		})
 	}
 }

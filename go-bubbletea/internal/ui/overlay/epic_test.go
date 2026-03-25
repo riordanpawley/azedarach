@@ -299,7 +299,7 @@ func TestEpicDrillDown_Title(t *testing.T) {
 	overlay := NewEpicDrillDown(epic, nil)
 	title := overlay.Title()
 
-	expected := "Epic: az-123"
+	expected := "Children: az-123"
 	if title != expected {
 		t.Errorf("Title() = %s, want %s", title, expected)
 	}

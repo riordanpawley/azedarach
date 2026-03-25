@@ -10,18 +10,18 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// EpicDrillDown is an overlay that shows epic details with child tasks
+// EpicDrillDown is an overlay that shows a parent issue and its child tasks.
 type EpicDrillDown struct {
-	epic     domain.Task
+	parent   domain.Task
 	children []domain.Task
 	cursor   int
 	styles   *Styles
 }
 
-// NewEpicDrillDown creates a new epic drill-down overlay
-func NewEpicDrillDown(epic domain.Task, children []domain.Task) *EpicDrillDown {
+// NewEpicDrillDown creates a new child drill-down overlay.
+func NewEpicDrillDown(parent domain.Task, children []domain.Task) *EpicDrillDown {
 	return &EpicDrillDown{
-		epic:     epic,
+		parent:   parent,
 		children: children,
 		cursor:   0,
 		styles:   New(),
@@ -70,13 +70,15 @@ func (e *EpicDrillDown) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return e, nil
 }
 
-// View renders the epic drill-down
+// View renders the child drill-down.
 func (e *EpicDrillDown) View() string {
 	var b strings.Builder
 
-	// Epic header
-	epicTitle := e.styles.Title.Render(e.epic.Title)
-	b.WriteString(epicTitle)
+	// Parent header
+	parentTitle := e.styles.Title.Render(e.parent.Title)
+	b.WriteString(parentTitle)
+	b.WriteString("\n")
+	b.WriteString(e.styles.Footer.Render(fmt.Sprintf("%s • %s", e.parent.ID, strings.ToUpper(string(e.parent.Type)))))
 	b.WriteString("\n")
 
 	// Progress bar
@@ -105,9 +107,9 @@ func (e *EpicDrillDown) View() string {
 	return b.String()
 }
 
-// Title returns the overlay title
+// Title returns the overlay title.
 func (e *EpicDrillDown) Title() string {
-	return "Epic: " + e.epic.ID
+	return "Children: " + e.parent.ID
 }
 
 // Size returns the overlay dimensions

@@ -15,8 +15,14 @@ import (
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 3
 
+// ChildProgress summarizes completion progress for a parent task's children.
+type ChildProgress struct {
+	Total int
+	Done  int
+}
+
 // renderCard renders a task card
-func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
+func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
 	if width < 1 {
 		width = 1
 	}
@@ -87,18 +93,12 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 		sessionRow = renderSessionStatus(task.Session, s)
 	}
 
-	// Epic progress (if epic type)
-	var epicProgress string
-	if task.Type == domain.TypeEpic {
-		epicProgress = renderEpicProgress(task, width, s)
-	}
-
 	auxParts := make([]string, 0, 2)
 	if sessionRow != "" {
 		auxParts = append(auxParts, sessionRow)
 	}
-	if epicProgress != "" {
-		auxParts = append(auxParts, epicProgress)
+	if childProgress != nil && childProgress.Total > 0 {
+		auxParts = append(auxParts, renderChildProgress(*childProgress, s))
 	}
 	auxLine := strings.Join(auxParts, " • ")
 
@@ -142,29 +142,29 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm", m)
 }
 
-// renderEpicProgress renders the epic progress bar with completion ratio
-func renderEpicProgress(task domain.Task, width int, s *styles.Styles) string {
-	// TODO: Get child counts from task metadata
-	// For now, use placeholder values
-	completed := 3
-	total := 5
-
-	if total == 0 {
+// renderChildProgress renders child completion progress with completion ratio.
+func renderChildProgress(progress ChildProgress, s *styles.Styles) string {
+	if progress.Total <= 0 {
 		return ""
 	}
-
-	percent := float64(completed) / float64(total)
+	percent := float64(progress.Done) / float64(progress.Total)
 	barWidth := 6
 	filled := int(percent * float64(barWidth))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > barWidth {
+		filled = barWidth
+	}
 	empty := barWidth - filled
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
-	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d] %s", completed, total, bar))
+	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d] %s", progress.Done, progress.Total, bar))
 }
 
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, isCursor, isSelected, width, nil, false, s)
+	return renderCard(task, isCursor, isSelected, width, nil, nil, false, s)
 }
 
 // CardLineFootprint returns the number of terminal lines consumed by one card.
@@ -181,9 +181,37 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 	}
-	cardLines := lipgloss.Height(renderCard(sample, false, false, width, nil, false, s))
+	cardLines := lipgloss.Height(renderCard(sample, false, false, width, nil, nil, false, s))
 	if cardLines < 1 {
 		cardLines = 1
 	}
 	return cardLines
+}
+
+// BuildChildProgress computes done/total child counts keyed by parent task ID.
+func BuildChildProgress(tasks []domain.Task) map[string]ChildProgress {
+	progressByParent := make(map[string]ChildProgress)
+	for _, task := range tasks {
+		parentID := ""
+		if task.ParentID != nil && *task.ParentID != "" {
+			parentID = *task.ParentID
+		} else {
+			for _, dep := range task.Dependencies {
+				if dep.Type == domain.DependencyParentChild && dep.ID != "" {
+					parentID = dep.ID
+					break
+				}
+			}
+		}
+		if parentID == "" {
+			continue
+		}
+		progress := progressByParent[parentID]
+		progress.Total++
+		if task.Status == domain.StatusDone {
+			progress.Done++
+		}
+		progressByParent[parentID] = progress
+	}
+	return progressByParent
 }

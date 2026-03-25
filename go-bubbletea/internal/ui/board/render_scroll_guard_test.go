@@ -94,7 +94,7 @@ func TestRender_UsesViewportOnlyOnActiveColumn(t *testing.T) {
 	inactiveStart, inactiveEnd := visibleTaskRange(len(columns[0].Tasks), 0, availableHeight, linesPerCard)
 	activeStart, activeEnd := visibleTaskRange(len(columns[1].Tasks), 4, availableHeight, linesPerCard)
 
-	out := normalizeBoardOutput(Render(columns, Cursor{Column: 1, Task: 4}, map[string]bool{}, nil, false, 4, s, width, height))
+	out := normalizeBoardOutput(Render(columns, Cursor{Column: 1, Task: 4}, map[string]bool{}, BuildChildProgress(columnsToTasks(columns)), nil, false, 4, s, width, height))
 
 	for i, task := range columns[0].Tasks {
 		wantVisible := i >= inactiveStart && i < inactiveEnd

@@ -1360,8 +1360,8 @@ func TestEpicDrillDownFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected EpicDrillDown overlay, got %T", current)
 	}
-	if got := drillDown.Title(); got != "Epic: az-epic" {
-		t.Fatalf("epic drill-down title = %q, want Epic: az-epic", got)
+	if got := drillDown.Title(); got != "Children: az-epic" {
+		t.Fatalf("child drill-down title = %q, want Children: az-epic", got)
 	}
 	if got := drillDown.View(); !strings.Contains(got, "Parent Epic") || !strings.Contains(got, "Epic Child") {
 		t.Fatalf("epic drill-down view does not render expected content: %q", got)

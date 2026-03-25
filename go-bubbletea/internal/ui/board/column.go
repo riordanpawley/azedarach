@@ -17,6 +17,7 @@ func renderColumn(
 	isActive bool,
 	viewportStart int,
 	selectedTasks map[string]bool,
+	childProgressByTask map[string]ChildProgress,
 	phaseData map[string]phases.TaskPhaseInfo,
 	showPhases bool,
 	width int,
@@ -56,8 +57,13 @@ func renderColumn(
 		if info, exists := phaseData[task.ID]; exists {
 			phaseInfo = &info
 		}
+		var childProgress *ChildProgress
+		if progress, exists := childProgressByTask[task.ID]; exists && progress.Total > 0 {
+			progressCopy := progress
+			childProgress = &progressCopy
+		}
 
-		cardContent.WriteString(renderCard(task, isCursor, isSelected, cardWidth, phaseInfo, showPhases, s))
+		cardContent.WriteString(renderCard(task, isCursor, isSelected, cardWidth, childProgress, phaseInfo, showPhases, s))
 	}
 
 	if bottomIndicator {
