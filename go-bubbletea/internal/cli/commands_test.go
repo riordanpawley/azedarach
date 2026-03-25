@@ -11,15 +11,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 type fakeDaemonTransport struct {
 	handshakeFn func(context.Context, protocol.Hello) (protocol.HelloAck, error)
-	commandFn func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	commandFn   func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 }
 
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
@@ -416,6 +418,234 @@ func TestExportCommandSurfacesFileWriteErrors(t *testing.T) {
 	}
 }
 
+func TestParseIssueListArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueListOptions
+		errContains string
+	}{
+		{
+			name: "defaults",
+			want: IssueListOptions{JSON: false},
+		},
+		{
+			name: "json output",
+			args: []string{"--json"},
+			want: IssueListOptions{JSON: true},
+		},
+		{
+			name:        "rejects extra args",
+			args:        []string{"extra"},
+			errContains: "unexpected argument: extra",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueListArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueListArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseIssueListArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseIssueGetArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueGetOptions
+		errContains string
+	}{
+		{
+			name: "defaults",
+			args: []string{"az-1"},
+			want: IssueGetOptions{IssueID: "az-1"},
+		},
+		{
+			name: "json output",
+			args: []string{"--json", "az-2"},
+			want: IssueGetOptions{IssueID: "az-2", JSON: true},
+		},
+		{
+			name:        "missing issue id",
+			args:        []string{},
+			errContains: "usage: az issue get <issue-id> [--json]",
+		},
+		{
+			name:        "too many args",
+			args:        []string{"az-1", "extra"},
+			errContains: "usage: az issue get <issue-id> [--json]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueGetArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueGetArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseIssueGetArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:        "az-2",
+			Title:     "Older issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "az-1",
+			Title:     "Newest issue",
+			Status:    domain.StatusInProgress,
+			Priority:  domain.P1,
+			Type:      domain.TypeFeature,
+			CreatedAt: now,
+			UpdatedAt: now.Add(1 * time.Hour),
+		},
+	}
+
+	var gotReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotReq = req
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        3,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{})
+	})
+
+	if gotReq.Command != daemonclient.CommandTaskList {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandTaskList)
+	}
+	if !strings.Contains(output, "ID") || !strings.Contains(output, "STATUS") || !strings.Contains(output, "PRIORITY") || !strings.Contains(output, "TITLE") {
+		t.Fatalf("output missing header: %q", output)
+	}
+	if first, second := strings.Index(output, "az-1"), strings.Index(output, "az-2"); !(first >= 0 && second > first) {
+		t.Fatalf("expected newest issue first in output: %q", output)
+	}
+}
+
+func TestIssueGetCommandJSON(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:          "az-5",
+			Title:       "Lookup issue",
+			Description: "Detailed context",
+			Status:      domain.StatusBlocked,
+			Priority:    domain.P0,
+			Type:        domain.TypeBug,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-5", JSON: true})
+	})
+	if !strings.Contains(output, "\"id\": \"az-5\"") || !strings.Contains(output, "\"title\": \"Lookup issue\"") {
+		t.Fatalf("output missing issue json fields: %q", output)
+	}
+}
+
+func TestIssueGetCommandNotFound(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        1,
+					Body:            []byte(`[]`),
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueGetCommand(deps, IssueGetOptions{IssueID: "az-missing"})
+	if err == nil || !strings.Contains(err.Error(), "issue not found: az-missing") {
+		t.Fatalf("error = %v, want not found", err)
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -427,6 +657,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
+	}
+	if !strings.Contains(output, "issue list [--json]") {
+		t.Fatalf("usage missing issue list command: %q", output)
+	}
+	if !strings.Contains(output, "issue get <id> [--json]") {
+		t.Fatalf("usage missing issue get command: %q", output)
 	}
 }
 

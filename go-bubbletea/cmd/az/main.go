@@ -97,6 +97,55 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "issue":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get> [arguments]\n")
+			os.Exit(1)
+		}
+		issueCommand := commandArgs[0]
+		issueArgs := commandArgs[1:]
+		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
+			fmt.Printf("Usage: az issue <list|get> [arguments]\n\n")
+			fmt.Printf("Commands:\n")
+			fmt.Printf("  list [--json]          List issues from daemon-backed store\n")
+			fmt.Printf("  get <issue-id> [--json]  Show a single issue by ID\n")
+			os.Exit(0)
+		}
+		switch issueCommand {
+		case "list":
+			opts, err := cli.ParseIssueListArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue list [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueListCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "get":
+			opts, err := cli.ParseIssueGetArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue get <issue-id> [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueGetCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get> [arguments]\n")
+			os.Exit(1)
+		}
+
 	case "daemon":
 		if len(commandArgs) != 1 || commandArgs[0] != "restart" {
 			fmt.Fprintf(os.Stderr, "Usage: az daemon restart\n")

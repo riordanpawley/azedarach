@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"text/tabwriter"
 	"time"
 
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
@@ -17,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 )
 
@@ -51,6 +54,15 @@ type daemonStarter interface {
 type ExportOptions struct {
 	Format string
 	Out    string
+}
+
+type IssueListOptions struct {
+	JSON bool
+}
+
+type IssueGetOptions struct {
+	IssueID string
+	JSON    bool
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
@@ -172,6 +184,35 @@ func ParseExportArgs(args []string) (ExportOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueListArgs(args []string) (IssueListOptions, error) {
+	opts := IssueListOptions{}
+	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
+	if err := fs.Parse(args); err != nil {
+		return IssueListOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueListOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	return opts, nil
+}
+
+func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
+	opts := IssueGetOptions{}
+	fs := flag.NewFlagSet("issue get", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
+	if err := fs.Parse(args); err != nil {
+		return IssueGetOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get <issue-id> [--json]")
+	}
+	opts.IssueID = fs.Arg(0)
+	return opts, nil
+}
+
 func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -208,6 +249,101 @@ func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	return nil
 }
 
+func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list issues: %w", err)
+	}
+	tasks := snapshot.Tasks
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
+			return tasks[i].ID < tasks[j].ID
+		}
+		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
+	})
+
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(tasks)
+	}
+
+	if len(tasks) == 0 {
+		fmt.Println("No issues found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tTITLE")
+	for _, task := range tasks {
+		fmt.Fprintf(
+			w,
+			"%s\t%s\t%s\t%s\t%s\n",
+			task.ID,
+			task.Status,
+			task.Priority.String(),
+			task.Type,
+			task.Title,
+		)
+	}
+	return w.Flush()
+}
+
+func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get issue %s: %w", opts.IssueID, err)
+	}
+
+	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(task)
+	}
+
+	fmt.Printf("ID: %s\n", task.ID)
+	fmt.Printf("Title: %s\n", task.Title)
+	fmt.Printf("Status: %s\n", task.Status)
+	fmt.Printf("Priority: %s\n", task.Priority.String())
+	fmt.Printf("Type: %s\n", task.Type)
+	if task.ParentID != nil {
+		fmt.Printf("Parent: %s\n", *task.ParentID)
+	}
+	fmt.Printf("Dependencies: %d\n", len(task.Dependencies))
+	if task.Description != "" {
+		fmt.Printf("Description: %s\n", task.Description)
+	}
+	fmt.Printf("Created: %s\n", task.CreatedAt.UTC().Format(time.RFC3339))
+	fmt.Printf("Updated: %s\n", task.UpdatedAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
+	for _, task := range tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return domain.Task{}, false
+}
+
 // RestartDaemonCommand forces daemon replacement and verifies client re-attach.
 func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -234,6 +370,8 @@ Commands:
   attach <issue-id>     Attach to an existing session
   kill <issue-id>       Kill a session
   status [issue-id]     Show session status (all or specific issue)
+  issue list [--json]  List issues from daemon-backed store
+  issue get <id> [--json]  Show a single issue from daemon-backed store
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
@@ -245,6 +383,8 @@ Examples:
   az kill az-123       # Kill issue az-123's session
   az status            # Show all active sessions
   az status az-123     # Show status for az-123
+  az issue list
+  az issue get az-123 --json
   az export --format json
   az export --format json --out snapshot.json
   az daemon restart
