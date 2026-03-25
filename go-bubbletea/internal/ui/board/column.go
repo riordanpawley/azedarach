@@ -89,6 +89,10 @@ func renderColumn(
 	}
 
 	content := cardContent.String()
+	if topIndicator && bottomIndicator {
+		content = lipgloss.PlaceVertical(bodyHeight, lipgloss.Center, content)
+	}
+
 	columnBody := lipgloss.NewStyle().
 		Width(width).
 		Height(bodyHeight).
@@ -134,5 +138,10 @@ func renderScrollIndicator(count int, up bool, width int, s *styles.Styles) stri
 		arrow = "^"
 	}
 	text := fmt.Sprintf("%d more %s", count, arrow)
-	return s.Separator.Width(width).Render(text)
+	return s.Separator.Copy().
+		Foreground(styles.Text).
+		Bold(true).
+		Width(width).
+		Align(lipgloss.Center).
+		Render(text)
 }
