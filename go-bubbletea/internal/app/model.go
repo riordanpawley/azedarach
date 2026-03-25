@@ -2163,22 +2163,52 @@ func (m *Model) ensureCursorVisible(columns []board.Column) {
 	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) || pos.Column >= len(m.viewportStarts) {
 		return
 	}
-	visibleCards := m.boardVisibleCards(columns)
-	start := m.viewportStarts[pos.Column]
+
+	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+	columnCount := m.boardVisibleColumnCount(len(columns))
+	if columnCount < 1 {
+		columnCount = board.DefaultColumnCount
+	}
+	columnWidth := m.width / columnCount
+	cardWidth := board.CardContentWidth(columnWidth)
+	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
+
 	taskCount := len(columns[pos.Column].Tasks)
-	maxStart := taskCount - visibleCards
-	if maxStart < 0 {
-		maxStart = 0
-	}
-	start = clampInt(start, 0, maxStart)
-
-	if pos.Task < start {
-		start = pos.Task
-	} else if pos.Task >= start+visibleCards {
-		start = pos.Task - visibleCards + 1
+	if taskCount <= 0 {
+		m.viewportStarts[pos.Column] = 0
+		return
 	}
 
-	start = clampInt(start, 0, maxStart)
+	start := clampInt(m.viewportStarts[pos.Column], 0, taskCount-1)
+	for i := 0; i < 8; i++ {
+		windowStart, windowEnd := board.VisibleTaskWindow(taskCount, start, availableHeight, linesPerCard)
+
+		if pos.Task < windowStart {
+			start = pos.Task
+			continue
+		}
+		if pos.Task >= windowEnd {
+			windowSize := windowEnd - windowStart
+			if windowSize < 1 {
+				windowSize = 1
+			}
+			start = pos.Task - windowSize + 1
+			if start < 0 {
+				start = 0
+			}
+			continue
+		}
+		start = windowStart
+		break
+	}
+
+	start = clampInt(start, 0, taskCount-1)
 	m.viewportStarts[pos.Column] = start
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
+	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -594,20 +595,93 @@ func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 		})
 	}
 
-	// With this height, board window shows 4 cards per column.
 	m.height = 24
-	// Simulate being at bottom of Open column with visible window [8..11].
 	m.viewportStarts[0] = 8
-	m.nav.SelectTask("j", 0)
+
+	columns := m.buildColumns()
+	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
+	columnCount := board.VisibleColumnCount(len(columns), m.width)
+	if columnCount < 1 {
+		columnCount = board.DefaultColumnCount
+	}
+	columnWidth := m.width / columnCount
+	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
+	initialStart, initialEnd := board.VisibleTaskWindow(len(columns[0].Tasks), m.viewportStarts[0], availableHeight, linesPerCard)
+	if initialEnd-initialStart < 2 {
+		t.Fatalf("expected at least two visible tasks in initial window, got [%d,%d)", initialStart, initialEnd)
+	}
+
+	lastVisible := initialEnd - 1
+	m.nav.SelectTask(columns[0].Tasks[lastVisible].ID, 0)
 
 	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyUp})
 	newModel := result.(Model)
 
-	if got := newModel.nav.GetCursor().TaskID; got != "i" {
-		t.Fatalf("expected cursor to move up one task to i, got %s", got)
+	expectedTask := columns[0].Tasks[lastVisible-1].ID
+	if got := newModel.nav.GetCursor().TaskID; got != expectedTask {
+		t.Fatalf("expected cursor to move up one task to %s, got %s", expectedTask, got)
 	}
-	if newModel.viewportStarts[0] != 8 {
-		t.Fatalf("expected viewport start to remain 8 after first up from bottom, got %d", newModel.viewportStarts[0])
+	if newModel.viewportStarts[0] != initialStart {
+		t.Fatalf("expected viewport start to remain %d after first up from bottom, got %d", initialStart, newModel.viewportStarts[0])
+	}
+}
+
+func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
+	m := newTestModel()
+
+	for i := 0; i < 30; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       fmt.Sprintf("open-%02d", i),
+			Title:    fmt.Sprintf("Open Task %02d", i),
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		})
+	}
+
+	m.height = 24
+	m.width = 80
+
+	columns := m.buildColumns()
+	if len(columns) == 0 || len(columns[0].Tasks) < 4 {
+		t.Fatalf("expected enough open-column tasks for viewport test")
+	}
+
+	availableHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
+	columnCount := board.VisibleColumnCount(len(columns), m.width)
+	if columnCount < 1 {
+		columnCount = board.DefaultColumnCount
+	}
+	columnWidth := m.width / columnCount
+	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
+
+	start := len(columns[0].Tasks) / 2
+	windowStart, windowEnd := board.VisibleTaskWindow(len(columns[0].Tasks), start, availableHeight, linesPerCard)
+	if windowEnd-windowStart < 2 {
+		t.Fatalf("expected at least two visible tasks in test window, got [%d,%d)", windowStart, windowEnd)
+	}
+
+	m.viewportStarts[0] = start
+	m.nav.SelectTask(columns[0].Tasks[windowEnd-1].ID, 0)
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
+	next := result.(Model)
+
+	nextColumns := next.buildColumns()
+	pos := next.nav.GetPosition(nextColumns)
+	if !pos.Valid || pos.Column != 0 {
+		t.Fatalf("expected valid cursor in open column after moving down; got %+v", pos)
+	}
+
+	nextStart, nextEnd := board.VisibleTaskWindow(len(nextColumns[0].Tasks), next.viewportStarts[0], availableHeight, linesPerCard)
+	if pos.Task < nextStart || pos.Task >= nextEnd {
+		t.Fatalf(
+			"cursor task index %d not visible in indicator-aware window [%d,%d) with viewport start %d",
+			pos.Task,
+			nextStart,
+			nextEnd,
+			next.viewportStarts[0],
+		)
 	}
 }
 

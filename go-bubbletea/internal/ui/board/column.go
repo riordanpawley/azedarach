@@ -34,30 +34,9 @@ func renderColumn(
 	bodyHeight := ColumnBodyHeight(height)
 	cardWidth := CardContentWidth(width)
 	linesPerCard := CardLineFootprint(s, cardWidth)
-
-	topIndicator := false
-	bottomIndicator := false
-	start, end := 0, 0
-	for range 4 {
-		reservedLines := 0
-		if topIndicator {
-			reservedLines++
-		}
-		if bottomIndicator {
-			reservedLines++
-		}
-
-		cardHeight := bodyHeight - reservedLines
-		start, end = visibleTaskRange(len(tasks), viewportStart, cardHeight, linesPerCard)
-
-		nextTop := start > 0
-		nextBottom := end < len(tasks)
-		if nextTop == topIndicator && nextBottom == bottomIndicator {
-			break
-		}
-		topIndicator = nextTop
-		bottomIndicator = nextBottom
-	}
+	start, end := VisibleTaskWindow(len(tasks), viewportStart, bodyHeight, linesPerCard)
+	topIndicator := start > 0
+	bottomIndicator := end < len(tasks)
 
 	var cardContent strings.Builder
 	if topIndicator {
@@ -99,6 +78,42 @@ func renderColumn(
 		Render(content)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, columnBody)
+}
+
+// VisibleTaskWindow computes the rendered task window for a column.
+// It accounts for conditional indicator rows at the top/bottom when overflow
+// exists and returns [start, end) task indices that should be visible.
+func VisibleTaskWindow(taskCount int, viewportStart int, bodyHeight int, linesPerCard int) (int, int) {
+	if taskCount <= 0 {
+		return 0, 0
+	}
+
+	topIndicator := false
+	bottomIndicator := false
+	start, end := 0, 0
+
+	for i := 0; i < 6; i++ {
+		reservedLines := 0
+		if topIndicator {
+			reservedLines++
+		}
+		if bottomIndicator {
+			reservedLines++
+		}
+
+		cardHeight := bodyHeight - reservedLines
+		start, end = visibleTaskRange(taskCount, viewportStart, cardHeight, linesPerCard)
+
+		nextTop := start > 0
+		nextBottom := end < taskCount
+		if nextTop == topIndicator && nextBottom == bottomIndicator {
+			break
+		}
+		topIndicator = nextTop
+		bottomIndicator = nextBottom
+	}
+
+	return start, end
 }
 
 func visibleTaskRange(taskCount int, viewportStart int, availableHeight int, linesPerCard int) (int, int) {
