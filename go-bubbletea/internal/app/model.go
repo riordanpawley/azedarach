@@ -915,6 +915,7 @@ func (m Model) View() string {
 
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
 	sb.SetEventTicker(m.eventTicker)
+	sb.SetCurrentProject(m.daemonProjectID())
 	sb.SetSelectionSummary(m.selectionSummary())
 	statusBarView := sb.Render()
 

@@ -14,6 +14,7 @@ import (
 type StatusBar struct {
 	mode             types.Mode
 	width            int
+	currentProject   string
 	selectionSummary string
 	eventTicker      *eventticker.Ring
 	styles           *styles.Styles
@@ -33,6 +34,11 @@ func (sb *StatusBar) SetSelectionSummary(summary string) {
 	sb.selectionSummary = summary
 }
 
+// SetCurrentProject sets the project name rendered at the left of the status bar.
+func (sb *StatusBar) SetCurrentProject(project string) {
+	sb.currentProject = project
+}
+
 // SetEventTicker sets the ring buffer that provides the latest event message.
 func (sb *StatusBar) SetEventTicker(ticker *eventticker.Ring) {
 	sb.eventTicker = ticker
@@ -49,19 +55,56 @@ func (sb StatusBar) Render() string {
 		contentWidth = 1
 	}
 
-	modeBadge, truncated := renderWithin(sb.styles.StatusMode, " "+sb.mode.String()+" ", contentWidth)
-	if modeBadge == "" {
-		return sb.styles.StatusBar.Width(sb.width).Render("")
-	}
-	if truncated {
-		return sb.styles.StatusBar.Width(sb.width).Render(modeBadge)
-	}
-
 	separator := sb.styles.StatusHint.Render(" │ ")
 	separatorWidth := lipgloss.Width(separator)
 
-	parts := []string{modeBadge}
-	visibleWidth := lipgloss.Width(modeBadge)
+	parts := make([]string, 0, 8)
+	visibleWidth := 0
+
+	appendPart := func(style lipgloss.Style, text string) bool {
+		availableWidth := contentWidth - visibleWidth
+		if availableWidth < 1 {
+			return false
+		}
+		rendered, truncated := renderWithin(style, text, availableWidth)
+		if rendered == "" {
+			return false
+		}
+		parts = append(parts, rendered)
+		visibleWidth += lipgloss.Width(rendered)
+		return !truncated
+	}
+
+	appendSlot := func(style lipgloss.Style, text string) bool {
+		if len(parts) > 0 {
+			if visibleWidth+separatorWidth >= contentWidth {
+				return false
+			}
+			parts = append(parts, separator)
+			visibleWidth += separatorWidth
+		}
+		return appendPart(style, text)
+	}
+
+	modeLabel := " " + sb.mode.String() + " "
+	modeLabelWidth := lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
+
+	if sb.currentProject != "" {
+		projectStyle := sb.styles.StatusInfo.Copy().Bold(true)
+		reservedForMode := modeLabelWidth + separatorWidth
+		projectWidth := contentWidth - reservedForMode
+		if projectWidth > 0 {
+			renderedProject, _ := renderWithin(projectStyle, sb.currentProject, projectWidth)
+			if renderedProject != "" {
+				parts = append(parts, renderedProject)
+				visibleWidth += lipgloss.Width(renderedProject)
+			}
+		}
+	}
+
+	if !appendSlot(sb.styles.StatusMode, modeLabel) {
+		return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
+	}
 
 	slots := make([]statusSlot, 0, 3)
 	if sb.eventTicker != nil {
@@ -77,19 +120,7 @@ func (sb StatusBar) Render() string {
 	}
 
 	for _, slot := range slots {
-		if visibleWidth+separatorWidth >= contentWidth {
-			break
-		}
-
-		availableWidth := contentWidth - visibleWidth - separatorWidth
-		rendered, truncated := renderWithin(slot.style, slot.text, availableWidth)
-		if rendered == "" {
-			continue
-		}
-
-		parts = append(parts, separator, rendered)
-		visibleWidth += separatorWidth + lipgloss.Width(rendered)
-		if truncated {
+		if !appendSlot(slot.style, slot.text) {
 			break
 		}
 	}

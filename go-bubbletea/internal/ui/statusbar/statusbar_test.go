@@ -133,6 +133,25 @@ func TestStatusBar_RenderLatestEventTicker(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderShowsCurrentProjectOnLeft(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 120, style)
+	sb.SetCurrentProject("azedarach")
+
+	result := sb.Render()
+	projectIdx := strings.Index(result, "azedarach")
+	modeIdx := strings.Index(result, "NORMAL")
+	if projectIdx < 0 {
+		t.Fatalf("expected status bar to contain current project, got: %s", result)
+	}
+	if modeIdx < 0 {
+		t.Fatalf("expected status bar to contain mode badge, got: %s", result)
+	}
+	if projectIdx > modeIdx {
+		t.Fatalf("expected current project to appear before mode badge, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderFallsBackToSelectionSummary(t *testing.T) {
 	style := styles.New()
 	sb := New(types.ModeNormal, 80, style)
