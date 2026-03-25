@@ -46,6 +46,26 @@ func TestViewHeight(t *testing.T) {
 	})
 }
 
+func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.toasts = append(m.toasts, types.Toast{
+		Message: "test toast",
+		Expires: time.Now().Add(time.Hour),
+	})
+
+	view := m.View()
+
+	if !strings.Contains(view, "NORMAL") {
+		t.Fatalf("expected status bar mode label to remain visible with toast overlay")
+	}
+	if !strings.Contains(view, "test toast") {
+		t.Fatalf("expected toast message to be visible in rendered view")
+	}
+}
+
 type testOverlay struct{}
 
 func (o *testOverlay) View() string                            { return "test overlay" }

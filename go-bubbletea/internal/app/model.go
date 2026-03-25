@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -58,6 +59,8 @@ const (
 	defaultDevserverBasePort = 3000
 	diffPreviewMaxCharacters = 200
 )
+
+var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -934,7 +937,7 @@ func (m Model) layer(bottom, top string) string {
 			t = tLines[i]
 		}
 
-		if strings.TrimSpace(t) == "" {
+		if isVisuallyEmptyOverlayLine(t) {
 			res[i] = b
 		} else {
 			res[i] = t
@@ -942,6 +945,11 @@ func (m Model) layer(bottom, top string) string {
 	}
 
 	return strings.Join(res, "\n")
+}
+
+func isVisuallyEmptyOverlayLine(line string) bool {
+	withoutANSI := ansiEscapeLinePattern.ReplaceAllString(line, "")
+	return strings.TrimSpace(withoutANSI) == ""
 }
 
 // buildColumns converts tasks into board columns, applying filter and sort
