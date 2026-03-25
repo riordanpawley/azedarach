@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -47,6 +48,7 @@ type Daemon struct {
 
 	issues   *issues.Client
 	tmux     *tmux.Client
+	git      *git.Client
 	worktree *git.WorktreeManager
 	session  *daemonhandlers.SessionHandler
 
@@ -81,9 +83,12 @@ func New(cfg Config) *Daemon {
 
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
+	gitClient := git.NewClient(gitRunner, cfg.Logger)
+	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
+	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
 
 	d := &Daemon{
 		cfg:      cfg,
@@ -91,14 +96,17 @@ func New(cfg Config) *Daemon {
 		hub:      publish.NewHub(512, 64, cfg.Logger),
 		issues:   issues.NewClient(cfg.RepoDir, cfg.Logger),
 		tmux:     tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:      gitClient,
 		worktree: git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
 		session:  sessionHandler,
 		revision: map[string]uint64{},
 	}
 	d.router = daemonhandlers.NewDispatcher(
 		sessionHandler,
+		daemonhandlers.NewGitHandler(gitClient),
 		daemonhandlers.NewWorktreeHandler(worktreeServiceAdapter{manager: d.worktree}),
 		daemonhandlers.NewDevServerHandler(devServerManager),
+		prHandler,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d.issues, applyRevisionAdapter{daemon: d})
 
@@ -133,7 +141,7 @@ func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uin
 }
 
 func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	if strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") {
+	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") {
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {

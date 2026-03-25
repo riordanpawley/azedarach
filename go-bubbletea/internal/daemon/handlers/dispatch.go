@@ -11,16 +11,33 @@ import (
 // Dispatcher composes daemon command handlers and routes by command namespace.
 type Dispatcher struct {
 	session   *SessionHandler
+	git       *GitHandler
+	pr        *PRHandler
 	worktree  *WorktreeHandler
 	devserver *DevServerHandler
 }
 
 // NewDispatcher returns a composed command router.
-func NewDispatcher(session *SessionHandler, worktree *WorktreeHandler, devserver *DevServerHandler) *Dispatcher {
+func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
+	d := &Dispatcher{session: session}
+	for _, handler := range handlers {
+		switch h := handler.(type) {
+		case *GitHandler:
+			d.git = h
+		case *PRHandler:
+			d.pr = h
+		case *WorktreeHandler:
+			d.worktree = h
+		case *DevServerHandler:
+			d.devserver = h
+		}
+	}
 	return &Dispatcher{
-		session:   session,
-		worktree:  worktree,
-		devserver: devserver,
+		session:   d.session,
+		git:       d.git,
+		pr:        d.pr,
+		worktree:  d.worktree,
+		devserver: d.devserver,
 	}
 }
 
@@ -29,6 +46,12 @@ func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 	switch {
 	case d.session != nil && strings.HasPrefix(req.Command, "session."):
 		return d.session.Handle(ctx, req)
+	case d.pr != nil && req.Command == CommandGitBranchBehind:
+		return d.pr.Handle(ctx, req)
+	case d.pr != nil && strings.HasPrefix(req.Command, "pr."):
+		return d.pr.Handle(ctx, req)
+	case d.git != nil && strings.HasPrefix(req.Command, "git."):
+		return d.git.Handle(ctx, req)
 	case d.worktree != nil && strings.HasPrefix(req.Command, "worktree."):
 		return d.worktree.Handle(ctx, req)
 	case d.devserver != nil && strings.HasPrefix(req.Command, "devserver."):

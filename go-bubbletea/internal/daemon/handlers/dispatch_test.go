@@ -9,6 +9,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/pr"
 )
 
 type fakeWorktreeService struct{}
@@ -52,11 +53,50 @@ func (m *routeDevServerManager) Get(issueID string) (*devserver.Server, bool) {
 	return srv, ok
 }
 
+type routePRWorkflow struct {
+	lastParams pr.CreatePRParams
+}
+
+func (w *routePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*pr.PRInfo, error) {
+	w.lastParams = params
+	return &pr.PRInfo{
+		Number:  42,
+		Title:   params.Title,
+		URL:     "https://github.com/example/repo/pull/42",
+		State:   "open",
+		Draft:   params.Draft,
+		Branch:  params.Branch,
+		BaseRef: params.BaseBranch,
+	}, nil
+}
+
+type routeBranchBehindGit struct {
+	fetched   bool
+	revRanges []string
+}
+
+func (g *routeBranchBehindGit) Fetch(context.Context, string, string) error {
+	g.fetched = true
+	return nil
+}
+
+func (g *routeBranchBehindGit) RevListCount(_ context.Context, _ string, revRange string) (int, error) {
+	g.revRanges = append(g.revRanges, revRange)
+	return 3, nil
+}
+
 func TestDispatcherMixedRouting(t *testing.T) {
 	session := NewSessionHandler(daemonstate.NewStore())
+	gitHandler := NewGitHandler(&fakeGitService{
+		fetchFn: func(context.Context, string, string) error { return nil },
+		mergeFn: func(context.Context, string, string) (*git.MergeResult, error) {
+			return &git.MergeResult{Success: true}, nil
+		},
+		checkoutFn: func(context.Context, string, string) error { return nil },
+	})
 	worktree := NewWorktreeHandler(&fakeWorktreeService{})
 	devserverH := NewDevServerHandler(newRouteDevServerManager())
-	dispatch := NewDispatcher(session, worktree, devserverH)
+	dispatch := NewDispatcher(session, gitHandler, worktree, devserverH)
 
 	mkReq := func(cmd string, body any) protocol.RequestEnvelope {
 		b, _ := json.Marshal(body)
@@ -85,18 +125,26 @@ func TestDispatcherMixedRouting(t *testing.T) {
 		t.Fatalf("worktree route failed: %+v", r2.Error)
 	}
 
-	r3 := dispatch.Handle(context.Background(), mkReq("devserver.status", map[string]string{
-		"issue_id": "afl",
+	r3 := dispatch.Handle(context.Background(), mkReq("git.fetch", map[string]string{
+		"worktree": "/tmp/az-1",
+		"remote":   "origin",
 	}))
 	if !r3.OK {
-		t.Fatalf("devserver route failed: %+v", r3.Error)
+		t.Fatalf("git route failed: %+v", r3.Error)
 	}
 
-	r4 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
-		"project_id": "proj",
+	r4 := dispatch.Handle(context.Background(), mkReq("devserver.status", map[string]string{
+		"issue_id": "afl",
 	}))
 	if !r4.OK {
-		t.Fatalf("cleanup route failed: %+v", r4.Error)
+		t.Fatalf("devserver route failed: %+v", r4.Error)
+	}
+
+	r5 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
+		"project_id": "proj",
+	}))
+	if !r5.OK {
+		t.Fatalf("cleanup route failed: %+v", r5.Error)
 	}
 }
 
@@ -116,7 +164,7 @@ func TestDispatcherSessionRoutingRequiresSessionHandler(t *testing.T) {
 		}
 	}
 
-	nilSessionDispatch := NewDispatcher(nil, nil, nil)
+	nilSessionDispatch := NewDispatcher(nil, nil, nil, nil)
 	resp := nilSessionDispatch.Handle(context.Background(), mkReq())
 	if resp.OK {
 		t.Fatal("expected session command to be rejected when dispatcher has no session handler")
@@ -125,7 +173,7 @@ func TestDispatcherSessionRoutingRequiresSessionHandler(t *testing.T) {
 		t.Fatalf("unexpected error mapping for nil-session dispatcher: %+v", resp.Error)
 	}
 
-	sessionDispatch := NewDispatcher(NewSessionHandler(daemonstate.NewStore()), nil, nil)
+	sessionDispatch := NewDispatcher(NewSessionHandler(daemonstate.NewStore()), nil, nil, nil)
 	resp = sessionDispatch.Handle(context.Background(), mkReq())
 	if !resp.OK {
 		t.Fatalf("expected session command to route when handler is present: %+v", resp.Error)
@@ -136,7 +184,7 @@ func TestDispatcherSessionRoutingRequiresSessionHandler(t *testing.T) {
 }
 
 func TestDispatcherUnknownCommand(t *testing.T) {
-	dispatch := NewDispatcher(nil, nil, nil)
+	dispatch := NewDispatcher(nil, nil, nil, nil)
 	resp := dispatch.Handle(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-x",
@@ -148,5 +196,66 @@ func TestDispatcherUnknownCommand(t *testing.T) {
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnsupportedCommand {
 		t.Fatalf("unexpected error mapping: %+v", resp.Error)
+	}
+}
+
+func TestDispatcherRoutesPRAndBranchBehindCommands(t *testing.T) {
+	prWorkflow := &routePRWorkflow{}
+	gitClient := &routeBranchBehindGit{}
+	dispatch := NewDispatcher(nil, NewPRHandler(prWorkflow, gitClient), nil, nil)
+
+	prBody, _ := json.Marshal(map[string]any{
+		"title":       "Add feature",
+		"body":        "Body",
+		"branch":      "feature/add",
+		"base_branch": "main",
+		"draft":       true,
+		"issue_id":    "az-1",
+	})
+	prResp := dispatch.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-pr",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandPRCreate,
+		Body:            prBody,
+	})
+	if !prResp.OK {
+		t.Fatalf("PR create route failed: %+v", prResp.Error)
+	}
+	var prOut prCreateResultBody
+	if err := json.Unmarshal(prResp.Body, &prOut); err != nil {
+		t.Fatalf("unmarshal PR response: %v", err)
+	}
+	if prOut.IssueID != "az-1" || prOut.PullRequest.Branch != "feature/add" {
+		t.Fatalf("PR response = %+v", prOut)
+	}
+	if prWorkflow.lastParams.Title != "Add feature" || !prWorkflow.lastParams.Draft {
+		t.Fatalf("PR workflow params = %+v", prWorkflow.lastParams)
+	}
+
+	behindBody, _ := json.Marshal(map[string]string{
+		"worktree":    "/tmp/repo",
+		"base_branch": "main",
+		"remote":      "origin",
+	})
+	behindResp := dispatch.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-behind",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandGitBranchBehind,
+		Body:            behindBody,
+	})
+	if !behindResp.OK {
+		t.Fatalf("branch-behind route failed: %+v", behindResp.Error)
+	}
+	var behindOut branchBehindResultBody
+	if err := json.Unmarshal(behindResp.Body, &behindOut); err != nil {
+		t.Fatalf("unmarshal branch-behind response: %v", err)
+	}
+	if behindOut.CommitsBehind != 3 || behindOut.RevRange != "main..origin/main" {
+		t.Fatalf("branch-behind response = %+v", behindOut)
+	}
+	if !gitClient.fetched || len(gitClient.revRanges) != 1 {
+		t.Fatalf("git service calls = fetched:%v revRanges:%v", gitClient.fetched, gitClient.revRanges)
 	}
 }
