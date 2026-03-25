@@ -352,6 +352,9 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	if err := firstIdle.WaitStopped(ctx); err != nil {
 		t.Fatalf("first wait stopped: %v", err)
 	}
+	if err := firstIdle.BeginOperation(); err != daemonruntime.ErrShuttingDown {
+		t.Fatalf("stopped idle supervisor BeginOperation err = %v, want %v", err, daemonruntime.ErrShuttingDown)
+	}
 	if got := daemon.closeCalls.Load(); got != 1 {
 		t.Fatalf("close transport after drain = %d, want 1", got)
 	}

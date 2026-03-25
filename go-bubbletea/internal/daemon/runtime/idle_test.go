@@ -78,6 +78,37 @@ func TestShutdownWaitsForInFlightOperations(t *testing.T) {
 	}
 }
 
+func TestRecordActivityResetsIdleShutdownTimer(t *testing.T) {
+	reachedClose := make(chan struct{}, 1)
+	s := NewIdleSupervisor(40*time.Millisecond, ShutdownHooks{
+		StopIntake: func() error { return nil },
+		DrainInFlight: func(context.Context) error {
+			return nil
+		},
+		CloseTransport: func() error {
+			reachedClose <- struct{}{}
+			return nil
+		},
+	})
+	s.Start()
+
+	time.Sleep(15 * time.Millisecond)
+	s.RecordActivity()
+
+	time.Sleep(35 * time.Millisecond)
+	select {
+	case <-reachedClose:
+		t.Fatal("shutdown fired before refreshed idle deadline")
+	default:
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.WaitStopped(ctx); err != nil {
+		t.Fatalf("WaitStopped after RecordActivity: %v", err)
+	}
+}
+
 func TestBeginOperationRejectedWhenStopping(t *testing.T) {
 	s := NewIdleSupervisor(10*time.Millisecond, ShutdownHooks{})
 	s.Start()

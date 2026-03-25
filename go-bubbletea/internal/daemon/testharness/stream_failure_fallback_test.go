@@ -258,3 +258,61 @@ func TestStreamOverflowGapFallbackAndIdempotency(t *testing.T) {
 		t.Fatalf("expected snapshot rehydrate event")
 	}
 }
+
+func TestStreamSnapshotFallbackAfterSubscriberOverflow(t *testing.T) {
+	h := New(Config{
+		BaseDir:   t.TempDir(),
+		ProjectID: "proj-afq-overflow",
+	})
+	if err := h.Boot(); err != nil {
+		t.Fatalf("Boot: %v", err)
+	}
+	defer func() {
+		if err := h.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	}()
+
+	daemon := newStreamDaemon(h, 1)
+	board := newProjectedBoard()
+
+	subID, stream, needSnapshot, _, _ := daemon.subscribe(0)
+	if needSnapshot {
+		t.Fatalf("unexpected snapshot fallback on initial subscribe")
+	}
+	defer daemon.unsubscribe(subID)
+
+	daemon.publish("T-1", "todo")
+	first := <-stream
+	if !board.apply(first) {
+		t.Fatalf("failed to apply first event: %+v", first)
+	}
+
+	daemon.publish("T-2", "doing")
+	daemon.publish("T-3", "blocked")
+	daemon.publish("T-4", "done")
+
+	_, _, needSnapshot, snapshot, rev := daemon.subscribe(board.rev)
+	if !needSnapshot {
+		t.Fatalf("expected snapshot fallback after subscriber overflow")
+	}
+	board.hydrate(snapshot, rev)
+
+	if board.rev != 4 {
+		t.Fatalf("board revision after hydrate = %d, want 4", board.rev)
+	}
+	if got := board.state["T-4"]; got != "done" {
+		t.Fatalf("T-4 state = %q, want done", got)
+	}
+	if got := board.state["T-1"]; got != "todo" {
+		t.Fatalf("T-1 state = %q, want todo", got)
+	}
+
+	events := readHarnessEvents(t, h.LogFilePath())
+	if countEvent(events, "daemon.stream.subscriber_overflow") < 1 {
+		t.Fatalf("expected subscriber_overflow event")
+	}
+	if countEvent(events, "client.rehydrate.snapshot") != 1 {
+		t.Fatalf("expected exactly one snapshot rehydrate event, got %d", countEvent(events, "client.rehydrate.snapshot"))
+	}
+}
