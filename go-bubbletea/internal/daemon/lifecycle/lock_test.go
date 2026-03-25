@@ -99,3 +99,40 @@ func TestLockManagerRecoversMalformedLock(t *testing.T) {
 		t.Fatalf("Acquire malformed lock: %v", err)
 	}
 }
+
+func TestLockManagerHandlesLegacyPIDLockFile(t *testing.T) {
+	t.Run("rejects active pid", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "daemon.lock")
+		if err := os.WriteFile(path, []byte("42\n"), 0o644); err != nil {
+			t.Fatalf("write lock: %v", err)
+		}
+
+		m := NewLockManager(path)
+		m.isAliveFn = func(pid int) bool { return pid == 42 }
+
+		if _, err := m.Acquire(); !errors.Is(err, ErrAlreadyRunning) {
+			t.Fatalf("Acquire err = %v, want ErrAlreadyRunning", err)
+		}
+	})
+
+	t.Run("recovers stale pid", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "daemon.lock")
+		if err := os.WriteFile(path, []byte("999999\n"), 0o644); err != nil {
+			t.Fatalf("write lock: %v", err)
+		}
+
+		m := NewLockManager(path)
+		m.isAliveFn = func(int) bool { return false }
+
+		lease, err := m.Acquire()
+		if err != nil {
+			t.Fatalf("Acquire stale pid lock: %v", err)
+		}
+		if lease == nil {
+			t.Fatal("expected lease")
+		}
+		if err := m.Release(); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+	})
+}

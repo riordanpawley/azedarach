@@ -298,3 +298,128 @@ func TestMultiprojectIsolationConcurrentClients(t *testing.T) {
 		t.Fatalf("command events = %d, want 2", countEvent(events, "daemon.multiproject.command"))
 	}
 }
+
+func TestMultiprojectIsolationScopedSnapshots(t *testing.T) {
+	h := New(Config{
+		BaseDir:   t.TempDir(),
+		ProjectID: "proj-root",
+	})
+	if err := h.Boot(); err != nil {
+		t.Fatalf("Boot: %v", err)
+	}
+	defer func() {
+		if err := h.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	}()
+
+	daemon := newMultiprojectDaemon(h)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	clientA := daemonclient.New(daemon).WithProjectID("proj-a")
+	clientB := daemonclient.New(daemon).WithProjectID("proj-b")
+	const sharedSessionID = "sess-shared"
+
+	upsert := func(client *daemonclient.Client, projectID, issueID string) daemonstate.Snapshot {
+		t.Helper()
+
+		reqBody, err := json.Marshal(multiprojectSessionRequest{
+			SessionID: sharedSessionID,
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateAttached,
+		})
+		if err != nil {
+			t.Fatalf("marshal request %s: %v", projectID, err)
+		}
+
+		resp, err := client.Command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       projectID + "-upsert",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         multiprojectUpsertCommand,
+			SentAt:          time.Now().UTC(),
+			Body:            reqBody,
+		})
+		if err != nil {
+			t.Fatalf("command %s: %v", projectID, err)
+		}
+
+		var snapshot daemonstate.Snapshot
+		if err := json.Unmarshal(resp.Body, &snapshot); err != nil {
+			t.Fatalf("decode snapshot %s: %v", projectID, err)
+		}
+		return snapshot
+	}
+
+	readSnapshot := func(client *daemonclient.Client, projectID string) daemonstate.Snapshot {
+		t.Helper()
+
+		resp, err := client.Command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       projectID + "-snapshot",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         multiprojectSnapshotCommand,
+			SentAt:          time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", projectID, err)
+		}
+
+		var snapshot daemonstate.Snapshot
+		if err := json.Unmarshal(resp.Body, &snapshot); err != nil {
+			t.Fatalf("decode snapshot %s: %v", projectID, err)
+		}
+		return snapshot
+	}
+
+	snapA := upsert(clientA, "proj-a", "issue-a")
+	if snapA.ProjectID != "proj-a" {
+		t.Fatalf("proj-a snapshot project_id = %q, want %q", snapA.ProjectID, "proj-a")
+	}
+	if snapA.Revision != 1 {
+		t.Fatalf("proj-a revision = %d, want 1", snapA.Revision)
+	}
+	if len(snapA.Sessions) != 1 {
+		t.Fatalf("proj-a sessions = %d, want 1", len(snapA.Sessions))
+	}
+	if got := snapA.Sessions[sharedSessionID]; got.IssueID != "issue-a" {
+		t.Fatalf("proj-a session issue_id = %q, want %q", got.IssueID, "issue-a")
+	}
+
+	snapB := readSnapshot(clientB, "proj-b")
+	if snapB.ProjectID != "proj-b" {
+		t.Fatalf("proj-b snapshot project_id = %q, want %q", snapB.ProjectID, "proj-b")
+	}
+	if snapB.Revision != 0 {
+		t.Fatalf("proj-b revision = %d, want 0 before any writes", snapB.Revision)
+	}
+	if len(snapB.Sessions) != 0 {
+		t.Fatalf("proj-b sessions = %d, want 0 before any writes", len(snapB.Sessions))
+	}
+
+	snapB = upsert(clientB, "proj-b", "issue-b")
+	if snapB.ProjectID != "proj-b" {
+		t.Fatalf("proj-b snapshot project_id = %q, want %q", snapB.ProjectID, "proj-b")
+	}
+	if snapB.Revision != 1 {
+		t.Fatalf("proj-b revision = %d, want 1", snapB.Revision)
+	}
+	if len(snapB.Sessions) != 1 {
+		t.Fatalf("proj-b sessions = %d, want 1", len(snapB.Sessions))
+	}
+	if got := snapB.Sessions[sharedSessionID]; got.IssueID != "issue-b" {
+		t.Fatalf("proj-b session issue_id = %q, want %q", got.IssueID, "issue-b")
+	}
+
+	snapA = readSnapshot(clientA, "proj-a")
+	if snapA.Revision != 1 {
+		t.Fatalf("proj-a revision after proj-b write = %d, want 1", snapA.Revision)
+	}
+	if len(snapA.Sessions) != 1 {
+		t.Fatalf("proj-a sessions after proj-b write = %d, want 1", len(snapA.Sessions))
+	}
+	if got := snapA.Sessions[sharedSessionID]; got.IssueID != "issue-a" {
+		t.Fatalf("proj-a session issue_id after proj-b write = %q, want %q", got.IssueID, "issue-a")
+	}
+}

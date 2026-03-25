@@ -16,6 +16,7 @@ func TestPolicyDelayCappedExponential(t *testing.T) {
 		attempt int
 		want    time.Duration
 	}{
+		{attempt: -1, want: 50 * time.Millisecond},
 		{attempt: 0, want: 50 * time.Millisecond},
 		{attempt: 1, want: 100 * time.Millisecond},
 		{attempt: 2, want: 200 * time.Millisecond},
@@ -27,6 +28,18 @@ func TestPolicyDelayCappedExponential(t *testing.T) {
 		if got := p.Delay(tc.attempt); got != tc.want {
 			t.Fatalf("Delay(%d) = %s, want %s", tc.attempt, got, tc.want)
 		}
+	}
+}
+
+func TestPolicyDelayFallsBackToMaxBackoffOnOverflow(t *testing.T) {
+	p := Policy{
+		MaxAttempts: 2,
+		BaseBackoff: time.Duration(1) << 62,
+		MaxBackoff:  375 * time.Millisecond,
+	}
+
+	if got := p.Delay(1); got != p.MaxBackoff {
+		t.Fatalf("Delay(1) = %s, want %s", got, p.MaxBackoff)
 	}
 }
 
