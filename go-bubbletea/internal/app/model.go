@@ -37,10 +37,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/compact"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
+	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
-	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
 // Re-export Mode type and constants for convenience
@@ -58,6 +58,8 @@ const (
 	defaultPaneCaptureLines  = 100
 	defaultDevserverBasePort = 3000
 	diffPreviewMaxCharacters = 200
+	eventTickerCapacity      = 64
+	eventLogCapacity         = 256
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -118,6 +120,10 @@ type Model struct {
 
 	// Toasts
 	toasts []Toast
+
+	// Runtime event stream (status ticker + event-log overlay source)
+	eventTicker   *eventticker.Ring
+	runtimeEvents []protocol.EventEnvelope
 
 	// Terminal size
 	width  int
@@ -240,6 +246,8 @@ func New(cfg *config.Config) Model {
 		overlayStack:       overlay.NewStack(),
 		viewMode:           ViewModeBoard, // Start with board view
 		toasts:             []Toast{},
+		eventTicker:        eventticker.NewRing(eventTickerCapacity),
+		runtimeEvents:      []protocol.EventEnvelope{},
 		styles:             styles.New(),
 		config:             cfg,
 		loading:            true, // Start with loading state
@@ -347,7 +355,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
 		if wasLoading {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastSuccess,
 				Message: "Issues loaded",
 				Expires: time.Now().Add(3 * time.Second),
@@ -368,7 +376,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case issuesErrorMsg:
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastError,
 			Message: msg.err.Error(),
 			Expires: time.Now().Add(8 * time.Second),
@@ -392,7 +400,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if oldState != msg.State && msg.State == domain.SessionWaiting {
 				fmt.Print("\a")
-				m.toasts = append(m.toasts, Toast{
+				m.addToast(Toast{
 					Level:   ToastWarning,
 					Message: fmt.Sprintf("Session %s is waiting for input", msg.IssueID),
 					Expires: time.Now().Add(10 * time.Second),
@@ -402,7 +410,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionStartedMsg:
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session started: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
@@ -410,7 +418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionStoppedMsg:
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
@@ -418,7 +426,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionErrorMsg:
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastError,
 			Message: fmt.Sprintf("Session error: %s - %v", msg.issueID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
@@ -429,6 +437,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonEvents == nil {
 			return m, nil
 		}
+		m.recordRuntimeEvent(msg.event)
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
@@ -453,7 +462,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case git.GitSyncMsg:
 		if msg.Err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Git sync failed: %v", msg.Err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -467,7 +476,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mergeResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Merge failed: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -476,7 +485,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.result.HasConflicts {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: fmt.Sprintf("Merge conflicts: %s", strings.Join(msg.result.ConflictFiles, ", ")),
 				Expires: time.Now().Add(5 * time.Second),
@@ -484,7 +493,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.overlayStack.Push(overlay.NewConflictDialog(msg.result.ConflictFiles))
 		}
 
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Successfully merged %s into %s", msg.sourceID, msg.targetID),
 			Expires: time.Now().Add(3 * time.Second),
@@ -493,7 +502,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fetchAndMergeResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Merge failed: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -503,7 +512,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.result.HasConflicts {
 			// Show conflict dialog
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: fmt.Sprintf("Merge conflicts in %d files", len(msg.result.ConflictFiles)),
 				Expires: time.Now().Add(3 * time.Second),
@@ -512,7 +521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Successful merge
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: "Updated from main successfully",
 			Expires: time.Now().Add(3 * time.Second),
@@ -524,7 +533,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case createPRResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to get branch info: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -533,7 +542,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Show PR command in toast
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: fmt.Sprintf("Run: %s", msg.cmd),
 			Expires: time.Now().Add(10 * time.Second),
@@ -542,7 +551,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case showDiffResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to get diff: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -559,7 +568,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			diff = "No changes"
 		}
 
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: diff,
 			Expires: time.Now().Add(8 * time.Second),
@@ -568,7 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case abortMergeResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to abort merge: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -576,7 +585,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: "Merge aborted successfully",
 			Expires: time.Now().Add(3 * time.Second),
@@ -603,7 +612,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonClient != nil {
 			m.daemonClient.WithProjectID(m.daemonProjectID())
 		}
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Switched to project: %s", msg.Project.Name),
 			Expires: time.Now().Add(3 * time.Second),
@@ -618,7 +627,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskCreatedResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to create task: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -626,7 +635,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Task created: %s", msg.taskID),
 			Expires: time.Now().Add(3 * time.Second),
@@ -642,14 +651,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case prCreatedResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to create PR: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
 		}
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("PR created: %s", msg.url),
 			Expires: time.Now().Add(5 * time.Second),
@@ -675,7 +684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Image attachment messages
 	case overlay.AttachmentActionMsg:
 		if msg.Action == "attached" {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastSuccess,
 				Message: fmt.Sprintf("Image attached: %s", msg.Attachment.Filename),
 				Expires: time.Now().Add(3 * time.Second),
@@ -687,7 +696,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.CleanupExecutedMsg:
 		m.overlayStack.Pop()
 		if msg.Error != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Cleanup failed: %v", msg.Error),
 				Expires: time.Now().Add(5 * time.Second),
@@ -716,7 +725,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			message = fmt.Sprintf("Cleanup: %s", strings.Join(operations, ", "))
 		}
 
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: message,
 			Expires: time.Now().Add(5 * time.Second),
@@ -742,7 +751,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.attachSessionCmd(msg.issueID)
 
 	case sessionAttachedMsg:
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Attached to session: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
@@ -751,7 +760,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case openPROverlayResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to get branch info: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -762,14 +771,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskDeletedResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to delete task: %v", msg.err),
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
 		}
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Task %s deleted", msg.taskID),
 			Expires: time.Now().Add(2 * time.Second),
@@ -778,14 +787,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskStatusResultMsg:
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
 		}
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Task moved to %s", msg.newStatus),
 			Expires: time.Now().Add(2 * time.Second),
@@ -805,7 +814,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bulkStatusResultMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Bulk action failed: %v", msg.err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -823,7 +832,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			level = ToastWarning
 			summary = fmt.Sprintf("%s, %d failed", summary, msg.failed)
 		}
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   level,
 			Message: summary,
 			Expires: time.Now().Add(3 * time.Second),
@@ -866,25 +875,6 @@ func (m Model) View() string {
 		mainView = m.renderBoardView()
 	}
 
-	if len(m.toasts) > 0 {
-		toastRenderer := toast.New(m.styles)
-		toastView := toastRenderer.Render(m.toasts, m.width)
-		if toastView != "" {
-			toastOverlay := lipgloss.Place(
-				m.width,
-				board.BoardContentHeight(m.height),
-				lipgloss.Right,
-				lipgloss.Bottom,
-				toastView,
-			)
-			mainView = m.layerWithinHeightTransparent(
-				mainView,
-				toastOverlay,
-				board.BoardContentHeight(m.height),
-			)
-		}
-	}
-
 	// Clamp board/compact content to the space above the footer to keep
 	// column headers and card rows stable even when internal render paths
 	// overproduce lines (for example via wrapped content or spacing styles).
@@ -894,6 +884,7 @@ func (m Model) View() string {
 		Render(mainView)
 
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
+	sb.SetEventTicker(m.eventTicker)
 	sb.SetSelectionSummary(m.selectionSummary())
 	statusBarView := sb.Render()
 
@@ -1145,6 +1136,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?": // Help
 		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
 
+	case overlay.EventLogHotkey:
+		return m, m.overlayStack.Push(overlay.NewEventLogOverlay(m.runtimeEvents))
+
 	case "enter": // View task details or drill into epic
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
@@ -1177,14 +1171,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab": // Toggle view mode
 		if m.viewMode == ViewModeBoard {
 			m.viewMode = ViewModeCompact
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: "Switched to compact view",
 				Expires: time.Now().Add(2 * time.Second),
 			})
 		} else {
 			m.viewMode = ViewModeBoard
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: "Switched to board view",
 				Expires: time.Now().Add(2 * time.Second),
@@ -1294,7 +1288,7 @@ func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "u", "m", "P":
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: "Action unavailable in go-bubbletea action mode; no git operation was started. " +
 				"If your repository has an active merge/rebase/cherry-pick/revert state, run git status and continue/abort it first.",
@@ -1814,7 +1808,7 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 	case "x": // Clear selection
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: "Selection cleared",
 			Expires: time.Now().Add(2 * time.Second),
@@ -1852,7 +1846,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		// Editor open error
 		m.overlayStack.Pop()
 		if err, ok := msg.Value.(error); ok {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Editor error: %v", err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -1876,7 +1870,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "set-default-success", "remove-success", "detect-success":
 		// Project registry actions succeeded - just show success toast
 		if name, ok := msg.Value.(string); ok {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastSuccess,
 				Message: fmt.Sprintf("Project %s: %s", msg.Key[:len(msg.Key)-8], name), // Remove "-success"
 				Expires: time.Now().Add(3 * time.Second),
@@ -1886,7 +1880,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "set-default-error", "remove-error", "add-error", "save-error", "detect-error":
 		// Project registry actions failed
 		if err, ok := msg.Value.(error); ok {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Error: %v", err),
 				Expires: time.Now().Add(5 * time.Second),
@@ -1912,7 +1906,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		originCandidates, eligibleUpstreamCount := m.sessionOriginCandidates(task)
 		if eligibleUpstreamCount == 0 {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: fmt.Sprintf("No eligible upstream sources; using base branch %s", m.resolveBaseBranch()),
 				Expires: time.Now().Add(4 * time.Second),
@@ -1946,7 +1940,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			// Check if branch is behind main
 			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
 		} else {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session for this task",
 				Expires: time.Now().Add(3 * time.Second),
@@ -1954,7 +1948,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 	case "p":
 		// TODO: Pause session
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: "Pause session (TODO)",
 			Expires: time.Now().Add(3 * time.Second),
@@ -1964,7 +1958,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			return m, m.stopSessionCmd(task.ID)
 		} else {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session for this task",
 				Expires: time.Now().Add(3 * time.Second),
@@ -1972,7 +1966,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 	case "R":
 		// TODO: Resume session
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: "Resume session (TODO)",
 			Expires: time.Now().Add(3 * time.Second),
@@ -1982,7 +1976,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		// Update from main
 		if session == nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session - start session first",
 				Expires: time.Now().Add(3 * time.Second),
@@ -1998,7 +1992,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "P":
 		// Create PR (with overlay)
 		if session == nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session - start session first",
 				Expires: time.Now().Add(3 * time.Second),
@@ -2011,7 +2005,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		// Show diff viewer
 		if session == nil {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session - start session first",
 				Expires: time.Now().Add(3 * time.Second),
@@ -2066,7 +2060,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "h":
 		// Move task left (to previous status)
 		if task.Status == domain.StatusOpen {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "Task is already in Open status",
 				Expires: time.Now().Add(2 * time.Second),
@@ -2078,7 +2072,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "l":
 		// Move task right (to next status)
 		if task.Status == domain.StatusDone {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "Task is already in Done status",
 				Expires: time.Now().Add(2 * time.Second),
@@ -2287,6 +2281,57 @@ func (m Model) renderLoading() string {
 // addToast adds a toast notification to the list
 func (m *Model) addToast(toast Toast) {
 	m.toasts = append(m.toasts, toast)
+	kind := protocol.EnvelopeKind("info")
+	switch toast.Level {
+	case ToastSuccess:
+		kind = protocol.EnvelopeKind("success")
+	case ToastWarning:
+		kind = protocol.EnvelopeKind("warning")
+	case ToastError:
+		kind = protocol.EnvelopeKind("error")
+	}
+	m.recordRuntimeEvent(protocol.EventEnvelope{
+		Revision:  m.daemonRevision,
+		ProjectID: m.daemonProjectID(),
+		Event:     "ui.toast",
+		Kind:      kind,
+		Body:      []byte(toast.Message),
+		EmittedAt: time.Now().UTC(),
+	})
+}
+
+func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
+	if evt.EmittedAt.IsZero() {
+		evt.EmittedAt = time.Now().UTC()
+	}
+	if evt.ProjectID == "" {
+		evt.ProjectID = m.daemonProjectID()
+	}
+	m.runtimeEvents = append(m.runtimeEvents, evt)
+	if len(m.runtimeEvents) > eventLogCapacity {
+		m.runtimeEvents = append([]protocol.EventEnvelope(nil), m.runtimeEvents[len(m.runtimeEvents)-eventLogCapacity:]...)
+	}
+	if m.eventTicker != nil {
+		summary := runtimeEventSummary(evt)
+		if summary != "" {
+			m.eventTicker.Push(summary)
+		}
+	}
+}
+
+func runtimeEventSummary(evt protocol.EventEnvelope) string {
+	eventName := strings.TrimSpace(evt.Event)
+	body := strings.TrimSpace(string(evt.Body))
+	switch {
+	case eventName != "" && body != "":
+		return eventName + ": " + body
+	case eventName != "":
+		return eventName
+	case body != "":
+		return body
+	default:
+		return strings.TrimSpace(string(evt.Kind))
+	}
 }
 
 // expireToasts removes expired toasts from the list
@@ -2450,7 +2495,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 
 	case resolution.OpenManually:
 		// Show instructions to open in editor
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: fmt.Sprintf("Open conflicted files in your editor at: %s", session.Worktree),
 			Expires: time.Now().Add(8 * time.Second),
@@ -2460,14 +2505,14 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 	case resolution.ResolveWithClaude:
 		// Attach to tmux session for Claude to resolve
 		if !m.tmuxAvailable {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", task.ID),
 				Expires: time.Now().Add(8 * time.Second),
 			})
 			return m, nil
 		}
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: fmt.Sprintf("Run: tmux attach-session -t %s (Claude can help resolve)", task.ID),
 			Expires: time.Now().Add(8 * time.Second),
@@ -2485,7 +2530,7 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 
 	sourceSession, hasSource := m.sessions[msg.SourceID]
 	if !hasSource {
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastError,
 			Message: "Source session not found",
 			Expires: time.Now().Add(3 * time.Second),
@@ -2499,7 +2544,7 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 
 	targetSession, hasTarget := m.sessions[msg.TargetID]
 	if !hasTarget {
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastError,
 			Message: "Target session not found",
 			Expires: time.Now().Add(3 * time.Second),
@@ -2577,7 +2622,7 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 
 func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
 	if task == nil {
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastWarning,
 			Message: "No focused issue to merge",
 			Expires: time.Now().Add(3 * time.Second),
@@ -2590,7 +2635,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 		}
 	}
 	if session == nil || session.Worktree == "" {
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastWarning,
 			Message: "No active session - start session first",
 			Expires: time.Now().Add(3 * time.Second),
@@ -2600,7 +2645,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
-		m.toasts = append(m.toasts, Toast{
+		m.addToast(Toast{
 			Level:   ToastWarning,
 			Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
 			Expires: time.Now().Add(5 * time.Second),
@@ -2611,7 +2656,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	if len(candidates) == 1 {
 		sourceSession, ok := m.sessions[candidates[0].target.ID]
 		if !ok || sourceSession == nil || sourceSession.Worktree == "" {
-			m.toasts = append(m.toasts, Toast{
+			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "Selected upstream source has no active worktree",
 				Expires: time.Now().Add(5 * time.Second),

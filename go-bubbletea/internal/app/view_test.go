@@ -52,15 +52,15 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	m.width = 100
 	m.height = 24
 	m.loading = false
-	m.toasts = append(m.toasts, types.Toast{
+	m.addToast(types.Toast{
 		Message: "test toast",
 		Expires: time.Now().Add(time.Hour),
 	})
 
 	view := m.View()
 
-	if !strings.Contains(view, "test toast") {
-		t.Fatalf("expected toast message to be visible in rendered view")
+	if strings.Contains(view, "test toast") && strings.Contains(strings.Split(strings.TrimRight(view, "\n"), "\n")[0], "test toast") {
+		t.Fatalf("expected no floating toast overlay in board content")
 	}
 
 	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
@@ -74,6 +74,9 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	lastLine := lines[len(lines)-1]
 	if !strings.Contains(lastLine, "NORMAL") {
 		t.Fatalf("expected status bar on final line to include mode label; last line=%q", lastLine)
+	}
+	if !strings.Contains(lastLine, "ui.toast") && !strings.Contains(lastLine, "test toast") {
+		t.Fatalf("expected status bar ticker to include latest event context; last line=%q", lastLine)
 	}
 }
 

@@ -554,6 +554,33 @@ func TestSearchModeEscClearsQuery(t *testing.T) {
 	}
 }
 
+func TestEventLogHotkeyPushesOverlay(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.addToast(Toast{
+		Level:   ToastInfo,
+		Message: "event seed",
+		Expires: time.Now().Add(5 * time.Second),
+	})
+
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model, got %T", updated)
+	}
+
+	current := next.overlayStack.Current()
+	logOverlay, ok := current.(*overlay.EventLogOverlay)
+	if !ok {
+		t.Fatalf("expected EventLogOverlay on stack, got %T", current)
+	}
+
+	if view := logOverlay.View(); !strings.Contains(view, "ui.toast") {
+		t.Fatalf("expected event log to render runtime events, got %q", view)
+	}
+}
+
 func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 	m := newTestModel()
 
