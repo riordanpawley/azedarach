@@ -663,9 +663,11 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	if task.ParentID != nil {
 		fmt.Printf("Parent: %s\n", *task.ParentID)
 	}
-	fmt.Printf("Dependencies: %d\n", len(task.Dependencies))
+	dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
+	fmt.Printf("Dependencies: %d\n", len(dependencies))
 	if opts.Deps {
-		printDependencies(task.Dependencies)
+		printDependencies(dependencies)
+		printDependents(dependents)
 	}
 	if task.Description != "" {
 		fmt.Printf("Description: %s\n", task.Description)
@@ -1057,6 +1059,81 @@ func printDependencies(deps []domain.Dependency) {
 	for _, dep := range deps {
 		fmt.Printf("- %s (%s)\n", dep.ID, dep.Type)
 	}
+}
+
+func printDependents(deps []domain.Dependency) {
+	if len(deps) == 0 {
+		return
+	}
+	fmt.Println("Dependents:")
+	for _, dep := range deps {
+		fmt.Printf("- %s (%s)\n", dep.ID, dep.Type)
+	}
+}
+
+func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]domain.Dependency, []domain.Dependency) {
+	dependencies := make([]domain.Dependency, 0, len(task.Dependencies)+1)
+	seenDependencies := make(map[string]struct{}, len(task.Dependencies)+1)
+
+	addDependency := func(dep domain.Dependency) {
+		id := strings.TrimSpace(dep.ID)
+		if id == "" {
+			return
+		}
+		key := id + "|" + string(dep.Type)
+		if _, ok := seenDependencies[key]; ok {
+			return
+		}
+		seenDependencies[key] = struct{}{}
+		dependencies = append(dependencies, domain.Dependency{ID: id, Type: dep.Type})
+	}
+
+	for _, dep := range task.Dependencies {
+		addDependency(dep)
+	}
+	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
+		addDependency(domain.Dependency{
+			ID:   strings.TrimSpace(*task.ParentID),
+			Type: domain.DependencyParentChild,
+		})
+	}
+
+	dependents := make([]domain.Dependency, 0, 8)
+	seenDependents := map[string]struct{}{}
+	addDependent := func(dep domain.Dependency) {
+		id := strings.TrimSpace(dep.ID)
+		if id == "" {
+			return
+		}
+		key := id + "|" + string(dep.Type)
+		if _, ok := seenDependents[key]; ok {
+			return
+		}
+		seenDependents[key] = struct{}{}
+		dependents = append(dependents, domain.Dependency{ID: id, Type: dep.Type})
+	}
+
+	for _, candidate := range allTasks {
+		if candidate.ID == task.ID {
+			continue
+		}
+		if candidate.ParentID != nil && strings.TrimSpace(*candidate.ParentID) == task.ID {
+			addDependent(domain.Dependency{
+				ID:   candidate.ID,
+				Type: domain.DependencyParentChild,
+			})
+		}
+		for _, dep := range candidate.Dependencies {
+			if strings.TrimSpace(dep.ID) == task.ID {
+				addDependent(domain.Dependency{
+					ID:   candidate.ID,
+					Type: dep.Type,
+				})
+			}
+		}
+	}
+
+	return dependencies, dependents
 }
 
 func executeBulkApply(deps *Dependencies, dryRun bool, operations []protocol.ApplyOperationBody) error {

@@ -1142,6 +1142,82 @@ func TestIssueGetCommandDepsProjectionCanonicalTypes(t *testing.T) {
 	}
 }
 
+func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing.T) {
+	now := time.Date(2026, 3, 26, 1, 15, 0, 0, time.UTC)
+	parentID := "az-parent"
+	targetID := "az-target"
+	childParentID := targetID
+	tasks := []domain.Task{
+		{
+			ID:        parentID,
+			Title:     "Parent issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeEpic,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{
+			ID:        targetID,
+			Title:     "Target issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			ParentID:  &parentID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "az-child",
+			Title:     "Child issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			ParentID:  &childParentID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        6,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID, Deps: true})
+	})
+	for _, want := range []string{
+		"Dependency edges:",
+		"- az-parent (parent-child)",
+		"Dependents:",
+		"- az-child (parent-child)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("deps projection missing %q: %q", want, output)
+		}
+	}
+}
+
 func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	tests := []struct {
 		name        string
