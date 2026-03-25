@@ -1,0 +1,70 @@
+package daemonclient
+
+import (
+	"context"
+
+	"github.com/riordanpawley/azedarach/internal/services/git"
+)
+
+const (
+	CommandGitFetch    = "git.fetch"
+	CommandGitMerge    = "git.merge"
+	CommandGitCheckout = "git.checkout"
+)
+
+// GitCommandRequest captures the daemon request body for git fetch and checkout commands.
+type GitCommandRequest struct {
+	Worktree string `json:"worktree"`
+	Remote   string `json:"remote,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+}
+
+// GitCommandResponse captures the daemon response body for git fetch and checkout commands.
+type GitCommandResponse struct {
+	Worktree string `json:"worktree"`
+	Remote   string `json:"remote,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+}
+
+// GitMergeCommandResponse captures the daemon response body for merge commands.
+type GitMergeCommandResponse struct {
+	Worktree string          `json:"worktree"`
+	Branch   string          `json:"branch"`
+	Result   git.MergeResult `json:"result"`
+}
+
+// GitFetch asks the daemon to fetch updates for a worktree from the requested remote.
+func (c *Client) GitFetch(ctx context.Context, worktree, remote string) (GitCommandResponse, error) {
+	var resp GitCommandResponse
+	if err := c.commandJSON(ctx, CommandGitFetch, GitCommandRequest{
+		Worktree: worktree,
+		Remote:   remote,
+	}, &resp); err != nil {
+		return GitCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitMerge asks the daemon to merge a branch into the requested worktree.
+func (c *Client) GitMerge(ctx context.Context, worktree, branch string) (GitMergeCommandResponse, error) {
+	var resp GitMergeCommandResponse
+	if err := c.commandJSON(ctx, CommandGitMerge, GitCommandRequest{
+		Worktree: worktree,
+		Branch:   branch,
+	}, &resp); err != nil {
+		return GitMergeCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitCheckout asks the daemon to checkout a branch in the requested worktree.
+func (c *Client) GitCheckout(ctx context.Context, worktree, branch string) (GitCommandResponse, error) {
+	var resp GitCommandResponse
+	if err := c.commandJSON(ctx, CommandGitCheckout, GitCommandRequest{
+		Worktree: worktree,
+		Branch:   branch,
+	}, &resp); err != nil {
+		return GitCommandResponse{}, err
+	}
+	return resp, nil
+}
