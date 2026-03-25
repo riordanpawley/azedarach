@@ -135,14 +135,28 @@ func TestHelperMethods(t *testing.T) {
 }
 
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
-	t.Run("returns empty when bin does not exist", func(t *testing.T) {
+	t.Run("prefers azd sibling of running az executable", func(t *testing.T) {
 		repoDir := t.TempDir()
-		if got := resolveDaemonBinaryForRepo(repoDir); got != "" {
-			t.Fatalf("expected empty path, got %q", got)
+		execDir := t.TempDir()
+		azPath := filepath.Join(execDir, "az")
+		azdPath := filepath.Join(execDir, "azd")
+		if err := os.WriteFile(azPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write az fixture: %v", err)
+		}
+		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write azd fixture: %v", err)
+		}
+
+		origExecutablePath := executablePath
+		t.Cleanup(func() { executablePath = origExecutablePath })
+		executablePath = func() (string, error) { return azPath, nil }
+
+		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
+			t.Fatalf("expected %q, got %q", azdPath, got)
 		}
 	})
 
-	t.Run("returns repo local bin azd when present", func(t *testing.T) {
+	t.Run("falls back to repo local bin azd when executable sibling missing", func(t *testing.T) {
 		repoDir := t.TempDir()
 		binDir := filepath.Join(repoDir, "bin")
 		if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -153,8 +167,23 @@ func TestResolveDaemonBinaryForRepo(t *testing.T) {
 			t.Fatalf("write azd binary fixture: %v", err)
 		}
 
+		origExecutablePath := executablePath
+		t.Cleanup(func() { executablePath = origExecutablePath })
+		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
+
 		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
 			t.Fatalf("expected %q, got %q", azdPath, got)
+		}
+	})
+
+	t.Run("returns empty when neither source has azd", func(t *testing.T) {
+		repoDir := t.TempDir()
+		origExecutablePath := executablePath
+		t.Cleanup(func() { executablePath = origExecutablePath })
+		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
+
+		if got := resolveDaemonBinaryForRepo(repoDir); got != "" {
+			t.Fatalf("expected empty path, got %q", got)
 		}
 	})
 }

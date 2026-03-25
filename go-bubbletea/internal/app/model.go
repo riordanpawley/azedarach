@@ -63,6 +63,7 @@ const (
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+var executablePath = os.Executable
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -1687,12 +1688,29 @@ func (m Model) daemonProjectID() string {
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {
+	if sibling := resolveDaemonBinaryNearExecutable(); sibling != "" {
+		return sibling
+	}
 	if strings.TrimSpace(repoDir) == "" {
 		return ""
 	}
 	bin := filepath.Join(repoDir, "bin", "azd")
 	if _, err := os.Stat(bin); err == nil {
 		return bin
+	}
+	return ""
+}
+
+func resolveDaemonBinaryNearExecutable() string {
+	exe, err := executablePath()
+	if err != nil || strings.TrimSpace(exe) == "" {
+		return ""
+	}
+
+	dir := filepath.Dir(exe)
+	candidate := filepath.Join(dir, "azd")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
 	}
 	return ""
 }
