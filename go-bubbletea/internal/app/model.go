@@ -1778,6 +1778,9 @@ func resolveInitialProjectName(registry *config.ProjectsRegistry, cwd string) st
 		if project := registry.FindByPath(cwd); project != nil && project.Name != "" {
 			return project.Name
 		}
+		if project := findProjectByCwdBasenamePrefix(registry, cwd); project != nil && project.Name != "" {
+			return project.Name
+		}
 	}
 	if registry != nil {
 		if project := registry.GetDefault(); project != nil && project.Name != "" {
@@ -1788,6 +1791,54 @@ func resolveInitialProjectName(registry *config.ProjectsRegistry, cwd string) st
 		return filepath.Base(cwd)
 	}
 	return "default"
+}
+
+func findProjectByCwdBasenamePrefix(registry *config.ProjectsRegistry, cwd string) *config.Project {
+	if registry == nil || len(registry.Projects) == 0 || strings.TrimSpace(cwd) == "" {
+		return nil
+	}
+
+	pathBases := make([]string, 0, 8)
+	for p := filepath.Clean(cwd); ; p = filepath.Dir(p) {
+		base := strings.ToLower(filepath.Base(p))
+		if base != "" && base != "." && base != string(filepath.Separator) {
+			pathBases = append(pathBases, base)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+	}
+
+	bestIndex := -1
+	bestLen := 0
+
+	for i := range registry.Projects {
+		project := registry.Projects[i]
+		candidates := []string{
+			strings.ToLower(strings.TrimSpace(project.Name)),
+			strings.ToLower(strings.TrimSpace(filepath.Base(filepath.Clean(project.Path)))),
+		}
+
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			for _, base := range pathBases {
+				if base == candidate || strings.HasPrefix(base, candidate+"-") || strings.HasPrefix(base, candidate+"_") {
+					if len(candidate) > bestLen {
+						bestLen = len(candidate)
+						bestIndex = i
+					}
+				}
+			}
+		}
+	}
+
+	if bestIndex < 0 {
+		return nil
+	}
+	return &registry.Projects[bestIndex]
 }
 
 func (m Model) projectSelectorCursor() int {
@@ -2040,6 +2091,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
+			overlay.WithCurrentProjectName(m.currentProject),
 		))
 	case "editor-error":
 		// Editor open error

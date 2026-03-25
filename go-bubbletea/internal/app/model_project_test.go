@@ -29,6 +29,20 @@ func TestResolveInitialProjectName(t *testing.T) {
 		}
 	})
 
+	t.Run("worktree-like cwd basename prefix wins over default", func(t *testing.T) {
+		registry := &config.ProjectsRegistry{
+			Projects: []config.Project{
+				{Name: "azedarach", Path: "/work/azedarach"},
+				{Name: "beta", Path: "/work/beta"},
+			},
+			DefaultProject: "beta",
+		}
+		got := resolveInitialProjectName(registry, "/work/azedarach-afv/go-bubbletea")
+		if got != "azedarach" {
+			t.Fatalf("resolveInitialProjectName() = %q, want %q", got, "azedarach")
+		}
+	})
+
 	t.Run("cwd basename is the final fallback", func(t *testing.T) {
 		got := resolveInitialProjectName(&config.ProjectsRegistry{}, "/tmp/project")
 		if got != "project" {
