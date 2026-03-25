@@ -648,10 +648,11 @@ func PrintUsage() {
 
 Commands:
   (no command)         Start the Azedarach TUI
-  start <issue-id>      Start a Claude session for an issue
-  attach <issue-id>     Attach to an existing session
-  kill <issue-id>       Kill a session
-  status [issue-id]     Show session status (all or specific issue)
+  session <subcommand>  Session commands (start|attach|kill|status)
+  start <issue-id>      Alias for 'az session start <issue-id>'
+  attach <issue-id>     Alias for 'az session attach <issue-id>'
+  kill <issue-id>       Alias for 'az session kill <issue-id>'
+  status [issue-id]     Alias for 'az session status [issue-id]'
   issue list [--json]  List issues from daemon-backed store
   issue get <id> [--json]  Show a single issue from daemon-backed store
   issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
@@ -664,11 +665,11 @@ Commands:
 
 Examples:
   az                   # Start TUI
-  az start az-123      # Start session for issue az-123
-  az attach az-123     # Attach to issue az-123's session
-  az kill az-123       # Kill issue az-123's session
-  az status            # Show all active sessions
-  az status az-123     # Show status for az-123
+  az session start az-123   # Start session for issue az-123
+  az session attach az-123  # Attach to issue az-123's session
+  az session kill az-123    # Kill issue az-123's session
+  az session status         # Show all active sessions
+  az session status az-123  # Show status for az-123
   az issue list
   az issue get az-123 --json
   az issue create "New task" --impl go-bubbletea --type task --priority P2

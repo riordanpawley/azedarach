@@ -32,53 +32,47 @@ func main() {
 	commandArgs := args[1:]
 
 	switch command {
-	case "start":
-		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az start <issue-id>\n")
+	case "session":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az session <start|attach|kill|status> [arguments]\n")
 			os.Exit(1)
 		}
-		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StartCommand(deps, commandArgs[0])
-		}); err != nil {
+		sessionCommand := commandArgs[0]
+		sessionArgs := commandArgs[1:]
+		if sessionCommand == "help" || sessionCommand == "-h" || sessionCommand == "--help" {
+			fmt.Printf("Usage: az session <start|attach|kill|status> [arguments]\n\n")
+			fmt.Printf("Commands:\n")
+			fmt.Printf("  start <issue-id>      Start a session for an issue\n")
+			fmt.Printf("  attach <issue-id>     Attach to an existing issue session\n")
+			fmt.Printf("  kill <issue-id>       Kill an issue session\n")
+			fmt.Printf("  status [issue-id]     Show all sessions or one issue session status\n")
+			os.Exit(0)
+		}
+		if err := runSessionCommand(cfg, sessionCommand, sessionArgs, true); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "start":
+		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "attach":
-		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az attach <issue-id>\n")
-			os.Exit(1)
-		}
-		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.AttachCommand(deps, commandArgs[0])
-		}); err != nil {
+		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "kill":
-		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az kill <issue-id>\n")
-			os.Exit(1)
-		}
-		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.KillCommand(deps, commandArgs[0])
-		}); err != nil {
+		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "status":
-		issueID := ""
-		if len(commandArgs) == 1 {
-			issueID = commandArgs[0]
-		} else if len(commandArgs) > 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az status [issue-id]\n")
-			os.Exit(1)
-		}
-		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StatusCommand(deps, issueID)
-		}); err != nil {
+		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -246,4 +240,57 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}
 	return fn(deps)
+}
+
+func runSessionCommand(cfg *config.Config, command string, args []string, namespaced bool) error {
+	switch command {
+	case "start":
+		if len(args) != 1 {
+			if namespaced {
+				return fmt.Errorf("usage: az session start <issue-id>")
+			}
+			return fmt.Errorf("usage: az start <issue-id>")
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.StartCommand(deps, args[0])
+		})
+	case "attach":
+		if len(args) != 1 {
+			if namespaced {
+				return fmt.Errorf("usage: az session attach <issue-id>")
+			}
+			return fmt.Errorf("usage: az attach <issue-id>")
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.AttachCommand(deps, args[0])
+		})
+	case "kill":
+		if len(args) != 1 {
+			if namespaced {
+				return fmt.Errorf("usage: az session kill <issue-id>")
+			}
+			return fmt.Errorf("usage: az kill <issue-id>")
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.KillCommand(deps, args[0])
+		})
+	case "status":
+		issueID := ""
+		if len(args) == 1 {
+			issueID = args[0]
+		} else if len(args) > 1 {
+			if namespaced {
+				return fmt.Errorf("usage: az session status [issue-id]")
+			}
+			return fmt.Errorf("usage: az status [issue-id]")
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.StatusCommand(deps, issueID)
+		})
+	default:
+		if namespaced {
+			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|kill|status>)", command)
+		}
+		return fmt.Errorf("unknown session command: %s", command)
+	}
 }
