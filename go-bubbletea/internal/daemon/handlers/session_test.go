@@ -32,17 +32,29 @@ func TestSessionHandlerStartPauseStopFlow(t *testing.T) {
 	if !r1.OK || r1.Revision != 1 {
 		t.Fatalf("start response = %+v", r1)
 	}
+	if got := store.ReadSnapshot("proj"); got.Sessions["s1"].State != daemonstate.SessionStateStarting {
+		t.Fatalf("store state after start = %+v", got.Sessions["s1"])
+	}
 	r2 := h.Handle(context.Background(), req(CommandSessionAttach))
 	if !r2.OK || r2.Revision != 2 {
 		t.Fatalf("attach response = %+v", r2)
+	}
+	if got := store.ReadSnapshot("proj"); got.Sessions["s1"].State != daemonstate.SessionStateAttached {
+		t.Fatalf("store state after attach = %+v", got.Sessions["s1"])
 	}
 	r3 := h.Handle(context.Background(), req(CommandSessionPause))
 	if !r3.OK || r3.Revision != 3 {
 		t.Fatalf("pause response = %+v", r3)
 	}
+	if got := store.ReadSnapshot("proj"); got.Sessions["s1"].State != daemonstate.SessionStatePaused {
+		t.Fatalf("store state after pause = %+v", got.Sessions["s1"])
+	}
 	r4 := h.Handle(context.Background(), req(CommandSessionStop))
 	if !r4.OK || r4.Revision != 4 {
 		t.Fatalf("stop response = %+v", r4)
+	}
+	if got := store.ReadSnapshot("proj"); got.Sessions["s1"].State != daemonstate.SessionStateStopped {
+		t.Fatalf("store state after stop = %+v", got.Sessions["s1"])
 	}
 }
 

@@ -100,6 +100,41 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	}
 }
 
+func TestDispatcherSessionRoutingRequiresSessionHandler(t *testing.T) {
+	mkReq := func() protocol.RequestEnvelope {
+		body, _ := json.Marshal(map[string]string{
+			"project_id": "proj",
+			"session_id": "s1",
+			"issue_id":   "aey",
+		})
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-session",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         "session.start",
+			Body:            body,
+		}
+	}
+
+	nilSessionDispatch := NewDispatcher(nil, nil, nil)
+	resp := nilSessionDispatch.Handle(context.Background(), mkReq())
+	if resp.OK {
+		t.Fatal("expected session command to be rejected when dispatcher has no session handler")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnsupportedCommand {
+		t.Fatalf("unexpected error mapping for nil-session dispatcher: %+v", resp.Error)
+	}
+
+	sessionDispatch := NewDispatcher(NewSessionHandler(daemonstate.NewStore()), nil, nil)
+	resp = sessionDispatch.Handle(context.Background(), mkReq())
+	if !resp.OK {
+		t.Fatalf("expected session command to route when handler is present: %+v", resp.Error)
+	}
+	if resp.Revision != 1 {
+		t.Fatalf("session start revision = %d, want 1", resp.Revision)
+	}
+}
+
 func TestDispatcherUnknownCommand(t *testing.T) {
 	dispatch := NewDispatcher(nil, nil, nil)
 	resp := dispatch.Handle(context.Background(), protocol.RequestEnvelope{

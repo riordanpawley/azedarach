@@ -178,7 +178,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 	command string,
 ) error {
 	if d.session == nil {
-		return nil
+		return errors.New("session handler unavailable")
 	}
 
 	body, err := json.Marshal(struct {
