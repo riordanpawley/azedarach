@@ -99,7 +99,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
