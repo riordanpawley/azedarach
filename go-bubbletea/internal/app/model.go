@@ -1619,6 +1619,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 
 func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
+	targetRepoDir := m.activeProjectPath()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
@@ -1627,10 +1628,21 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(m.repoDir, config.GlobalDaemonSocketPath())
+		launcher := daemonprocess.NewLauncher(targetRepoDir, config.GlobalDaemonSocketPath())
 		if bin := resolveDaemonBinaryForRepo(m.repoDir); bin != "" {
 			launcher.BinPath = bin
 		}
+
+		// Startup should bind daemon authority to the active project context
+		// when we have an explicit daemon binary path to execute.
+		// If no explicit binary is resolved (for example in isolated tests),
+		// fall back to attach-only behavior.
+		if launcher.BinPath != "" {
+			if err := launcher.Replace(ctx); err != nil {
+				return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon restart: %w", err)}
+			}
+		}
+
 		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
@@ -1662,6 +1674,15 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			events:    events,
 		}
 	}
+}
+
+func (m Model) activeProjectPath() string {
+	if m.projectRegistry != nil && m.currentProject != "" {
+		if project, err := m.projectRegistry.Get(m.currentProject); err == nil && strings.TrimSpace(project.Path) != "" {
+			return project.Path
+		}
+	}
+	return m.repoDir
 }
 
 func (m Model) waitForDaemonEventCmd() tea.Cmd {

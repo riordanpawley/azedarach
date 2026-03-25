@@ -82,3 +82,34 @@ func TestProjectSelectorCursor(t *testing.T) {
 		}
 	})
 }
+
+func TestActiveProjectPath(t *testing.T) {
+	registry := &config.ProjectsRegistry{
+		Projects: []config.Project{
+			{Name: "alpha", Path: "/work/alpha"},
+			{Name: "beta", Path: "/work/beta"},
+		},
+	}
+
+	t.Run("uses current project path when available", func(t *testing.T) {
+		m := Model{
+			currentProject:  "beta",
+			projectRegistry: registry,
+			repoDir:         "/work/alpha",
+		}
+		if got := m.activeProjectPath(); got != "/work/beta" {
+			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/beta")
+		}
+	})
+
+	t.Run("falls back to repoDir when current project missing", func(t *testing.T) {
+		m := Model{
+			currentProject:  "missing",
+			projectRegistry: registry,
+			repoDir:         "/work/alpha",
+		}
+		if got := m.activeProjectPath(); got != "/work/alpha" {
+			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/alpha")
+		}
+	})
+}
