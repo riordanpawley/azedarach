@@ -870,6 +870,14 @@ func (m Model) View() string {
 		}
 	}
 
+	// Clamp board/compact content to the space above the footer to keep
+	// column headers and card rows stable even when internal render paths
+	// overproduce lines (for example via wrapped content or spacing styles).
+	mainView = lipgloss.NewStyle().
+		Height(board.BoardContentHeight(m.height)).
+		MaxHeight(board.BoardContentHeight(m.height)).
+		Render(mainView)
+
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
 	sb.SetSelectionSummary(m.selectionSummary())
 	statusBarView := sb.Render()
