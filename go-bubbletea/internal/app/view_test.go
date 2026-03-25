@@ -58,11 +58,17 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 
 	view := m.View()
 
-	if !strings.Contains(view, "NORMAL") {
-		t.Fatalf("expected status bar mode label to remain visible with toast overlay")
-	}
 	if !strings.Contains(view, "test toast") {
 		t.Fatalf("expected toast message to be visible in rendered view")
+	}
+
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	lastLine := lines[len(lines)-1]
+	if !strings.Contains(lastLine, "NORMAL") {
+		t.Fatalf("expected status bar on final line to include mode label; last line=%q", lastLine)
 	}
 }
 

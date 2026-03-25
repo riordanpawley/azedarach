@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -59,8 +58,6 @@ const (
 	defaultDevserverBasePort = 3000
 	diffPreviewMaxCharacters = 200
 )
-
-var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -858,6 +855,21 @@ func (m Model) View() string {
 		mainView = m.renderBoardView()
 	}
 
+	if len(m.toasts) > 0 {
+		toastRenderer := toast.New(m.styles)
+		toastView := toastRenderer.Render(m.toasts, m.width)
+		if toastView != "" {
+			toastOverlay := lipgloss.Place(
+				m.width,
+				board.BoardContentHeight(m.height),
+				lipgloss.Right,
+				lipgloss.Bottom,
+				toastView,
+			)
+			mainView = m.layer(mainView, toastOverlay)
+		}
+	}
+
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
 	sb.SetSelectionSummary(m.selectionSummary())
 	statusBarView := sb.Render()
@@ -905,21 +917,6 @@ func (m Model) View() string {
 		}
 	}
 
-	if len(m.toasts) > 0 {
-		toastRenderer := toast.New(m.styles)
-		toastView := toastRenderer.Render(m.toasts, m.width)
-		if toastView != "" {
-			toastOverlay := lipgloss.Place(
-				m.width,
-				m.height,
-				lipgloss.Right,
-				lipgloss.Bottom,
-				toastView,
-			)
-			return m.layer(view, toastOverlay)
-		}
-	}
-
 	return view
 }
 
@@ -937,7 +934,7 @@ func (m Model) layer(bottom, top string) string {
 			t = tLines[i]
 		}
 
-		if isVisuallyEmptyOverlayLine(t) {
+		if strings.TrimSpace(t) == "" {
 			res[i] = b
 		} else {
 			res[i] = t
@@ -945,11 +942,6 @@ func (m Model) layer(bottom, top string) string {
 	}
 
 	return strings.Join(res, "\n")
-}
-
-func isVisuallyEmptyOverlayLine(line string) bool {
-	withoutANSI := ansiEscapeLinePattern.ReplaceAllString(line, "")
-	return strings.TrimSpace(withoutANSI) == ""
 }
 
 // buildColumns converts tasks into board columns, applying filter and sort
