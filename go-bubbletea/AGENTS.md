@@ -81,11 +81,14 @@ This section is non-optional for all `go-bubbletea` architecture work.
 4. **Session Authority Rule**:
    - Session lifecycle transitions must be daemon-authoritative.
    - TUI session maps are projections only; do not perform local writes that establish or mutate lifecycle authority.
+   - `internal/app` may stop or clear `SessionMonitor` state during teardown, but it must not call `SessionMonitor.Start` or recreate lifecycle monitoring locally.
+   - Any `m.sessions` mutation must come from daemon snapshot refresh (`projectSessionProjection`), not from per-session authority writes or monitor callbacks.
 5. **Singleton Scope Rule**:
    - If daemon runtime assets are user-global (socket/lock), design changes must explicitly preserve project isolation semantics and avoid cross-repo authority bleed.
 6. **Required Drift Guards**:
    - Boundary changes must include regression guards that fail when direct authority operations reappear in client layers.
    - Keep migration/boundary guard tests in `internal/app` and `internal/cli` current with each boundary change.
+   - Guard coverage for session projection must fail if `model.go` regains `SessionMonitor.Start` or direct `m.sessions[...] =` / `delete(m.sessions, ...)` authority writes.
 7. **Boundary Evidence Before Close**:
    - For any boundary issue, notes must include:
      - commands run

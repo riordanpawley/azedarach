@@ -1685,11 +1685,6 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
-		// Start monitoring the session
-		// Note: We need a way to pass the tea.Program to the monitor
-		// For now, we'll skip this and implement it properly later
-		// m.sessionMonitor.Start(ctx, issueID, program)
-
 		return sessionStartedMsg{issueID: issueID}
 	}
 }
@@ -1703,7 +1698,7 @@ func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		// Stop monitoring
+		// Stop local projection observer state; lifecycle authority remains daemon-owned.
 		m.sessionMonitor.Stop(issueID)
 
 		if _, err := m.daemonClient.StopSession(ctx, issueID); err != nil {
