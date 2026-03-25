@@ -427,12 +427,17 @@ func TestParseIssueListArgs(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			want: IssueListOptions{JSON: false},
+			want: IssueListOptions{JSON: false, Deps: false},
 		},
 		{
 			name: "json output",
 			args: []string{"--json"},
-			want: IssueListOptions{JSON: true},
+			want: IssueListOptions{JSON: true, Deps: false},
+		},
+		{
+			name: "deps projection",
+			args: []string{"--deps"},
+			want: IssueListOptions{JSON: false, Deps: true},
 		},
 		{
 			name:        "rejects extra args",
@@ -470,22 +475,27 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name: "defaults",
 			args: []string{"az-1"},
-			want: IssueGetOptions{IssueID: "az-1"},
+			want: IssueGetOptions{IssueID: "az-1", JSON: false, Deps: false},
 		},
 		{
 			name: "json output",
 			args: []string{"--json", "az-2"},
-			want: IssueGetOptions{IssueID: "az-2", JSON: true},
+			want: IssueGetOptions{IssueID: "az-2", JSON: true, Deps: false},
+		},
+		{
+			name: "deps projection",
+			args: []string{"--deps", "az-3"},
+			want: IssueGetOptions{IssueID: "az-3", JSON: false, Deps: true},
 		},
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get <issue-id> [--json]",
+			errContains: "usage: az issue get <issue-id> [--json] [--deps]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get <issue-id> [--json]",
+			errContains: "usage: az issue get <issue-id> [--json] [--deps]",
 		},
 	}
 
@@ -809,6 +819,60 @@ func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	}
 }
 
+func TestIssueListCommandDepsProjection(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:       "az-1",
+			Title:    "Dependent issue",
+			Status:   domain.StatusInProgress,
+			Priority: domain.P1,
+			Type:     domain.TypeFeature,
+			Dependencies: []domain.Dependency{
+				{ID: "az-2", Type: domain.DependencyBlocks},
+				{ID: "az-3", Type: domain.DependencyBlockedBy},
+				{ID: "az-4", Type: domain.DependencyBlockedBy},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        3,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Deps: true})
+	})
+	if !strings.Contains(output, "DEPS") {
+		t.Fatalf("deps output missing DEPS column: %q", output)
+	}
+	if !strings.Contains(output, "blocks:1,blocked_by:2") {
+		t.Fatalf("deps output missing summary: %q", output)
+	}
+}
+
 func TestIssueGetCommandJSON(t *testing.T) {
 	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
@@ -880,6 +944,60 @@ func TestIssueGetCommandNotFound(t *testing.T) {
 	err := IssueGetCommand(deps, IssueGetOptions{IssueID: "az-missing"})
 	if err == nil || !strings.Contains(err.Error(), "issue not found: az-missing") {
 		t.Fatalf("error = %v, want not found", err)
+	}
+}
+
+func TestIssueGetCommandDepsProjection(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:          "az-8",
+			Title:       "Dependency detail",
+			Description: "Detail context",
+			Status:      domain.StatusOpen,
+			Priority:    domain.P2,
+			Type:        domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: "az-2", Type: domain.DependencyBlocks},
+				{ID: "az-5", Type: domain.DependencyRelatedTo},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-8", Deps: true})
+	})
+	if !strings.Contains(output, "Dependency edges:") {
+		t.Fatalf("deps output missing dependency section: %q", output)
+	}
+	if !strings.Contains(output, "- az-2 (blocks)") || !strings.Contains(output, "- az-5 (related_to)") {
+		t.Fatalf("deps output missing dependency rows: %q", output)
 	}
 }
 
@@ -1146,10 +1264,10 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
 	}
-	if !strings.Contains(output, "issue list [--json]") {
+	if !strings.Contains(output, "issue list [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
-	if !strings.Contains(output, "issue get <id> [--json]") {
+	if !strings.Contains(output, "issue get <id> [--json] [--deps]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
 	if !strings.Contains(output, "issue create <title>") {

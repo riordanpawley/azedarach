@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -58,11 +59,13 @@ type ExportOptions struct {
 
 type IssueListOptions struct {
 	JSON bool
+	Deps bool
 }
 
 type IssueGetOptions struct {
 	IssueID string
 	JSON    bool
+	Deps    bool
 }
 
 type IssueCreateOptions struct {
@@ -232,6 +235,7 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
+	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
@@ -246,11 +250,12 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	fs := flag.NewFlagSet("issue get", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
+	fs.BoolVar(&opts.Deps, "deps", false, "include dependency details")
 	if err := fs.Parse(args); err != nil {
 		return IssueGetOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get <issue-id> [--json]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get <issue-id> [--json] [--deps]")
 	}
 	opts.IssueID = fs.Arg(0)
 	return opts, nil
@@ -485,17 +490,26 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tTITLE")
+	if opts.Deps {
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tDEPS\tTITLE")
+	} else {
+		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tTITLE")
+	}
 	for _, task := range tasks {
-		fmt.Fprintf(
-			w,
-			"%s\t%s\t%s\t%s\t%s\n",
-			task.ID,
-			task.Status,
-			task.Priority.String(),
-			task.Type,
-			task.Title,
-		)
+		if opts.Deps {
+			fmt.Fprintf(
+				w,
+				"%s\t%s\t%s\t%s\t%s\t%s\n",
+				task.ID,
+				task.Status,
+				task.Priority.String(),
+				task.Type,
+				formatDependencySummary(task.Dependencies),
+				task.Title,
+			)
+			continue
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, task.Title)
 	}
 	return w.Flush()
 }
@@ -532,6 +546,9 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 		fmt.Printf("Parent: %s\n", *task.ParentID)
 	}
 	fmt.Printf("Dependencies: %d\n", len(task.Dependencies))
+	if opts.Deps {
+		printDependencies(task.Dependencies)
+	}
 	if task.Description != "" {
 		fmt.Printf("Description: %s\n", task.Description)
 	}
@@ -677,6 +694,42 @@ func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 	return domain.Task{}, false
 }
 
+func formatDependencySummary(deps []domain.Dependency) string {
+	if len(deps) == 0 {
+		return "-"
+	}
+	counts := map[domain.DependencyType]int{}
+	for _, dep := range deps {
+		counts[dep.Type]++
+	}
+	ordered := []domain.DependencyType{
+		domain.DependencyBlocks,
+		domain.DependencyBlockedBy,
+		domain.DependencyRelatedTo,
+		domain.DependencyParentChild,
+	}
+	parts := make([]string, 0, len(ordered))
+	for _, depType := range ordered {
+		if count := counts[depType]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", depType, count))
+		}
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ",")
+}
+
+func printDependencies(deps []domain.Dependency) {
+	if len(deps) == 0 {
+		return
+	}
+	fmt.Println("Dependency edges:")
+	for _, dep := range deps {
+		fmt.Printf("- %s (%s)\n", dep.ID, dep.Type)
+	}
+}
+
 func parseTaskType(raw string) (domain.TaskType, error) {
 	tt := domain.TaskType(raw)
 	switch tt {
@@ -746,8 +799,8 @@ Commands:
   attach <issue-id>     Alias for 'az session attach <issue-id>'
   kill <issue-id>       Alias for 'az session kill <issue-id>'
   status [issue-id]     Alias for 'az session status [issue-id]'
-  issue list [--json]  List issues from daemon-backed store
-  issue get <id> [--json]  Show a single issue from daemon-backed store
+  issue list [--json] [--deps]  List issues from daemon-backed store
+  issue get <id> [--json] [--deps]  Show a single issue from daemon-backed store
   issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
   issue update <id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
   issue status <id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status
@@ -766,7 +819,9 @@ Examples:
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
   az issue list
+  az issue list --deps
   az issue get az-123 --json
+  az issue get az-123 --deps
   az issue create "New task" --impl go-bubbletea --type task --priority P2
   az issue update az-123 --impl go-bubbletea --title "Renamed task" --priority P1
   az issue status az-123 in_progress --impl go-bubbletea
