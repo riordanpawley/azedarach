@@ -28,3 +28,8 @@ install:
 
 lint:
     golangci-lint run ./...
+
+boundary-check:
+    ../scripts/afv-drift-sentinel.sh
+    go test ./internal/app ./internal/cli
+    go test ./internal/daemon/... ./internal/client/...

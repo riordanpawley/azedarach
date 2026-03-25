@@ -42,7 +42,13 @@ func (f *Filter) IsActive() bool {
 
 // Apply filters a list of tasks
 func (f *Filter) Apply(tasks []Task) []Task {
-	if !f.IsActive() {
+	if len(f.Status) == 0 &&
+		len(f.Priority) == 0 &&
+		len(f.Type) == 0 &&
+		len(f.SessionState) == 0 &&
+		!f.HideEpicChildren &&
+		f.AgeMaxDays == nil &&
+		f.SearchQuery == "" {
 		return tasks
 	}
 

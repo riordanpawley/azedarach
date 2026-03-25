@@ -75,6 +75,9 @@ func TestRenderCard_Basic(t *testing.T) {
 	if !strings.Contains(stripped, "Test task") {
 		t.Errorf("Card should contain task title, got: %s", stripped)
 	}
+	if !strings.Contains(stripped, "az-123") {
+		t.Errorf("Card should contain issue ID, got: %s", stripped)
+	}
 
 	// Should contain priority badge
 	if !strings.Contains(stripped, "P1") {
@@ -84,6 +87,21 @@ func TestRenderCard_Basic(t *testing.T) {
 	// Should contain type badge
 	if !strings.Contains(stripped, "T") {
 		t.Errorf("Card should contain type badge, got: %s", stripped)
+	}
+}
+
+func TestRenderCard_TitleAlwaysStartsWithIssueID(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "az-long-id-999",
+		Title:    "This title is intentionally long so truncation happens early",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	}
+	stripped := stripANSI(RenderCard(task, false, false, 20, s))
+	if !strings.Contains(stripped, "az-long-id-999") && !strings.Contains(stripped, "az-long-id") {
+		t.Fatalf("expected truncated title line to keep issue ID prefix, got: %s", stripped)
 	}
 }
 

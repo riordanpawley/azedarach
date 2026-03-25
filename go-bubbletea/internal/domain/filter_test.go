@@ -101,6 +101,30 @@ func TestFilter_Matches_EmptyFilter(t *testing.T) {
 	}
 }
 
+func TestFilter_Apply_DefaultHidesChildIssues(t *testing.T) {
+	f := NewFilter()
+	parentID := "az-parent"
+	tasks := []Task{
+		{ID: parentID, Title: "Parent", Status: StatusOpen, Priority: P2, Type: TypeTask},
+		{ID: "az-child-parent-id", Title: "Child via parent_id", Status: StatusOpen, Priority: P2, Type: TypeTask, ParentID: &parentID},
+		{
+			ID:       "az-child-dep",
+			Title:    "Child via dep",
+			Status:   StatusOpen,
+			Priority: P2,
+			Type:     TypeTask,
+			Dependencies: []Dependency{
+				{ID: parentID, Type: DependencyParentChild},
+			},
+		},
+	}
+
+	got := f.Apply(tasks)
+	if len(got) != 1 || got[0].ID != parentID {
+		t.Fatalf("Apply() with default filter should hide children, got %+v", got)
+	}
+}
+
 func TestFilter_Matches_Status(t *testing.T) {
 	f := NewFilter()
 	f.ToggleStatus(StatusOpen)

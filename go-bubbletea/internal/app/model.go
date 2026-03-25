@@ -2056,7 +2056,30 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 // getCurrentTaskAndSession returns the currently selected task and its session
 func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
-	return m.nav.GetCurrentTask(columns)
+	cursor := m.nav.GetCursor()
+	if task, session := m.nav.GetCurrentTask(columns); task != nil {
+		if cursor == nil || cursor.TaskID == "" || task.ID == cursor.TaskID {
+			return task, session
+		}
+	}
+
+	// Cursor can target a task hidden by current filters (for example child
+	// issues hidden from board). In that case, resolve directly from full task
+	// set so actions/drill-down flows still operate on the selected task ID.
+	if cursor == nil || cursor.TaskID == "" {
+		return nil, nil
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID == cursor.TaskID {
+			task := m.tasks[i]
+			session := task.Session
+			if session == nil {
+				session = m.sessions[task.ID]
+			}
+			return &task, session
+		}
+	}
+	return nil, nil
 }
 
 // handleBulkAction handles bulk action menu selections

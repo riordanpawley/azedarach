@@ -20,6 +20,10 @@ fail() {
   failures=$((failures + 1))
 }
 
+warn() {
+  printf 'WARN: %s\n' "$1" >&2
+}
+
 require_marker() {
   local marker="$1"
   local ref_file="$2"
@@ -37,10 +41,38 @@ forbidden_scan() {
   local pattern="$2"
   shift 2
 
-  if rg -n -F --glob 'go-bubbletea/internal/cli/**' --glob 'go-bubbletea/internal/ui/**' --glob '!**/*_test.go' "$pattern" "$@" >/dev/null; then
+  if rg -n -F \
+    --glob 'go-bubbletea/internal/cli/**' \
+    --glob 'go-bubbletea/internal/ui/**' \
+    --glob '!**/*_test.go' \
+    "$pattern" "$@" >/dev/null; then
     fail "$description"
-    rg -n -F --glob 'go-bubbletea/internal/cli/**' --glob 'go-bubbletea/internal/ui/**' --glob '!**/*_test.go' "$pattern" "$@" >&2 || true
+    rg -n -F \
+      --glob 'go-bubbletea/internal/cli/**' \
+      --glob 'go-bubbletea/internal/ui/**' \
+      --glob '!**/*_test.go' \
+      "$pattern" "$@" >&2 || true
     printf '      Move the ownership boundary back to the daemon/client layer.\n' >&2
+  else
+    pass "$description"
+  fi
+}
+
+advisory_app_scan() {
+  local description="$1"
+  local pattern="$2"
+  shift 2
+
+  if rg -n -F \
+    --glob 'go-bubbletea/internal/app/**' \
+    --glob '!**/*_test.go' \
+    "$pattern" "$@" >/dev/null; then
+    warn "$description"
+    rg -n -F \
+      --glob 'go-bubbletea/internal/app/**' \
+      --glob '!**/*_test.go' \
+      "$pattern" "$@" >&2 || true
+    printf '      Advisory only. Enable strict app checks once migration slice is complete.\n' >&2
   else
     pass "$description"
   fi
@@ -71,6 +103,15 @@ forbidden_scan \
   'worktree.' \
   go-bubbletea/internal/cli \
   go-bubbletea/internal/ui
+
+advisory_app_scan \
+  'advisory: internal/app still imports daemon-owned mutation services directly' \
+  'github.com/riordanpawley/azedarach/internal/services/'
+
+advisory_app_scan \
+  'advisory: internal/app still uses direct session map writes/deletes (authority-risk marker)' \
+  'm.sessions[' \
+  go-bubbletea/internal/app
 
 if (( failures > 0 )); then
   printf 'Drift sentinel failed: %d check(s) failed.\n' "$failures" >&2

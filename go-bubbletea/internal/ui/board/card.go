@@ -74,12 +74,8 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, chi
 		cursor = "▶"
 	}
 
-	// Build the card content
-	title := task.Title
-	if len(title) > maxLineLen {
-		title = title[:maxLineLen-1] + "…"
-	}
-	titleLine := cursor + title
+	// Build the card content. Keep issue ID at the start so it is always visible.
+	titleLine := cursor + task.ID + " " + task.Title
 
 	// Badge line: priority • type [• phase]
 	badgeLine := lipgloss.JoinHorizontal(lipgloss.Left, priorityBadge, " • ", typeBadge)
