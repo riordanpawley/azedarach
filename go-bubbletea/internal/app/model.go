@@ -2413,7 +2413,13 @@ func (m Model) showDiffCmd(worktree string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		diff, err := m.gitClient.DiffStat(ctx, worktree)
+		if m.daemonClient == nil {
+			return showDiffResultMsg{
+				err: fmt.Errorf("daemon client unavailable"),
+			}
+		}
+
+		diff, err := m.daemonClient.GitDiffStat(ctx, worktree)
 		if err != nil {
 			return showDiffResultMsg{
 				err: fmt.Errorf("failed to get diff: %w", err),
@@ -2735,7 +2741,14 @@ func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		err := m.gitClient.AbortMerge(ctx, worktree)
+		if m.daemonClient == nil {
+			return abortMergeResultMsg{
+				worktree: worktree,
+				err:      fmt.Errorf("daemon client unavailable"),
+			}
+		}
+
+		_, err := m.daemonClient.GitAbortMerge(ctx, worktree)
 		return abortMergeResultMsg{
 			worktree: worktree,
 			err:      err,

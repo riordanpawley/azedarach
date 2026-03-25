@@ -253,6 +253,22 @@ func TestDaemonCommandsReportMissingDaemonClient(t *testing.T) {
 	} else if errMsg.err == nil || errMsg.err.Error() != "daemon client unavailable" {
 		t.Fatalf("attachDaemonCmd error = %v, want daemon client unavailable", errMsg.err)
 	}
+
+	if msg := m.showDiffCmd("/tmp/az-1")(); msg == nil {
+		t.Fatal("showDiffCmd returned nil message")
+	} else if diffMsg, ok := msg.(showDiffResultMsg); !ok {
+		t.Fatalf("showDiffCmd message type = %T, want showDiffResultMsg", msg)
+	} else if diffMsg.err == nil || diffMsg.err.Error() != "daemon client unavailable" {
+		t.Fatalf("showDiffCmd error = %v, want daemon client unavailable", diffMsg.err)
+	}
+
+	if msg := m.abortMergeCmd("/tmp/az-1")(); msg == nil {
+		t.Fatal("abortMergeCmd returned nil message")
+	} else if abortMsg, ok := msg.(abortMergeResultMsg); !ok {
+		t.Fatalf("abortMergeCmd message type = %T, want abortMergeResultMsg", msg)
+	} else if abortMsg.err == nil || abortMsg.err.Error() != "daemon client unavailable" {
+		t.Fatalf("abortMergeCmd error = %v, want daemon client unavailable", abortMsg.err)
+	}
 }
 
 func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
@@ -651,6 +667,85 @@ func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
 	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandGitMerge {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestGitWorkflowCommandsUseDaemonClient(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandGitDiffStat:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal diff request: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" {
+					t.Fatalf("diff body = %+v", body)
+				}
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: " M model.go\n"})
+				if err != nil {
+					t.Fatalf("marshal diff response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitAbortMerge:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal abort request: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" {
+					t.Fatalf("abort body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree})
+				if err != nil {
+					t.Fatalf("marshal abort response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+
+	diffMsg := m.showDiffCmd("/tmp/az-1")()
+	diffResult, ok := diffMsg.(showDiffResultMsg)
+	if !ok {
+		t.Fatalf("diff message type = %T, want showDiffResultMsg", diffMsg)
+	}
+	if diffResult.err != nil {
+		t.Fatalf("diff err = %v", diffResult.err)
+	}
+	if diffResult.diff != " M model.go\n" {
+		t.Fatalf("diff output = %q", diffResult.diff)
+	}
+
+	abortMsg := m.abortMergeCmd("/tmp/az-1")()
+	abortResult, ok := abortMsg.(abortMergeResultMsg)
+	if !ok {
+		t.Fatalf("abort message type = %T, want abortMergeResultMsg", abortMsg)
+	}
+	if abortResult.err != nil {
+		t.Fatalf("abort err = %v", abortResult.err)
+	}
+
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandGitDiffStat || got[1] != daemonclient.CommandGitAbortMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
