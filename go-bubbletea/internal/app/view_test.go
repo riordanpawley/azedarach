@@ -80,6 +80,58 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	}
 }
 
+func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.editor.EnterNormal()
+	m.nav.SelectTask("az-2", 0)
+
+	boardView := m.View()
+	boardLines := strings.Split(strings.TrimRight(boardView, "\n"), "\n")
+	if len(boardLines) == 0 {
+		t.Fatal("expected board view to render at least one line")
+	}
+	if !strings.Contains(boardLines[0], "Open (") {
+		t.Fatalf("expected board headers on first line, got %q", boardLines[0])
+	}
+
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	compactModel := updated.(Model)
+	compactView := compactModel.View()
+	compactLines := strings.Split(strings.TrimRight(compactView, "\n"), "\n")
+	if len(compactLines) == 0 {
+		t.Fatal("expected compact view to render at least one line")
+	}
+	if strings.Contains(compactLines[0], "Open (") {
+		t.Fatalf("expected compact view to replace board headers, got %q", compactLines[0])
+	}
+	if !strings.Contains(compactLines[0], "#") || !strings.Contains(compactLines[0], "ID") || !strings.Contains(compactLines[0], "Title") {
+		t.Fatalf("expected compact header row on first line, got %q", compactLines[0])
+	}
+	if got := getCursorPosition(compactModel); got.Column != 0 || got.Task != 1 {
+		t.Fatalf("cursor position changed across tab toggle: got (%d,%d), want (0,1)", got.Column, got.Task)
+	}
+	if !strings.Contains(compactView, "Switched to compact view") && !strings.Contains(compactView, "ui.toast") {
+		t.Fatalf("expected compact view footer to reflect view-mode toast, got %q", compactView)
+	}
+
+	updated, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	boardModel := updated.(Model)
+	boardView = boardModel.View()
+	boardLines = strings.Split(strings.TrimRight(boardView, "\n"), "\n")
+	if len(boardLines) == 0 {
+		t.Fatal("expected board view to render after toggling back")
+	}
+	if !strings.Contains(boardLines[0], "Open (") {
+		t.Fatalf("expected board headers after toggling back, got %q", boardLines[0])
+	}
+	if got := getCursorPosition(boardModel); got.Column != 0 || got.Task != 1 {
+		t.Fatalf("cursor position changed after toggling back: got (%d,%d), want (0,1)", got.Column, got.Task)
+	}
+}
+
 func TestLayerWithinHeightTransparent_IgnoresANSISpaceOnlyLines(t *testing.T) {
 	m := newTestModel()
 
