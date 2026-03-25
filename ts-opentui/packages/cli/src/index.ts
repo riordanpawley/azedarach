@@ -1888,6 +1888,7 @@ const issueListHandler = (args: {
 	readonly parent: Option.Option<string>
 	readonly implementations: readonly string[]
 	readonly limit: Option.Option<number>
+	readonly deps: boolean
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
@@ -1935,8 +1936,17 @@ const issueListHandler = (args: {
 			return
 		}
 
-		for (const issue of issues) {
-			yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
+		if (args.deps) {
+			const dependencyGraphLines = formatIssueListDependencyGraph(issues, {
+				showImplementations,
+			})
+			for (const line of dependencyGraphLines) {
+				yield* Console.log(line)
+			}
+		} else {
+			for (const issue of issues) {
+				yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
+			}
 		}
 
 		const listedCount = issues.length
@@ -1956,6 +1966,199 @@ const issueListHandler = (args: {
 			)
 		}
 	})
+
+const normalizeIssueListIdKey = (value: string): string => value.trim().toLowerCase()
+
+const resolveKnownIssueIdFromRef = (
+	keyToIssueId: ReadonlyMap<string, string>,
+	refId: string | undefined,
+): string | undefined => {
+	if (refId === undefined) return undefined
+	const normalized = normalizeIssueListIdKey(refId)
+	if (normalized.length === 0) return undefined
+	return keyToIssueId.get(normalized)
+}
+
+const collectIssueRelationshipIds = (
+	refs: ReadonlyArray<{ readonly id: string; readonly dependency_type: string }> | undefined,
+	dependencyType: "blocks" | "related" | "discovered-from" | "parent-child",
+	knownIssueIds: ReadonlySet<string>,
+): readonly string[] => {
+	if (!refs || refs.length === 0) return []
+	const values: string[] = []
+	const seen = new Set<string>()
+	for (const ref of refs) {
+		if (ref.dependency_type !== dependencyType) continue
+		const id = ref.id.trim()
+		if (id.length === 0 || seen.has(id)) continue
+		if (!knownIssueIds.has(normalizeIssueListIdKey(id))) continue
+		seen.add(id)
+		values.push(id)
+	}
+	return values
+}
+
+const collectIssueExternalParentIds = (
+	issue: TrackedIssue,
+	knownIssueIds: ReadonlySet<string>,
+): readonly string[] => {
+	const values: string[] = []
+	const seen = new Set<string>()
+	for (const dependency of issue.dependencies ?? []) {
+		if (dependency.dependency_type !== "parent-child") continue
+		const id = dependency.id.trim()
+		const key = normalizeIssueListIdKey(id)
+		if (id.length === 0 || knownIssueIds.has(key) || seen.has(id)) continue
+		seen.add(id)
+		values.push(id)
+	}
+	return values
+}
+
+const formatIssueListDependencyGraph = (
+	issues: ReadonlyArray<TrackedIssue>,
+	options: {
+		readonly showImplementations: boolean
+	},
+): readonly string[] => {
+	const issuesByKey = new Map<string, TrackedIssue>()
+	const keyToIssueId = new Map<string, string>()
+	const issueOrder = new Map<string, number>()
+	for (const [index, issue] of issues.entries()) {
+		const key = normalizeIssueListIdKey(issue.id)
+		issuesByKey.set(key, issue)
+		keyToIssueId.set(key, issue.id)
+		issueOrder.set(key, index)
+	}
+	const knownIssueIds = new Set(keyToIssueId.keys())
+
+	const parentByChild = new Map<string, string>()
+	for (const issue of issues) {
+		const childKey = normalizeIssueListIdKey(issue.id)
+		for (const dependency of issue.dependencies ?? []) {
+			if (dependency.dependency_type !== "parent-child") continue
+			const parentIssueId = resolveKnownIssueIdFromRef(keyToIssueId, dependency.id)
+			if (parentIssueId === undefined) continue
+			const parentKey = normalizeIssueListIdKey(parentIssueId)
+			if (parentKey === childKey || parentByChild.has(childKey)) continue
+			parentByChild.set(childKey, parentKey)
+		}
+	}
+	for (const issue of issues) {
+		const parentKey = normalizeIssueListIdKey(issue.id)
+		for (const dependent of issue.dependents ?? []) {
+			if (dependent.dependency_type !== "parent-child") continue
+			const childIssueId = resolveKnownIssueIdFromRef(keyToIssueId, dependent.id)
+			if (childIssueId === undefined) continue
+			const childKey = normalizeIssueListIdKey(childIssueId)
+			if (childKey === parentKey || parentByChild.has(childKey)) continue
+			parentByChild.set(childKey, parentKey)
+		}
+	}
+
+	const childrenByParent = new Map<string, string[]>()
+	for (const [childKey, parentKey] of parentByChild.entries()) {
+		const children = childrenByParent.get(parentKey) ?? []
+		children.push(childKey)
+		childrenByParent.set(parentKey, children)
+	}
+	for (const children of childrenByParent.values()) {
+		children.sort((left, right) => (issueOrder.get(left) ?? 0) - (issueOrder.get(right) ?? 0))
+	}
+
+	let rootKeys = issues
+		.map((issue) => normalizeIssueListIdKey(issue.id))
+		.filter((issueKey) => {
+			const parentKey = parentByChild.get(issueKey)
+			return parentKey === undefined || !issuesByKey.has(parentKey)
+		})
+	rootKeys.sort((left, right) => (issueOrder.get(left) ?? 0) - (issueOrder.get(right) ?? 0))
+	if (rootKeys.length === 0 && issues.length > 0) {
+		rootKeys = [normalizeIssueListIdKey(issues[0].id)]
+	}
+
+	const lines: string[] = []
+	const rootIds = rootKeys.flatMap((issueKey) => {
+		const issueId = keyToIssueId.get(issueKey)
+		return issueId ? [issueId] : []
+	})
+	lines.push(`Top-level issues: ${rootIds.length > 0 ? rootIds.join(", ") : "(none)"}`)
+
+	const visited = new Set<string>()
+	const renderNode = (issueKey: string, depth: number, ancestry: ReadonlySet<string>): void => {
+		const issue = issuesByKey.get(issueKey)
+		if (!issue) return
+		visited.add(issueKey)
+		const indent = "  ".repeat(depth)
+		lines.push(`${indent}${formatIssueSummaryLine(issue, options)}`)
+
+		const blockedBy = collectIssueRelationshipIds(issue.dependencies, "blocks", knownIssueIds)
+		if (blockedBy.length > 0) {
+			lines.push(`${indent}  blocked-by: ${blockedBy.join(", ")}`)
+		}
+		const blocks = collectIssueRelationshipIds(issue.dependents, "blocks", knownIssueIds)
+		if (blocks.length > 0) {
+			lines.push(`${indent}  blocks: ${blocks.join(", ")}`)
+		}
+		const related = Array.from(
+			new Set([
+				...collectIssueRelationshipIds(issue.dependencies, "related", knownIssueIds),
+				...collectIssueRelationshipIds(issue.dependents, "related", knownIssueIds),
+			]),
+		)
+		if (related.length > 0) {
+			lines.push(`${indent}  related: ${related.join(", ")}`)
+		}
+		const discoveredFrom = collectIssueRelationshipIds(
+			issue.dependencies,
+			"discovered-from",
+			knownIssueIds,
+		)
+		if (discoveredFrom.length > 0) {
+			lines.push(`${indent}  discovered-from: ${discoveredFrom.join(", ")}`)
+		}
+		const discoveredBy = collectIssueRelationshipIds(
+			issue.dependents,
+			"discovered-from",
+			knownIssueIds,
+		)
+		if (discoveredBy.length > 0) {
+			lines.push(`${indent}  discovered-by: ${discoveredBy.join(", ")}`)
+		}
+		const externalParents = collectIssueExternalParentIds(issue, knownIssueIds)
+		if (externalParents.length > 0) {
+			lines.push(`${indent}  parent(outside-list): ${externalParents.join(", ")}`)
+		}
+
+		const nextAncestry = new Set(ancestry)
+		nextAncestry.add(issueKey)
+		for (const childKey of childrenByParent.get(issueKey) ?? []) {
+			if (nextAncestry.has(childKey)) {
+				const childId = keyToIssueId.get(childKey) ?? childKey
+				lines.push(`${indent}  cycle-detected: ${childId}`)
+				continue
+			}
+			renderNode(childKey, depth + 1, nextAncestry)
+		}
+	}
+
+	for (const rootKey of rootKeys) {
+		renderNode(rootKey, 0, new Set())
+	}
+
+	const unrenderedKeys = issues
+		.map((issue) => normalizeIssueListIdKey(issue.id))
+		.filter((issueKey) => !visited.has(issueKey))
+	if (unrenderedKeys.length > 0) {
+		lines.push("Additional linked issues:")
+		unrenderedKeys.sort((left, right) => (issueOrder.get(left) ?? 0) - (issueOrder.get(right) ?? 0))
+		for (const issueKey of unrenderedKeys) {
+			renderNode(issueKey, 1, new Set())
+		}
+	}
+
+	return lines
+}
 
 /**
  * Create a new issue
@@ -5734,6 +5937,11 @@ const issueListCommand = Command.make(
 			Options.withAlias("l"),
 			Options.optional,
 			Options.withDescription("Maximum number of issues to return"),
+		),
+		deps: Options.boolean("deps").pipe(
+			Options.withDescription(
+				"Show dependency graph context including top-level issues and linked relationships",
+			),
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
