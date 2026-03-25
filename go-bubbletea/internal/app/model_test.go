@@ -135,6 +135,38 @@ func TestHelperMethods(t *testing.T) {
 }
 
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
+	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
+		repoDir := t.TempDir()
+		azBinDir := t.TempDir()
+		azPath := filepath.Join(azBinDir, "az")
+		azdPath := filepath.Join(azBinDir, "azd")
+		if err := os.WriteFile(azPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write az fixture: %v", err)
+		}
+		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write azd fixture: %v", err)
+		}
+
+		origProcessArgs := processArgs
+		origLookupPath := lookupPath
+		t.Cleanup(func() {
+			processArgs = origProcessArgs
+			lookupPath = origLookupPath
+		})
+
+		processArgs = func() []string { return []string{"az"} }
+		lookupPath = func(file string) (string, error) {
+			if file == "az" {
+				return azPath, nil
+			}
+			return "", fmt.Errorf("not found: %s", file)
+		}
+
+		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
+			t.Fatalf("expected %q, got %q", azdPath, got)
+		}
+	})
+
 	t.Run("prefers azd sibling of running az executable", func(t *testing.T) {
 		repoDir := t.TempDir()
 		execDir := t.TempDir()
@@ -148,7 +180,13 @@ func TestResolveDaemonBinaryForRepo(t *testing.T) {
 		}
 
 		origExecutablePath := executablePath
+		origProcessArgs := processArgs
+		origLookupPath := lookupPath
 		t.Cleanup(func() { executablePath = origExecutablePath })
+		t.Cleanup(func() { processArgs = origProcessArgs })
+		t.Cleanup(func() { lookupPath = origLookupPath })
+		processArgs = func() []string { return []string{"az"} }
+		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
 		executablePath = func() (string, error) { return azPath, nil }
 
 		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
@@ -168,7 +206,13 @@ func TestResolveDaemonBinaryForRepo(t *testing.T) {
 		}
 
 		origExecutablePath := executablePath
+		origProcessArgs := processArgs
+		origLookupPath := lookupPath
 		t.Cleanup(func() { executablePath = origExecutablePath })
+		t.Cleanup(func() { processArgs = origProcessArgs })
+		t.Cleanup(func() { lookupPath = origLookupPath })
+		processArgs = func() []string { return []string{"az"} }
+		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
 		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
 
 		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
@@ -179,7 +223,13 @@ func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("returns empty when neither source has azd", func(t *testing.T) {
 		repoDir := t.TempDir()
 		origExecutablePath := executablePath
+		origProcessArgs := processArgs
+		origLookupPath := lookupPath
 		t.Cleanup(func() { executablePath = origExecutablePath })
+		t.Cleanup(func() { processArgs = origProcessArgs })
+		t.Cleanup(func() { lookupPath = origLookupPath })
+		processArgs = func() []string { return []string{"az"} }
+		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
 		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
 
 		if got := resolveDaemonBinaryForRepo(repoDir); got != "" {

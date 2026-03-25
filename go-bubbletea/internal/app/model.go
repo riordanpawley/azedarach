@@ -3,9 +3,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -64,6 +66,8 @@ const (
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 var executablePath = os.Executable
+var lookupPath = exec.LookPath
+var processArgs = func() []string { return os.Args }
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -1688,6 +1692,9 @@ func (m Model) daemonProjectID() string {
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {
+	if sibling := resolveDaemonBinaryNearInvokedAz(); sibling != "" {
+		return sibling
+	}
 	if sibling := resolveDaemonBinaryNearExecutable(); sibling != "" {
 		return sibling
 	}
@@ -1713,6 +1720,41 @@ func resolveDaemonBinaryNearExecutable() string {
 		return candidate
 	}
 	return ""
+}
+
+func resolveDaemonBinaryNearInvokedAz() string {
+	args := processArgs()
+	candidates := make([]string, 0, 2)
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		candidates = append(candidates, args[0])
+	}
+	candidates = append(candidates, "az")
+
+	for _, candidate := range candidates {
+		resolved, err := resolveCommandPath(candidate)
+		if err != nil || strings.TrimSpace(resolved) == "" {
+			continue
+		}
+		azd := filepath.Join(filepath.Dir(resolved), "azd")
+		if _, err := os.Stat(azd); err == nil {
+			return azd
+		}
+	}
+
+	return ""
+}
+
+func resolveCommandPath(command string) (string, error) {
+	if command == "" {
+		return "", errors.New("empty command")
+	}
+	if filepath.IsAbs(command) {
+		if _, err := os.Stat(command); err != nil {
+			return "", err
+		}
+		return command, nil
+	}
+	return lookupPath(command)
 }
 
 func resolveInitialProjectName(registry *config.ProjectsRegistry, cwd string) string {
