@@ -21,20 +21,20 @@ type DevServerInfo struct {
 
 // DevServerOverlay is a menu overlay for dev server management
 type DevServerOverlay struct {
-	servers  []DevServerInfo
-	cursor   int
-	beadID   string
-	onToggle func(serverID string) tea.Cmd
-	onView   func(serverID string) tea.Cmd
+	servers   []DevServerInfo
+	cursor    int
+	issueID   string
+	onToggle  func(serverID string) tea.Cmd
+	onView    func(serverID string) tea.Cmd
 	onRestart func(serverID string) tea.Cmd
-	onClose  func() tea.Cmd
-	styles   *Styles
+	onClose   func() tea.Cmd
+	styles    *Styles
 }
 
 // NewDevServerOverlay creates a new dev server overlay
 func NewDevServerOverlay(
 	servers []DevServerInfo,
-	beadID string,
+	issueID string,
 	onToggle func(serverID string) tea.Cmd,
 	onView func(serverID string) tea.Cmd,
 	onRestart func(serverID string) tea.Cmd,
@@ -43,7 +43,7 @@ func NewDevServerOverlay(
 	return &DevServerOverlay{
 		servers:   servers,
 		cursor:    0,
-		beadID:    beadID,
+		issueID:   issueID,
 		onToggle:  onToggle,
 		onView:    onView,
 		onRestart: onRestart,

@@ -4,10 +4,10 @@ import "testing"
 
 func TestErrorCodeTaxonomy(t *testing.T) {
 	cases := []struct {
-		name         string
-		code         ErrorCode
-		valid        bool
-		retryable    bool
+		name          string
+		code          ErrorCode
+		valid         bool
+		retryable     bool
 		compatibility bool
 	}{
 		{name: "invalid request", code: ErrorCodeInvalidRequest, valid: true, retryable: false, compatibility: false},

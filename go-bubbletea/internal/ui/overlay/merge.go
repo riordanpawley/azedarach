@@ -19,14 +19,23 @@ type MergeTarget struct {
 	HasWorktree bool          // Whether this target has a worktree
 }
 
+// MergeSelectMode determines whether the overlay is picking a merge target or an upstream source.
+type MergeSelectMode int
+
+const (
+	MergeSelectModeTarget MergeSelectMode = iota
+	MergeSelectModeUpstreamSource
+)
+
 // MergeSelectOverlay allows selecting a merge target task
 type MergeSelectOverlay struct {
-	source     *domain.Task  // The bead being merged FROM
-	candidates []MergeTarget // Beads that can be merged INTO (including main)
-	cursor     int
-	onMerge    func(targetID string) tea.Cmd
-	onCancel   func() tea.Cmd
-	overlayStyles     *Styles
+	source        *domain.Task  // The issue being merged FROM
+	candidates    []MergeTarget // Issues that can be merged INTO (including main)
+	cursor        int
+	onMerge       func(targetID string) tea.Cmd
+	onCancel      func() tea.Cmd
+	overlayStyles *Styles
+	mode          MergeSelectMode
 }
 
 // MergeTargetSelectedMsg is sent when a merge target is selected
@@ -42,13 +51,34 @@ func NewMergeSelectOverlay(
 	onMerge func(targetID string) tea.Cmd,
 	onCancel func() tea.Cmd,
 ) *MergeSelectOverlay {
+	return newMergeSelectOverlay(source, candidates, onMerge, onCancel, MergeSelectModeTarget)
+}
+
+// NewMergeSourceSelectOverlay creates a new upstream-source selection overlay.
+func NewMergeSourceSelectOverlay(
+	target *domain.Task,
+	candidates []MergeTarget,
+	onMerge func(targetID string) tea.Cmd,
+	onCancel func() tea.Cmd,
+) *MergeSelectOverlay {
+	return newMergeSelectOverlay(target, candidates, onMerge, onCancel, MergeSelectModeUpstreamSource)
+}
+
+func newMergeSelectOverlay(
+	source *domain.Task,
+	candidates []MergeTarget,
+	onMerge func(targetID string) tea.Cmd,
+	onCancel func() tea.Cmd,
+	mode MergeSelectMode,
+) *MergeSelectOverlay {
 	return &MergeSelectOverlay{
-		source:     source,
-		candidates: candidates,
-		cursor:     0,
-		onMerge:    onMerge,
-		onCancel:   onCancel,
-		overlayStyles:     New(),
+		source:        source,
+		candidates:    candidates,
+		cursor:        0,
+		onMerge:       onMerge,
+		onCancel:      onCancel,
+		overlayStyles: New(),
+		mode:          mode,
 	}
 }
 
@@ -88,8 +118,11 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *MergeSelectOverlay) View() string {
 	var b strings.Builder
 
-	// Header showing source bead
+	// Header showing the merge direction.
 	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID))
+	if m.mode == MergeSelectModeUpstreamSource {
+		header = fmt.Sprintf("Merge into %s from:", m.overlayStyles.MenuKey.Render(m.source.ID))
+	}
 	b.WriteString(m.overlayStyles.Title.Render(header))
 	b.WriteString("\n\n")
 
@@ -125,9 +158,12 @@ func (m *MergeSelectOverlay) renderCandidate(target MergeTarget, isActive bool) 
 	}
 	parts = append(parts, cursor)
 
-	// Main branch gets special rendering
+	// Base branch gets special rendering.
 	if target.IsMain {
-		label := "main"
+		label := target.Label
+		if label == "" {
+			label = "main"
+		}
 		if isActive {
 			label = m.overlayStyles.MenuItemActive.Render(label)
 		} else {
@@ -137,7 +173,7 @@ func (m *MergeSelectOverlay) renderCandidate(target MergeTarget, isActive bool) 
 				Render(label)
 		}
 		parts = append(parts, label)
-		parts = append(parts, m.overlayStyles.MenuItemDisabled.Render("(main branch)"))
+		parts = append(parts, m.overlayStyles.MenuItemDisabled.Render("(base branch)"))
 		return strings.Join(parts, "")
 	}
 
@@ -197,6 +233,15 @@ func (m *MergeSelectOverlay) selectCurrent() tea.Cmd {
 	}
 
 	return func() tea.Msg {
+		if m.mode == MergeSelectModeUpstreamSource {
+			return SelectionMsg{
+				Key: "merge",
+				Value: MergeTargetSelectedMsg{
+					SourceID: target.ID,
+					TargetID: m.source.ID,
+				},
+			}
+		}
 		return SelectionMsg{
 			Key: "merge",
 			Value: MergeTargetSelectedMsg{
@@ -209,6 +254,9 @@ func (m *MergeSelectOverlay) selectCurrent() tea.Cmd {
 
 // Title returns the overlay title
 func (m *MergeSelectOverlay) Title() string {
+	if m.mode == MergeSelectModeUpstreamSource {
+		return "Select Upstream Source"
+	}
 	return "Select Merge Target"
 }
 

@@ -46,10 +46,10 @@ func GenerateLabels(count int) []string {
 
 // JumpMode is an overlay that shows jump labels for quick navigation
 type JumpMode struct {
-	labels  map[string]int // label -> task index (flat across all columns)
-	input   string         // accumulated input
-	maxLen  int            // maximum label length
-	styles  *Styles
+	labels map[string]int // label -> task index (flat across all columns)
+	input  string         // accumulated input
+	maxLen int            // maximum label length
+	styles *Styles
 }
 
 // JumpSelectedMsg is sent when a jump target is selected
@@ -71,10 +71,10 @@ func NewJumpMode(taskCount int) *JumpMode {
 	}
 
 	return &JumpMode{
-		labels:  labelMap,
-		input:   "",
-		maxLen:  maxLen,
-		styles:  New(),
+		labels: labelMap,
+		input:  "",
+		maxLen: maxLen,
+		styles: New(),
 	}
 }
 

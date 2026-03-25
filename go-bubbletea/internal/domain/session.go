@@ -4,7 +4,7 @@ import "time"
 
 // Session represents an active Claude session
 type Session struct {
-	BeadID    string       `json:"bead_id"`
+	IssueID   string       `json:"issue_id"`
 	State     SessionState `json:"state"`
 	StartedAt *time.Time   `json:"started_at,omitempty"`
 	Worktree  string       `json:"worktree,omitempty"`

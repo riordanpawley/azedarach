@@ -1202,6 +1202,34 @@ func TestIssuesLoadedReconcilesSelection(t *testing.T) {
 	}
 }
 
+func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-5", 3)
+
+	result, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-2", Title: "Task 2", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeBug},
+			{ID: "az-3", Title: "Task 3", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 10,
+	})
+	newModel := result.(Model)
+
+	cursor := newModel.nav.GetCursor()
+	if cursor.TaskID == "" {
+		t.Fatal("expected cursor to stay on a valid task after refresh")
+	}
+	validTaskIDs := map[string]struct{}{
+		"az-1": {},
+		"az-2": {},
+		"az-3": {},
+	}
+	if _, ok := validTaskIDs[cursor.TaskID]; !ok {
+		t.Fatalf("cursor task %q not present in refreshed task set", cursor.TaskID)
+	}
+}
+
 func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	t.Setenv("TMUX", "")
 

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/core/phases"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -177,6 +179,51 @@ func TestRenderCard(t *testing.T) {
 				t.Errorf("RenderCard() output mismatch\nGot:\n%s\n\nWant:\n%s", got, string(want))
 			}
 		})
+	}
+}
+
+func TestRenderCard_ShowsBlockedPhaseChip(t *testing.T) {
+	s := styles.New()
+
+	blocker := domain.Task{
+		ID:       "az-blocker",
+		Title:    "Blocker",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	}
+	blocked := domain.Task{
+		ID:       "az-blocked",
+		Title:    "Blocked",
+		Status:   domain.StatusBlocked,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: blocker.ID, Type: domain.DependencyBlocks},
+		},
+	}
+
+	tasks := map[string]domain.Task{
+		blocker.ID: blocker,
+		blocked.ID: blocked,
+	}
+	taskIDs := map[string]bool{
+		blocker.ID: true,
+		blocked.ID: true,
+	}
+	phaseInfo := phases.ComputeDependencyPhases(taskIDs, tasks)
+
+	blockerPhase := phaseInfo.Phases[blocker.ID]
+	blockedPhase := phaseInfo.Phases[blocked.ID]
+
+	blockerView := normalizeBoardOutput(renderCard(blocker, false, false, 80, &blockerPhase, true, s))
+	blockedView := normalizeBoardOutput(renderCard(blocked, false, false, 80, &blockedPhase, true, s))
+
+	if !strings.Contains(blockerView, "Φ0") {
+		t.Fatalf("expected ready blocker chip in view, got %q", blockerView)
+	}
+	if !strings.Contains(blockedView, "Φ1") {
+		t.Fatalf("expected blocked chip in view, got %q", blockedView)
 	}
 }
 

@@ -36,9 +36,9 @@ type sessionCommandBody struct {
 }
 
 type sessionResultBody struct {
-	ProjectID string                    `json:"project_id"`
-	Session   daemonstate.Session       `json:"session"`
-	Event     daemonstate.SessionEvent  `json:"event"`
+	ProjectID string                   `json:"project_id"`
+	Session   daemonstate.Session      `json:"session"`
+	Event     daemonstate.SessionEvent `json:"event"`
 }
 
 // Handle executes one session lifecycle command from a daemon request envelope.

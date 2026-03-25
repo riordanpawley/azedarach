@@ -48,6 +48,7 @@ func TestPRWorkflow_Create(t *testing.T) {
 		wantNumber int
 		wantDraft  bool
 		wantErr    bool
+		wantErrContains string
 	}{
 		{
 			name: "successful draft PR creation",
@@ -57,7 +58,7 @@ func TestPRWorkflow_Create(t *testing.T) {
 				Branch:     "feature/x",
 				BaseBranch: "main",
 				Draft:      true,
-				BeadID:     "az-123",
+				IssueID:    "az-123",
 			},
 			createOut: "https://github.com/owner/repo/pull/42\n",
 			getOut: `{
@@ -80,7 +81,7 @@ func TestPRWorkflow_Create(t *testing.T) {
 				Branch:     "fix/bug-y",
 				BaseBranch: "main",
 				Draft:      false,
-				BeadID:     "az-456",
+				IssueID:    "az-456",
 			},
 			createOut: "https://github.com/owner/repo/pull/99\n",
 			getOut: `{
@@ -105,6 +106,20 @@ func TestPRWorkflow_Create(t *testing.T) {
 			},
 			createErr: errors.New("gh command failed"),
 			wantErr:   true,
+			wantErrContains: "failed to create PR",
+		},
+		{
+			name: "get command fails after create",
+			params: CreatePRParams{
+				Title:      "Test",
+				Body:       "Test PR",
+				Branch:     "test",
+				BaseBranch: "main",
+			},
+			createOut: "https://github.com/owner/repo/pull/101\n",
+			getErr:    errors.New("gh command failed"),
+			wantErr:   true,
+			wantErrContains: "failed to get PR info",
 		},
 	}
 
@@ -128,6 +143,9 @@ func TestPRWorkflow_Create(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				return
 			}
 
@@ -148,6 +166,7 @@ func TestPRWorkflow_Get(t *testing.T) {
 		wantNumber int
 		wantState  string
 		wantErr    bool
+		wantErrContains string
 	}{
 		{
 			name:   "successful get",
@@ -184,12 +203,14 @@ func TestPRWorkflow_Get(t *testing.T) {
 			branch:  "test",
 			output:  `not json`,
 			wantErr: true,
+			wantErrContains: "failed to parse PR JSON",
 		},
 		{
 			name:    "runner error",
 			branch:  "test",
 			runErr:  errors.New("gh command failed"),
 			wantErr: true,
+			wantErrContains: "failed to get PR info for branch test",
 		},
 	}
 
@@ -205,6 +226,9 @@ func TestPRWorkflow_Get(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				return
 			}
 
@@ -223,6 +247,7 @@ func TestPRWorkflow_List(t *testing.T) {
 		runErr    error
 		wantCount int
 		wantErr   bool
+		wantErrContains string
 	}{
 		{
 			name: "multiple PRs",
@@ -257,11 +282,13 @@ func TestPRWorkflow_List(t *testing.T) {
 			name:    "invalid json",
 			output:  `{invalid}`,
 			wantErr: true,
+			wantErrContains: "failed to parse PR list JSON",
 		},
 		{
 			name:    "runner error",
 			runErr:  errors.New("list failed"),
 			wantErr: true,
+			wantErrContains: "failed to list PRs",
 		},
 	}
 
@@ -277,6 +304,9 @@ func TestPRWorkflow_List(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				return
 			}
 
@@ -293,6 +323,7 @@ func TestPRWorkflow_Merge(t *testing.T) {
 		strategy string
 		runErr   error
 		wantErr  bool
+		wantErrContains string
 	}{
 		{
 			name:     "squash merge",
@@ -314,6 +345,7 @@ func TestPRWorkflow_Merge(t *testing.T) {
 			prNumber: 45,
 			strategy: "invalid",
 			wantErr:  true,
+			wantErrContains: "invalid merge strategy: invalid",
 		},
 		{
 			name:     "runner error",
@@ -321,6 +353,7 @@ func TestPRWorkflow_Merge(t *testing.T) {
 			strategy: "squash",
 			runErr:   errors.New("merge failed"),
 			wantErr:  true,
+			wantErrContains: "failed to merge PR 46",
 		},
 	}
 
@@ -333,6 +366,9 @@ func TestPRWorkflow_Merge(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				return
 			}
 
@@ -347,6 +383,7 @@ func TestPRWorkflow_Close(t *testing.T) {
 		prNumber int
 		runErr   error
 		wantErr  bool
+		wantErrContains string
 	}{
 		{
 			name:     "successful close",
@@ -357,6 +394,7 @@ func TestPRWorkflow_Close(t *testing.T) {
 			prNumber: 100,
 			runErr:   errors.New("close failed"),
 			wantErr:  true,
+			wantErrContains: "failed to close PR 100",
 		},
 	}
 
@@ -369,6 +407,9 @@ func TestPRWorkflow_Close(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				return
 			}
 
@@ -383,6 +424,7 @@ func TestPRWorkflow_MarkReady(t *testing.T) {
 		prNumber int
 		runErr   error
 		wantErr  bool
+		wantErrContains string
 	}{
 		{
 			name:     "successful mark ready",
@@ -393,6 +435,7 @@ func TestPRWorkflow_MarkReady(t *testing.T) {
 			prNumber: 43,
 			runErr:   errors.New("mark ready failed"),
 			wantErr:  true,
+			wantErrContains: "failed to mark PR 43 ready",
 		},
 	}
 
@@ -405,6 +448,9 @@ func TestPRWorkflow_MarkReady(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				return
 			}
 

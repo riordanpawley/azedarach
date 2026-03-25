@@ -11,14 +11,14 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 // ApplyTaskService captures the task mutation operations needed by the bulk apply executor.
 type ApplyTaskService interface {
-	Create(context.Context, beads.CreateTaskParams) (string, error)
+	Create(context.Context, issues.CreateTaskParams) (string, error)
 	Update(context.Context, string, domain.Status) error
-	UpdateDetails(context.Context, string, beads.UpdateTaskParams) error
+	UpdateDetails(context.Context, string, issues.UpdateTaskParams) error
 	Delete(context.Context, string) error
 	Archive(context.Context, string) error
 }
@@ -219,7 +219,7 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
-		taskID, err := h.service.Create(ctx, beads.CreateTaskParams{
+		taskID, err := h.service.Create(ctx, issues.CreateTaskParams{
 			Title:       payload.Title,
 			Description: payload.Description,
 			Type:        taskType,
@@ -248,7 +248,7 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
-		if err := h.service.UpdateDetails(ctx, payload.TaskID, beads.UpdateTaskParams{
+		if err := h.service.UpdateDetails(ctx, payload.TaskID, issues.UpdateTaskParams{
 			Title:       payload.Title,
 			Description: payload.Description,
 			Type:        taskType,

@@ -55,14 +55,14 @@ func NewWorktreeHandler(service worktreeService) *WorktreeHandler {
 
 type worktreeCommandBody struct {
 	ProjectID  string `json:"project_id"`
-	BeadID     string `json:"bead_id,omitempty"`
+	IssueID    string `json:"issue_id,omitempty"`
 	BaseBranch string `json:"base_branch,omitempty"`
 }
 
 type worktreePayload struct {
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
-	BeadID string `json:"bead_id"`
+	Path    string `json:"path"`
+	Branch  string `json:"branch"`
+	IssueID string `json:"issue_id"`
 }
 
 type worktreeListResultBody struct {
@@ -77,7 +77,7 @@ type worktreeResultBody struct {
 
 type worktreeRemoveResultBody struct {
 	ProjectID string `json:"project_id"`
-	BeadID    string `json:"bead_id"`
+	IssueID   string `json:"issue_id"`
 }
 
 // Handle executes one worktree command from a daemon request envelope.
@@ -135,16 +135,16 @@ func (h *WorktreeHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		return resp
 
 	case CommandWorktreeCreate:
-		if cmd.ProjectID == "" || cmd.BeadID == "" || cmd.BaseBranch == "" {
+		if cmd.ProjectID == "" || cmd.IssueID == "" || cmd.BaseBranch == "" {
 			resp.Error = &protocol.ErrorEnvelope{
 				Code:      protocol.ErrorCodeInvalidRequest,
-				Message:   "missing required fields: project_id/bead_id/base_branch",
+				Message:   "missing required fields: project_id/issue_id/base_branch",
 				Retryable: false,
 			}
 			return resp
 		}
 
-		worktree, err := h.service.Create(ctx, cmd.ProjectID, cmd.BeadID, cmd.BaseBranch)
+		worktree, err := h.service.Create(ctx, cmd.ProjectID, cmd.IssueID, cmd.BaseBranch)
 		if err != nil {
 			resp.Error = mapWorktreeError(err)
 			return resp
@@ -168,23 +168,23 @@ func (h *WorktreeHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		return resp
 
 	case CommandWorktreeRemove:
-		if cmd.ProjectID == "" || cmd.BeadID == "" {
+		if cmd.ProjectID == "" || cmd.IssueID == "" {
 			resp.Error = &protocol.ErrorEnvelope{
 				Code:      protocol.ErrorCodeInvalidRequest,
-				Message:   "missing required fields: project_id/bead_id",
+				Message:   "missing required fields: project_id/issue_id",
 				Retryable: false,
 			}
 			return resp
 		}
 
-		if err := h.service.Delete(ctx, cmd.ProjectID, cmd.BeadID); err != nil {
+		if err := h.service.Delete(ctx, cmd.ProjectID, cmd.IssueID); err != nil {
 			resp.Error = mapWorktreeError(err)
 			return resp
 		}
 
 		body, err := json.Marshal(worktreeRemoveResultBody{
 			ProjectID: cmd.ProjectID,
-			BeadID:    cmd.BeadID,
+			IssueID:   cmd.IssueID,
 		})
 		if err != nil {
 			resp.Error = &protocol.ErrorEnvelope{
@@ -258,9 +258,9 @@ func mapWorktreePayload(wt *git.Worktree) worktreePayload {
 	}
 
 	return worktreePayload{
-		Path:   wt.Path,
-		Branch: wt.Branch,
-		BeadID: wt.BeadID,
+		Path:    wt.Path,
+		Branch:  wt.Branch,
+		IssueID: wt.IssueID,
 	}
 }
 
@@ -341,8 +341,8 @@ func normalizeCleanupOrphanedResult(result *CleanupOrphanedResult) {
 
 	sortWorktrees := func(worktrees []git.Worktree) {
 		sort.SliceStable(worktrees, func(i, j int) bool {
-			if worktrees[i].BeadID != worktrees[j].BeadID {
-				return worktrees[i].BeadID < worktrees[j].BeadID
+			if worktrees[i].IssueID != worktrees[j].IssueID {
+				return worktrees[i].IssueID < worktrees[j].IssueID
 			}
 			if worktrees[i].Path != worktrees[j].Path {
 				return worktrees[i].Path < worktrees[j].Path

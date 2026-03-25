@@ -1,0 +1,4 @@
+./patterns.go
+./session.go
+./patterns_test.go
+./session_test.go

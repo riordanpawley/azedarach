@@ -85,13 +85,13 @@ var statePatterns = []StatePattern{
 	{domain.SessionError, regexp.MustCompile(`(?m)^\s*at\s+.*:\d+:\d+`), PriorityError}, // Stack trace line
 
 	// File system errors
-	{domain.SessionError, regexp.MustCompile(`ENOENT`), PriorityError},   // File not found
-	{domain.SessionError, regexp.MustCompile(`EACCES`), PriorityError},   // Permission denied
-	{domain.SessionError, regexp.MustCompile(`EEXIST`), PriorityError},   // File exists
-	{domain.SessionError, regexp.MustCompile(`EISDIR`), PriorityError},   // Is a directory
-	{domain.SessionError, regexp.MustCompile(`ENOTDIR`), PriorityError},  // Not a directory
-	{domain.SessionError, regexp.MustCompile(`EMFILE`), PriorityError},   // Too many open files
-	{domain.SessionError, regexp.MustCompile(`ENOSPC`), PriorityError},   // No space left
+	{domain.SessionError, regexp.MustCompile(`ENOENT`), PriorityError},  // File not found
+	{domain.SessionError, regexp.MustCompile(`EACCES`), PriorityError},  // Permission denied
+	{domain.SessionError, regexp.MustCompile(`EEXIST`), PriorityError},  // File exists
+	{domain.SessionError, regexp.MustCompile(`EISDIR`), PriorityError},  // Is a directory
+	{domain.SessionError, regexp.MustCompile(`ENOTDIR`), PriorityError}, // Not a directory
+	{domain.SessionError, regexp.MustCompile(`EMFILE`), PriorityError},  // Too many open files
+	{domain.SessionError, regexp.MustCompile(`ENOSPC`), PriorityError},  // No space left
 	{domain.SessionError, regexp.MustCompile(`(?i)permission denied`), PriorityError},
 	{domain.SessionError, regexp.MustCompile(`(?i)file not found`), PriorityError},
 	{domain.SessionError, regexp.MustCompile(`(?i)no such file`), PriorityError},

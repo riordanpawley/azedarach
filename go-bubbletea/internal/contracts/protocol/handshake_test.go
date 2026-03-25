@@ -4,11 +4,11 @@ import "testing"
 
 func TestNegotiateHelloCompatibilityMatrix(t *testing.T) {
 	tests := []struct {
-		name              string
-		clientVersion     Version
-		wantAccepted      bool
-		wantErrorCode     ErrorCode
-		wantRetryAfter    bool
+		name           string
+		clientVersion  Version
+		wantAccepted   bool
+		wantErrorCode  ErrorCode
+		wantRetryAfter bool
 	}{
 		{
 			name:          "match version accepted",

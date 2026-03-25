@@ -57,6 +57,13 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
    - If an active-path placeholder remains, the issue must stay partial/in-progress with linked follow-up issue IDs.
 12. **Closure Evidence (Required)**:
    - For architecture issues, close only after notes include commands run, key outputs, files changed, and explicit AC pass/fail checklist.
+13. **Binary Boundary (Critical)**:
+   - PATH `az` belongs to the TypeScript implementation (`ts-opentui`), not `go-bubbletea`.
+   - Never use PATH `az` to test Go CLI/TUI/daemon behavior.
+   - For Go validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from `go-bubbletea/`.
+14. **Daemon Restart Policy**:
+   - For operational daemon restarts, use `az daemon restart` (from `go-bubbletea/` with the Go binary/path).
+   - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
 
 ## Quick Commands
 

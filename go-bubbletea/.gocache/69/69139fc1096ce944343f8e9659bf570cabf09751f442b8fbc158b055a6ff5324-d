@@ -1,0 +1,4 @@
+./daemon.go
+./handler_adapters.go
+./session_commands.go
+./task_commands.go

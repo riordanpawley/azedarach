@@ -7,10 +7,10 @@ import (
 )
 
 // PortAllocator manages port allocation for dev servers.
-// It ensures each bead gets a unique available port.
+// It ensures each issue gets a unique available port.
 type PortAllocator struct {
 	mu        sync.Mutex
-	allocated map[int]string // port -> beadID
+	allocated map[int]string // port -> issueID
 	basePort  int
 }
 
@@ -22,15 +22,15 @@ func NewPortAllocator(basePort int) *PortAllocator {
 	}
 }
 
-// Allocate finds an available port starting from basePort and assigns it to the beadID.
-// Returns an error if the bead already has a port or if no ports are available.
-func (p *PortAllocator) Allocate(beadID string) (int, error) {
+// Allocate finds an available port starting from basePort and assigns it to the issueID.
+// Returns an error if the issue already has a port or if no ports are available.
+func (p *PortAllocator) Allocate(issueID string) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Check if bead already has a port allocated
+	// Check if issue already has a port allocated
 	for port, id := range p.allocated {
-		if id == beadID {
+		if id == issueID {
 			return port, nil
 		}
 	}
@@ -51,34 +51,34 @@ func (p *PortAllocator) Allocate(beadID string) (int, error) {
 		}
 
 		// Allocate port
-		p.allocated[port] = beadID
+		p.allocated[port] = issueID
 		return port, nil
 	}
 
 	return 0, fmt.Errorf("no available ports found (tried %d ports starting from %d)", maxAttempts, p.basePort)
 }
 
-// Release frees the port allocated to the given beadID.
-func (p *PortAllocator) Release(beadID string) {
+// Release frees the port allocated to the given issueID.
+func (p *PortAllocator) Release(issueID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	for port, id := range p.allocated {
-		if id == beadID {
+		if id == issueID {
 			delete(p.allocated, port)
 			return
 		}
 	}
 }
 
-// GetPort returns the port allocated to the given beadID.
+// GetPort returns the port allocated to the given issueID.
 // Returns 0 and false if no port is allocated.
-func (p *PortAllocator) GetPort(beadID string) (int, bool) {
+func (p *PortAllocator) GetPort(issueID string) (int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	for port, id := range p.allocated {
-		if id == beadID {
+		if id == issueID {
 			return port, true
 		}
 	}

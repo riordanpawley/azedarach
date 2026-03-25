@@ -48,6 +48,8 @@ Select the implementation based on user request or current working directory.
 8. **Spec Sync Discipline (ts-opentui)**: Keep `az spec` requirements/links aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
 9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
+11. **CLI Binary Boundary (Critical)**: PATH `az` is the TypeScript CLI (`ts-opentui`). Do not use PATH `az` to validate `go-bubbletea` runtime behavior.
+12. **Daemon Restart Policy (Go)**: Do not bump protocol/version solely to force a daemon restart. Use `go-bubbletea` CLI daemon control (`az daemon restart` from `go-bubbletea/`) for operational restarts.
 
 ## Quick Commands
 
@@ -73,6 +75,12 @@ az prime                          # Session primer + AI workflow guide
 az impl list                      # Show project implementations/default
 az issue create "Title" --impl ts-opentui
 az issue create "Shared task" --impl ts-opentui --impl go-bubbletea
+
+# go-bubbletea runtime validation (DO NOT use PATH az)
+cd go-bubbletea
+go run ./cmd/az --help            # Go CLI entrypoint
+go run ./cmd/azd --help           # Go daemon entrypoint
+./bin/az --help                   # Built Go CLI binary
 
 # Codex Context
 fd . .codex/skills -td            # List installed local skills

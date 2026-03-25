@@ -268,6 +268,24 @@ func (s *Service) ClearSelection() {
 	s.selectedTasks = make(map[string]bool)
 }
 
+// ReconcileSelection removes selected task IDs that are no longer present.
+func (s *Service) ReconcileSelection(tasks []domain.Task) {
+	if len(s.selectedTasks) == 0 {
+		return
+	}
+
+	present := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		present[task.ID] = struct{}{}
+	}
+
+	for id := range s.selectedTasks {
+		if _, ok := present[id]; !ok {
+			delete(s.selectedTasks, id)
+		}
+	}
+}
+
 // SelectionCount returns the number of selected tasks
 func (s *Service) SelectionCount() int {
 	return len(s.selectedTasks)

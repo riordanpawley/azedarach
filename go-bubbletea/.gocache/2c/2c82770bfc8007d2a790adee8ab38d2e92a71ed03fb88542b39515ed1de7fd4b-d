@@ -1,0 +1,20 @@
+# test log
+getenv TMPDIR
+stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001
+stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon.lock
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001
+stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon.lock
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T/TestStartupReconnectScenarioAC1852051638/001/daemon-events.log
+open /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T

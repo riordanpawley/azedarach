@@ -30,15 +30,15 @@ type SessionMonitor struct {
 
 // monitoredSession represents a session being monitored
 type monitoredSession struct {
-	beadID string
-	cancel context.CancelFunc
-	state  domain.SessionState
+	issueID string
+	cancel  context.CancelFunc
+	state   domain.SessionState
 }
 
 // SessionStateMsg is sent to the Bubble Tea program when state changes
 type SessionStateMsg struct {
-	BeadID string
-	State  domain.SessionState
+	IssueID string
+	State   domain.SessionState
 }
 
 // NewSessionMonitor creates a new session monitor
@@ -51,12 +51,12 @@ func NewSessionMonitor(tmux TmuxClient) *SessionMonitor {
 
 // Start begins monitoring a session
 // Polls every 500ms and sends SessionStateMsg to the program when state changes
-func (m *SessionMonitor) Start(ctx context.Context, beadID string, program ProgramSender) {
+func (m *SessionMonitor) Start(ctx context.Context, issueID string, program ProgramSender) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Stop existing monitor if any
-	if existing, ok := m.sessions[beadID]; ok {
+	if existing, ok := m.sessions[issueID]; ok {
 		existing.cancel()
 	}
 
@@ -64,34 +64,34 @@ func (m *SessionMonitor) Start(ctx context.Context, beadID string, program Progr
 	monitorCtx, cancel := context.WithCancel(ctx)
 
 	session := &monitoredSession{
-		beadID: beadID,
-		cancel: cancel,
-		state:  domain.SessionIdle,
+		issueID: issueID,
+		cancel:  cancel,
+		state:   domain.SessionIdle,
 	}
-	m.sessions[beadID] = session
+	m.sessions[issueID] = session
 
 	// Start monitoring goroutine
 	m.wg.Add(1)
-	go m.monitor(monitorCtx, beadID, program)
+	go m.monitor(monitorCtx, issueID, program)
 }
 
 // Stop stops monitoring a session
-func (m *SessionMonitor) Stop(beadID string) {
+func (m *SessionMonitor) Stop(issueID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if session, ok := m.sessions[beadID]; ok {
+	if session, ok := m.sessions[issueID]; ok {
 		session.cancel()
-		delete(m.sessions, beadID)
+		delete(m.sessions, issueID)
 	}
 }
 
 // GetState returns the current state of a monitored session
-func (m *SessionMonitor) GetState(beadID string) domain.SessionState {
+func (m *SessionMonitor) GetState(issueID string) domain.SessionState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if session, ok := m.sessions[beadID]; ok {
+	if session, ok := m.sessions[issueID]; ok {
 		return session.state
 	}
 	return domain.SessionIdle
@@ -100,9 +100,9 @@ func (m *SessionMonitor) GetState(beadID string) domain.SessionState {
 // StopAll stops monitoring all sessions
 func (m *SessionMonitor) StopAll() {
 	m.mu.Lock()
-	for beadID, session := range m.sessions {
+	for issueID, session := range m.sessions {
 		session.cancel()
-		delete(m.sessions, beadID)
+		delete(m.sessions, issueID)
 	}
 	m.mu.Unlock()
 
@@ -111,7 +111,7 @@ func (m *SessionMonitor) StopAll() {
 }
 
 // monitor is the main monitoring loop for a session
-func (m *SessionMonitor) monitor(ctx context.Context, beadID string, program ProgramSender) {
+func (m *SessionMonitor) monitor(ctx context.Context, issueID string, program ProgramSender) {
 	defer m.wg.Done()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -123,7 +123,7 @@ func (m *SessionMonitor) monitor(ctx context.Context, beadID string, program Pro
 			return
 		case <-ticker.C:
 			// Capture tmux pane output
-			output, err := m.tmux.CapturePane(ctx, beadID)
+			output, err := m.tmux.CapturePane(ctx, issueID)
 			if err != nil {
 				// On error, continue monitoring (session might not be ready yet)
 				continue
@@ -134,7 +134,7 @@ func (m *SessionMonitor) monitor(ctx context.Context, beadID string, program Pro
 
 			// Check if state changed
 			m.mu.Lock()
-			session, ok := m.sessions[beadID]
+			session, ok := m.sessions[issueID]
 			if !ok {
 				m.mu.Unlock()
 				return // Session was stopped
@@ -147,8 +147,8 @@ func (m *SessionMonitor) monitor(ctx context.Context, beadID string, program Pro
 				// Send state change message to program
 				if program != nil {
 					program.Send(SessionStateMsg{
-						BeadID: beadID,
-						State:  newState,
+						IssueID: issueID,
+						State:   newState,
 					})
 				}
 			} else {

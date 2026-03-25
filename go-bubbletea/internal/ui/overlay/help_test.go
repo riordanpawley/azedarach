@@ -66,14 +66,14 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 
 	// Check that view contains some key bindings from different categories
 	expectedBindings := []string{
-		"h/l",        // Navigation
-		"j/k",        // Navigation
-		"Space",      // Actions
-		"Enter",      // Actions
-		"/",          // Modes
-		"?",          // Modes
-		"Tab",        // Other
-		"Quit",       // Other
+		"h/l",   // Navigation
+		"j/k",   // Navigation
+		"Space", // Actions
+		"Enter", // Actions
+		"/",     // Modes
+		"?",     // Modes
+		"Tab",   // Other
+		"Quit",  // Other
 	}
 
 	for _, binding := range expectedBindings {
@@ -139,7 +139,7 @@ func TestHelpOverlay_Update_ScrollDown(t *testing.T) {
 
 func TestHelpOverlay_Update_ScrollUp(t *testing.T) {
 	help := NewHelpOverlay()
-	help.scroll = 5     // Start scrolled down
+	help.scroll = 5 // Start scrolled down
 	help.viewHeight = 5
 	help.maxScroll = 10
 
@@ -240,8 +240,8 @@ func TestHelpOverlay_GetCategories(t *testing.T) {
 
 func TestHelpOverlay_ScrollIndicator(t *testing.T) {
 	help := NewHelpOverlay()
-	help.viewHeight = 3   // Very small viewport to force scrolling
-	help.maxScroll = 10   // Content requires scrolling
+	help.viewHeight = 3 // Very small viewport to force scrolling
+	help.maxScroll = 10 // Content requires scrolling
 
 	view := help.View()
 
@@ -253,10 +253,10 @@ func TestHelpOverlay_ScrollIndicator(t *testing.T) {
 
 func TestMinMaxHelpers(t *testing.T) {
 	tests := []struct {
-		name     string
-		a, b     int
-		wantMin  int
-		wantMax  int
+		name    string
+		a, b    int
+		wantMin int
+		wantMax int
 	}{
 		{"positive numbers", 5, 10, 5, 10},
 		{"negative numbers", -5, -10, -10, -5},

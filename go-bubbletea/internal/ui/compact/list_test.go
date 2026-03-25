@@ -321,8 +321,8 @@ func TestRenderSessionIcon(t *testing.T) {
 				Priority: domain.P2,
 				Type:     domain.TypeTask,
 				Session: &domain.Session{
-					BeadID: "az-test",
-					State:  state,
+					IssueID: "az-test",
+					State:   state,
 				},
 				CreatedAt: time.Now(),
 				UpdatedAt: time.Now(),

@@ -79,7 +79,7 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	}
 
 	session := &domain.Session{
-		BeadID:    "az-456",
+		IssueID:   "az-456",
 		State:     domain.SessionBusy,
 		StartedAt: &startTime,
 		Worktree:  "/path/to/worktree",
@@ -115,6 +115,50 @@ func TestDetailPanelViewWithParent(t *testing.T) {
 
 	assert.Contains(t, view, "Parent:")
 	assert.Contains(t, view, "az-parent")
+}
+
+func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
+	taskID := "az-current"
+	task := domain.Task{
+		ID:       taskID,
+		Title:    "Current task",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: "az-downstream", Type: domain.DependencyBlocks},
+		},
+	}
+
+	related := []domain.Task{
+		task,
+		{
+			ID:       "az-upstream",
+			Title:    "Upstream task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: taskID, Type: domain.DependencyRelatedTo},
+			},
+		},
+		{
+			ID:       "az-downstream",
+			Title:    "Downstream task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		},
+	}
+
+	panel := NewDetailPanel(task, nil).WithRelatedTasks(related)
+	view := panel.View()
+
+	assert.Contains(t, view, "Dependencies")
+	assert.Contains(t, view, "Outgoing")
+	assert.Contains(t, view, "blocks -> az-downstream")
+	assert.Contains(t, view, "Incoming")
+	assert.Contains(t, view, "related_to <- az-upstream")
 }
 
 func TestDetailPanelScrolling(t *testing.T) {

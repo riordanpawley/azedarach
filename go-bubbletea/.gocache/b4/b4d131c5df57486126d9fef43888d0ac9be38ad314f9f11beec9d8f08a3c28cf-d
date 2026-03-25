@@ -1,0 +1,4 @@
+./client.go
+./runner.go
+./sync.go
+./worktree.go

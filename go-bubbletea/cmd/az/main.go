@@ -34,7 +34,7 @@ func main() {
 	switch command {
 	case "start":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az start <bead-id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az start <issue-id>\n")
 			os.Exit(1)
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
@@ -46,7 +46,7 @@ func main() {
 
 	case "attach":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az attach <bead-id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az attach <issue-id>\n")
 			os.Exit(1)
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
@@ -58,7 +58,7 @@ func main() {
 
 	case "kill":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az kill <bead-id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: az kill <issue-id>\n")
 			os.Exit(1)
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
@@ -69,15 +69,15 @@ func main() {
 		}
 
 	case "status":
-		beadID := ""
+		issueID := ""
 		if len(commandArgs) == 1 {
-			beadID = commandArgs[0]
+			issueID = commandArgs[0]
 		} else if len(commandArgs) > 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az status [bead-id]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az status [issue-id]\n")
 			os.Exit(1)
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StatusCommand(deps, beadID)
+			return cli.StatusCommand(deps, issueID)
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -92,6 +92,18 @@ func main() {
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.ExportCommand(deps, exportOpts)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "daemon":
+		if len(commandArgs) != 1 || commandArgs[0] != "restart" {
+			fmt.Fprintf(os.Stderr, "Usage: az daemon restart\n")
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.RestartDaemonCommand(deps)
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

@@ -446,10 +446,10 @@ func TestNewProjectSelectorWithOptions(t *testing.T) {
 
 func TestProjectSelector_GetMaxCursor(t *testing.T) {
 	tests := []struct {
-		name           string
-		numProjects    int
-		mode           projectSelectorMode
-		expectedMax    int
+		name        string
+		numProjects int
+		mode        projectSelectorMode
+		expectedMax int
 	}{
 		{"empty list mode", 0, projectModeList, 0},
 		{"one project list mode", 1, projectModeList, 0},

@@ -22,12 +22,12 @@ func (m mockWorktreeService) List(ctx context.Context, projectID string) ([]git.
 	return m.listFn(ctx, projectID)
 }
 
-func (m mockWorktreeService) Create(ctx context.Context, projectID, beadID, baseBranch string) (*git.Worktree, error) {
-	return m.createFn(ctx, projectID, beadID, baseBranch)
+func (m mockWorktreeService) Create(ctx context.Context, projectID, issueID, baseBranch string) (*git.Worktree, error) {
+	return m.createFn(ctx, projectID, issueID, baseBranch)
 }
 
-func (m mockWorktreeService) Delete(ctx context.Context, projectID, beadID string) error {
-	return m.deleteFn(ctx, projectID, beadID)
+func (m mockWorktreeService) Delete(ctx context.Context, projectID, issueID string) error {
+	return m.deleteFn(ctx, projectID, issueID)
 }
 
 func (m mockWorktreeService) CleanupOrphaned(ctx context.Context, projectID string) (*CleanupOrphanedResult, error) {
@@ -38,12 +38,12 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 	h := NewWorktreeHandler(mockWorktreeService{
 		listFn: func(context.Context, string) ([]git.Worktree, error) {
 			return []git.Worktree{
-				{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
-				{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
+				{Path: "/tmp/repo-a", Branch: "az/issue-a", IssueID: "issue-a"},
+				{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-b"},
 			}, nil
 		},
 		createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
-			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"}, nil
+			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"}, nil
 		},
 		deleteFn: func(context.Context, string, string) error {
 			return nil
@@ -52,12 +52,12 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 			return &CleanupOrphanedResult{
 				ProjectID: "proj",
 				Removed: []git.Worktree{
-					{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"},
-					{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
+					{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"},
+					{Path: "/tmp/repo-a", Branch: "az/issue-a", IssueID: "issue-a"},
 				},
 				Skipped: []git.Worktree{
-					{Path: "/tmp/repo-d", Branch: "az/bead-d", BeadID: "bead-d"},
-					{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
+					{Path: "/tmp/repo-d", Branch: "az/issue-d", IssueID: "issue-d"},
+					{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-b"},
 				},
 			}, nil
 		},
@@ -88,7 +88,7 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 				if len(body.Worktrees) != 2 {
 					t.Fatalf("worktrees len = %d, want 2", len(body.Worktrees))
 				}
-				if body.Worktrees[0].BeadID != "bead-a" || body.Worktrees[1].BeadID != "bead-b" {
+				if body.Worktrees[0].IssueID != "issue-a" || body.Worktrees[1].IssueID != "issue-b" {
 					t.Fatalf("unexpected worktrees: %+v", body.Worktrees)
 				}
 			},
@@ -98,7 +98,7 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 			command: CommandWorktreeCreate,
 			body: map[string]string{
 				"project_id":  "proj",
-				"bead_id":     "bead-c",
+				"issue_id":    "issue-c",
 				"base_branch": "main",
 			},
 			check: func(t *testing.T, resp protocol.ResponseEnvelope) {
@@ -110,7 +110,7 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 				if err := json.Unmarshal(resp.Body, &body); err != nil {
 					t.Fatalf("unmarshal create body: %v", err)
 				}
-				if body.Worktree.BeadID != "bead-c" || body.Worktree.Path != "/tmp/repo-c" {
+				if body.Worktree.IssueID != "issue-c" || body.Worktree.Path != "/tmp/repo-c" {
 					t.Fatalf("unexpected worktree body: %+v", body.Worktree)
 				}
 			},
@@ -120,7 +120,7 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 			command: CommandWorktreeRemove,
 			body: map[string]string{
 				"project_id": "proj",
-				"bead_id":    "bead-c",
+				"issue_id":   "issue-c",
 			},
 			check: func(t *testing.T, resp protocol.ResponseEnvelope) {
 				t.Helper()
@@ -131,7 +131,7 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 				if err := json.Unmarshal(resp.Body, &body); err != nil {
 					t.Fatalf("unmarshal remove body: %v", err)
 				}
-				if body.ProjectID != "proj" || body.BeadID != "bead-c" {
+				if body.ProjectID != "proj" || body.IssueID != "issue-c" {
 					t.Fatalf("unexpected remove body: %+v", body)
 				}
 			},
@@ -200,7 +200,7 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 			command: CommandWorktreeCreate,
 			body: map[string]string{
 				"project_id":  "proj",
-				"bead_id":     "bead-c",
+				"issue_id":    "issue-c",
 				"base_branch": "main",
 			},
 			err:  ErrWorktreeAlreadyExists,
@@ -211,7 +211,7 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 			command: CommandWorktreeRemove,
 			body: map[string]string{
 				"project_id": "proj",
-				"bead_id":    "bead-c",
+				"issue_id":   "issue-c",
 			},
 			err:  context.DeadlineExceeded,
 			code: protocol.ErrorCodeTimeout,
@@ -374,29 +374,29 @@ func TestMapCleanupOrphanedError(t *testing.T) {
 func TestNormalizeCleanupOrphanedResult(t *testing.T) {
 	result := &CleanupOrphanedResult{
 		Removed: []git.Worktree{
-			{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"},
-			{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
-			{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-a"},
+			{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"},
+			{Path: "/tmp/repo-a", Branch: "az/issue-a", IssueID: "issue-a"},
+			{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-a"},
 		},
 		Skipped: []git.Worktree{
-			{Path: "/tmp/repo-d", Branch: "az/bead-d", BeadID: "bead-d"},
-			{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
+			{Path: "/tmp/repo-d", Branch: "az/issue-d", IssueID: "issue-d"},
+			{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-b"},
 		},
 	}
 
 	normalizeCleanupOrphanedResult(result)
 
 	if got, want := result.Removed, []git.Worktree{
-		{Path: "/tmp/repo-a", Branch: "az/bead-a", BeadID: "bead-a"},
-		{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-a"},
-		{Path: "/tmp/repo-c", Branch: "az/bead-c", BeadID: "bead-c"},
+		{Path: "/tmp/repo-a", Branch: "az/issue-a", IssueID: "issue-a"},
+		{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-a"},
+		{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Removed = %+v, want %+v", got, want)
 	}
 
 	if got, want := result.Skipped, []git.Worktree{
-		{Path: "/tmp/repo-b", Branch: "az/bead-b", BeadID: "bead-b"},
-		{Path: "/tmp/repo-d", Branch: "az/bead-d", BeadID: "bead-d"},
+		{Path: "/tmp/repo-b", Branch: "az/issue-b", IssueID: "issue-b"},
+		{Path: "/tmp/repo-d", Branch: "az/issue-d", IssueID: "issue-d"},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Skipped = %+v, want %+v", got, want)
 	}

@@ -16,12 +16,12 @@ func (a worktreeServiceAdapter) List(ctx context.Context, _ string) ([]git.Workt
 	return a.manager.List(ctx)
 }
 
-func (a worktreeServiceAdapter) Create(ctx context.Context, _ string, beadID string, baseBranch string) (*git.Worktree, error) {
-	return a.manager.Create(ctx, beadID, baseBranch)
+func (a worktreeServiceAdapter) Create(ctx context.Context, _ string, issueID string, baseBranch string) (*git.Worktree, error) {
+	return a.manager.Create(ctx, issueID, baseBranch)
 }
 
-func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, beadID string) error {
-	return a.manager.Delete(ctx, beadID)
+func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, issueID string) error {
+	return a.manager.Delete(ctx, issueID)
 }
 
 func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
@@ -34,7 +34,7 @@ func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID s
 		ProjectID: projectID,
 	}
 	for _, wt := range worktrees {
-		if err := a.manager.Delete(ctx, wt.BeadID); err != nil {
+		if err := a.manager.Delete(ctx, wt.IssueID); err != nil {
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}

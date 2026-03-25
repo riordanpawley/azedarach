@@ -28,12 +28,12 @@ type DiffLine struct {
 
 // DiffHunk represents a section of changes in a file
 type DiffHunk struct {
-	Header  string
+	Header   string
 	OldStart int
 	OldCount int
 	NewStart int
 	NewCount int
-	Lines   []DiffLine
+	Lines    []DiffLine
 }
 
 // DiffFile represents changes to a single file
@@ -78,12 +78,12 @@ func (s FileStatus) String() string {
 
 var (
 	// Regex patterns for parsing unified diff format
-	fileHeaderRegex = regexp.MustCompile(`^diff --git a/(.*) b/(.*)$`)
-	oldFileRegex    = regexp.MustCompile(`^--- (.*)$`)
-	newFileRegex    = regexp.MustCompile(`^\+\+\+ (.*)$`)
-	hunkHeaderRegex = regexp.MustCompile(`^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@(.*)$`)
-	renameRegex     = regexp.MustCompile(`^rename from (.*)$`)
-	renameToRegex   = regexp.MustCompile(`^rename to (.*)$`)
+	fileHeaderRegex  = regexp.MustCompile(`^diff --git a/(.*) b/(.*)$`)
+	oldFileRegex     = regexp.MustCompile(`^--- (.*)$`)
+	newFileRegex     = regexp.MustCompile(`^\+\+\+ (.*)$`)
+	hunkHeaderRegex  = regexp.MustCompile(`^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@(.*)$`)
+	renameRegex      = regexp.MustCompile(`^rename from (.*)$`)
+	renameToRegex    = regexp.MustCompile(`^rename to (.*)$`)
 	newFileModeRegex = regexp.MustCompile(`^new file mode`)
 	deletedFileRegex = regexp.MustCompile(`^deleted file mode`)
 )
@@ -114,10 +114,10 @@ func ParseUnifiedDiff(output string) []DiffFile {
 
 			// Start new file
 			currentFile = &DiffFile{
-				Path:      matches[2],
-				OldPath:   matches[1],
-				Status:    FileModified,
-				Hunks:     []DiffHunk{},
+				Path:    matches[2],
+				OldPath: matches[1],
+				Status:  FileModified,
+				Hunks:   []DiffHunk{},
 			}
 			continue
 		}

@@ -16,7 +16,7 @@ type mockDiagnosticsService struct {
 	diagnostics *diagnostics.SystemDiagnostics
 }
 
-func (m *mockDiagnosticsService) CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, beadsPath *string) *diagnostics.SystemDiagnostics {
+func (m *mockDiagnosticsService) CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, issuesPath *string) *diagnostics.SystemDiagnostics {
 	return m.diagnostics
 }
 
@@ -354,6 +354,57 @@ func TestDiagnosticsPanel_View(t *testing.T) {
 				t.Error("View() returned empty string")
 			}
 		})
+	}
+}
+
+func TestDiagnosticsPanel_View_ShowsOperationSummaryAndErrors(t *testing.T) {
+	now := time.Now()
+	mockService := &mockDiagnosticsService{
+		diagnostics: &diagnostics.SystemDiagnostics{
+			Timestamp:    now,
+			OverallState: diagnostics.HealthCritical,
+			Operations: diagnostics.OperationInfo{
+				Total:      4,
+				Busy:       1,
+				Waiting:    1,
+				Done:       1,
+				Error:      1,
+				Cancelable: 2,
+			},
+			Errors: []string{
+				"Session test-error is in error state (worktree: /worktree/error); started 3m 0s ago; inspect recent output or restart the session",
+			},
+			Sessions:  []diagnostics.SessionInfo{},
+			Ports:     []diagnostics.PortInfo{},
+			Worktrees: []diagnostics.WorktreeInfo{},
+			Network: diagnostics.NetworkInfo{
+				IsOnline:  true,
+				LastCheck: now,
+			},
+			System: diagnostics.SystemInfo{
+				GoVersion:    "go1.21",
+				OS:           "linux",
+				Arch:         "amd64",
+				NumGoroutine: 10,
+				MemoryUsage:  1024 * 1024,
+			},
+		},
+	}
+	sessions := make(map[string]*domain.Session)
+
+	panel := NewDiagnosticsPanel(mockService, sessions)
+	panel.currentDiagnostics = mockService.diagnostics
+	panel.activeSection = SectionOverview
+
+	view := panel.View()
+	if !strings.Contains(view, "Operations:") {
+		t.Fatalf("View() missing operations summary: %s", view)
+	}
+	if !strings.Contains(view, "background ops in error") {
+		t.Fatalf("View() missing failure summary: %s", view)
+	}
+	if !strings.Contains(view, "inspect recent output or restart the session") {
+		t.Fatalf("View() missing retry guidance: %s", view)
 	}
 }
 

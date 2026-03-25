@@ -30,12 +30,12 @@ type commandOutputBody struct {
 }
 
 type devServerCommandBody struct {
-	BeadID string `json:"bead_id"`
+	IssueID string `json:"issue_id"`
 }
 
 type devServerResultBody struct {
-	BeadID string           `json:"bead_id"`
-	Server devserver.Server `json:"server"`
+	IssueID string           `json:"issue_id"`
+	Server  devserver.Server `json:"server"`
 }
 
 type worktreeListBody struct {
@@ -44,9 +44,9 @@ type worktreeListBody struct {
 }
 
 type worktreePayload struct {
-	Path   string `json:"path"`
-	Branch string `json:"branch"`
-	BeadID string `json:"bead_id"`
+	Path    string `json:"path"`
+	Branch  string `json:"branch"`
+	IssueID string `json:"issue_id"`
 }
 
 func (c *Client) commandOutput(ctx context.Context, command string, body any) (string, error) {
@@ -71,76 +71,76 @@ func (c *Client) projectRoute() string {
 	return "default"
 }
 
-// StartSession asks the daemon to start one session for bead/task id.
-func (c *Client) StartSession(ctx context.Context, beadID string, baseBranch string) (string, error) {
+// StartSession asks the daemon to start one session for issue/task id.
+func (c *Client) StartSession(ctx context.Context, issueID string, baseBranch string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
 		ProjectID:  c.projectID,
-		SessionID:  beadID,
+		SessionID:  issueID,
 		BaseBranch: baseBranch,
 	})
 }
 
-// StopSession asks the daemon to stop one session for bead/task id.
-func (c *Client) StopSession(ctx context.Context, beadID string) (string, error) {
+// StopSession asks the daemon to stop one session for issue/task id.
+func (c *Client) StopSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStop, sessionCommandBody{
 		ProjectID: c.projectID,
-		SessionID: beadID,
+		SessionID: issueID,
 	})
 }
 
-// DevServerStatus returns daemon-owned devserver status for one bead.
-func (c *Client) DevServerStatus(ctx context.Context, beadID string) (devserver.Server, error) {
+// DevServerStatus returns daemon-owned devserver status for one issue.
+func (c *Client) DevServerStatus(ctx context.Context, issueID string) (devserver.Server, error) {
 	var out devServerResultBody
-	if err := c.commandJSON(ctx, CommandDevServerStatus, devServerCommandBody{BeadID: beadID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandDevServerStatus, devServerCommandBody{IssueID: issueID}, &out); err != nil {
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
 }
 
 // StartDevServer asks daemon to start one devserver.
-func (c *Client) StartDevServer(ctx context.Context, beadID string) (devserver.Server, error) {
+func (c *Client) StartDevServer(ctx context.Context, issueID string) (devserver.Server, error) {
 	var out devServerResultBody
-	if err := c.commandJSON(ctx, CommandDevServerStart, devServerCommandBody{BeadID: beadID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandDevServerStart, devServerCommandBody{IssueID: issueID}, &out); err != nil {
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
 }
 
 // StopDevServer asks daemon to stop one devserver.
-func (c *Client) StopDevServer(ctx context.Context, beadID string) (devserver.Server, error) {
+func (c *Client) StopDevServer(ctx context.Context, issueID string) (devserver.Server, error) {
 	var out devServerResultBody
-	if err := c.commandJSON(ctx, CommandDevServerStop, devServerCommandBody{BeadID: beadID}, &out); err != nil {
+	if err := c.commandJSON(ctx, CommandDevServerStop, devServerCommandBody{IssueID: issueID}, &out); err != nil {
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
 }
 
 // ToggleDevServer toggles running/stopped state through daemon command authority.
-func (c *Client) ToggleDevServer(ctx context.Context, beadID string) (devserver.Server, error) {
-	srv, err := c.DevServerStatus(ctx, beadID)
+func (c *Client) ToggleDevServer(ctx context.Context, issueID string) (devserver.Server, error) {
+	srv, err := c.DevServerStatus(ctx, issueID)
 	if err != nil {
 		var cmdErr *CommandError
 		if errors.As(err, &cmdErr) && cmdErr.Code == protocol.ErrorCodeInvalidRequest {
-			return c.StartDevServer(ctx, beadID)
+			return c.StartDevServer(ctx, issueID)
 		}
 		return devserver.Server{}, err
 	}
 	if srv.Status == "running" {
-		return c.StopDevServer(ctx, beadID)
+		return c.StopDevServer(ctx, issueID)
 	}
-	return c.StartDevServer(ctx, beadID)
+	return c.StartDevServer(ctx, issueID)
 }
 
 // RestartDevServer restarts one devserver through daemon command authority.
-func (c *Client) RestartDevServer(ctx context.Context, beadID string) (devserver.Server, error) {
-	_, err := c.StopDevServer(ctx, beadID)
+func (c *Client) RestartDevServer(ctx context.Context, issueID string) (devserver.Server, error) {
+	_, err := c.StopDevServer(ctx, issueID)
 	if err != nil {
 		var cmdErr *CommandError
 		if !errors.As(err, &cmdErr) || (cmdErr.Code != protocol.ErrorCodeInvalidRequest && cmdErr.Code != protocol.ErrorCodeConflict) {
 			return devserver.Server{}, err
 		}
 	}
-	return c.StartDevServer(ctx, beadID)
+	return c.StartDevServer(ctx, issueID)
 }
 
 // ListWorktrees returns daemon-owned worktrees for the current project route.
@@ -155,9 +155,9 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 	worktrees := make([]git.Worktree, 0, len(out.Worktrees))
 	for _, wt := range out.Worktrees {
 		worktrees = append(worktrees, git.Worktree{
-			Path:   wt.Path,
-			Branch: wt.Branch,
-			BeadID: wt.BeadID,
+			Path:    wt.Path,
+			Branch:  wt.Branch,
+			IssueID: wt.IssueID,
 		})
 	}
 	return worktrees, nil

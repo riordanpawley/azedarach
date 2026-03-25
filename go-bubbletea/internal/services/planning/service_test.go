@@ -319,12 +319,13 @@ func TestService_RefinePlan(t *testing.T) {
 
 func TestService_CreateIssuesFromPlan(t *testing.T) {
 	tests := []struct {
-		name        string
-		plan        *domain.Plan
-		createErr   error
-		wantIssues  int
-		wantCreated int
-		wantErr     bool
+		name            string
+		plan            *domain.Plan
+		createErr       error
+		wantIssues      int
+		wantCreated     int
+		wantErr         bool
+		wantErrContains string
 	}{
 		{
 			name: "simple plan with no dependencies",
@@ -418,6 +419,76 @@ func TestService_CreateIssuesFromPlan(t *testing.T) {
 			wantCreated: 0,
 		},
 		{
+			name: "plan with duplicate task ids",
+			plan: &domain.Plan{
+				EpicTitle:       "Test Epic",
+				EpicDescription: "Description",
+				Summary:         "Summary",
+				Tasks: []domain.PlannedTask{
+					{
+						ID:             "task-1",
+						Title:          "Task 1",
+						Description:    "Desc 1",
+						Type:           domain.TypeTask,
+						Priority:       1,
+						DependsOn:      []string{},
+						CanParallelize: true,
+						Design:         "Design 1",
+						Acceptance:     "Accept 1",
+					},
+					{
+						ID:             "task-1",
+						Title:          "Task 1 duplicate",
+						Description:    "Desc 1 duplicate",
+						Type:           domain.TypeTask,
+						Priority:       1,
+						DependsOn:      []string{},
+						CanParallelize: true,
+						Design:         "Design 1",
+						Acceptance:     "Accept 1",
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "duplicate task id",
+			wantCreated:     0,
+		},
+		{
+			name: "plan with cyclic dependency",
+			plan: &domain.Plan{
+				EpicTitle:       "Test Epic",
+				EpicDescription: "Description",
+				Summary:         "Summary",
+				Tasks: []domain.PlannedTask{
+					{
+						ID:             "task-1",
+						Title:          "Task 1",
+						Description:    "Desc 1",
+						Type:           domain.TypeTask,
+						Priority:       1,
+						DependsOn:      []string{"task-2"},
+						CanParallelize: false,
+						Design:         "Design 1",
+						Acceptance:     "Accept 1",
+					},
+					{
+						ID:             "task-2",
+						Title:          "Task 2",
+						Description:    "Desc 2",
+						Type:           domain.TypeTask,
+						Priority:       1,
+						DependsOn:      []string{"task-1"},
+						CanParallelize: false,
+						Design:         "Design 2",
+						Acceptance:     "Accept 2",
+					},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "task dependency cycle detected",
+			wantCreated:     0,
+		},
+		{
 			name: "epic creation error",
 			plan: &domain.Plan{
 				EpicTitle:       "Test Epic",
@@ -447,6 +518,9 @@ func TestService_CreateIssuesFromPlan(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantErrContains != "" {
+					assert.Contains(t, err.Error(), tt.wantErrContains)
+				}
 				assert.Nil(t, issues)
 				assert.Equal(t, domain.PlanningErrorStatus, svc.state.Status)
 				assert.Len(t, issuesClient.createdTasks, tt.wantCreated)

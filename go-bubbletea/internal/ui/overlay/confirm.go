@@ -61,7 +61,7 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Confirm current selection
 			return c, func() tea.Msg {
 				return SelectionMsg{
-					Key: map[bool]string{true: "yes", false: "no"}[c.selected],
+					Key:   map[bool]string{true: "yes", false: "no"}[c.selected],
 					Value: ConfirmResult{Confirmed: c.selected},
 				}
 			}

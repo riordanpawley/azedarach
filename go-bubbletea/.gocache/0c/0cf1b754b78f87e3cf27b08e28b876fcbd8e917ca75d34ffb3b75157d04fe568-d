@@ -1,0 +1,4 @@
+./config.go
+./daemon_paths.go
+./projects.go
+./version.go

@@ -25,7 +25,7 @@ const (
 // PortInfo represents information about a port allocation
 type PortInfo struct {
 	Port      int
-	BeadID    string
+	IssueID   string
 	InUse     bool
 	Available bool
 }
@@ -33,17 +33,28 @@ type PortInfo struct {
 // SessionInfo represents information about a tmux session
 type SessionInfo struct {
 	Name      string
-	BeadID    string
+	IssueID   string
 	State     domain.SessionState
 	StartedAt *time.Time
 	Worktree  string
 	Uptime    time.Duration
 }
 
+// OperationInfo summarizes the background operation mix inferred from sessions.
+type OperationInfo struct {
+	Total      int
+	Busy       int
+	Waiting    int
+	Done       int
+	Error      int
+	Paused     int
+	Cancelable int
+}
+
 // WorktreeInfo represents information about a git worktree
 type WorktreeInfo struct {
 	Path      string
-	BeadID    string
+	IssueID   string
 	Branch    string
 	IsDirty   bool
 	Exists    bool
@@ -71,6 +82,7 @@ type SystemInfo struct {
 type SystemDiagnostics struct {
 	Timestamp    time.Time
 	OverallState HealthStatus
+	Operations   OperationInfo
 	Ports        []PortInfo
 	Sessions     []SessionInfo
 	Worktrees    []WorktreeInfo
@@ -93,7 +105,7 @@ type GitClient interface {
 
 // PortAllocator interface for port management
 type PortAllocator interface {
-	GetPort(beadID string) (int, bool)
+	GetPort(issueID string) (int, bool)
 }
 
 // NetworkChecker interface for network status
@@ -135,7 +147,7 @@ func (s *Service) GetSystemStatus(ctx context.Context, sessions map[string]*doma
 func (s *Service) GetPortConflicts(ctx context.Context, sessions map[string]*domain.Session) []PortInfo {
 	var conflicts []PortInfo
 
-	for beadID, session := range sessions {
+	for issueID, session := range sessions {
 		if session.DevServer == nil {
 			continue
 		}
@@ -146,7 +158,7 @@ func (s *Service) GetPortConflicts(ctx context.Context, sessions map[string]*dom
 		if !available && session.DevServer.Running {
 			conflicts = append(conflicts, PortInfo{
 				Port:      port,
-				BeadID:    beadID,
+				IssueID:   issueID,
 				InUse:     true,
 				Available: false,
 			})
@@ -160,10 +172,10 @@ func (s *Service) GetPortConflicts(ctx context.Context, sessions map[string]*dom
 func (s *Service) GetSessionHealth(ctx context.Context, sessions map[string]*domain.Session) []SessionInfo {
 	var sessionInfos []SessionInfo
 
-	for beadID, session := range sessions {
+	for issueID, session := range sessions {
 		info := SessionInfo{
-			Name:      beadID,
-			BeadID:    beadID,
+			Name:      issueID,
+			IssueID:   issueID,
 			State:     session.State,
 			StartedAt: session.StartedAt,
 			Worktree:  session.Worktree,
@@ -183,14 +195,14 @@ func (s *Service) GetSessionHealth(ctx context.Context, sessions map[string]*dom
 func (s *Service) GetWorktreeStatus(ctx context.Context, sessions map[string]*domain.Session) []WorktreeInfo {
 	var worktreeInfos []WorktreeInfo
 
-	for beadID, session := range sessions {
+	for issueID, session := range sessions {
 		if session.Worktree == "" {
 			continue
 		}
 
 		info := WorktreeInfo{
 			Path:      session.Worktree,
-			BeadID:    beadID,
+			IssueID:   issueID,
 			Exists:    true, // Assume exists if in session
 			IsHealthy: true,
 		}
@@ -202,7 +214,7 @@ func (s *Service) GetWorktreeStatus(ctx context.Context, sessions map[string]*do
 }
 
 // CollectDiagnostics gathers all diagnostic information
-func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, beadsPath *string) *SystemDiagnostics {
+func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, issuesPath *string) *SystemDiagnostics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -215,14 +227,14 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 	var ports []PortInfo
 	seenPorts := make(map[int]bool)
 
-	for beadID, session := range sessions {
+	for issueID, session := range sessions {
 		if session.DevServer != nil {
 			port := session.DevServer.Port
 			if !seenPorts[port] {
 				available := isPortAvailable(port)
 				ports = append(ports, PortInfo{
 					Port:      port,
-					BeadID:    beadID,
+					IssueID:   issueID,
 					InUse:     session.DevServer.Running,
 					Available: available,
 				})
@@ -230,7 +242,7 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 
 				// Add warning if port is in use but not available
 				if session.DevServer.Running && !available {
-					warnings = append(warnings, fmt.Sprintf("Port %d allocated to %s but not available", port, beadID))
+					warnings = append(warnings, fmt.Sprintf("Port %d allocated to %s but not available", port, issueID))
 				}
 			}
 		}
@@ -238,6 +250,32 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 
 	// Collect session information
 	sessionInfos := s.GetSessionHealth(ctx, sessions)
+	ops := OperationInfo{Total: len(sessionInfos)}
+	for _, session := range sessionInfos {
+		switch session.State {
+		case domain.SessionBusy:
+			ops.Busy++
+			ops.Cancelable++
+		case domain.SessionWaiting:
+			ops.Waiting++
+			ops.Cancelable++
+		case domain.SessionDone:
+			ops.Done++
+		case domain.SessionError:
+			ops.Error++
+			errMsg := fmt.Sprintf("Session %s is in error state", session.IssueID)
+			if session.Worktree != "" {
+				errMsg += fmt.Sprintf(" (worktree: %s)", session.Worktree)
+			}
+			if session.Uptime > 0 {
+				errMsg += fmt.Sprintf("; started %s ago", formatDuration(session.Uptime))
+			}
+			errMsg += "; inspect recent output or restart the session"
+			errors = append(errors, errMsg)
+		case domain.SessionPaused:
+			ops.Paused++
+		}
+	}
 
 	// Collect tmux session names
 	tmuxSessions, err := s.tmuxClient.ListSessions(ctx)
@@ -245,14 +283,14 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 		warnings = append(warnings, fmt.Sprintf("Failed to list tmux sessions: %v", err))
 	}
 
-	// Check for orphaned tmux sessions (sessions without beads)
-	beadIDs := make(map[string]bool)
-	for beadID := range sessions {
-		beadIDs[beadID] = true
+	// Check for orphaned tmux sessions (sessions without issues)
+	issueIDs := make(map[string]bool)
+	for issueID := range sessions {
+		issueIDs[issueID] = true
 	}
 
 	for _, tmuxName := range tmuxSessions {
-		if !beadIDs[tmuxName] && !strings.HasPrefix(tmuxName, "devserver-") {
+		if !issueIDs[tmuxName] && !strings.HasPrefix(tmuxName, "devserver-") {
 			warnings = append(warnings, fmt.Sprintf("Orphaned tmux session: %s", tmuxName))
 		}
 	}
@@ -296,6 +334,7 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 	diag := &SystemDiagnostics{
 		Timestamp:    now,
 		OverallState: overallState,
+		Operations:   ops,
 		Ports:        ports,
 		Sessions:     sessionInfos,
 		Worktrees:    worktreeInfos,
@@ -318,6 +357,15 @@ func (s *Service) FormatDiagnostics(diag *SystemDiagnostics) string {
 	// Overall status
 	b.WriteString(fmt.Sprintf("System Status: %s\n", strings.ToUpper(string(diag.OverallState))))
 	b.WriteString(fmt.Sprintf("Last Updated: %s\n\n", diag.Timestamp.Format("15:04:05")))
+
+	b.WriteString("OPERATIONS:\n")
+	b.WriteString(fmt.Sprintf("  Total: %d\n", diag.Operations.Total))
+	b.WriteString(fmt.Sprintf("  Busy: %d\n", diag.Operations.Busy))
+	b.WriteString(fmt.Sprintf("  Waiting: %d\n", diag.Operations.Waiting))
+	b.WriteString(fmt.Sprintf("  Done: %d\n", diag.Operations.Done))
+	b.WriteString(fmt.Sprintf("  Error: %d\n", diag.Operations.Error))
+	b.WriteString(fmt.Sprintf("  Paused: %d\n", diag.Operations.Paused))
+	b.WriteString(fmt.Sprintf("  Cancelable: %d\n\n", diag.Operations.Cancelable))
 
 	// Errors
 	if len(diag.Errors) > 0 {
@@ -352,7 +400,7 @@ func (s *Service) FormatDiagnostics(diag *SystemDiagnostics) string {
 		b.WriteString("  (none)\n")
 	} else {
 		for _, session := range diag.Sessions {
-			b.WriteString(fmt.Sprintf("  %s: %s", session.BeadID, session.State))
+			b.WriteString(fmt.Sprintf("  %s: %s", session.IssueID, session.State))
 			if session.Uptime > 0 {
 				b.WriteString(fmt.Sprintf(" (uptime: %s)", formatDuration(session.Uptime)))
 			}
@@ -372,7 +420,7 @@ func (s *Service) FormatDiagnostics(diag *SystemDiagnostics) string {
 			if !port.Available {
 				status = "UNAVAILABLE"
 			}
-			b.WriteString(fmt.Sprintf("  :%d → %s (%s)\n", port.Port, port.BeadID, status))
+			b.WriteString(fmt.Sprintf("  :%d → %s (%s)\n", port.Port, port.IssueID, status))
 		}
 		b.WriteString("\n")
 	}
@@ -381,7 +429,7 @@ func (s *Service) FormatDiagnostics(diag *SystemDiagnostics) string {
 	if len(diag.Worktrees) > 0 {
 		b.WriteString(fmt.Sprintf("WORKTREES: %d active\n", len(diag.Worktrees)))
 		for _, wt := range diag.Worktrees {
-			b.WriteString(fmt.Sprintf("  %s: %s\n", wt.BeadID, wt.Path))
+			b.WriteString(fmt.Sprintf("  %s: %s\n", wt.IssueID, wt.Path))
 		}
 		b.WriteString("\n")
 	}

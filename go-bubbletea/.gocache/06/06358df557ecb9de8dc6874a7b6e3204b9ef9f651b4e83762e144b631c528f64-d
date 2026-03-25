@@ -1,0 +1,4 @@
+./commands.go
+./apply_integration_test.go
+./commands_test.go
+./migration_guard_test.go

@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -71,7 +72,7 @@ func (m *ActionMenu) buildActions() []Action {
 	hasWorktree := m.session != nil && m.session.Worktree != ""
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
-		Action{Key: "m", Label: "Merge to main", Enabled: hasWorktree},
+		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
 	)
@@ -240,7 +241,7 @@ type BulkActionMsg struct {
 func NewBulkActionMenu(selectedIDs []string, count int) *BulkActionMenu {
 	s := New()
 	menu := &BulkActionMenu{
-		selectedIDs: selectedIDs,
+		selectedIDs: append([]string(nil), selectedIDs...),
 		count:       count,
 		styles:      s,
 	}
@@ -311,6 +312,8 @@ func (m *BulkActionMenu) View() string {
 	if m.count > 10 {
 		b.WriteString(m.styles.MenuCount.Render("..."))
 	}
+	b.WriteString("\n\n")
+	b.WriteString(m.styles.MenuHeader.Render(fmt.Sprintf("Scope: %d frozen selected task(s)", m.count)))
 	b.WriteString("\n\n")
 
 	for i, action := range m.actions {

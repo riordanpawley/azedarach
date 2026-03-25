@@ -25,12 +25,12 @@ type lockRecord struct {
 
 // LockManager coordinates singleton daemon ownership via a lock file.
 type LockManager struct {
-	path       string
-	pid        int
-	isAliveFn  func(int) bool
-	nowFn      func() time.Time
-	mu         sync.Mutex
-	ownsLock   bool
+	path      string
+	pid       int
+	isAliveFn func(int) bool
+	nowFn     func() time.Time
+	mu        sync.Mutex
+	ownsLock  bool
 }
 
 // Lease represents an acquired singleton lock.

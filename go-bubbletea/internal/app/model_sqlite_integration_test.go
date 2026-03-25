@@ -20,6 +20,7 @@ import (
 func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 	repoDir := t.TempDir()
 	seedModelIssueStore(t, repoDir, "agm", "Close go-bubbletea parity gaps", "open", 1, "epic")
+	seedModelIssueStore(t, repoDir, "agn", "Finish go-bubbletea parity lane", "closed", 2, "task")
 
 	runtimeDir, err := os.MkdirTemp(".", "azd-model-")
 	if err != nil {
@@ -31,23 +32,53 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
-	model := Model{
-		daemonClient: daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model"),
-	}
+	model := newTestModel()
+	model.daemonClient = daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
 	msg := model.loadIssuesCmd()()
 
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
 	}
-	if got, want := len(loaded.tasks), 1; got != want {
+	if got, want := len(loaded.tasks), 2; got != want {
 		t.Fatalf("loaded tasks = %d, want %d", got, want)
 	}
-	if loaded.tasks[0].ID != "agm" {
-		t.Fatalf("loaded task id = %q, want agm", loaded.tasks[0].ID)
+
+	statusByID := make(map[string]string, len(loaded.tasks))
+	titleByID := make(map[string]string, len(loaded.tasks))
+	for _, task := range loaded.tasks {
+		statusByID[task.ID] = string(task.Status)
+		titleByID[task.ID] = task.Title
 	}
-	if loaded.tasks[0].Title != "Close go-bubbletea parity gaps" {
-		t.Fatalf("loaded task title = %q", loaded.tasks[0].Title)
+	if got, want := statusByID["agm"], "open"; got != want {
+		t.Fatalf("loaded task status for agm = %q, want %q", got, want)
+	}
+	if got, want := statusByID["agn"], "closed"; got != want {
+		t.Fatalf("loaded task status for agn = %q, want %q", got, want)
+	}
+	if got, want := titleByID["agm"], "Close go-bubbletea parity gaps"; got != want {
+		t.Fatalf("loaded task title for agm = %q, want %q", got, want)
+	}
+	if got, want := titleByID["agn"], "Finish go-bubbletea parity lane"; got != want {
+		t.Fatalf("loaded task title for agn = %q, want %q", got, want)
+	}
+
+	model.tasks = loaded.tasks
+	columns := model.buildColumns()
+	if got, want := len(columns), 4; got != want {
+		t.Fatalf("columns = %d, want %d", got, want)
+	}
+	if got, want := len(columns[0].Tasks), 1; got != want {
+		t.Fatalf("open column tasks = %d, want %d", got, want)
+	}
+	if got, want := len(columns[3].Tasks), 1; got != want {
+		t.Fatalf("closed column tasks = %d, want %d", got, want)
+	}
+	if columns[0].Tasks[0].ID != "agm" {
+		t.Fatalf("open column task id = %q, want agm", columns[0].Tasks[0].ID)
+	}
+	if columns[3].Tasks[0].ID != "agn" {
+		t.Fatalf("closed column task id = %q, want agn", columns[3].Tasks[0].ID)
 	}
 }
 
@@ -65,7 +96,7 @@ func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priori
 	defer db.Close()
 
 	schema := []string{
-		`CREATE TABLE issues (
+		`CREATE TABLE IF NOT EXISTS issues (
 			id TEXT PRIMARY KEY,
 			title TEXT NOT NULL,
 			description TEXT,
@@ -84,14 +115,14 @@ func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priori
 			estimate INTEGER,
 			deleted_at TEXT
 		);`,
-		`CREATE TABLE issue_dependencies (
+		`CREATE TABLE IF NOT EXISTS issue_dependencies (
 			issue_id TEXT NOT NULL,
 			depends_on_id TEXT NOT NULL,
 			dependency_type TEXT NOT NULL,
 			tombstoned_at TEXT,
 			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
 		);`,
-		`CREATE TABLE meta (
+		`CREATE TABLE IF NOT EXISTS meta (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);`,

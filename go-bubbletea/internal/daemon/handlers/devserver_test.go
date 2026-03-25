@@ -12,28 +12,28 @@ import (
 )
 
 type fakeDevServerManager struct {
-	getFn   func(beadID string) (*devserver.Server, bool)
-	startFn func(ctx context.Context, beadID, name, command string) (*devserver.Server, error)
-	stopFn  func(ctx context.Context, beadID string) error
+	getFn   func(issueID string) (*devserver.Server, bool)
+	startFn func(ctx context.Context, issueID, name, command string) (*devserver.Server, error)
+	stopFn  func(ctx context.Context, issueID string) error
 }
 
-func (m fakeDevServerManager) Start(ctx context.Context, beadID, name, command string) (*devserver.Server, error) {
+func (m fakeDevServerManager) Start(ctx context.Context, issueID, name, command string) (*devserver.Server, error) {
 	if m.startFn != nil {
-		return m.startFn(ctx, beadID, name, command)
+		return m.startFn(ctx, issueID, name, command)
 	}
 	return nil, nil
 }
 
-func (m fakeDevServerManager) Stop(ctx context.Context, beadID string) error {
+func (m fakeDevServerManager) Stop(ctx context.Context, issueID string) error {
 	if m.stopFn != nil {
-		return m.stopFn(ctx, beadID)
+		return m.stopFn(ctx, issueID)
 	}
 	return nil
 }
 
-func (m fakeDevServerManager) Get(beadID string) (*devserver.Server, bool) {
+func (m fakeDevServerManager) Get(issueID string) (*devserver.Server, bool) {
 	if m.getFn != nil {
-		return m.getFn(beadID)
+		return m.getFn(issueID)
 	}
 	return nil, false
 }
@@ -47,8 +47,8 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 	startedAt := time.Date(2026, time.March, 24, 13, 0, 0, 0, time.UTC)
 	manager.startFn = func(context.Context, string, string, string) (*devserver.Server, error) {
 		current = &devserver.Server{
-			ID:        "bead-1",
-			Name:      "bead-1",
+			ID:        "issue-1",
+			Name:      "issue-1",
 			Port:      3001,
 			Status:    "running",
 			Command:   "bun run dev",
@@ -56,15 +56,15 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 		}
 		return current, nil
 	}
-	manager.getFn = func(beadID string) (*devserver.Server, bool) {
-		if beadID != "bead-1" || current == nil {
+	manager.getFn = func(issueID string) (*devserver.Server, bool) {
+		if issueID != "issue-1" || current == nil {
 			return nil, false
 		}
 		return current, true
 	}
 
 	req := func(command string) protocol.RequestEnvelope {
-		body, _ := json.Marshal(map[string]string{"bead_id": "bead-1"})
+		body, _ := json.Marshal(map[string]string{"issue_id": "issue-1"})
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
 			RequestID:       "req-" + command,
@@ -82,7 +82,7 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 	if err := json.Unmarshal(startResp.Body, &startBody); err != nil {
 		t.Fatalf("unmarshal start response: %v", err)
 	}
-	if startBody.BeadID != "bead-1" || startBody.Server.Status != "running" {
+	if startBody.IssueID != "issue-1" || startBody.Server.Status != "running" {
 		t.Fatalf("start body = %+v", startBody)
 	}
 
@@ -124,10 +124,10 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 
 func TestDevServerHandlerInvalidStateAndFailureMappings(t *testing.T) {
 	t.Run("start when already running", func(t *testing.T) {
-		current := &devserver.Server{ID: "bead-1", Name: "bead-1", Status: "running"}
+		current := &devserver.Server{ID: "issue-1", Name: "issue-1", Status: "running"}
 		handler := NewDevServerHandler(fakeDevServerManager{
-			getFn: func(beadID string) (*devserver.Server, bool) {
-				return current, beadID == "bead-1"
+			getFn: func(issueID string) (*devserver.Server, bool) {
+				return current, issueID == "issue-1"
 			},
 		})
 		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
@@ -135,7 +135,7 @@ func TestDevServerHandlerInvalidStateAndFailureMappings(t *testing.T) {
 			RequestID:       "req-start",
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         CommandDevServerStart,
-			Body:            mustJSON(t, map[string]string{"bead_id": "bead-1"}),
+			Body:            mustJSON(t, map[string]string{"issue_id": "issue-1"}),
 		})
 		if resp.OK {
 			t.Fatalf("expected conflict, got %+v", resp)
@@ -152,7 +152,7 @@ func TestDevServerHandlerInvalidStateAndFailureMappings(t *testing.T) {
 			RequestID:       "req-stop",
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         CommandDevServerStop,
-			Body:            mustJSON(t, map[string]string{"bead_id": "bead-2"}),
+			Body:            mustJSON(t, map[string]string{"issue_id": "issue-2"}),
 		})
 		if resp.OK {
 			t.Fatalf("expected invalid request, got %+v", resp)
@@ -173,7 +173,7 @@ func TestDevServerHandlerInvalidStateAndFailureMappings(t *testing.T) {
 			RequestID:       "req-fail",
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         CommandDevServerStart,
-			Body:            mustJSON(t, map[string]string{"bead_id": "bead-3"}),
+			Body:            mustJSON(t, map[string]string{"issue_id": "issue-3"}),
 		})
 		if resp.OK {
 			t.Fatalf("expected failure, got %+v", resp)
@@ -194,7 +194,7 @@ func TestDevServerHandlerInvalidStateAndFailureMappings(t *testing.T) {
 			RequestID:       "req-timeout",
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         CommandDevServerStart,
-			Body:            mustJSON(t, map[string]string{"bead_id": "bead-4"}),
+			Body:            mustJSON(t, map[string]string{"issue_id": "issue-4"}),
 		})
 		if resp.OK {
 			t.Fatalf("expected timeout, got %+v", resp)
@@ -212,7 +212,7 @@ func TestDevServerHandlerUnsupportedCommand(t *testing.T) {
 		RequestID:       "req-x",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "devserver.restart",
-		Body:            mustJSON(t, map[string]string{"bead_id": "bead-1"}),
+		Body:            mustJSON(t, map[string]string{"issue_id": "issue-1"}),
 	})
 	if resp.OK {
 		t.Fatalf("expected unsupported command error")

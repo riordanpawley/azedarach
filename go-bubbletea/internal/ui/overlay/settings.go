@@ -29,8 +29,8 @@ type SettingItem struct {
 	Label    string
 	Type     SettingType
 	Value    any
-	Choices  []string      // For SettingChoice type
-	OnChange func(any)     // Callback when value changes
+	Choices  []string       // For SettingChoice type
+	OnChange func(any)      // Callback when value changes
 	OnAction func() tea.Cmd // Callback for SettingAction type
 }
 
@@ -59,7 +59,7 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 	items := []SettingItem{
 		{
 			Key:   "refresh",
-			Label: "Auto-refresh beads",
+			Label: "Auto-refresh issues",
 			Type:  SettingToggle,
 			Value: true,
 			OnChange: func(value any) {
@@ -456,7 +456,7 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 		{
 			Key:   "refresh",
-			Label: "Auto-refresh beads",
+			Label: "Auto-refresh issues",
 			Type:  SettingToggle,
 			Value: true,
 			OnChange: func(value any) {

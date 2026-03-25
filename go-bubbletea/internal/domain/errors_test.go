@@ -5,46 +5,46 @@ import (
 	"testing"
 )
 
-func TestBeadsError_Error(t *testing.T) {
+func TestTaskStoreError_Error(t *testing.T) {
 	tests := []struct {
 		name string
-		err  BeadsError
+		err  TaskStoreError
 		want string
 	}{
 		{
-			name: "with bead ID",
-			err:  BeadsError{Op: "update", BeadID: "az-1", Message: "failed"},
-			want: "beads update [az-1]: failed",
+			name: "with task id",
+			err:  TaskStoreError{Op: "update", TaskID: "az-1", Message: "failed"},
+			want: "taskstore update [az-1]: failed",
 		},
 		{
 			name: "with message only",
-			err:  BeadsError{Op: "list", Message: "timeout"},
-			want: "beads list: timeout",
+			err:  TaskStoreError{Op: "list", Message: "timeout"},
+			want: "taskstore list: timeout",
 		},
 		{
 			name: "with underlying error",
-			err:  BeadsError{Op: "create", Err: errors.New("connection refused")},
-			want: "beads create: connection refused",
+			err:  TaskStoreError{Op: "create", Err: errors.New("connection refused")},
+			want: "taskstore create: connection refused",
 		},
 		{
 			name: "minimal",
-			err:  BeadsError{Op: "search"},
-			want: "beads search failed",
+			err:  TaskStoreError{Op: "search"},
+			want: "taskstore search failed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.err.Error(); got != tt.want {
-				t.Errorf("BeadsError.Error() = %v, want %v", got, tt.want)
+				t.Errorf("TaskStoreError.Error() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestBeadsError_Unwrap(t *testing.T) {
+func TestTaskStoreError_Unwrap(t *testing.T) {
 	underlying := errors.New("underlying error")
-	err := &BeadsError{Op: "test", Err: underlying}
+	err := &TaskStoreError{Op: "test", Err: underlying}
 
 	if unwrapped := err.Unwrap(); unwrapped != underlying {
 		t.Errorf("Unwrap() = %v, want %v", unwrapped, underlying)

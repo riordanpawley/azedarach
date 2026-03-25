@@ -1,0 +1,12 @@
+# test log
+getenv NO_COLOR
+open testdata/default_cursor_at_origin.golden
+open testdata/cursor_in_progress_column.golden
+open testdata/cursor_on_second_task.golden
+open testdata/with_selected_tasks.golden
+open testdata/narrow_terminal.golden
+open testdata/wide_terminal.golden
+open testdata/card_normal_card.golden
+open testdata/card_cursor_card.golden
+open testdata/card_selected_card.golden
+open testdata/card_truncated_title.golden

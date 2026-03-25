@@ -8,9 +8,10 @@ import (
 
 // StatusBar represents the status bar at the bottom of the TUI
 type StatusBar struct {
-	mode   types.Mode
-	width  int
-	styles *styles.Styles
+	mode             types.Mode
+	width            int
+	selectionSummary string
+	styles           *styles.Styles
 }
 
 // New creates a new StatusBar with the given mode, width, and styles
@@ -22,9 +23,22 @@ func New(mode types.Mode, width int, styles *styles.Styles) StatusBar {
 	}
 }
 
+// SetSelectionSummary sets the optional selection summary rendered in the status bar.
+func (sb *StatusBar) SetSelectionSummary(summary string) {
+	sb.selectionSummary = summary
+}
+
 // Render renders the status bar as a string
 func (sb StatusBar) Render() string {
+	if sb.width < 1 {
+		sb.width = 1
+	}
+
 	modeBadge := sb.styles.StatusMode.Render(" " + sb.mode.String() + " ")
+	info := ""
+	if sb.selectionSummary != "" {
+		info = sb.styles.StatusInfo.Render(" " + sb.selectionSummary + " ")
+	}
 
 	// Keybinding hints
 	hints := GetHints(sb.mode)
@@ -32,9 +46,35 @@ func (sb StatusBar) Render() string {
 
 	// Combine mode badge and hints with separator
 	var content string
-	if hints != "" {
+	if info != "" && hints != "" {
 		separator := sb.styles.StatusHint.Render(" │ ")
-		content = lipgloss.JoinHorizontal(lipgloss.Left, modeBadge, separator, hintsRendered)
+		fullContent := lipgloss.JoinHorizontal(lipgloss.Left, modeBadge, separator, info, separator, hintsRendered)
+		if lipgloss.Width(fullContent) <= sb.width {
+			content = fullContent
+		} else {
+			infoContent := lipgloss.JoinHorizontal(lipgloss.Left, modeBadge, separator, info)
+			if lipgloss.Width(infoContent) <= sb.width {
+				content = infoContent
+			} else {
+				content = modeBadge
+			}
+		}
+	} else if info != "" {
+		separator := sb.styles.StatusHint.Render(" │ ")
+		infoContent := lipgloss.JoinHorizontal(lipgloss.Left, modeBadge, separator, info)
+		if lipgloss.Width(infoContent) <= sb.width {
+			content = infoContent
+		} else {
+			content = modeBadge
+		}
+	} else if hints != "" {
+		separator := sb.styles.StatusHint.Render(" │ ")
+		fullContent := lipgloss.JoinHorizontal(lipgloss.Left, modeBadge, separator, hintsRendered)
+		if lipgloss.Width(fullContent) <= sb.width {
+			content = fullContent
+		} else {
+			content = modeBadge
+		}
 	} else {
 		content = modeBadge
 	}

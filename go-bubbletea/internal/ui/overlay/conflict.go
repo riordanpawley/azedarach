@@ -10,11 +10,11 @@ import (
 
 // ConflictOverlay displays merge conflicts and resolution options
 type ConflictOverlay struct {
-	files                []string
-	cursor               int
-	onResolveWithClaude  func() tea.Cmd
-	onAbort              func() tea.Cmd
-	overlayStyles        *Styles
+	files               []string
+	cursor              int
+	onResolveWithClaude func() tea.Cmd
+	onAbort             func() tea.Cmd
+	overlayStyles       *Styles
 }
 
 // ConflictResolutionMsg is sent when the user chooses a resolution method

@@ -16,13 +16,13 @@ type PRWorkflow struct {
 
 // PRInfo contains information about a pull request
 type PRInfo struct {
-	Number   int    `json:"number"`
-	Title    string `json:"title"`
-	URL      string `json:"url"`
-	State    string `json:"state"`    // open, closed, merged
-	Draft    bool   `json:"isDraft"`
-	Branch   string `json:"headRefName"`
-	BaseRef  string `json:"baseRefName"`
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	State   string `json:"state"` // open, closed, merged
+	Draft   bool   `json:"isDraft"`
+	Branch  string `json:"headRefName"`
+	BaseRef string `json:"baseRefName"`
 }
 
 // CreatePRParams contains parameters for creating a pull request
@@ -32,7 +32,7 @@ type CreatePRParams struct {
 	Branch     string
 	BaseBranch string
 	Draft      bool
-	BeadID     string
+	IssueID    string
 }
 
 // NewPRWorkflow creates a new PR workflow service
@@ -50,7 +50,7 @@ func (w *PRWorkflow) Create(ctx context.Context, params CreatePRParams) (*PRInfo
 		"branch", params.Branch,
 		"base", params.BaseBranch,
 		"draft", params.Draft,
-		"bead_id", params.BeadID,
+		"issue_id", params.IssueID,
 	)
 
 	args := []string{

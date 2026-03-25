@@ -6,9 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -403,6 +405,688 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 	}
 }
 
+func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
+	parentID := "az-parent"
+	blockerID := "az-blocker"
+	nonReadyID := "az-open"
+
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{
+			ID:       "az-child",
+			Title:    "Child task",
+			Status:   domain.StatusInProgress,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+			Dependencies: []domain.Dependency{
+				{ID: blockerID, Type: domain.DependencyBlocks},
+				{ID: nonReadyID, Type: domain.DependencyBlocks},
+			},
+		},
+		{ID: parentID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic},
+		{ID: blockerID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask},
+		{ID: nonReadyID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
+	}
+	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	m.sessions[blockerID] = &domain.Session{IssueID: blockerID, State: domain.SessionBusy, Worktree: "/tmp/blocker"}
+	m.sessions[nonReadyID] = &domain.Session{IssueID: nonReadyID, State: domain.SessionBusy, Worktree: "/tmp/open"}
+
+	candidates := m.getFollowOnMergeCandidates(&m.tasks[0])
+	if len(candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2", len(candidates))
+	}
+	if candidates[0].target.ID != parentID {
+		t.Fatalf("first candidate = %s, want %s", candidates[0].target.ID, parentID)
+	}
+	if candidates[1].target.ID != blockerID {
+		t.Fatalf("second candidate = %s, want %s", candidates[1].target.ID, blockerID)
+	}
+	for _, candidate := range candidates {
+		if candidate.target.ID == nonReadyID {
+			t.Fatalf("non-ready candidate %s should have been excluded", nonReadyID)
+		}
+	}
+}
+
+func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
+	gitRunner := &recordingCommandRunner{output: "parent-main\n"}
+	m := newTestModel()
+	m.gitClient = git.NewClient(gitRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	parentID := "az-parent"
+	childID := "az-child"
+	m.tasks = []domain.Task{
+		{
+			ID:       childID,
+			Title:    "Child task",
+			Status:   domain.StatusInProgress,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+		},
+		{
+			ID:     parentID,
+			Title:  "Parent epic",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeEpic,
+		},
+	}
+	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionBusy, Worktree: "/tmp/child"}
+	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	m.nav.SelectTask(childID, 1)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected direct follow-on merge command")
+	}
+
+	msg := cmd()
+	mergeMsg, ok := msg.(mergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergeResultMsg", msg)
+	}
+	if mergeMsg.sourceID != parentID || mergeMsg.targetID != childID {
+		t.Fatalf("merge result = %+v, want source=%s target=%s", mergeMsg, parentID, childID)
+	}
+	if mergeMsg.err != nil {
+		t.Fatalf("merge err = %v", mergeMsg.err)
+	}
+
+	if len(gitRunner.calls) != 2 {
+		t.Fatalf("git calls = %v", gitRunner.calls)
+	}
+	if !reflect.DeepEqual(gitRunner.calls[0], []string{"branch", "--show-current"}) {
+		t.Fatalf("git call 0 = %v, want branch lookup", gitRunner.calls[0])
+	}
+	if !reflect.DeepEqual(gitRunner.calls[1], []string{"merge", "parent-main"}) {
+		t.Fatalf("git call 1 = %v, want merge parent-main", gitRunner.calls[1])
+	}
+}
+
+func TestMergeSourceOverlaySelectsUpstreamSource(t *testing.T) {
+	target := domain.Task{
+		ID:     "az-child",
+		Title:  "Child task",
+		Status: domain.StatusInProgress,
+		Type:   domain.TypeTask,
+	}
+	candidates := []overlay.MergeTarget{
+		{ID: "az-parent", Label: "Parent epic", Status: domain.StatusInProgress, HasWorktree: true},
+	}
+
+	menu := overlay.NewMergeSourceSelectOverlay(&target, candidates, nil, nil)
+	if got := menu.Title(); got != "Select Upstream Source" {
+		t.Fatalf("title = %q, want Select Upstream Source", got)
+	}
+
+	view := menu.View()
+	if !strings.Contains(view, "Merge into") || !strings.Contains(view, target.ID) {
+		t.Fatalf("view = %q, want upstream header", view)
+	}
+
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected selection command")
+	}
+	msg := cmd()
+	selMsg, ok := msg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection type = %T, want SelectionMsg", msg)
+	}
+	result, ok := selMsg.Value.(overlay.MergeTargetSelectedMsg)
+	if !ok {
+		t.Fatalf("selection value type = %T, want MergeTargetSelectedMsg", selMsg.Value)
+	}
+	if result.SourceID != "az-parent" || result.TargetID != "az-child" {
+		t.Fatalf("selection = %+v, want source az-parent target az-child", result)
+	}
+}
+
+func TestStartSessionPlusWorkUsesSelectedOriginBranch(t *testing.T) {
+	baseBranch := "develop"
+	parentID := "az-parent"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStart:
+				var body struct {
+					ProjectID  string `json:"project_id"`
+					SessionID  string `json:"session_id"`
+					BaseBranch string `json:"base_branch,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session start request: %v", err)
+				}
+				if body.SessionID != childID {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != "az/"+parentID {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, "az/"+parentID)
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "started"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandWorktreeList:
+				respBody, _ := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: childID},
+					},
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	m.tasks = []domain.Task{
+		{
+			ID:       childID,
+			Title:    "Child task",
+			Status:   domain.StatusInProgress,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+		},
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusDone,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.sessions[parentID] = &domain.Session{
+		IssueID:  parentID,
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/parent",
+	}
+	m.nav.SelectTask(childID, 0)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
+	if cmd != nil {
+		t.Fatalf("expected overlay push command to be nil, got %T", cmd)
+	}
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	current := updatedModel.overlayStack.Current()
+	originOverlay, ok := current.(*overlay.MergeSelectOverlay)
+	if !ok {
+		t.Fatalf("overlay type = %T, want *overlay.MergeSelectOverlay", current)
+	}
+	if got := originOverlay.Title(); got != "Select Upstream Source" {
+		t.Fatalf("title = %q, want Select Upstream Source", got)
+	}
+	view := originOverlay.View()
+	if !strings.Contains(view, baseBranch) {
+		t.Fatalf("view = %q, want base branch %q", view, baseBranch)
+	}
+	if !strings.Contains(view, parentID) {
+		t.Fatalf("view = %q, want upstream issue %q", view, parentID)
+	}
+
+	moved, _ := originOverlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	originOverlay = moved.(*overlay.MergeSelectOverlay)
+
+	_, selectCmd := originOverlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if selectCmd == nil {
+		t.Fatal("expected selection command")
+	}
+	selectMsg := selectCmd()
+	selection, ok := selectMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection type = %T, want SelectionMsg", selectMsg)
+	}
+	if selection.Key != "session_origin" {
+		t.Fatalf("selection key = %q, want session_origin", selection.Key)
+	}
+
+	nextModel, startCmd := updatedModel.Update(selection)
+	if startCmd == nil {
+		t.Fatal("expected session start command")
+	}
+	nextModelValue, ok := nextModel.(Model)
+	if !ok {
+		t.Fatalf("next model type = %T, want Model", nextModel)
+	}
+	if !nextModelValue.overlayStack.IsEmpty() {
+		t.Fatal("expected origin overlay to close after selection")
+	}
+
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+
+	finalModel, finalCmd := nextModelValue.Update(startMsg)
+	if finalCmd != nil {
+		t.Fatalf("final update command = %T, want nil", finalCmd)
+	}
+	finalModelValue, ok := finalModel.(Model)
+	if !ok {
+		t.Fatalf("final model type = %T, want Model", finalModel)
+	}
+	if session, ok := finalModelValue.sessions[childID]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
+		t.Fatalf("session record = %+v, want worktree /tmp/az-child", session)
+	}
+	if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandSessionStart || transport.requests[1] != daemonclient.CommandWorktreeList {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
+	baseBranch := "develop"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStart:
+				var body struct {
+					ProjectID  string `json:"project_id"`
+					SessionID  string `json:"session_id"`
+					BaseBranch string `json:"base_branch,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session start request: %v", err)
+				}
+				if body.SessionID != childID {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != baseBranch {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "started"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandWorktreeList:
+				respBody, _ := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: childID},
+					},
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	m.tasks = []domain.Task{
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.nav.SelectTask(childID, 0)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
+	if cmd != nil {
+		t.Fatalf("expected overlay push command to be nil, got %T", cmd)
+	}
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if len(updatedModel.toasts) == 0 || !strings.Contains(updatedModel.toasts[len(updatedModel.toasts)-1].Message, "No eligible upstream sources") {
+		t.Fatalf("toasts = %+v, want no-upstream warning", updatedModel.toasts)
+	}
+
+	current := updatedModel.overlayStack.Current()
+	originOverlay, ok := current.(*overlay.MergeSelectOverlay)
+	if !ok {
+		t.Fatalf("overlay type = %T, want *overlay.MergeSelectOverlay", current)
+	}
+	view := originOverlay.View()
+	if !strings.Contains(view, baseBranch) {
+		t.Fatalf("view = %q, want base branch %q", view, baseBranch)
+	}
+	if strings.Contains(view, "az-parent") {
+		t.Fatalf("view = %q, did not expect upstream sources", view)
+	}
+
+	_, selectCmd := originOverlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if selectCmd == nil {
+		t.Fatal("expected selection command")
+	}
+	selectMsg := selectCmd()
+	selection, ok := selectMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection type = %T, want SelectionMsg", selectMsg)
+	}
+	if selection.Key != "session_origin" {
+		t.Fatalf("selection key = %q, want session_origin", selection.Key)
+	}
+
+	nextModel, startCmd := updatedModel.Update(selection)
+	if startCmd == nil {
+		t.Fatal("expected session start command")
+	}
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+
+	finalModel, finalCmd := nextModel.(Model).Update(startMsg)
+	if finalCmd != nil {
+		t.Fatalf("final update command = %T, want nil", finalCmd)
+	}
+	finalModelValue, ok := finalModel.(Model)
+	if !ok {
+		t.Fatalf("final model type = %T, want Model", finalModel)
+	}
+	if session, ok := finalModelValue.sessions[childID]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
+		t.Fatalf("session record = %+v, want worktree /tmp/az-child", session)
+	}
+	if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandSessionStart || transport.requests[1] != daemonclient.CommandWorktreeList {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T) {
+	baseBranch := "develop"
+	parentID := "az-parent"
+	childID := "az-child"
+
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	m.config.Git.BaseBranch = baseBranch
+	m.tasks = []domain.Task{
+		{
+			ID:       childID,
+			Title:    "Child task",
+			Status:   domain.StatusInProgress,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+		},
+		{
+			ID:     parentID,
+			Title:  "Parent task",
+			Status: domain.StatusDone,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.sessions[parentID] = &domain.Session{
+		IssueID:  parentID,
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/parent",
+	}
+
+	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
+	if upstreamCount != 1 {
+		t.Fatalf("upstreamCount = %d, want 1", upstreamCount)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("candidates = %+v, want base branch plus one upstream source", candidates)
+	}
+	if candidates[0].ID != baseBranch || candidates[0].Label != baseBranch || !candidates[0].IsMain {
+		t.Fatalf("base candidate = %+v, want main branch %q", candidates[0], baseBranch)
+	}
+	if candidates[1].ID != parentID || candidates[1].Status != domain.StatusDone || !candidates[1].HasWorktree {
+		t.Fatalf("upstream candidate = %+v, want upstream issue %q with worktree", candidates[1], parentID)
+	}
+	if got := m.originBranchForSelection(""); got != baseBranch {
+		t.Fatalf("originBranchForSelection(\"\") = %q, want %q", got, baseBranch)
+	}
+	if got := m.originBranchForSelection(parentID); got != "az/"+parentID {
+		t.Fatalf("originBranchForSelection(%q) = %q, want %q", parentID, got, "az/"+parentID)
+	}
+	if got := m.originBranchForSelection("az/custom"); got != "az/custom" {
+		t.Fatalf("originBranchForSelection(%q) = %q, want %q", "az/custom", got, "az/custom")
+	}
+}
+
+func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *testing.T) {
+	baseBranch := "develop"
+	parentA := "az-parent-a"
+	parentB := "az-parent-b"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStart:
+				var body struct {
+					ProjectID  string `json:"project_id"`
+					SessionID  string `json:"session_id"`
+					BaseBranch string `json:"base_branch,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session start request: %v", err)
+				}
+				if body.SessionID != childID {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != "az/"+parentB {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, "az/"+parentB)
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "started"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandWorktreeList:
+				respBody, _ := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-child", Branch: "az/az-child", IssueID: childID},
+					},
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	m.tasks = []domain.Task{
+		{
+			ID:           childID,
+			Title:        "Child task",
+			Status:       domain.StatusInProgress,
+			Type:         domain.TypeTask,
+			ParentID:     &parentA,
+			Dependencies: []domain.Dependency{{ID: parentB, Type: domain.DependencyBlocks}},
+		},
+		{
+			ID:     parentA,
+			Title:  "Parent A",
+			Status: domain.StatusDone,
+			Type:   domain.TypeTask,
+		},
+		{
+			ID:     parentB,
+			Title:  "Parent B",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.sessions[parentA] = &domain.Session{
+		IssueID:  parentA,
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/parent-a",
+	}
+	m.sessions[parentB] = &domain.Session{
+		IssueID:  parentB,
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/parent-b",
+	}
+	m.nav.SelectTask(childID, 0)
+
+	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
+	if upstreamCount != 2 {
+		t.Fatalf("upstreamCount = %d, want 2", upstreamCount)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("candidates = %+v, want base branch plus two upstream sources", candidates)
+	}
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
+	if cmd != nil {
+		t.Fatalf("expected overlay push command to be nil, got %T", cmd)
+	}
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	current := updatedModel.overlayStack.Current()
+	originOverlay, ok := current.(*overlay.MergeSelectOverlay)
+	if !ok {
+		t.Fatalf("overlay type = %T, want *overlay.MergeSelectOverlay", current)
+	}
+	view := originOverlay.View()
+	if !strings.Contains(view, baseBranch) || !strings.Contains(view, parentA) || !strings.Contains(view, parentB) {
+		t.Fatalf("view = %q, want base branch and both upstream sources", view)
+	}
+
+	moved, _ := originOverlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	originOverlay = moved.(*overlay.MergeSelectOverlay)
+	moved, _ = originOverlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	originOverlay = moved.(*overlay.MergeSelectOverlay)
+
+	_, selectCmd := originOverlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if selectCmd == nil {
+		t.Fatal("expected selection command")
+	}
+	selectMsg := selectCmd()
+	selection, ok := selectMsg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("selection type = %T, want SelectionMsg", selectMsg)
+	}
+	if selection.Key != "session_origin" {
+		t.Fatalf("selection key = %q, want session_origin", selection.Key)
+	}
+	source, ok := selection.Value.(overlay.MergeTargetSelectedMsg)
+	if !ok {
+		t.Fatalf("selection value type = %T, want MergeTargetSelectedMsg", selection.Value)
+	}
+	if source.SourceID != parentB || source.TargetID != childID {
+		t.Fatalf("selection = %+v, want source %q target %q", source, parentB, childID)
+	}
+
+	nextModel, startCmd := updatedModel.Update(selection)
+	if startCmd == nil {
+		t.Fatal("expected session start command")
+	}
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+
+	finalModel, finalCmd := nextModel.(Model).Update(startMsg)
+	if finalCmd != nil {
+		t.Fatalf("final update command = %T, want nil", finalCmd)
+	}
+	finalModelValue, ok := finalModel.(Model)
+	if !ok {
+		t.Fatalf("final model type = %T, want Model", finalModel)
+	}
+	if session, ok := finalModelValue.sessions[childID]; !ok || session == nil || session.Worktree != "/tmp/az-child" {
+		t.Fatalf("session record = %+v, want worktree /tmp/az-child", session)
+	}
+	if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandSessionStart || transport.requests[1] != daemonclient.CommandWorktreeList {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
 func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 	base := time.Date(2026, time.March, 24, 12, 0, 0, 0, time.UTC)
 	oldSessionStart := base.Add(-48 * time.Hour)
@@ -642,4 +1326,209 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
+
+	t.Run("bulk delete reports per-item failures", func(t *testing.T) {
+		deleteCount := 0
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskDelete {
+					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskDelete)
+				}
+				var body daemonclient.TaskIDRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal delete request: %v", err)
+				}
+				deleteCount++
+				if deleteCount == 2 {
+					return protocol.ResponseEnvelope{}, io.ErrUnexpectedEOF
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusOpen},
+		}
+
+		msg := m.bulkDeleteCmd([]string{"az-1", "az-2"})()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+		}
+		if result.updated != 1 || result.failed != 1 || len(result.issues) != 1 {
+			t.Fatalf("bulk delete result = %+v", result)
+		}
+		if result.issues[0].taskID != "az-2" || !strings.Contains(result.issues[0].reason, "unexpected EOF") {
+			t.Fatalf("issues = %+v", result.issues)
+		}
+		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandTaskDelete || got[1] != daemonclient.CommandTaskDelete {
+			t.Fatalf("requests = %v", got)
+		}
+
+		updated, _ := m.Update(result)
+		updatedModel, ok := updated.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+		if len(updatedModel.toasts) == 0 {
+			t.Fatal("expected bulk action toast")
+		}
+		gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
+		if !strings.Contains(gotToast, "az-2:") || !strings.Contains(gotToast, "unexpected EOF") {
+			t.Fatalf("toast = %q, want wrapped failure reason", gotToast)
+		}
+	})
+
+	t.Run("bulk move right applies to selected set", func(t *testing.T) {
+		statusBodies := make([]daemonclient.TaskStatusRequest, 0, 2)
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskUpdateStatus:
+					var body daemonclient.TaskStatusRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal status request: %v", err)
+					}
+					statusBodies = append(statusBodies, body)
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Status: domain.StatusOpen},
+			{ID: "az-2", Status: domain.StatusInProgress},
+			{ID: "az-3", Status: domain.StatusBlocked},
+		}
+
+		updated, cmd := m.handleBulkAction(overlay.BulkActionMsg{
+			Action:      "l",
+			SelectedIDs: []string{"az-1", "az-2"},
+		})
+		if cmd == nil {
+			t.Fatal("expected bulk move command")
+		}
+		if _, ok := updated.(Model); !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+
+		msg := cmd()
+		result, ok := msg.(bulkStatusResultMsg)
+		if !ok || result.updated != 2 || result.failed != 0 {
+			t.Fatalf("bulk move result = %#v", msg)
+		}
+		if len(statusBodies) != 2 {
+			t.Fatalf("status bodies = %+v, want 2 updates", statusBodies)
+		}
+		if statusBodies[0].TaskID != "az-1" || statusBodies[0].Status != domain.StatusInProgress {
+			t.Fatalf("first update = %+v, want az-1 -> in_progress", statusBodies[0])
+		}
+		if statusBodies[1].TaskID != "az-2" || statusBodies[1].Status != domain.StatusBlocked {
+			t.Fatalf("second update = %+v, want az-2 -> blocked", statusBodies[1])
+		}
+		if got := transport.requests; len(got) != 2 ||
+			got[0] != daemonclient.CommandTaskUpdateStatus ||
+			got[1] != daemonclient.CommandTaskUpdateStatus {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+}
+
+func TestBulkActionMenuPreviewAndFrozenSelection(t *testing.T) {
+	selected := []string{"az-1", "az-2"}
+	menu := overlay.NewBulkActionMenu(selected, len(selected))
+
+	selected[0] = "az-mutated"
+
+	view := menu.View()
+	if !strings.Contains(view, "Selected:") {
+		t.Fatalf("view = %q, want selected preview", view)
+	}
+	if !strings.Contains(view, "Scope: 2 frozen selected task(s)") {
+		t.Fatalf("view = %q, want frozen scope preview", view)
+	}
+
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd == nil {
+		t.Fatal("expected bulk action command")
+	}
+
+	msg := cmd()
+	result, ok := msg.(overlay.BulkActionMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want BulkActionMsg", msg)
+	}
+
+	if !reflect.DeepEqual(result.SelectedIDs, []string{"az-1", "az-2"}) {
+		t.Fatalf("selected ids = %+v, want frozen original ids", result.SelectedIDs)
+	}
+}
+
+func TestBulkDeleteReportsSkippedDriftedIDs(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskDelete {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskDelete)
+			}
+			var body daemonclient.TaskIDRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal delete request: %v", err)
+			}
+			if body.TaskID != "az-1" {
+				t.Fatalf("delete body = %+v, want az-1", body)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{
+		{ID: "az-1", Status: domain.StatusOpen},
+	}
+
+	msg := m.bulkDeleteCmd([]string{"az-1", "az-2"})()
+	result, ok := msg.(bulkStatusResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want bulkStatusResultMsg", msg)
+	}
+	if result.updated != 1 || result.failed != 0 || len(result.issues) != 1 {
+		t.Fatalf("bulk delete result = %+v", result)
+	}
+	if result.issues[0].taskID != "az-2" || result.issues[0].reason != "task not found" {
+		t.Fatalf("issue details = %+v", result.issues)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandTaskDelete {
+		t.Fatalf("requests = %v", got)
+	}
+
+	updated, _ := m.Update(result)
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if len(updatedModel.toasts) == 0 {
+		t.Fatal("expected bulk action toast")
+	}
+	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
+	if !strings.Contains(gotToast, "az-2: task not found") {
+		t.Fatalf("toast = %q, want issue reason", gotToast)
+	}
 }

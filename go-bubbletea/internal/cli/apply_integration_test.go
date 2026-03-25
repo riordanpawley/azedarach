@@ -11,7 +11,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 type applyIntegrationTransport struct {
@@ -35,7 +35,7 @@ type applyIntegrationService struct {
 	deleteErr error
 }
 
-func (s *applyIntegrationService) Create(_ context.Context, params beads.CreateTaskParams) (string, error) {
+func (s *applyIntegrationService) Create(_ context.Context, params issues.CreateTaskParams) (string, error) {
 	parentID := ""
 	if params.ParentID != nil {
 		parentID = *params.ParentID
@@ -49,7 +49,7 @@ func (s *applyIntegrationService) Update(_ context.Context, id string, status do
 	return nil
 }
 
-func (s *applyIntegrationService) UpdateDetails(_ context.Context, id string, params beads.UpdateTaskParams) error {
+func (s *applyIntegrationService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
 	s.calls = append(s.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
 	return nil
 }

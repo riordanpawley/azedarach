@@ -13,16 +13,16 @@ import (
 	"time"
 )
 
-// Service manages image attachments for beads
+// Service manages image attachments for issues
 type Service struct {
-	beadsPath string
-	logger    *slog.Logger
+	issuesPath string
+	logger     *slog.Logger
 }
 
 // Attachment represents a file attachment
 type Attachment struct {
 	ID       string    `json:"id"`
-	BeadID   string    `json:"bead_id"`
+	IssueID  string    `json:"issue_id"`
 	Filename string    `json:"filename"`
 	Path     string    `json:"path"`
 	MimeType string    `json:"mime_type"`
@@ -31,16 +31,16 @@ type Attachment struct {
 }
 
 // NewService creates a new attachment service
-func NewService(beadsPath string, logger *slog.Logger) *Service {
+func NewService(issuesPath string, logger *slog.Logger) *Service {
 	return &Service{
-		beadsPath: beadsPath,
-		logger:    logger,
+		issuesPath: issuesPath,
+		logger:     logger,
 	}
 }
 
-// Attach copies a file from sourcePath to the beads images directory
-func (s *Service) Attach(ctx context.Context, beadID string, sourcePath string) (*Attachment, error) {
-	s.logger.Debug("attaching file", "bead_id", beadID, "source", sourcePath)
+// Attach copies a file from sourcePath to the issues images directory
+func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string) (*Attachment, error) {
+	s.logger.Debug("attaching file", "issue_id", issueID, "source", sourcePath)
 
 	// Verify source file exists
 	info, err := os.Stat(sourcePath)
@@ -65,12 +65,12 @@ func (s *Service) Attach(ctx context.Context, beadID string, sourcePath string) 
 	filename := filepath.Base(sourcePath)
 
 	// Create attachment
-	return s.createAttachment(ctx, beadID, filename, data, info.Size())
+	return s.createAttachment(ctx, issueID, filename, data, info.Size())
 }
 
 // AttachFromClipboard reads an image from the clipboard and attaches it
-func (s *Service) AttachFromClipboard(ctx context.Context, beadID string) (*Attachment, error) {
-	s.logger.Debug("attaching from clipboard", "bead_id", beadID)
+func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Attachment, error) {
+	s.logger.Debug("attaching from clipboard", "issue_id", issueID)
 
 	// Read image from clipboard
 	data, err := ReadImageFromClipboard(ctx)
@@ -89,14 +89,14 @@ func (s *Service) AttachFromClipboard(ctx context.Context, beadID string) (*Atta
 	// Generate filename with timestamp
 	filename := fmt.Sprintf("clipboard-%s%s", time.Now().Format("20060102-150405"), ext)
 
-	return s.createAttachment(ctx, beadID, filename, data, int64(len(data)))
+	return s.createAttachment(ctx, issueID, filename, data, int64(len(data)))
 }
 
-// List returns all attachments for a given bead
-func (s *Service) List(ctx context.Context, beadID string) ([]Attachment, error) {
-	s.logger.Debug("listing attachments", "bead_id", beadID)
+// List returns all attachments for a given issue
+func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error) {
+	s.logger.Debug("listing attachments", "issue_id", issueID)
 
-	imagesDir := s.getImagesDir(beadID)
+	imagesDir := s.getImagesDir(issueID)
 
 	// Check if directory exists
 	if _, err := os.Stat(imagesDir); os.IsNotExist(err) {
@@ -133,7 +133,7 @@ func (s *Service) List(ctx context.Context, beadID string) ([]Attachment, error)
 
 		attachments = append(attachments, Attachment{
 			ID:       id,
-			BeadID:   beadID,
+			IssueID:  issueID,
 			Filename: entry.Name(),
 			Path:     fullPath,
 			MimeType: mimeType,
@@ -147,10 +147,10 @@ func (s *Service) List(ctx context.Context, beadID string) ([]Attachment, error)
 }
 
 // Delete removes an attachment by ID
-func (s *Service) Delete(ctx context.Context, beadID, attachmentID string) error {
-	s.logger.Debug("deleting attachment", "bead_id", beadID, "attachment_id", attachmentID)
+func (s *Service) Delete(ctx context.Context, issueID, attachmentID string) error {
+	s.logger.Debug("deleting attachment", "issue_id", issueID, "attachment_id", attachmentID)
 
-	imagesDir := s.getImagesDir(beadID)
+	imagesDir := s.getImagesDir(issueID)
 
 	// Find the file with this ID prefix
 	entries, err := os.ReadDir(imagesDir)
@@ -173,14 +173,14 @@ func (s *Service) Delete(ctx context.Context, beadID, attachmentID string) error
 }
 
 // GetPath returns the full path to an attachment
-func (s *Service) GetPath(beadID, filename string) string {
-	return filepath.Join(s.getImagesDir(beadID), filename)
+func (s *Service) GetPath(issueID, filename string) string {
+	return filepath.Join(s.getImagesDir(issueID), filename)
 }
 
 // createAttachment creates a new attachment file
-func (s *Service) createAttachment(ctx context.Context, beadID, filename string, data []byte, size int64) (*Attachment, error) {
+func (s *Service) createAttachment(ctx context.Context, issueID, filename string, data []byte, size int64) (*Attachment, error) {
 	// Ensure images directory exists
-	imagesDir := s.getImagesDir(beadID)
+	imagesDir := s.getImagesDir(issueID)
 	if err := os.MkdirAll(imagesDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create images directory: %w", err)
 	}
@@ -201,7 +201,7 @@ func (s *Service) createAttachment(ctx context.Context, beadID, filename string,
 
 	attachment := &Attachment{
 		ID:       id,
-		BeadID:   beadID,
+		IssueID:  issueID,
 		Filename: newFilename,
 		Path:     destPath,
 		MimeType: mimeType,
@@ -213,9 +213,9 @@ func (s *Service) createAttachment(ctx context.Context, beadID, filename string,
 	return attachment, nil
 }
 
-// getImagesDir returns the images directory for a bead
-func (s *Service) getImagesDir(beadID string) string {
-	return filepath.Join(s.beadsPath, "images", beadID)
+// getImagesDir returns the images directory for a issue
+func (s *Service) getImagesDir(issueID string) string {
+	return filepath.Join(s.issuesPath, "images", issueID)
 }
 
 // generateID generates a random ID for an attachment

@@ -13,6 +13,7 @@ import (
 // DetailPanel displays full task details with scrollable description
 type DetailPanel struct {
 	task          domain.Task
+	relatedTasks  []domain.Task
 	session       *domain.Session
 	scrollY       int
 	contentHeight int
@@ -36,6 +37,13 @@ func NewDetailPanel(task domain.Task, session *domain.Session) *DetailPanel {
 		viewHeight:    20, // Default, will be updated in Size()
 		styles:        New(),
 	}
+}
+
+// WithRelatedTasks attaches the current task list so the panel can render
+// incoming dependency edges alongside the task's outgoing dependencies.
+func (d *DetailPanel) WithRelatedTasks(tasks []domain.Task) *DetailPanel {
+	d.relatedTasks = append([]domain.Task(nil), tasks...)
+	return d
 }
 
 // Init initializes the detail panel
@@ -122,6 +130,14 @@ func (d *DetailPanel) View() string {
 		b.WriteString("\n")
 	}
 
+	if deps := d.renderDependencies(); deps != "" {
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render("Dependencies"))
+		b.WriteString("\n")
+		b.WriteString(deps)
+		b.WriteString("\n")
+	}
+
 	// Timestamps
 	b.WriteString(labelStyle.Render("Created:"))
 	b.WriteString("  ")
@@ -202,6 +218,60 @@ func (d *DetailPanel) View() string {
 	}
 
 	return b.String()
+}
+
+func (d *DetailPanel) renderDependencies() string {
+	outgoing := d.task.Dependencies
+	incoming := d.incomingDependencies()
+	if len(outgoing) == 0 && len(incoming) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(d.styles.MenuItem.Render("Outgoing"))
+	b.WriteString("\n")
+	if len(outgoing) == 0 {
+		b.WriteString("- none\n")
+	} else {
+		for _, dep := range outgoing {
+			b.WriteString(fmt.Sprintf("- %s -> %s\n", dep.Type, dep.ID))
+		}
+	}
+
+	b.WriteString(d.styles.MenuItem.Render("Incoming"))
+	b.WriteString("\n")
+	if len(incoming) == 0 {
+		b.WriteString("- none\n")
+	} else {
+		for _, dep := range incoming {
+			b.WriteString(fmt.Sprintf("- %s <- %s\n", dep.Type, dep.ID))
+		}
+	}
+
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (d *DetailPanel) incomingDependencies() []domain.Dependency {
+	if len(d.relatedTasks) == 0 {
+		return nil
+	}
+
+	var incoming []domain.Dependency
+	for _, task := range d.relatedTasks {
+		if task.ID == d.task.ID {
+			continue
+		}
+		for _, dep := range task.Dependencies {
+			if dep.ID == d.task.ID {
+				incoming = append(incoming, domain.Dependency{
+					ID:   task.ID,
+					Type: dep.Type,
+				})
+			}
+		}
+	}
+
+	return incoming
 }
 
 // Title returns the overlay title

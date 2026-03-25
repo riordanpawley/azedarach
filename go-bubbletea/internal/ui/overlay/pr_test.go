@@ -4,34 +4,35 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewPRCreateOverlay(t *testing.T) {
-	overlay := NewPRCreateOverlay("feature/x", "main", "az-123")
+	overlay := NewPRCreateOverlay("feature/x", testprofile.Smoke.BaseBranch, "az-123")
 	require.NotNil(t, overlay)
 	assert.Equal(t, "feature/x", overlay.branch)
-	assert.Equal(t, "main", overlay.baseBranch)
-	assert.Equal(t, "az-123", overlay.beadID)
+	assert.Equal(t, testprofile.Smoke.BaseBranch, overlay.baseBranch)
+	assert.Equal(t, "az-123", overlay.issueID)
 	assert.True(t, overlay.draft) // Default to draft
 	assert.Equal(t, prFocusTitle, overlay.focusIndex)
 }
 
 func TestPRCreateOverlayTitle(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 	assert.Equal(t, "Create Pull Request", overlay.Title())
 }
 
 func TestPRCreateOverlaySize(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 	width, height := overlay.Size()
 	assert.Equal(t, 80, width)
 	assert.Equal(t, 28, height)
 }
 
 func TestPRCreateOverlayView(t *testing.T) {
-	overlay := NewPRCreateOverlay("feature/auth", "main", "az-42")
+	overlay := NewPRCreateOverlay("feature/auth", testprofile.Smoke.BaseBranch, "az-42")
 	view := overlay.View()
 
 	// Check that form elements are present
@@ -39,12 +40,12 @@ func TestPRCreateOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Description:")
 	assert.Contains(t, view, "Draft:")
 	assert.Contains(t, view, "Create Pull Request")
-	assert.Contains(t, view, "feature/auth → main")
+	assert.Contains(t, view, "feature/auth → "+testprofile.Smoke.BaseBranch)
 	assert.Contains(t, view, "az-42")
 }
 
 func TestPRCreateOverlayEscapeCloses(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	require.NotNil(t, cmd)
@@ -56,7 +57,7 @@ func TestPRCreateOverlayEscapeCloses(t *testing.T) {
 }
 
 func TestPRCreateOverlayTabNavigation(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	// Start at title
 	assert.Equal(t, prFocusTitle, overlay.focusIndex)
@@ -83,7 +84,7 @@ func TestPRCreateOverlayTabNavigation(t *testing.T) {
 }
 
 func TestPRCreateOverlayShiftTabNavigation(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	// Start at title (0)
 	assert.Equal(t, prFocusTitle, overlay.focusIndex)
@@ -100,7 +101,7 @@ func TestPRCreateOverlayShiftTabNavigation(t *testing.T) {
 }
 
 func TestPRCreateOverlayDraftToggle(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	// Default is draft
 	assert.True(t, overlay.draft)
@@ -123,7 +124,7 @@ func TestPRCreateOverlayDraftToggle(t *testing.T) {
 }
 
 func TestPRCreateOverlayDraftToggleOnlyWhenFocused(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	// Start at title (not draft)
 	assert.Equal(t, prFocusTitle, overlay.focusIndex)
@@ -136,7 +137,7 @@ func TestPRCreateOverlayDraftToggleOnlyWhenFocused(t *testing.T) {
 }
 
 func TestPRCreateOverlaySubmitWithCtrlS(t *testing.T) {
-	overlay := NewPRCreateOverlay("feature/test", "main", "az-99")
+	overlay := NewPRCreateOverlay("feature/test", testprofile.Smoke.BaseBranch, "az-99")
 
 	// Set a title
 	overlay.title.SetValue("Test PR")
@@ -152,13 +153,13 @@ func TestPRCreateOverlaySubmitWithCtrlS(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "Test PR", prMsg.Title)
 	assert.Equal(t, "feature/test", prMsg.Branch)
-	assert.Equal(t, "main", prMsg.BaseBranch)
-	assert.Equal(t, "az-99", prMsg.BeadID)
+	assert.Equal(t, testprofile.Smoke.BaseBranch, prMsg.BaseBranch)
+	assert.Equal(t, "az-99", prMsg.IssueID)
 	assert.True(t, prMsg.Draft)
 }
 
 func TestPRCreateOverlaySubmitWithEnter(t *testing.T) {
-	overlay := NewPRCreateOverlay("fix/bug", "main", "az-50")
+	overlay := NewPRCreateOverlay("fix/bug", testprofile.Smoke.BaseBranch, "az-50")
 
 	// Set a title
 	overlay.title.SetValue("Fix critical bug")
@@ -180,7 +181,7 @@ func TestPRCreateOverlaySubmitWithEnter(t *testing.T) {
 }
 
 func TestPRCreateOverlaySubmitEmptyTitleIgnored(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	// Don't set a title (leave it empty)
 
@@ -191,7 +192,7 @@ func TestPRCreateOverlaySubmitEmptyTitleIgnored(t *testing.T) {
 }
 
 func TestPRCreateOverlaySubmitWithBody(t *testing.T) {
-	overlay := NewPRCreateOverlay("feature/y", "develop", "az-77")
+	overlay := NewPRCreateOverlay("feature/y", testprofile.Integration.BaseBranch, "az-77")
 
 	// Set title and body
 	overlay.title.SetValue("Add feature Y")
@@ -215,12 +216,12 @@ func TestPRCreateOverlaySubmitWithBody(t *testing.T) {
 	assert.Contains(t, prMsg.Body, "implements feature Y")
 	assert.Contains(t, prMsg.Body, "Closes #123")
 	assert.Equal(t, "feature/y", prMsg.Branch)
-	assert.Equal(t, "develop", prMsg.BaseBranch)
+	assert.Equal(t, testprofile.Integration.BaseBranch, prMsg.BaseBranch)
 	assert.False(t, prMsg.Draft)
 }
 
 func TestPRCreateOverlayRenderDraftToggle(t *testing.T) {
-	overlay := NewPRCreateOverlay("test", "main", "az-1")
+	overlay := NewPRCreateOverlay("test", testprofile.Smoke.BaseBranch, "az-1")
 
 	// Draft is true by default
 	assert.True(t, overlay.draft)

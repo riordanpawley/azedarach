@@ -33,18 +33,18 @@ type Replacer interface {
 
 // AutostartOrchestrator coordinates attach/start/reattach with singleflight.
 type AutostartOrchestrator struct {
-	handshaker  Handshaker
-	starter     Starter
-	replacer    Replacer
-	group       singleflight.Group
-	maxRetries  int
-	backoffFn   func(attempt int) time.Duration
-	sleepFn     func(time.Duration)
-	onceMu      sync.Mutex
-	spawned     bool
-	replaced    bool
-	startKey    string
-	replaceKey  string
+	handshaker Handshaker
+	starter    Starter
+	replacer   Replacer
+	group      singleflight.Group
+	maxRetries int
+	backoffFn  func(attempt int) time.Duration
+	sleepFn    func(time.Duration)
+	onceMu     sync.Mutex
+	spawned    bool
+	replaced   bool
+	startKey   string
+	replaceKey string
 }
 
 // NewAutostartOrchestrator returns a default autostart orchestrator.
@@ -58,9 +58,10 @@ func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *Autostart
 		handshaker: handshaker,
 		starter:    starter,
 		replacer:   replacer,
-		maxRetries: 3,
+		// Daemon boot can take >300ms on cold starts; allow a wider attach window.
+		maxRetries: 20,
 		backoffFn: func(attempt int) time.Duration {
-			return time.Duration(attempt+1) * 50 * time.Millisecond
+			return time.Duration(attempt+1) * 100 * time.Millisecond
 		},
 		sleepFn:    time.Sleep,
 		startKey:   "daemon-autostart",

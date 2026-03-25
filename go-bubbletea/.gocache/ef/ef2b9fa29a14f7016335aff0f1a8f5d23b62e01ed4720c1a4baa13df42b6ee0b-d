@@ -1,0 +1,3 @@
+./clipboard.go
+./service.go
+./service_test.go

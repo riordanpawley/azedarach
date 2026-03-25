@@ -10,10 +10,10 @@ import (
 
 // Mock TmuxClient for testing
 type mockTmuxClient struct {
-	sessions    []string
-	sessionErr  error
-	hasSession  bool
-	hasErr      error
+	sessions   []string
+	sessionErr error
+	hasSession bool
+	hasErr     error
 }
 
 func (m *mockTmuxClient) ListSessions(ctx context.Context) ([]string, error) {
@@ -29,11 +29,11 @@ type mockPortAllocator struct {
 	ports map[string]int
 }
 
-func (m *mockPortAllocator) GetPort(beadID string) (int, bool) {
+func (m *mockPortAllocator) GetPort(issueID string) (int, bool) {
 	if m.ports == nil {
 		return 0, false
 	}
-	port, ok := m.ports[beadID]
+	port, ok := m.ports[issueID]
 	return port, ok
 }
 
@@ -110,31 +110,97 @@ func TestGetSystemStatus(t *testing.T) {
 	}
 }
 
+func TestCollectDiagnosticsIncludesOperationSummaryAndErrorGuidance(t *testing.T) {
+	now := time.Now().Add(-3 * time.Minute)
+	tmux := &mockTmuxClient{sessions: []string{}}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
+	service := NewService(tmux, ports, network)
+
+	diag := service.CollectDiagnostics(context.Background(), map[string]*domain.Session{
+		"test-busy": {
+			IssueID:   "test-busy",
+			State:     domain.SessionBusy,
+			StartedAt: &now,
+			Worktree:  "/worktree/busy",
+		},
+		"test-wait": {
+			IssueID: "test-wait",
+			State:   domain.SessionWaiting,
+		},
+		"test-done": {
+			IssueID: "test-done",
+			State:   domain.SessionDone,
+		},
+		"test-error": {
+			IssueID:   "test-error",
+			State:     domain.SessionError,
+			StartedAt: &now,
+			Worktree:  "/worktree/error",
+		},
+		"test-paused": {
+			IssueID: "test-paused",
+			State:   domain.SessionPaused,
+		},
+	}, nil)
+
+	if got, want := diag.Operations.Total, 5; got != want {
+		t.Fatalf("Operations.Total = %d, want %d", got, want)
+	}
+	if got, want := diag.Operations.Busy, 1; got != want {
+		t.Fatalf("Operations.Busy = %d, want %d", got, want)
+	}
+	if got, want := diag.Operations.Waiting, 1; got != want {
+		t.Fatalf("Operations.Waiting = %d, want %d", got, want)
+	}
+	if got, want := diag.Operations.Done, 1; got != want {
+		t.Fatalf("Operations.Done = %d, want %d", got, want)
+	}
+	if got, want := diag.Operations.Error, 1; got != want {
+		t.Fatalf("Operations.Error = %d, want %d", got, want)
+	}
+	if got, want := diag.Operations.Paused, 1; got != want {
+		t.Fatalf("Operations.Paused = %d, want %d", got, want)
+	}
+	if got, want := diag.Operations.Cancelable, 2; got != want {
+		t.Fatalf("Operations.Cancelable = %d, want %d", got, want)
+	}
+	if diag.OverallState != HealthCritical {
+		t.Fatalf("OverallState = %v, want %v", diag.OverallState, HealthCritical)
+	}
+	if len(diag.Errors) == 0 {
+		t.Fatal("expected error guidance for SessionError state")
+	}
+	if got := diag.Errors[0]; got != "Session test-error is in error state (worktree: /worktree/error); started 3m 0s ago; inspect recent output or restart the session" {
+		t.Fatalf("Errors[0] = %q", got)
+	}
+}
+
 func TestGetPortConflicts(t *testing.T) {
 	tests := []struct {
-		name       string
-		sessions   map[string]*domain.Session
-		wantCount  int
+		name         string
+		sessions     map[string]*domain.Session
+		wantCount    int
 		wantConflict bool
 	}{
 		{
-			name:       "no ports allocated",
-			sessions:   map[string]*domain.Session{},
-			wantCount:  0,
+			name:         "no ports allocated",
+			sessions:     map[string]*domain.Session{},
+			wantCount:    0,
 			wantConflict: false,
 		},
 		{
 			name: "port in use (no conflict)",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					BeadID: "test-1",
+					IssueID: "test-1",
 					DevServer: &domain.DevServer{
 						Port:    9999, // High port unlikely to conflict
 						Running: false,
 					},
 				},
 			},
-			wantCount:  0,
+			wantCount:    0,
 			wantConflict: false,
 		},
 	}
@@ -173,7 +239,7 @@ func TestGetSessionHealth(t *testing.T) {
 			name: "one session",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					BeadID:    "test-1",
+					IssueID:   "test-1",
 					State:     domain.SessionBusy,
 					StartedAt: &now,
 					Worktree:  "/path/to/worktree",
@@ -185,12 +251,12 @@ func TestGetSessionHealth(t *testing.T) {
 			name: "multiple sessions",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					BeadID: "test-1",
-					State:  domain.SessionBusy,
+					IssueID: "test-1",
+					State:   domain.SessionBusy,
 				},
 				"test-2": {
-					BeadID: "test-2",
-					State:  domain.SessionWaiting,
+					IssueID: "test-2",
+					State:   domain.SessionWaiting,
 				},
 			},
 			wantCount: 2,
@@ -213,16 +279,16 @@ func TestGetSessionHealth(t *testing.T) {
 
 			// Verify session info is correct
 			for _, info := range health {
-				session, ok := tt.sessions[info.BeadID]
+				session, ok := tt.sessions[info.IssueID]
 				if !ok {
-					t.Errorf("Session %s not found in input", info.BeadID)
+					t.Errorf("Session %s not found in input", info.IssueID)
 					continue
 				}
 				if info.State != session.State {
-					t.Errorf("Session %s state = %v, want %v", info.BeadID, info.State, session.State)
+					t.Errorf("Session %s state = %v, want %v", info.IssueID, info.State, session.State)
 				}
 				if info.Worktree != session.Worktree {
-					t.Errorf("Session %s worktree = %v, want %v", info.BeadID, info.Worktree, session.Worktree)
+					t.Errorf("Session %s worktree = %v, want %v", info.IssueID, info.Worktree, session.Worktree)
 				}
 			}
 		})
@@ -244,7 +310,7 @@ func TestGetWorktreeStatus(t *testing.T) {
 			name: "session without worktree",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					BeadID:   "test-1",
+					IssueID:  "test-1",
 					Worktree: "",
 				},
 			},
@@ -254,7 +320,7 @@ func TestGetWorktreeStatus(t *testing.T) {
 			name: "session with worktree",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					BeadID:   "test-1",
+					IssueID:  "test-1",
 					Worktree: "/path/to/worktree",
 				},
 			},
@@ -283,13 +349,13 @@ func TestCollectDiagnostics(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name           string
-		sessions       map[string]*domain.Session
-		tmuxSessions   []string
-		online         bool
-		wantHealthy    bool
-		wantWarnings   int
-		wantErrors     int
+		name         string
+		sessions     map[string]*domain.Session
+		tmuxSessions []string
+		online       bool
+		wantHealthy  bool
+		wantWarnings int
+		wantErrors   int
 	}{
 		{
 			name:         "healthy system",
@@ -313,7 +379,7 @@ func TestCollectDiagnostics(t *testing.T) {
 			name: "orphaned tmux session",
 			sessions: map[string]*domain.Session{
 				"test-1": {
-					BeadID: "test-1",
+					IssueID: "test-1",
 				},
 			},
 			tmuxSessions: []string{"test-1", "orphaned-session"},

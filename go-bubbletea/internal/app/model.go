@@ -335,6 +335,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasLoading := m.loading
 		m.tasks = msg.tasks
 		m.editor.ReconcileSelection(msg.tasks)
+		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
@@ -801,9 +802,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		summary := fmt.Sprintf("Bulk action completed: %d updated", msg.updated)
+		level := ToastSuccess
+		if len(msg.issues) > 0 {
+			level = ToastWarning
+			summary = fmt.Sprintf("%s, %d reported issues (%s)", summary, len(msg.issues), summarizeBulkIssues(msg.issues))
+		}
+		if msg.failed > 0 {
+			level = ToastWarning
+			summary = fmt.Sprintf("%s, %d failed", summary, msg.failed)
+		}
 		m.toasts = append(m.toasts, Toast{
-			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Bulk action completed: %d updated, %d failed", msg.updated, msg.failed),
+			Level:   level,
+			Message: summary,
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		m.editor.ClearSelection()
@@ -812,6 +823,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) reconcileCursorAfterIssuesRefresh() {
+	columns := m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) {
+		return
+	}
+	col := columns[pos.Column]
+	if pos.Task < 0 || pos.Task >= len(col.Tasks) {
+		return
+	}
+	m.nav.SelectTask(col.Tasks[pos.Task].ID, pos.Column)
 }
 
 // View renders the current state as a string
@@ -832,6 +856,7 @@ func (m Model) View() string {
 	}
 
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
+	sb.SetSelectionSummary(m.selectionSummary())
 	statusBarView := sb.Render()
 
 	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
@@ -957,6 +982,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.overlayStack.Pop()
 			return m, nil
 		}
+		if m.editor.IsSelect() {
+			m.editor.ClearSelection()
+			m.editor.EnterNormal()
+			return m, nil
+		}
 		if !m.editor.IsNormal() {
 			m.editor.EnterNormal()
 			return m, nil
@@ -1060,7 +1090,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.overlayStack.Push(overlay.NewEpicDrillDown(*task, children))
 			} else {
 				// Regular task detail panel
-				return m, m.overlayStack.Push(overlay.NewDetailPanel(*task, session))
+				return m, m.overlayStack.Push(overlay.NewDetailPanel(*task, session).WithRelatedTasks(m.tasks))
 			}
 		}
 		return m, nil
@@ -1175,6 +1205,9 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 		))
+	case "s":
+		// Dedicated Spec workspace
+		return m, m.overlayStack.Push(overlay.NewSpecWorkspaceOverlay(m.currentProject))
 	}
 
 	return m, nil
@@ -1252,15 +1285,22 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	// Toggle selection without moving
+	// Toggle current selection without moving
 	case " ":
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
 		return m, nil
 
-	// Select all in current column
+	// Toggle current selection
 	case "a":
+		if task != nil {
+			m.editor.ToggleSelection(task.ID)
+		}
+		return m, nil
+
+	// Select all in current column
+	case "A":
 		status := m.nav.GetCurrentStatus(columns)
 		for _, t := range m.tasks {
 			if t.Status == status {
@@ -1270,14 +1310,31 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Select all visible tasks
-	case "A":
+	case "%":
 		filteredTasks := m.editor.ApplyFilter(m.tasks)
 		m.editor.SelectAll(filteredTasks)
+		return m, nil
+
+	// Invert visible selection
+	case "*":
+		for _, t := range m.editor.ApplyFilter(m.tasks) {
+			if m.editor.IsSelected(t.ID) {
+				m.editor.Deselect(t.ID)
+			} else {
+				m.editor.Select(t.ID)
+			}
+		}
 		return m, nil
 
 	// Clear selection
 	case "x":
 		m.editor.ClearSelection()
+		return m, nil
+
+	// Exit select mode and clear selection
+	case "v":
+		m.editor.ClearSelection()
+		m.editor.EnterNormal()
 		return m, nil
 
 	// Bulk action menu for selected tasks
@@ -1290,6 +1347,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Exit select mode
 	case "esc":
+		m.editor.ClearSelection()
 		m.editor.EnterNormal()
 		return m, nil
 	}
@@ -1489,15 +1547,61 @@ func tickEvery(d time.Duration) tea.Cmd {
 	})
 }
 
+func (m Model) resolveBaseBranch() string {
+	baseBranch := m.config.Git.BaseBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	return baseBranch
+}
+
+func (m Model) originBranchForSelection(selectedID string) string {
+	baseBranch := m.resolveBaseBranch()
+	if selectedID == "" || selectedID == baseBranch {
+		return baseBranch
+	}
+	if strings.HasPrefix(selectedID, "az/") {
+		return selectedID
+	}
+	return fmt.Sprintf("az/%s", selectedID)
+}
+
+func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget, int) {
+	baseBranch := m.resolveBaseBranch()
+	candidates := []overlay.MergeTarget{
+		{
+			ID:          baseBranch,
+			Label:       baseBranch,
+			IsMain:      true,
+			HasWorktree: false,
+		},
+	}
+
+	upstreamCount := 0
+	for _, candidate := range m.getFollowOnMergeCandidates(task) {
+		if !candidate.target.HasWorktree {
+			continue
+		}
+		upstreamCount++
+		candidates = append(candidates, overlay.MergeTarget{
+			ID:          candidate.target.ID,
+			Label:       candidate.target.Label,
+			Status:      candidate.target.Status,
+			HasWorktree: true,
+		})
+	}
+
+	return candidates, upstreamCount
+}
+
 // startSessionCmd requests daemon-owned lifecycle start and refreshes local session projection.
-func (m Model) startSessionCmd(issueID string) tea.Cmd {
+func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		baseBranch := m.config.Git.BaseBranch
 		if baseBranch == "" {
-			baseBranch = "main"
+			baseBranch = m.resolveBaseBranch()
 		}
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
@@ -1737,14 +1841,38 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start session
-		return m, m.startSessionCmd(task.ID)
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
 	case "S":
-		// TODO: Start session + work
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Start session + work (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		originCandidates, eligibleUpstreamCount := m.sessionOriginCandidates(task)
+		if eligibleUpstreamCount == 0 {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("No eligible upstream sources; using base branch %s", m.resolveBaseBranch()),
+				Expires: time.Now().Add(4 * time.Second),
+			})
+		}
+		originOverlay := overlay.NewMergeSourceSelectOverlay(
+			task,
+			originCandidates,
+			func(targetID string) tea.Cmd {
+				return func() tea.Msg {
+					return overlay.SelectionMsg{
+						Key: "session_origin",
+						Value: overlay.MergeTargetSelectedMsg{
+							SourceID: targetID,
+							TargetID: task.ID,
+						},
+					}
+				}
+			},
+			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+		)
+		return m, m.overlayStack.Push(originOverlay)
+	case "session_origin":
+		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
+			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID))
+		}
+		return m, nil
 	case "a":
 		// Attach to session
 		if session != nil {
@@ -2045,6 +2173,31 @@ func (m *Model) ensureColumnVisible(pos navigation.Position, totalColumns int) {
 		start = pos.Column - visibleColumns + 1
 	}
 	m.columnViewportStart = clampInt(start, 0, maxStart)
+}
+
+func (m Model) selectionSummary() string {
+	selected := m.editor.GetSelectedTasks()
+	if len(selected) == 0 {
+		return ""
+	}
+
+	filtered := m.editor.ApplyFilter(m.tasks)
+	visible := make(map[string]struct{}, len(filtered))
+	for _, task := range filtered {
+		visible[task.ID] = struct{}{}
+	}
+
+	hiddenCount := 0
+	for taskID := range selected {
+		if _, ok := visible[taskID]; !ok {
+			hiddenCount++
+		}
+	}
+
+	if hiddenCount > 0 {
+		return fmt.Sprintf("Selected: %d (%d hidden)", len(selected), hiddenCount)
+	}
+	return fmt.Sprintf("Selected: %d", len(selected))
 }
 
 // renderLoading renders a centered loading spinner with message
@@ -2518,8 +2671,14 @@ func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 
 type bulkStatusResultMsg struct {
 	updated int
+	issues  []bulkTaskIssue
 	failed  int
 	err     error
+}
+
+type bulkTaskIssue struct {
+	taskID string
+	reason string
 }
 
 // bulkMoveStatusCmd moves tasks by delta (-1 = left, +1 = right)
@@ -2537,6 +2696,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 		updated := 0
 		failed := 0
+		issues := make([]bulkTaskIssue, 0)
 
 		for _, taskID := range taskIDs {
 			// Find the task to get current status
@@ -2549,7 +2709,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			}
 
 			if currentTask == nil {
-				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
 				continue
 			}
 
@@ -2563,14 +2723,14 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			}
 
 			if currentIdx == -1 {
-				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "invalid status"})
 				continue
 			}
 
 			// Calculate new status
 			newIdx := currentIdx + delta
 			if newIdx < 0 || newIdx >= len(statusOrder) {
-				// Can't move beyond bounds
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "cannot move beyond status bounds"})
 				continue
 			}
 
@@ -2579,18 +2739,20 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			// Update via daemon client
 			if m.daemonClient == nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
 			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
 			if err != nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 				continue
 			}
 
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
 	}
 }
 
@@ -2601,21 +2763,28 @@ func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 
 		updated := 0
 		failed := 0
+		issues := make([]bulkTaskIssue, 0)
 
 		for _, taskID := range taskIDs {
+			if !m.taskExists(taskID) {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
+				continue
+			}
 			if m.daemonClient == nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
 			err := m.daemonClient.DeleteTask(ctx, taskID)
 			if err != nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 				continue
 			}
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
 	}
 }
 
@@ -2626,21 +2795,28 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 
 		updated := 0
 		failed := 0
+		issues := make([]bulkTaskIssue, 0)
 
 		for _, taskID := range taskIDs {
+			if !m.taskExists(taskID) {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
+				continue
+			}
 			if m.daemonClient == nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
 			err := m.daemonClient.ArchiveTask(ctx, taskID)
 			if err != nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 				continue
 			}
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
 	}
 }
 
@@ -2652,22 +2828,50 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 
 		updated := 0
 		failed := 0
+		issues := make([]bulkTaskIssue, 0)
 
 		for _, taskID := range taskIDs {
+			if !m.taskExists(taskID) {
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "task not found"})
+				continue
+			}
 			if m.daemonClient == nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: "daemon client unavailable"})
 				continue
 			}
 			err := m.daemonClient.UpdateTaskStatus(ctx, taskID, status)
 			if err != nil {
 				failed++
+				issues = append(issues, bulkTaskIssue{taskID: taskID, reason: err.Error()})
 				continue
 			}
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return bulkStatusResultMsg{updated: updated, issues: issues, failed: failed}
 	}
+}
+
+func (m Model) taskExists(taskID string) bool {
+	for i := range m.tasks {
+		if m.tasks[i].ID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeBulkIssues(issues []bulkTaskIssue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(issues))
+	for _, item := range issues {
+		parts = append(parts, fmt.Sprintf("%s: %s", item.taskID, item.reason))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {

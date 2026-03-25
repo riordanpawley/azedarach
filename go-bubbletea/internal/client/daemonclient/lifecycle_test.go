@@ -75,13 +75,13 @@ func TestDevServerLifecycleHelpers(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			body, err := json.Marshal(devServerResultBody{
-				BeadID: "az-1",
+				IssueID: "az-1",
 				Server: devserver.Server{
-					ID:     "az-1",
-					Name:   "az-1",
-					Port:   3001,
-					Status: "running",
-					BeadID: "az-1",
+					ID:      "az-1",
+					Name:    "az-1",
+					Port:    3001,
+					Status:  "running",
+					IssueID: "az-1",
 				},
 			})
 			if err != nil {
@@ -119,7 +119,7 @@ func TestListWorktreesUsesProjectRoute(t *testing.T) {
 			body, err := json.Marshal(worktreeListBody{
 				ProjectID: "proj-a",
 				Worktrees: []worktreePayload{
-					{Path: "/tmp/az-1", Branch: "az/az-1", BeadID: "az-1"},
+					{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
 				},
 			})
 			if err != nil {
@@ -143,7 +143,7 @@ func TestListWorktreesUsesProjectRoute(t *testing.T) {
 	if transport.lastReq.Command != CommandWorktreeList {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandWorktreeList)
 	}
-	if len(worktrees) != 1 || worktrees[0].BeadID != "az-1" {
+	if len(worktrees) != 1 || worktrees[0].IssueID != "az-1" {
 		t.Fatalf("worktrees = %+v", worktrees)
 	}
 }

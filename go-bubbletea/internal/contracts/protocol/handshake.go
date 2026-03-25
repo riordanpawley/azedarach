@@ -16,12 +16,12 @@ type Hello struct {
 
 // HelloAck is the daemon handshake response.
 type HelloAck struct {
-	Accepted              bool    `json:"accepted" msgpack:"accepted"`
-	DaemonProtocolVersion Version `json:"daemon_protocol_version" msgpack:"daemon_protocol_version"`
-	DaemonVersion         string  `json:"daemon_version" msgpack:"daemon_version"`
+	Accepted              bool      `json:"accepted" msgpack:"accepted"`
+	DaemonProtocolVersion Version   `json:"daemon_protocol_version" msgpack:"daemon_protocol_version"`
+	DaemonVersion         string    `json:"daemon_version" msgpack:"daemon_version"`
 	ErrorCode             ErrorCode `json:"error_code,omitempty" msgpack:"error_code,omitempty"`
 	RetryAfterRestart     bool      `json:"retry_after_restart,omitempty" msgpack:"retry_after_restart,omitempty"`
-	Reason                string  `json:"reason,omitempty" msgpack:"reason,omitempty"`
+	Reason                string    `json:"reason,omitempty" msgpack:"reason,omitempty"`
 }
 
 // NegotiateHello evaluates protocol compatibility at attach/reconnect handshake.

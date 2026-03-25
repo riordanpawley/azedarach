@@ -1,0 +1,3 @@
+./autostart.go
+./autostart_adapter.go
+./client.go

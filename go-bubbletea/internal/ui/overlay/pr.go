@@ -17,7 +17,7 @@ type PRCreatedMsg struct {
 	Branch     string
 	BaseBranch string
 	Draft      bool
-	BeadID     string
+	IssueID    string
 }
 
 // PRCreateOverlay provides a form to create a pull request
@@ -27,7 +27,7 @@ type PRCreateOverlay struct {
 	draft      bool
 	branch     string
 	baseBranch string
-	beadID     string
+	issueID    string
 	focusIndex int
 	styles     *Styles
 }
@@ -40,7 +40,7 @@ const (
 )
 
 // NewPRCreateOverlay creates a new PR creation overlay
-func NewPRCreateOverlay(branch, baseBranch, beadID string) *PRCreateOverlay {
+func NewPRCreateOverlay(branch, baseBranch, issueID string) *PRCreateOverlay {
 	// Initialize title input
 	ti := textinput.New()
 	ti.Placeholder = "Pull request title..."
@@ -61,7 +61,7 @@ func NewPRCreateOverlay(branch, baseBranch, beadID string) *PRCreateOverlay {
 		draft:      true, // Default to draft
 		branch:     branch,
 		baseBranch: baseBranch,
-		beadID:     beadID,
+		issueID:    issueID,
 		focusIndex: prFocusTitle,
 		styles:     New(),
 	}
@@ -155,8 +155,8 @@ func (p *PRCreateOverlay) View() string {
 
 	// Branch info header
 	b.WriteString(infoStyle.Render(fmt.Sprintf(
-		"Creating PR: %s → %s (Bead: %s)",
-		p.branch, p.baseBranch, p.beadID,
+		"Creating PR: %s → %s (Issue: %s)",
+		p.branch, p.baseBranch, p.issueID,
 	)))
 	b.WriteString("\n\n")
 
@@ -248,7 +248,7 @@ func (p *PRCreateOverlay) submit() tea.Cmd {
 			Branch:     p.branch,
 			BaseBranch: p.baseBranch,
 			Draft:      p.draft,
-			BeadID:     p.beadID,
+			IssueID:    p.issueID,
 		}
 	}
 }

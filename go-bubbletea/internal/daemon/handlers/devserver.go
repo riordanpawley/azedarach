@@ -19,9 +19,9 @@ const (
 
 // DevServerManager captures the devserver service behavior needed by the daemon.
 type DevServerManager interface {
-	Start(ctx context.Context, beadID, name, command string) (*devserver.Server, error)
-	Stop(ctx context.Context, beadID string) error
-	Get(beadID string) (*devserver.Server, bool)
+	Start(ctx context.Context, issueID, name, command string) (*devserver.Server, error)
+	Stop(ctx context.Context, issueID string) error
+	Get(issueID string) (*devserver.Server, bool)
 }
 
 // DevServerHandler routes devserver lifecycle commands.
@@ -35,12 +35,12 @@ func NewDevServerHandler(manager DevServerManager) *DevServerHandler {
 }
 
 type devServerCommandBody struct {
-	BeadID string `json:"bead_id"`
+	IssueID string `json:"issue_id"`
 }
 
 type devServerResultBody struct {
-	BeadID string           `json:"bead_id"`
-	Server devserver.Server `json:"server"`
+	IssueID string           `json:"issue_id"`
+	Server  devserver.Server `json:"server"`
 }
 
 // Handle executes a devserver command from a daemon request envelope.
@@ -62,10 +62,10 @@ func (h *DevServerHandler) Handle(ctx context.Context, req protocol.RequestEnvel
 		}
 		return resp
 	}
-	if cmd.BeadID == "" {
+	if cmd.IssueID == "" {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   "missing required field: bead_id",
+			Message:   "missing required field: issue_id",
 			Retryable: false,
 		}
 		return resp
@@ -89,7 +89,7 @@ func (h *DevServerHandler) Handle(ctx context.Context, req protocol.RequestEnvel
 }
 
 func (h *DevServerHandler) handleStart(ctx context.Context, resp protocol.ResponseEnvelope, cmd devServerCommandBody) protocol.ResponseEnvelope {
-	if srv, ok := h.manager.Get(cmd.BeadID); ok && srv.Status == "running" {
+	if srv, ok := h.manager.Get(cmd.IssueID); ok && srv.Status == "running" {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeConflict,
 			Message:   "devserver already running",
@@ -98,16 +98,16 @@ func (h *DevServerHandler) handleStart(ctx context.Context, resp protocol.Respon
 		return resp
 	}
 
-	name := cmd.BeadID
+	name := cmd.IssueID
 	command := ""
-	if srv, ok := h.manager.Get(cmd.BeadID); ok {
+	if srv, ok := h.manager.Get(cmd.IssueID); ok {
 		if srv.Name != "" {
 			name = srv.Name
 		}
 		command = srv.Command
 	}
 
-	srv, err := h.manager.Start(ctx, cmd.BeadID, name, command)
+	srv, err := h.manager.Start(ctx, cmd.IssueID, name, command)
 	if err != nil {
 		resp.Error = mapDevServerError(err)
 		return resp
@@ -121,11 +121,11 @@ func (h *DevServerHandler) handleStart(ctx context.Context, resp protocol.Respon
 		return resp
 	}
 
-	return devServerSuccess(resp, cmd.BeadID, *srv)
+	return devServerSuccess(resp, cmd.IssueID, *srv)
 }
 
 func (h *DevServerHandler) handleStop(ctx context.Context, resp protocol.ResponseEnvelope, cmd devServerCommandBody) protocol.ResponseEnvelope {
-	srv, ok := h.manager.Get(cmd.BeadID)
+	srv, ok := h.manager.Get(cmd.IssueID)
 	if !ok {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
@@ -143,13 +143,13 @@ func (h *DevServerHandler) handleStop(ctx context.Context, resp protocol.Respons
 		return resp
 	}
 
-	if err := h.manager.Stop(ctx, cmd.BeadID); err != nil {
+	if err := h.manager.Stop(ctx, cmd.IssueID); err != nil {
 		resp.Error = mapDevServerError(err)
 		return resp
 	}
 
-	if srv, ok := h.manager.Get(cmd.BeadID); ok {
-		return devServerSuccess(resp, cmd.BeadID, *srv)
+	if srv, ok := h.manager.Get(cmd.IssueID); ok {
+		return devServerSuccess(resp, cmd.IssueID, *srv)
 	}
 
 	resp.Error = &protocol.ErrorEnvelope{
@@ -161,7 +161,7 @@ func (h *DevServerHandler) handleStop(ctx context.Context, resp protocol.Respons
 }
 
 func (h *DevServerHandler) handleStatus(resp protocol.ResponseEnvelope, cmd devServerCommandBody) protocol.ResponseEnvelope {
-	srv, ok := h.manager.Get(cmd.BeadID)
+	srv, ok := h.manager.Get(cmd.IssueID)
 	if !ok {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
@@ -171,13 +171,13 @@ func (h *DevServerHandler) handleStatus(resp protocol.ResponseEnvelope, cmd devS
 		return resp
 	}
 
-	return devServerSuccess(resp, cmd.BeadID, *srv)
+	return devServerSuccess(resp, cmd.IssueID, *srv)
 }
 
-func devServerSuccess(resp protocol.ResponseEnvelope, beadID string, srv devserver.Server) protocol.ResponseEnvelope {
+func devServerSuccess(resp protocol.ResponseEnvelope, issueID string, srv devserver.Server) protocol.ResponseEnvelope {
 	body, err := json.Marshal(devServerResultBody{
-		BeadID: beadID,
-		Server: srv,
+		IssueID: issueID,
+		Server:  srv,
 	})
 	if err != nil {
 		resp.Error = &protocol.ErrorEnvelope{

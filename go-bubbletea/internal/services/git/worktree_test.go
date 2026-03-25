@@ -13,7 +13,7 @@ import (
 
 // MockRunner implements CommandRunner for testing.
 type MockRunner struct {
-	commands []string                                    // Record of commands run
+	commands []string                                                  // Record of commands run
 	handler  func(ctx context.Context, args ...string) (string, error) // Custom handler
 }
 
@@ -49,7 +49,7 @@ func (m *MockRunner) Reset() {
 func TestWorktreeManager_Create(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
-	beadID := "bead-123"
+	issueID := "issue-123"
 	baseBranch := "main"
 
 	mock := NewMockRunner()
@@ -68,23 +68,23 @@ func TestWorktreeManager_Create(t *testing.T) {
 	logger := slog.Default()
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
-	worktree, err := manager.Create(ctx, beadID, baseBranch)
+	worktree, err := manager.Create(ctx, issueID, baseBranch)
 
 	require.NoError(t, err)
 	assert.NotNil(t, worktree)
-	assert.Equal(t, beadID, worktree.BeadID)
-	assert.Equal(t, "az/bead-123", worktree.Branch)
-	assert.Equal(t, "/home/user/test-repo-bead-123", worktree.Path)
+	assert.Equal(t, issueID, worktree.IssueID)
+	assert.Equal(t, "az/issue-123", worktree.Branch)
+	assert.Equal(t, "/home/user/test-repo-issue-123", worktree.Path)
 
 	// Verify the command was called correctly
-	expectedCmd := "worktree add -b az/bead-123 /home/user/test-repo-bead-123 main"
+	expectedCmd := "worktree add -b az/issue-123 /home/user/test-repo-issue-123 main"
 	mock.AssertCommand(t, expectedCmd)
 }
 
 func TestWorktreeManager_Create_AlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
-	beadID := "bead-123"
+	issueID := "issue-123"
 	baseBranch := "main"
 
 	mock := NewMockRunner()
@@ -95,9 +95,9 @@ func TestWorktreeManager_Create_AlreadyExists(t *testing.T) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 `, nil
 		}
 		return "", nil
@@ -106,7 +106,7 @@ branch refs/heads/az/bead-123
 	logger := slog.Default()
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
-	_, err := manager.Create(ctx, beadID, baseBranch)
+	_, err := manager.Create(ctx, issueID, baseBranch)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
@@ -115,7 +115,7 @@ branch refs/heads/az/bead-123
 func TestWorktreeManager_Delete(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
-	beadID := "bead-123"
+	issueID := "issue-123"
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
@@ -125,9 +125,9 @@ func TestWorktreeManager_Delete(t *testing.T) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 `, nil
 		}
 		// Mock 'worktree remove' to succeed
@@ -144,17 +144,17 @@ branch refs/heads/az/bead-123
 	logger := slog.Default()
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
-	err := manager.Delete(ctx, beadID)
+	err := manager.Delete(ctx, issueID)
 
 	require.NoError(t, err)
-	mock.AssertCommand(t, "worktree remove /home/user/test-repo-bead-123")
-	mock.AssertCommand(t, "branch -D az/bead-123")
+	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
 func TestWorktreeManager_Delete_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
-	beadID := "nonexistent"
+	issueID := "nonexistent"
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
@@ -171,7 +171,7 @@ branch refs/heads/main
 	logger := slog.Default()
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
-	err := manager.Delete(ctx, beadID)
+	err := manager.Delete(ctx, issueID)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
@@ -180,7 +180,7 @@ branch refs/heads/main
 func TestWorktreeManager_Get(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
-	beadID := "bead-123"
+	issueID := "issue-123"
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
@@ -190,13 +190,13 @@ func TestWorktreeManager_Get(t *testing.T) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 
-worktree /home/user/test-repo-bead-456
+worktree /home/user/test-repo-issue-456
 HEAD ghi789
-branch refs/heads/az/bead-456
+branch refs/heads/az/issue-456
 `, nil
 		}
 		return "", nil
@@ -205,19 +205,19 @@ branch refs/heads/az/bead-456
 	logger := slog.Default()
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
-	worktree, err := manager.Get(ctx, beadID)
+	worktree, err := manager.Get(ctx, issueID)
 
 	require.NoError(t, err)
 	assert.NotNil(t, worktree)
-	assert.Equal(t, beadID, worktree.BeadID)
-	assert.Equal(t, "az/bead-123", worktree.Branch)
-	assert.Equal(t, "/home/user/test-repo-bead-123", worktree.Path)
+	assert.Equal(t, issueID, worktree.IssueID)
+	assert.Equal(t, "az/issue-123", worktree.Branch)
+	assert.Equal(t, "/home/user/test-repo-issue-123", worktree.Path)
 }
 
 func TestWorktreeManager_Get_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
-	beadID := "nonexistent"
+	issueID := "nonexistent"
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
@@ -234,7 +234,7 @@ branch refs/heads/main
 	logger := slog.Default()
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
-	_, err := manager.Get(ctx, beadID)
+	_, err := manager.Get(ctx, issueID)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
@@ -252,13 +252,13 @@ func TestWorktreeManager_List(t *testing.T) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 
-worktree /home/user/test-repo-bead-456
+worktree /home/user/test-repo-issue-456
 HEAD ghi789
-branch refs/heads/az/bead-456
+branch refs/heads/az/issue-456
 
 worktree /home/user/test-repo-feature
 HEAD jkl012
@@ -277,14 +277,14 @@ branch refs/heads/feature/something
 	assert.Len(t, worktrees, 2) // Only az/ branches
 
 	// Check first worktree
-	assert.Equal(t, "bead-123", worktrees[0].BeadID)
-	assert.Equal(t, "az/bead-123", worktrees[0].Branch)
-	assert.Equal(t, "/home/user/test-repo-bead-123", worktrees[0].Path)
+	assert.Equal(t, "issue-123", worktrees[0].IssueID)
+	assert.Equal(t, "az/issue-123", worktrees[0].Branch)
+	assert.Equal(t, "/home/user/test-repo-issue-123", worktrees[0].Path)
 
 	// Check second worktree
-	assert.Equal(t, "bead-456", worktrees[1].BeadID)
-	assert.Equal(t, "az/bead-456", worktrees[1].Branch)
-	assert.Equal(t, "/home/user/test-repo-bead-456", worktrees[1].Path)
+	assert.Equal(t, "issue-456", worktrees[1].IssueID)
+	assert.Equal(t, "az/issue-456", worktrees[1].Branch)
+	assert.Equal(t, "/home/user/test-repo-issue-456", worktrees[1].Path)
 }
 
 func TestWorktreeManager_List_Empty(t *testing.T) {
@@ -324,9 +324,9 @@ func TestWorktreeManager_Exists(t *testing.T) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 `, nil
 		}
 		return "", nil
@@ -336,7 +336,7 @@ branch refs/heads/az/bead-123
 	manager := NewWorktreeManager(mock, repoDir, logger)
 
 	// Test existing worktree
-	exists, err := manager.Exists(ctx, "bead-123")
+	exists, err := manager.Exists(ctx, "issue-123")
 	require.NoError(t, err)
 	assert.True(t, exists)
 
@@ -365,18 +365,18 @@ func TestWorktreeManager_ErrorHandling(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to list worktrees")
 
 	// Test Get error
-	_, err = manager.Get(ctx, "bead-123")
+	_, err = manager.Get(ctx, "issue-123")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to list worktrees")
 
 	// Test Exists error
-	_, err = manager.Exists(ctx, "bead-123")
+	_, err = manager.Exists(ctx, "issue-123")
 	require.Error(t, err)
 }
 
 func TestWorktreeManager_PathGeneration(t *testing.T) {
 	ctx := context.Background()
-	beadID := "bead-xyz"
+	issueID := "issue-xyz"
 	baseBranch := "main"
 
 	testCases := []struct {
@@ -387,17 +387,17 @@ func TestWorktreeManager_PathGeneration(t *testing.T) {
 		{
 			name:         "simple path",
 			repoDir:      "/home/user/my-repo",
-			expectedPath: "/home/user/my-repo-bead-xyz",
+			expectedPath: "/home/user/my-repo-issue-xyz",
 		},
 		{
 			name:         "nested path",
 			repoDir:      "/home/user/projects/awesome-app",
-			expectedPath: "/home/user/projects/awesome-app-bead-xyz",
+			expectedPath: "/home/user/projects/awesome-app-issue-xyz",
 		},
 		{
 			name:         "path with spaces",
 			repoDir:      "/home/user/my projects/test repo",
-			expectedPath: "/home/user/my projects/test repo-bead-xyz",
+			expectedPath: "/home/user/my projects/test repo-issue-xyz",
 		},
 	}
 
@@ -424,7 +424,7 @@ func TestWorktreeManager_PathGeneration(t *testing.T) {
 			logger := slog.Default()
 			manager := NewWorktreeManager(mock, tc.repoDir, logger)
 
-			worktree, err := manager.Create(ctx, beadID, baseBranch)
+			worktree, err := manager.Create(ctx, issueID, baseBranch)
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectedPath, worktree.Path)
@@ -453,15 +453,15 @@ func TestParseWorktreeList(t *testing.T) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 `,
 			expected: []Worktree{
 				{
-					Path:   "/home/user/test-repo-bead-123",
-					Branch: "az/bead-123",
-					BeadID: "bead-123",
+					Path:    "/home/user/test-repo-issue-123",
+					Branch:  "az/issue-123",
+					IssueID: "issue-123",
 				},
 			},
 		},
@@ -471,28 +471,28 @@ branch refs/heads/az/bead-123
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 
 worktree /home/user/test-repo-feature
 HEAD ghi789
 branch refs/heads/feature/test
 
-worktree /home/user/test-repo-bead-456
+worktree /home/user/test-repo-issue-456
 HEAD jkl012
-branch refs/heads/az/bead-456
+branch refs/heads/az/issue-456
 `,
 			expected: []Worktree{
 				{
-					Path:   "/home/user/test-repo-bead-123",
-					Branch: "az/bead-123",
-					BeadID: "bead-123",
+					Path:    "/home/user/test-repo-issue-123",
+					Branch:  "az/issue-123",
+					IssueID: "issue-123",
 				},
 				{
-					Path:   "/home/user/test-repo-bead-456",
-					Branch: "az/bead-456",
-					BeadID: "bead-456",
+					Path:    "/home/user/test-repo-issue-456",
+					Branch:  "az/issue-456",
+					IssueID: "issue-456",
 				},
 			},
 		},
@@ -502,14 +502,14 @@ branch refs/heads/az/bead-456
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123`,
+branch refs/heads/az/issue-123`,
 			expected: []Worktree{
 				{
-					Path:   "/home/user/test-repo-bead-123",
-					Branch: "az/bead-123",
-					BeadID: "bead-123",
+					Path:    "/home/user/test-repo-issue-123",
+					Branch:  "az/issue-123",
+					IssueID: "issue-123",
 				},
 			},
 		},
@@ -569,13 +569,13 @@ func BenchmarkParseWorktreeList(b *testing.B) {
 HEAD abc123
 branch refs/heads/main
 
-worktree /home/user/test-repo-bead-123
+worktree /home/user/test-repo-issue-123
 HEAD def456
-branch refs/heads/az/bead-123
+branch refs/heads/az/issue-123
 
-worktree /home/user/test-repo-bead-456
+worktree /home/user/test-repo-issue-456
 HEAD ghi789
-branch refs/heads/az/bead-456
+branch refs/heads/az/issue-456
 `
 
 	b.ResetTimer()

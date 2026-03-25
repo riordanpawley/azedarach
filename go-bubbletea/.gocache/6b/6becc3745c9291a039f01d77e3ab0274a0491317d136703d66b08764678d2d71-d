@@ -1,0 +1,7 @@
+./client.go
+./lifecycle.go
+./tasks.go
+./client_test.go
+./lifecycle_test.go
+./sqlite_integration_test.go
+./tasks_test.go

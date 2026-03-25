@@ -45,12 +45,12 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 	if exists {
 		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.SessionID, cmd.SessionID)), nil
 	}
-	tasks, err := d.beads.Search(ctx, cmd.SessionID)
+	tasks, err := d.issues.Search(ctx, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if len(tasks) == 0 {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("bead not found: %s", cmd.SessionID)), nil
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.SessionID)), nil
 	}
 	baseBranch := cmd.BaseBranch
 	if baseBranch == "" {
@@ -66,7 +66,7 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, d.cfg.CLITool); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	_ = d.beads.Update(ctx, cmd.SessionID, domain.StatusInProgress)
+	_ = d.issues.Update(ctx, cmd.SessionID, domain.StatusInProgress)
 
 	output := strings.Join([]string{
 		fmt.Sprintf("Starting session for: %s - %s", tasks[0].ID, tasks[0].Title),
@@ -135,7 +135,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	tasks, err := d.beads.List(ctx)
+	tasks, err := d.issues.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -152,7 +152,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 			}
 		}
 		if !found {
-			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("no active session found for bead: %s", cmd.SessionID)), nil
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("no active session found for issue: %s", cmd.SessionID)), nil
 		}
 		tmuxSessions = []string{cmd.SessionID}
 	}
@@ -162,12 +162,12 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active Sessions (%d):\n\n", len(tmuxSessions))
-	b.WriteString("BEAD ID\tSTATUS\tTITLE\n")
+	b.WriteString("ISSUE ID\tSTATUS\tTITLE\n")
 	b.WriteString("-------\t------\t-----\n")
 	for _, name := range tmuxSessions {
 		task, ok := taskMap[name]
 		status := "unknown"
-		title := "(not in beads)"
+		title := "(not in issues)"
 		if ok {
 			status = string(task.Status)
 			title = task.Title
@@ -177,6 +177,6 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		}
 		fmt.Fprintf(&b, "%s\t%s\t%s\n", name, status, title)
 	}
-	b.WriteString("\nUse 'az attach <bead-id>' to attach to a session\n")
+	b.WriteString("\nUse 'az attach <issue-id>' to attach to a session\n")
 	return d.commandOutput(req, b.String()), nil
 }

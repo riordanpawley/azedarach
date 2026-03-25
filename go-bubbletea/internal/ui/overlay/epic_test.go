@@ -213,8 +213,8 @@ func TestEpicDrillDown_View(t *testing.T) {
 	}
 
 	session := &domain.Session{
-		BeadID: "az-2",
-		State:  domain.SessionBusy,
+		IssueID: "az-2",
+		State:   domain.SessionBusy,
 	}
 
 	children := []domain.Task{

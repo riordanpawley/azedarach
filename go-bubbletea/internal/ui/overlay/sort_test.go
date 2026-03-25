@@ -57,11 +57,11 @@ func TestSortMenu_Size(t *testing.T) {
 
 func TestSortMenu_InitialDisplay(t *testing.T) {
 	tests := []struct {
-		name          string
-		field         domain.SortField
-		order         domain.SortOrder
-		expectArrow   string
-		expectActive  string
+		name         string
+		field        domain.SortField
+		order        domain.SortOrder
+		expectArrow  string
+		expectActive string
 	}{
 		{
 			name:         "Session ascending",
@@ -127,11 +127,11 @@ func TestSortMenu_InitialDisplay(t *testing.T) {
 
 func TestSortMenu_FieldSelection(t *testing.T) {
 	tests := []struct {
-		name          string
-		initialField  domain.SortField
-		pressKey      string
-		expectField   domain.SortField
-		expectOrder   domain.SortOrder
+		name         string
+		initialField domain.SortField
+		pressKey     string
+		expectField  domain.SortField
+		expectOrder  domain.SortOrder
 	}{
 		{
 			name:         "Change from Priority to Session",

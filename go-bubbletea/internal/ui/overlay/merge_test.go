@@ -47,10 +47,10 @@ func TestMergeSelectOverlay_Title(t *testing.T) {
 
 func TestMergeSelectOverlay_Size(t *testing.T) {
 	tests := []struct {
-		name             string
-		candidatesCount  int
-		expectedHeight   int
-		expectedWidth    int
+		name            string
+		candidatesCount int
+		expectedHeight  int
+		expectedWidth   int
 	}{
 		{
 			name:            "no candidates",
@@ -241,7 +241,7 @@ func TestMergeSelectOverlay_RenderMainBranch(t *testing.T) {
 	source := makeTask("az-123", "Source", domain.StatusOpen, domain.TypeTask)
 	mainTarget := MergeTarget{
 		ID:          "main",
-		Label:       "main branch",
+		Label:       "develop",
 		IsMain:      true,
 		HasWorktree: false,
 	}
@@ -249,8 +249,8 @@ func TestMergeSelectOverlay_RenderMainBranch(t *testing.T) {
 	overlay := NewMergeSelectOverlay(&source, []MergeTarget{mainTarget}, nil, nil)
 
 	formatted := overlay.renderCandidate(mainTarget, false)
-	assert.Contains(t, formatted, "main")
-	assert.Contains(t, formatted, "(main branch)")
+	assert.Contains(t, formatted, "develop")
+	assert.Contains(t, formatted, "(base branch)")
 }
 
 func TestMergeSelectOverlay_Init(t *testing.T) {

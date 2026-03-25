@@ -18,10 +18,14 @@ import (
 )
 
 type fakeDaemonTransport struct {
+	handshakeFn func(context.Context, protocol.Hello) (protocol.HelloAck, error)
 	commandFn func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 }
 
-func (f *fakeDaemonTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	if f.handshakeFn != nil {
+		return f.handshakeFn(ctx, hello)
+	}
 	return protocol.HelloAck{Accepted: true}, nil
 }
 
@@ -43,7 +47,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				gotReq = req
-				return responseWithOutput(req, "Starting session for: bead-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-bead-1\nCreating tmux session: bead-1\n\n✓ Session started successfully\n  To attach: az attach bead-1\n  Or run:    tmux attach-session -t bead-1\n"), nil
+				return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
 			},
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -51,7 +55,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return StartCommand(deps, "bead-1")
+		return StartCommand(deps, "issue-1")
 	})
 
 	if gotReq.Command != commandSessionStart {
@@ -61,7 +65,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
-	if body.ProjectID != "proj" || body.SessionID != "bead-1" || body.BaseBranch != "main" {
+	if body.ProjectID != "proj" || body.SessionID != "issue-1" || body.BaseBranch != "main" {
 		t.Fatalf("body = %+v", body)
 	}
 	if !strings.Contains(output, "Session started successfully") {
@@ -81,18 +85,18 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 		{
 			name:         "attach",
 			command:      AttachCommand,
-			sessionID:    "bead-2",
+			sessionID:    "issue-2",
 			wantCommand:  commandSessionAttach,
-			wantContains: "Attaching to session: bead-2",
-			response:     "Attaching to session: bead-2\n(Press Ctrl+B then D to detach)\n",
+			wantContains: "Attaching to session: issue-2",
+			response:     "Attaching to session: issue-2\n(Press Ctrl+B then D to detach)\n",
 		},
 		{
 			name:         "kill",
 			command:      KillCommand,
-			sessionID:    "bead-3",
+			sessionID:    "issue-3",
 			wantCommand:  commandSessionStop,
-			wantContains: "Session killed: bead-3",
-			response:     "Killing session: bead-3\n✓ Session killed: bead-3\n  Note: Worktree is preserved. Use 'git worktree remove' to clean up.\n",
+			wantContains: "Session killed: issue-3",
+			response:     "Killing session: issue-3\n✓ Session killed: issue-3\n  Note: Worktree is preserved. Use 'git worktree remove' to clean up.\n",
 		},
 		{
 			name:         "status",
@@ -100,7 +104,7 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 			sessionID:    "",
 			wantCommand:  commandSessionStatus,
 			wantContains: "Active Sessions (1):",
-			response:     "Active Sessions (1):\n\nBEAD ID  STATUS   TITLE\n-------  ------   -----\nbead-4   active   Example task\n\nUse 'az attach <bead-id>' to attach to a session\n",
+			response:     "Active Sessions (1):\n\nISSUE ID  STATUS   TITLE\n-------  ------   -----\nbead-4   active   Example task\n\nUse 'az attach <issue-id>' to attach to a session\n",
 		},
 	}
 
@@ -148,7 +152,7 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 					OK:              false,
 					Error: &protocol.ErrorEnvelope{
 						Code:      protocol.ErrorCodeConflict,
-						Message:   "session already exists: bead-1 (use 'az attach bead-1' to connect)",
+						Message:   "session already exists: issue-1 (use 'az attach issue-1' to connect)",
 						Retryable: false,
 					},
 				}, nil
@@ -158,8 +162,8 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 		ProjectID: "proj",
 	}
 
-	err := StartCommand(deps, "bead-1")
-	if err == nil || err.Error() != "session already exists: bead-1 (use 'az attach bead-1' to connect)" {
+	err := StartCommand(deps, "issue-1")
+	if err == nil || err.Error() != "session already exists: issue-1 (use 'az attach issue-1' to connect)" {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -423,6 +427,74 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
+	}
+}
+
+type fakeLauncher struct {
+	replaceErr    error
+	replaceCalled bool
+}
+
+func (f *fakeLauncher) Start(context.Context) error { return nil }
+
+func (f *fakeLauncher) Replace(context.Context) error {
+	f.replaceCalled = true
+	return f.replaceErr
+}
+
+func TestRestartDaemonCommand(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	output := captureStdout(t, func() error {
+		return RestartDaemonCommand(deps)
+	})
+
+	if !fake.replaceCalled {
+		t.Fatalf("expected replace to be called")
+	}
+	if !strings.Contains(output, "Daemon restarted successfully.") {
+		t.Fatalf("output missing restart success: %q", output)
+	}
+}
+
+func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{replaceErr: errors.New("boom")}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      t.TempDir(),
+	}
+
+	err := RestartDaemonCommand(deps)
+	if err == nil || !strings.Contains(err.Error(), "restart daemon: boom") {
+		t.Fatalf("error = %v, want restart daemon boom", err)
 	}
 }
 

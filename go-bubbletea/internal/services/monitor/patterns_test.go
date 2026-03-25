@@ -656,10 +656,10 @@ Optimizing assets...`,
 
 func TestDetectStateWithContext_Confidence(t *testing.T) {
 	tests := []struct {
-		name           string
-		output         string
-		expectedState  domain.SessionState
-		minConfidence  float64
+		name            string
+		output          string
+		expectedState   domain.SessionState
+		minConfidence   float64
 		shouldHaveMatch bool
 	}{
 		{

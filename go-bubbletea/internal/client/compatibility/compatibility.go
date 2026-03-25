@@ -17,10 +17,10 @@ var (
 
 // Diagnostic is a typed handshake/reconnect diagnostic.
 type Diagnostic struct {
-	Code       protocol.ErrorCode
-	Retryable  bool
-	Message    string
-	Err        error
+	Code      protocol.ErrorCode
+	Retryable bool
+	Message   string
+	Err       error
 }
 
 // ClassifyHandshake translates handshake ack into a typed diagnostic.

@@ -1,0 +1,7 @@
+# test log
+getenv PATH
+stat /opt/homebrew/Cellar/go/1.26.1/libexec/bin/git
+stat /opt/homebrew/bin/git
+open /dev/null
+open /opt/homebrew/bin/git
+stat /tmp

@@ -68,7 +68,7 @@ A  added.txt
 			},
 		},
 		{
-			name:      "untracked files only",
+			name: "untracked files only",
 			gitOutput: `?? file1.txt
 ?? file2.txt`,
 			expectedStatus: &GitStatus{
@@ -226,8 +226,8 @@ func TestCurrentBranch(t *testing.T) {
 		},
 		{
 			name:           "feature branch",
-			gitOutput:      "az/bead-123",
-			expectedBranch: "az/bead-123",
+			gitOutput:      "az/issue-123",
+			expectedBranch: "az/issue-123",
 		},
 		{
 			name:           "branch with trailing newline",

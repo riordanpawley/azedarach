@@ -18,7 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 type roundtripExportTransport struct {
@@ -55,7 +55,7 @@ type roundtripApplyService struct {
 	calls     []string
 }
 
-func (s *roundtripApplyService) Create(_ context.Context, params beads.CreateTaskParams) (string, error) {
+func (s *roundtripApplyService) Create(_ context.Context, params issues.CreateTaskParams) (string, error) {
 	if len(s.createIDs) == 0 {
 		return "", errors.New("no task ids left")
 	}
@@ -70,7 +70,7 @@ func (s *roundtripApplyService) Update(_ context.Context, id string, status doma
 	return nil
 }
 
-func (s *roundtripApplyService) UpdateDetails(_ context.Context, id string, params beads.UpdateTaskParams) error {
+func (s *roundtripApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
 	s.calls = append(s.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
 	return nil
 }

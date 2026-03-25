@@ -6,9 +6,9 @@ import "time"
 type DependencyType string
 
 const (
-	DependencyBlocks     DependencyType = "blocks"
-	DependencyBlockedBy  DependencyType = "blocked_by"
-	DependencyRelatedTo  DependencyType = "related_to"
+	DependencyBlocks      DependencyType = "blocks"
+	DependencyBlockedBy   DependencyType = "blocked_by"
+	DependencyRelatedTo   DependencyType = "related_to"
 	DependencyParentChild DependencyType = "parent_child"
 )
 
@@ -18,7 +18,7 @@ type Dependency struct {
 	Type DependencyType `json:"dependency_type"`
 }
 
-// Task represents a bead/issue
+// Task represents a issue
 type Task struct {
 	ID           string       `json:"id"`
 	Title        string       `json:"title"`

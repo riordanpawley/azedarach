@@ -35,9 +35,9 @@ type Styles struct {
 	LineNumber  lipgloss.Style
 
 	// Navigation hints
-	Footer   lipgloss.Style
-	KeyHint  lipgloss.Style
-	Dimmed   lipgloss.Style
+	Footer  lipgloss.Style
+	KeyHint lipgloss.Style
+	Dimmed  lipgloss.Style
 }
 
 // New creates a new Styles instance using Catppuccin Macchiato colors

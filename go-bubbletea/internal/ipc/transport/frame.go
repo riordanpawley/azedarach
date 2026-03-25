@@ -7,13 +7,13 @@ import (
 type frameType string
 
 const (
-	frameTypeHello    frameType = "hello"
-	frameTypeHelloAck frameType = "hello_ack"
-	frameTypeCommand  frameType = "command"
-	frameTypeResponse frameType = "response"
+	frameTypeHello     frameType = "hello"
+	frameTypeHelloAck  frameType = "hello_ack"
+	frameTypeCommand   frameType = "command"
+	frameTypeResponse  frameType = "response"
 	frameTypeSubscribe frameType = "subscribe"
-	frameTypeEvent    frameType = "event"
-	frameTypeError    frameType = "error"
+	frameTypeEvent     frameType = "event"
+	frameTypeError     frameType = "error"
 )
 
 type subscribeRequest struct {

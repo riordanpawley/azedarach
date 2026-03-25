@@ -14,7 +14,7 @@ import (
 
 // ImagePreviewOverlay displays and manages image attachments with navigation
 type ImagePreviewOverlay struct {
-	beadID        string
+	issueID       string
 	service       *attachment.Service
 	images        []attachment.Attachment
 	currentIndex  int
@@ -30,9 +30,9 @@ type ImageDeletedMsg struct {
 }
 
 // NewImagePreviewOverlay creates a new image preview overlay
-func NewImagePreviewOverlay(beadID string, service *attachment.Service, initialIndex int) *ImagePreviewOverlay {
+func NewImagePreviewOverlay(issueID string, service *attachment.Service, initialIndex int) *ImagePreviewOverlay {
 	return &ImagePreviewOverlay{
-		beadID:        beadID,
+		issueID:       issueID,
 		service:       service,
 		currentIndex:  initialIndex,
 		confirmDelete: false,
@@ -275,15 +275,15 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 	hints := []string{}
 	if len(i.images) > 1 {
 		hints = append(hints,
-			i.styles.MenuKey.Render("h/l") + " " + i.styles.Footer.Render("Navigate"),
-			i.styles.MenuKey.Render("g/G") + " " + i.styles.Footer.Render("First/Last"),
+			i.styles.MenuKey.Render("h/l")+" "+i.styles.Footer.Render("Navigate"),
+			i.styles.MenuKey.Render("g/G")+" "+i.styles.Footer.Render("First/Last"),
 		)
 	}
 	hints = append(hints,
-		i.styles.MenuKey.Render("o") + " " + i.styles.Footer.Render("Open"),
-		i.styles.MenuKey.Render("d") + " " + i.styles.Footer.Render("Delete"),
-		i.styles.MenuKey.Render("r") + " " + i.styles.Footer.Render("Refresh"),
-		i.styles.MenuKey.Render("Esc") + " " + i.styles.Footer.Render("Close"),
+		i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
+		i.styles.MenuKey.Render("d")+" "+i.styles.Footer.Render("Delete"),
+		i.styles.MenuKey.Render("r")+" "+i.styles.Footer.Render("Refresh"),
+		i.styles.MenuKey.Render("Esc")+" "+i.styles.Footer.Render("Close"),
 	)
 
 	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
@@ -361,7 +361,7 @@ type imagePreviewErrorMsg struct {
 func (i *ImagePreviewOverlay) loadImages() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		images, err := i.service.List(ctx, i.beadID)
+		images, err := i.service.List(ctx, i.issueID)
 		if err != nil {
 			return imagePreviewErrorMsg{err: err}
 		}
@@ -377,7 +377,7 @@ func (i *ImagePreviewOverlay) deleteCurrentImage() tea.Cmd {
 	img := i.images[i.currentIndex]
 	return func() tea.Msg {
 		ctx := context.Background()
-		err := i.service.Delete(ctx, i.beadID, img.ID)
+		err := i.service.Delete(ctx, i.issueID, img.ID)
 		if err != nil {
 			return imagePreviewErrorMsg{err: err}
 		}

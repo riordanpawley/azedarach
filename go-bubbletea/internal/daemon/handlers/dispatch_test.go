@@ -14,10 +14,10 @@ import (
 type fakeWorktreeService struct{}
 
 func (f *fakeWorktreeService) List(context.Context, string) ([]git.Worktree, error) {
-	return []git.Worktree{{Path: "/tmp/wt", Branch: "main", BeadID: "afk"}}, nil
+	return []git.Worktree{{Path: "/tmp/wt", Branch: "main", IssueID: "afk"}}, nil
 }
 func (f *fakeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, error) {
-	return &git.Worktree{Path: "/tmp/wt", Branch: "main", BeadID: "afk"}, nil
+	return &git.Worktree{Path: "/tmp/wt", Branch: "main", IssueID: "afk"}, nil
 }
 func (f *fakeWorktreeService) Delete(context.Context, string, string) error { return nil }
 func (f *fakeWorktreeService) CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error) {
@@ -36,19 +36,19 @@ func newRouteDevServerManager() *routeDevServerManager {
 	}
 }
 
-func (m *routeDevServerManager) Start(ctx context.Context, beadID, name, command string) (*devserver.Server, error) {
+func (m *routeDevServerManager) Start(ctx context.Context, issueID, name, command string) (*devserver.Server, error) {
 	srv := &devserver.Server{Name: name, Command: command, Status: "running"}
-	m.servers[beadID] = srv
+	m.servers[issueID] = srv
 	return srv, nil
 }
-func (m *routeDevServerManager) Stop(ctx context.Context, beadID string) error {
-	if srv, ok := m.servers[beadID]; ok {
+func (m *routeDevServerManager) Stop(ctx context.Context, issueID string) error {
+	if srv, ok := m.servers[issueID]; ok {
 		srv.Status = "stopped"
 	}
 	return nil
 }
-func (m *routeDevServerManager) Get(beadID string) (*devserver.Server, bool) {
-	srv, ok := m.servers[beadID]
+func (m *routeDevServerManager) Get(issueID string) (*devserver.Server, bool) {
+	srv, ok := m.servers[issueID]
 	return srv, ok
 }
 
@@ -86,7 +86,7 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	}
 
 	r3 := dispatch.Handle(context.Background(), mkReq("devserver.status", map[string]string{
-		"bead_id": "afl",
+		"issue_id": "afl",
 	}))
 	if !r3.OK {
 		t.Fatalf("devserver route failed: %+v", r3.Error)

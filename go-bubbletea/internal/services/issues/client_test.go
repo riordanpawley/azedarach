@@ -379,6 +379,50 @@ func TestClient_DeleteRemovesIssue(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_CreateDoesNotReuseDeletedLocalIssueIDs(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	firstID, err := client.Create(ctx, CreateTaskParams{Title: "first", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	secondID, err := client.Create(ctx, CreateTaskParams{Title: "second", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	thirdID, err := client.Create(ctx, CreateTaskParams{Title: "third", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.Equal(t, "a", firstID)
+	require.Equal(t, "b", secondID)
+	require.Equal(t, "c", thirdID)
+
+	require.NoError(t, client.Delete(ctx, secondID))
+
+	fourthID, err := client.Create(ctx, CreateTaskParams{Title: "fourth", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	assert.Equal(t, "d", fourthID)
+}
+
+func TestClient_CreateSkipsHistoricallyUsedIDsWhenMetaIndexDrifts(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	firstID, err := client.Create(ctx, CreateTaskParams{Title: "first", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	secondID, err := client.Create(ctx, CreateTaskParams{Title: "second", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	require.Equal(t, "a", firstID)
+	require.Equal(t, "b", secondID)
+
+	// Simulate metadata/index drift pointing at an already-used historical ID.
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`UPDATE meta SET value = '0' WHERE key = ?`, nextAlphaIssueIndexMetaKey)
+	require.NoError(t, err)
+
+	thirdID, err := client.Create(ctx, CreateTaskParams{Title: "third", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	assert.Equal(t, "c", thirdID)
+}
+
 func TestClient_ErrorWrapping(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

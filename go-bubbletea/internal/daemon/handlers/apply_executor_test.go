@@ -8,7 +8,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 type recordingApplyService struct {
@@ -20,7 +20,7 @@ type recordingApplyService struct {
 	archiveErr       error
 }
 
-func (r *recordingApplyService) Create(_ context.Context, params beads.CreateTaskParams) (string, error) {
+func (r *recordingApplyService) Create(_ context.Context, params issues.CreateTaskParams) (string, error) {
 	parentID := ""
 	if params.ParentID != nil {
 		parentID = *params.ParentID
@@ -37,7 +37,7 @@ func (r *recordingApplyService) Update(_ context.Context, id string, status doma
 	return r.updateErr
 }
 
-func (r *recordingApplyService) UpdateDetails(_ context.Context, id string, params beads.UpdateTaskParams) error {
+func (r *recordingApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
 	r.calls = append(r.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
 	return r.updateDetailsErr
 }

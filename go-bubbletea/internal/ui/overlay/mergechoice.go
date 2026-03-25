@@ -8,15 +8,15 @@ import (
 )
 
 type MergeChoiceOverlay struct {
-	beadID        string
+	issueID       string
 	commitsBehind int
 	baseBranch    string
 	styles        *Styles
 }
 
-func NewMergeChoiceOverlay(beadID string, commitsBehind int, baseBranch string) *MergeChoiceOverlay {
+func NewMergeChoiceOverlay(issueID string, commitsBehind int, baseBranch string) *MergeChoiceOverlay {
 	return &MergeChoiceOverlay{
-		beadID:        beadID,
+		issueID:       issueID,
 		commitsBehind: commitsBehind,
 		baseBranch:    baseBranch,
 		styles:        New(),
@@ -35,14 +35,14 @@ func (m *MergeChoiceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg {
 				return SelectionMsg{
 					Key:   "merge_attach",
-					Value: m.beadID,
+					Value: m.issueID,
 				}
 			}
 		case "s", "S":
 			return m, func() tea.Msg {
 				return SelectionMsg{
 					Key:   "skip_attach",
-					Value: m.beadID,
+					Value: m.issueID,
 				}
 			}
 		case "esc":

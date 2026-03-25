@@ -20,6 +20,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 )
 
+var newLauncher = func(repoDir, socketPath string) daemonStarter {
+	return daemonprocess.NewLauncher(repoDir, socketPath)
+}
+
 const (
 	commandSessionStart       = "session.start"
 	commandSessionAttach      = "session.attach"
@@ -37,6 +41,11 @@ type Dependencies struct {
 	Logger       *slog.Logger
 	ProjectID    string
 	RepoDir      string
+}
+
+type daemonStarter interface {
+	Start(ctx context.Context) error
+	Replace(ctx context.Context) error
 }
 
 type ExportOptions struct {
@@ -65,15 +74,15 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	}, nil
 }
 
-func StartCommand(deps *Dependencies, beadID string) error {
+func StartCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	deps.Logger.Info("starting session", "bead_id", beadID)
+	deps.Logger.Info("starting session", "issue_id", issueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, beadID, "main"))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStart, deps.ProjectID, issueID, "main"))
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
@@ -84,15 +93,15 @@ func StartCommand(deps *Dependencies, beadID string) error {
 	return printCommandOutput(resp)
 }
 
-func AttachCommand(deps *Dependencies, beadID string) error {
+func AttachCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	deps.Logger.Info("attaching to session", "bead_id", beadID)
+	deps.Logger.Info("attaching to session", "issue_id", issueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionAttach, deps.ProjectID, beadID, ""))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionAttach, deps.ProjectID, issueID, ""))
 	if err != nil {
 		return fmt.Errorf("failed to attach to session: %w", err)
 	}
@@ -103,15 +112,15 @@ func AttachCommand(deps *Dependencies, beadID string) error {
 	return printCommandOutput(resp)
 }
 
-func KillCommand(deps *Dependencies, beadID string) error {
+func KillCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	deps.Logger.Info("killing session", "bead_id", beadID)
+	deps.Logger.Info("killing session", "issue_id", issueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStop, deps.ProjectID, beadID, ""))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStop, deps.ProjectID, issueID, ""))
 	if err != nil {
 		return fmt.Errorf("failed to kill session: %w", err)
 	}
@@ -122,16 +131,16 @@ func KillCommand(deps *Dependencies, beadID string) error {
 	return printCommandOutput(resp)
 }
 
-func StatusCommand(deps *Dependencies, beadID string) error {
+func StatusCommand(deps *Dependencies, issueID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
 
-	deps.Logger.Info("checking session status", "bead_id", beadID)
+	deps.Logger.Info("checking session status", "issue_id", issueID)
 
-	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStatus, deps.ProjectID, beadID, ""))
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionStatus, deps.ProjectID, issueID, ""))
 	if err != nil {
 		return fmt.Errorf("failed to list tmux sessions: %w", err)
 	}
@@ -199,27 +208,46 @@ func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	return nil
 }
 
+// RestartDaemonCommand forces daemon replacement and verifies client re-attach.
+func RestartDaemonCommand(deps *Dependencies) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	launcher := newLauncher(deps.RepoDir, config.GlobalDaemonSocketPath())
+	if err := launcher.Replace(ctx); err != nil {
+		return fmt.Errorf("restart daemon: %w", err)
+	}
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return fmt.Errorf("daemon health check after restart failed: %w", err)
+	}
+
+	fmt.Println("Daemon restarted successfully.")
+	return nil
+}
+
 func PrintUsage() {
 	usage := `Usage: az [command] [arguments]
 
 Commands:
   (no command)         Start the Azedarach TUI
-  start <bead-id>      Start a Claude session for a bead
-  attach <bead-id>     Attach to an existing session
-  kill <bead-id>       Kill a session
-  status [bead-id]     Show session status (all or specific bead)
+  start <issue-id>      Start a Claude session for an issue
+  attach <issue-id>     Attach to an existing session
+  kill <issue-id>       Kill a session
+  status [issue-id]     Show session status (all or specific issue)
   export               Export a snapshot (use --format json [--out <path>])
+  daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
 
 Examples:
   az                   # Start TUI
-  az start az-123      # Start session for bead az-123
-  az attach az-123     # Attach to az-123's session
-  az kill az-123       # Kill az-123's session
+  az start az-123      # Start session for issue az-123
+  az attach az-123     # Attach to issue az-123's session
+  az kill az-123       # Kill issue az-123's session
   az status            # Show all active sessions
   az status az-123     # Show status for az-123
   az export --format json
   az export --format json --out snapshot.json
+  az daemon restart
 
 For more information, see: https://github.com/riordanpawley/azedarach
 `
@@ -314,7 +342,7 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
-	launcher := daemonprocess.NewLauncher(deps.RepoDir, config.GlobalDaemonSocketPath())
+	launcher := newLauncher(deps.RepoDir, config.GlobalDaemonSocketPath())
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
