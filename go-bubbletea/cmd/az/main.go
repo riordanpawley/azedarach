@@ -93,13 +93,13 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
 		issueArgs := commandArgs[1:]
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
-			fmt.Printf("Usage: az issue <list|get|create|update|status|close> [arguments]\n\n")
+			fmt.Printf("Usage: az issue <list|get|create|update|status|close|dep> [arguments]\n\n")
 			fmt.Printf("Commands:\n")
 			fmt.Printf("  list [--json]          List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json]  Show a single issue by ID\n")
@@ -107,6 +107,8 @@ func main() {
 			fmt.Printf("  update <issue-id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
 			fmt.Printf("  status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status\n")
 			fmt.Printf("  close <issue-id> --impl <implementation>       Close an issue (sets status=closed)\n")
+			fmt.Printf("  dep add <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from]  Add a dependency edge\n")
+			fmt.Printf("  dep remove <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from] [--confirm]  Remove a dependency edge\n")
 			os.Exit(0)
 		}
 		switch issueCommand {
@@ -194,9 +196,49 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "dep":
+			if len(issueArgs) == 0 {
+				fmt.Fprintf(os.Stderr, "Usage: az issue dep <add|remove> [arguments]\n")
+				os.Exit(1)
+			}
+			depCommand := issueArgs[0]
+			depArgs := issueArgs[1:]
+			switch depCommand {
+			case "add":
+				opts, err := cli.ParseIssueDependencyAddArgs(depArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDependencyAddCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			case "remove":
+				opts, err := cli.ParseIssueDependencyRemoveArgs(depArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from] [--confirm]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueDependencyRemoveCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			default:
+				fmt.Fprintf(os.Stderr, "Unknown issue dep command: %s\n", depCommand)
+				fmt.Fprintf(os.Stderr, "Usage: az issue dep <add|remove> [arguments]\n")
+				os.Exit(1)
+			}
+
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep> [arguments]\n")
 			os.Exit(1)
 		}
 

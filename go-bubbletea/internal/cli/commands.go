@@ -93,6 +93,21 @@ type IssueStatusOptions struct {
 	Status         domain.Status
 }
 
+type IssueDependencyAddOptions struct {
+	Implementation string
+	IssueID        string
+	DependsOnID    string
+	Type           string
+}
+
+type IssueDependencyRemoveOptions struct {
+	Implementation string
+	IssueID        string
+	DependsOnID    string
+	Type           string
+	Confirm        bool
+}
+
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
@@ -362,6 +377,47 @@ func ParseIssueStatusArgs(args []string) (IssueStatusOptions, error) {
 	}, nil
 }
 
+func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, error) {
+	opts := IssueDependencyAddOptions{Type: "blocks"}
+	fs := flag.NewFlagSet("issue dep add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
+	if err := fs.Parse(args); err != nil {
+		return IssueDependencyAddOptions{}, err
+	}
+	if fs.NArg() != 2 {
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from]")
+	}
+	if opts.Implementation == "" {
+		return IssueDependencyAddOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	opts.IssueID = fs.Arg(0)
+	opts.DependsOnID = fs.Arg(1)
+	return opts, nil
+}
+
+func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions, error) {
+	opts := IssueDependencyRemoveOptions{Type: "blocks"}
+	fs := flag.NewFlagSet("issue dep remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
+	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
+	if err := fs.Parse(args); err != nil {
+		return IssueDependencyRemoveOptions{}, err
+	}
+	if fs.NArg() != 2 {
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from] [--confirm]")
+	}
+	if opts.Implementation == "" {
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	opts.IssueID = fs.Arg(0)
+	opts.DependsOnID = fs.Arg(1)
+	return opts, nil
+}
+
 func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -575,6 +631,43 @@ func IssueStatusCommand(deps *Dependencies, opts IssueStatusOptions) error {
 	return nil
 }
 
+func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	if err := deps.DaemonClient.AddTaskDependency(ctx, daemonclient.TaskDependencyParams{
+		TaskID:      opts.IssueID,
+		DependsOnID: opts.DependsOnID,
+		Type:        opts.Type,
+	}); err != nil {
+		return fmt.Errorf("failed to add dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
+	}
+	fmt.Printf("Added dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
+	return nil
+}
+
+func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemoveOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	if err := deps.DaemonClient.RemoveTaskDependency(ctx, daemonclient.TaskDependencyRemoveParams{
+		TaskID:      opts.IssueID,
+		DependsOnID: opts.DependsOnID,
+		Type:        opts.Type,
+		Confirm:     opts.Confirm,
+	}); err != nil {
+		return fmt.Errorf("failed to remove dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
+	}
+	fmt.Printf("Removed dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
+	return nil
+}
+
 func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 	for _, task := range tasks {
 		if task.ID == id {
@@ -659,6 +752,8 @@ Commands:
   issue update <id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
   issue status <id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status
   issue close <id> --impl <implementation>      Close an issue (sets status=closed)
+  issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type ...]  Add a dependency edge
+  issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type ...] [--confirm]  Remove a dependency edge
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
@@ -676,6 +771,8 @@ Examples:
   az issue update az-123 --impl go-bubbletea --title "Renamed task" --priority P1
   az issue status az-123 in_progress --impl go-bubbletea
   az issue close az-123 --impl go-bubbletea
+  az issue dep add az-456 az-123 --impl go-bubbletea --type blocks
+  az issue dep remove az-456 az-123 --impl go-bubbletea --type blocks --confirm
   az export --format json
   az export --format json --out snapshot.json
   az daemon restart

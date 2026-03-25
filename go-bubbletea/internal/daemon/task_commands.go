@@ -168,6 +168,47 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 	return resp, nil
 }
 
+func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var cmd struct {
+		TaskID         string `json:"task_id"`
+		DependsOnID    string `json:"depends_on_id"`
+		DependencyType string `json:"dependency_type"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if err := d.issues.AddDependency(ctx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	return resp, nil
+}
+
+func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var cmd struct {
+		TaskID         string `json:"task_id"`
+		DependsOnID    string `json:"depends_on_id"`
+		DependencyType string `json:"dependency_type"`
+		Confirm        bool   `json:"confirm"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	callCtx := ctx
+	if cmd.Confirm {
+		callCtx = issues.WithDependencyRemovalConfirmation(callCtx)
+	}
+	if err := d.issues.RemoveDependency(callCtx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	return resp, nil
+}
+
 func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	tasks, err := d.issues.List(ctx)

@@ -143,6 +143,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleTaskDelete(ctx, req)
 	case "task.archive":
 		return d.handleTaskArchive(ctx, req)
+	case "task.dependency.add":
+		return d.handleTaskDependencyAdd(ctx, req)
+	case "task.dependency.remove":
+		return d.handleTaskDependencyRemove(ctx, req)
 	case "task.snapshot.export":
 		return d.handleTaskSnapshotExport(ctx, req)
 	case protocol.CommandTaskBulkApply:

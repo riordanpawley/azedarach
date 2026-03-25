@@ -719,6 +719,32 @@ func TestParseIssueStatusArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueDependencyArgs(t *testing.T) {
+	add, err := ParseIssueDependencyAddArgs([]string{"--impl", "go-bubbletea", "--type", "related", "az-1", "az-2"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs() error = %v", err)
+	}
+	if add.Implementation != "go-bubbletea" || add.IssueID != "az-1" || add.DependsOnID != "az-2" || add.Type != "related" {
+		t.Fatalf("ParseIssueDependencyAddArgs() = %+v", add)
+	}
+	_, err = ParseIssueDependencyAddArgs([]string{"az-1", "az-2"})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
+		t.Fatalf("expected missing impl error for add, got %v", err)
+	}
+
+	remove, err := ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "--type", "blocks", "--confirm", "az-3", "az-4"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyRemoveArgs() error = %v", err)
+	}
+	if remove.Implementation != "go-bubbletea" || remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || remove.Type != "blocks" || !remove.Confirm {
+		t.Fatalf("ParseIssueDependencyRemoveArgs() = %+v", remove)
+	}
+	_, err = ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "az-3"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue dep remove <issue-id> <depends-on-id>") {
+		t.Fatalf("expected usage error for remove, got %v", err)
+	}
+}
+
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
@@ -1035,6 +1061,79 @@ func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
+	var gotAddReq protocol.RequestEnvelope
+	var gotRemoveReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskDependencyAdd:
+					gotAddReq = req
+				case daemonclient.CommandTaskDependencyRemove:
+					gotRemoveReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	addOut := captureStdout(t, func() error {
+		return IssueDependencyAddCommand(deps, IssueDependencyAddOptions{
+			Implementation: "go-bubbletea",
+			IssueID:        "az-5",
+			DependsOnID:    "az-2",
+			Type:           "blocks",
+		})
+	})
+	if gotAddReq.Command != daemonclient.CommandTaskDependencyAdd {
+		t.Fatalf("add command = %q, want %q", gotAddReq.Command, daemonclient.CommandTaskDependencyAdd)
+	}
+	var addBody daemonclient.TaskDependencyParams
+	if err := json.Unmarshal(gotAddReq.Body, &addBody); err != nil {
+		t.Fatalf("unmarshal add body: %v", err)
+	}
+	if addBody.TaskID != "az-5" || addBody.DependsOnID != "az-2" || addBody.Type != "blocks" {
+		t.Fatalf("add body = %+v", addBody)
+	}
+	if !strings.Contains(addOut, "Added dependency: az-5 --(blocks)--> az-2") {
+		t.Fatalf("add output = %q", addOut)
+	}
+
+	removeOut := captureStdout(t, func() error {
+		return IssueDependencyRemoveCommand(deps, IssueDependencyRemoveOptions{
+			Implementation: "go-bubbletea",
+			IssueID:        "az-5",
+			DependsOnID:    "az-2",
+			Type:           "blocks",
+			Confirm:        true,
+		})
+	})
+	if gotRemoveReq.Command != daemonclient.CommandTaskDependencyRemove {
+		t.Fatalf("remove command = %q, want %q", gotRemoveReq.Command, daemonclient.CommandTaskDependencyRemove)
+	}
+	var removeBody daemonclient.TaskDependencyRemoveParams
+	if err := json.Unmarshal(gotRemoveReq.Body, &removeBody); err != nil {
+		t.Fatalf("unmarshal remove body: %v", err)
+	}
+	if removeBody.TaskID != "az-5" || removeBody.DependsOnID != "az-2" || removeBody.Type != "blocks" || !removeBody.Confirm {
+		t.Fatalf("remove body = %+v", removeBody)
+	}
+	if !strings.Contains(removeOut, "Removed dependency: az-5 --(blocks)--> az-2") {
+		t.Fatalf("remove output = %q", removeOut)
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -1064,6 +1163,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue close <id>") {
 		t.Fatalf("usage missing issue close command: %q", output)
+	}
+	if !strings.Contains(output, "issue dep add <issue-id> <depends-on-id>") {
+		t.Fatalf("usage missing issue dep add command: %q", output)
+	}
+	if !strings.Contains(output, "issue dep remove <issue-id> <depends-on-id>") {
+		t.Fatalf("usage missing issue dep remove command: %q", output)
 	}
 	if !strings.Contains(output, "--impl <implementation>") {
 		t.Fatalf("usage missing implementation targeting hint: %q", output)

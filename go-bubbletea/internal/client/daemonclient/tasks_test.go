@@ -257,6 +257,62 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 			t.Fatalf("commands = %v", commands)
 		}
 	})
+
+	t.Run("dependency add and remove", func(t *testing.T) {
+		commands := make([]string, 0, 2)
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case CommandTaskDependencyAdd:
+					var body TaskDependencyParams
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal add request: %v", err)
+					}
+					if body.TaskID != "az-6" || body.DependsOnID != "az-1" || body.Type != "blocks" {
+						t.Fatalf("add request body = %+v", body)
+					}
+				case CommandTaskDependencyRemove:
+					var body TaskDependencyRemoveParams
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal remove request: %v", err)
+					}
+					if body.TaskID != "az-6" || body.DependsOnID != "az-1" || body.Type != "blocks" || !body.Confirm {
+						t.Fatalf("remove request body = %+v", body)
+					}
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		if err := client.AddTaskDependency(context.Background(), TaskDependencyParams{
+			TaskID:      "az-6",
+			DependsOnID: "az-1",
+			Type:        "blocks",
+		}); err != nil {
+			t.Fatalf("AddTaskDependency error: %v", err)
+		}
+		if err := client.RemoveTaskDependency(context.Background(), TaskDependencyRemoveParams{
+			TaskID:      "az-6",
+			DependsOnID: "az-1",
+			Type:        "blocks",
+			Confirm:     true,
+		}); err != nil {
+			t.Fatalf("RemoveTaskDependency error: %v", err)
+		}
+		if len(commands) != 2 || commands[0] != CommandTaskDependencyAdd || commands[1] != CommandTaskDependencyRemove {
+			t.Fatalf("commands = %v", commands)
+		}
+	})
 }
 
 func TestTaskCommandErrors(t *testing.T) {

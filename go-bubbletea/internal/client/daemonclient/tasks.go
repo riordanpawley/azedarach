@@ -11,12 +11,14 @@ import (
 )
 
 const (
-	CommandTaskList         = "task.list"
-	CommandTaskCreate       = "task.create"
-	CommandTaskUpdateStatus = "task.update_status"
-	CommandTaskUpdate       = "task.update_details"
-	CommandTaskDelete       = "task.delete"
-	CommandTaskArchive      = "task.archive"
+	CommandTaskList             = "task.list"
+	CommandTaskCreate           = "task.create"
+	CommandTaskUpdateStatus     = "task.update_status"
+	CommandTaskUpdate           = "task.update_details"
+	CommandTaskDelete           = "task.delete"
+	CommandTaskArchive          = "task.archive"
+	CommandTaskDependencyAdd    = "task.dependency.add"
+	CommandTaskDependencyRemove = "task.dependency.remove"
 )
 
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
@@ -45,6 +47,21 @@ type TaskStatusRequest struct {
 // TaskIDRequest contains the payload used for delete/archive task operations.
 type TaskIDRequest struct {
 	TaskID string `json:"task_id"`
+}
+
+// TaskDependencyParams contains the payload used for dependency operations.
+type TaskDependencyParams struct {
+	TaskID      string `json:"task_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"dependency_type"`
+}
+
+// TaskDependencyRemoveParams extends dependency params with explicit confirmation.
+type TaskDependencyRemoveParams struct {
+	TaskID      string `json:"task_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"dependency_type"`
+	Confirm     bool   `json:"confirm"`
 }
 
 // TaskIDResponse is returned by commands that allocate a new task identifier.
@@ -192,4 +209,14 @@ func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 // ArchiveTask archives a task through the daemon client boundary.
 func (c *Client) ArchiveTask(ctx context.Context, taskID string) error {
 	return c.commandJSON(ctx, CommandTaskArchive, TaskIDRequest{TaskID: taskID}, nil)
+}
+
+// AddTaskDependency creates or restores a dependency between two tasks.
+func (c *Client) AddTaskDependency(ctx context.Context, params TaskDependencyParams) error {
+	return c.commandJSON(ctx, CommandTaskDependencyAdd, params, nil)
+}
+
+// RemoveTaskDependency tombstones a dependency between two tasks.
+func (c *Client) RemoveTaskDependency(ctx context.Context, params TaskDependencyRemoveParams) error {
+	return c.commandJSON(ctx, CommandTaskDependencyRemove, params, nil)
 }
