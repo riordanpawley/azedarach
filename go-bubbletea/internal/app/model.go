@@ -866,7 +866,7 @@ func (m Model) View() string {
 				lipgloss.Bottom,
 				toastView,
 			)
-			mainView = m.layer(mainView, toastOverlay)
+			mainView = m.layerWithinHeight(mainView, toastOverlay, board.BoardContentHeight(m.height))
 		}
 	}
 
@@ -921,11 +921,19 @@ func (m Model) View() string {
 }
 
 func (m Model) layer(bottom, top string) string {
-	bLines := strings.Split(lipgloss.NewStyle().Height(m.height).MaxHeight(m.height).Render(bottom), "\n")
-	tLines := strings.Split(lipgloss.NewStyle().Height(m.height).MaxHeight(m.height).Render(top), "\n")
+	return m.layerWithinHeight(bottom, top, m.height)
+}
 
-	res := make([]string, m.height)
-	for i := 0; i < m.height; i++ {
+func (m Model) layerWithinHeight(bottom, top string, height int) string {
+	if height < 1 {
+		height = 1
+	}
+
+	bLines := strings.Split(lipgloss.NewStyle().Height(height).MaxHeight(height).Render(bottom), "\n")
+	tLines := strings.Split(lipgloss.NewStyle().Height(height).MaxHeight(height).Render(top), "\n")
+
+	res := make([]string, height)
+	for i := 0; i < height; i++ {
 		var b, t string
 		if i < len(bLines) {
 			b = bLines[i]
@@ -2273,8 +2281,17 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			branch = "main"
 		}
 
-		// Fetch from origin
-		if err := m.gitClient.Fetch(ctx, worktree, "origin"); err != nil {
+		if m.daemonClient == nil {
+			return fetchAndMergeResultMsg{
+				worktree:    worktree,
+				issueID:     issueID,
+				attachAfter: attachAfter,
+				err:         fmt.Errorf("daemon client unavailable"),
+			}
+		}
+
+		// Fetch from origin through the daemon command surface.
+		if _, err := m.daemonClient.GitFetch(ctx, worktree, "origin"); err != nil {
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,
 				issueID:     issueID,
@@ -2283,13 +2300,13 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			}
 		}
 
-		// Merge origin/branch
-		result, err := m.gitClient.Merge(ctx, worktree, "origin/"+branch)
+		// Merge origin/branch through the daemon command surface.
+		result, err := m.daemonClient.GitMerge(ctx, worktree, "origin/"+branch)
 		return fetchAndMergeResultMsg{
 			worktree:    worktree,
 			issueID:     issueID,
 			attachAfter: attachAfter,
-			result:      result,
+			result:      &result.Result,
 			err:         err,
 		}
 	}
@@ -2301,21 +2318,14 @@ type sessionAttachedMsg struct {
 
 func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 	return func() tea.Msg {
-		if !m.tmuxAvailable {
-			return Toast{
-				Level:   ToastWarning,
-				Message: fmt.Sprintf("tmux attach-session -t %s is unavailable outside tmux; launch az inside tmux to use tmux actions", issueID),
-				Expires: time.Now().Add(8 * time.Second),
-			}
-		}
-		if m.tmuxClient == nil {
-			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("tmux client unavailable")}
+		if m.daemonClient == nil {
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		if err := m.tmuxClient.AttachSession(ctx, issueID); err != nil {
+		if _, err := m.daemonClient.AttachSession(ctx, issueID); err != nil {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
@@ -2328,8 +2338,7 @@ func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		// Get current branch name
-		branch, err := m.gitClient.CurrentBranch(ctx, worktree)
+		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
 		if err != nil {
 			return createPRResultMsg{
 				issueID: issueID,
@@ -2456,7 +2465,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 		ctx := context.Background()
 		baseBranch := m.config.Git.BaseBranch
 
-		branch, err := m.gitClient.CurrentBranch(ctx, sourceWorktree)
+		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
@@ -2467,16 +2476,20 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 			"targetBranch", baseBranch,
 		)
 
-		if err := m.gitClient.Fetch(ctx, ".", "origin"); err != nil {
+		if m.daemonClient == nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		if _, err := m.daemonClient.GitFetch(ctx, ".", "origin"); err != nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
-		if err := m.gitClient.Checkout(ctx, ".", baseBranch); err != nil {
+		if _, err := m.daemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
-		result, err := m.gitClient.Merge(ctx, ".", branch)
-		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: result, err: err}
+		result, err := m.daemonClient.GitMerge(ctx, ".", branch)
+		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: &result.Result, err: err}
 	}
 }
 
@@ -2484,7 +2497,7 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		sourceBranch, err := m.gitClient.CurrentBranch(ctx, sourceWorktree)
+		sourceBranch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: err}
 		}
@@ -2496,8 +2509,12 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 			"targetWorktree", targetWorktree,
 		)
 
-		result, err := m.gitClient.Merge(ctx, targetWorktree, sourceBranch)
-		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: result, err: err}
+		if m.daemonClient == nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		result, err := m.daemonClient.GitMerge(ctx, targetWorktree, sourceBranch)
+		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: &result.Result, err: err}
 	}
 }
 
@@ -3031,7 +3048,7 @@ type openPROverlayResultMsg struct {
 func (m Model) openPROverlayCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		branch, err := m.gitClient.CurrentBranch(ctx, worktree)
+		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
 		if err != nil {
 			return openPROverlayResultMsg{err: err}
 		}
@@ -3044,7 +3061,11 @@ func (m Model) createPRWithOverlayCmd(msg overlay.PRCreatedMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		result, err := m.prWorkflow.Create(ctx, pr.CreatePRParams{
+		if m.daemonClient == nil {
+			return prCreatedResultMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		result, err := m.daemonClient.CreatePullRequest(ctx, daemonclient.CreatePullRequestParams{
 			Title:      msg.Title,
 			Body:       msg.Body,
 			Branch:     msg.Branch,
@@ -3056,7 +3077,7 @@ func (m Model) createPRWithOverlayCmd(msg overlay.PRCreatedMsg) tea.Cmd {
 			return prCreatedResultMsg{err: err}
 		}
 
-		return prCreatedResultMsg{url: result.URL}
+		return prCreatedResultMsg{url: result.PullRequest.URL}
 	}
 }
 
@@ -3075,12 +3096,15 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 		baseBranch := m.config.Git.BaseBranch
 		remote := "origin"
 
-		if err := m.gitClient.Fetch(ctx, worktree, remote); err != nil {
-			return branchBehindMsg{issueID: issueID, worktree: worktree, err: err}
+		if m.daemonClient == nil {
+			return branchBehindMsg{issueID: issueID, worktree: worktree, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		revRange := fmt.Sprintf("%s..%s/%s", baseBranch, remote, baseBranch)
-		count, err := m.gitClient.RevListCount(ctx, worktree, revRange)
+		result, err := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
+			Worktree:   worktree,
+			BaseBranch: baseBranch,
+			Remote:     remote,
+		})
 		if err != nil {
 			return branchBehindMsg{issueID: issueID, worktree: worktree, err: err}
 		}
@@ -3088,9 +3112,53 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 		return branchBehindMsg{
 			issueID:       issueID,
 			worktree:      worktree,
-			commitsBehind: count,
+			commitsBehind: result.CommitsBehind,
 		}
 	}
+}
+
+func (m Model) listDaemonWorktrees(ctx context.Context) ([]git.Worktree, error) {
+	if m.daemonClient == nil {
+		return nil, fmt.Errorf("daemon client unavailable")
+	}
+
+	worktrees, err := m.daemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return worktrees, nil
+}
+
+func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {
+	for _, wt := range worktrees {
+		if worktreePath != "" && wt.Path == worktreePath {
+			return wt, true
+		}
+		if issueID != "" && wt.IssueID == issueID {
+			return wt, true
+		}
+	}
+	return git.Worktree{}, false
+}
+
+func (m Model) resolveWorktreeBranch(ctx context.Context, worktree, issueID string) (string, error) {
+	worktrees, err := m.listDaemonWorktrees(ctx)
+	if err != nil {
+		if issueID != "" {
+			return m.originBranchForSelection(issueID), nil
+		}
+		return "", err
+	}
+
+	if wt, ok := findDaemonWorktree(worktrees, worktree, issueID); ok {
+		return wt.Branch, nil
+	}
+
+	if issueID != "" {
+		return m.originBranchForSelection(issueID), nil
+	}
+
+	return "", fmt.Errorf("worktree branch not found")
 }
 
 func (m Model) getDevServerInfo(issueID string) []overlay.DevServerInfo {

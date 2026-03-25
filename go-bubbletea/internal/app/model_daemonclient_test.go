@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,7 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
-	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -323,9 +322,37 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 }
 
 func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
-	runner := &recordingCommandRunner{}
-	m := newTestModel()
-	m.tmuxClient = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			var body struct {
+				ProjectID string `json:"project_id"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal attach request: %v", err)
+			}
+			if body.SessionID != "az-1" {
+				t.Fatalf("attach session = %q, want az-1", body.SessionID)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
 
 	updated, cmd := m.Update(branchBehindMsg{
 		issueID:       "az-1",
@@ -347,23 +374,96 @@ func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
 	if attached.issueID != "az-1" {
 		t.Fatalf("attached issue = %q, want az-1", attached.issueID)
 	}
-	if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0], []string{"attach-session", "-t", "az-1"}) {
-		t.Fatalf("tmux calls = %v", runner.calls)
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionAttach {
+		t.Fatalf("requests = %v", transport.requests)
 	}
 }
 
 func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
-	gitRunner := &recordingCommandRunner{}
-	tmuxRunner := &recordingCommandRunner{}
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandGitFetch:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal fetch request: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" || body.Remote != "origin" {
+					t.Fatalf("fetch body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Remote: body.Remote})
+				if err != nil {
+					t.Fatalf("marshal fetch response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" || body.Branch != "origin/main" {
+					t.Fatalf("merge body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+					Worktree: body.Worktree,
+					Branch:   body.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandSessionAttach:
+				var body struct {
+					ProjectID string `json:"project_id"`
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal attach request: %v", err)
+				}
+				if body.SessionID != "az-1" {
+					t.Fatalf("attach body = %+v", body)
+				}
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "attached"})
+				if err != nil {
+					t.Fatalf("marshal attach response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
 
 	m := newTestModel()
-	m.gitClient = git.NewClient(gitRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.daemonClient = daemonclient.New(transport)
 	m.sessions["az-1"] = &domain.Session{
 		IssueID:  "az-1",
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/az-1",
 	}
+	m.config.Git.BaseBranch = "main"
 
 	updated, cmd := m.Update(overlay.SelectionMsg{
 		Key:   "merge_attach",
@@ -397,11 +497,8 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 	if attachedMsg.issueID != "az-1" {
 		t.Fatalf("attached issue = %q, want az-1", attachedMsg.issueID)
 	}
-	if len(gitRunner.calls) != 2 || !reflect.DeepEqual(gitRunner.calls[0], []string{"fetch", "origin"}) || !reflect.DeepEqual(gitRunner.calls[1], []string{"merge", "origin/main"}) {
-		t.Fatalf("git calls = %v", gitRunner.calls)
-	}
-	if len(tmuxRunner.calls) != 1 || !reflect.DeepEqual(tmuxRunner.calls[0], []string{"attach-session", "-t", "az-1"}) {
-		t.Fatalf("tmux calls = %v", tmuxRunner.calls)
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandGitFetch || got[1] != daemonclient.CommandGitMerge || got[2] != daemonclient.CommandSessionAttach {
+		t.Fatalf("requests = %v", got)
 	}
 }
 
@@ -449,12 +546,72 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 }
 
 func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
-	gitRunner := &recordingCommandRunner{output: "parent-main\n"}
-	m := newTestModel()
-	m.gitClient = git.NewClient(gitRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
-
 	parentID := "az-parent"
 	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/parent", Branch: "az/az-parent", IssueID: parentID},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+					t.Fatalf("merge body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+					Worktree: body.Worktree,
+					Branch:   body.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+
 	m.tasks = []domain.Task{
 		{
 			ID:       childID,
@@ -493,15 +650,184 @@ func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandGitMerge {
+		t.Fatalf("requests = %v", got)
+	}
+}
 
-	if len(gitRunner.calls) != 2 {
-		t.Fatalf("git calls = %v", gitRunner.calls)
+func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandWorktreeList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandWorktreeList)
+			}
+			respBody, err := json.Marshal(struct {
+				ProjectID string `json:"project_id"`
+				Worktrees []struct {
+					Path    string `json:"path"`
+					Branch  string `json:"branch"`
+					IssueID string `json:"issue_id"`
+				} `json:"worktrees"`
+			}{
+				ProjectID: "default",
+				Worktrees: []struct {
+					Path    string `json:"path"`
+					Branch  string `json:"branch"`
+					IssueID string `json:"issue_id"`
+				}{
+					{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
 	}
-	if !reflect.DeepEqual(gitRunner.calls[0], []string{"branch", "--show-current"}) {
-		t.Fatalf("git call 0 = %v, want branch lookup", gitRunner.calls[0])
+
+	m := newDaemonTestModel(transport)
+	msg := m.openPROverlayCmd("/tmp/az-1", "az-1")()
+	result, ok := msg.(openPROverlayResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want openPROverlayResultMsg", msg)
 	}
-	if !reflect.DeepEqual(gitRunner.calls[1], []string{"merge", "parent-main"}) {
-		t.Fatalf("git call 1 = %v, want merge parent-main", gitRunner.calls[1])
+	if result.branch != "az/az-1" || result.issueID != "az-1" {
+		t.Fatalf("result = %+v", result)
+	}
+
+	updated, cmd := m.Update(result)
+	if cmd == nil {
+		t.Fatal("expected overlay push command")
+	}
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	current := updatedModel.overlayStack.Current()
+	prOverlay, ok := current.(*overlay.PRCreateOverlay)
+	if !ok {
+		t.Fatalf("overlay type = %T, want *overlay.PRCreateOverlay", current)
+	}
+	view := prOverlay.View()
+	if !strings.Contains(view, "az/az-1") || !strings.Contains(view, "az-1") {
+		t.Fatalf("overlay view = %q, want branch and issue", view)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandWorktreeList {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestCreatePROverlayUsesDaemonPRSurface(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandPRCreate {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandPRCreate)
+			}
+			var body daemonclient.CreatePullRequestParams
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.Branch != "az/az-1" || body.BaseBranch != "main" || body.IssueID != "az-1" {
+				t.Fatalf("request body = %+v", body)
+			}
+			respBody, err := json.Marshal(daemonclient.CreatePullRequestResult{
+				IssueID: "az-1",
+				PullRequest: pr.PRInfo{
+					Number:  7,
+					Title:   body.Title,
+					URL:     "https://example.com/pr/7",
+					State:   "open",
+					Draft:   body.Draft,
+					Branch:  body.Branch,
+					BaseRef: body.BaseBranch,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	msg := m.createPRWithOverlayCmd(overlay.PRCreatedMsg{
+		Title:      "Add feature",
+		Body:       "Body",
+		Branch:     "az/az-1",
+		BaseBranch: "main",
+		Draft:      true,
+		IssueID:    "az-1",
+	})()
+	result, ok := msg.(prCreatedResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want prCreatedResultMsg", msg)
+	}
+	if result.url != "https://example.com/pr/7" || result.err != nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandPRCreate {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestCheckBranchBehindCmdUsesDaemonSurface(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitBranchBehind {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandGitBranchBehind)
+			}
+			var body daemonclient.BranchBehindCheckParams
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.Worktree != "/tmp/az-1" || body.BaseBranch != "main" || body.Remote != "origin" {
+				t.Fatalf("request body = %+v", body)
+			}
+			respBody, err := json.Marshal(daemonclient.BranchBehindCheckResult{
+				Worktree:      body.Worktree,
+				BaseBranch:    body.BaseBranch,
+				Remote:        body.Remote,
+				RevRange:      "main..origin/main",
+				CommitsBehind: 2,
+				Behind:        true,
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = "main"
+	msg := m.checkBranchBehindCmd("/tmp/az-1", "az-1")()
+	result, ok := msg.(branchBehindMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want branchBehindMsg", msg)
+	}
+	if result.commitsBehind != 2 || result.err != nil || result.issueID != "az-1" {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandGitBranchBehind {
+		t.Fatalf("requests = %v", got)
 	}
 }
 

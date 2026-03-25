@@ -1,12 +1,15 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -389,7 +392,7 @@ func TestHalfPageScroll(t *testing.T) {
 		m := newTestModel()
 		for i := 0; i < 50; i++ {
 			m.tasks = append(m.tasks, domain.Task{
-				ID:       string(rune('a' + i%26)) + string(rune('A'+i/26)),
+				ID:       string(rune('a'+i%26)) + string(rune('A'+i/26)),
 				Title:    "Extra Task",
 				Status:   domain.StatusOpen,
 				Priority: domain.P3,
@@ -1283,29 +1286,59 @@ func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	t.Setenv("TMUX", "")
 
 	m := newTestModel()
+	m.daemonClient = nil
 
 	msg := m.attachSessionCmd("az-1")()
-	toast, ok := msg.(Toast)
+	errMsg, ok := msg.(sessionErrorMsg)
 	if !ok {
-		t.Fatalf("attachSessionCmd() returned %T, want Toast", msg)
+		t.Fatalf("attachSessionCmd() returned %T, want sessionErrorMsg", msg)
 	}
-	if toast.Level != ToastWarning {
-		t.Fatalf("attachSessionCmd() toast level = %v, want warning", toast.Level)
-	}
-	if !strings.Contains(toast.Message, "unavailable outside tmux") {
-		t.Fatalf("attachSessionCmd() toast message = %q, want tmux-unavailable guidance", toast.Message)
+	if errMsg.err == nil || !strings.Contains(errMsg.err.Error(), "daemon client unavailable") {
+		t.Fatalf("attachSessionCmd() error = %v, want daemon client unavailable", errMsg.err)
 	}
 
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			var body struct {
+				ProjectID string `json:"project_id"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal attach request: %v", err)
+			}
+			if body.SessionID != "devserver-devserver-1" {
+				t.Fatalf("session id = %q, want devserver-devserver-1", body.SessionID)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
 	msg = m.viewDevServer("devserver-1")()
-	toast, ok = msg.(Toast)
+	attached, ok := msg.(sessionAttachedMsg)
 	if !ok {
-		t.Fatalf("viewDevServer() returned %T, want Toast", msg)
+		t.Fatalf("viewDevServer() returned %T, want sessionAttachedMsg", msg)
 	}
-	if toast.Level != ToastWarning {
-		t.Fatalf("viewDevServer() toast level = %v, want warning", toast.Level)
+	if attached.issueID != "devserver-devserver-1" {
+		t.Fatalf("viewDevServer() issue = %q, want devserver-devserver-1", attached.issueID)
 	}
-	if !strings.Contains(toast.Message, "unavailable outside tmux") {
-		t.Fatalf("viewDevServer() toast message = %q, want tmux-unavailable guidance", toast.Message)
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionAttach {
+		t.Fatalf("requests = %v", transport.requests)
 	}
 
 	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
