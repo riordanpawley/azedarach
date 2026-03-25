@@ -38,34 +38,19 @@ Select the implementation based on user request or current working directory.
 
 ## Critical Rules (Quick Reference)
 
-1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use `as` casting or `any` (ts-opentui only).
-2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed), and `bat` (not cat).
-3. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
-4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
-5. **Codex Canonical Source**: Edit live instruction assets directly (`AGENTS.md`, nested `AGENTS.md`, `.codex/skills/*`, `.codex/subagents/*`).
-6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
-7. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-8. **Spec Sync Discipline (ts-opentui)**: Keep `az spec` requirements/links aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
-9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
-10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
-11. **CLI Binary Boundary (Critical)**: PATH `az` is the TypeScript CLI (`ts-opentui`). Do not use PATH `az` to validate `go-bubbletea` runtime behavior.
-12. **Daemon Restart Policy (Go)**: Do not bump protocol/version solely to force a daemon restart. Use `go-bubbletea` CLI daemon control (`az daemon restart` from `go-bubbletea/`) for operational restarts.
+1. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed), and `bat` (not cat).
+2. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
+3. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
+4. **Codex Canonical Source**: Edit live instruction assets directly (`AGENTS.md`, nested `AGENTS.md`, `.codex/skills/*`, `.codex/subagents/*`).
+5. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
+6. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
+7. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
+8. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
+9. **Implementation-Specific Rules Live in Nested Overlays**: Keep implementation runtime, language, and architecture policy in `ts-opentui/AGENTS.md` or `go-bubbletea/AGENTS.md`, not in root.
 
 ## Quick Commands
 
 ```bash
-# ts-opentui (TypeScript/Bun)
-cd ts-opentui
-bun run dev                       # Start development TUI
-bun run type-check                # Full project check
-bun run build                     # Build the project
-
-# go-bubbletea (Go)
-cd go-bubbletea
-just build                        # Build Go binary
-just test                         # Run tests
-just run                          # Build and run
-
 # Search (modern tools)
 rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
@@ -75,12 +60,6 @@ az prime                          # Session primer + AI workflow guide
 az impl list                      # Show project implementations/default
 az issue create "Title" --impl ts-opentui
 az issue create "Shared task" --impl ts-opentui --impl go-bubbletea
-
-# go-bubbletea runtime validation (DO NOT use PATH az)
-cd go-bubbletea
-go run ./cmd/az --help            # Go CLI entrypoint
-go run ./cmd/azd --help           # Go daemon entrypoint
-./bin/az --help                   # Built Go CLI binary
 
 # Codex Context
 fd . .codex/skills -td            # List installed local skills
@@ -104,30 +83,6 @@ Sync behavior:
 - There is no generation step in the active workflow.
 - Edit Codex-native files directly and keep root + nested AGENTS aligned in the same change.
 - OpenCode plugin files remain intentionally unmanaged by Codex context files.
-
-## Architecture Quick Reference
-
-```
-ts-opentui/
-├── src/
-│   ├── ui/           # OpenTUI + React components (Board, TaskCard, etc.)
-│   ├── core/         # Effect services (SessionManager, TmuxService, etc.)
-│   ├── services/     # Application services (Navigation, Editor, etc.)
-│   └── config/       # Configuration and schemas
-
-go-bubbletea/
-├── cmd/              # Main applications (minimal wiring)
-├── internal/         # Private code (app, services, types, ui)
-│   ├── app/          # Bubbletea application logic
-│   ├── services/     # Business logic (Linear, Tmux, Git)
-│   ├── types/        # Domain models
-│   └── ui/           # Bubbletea UI components
-└── docs/             # Documentation
-```
-
-**Stacks:**
-- **ts-opentui**: TypeScript, OpenTUI + React, Effect, tmux, az issue tracker
-- **go-bubbletea**: Go, Bubbletea, Lip Gloss, tmux, az issue tracker
 
 ## Decision Matrix
 
@@ -273,5 +228,100 @@ This project uses two OpenCode plugins:
 2. **.opencode/plugin/azedarach.js** - Session status monitoring for TUI
 
 Both are configured in `opencode.json`.
+
+## RTK / Rust Token Killer Usage Guidelines (for Codex CLI)
+### Objective
+* When executing shell commands that may produce large amounts of output, prioritize using RTK (Rust Token Killer) to compress, filter, and summarize the output, reducing LLM token consumption and improving context efficiency.
+* RTK is suitable for:
+  
+  * File reading
+  * Code search
+  * git status / diff
+  * Test output
+  * build / lint output
+  * docker / kubectl logs
+  * Other high-noise, high-output commands
+
+### Codex CLI Environment Constraints
+* RTK’s automatic hook / auto-rewrite capabilities (e.g., `rtk init --global`) currently mainly support **Claude Code** and **OpenCode**.
+* In **Codex CLI**, **do not assume RTK has automatically taken over shell commands**.
+* When using RTK in Codex CLI, you must rely on:
+  
+  1. The agent explicitly invoking `rtk ...` commands
+  2. The rules defined in this document
+* Therefore, in this environment, if the display shows the original command being executed, it usually means the original command is actually executed, not automatically rewritten by RTK.
+
+### Mandatory Rules
+* For commands that produce high output, **do not use the original command directly**; you must prioritize rewriting it using the corresponding RTK command.
+* Only skip RTK when conditions for “allowed fallback to original commands” are met.
+* If you ultimately decide to fall back to the original command, you should narrow the output scope as much as possible to avoid unbounded output.
+
+### RTK Command Replacement Rules
+The following high-output commands must be rewritten to RTK form by default:
+
+* `git status` → `rtk git status`
+* `git diff` → `rtk git diff`
+* `git log` → `rtk git log`
+* `cat <file>` → `rtk read <file>`
+* `head <file>` → `rtk read <file>`
+* `tail <file>` → `rtk read <file>`
+* `grep <pattern> .` → `rtk grep <pattern> .`
+* `rg <pattern>` → `rtk grep <pattern> .`
+* `ls` → `rtk ls`
+* `pytest` → `rtk pytest`
+* `cargo test` → `rtk cargo test`
+* `go test` → `rtk go test`
+* `tsc` → `rtk tsc`
+* `docker ps` → `rtk docker ps`
+* `docker logs <container>` → `rtk docker logs <container>`
+* `kubectl logs <pod>` → `rtk kubectl logs <pod>`
+
+### RTK Usage Priority
+#### Must use RTK first
+* File reading
+* Search output
+* git status / diff / logs
+* Test output
+* build / lint output
+* docker / kubectl logs
+
+#### Recommended to use RTK
+* Package list queries
+* Dependency analysis
+* Query-type outputs from package managers
+* Other commands known to produce large outputs
+
+#### Can use original commands directly
+* `pwd`
+* `echo`
+* Very short-output commands
+* Commands with strict output format requirements where RTK may alter the format
+
+### RTK Fallback Rules
+* If RTK clearly supports a command, it must be used first.
+* If unsure whether RTK supports a command, try:
+  
+  * `rtk proxy <command>`
+
+Examples:
+
+* `rtk proxy make build`
+* `rtk proxy uv run script.py`
+
+### Allowed Cases for Falling Back to Original Commands
+Only allowed under the following conditions:
+
+1. RTK does not support the command
+2. RTK output is insufficient to diagnose the issue
+3. Full raw logs are required for deep debugging
+4. The command output is very short, with no significant benefit from RTK
+5. RTK alters necessary output format, affecting current analysis or subsequent processing
+
+### RTK Behavioral Principles
+* Prioritize reducing unnecessary output rather than blindly preserving all original output.
+* In high-output scenarios, do not use original commands directly unless there is a clear reason.
+* If RTK does not provide sufficient information on the first attempt, then fall back to the original command.
+* Even after fallback, limit the output scope (e.g., only view necessary sections, files, or error segments).
+* In Codex CLI, treat RTK as an **explicit command strategy**, not an implicit hook capability.
 
 </ai_context>
