@@ -1,7 +1,7 @@
 <!--
 File: CONTEXT.md
-Version: 1.1.0
-Updated: 2026-03-07
+Version: 1.2.0
+Updated: 2026-03-25
 Purpose: go-bubbletea overlay context synced to nested AGENTS.md
 -->
 
@@ -64,6 +64,54 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
 14. **Daemon Restart Policy**:
    - For operational daemon restarts, use `az daemon restart` (from `go-bubbletea/` with the Go binary/path).
    - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
+
+## Thin-Client Boundary Contract (Critical)
+
+This section is non-optional for all `go-bubbletea` architecture work.
+
+1. **Authority Ownership**:
+   - Daemon owns durable/project state and lifecycle authority (tasks, session lifecycle, worktree lifecycle, devserver lifecycle).
+   - CLI and TUI are clients only. They may hold presentation/runtime-ephemeral state only (cursor position, overlays, viewport, transient loading flags).
+2. **No Direct Authority Operations in TUI/CLI**:
+   - `internal/app` and `internal/cli` must not directly execute authority operations through `internal/services/git`, `internal/services/tmux`, `internal/services/issues`, `internal/services/devserver`, or `internal/services/pr` when a daemon command path exists.
+   - Boundary operations must go through `internal/client/daemonclient` and typed protocol contracts.
+3. **Daemon Routing Requirement**:
+   - New or changed boundary operations must be represented as daemon commands with typed request/response payloads.
+   - Runtime daemon command paths must be wired through active handlers on production entrypoints; test-only handlers do not satisfy this.
+4. **Session Authority Rule**:
+   - Session lifecycle transitions must be daemon-authoritative.
+   - TUI session maps are projections only; do not perform local writes that establish or mutate lifecycle authority.
+5. **Singleton Scope Rule**:
+   - If daemon runtime assets are user-global (socket/lock), design changes must explicitly preserve project isolation semantics and avoid cross-repo authority bleed.
+6. **Required Drift Guards**:
+   - Boundary changes must include regression guards that fail when direct authority operations reappear in client layers.
+   - Keep migration/boundary guard tests in `internal/app` and `internal/cli` current with each boundary change.
+7. **Boundary Evidence Before Close**:
+   - For any boundary issue, notes must include:
+     - commands run
+     - key outputs/assertions
+     - files changed
+     - explicit AC verdicts for runtime, integration, and regression checks
+   - If any are missing, keep the issue in `in_progress` or `blocked`.
+
+## Boundary Verification Checklist (Required)
+
+Run this checklist whenever touching daemon/client boundaries:
+
+```bash
+cd go-bubbletea
+
+# 1) Guard rails remain active
+go test ./internal/app ./internal/cli
+
+# 2) Daemon boundary behavior remains correct
+go test ./internal/daemon/... ./internal/client/...
+
+# 3) Full boundary-facing integration safety net
+go test ./internal/app ./internal/cli ./internal/daemon/...
+```
+
+If sandbox restrictions prevent unix socket integration tests, rerun with the required approval path and record that in issue notes.
 
 ## Quick Commands
 
