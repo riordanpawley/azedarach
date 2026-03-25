@@ -508,6 +508,106 @@ func TestParseIssueGetArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueCreateArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueCreateOptions
+		errContains string
+	}{
+		{
+			name: "defaults",
+			args: []string{"Title"},
+			want: IssueCreateOptions{
+				Title:    "Title",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+			},
+		},
+		{
+			name: "explicit options",
+			args: []string{"--type", "bug", "--priority", "P0", "--description", "details", "Title"},
+			want: IssueCreateOptions{
+				Title:       "Title",
+				Description: "details",
+				Type:        domain.TypeBug,
+				Priority:    domain.P0,
+			},
+		},
+		{
+			name:        "invalid priority",
+			args:        []string{"--priority", "high", "Title"},
+			errContains: "invalid priority: high",
+		},
+		{
+			name:        "missing title",
+			args:        []string{},
+			errContains: "usage: az issue create <title>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueCreateArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueCreateArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseIssueCreateArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseIssueCloseArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueCloseOptions
+		errContains string
+	}{
+		{
+			name: "valid",
+			args: []string{"az-1"},
+			want: IssueCloseOptions{IssueID: "az-1"},
+		},
+		{
+			name:        "missing id",
+			args:        []string{},
+			errContains: "usage: az issue close <issue-id>",
+		},
+		{
+			name:        "extra args",
+			args:        []string{"az-1", "extra"},
+			errContains: "usage: az issue close <issue-id>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueCloseArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueCloseArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseIssueCloseArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
@@ -646,6 +746,80 @@ func TestIssueGetCommandNotFound(t *testing.T) {
 	}
 }
 
+func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
+	tests := []struct {
+		name        string
+		run         func(*Dependencies) error
+		wantCommand string
+		wantText    string
+	}{
+		{
+			name: "create",
+			run: func(deps *Dependencies) error {
+				return IssueCreateCommand(deps, IssueCreateOptions{
+					Title:       "New issue",
+					Description: "Context",
+					Type:        domain.TypeFeature,
+					Priority:    domain.P1,
+				})
+			},
+			wantCommand: daemonclient.CommandTaskCreate,
+			wantText:    "Created issue: az-42",
+		},
+		{
+			name: "close",
+			run: func(deps *Dependencies) error {
+				return IssueCloseCommand(deps, IssueCloseOptions{IssueID: "az-9"})
+			},
+			wantCommand: daemonclient.CommandTaskUpdateStatus,
+			wantText:    "Closed issue: az-9",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotReq protocol.RequestEnvelope
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						gotReq = req
+						body := []byte{}
+						if req.Command == daemonclient.CommandTaskCreate {
+							payload, err := json.Marshal(map[string]string{"task_id": "az-42"})
+							if err != nil {
+								t.Fatalf("marshal task create response: %v", err)
+							}
+							body = payload
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							Meta:            req.Meta,
+							OK:              true,
+							CompletedAt:     req.SentAt,
+							Body:            body,
+						}, nil
+					},
+				}),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: "proj",
+			}
+
+			output := captureStdout(t, func() error {
+				return tt.run(deps)
+			})
+			if gotReq.Command != tt.wantCommand {
+				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
+			}
+			if !strings.Contains(output, tt.wantText) {
+				t.Fatalf("output missing %q: %q", tt.wantText, output)
+			}
+		})
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -663,6 +837,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue get <id> [--json]") {
 		t.Fatalf("usage missing issue get command: %q", output)
+	}
+	if !strings.Contains(output, "issue create <title>") {
+		t.Fatalf("usage missing issue create command: %q", output)
+	}
+	if !strings.Contains(output, "issue close <id>") {
+		t.Fatalf("usage missing issue close command: %q", output)
 	}
 }
 

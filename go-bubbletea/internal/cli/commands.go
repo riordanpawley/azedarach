@@ -65,6 +65,17 @@ type IssueGetOptions struct {
 	JSON    bool
 }
 
+type IssueCreateOptions struct {
+	Title       string
+	Description string
+	Type        domain.TaskType
+	Priority    domain.Priority
+}
+
+type IssueCloseOptions struct {
+	IssueID string
+}
+
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
@@ -213,6 +224,46 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
+	opts := IssueCreateOptions{
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	}
+	var priorityRaw string
+	var typeRaw string
+	fs := flag.NewFlagSet("issue create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Description, "description", "", "issue description")
+	fs.StringVar(&priorityRaw, "priority", "P2", "issue priority (P0-P4)")
+	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
+	if err := fs.Parse(args); err != nil {
+		return IssueCreateOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create <title> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
+	}
+	opts.Title = fs.Arg(0)
+
+	taskType, err := parseTaskType(typeRaw)
+	if err != nil {
+		return IssueCreateOptions{}, err
+	}
+	priority, err := parsePriority(priorityRaw)
+	if err != nil {
+		return IssueCreateOptions{}, err
+	}
+	opts.Type = taskType
+	opts.Priority = priority
+	return opts, nil
+}
+
+func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
+	if len(args) != 1 {
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close <issue-id>")
+	}
+	return IssueCloseOptions{IssueID: args[0]}, nil
+}
+
 func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -335,6 +386,41 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	return nil
 }
 
+func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+		Title:       opts.Title,
+		Description: opts.Description,
+		Type:        opts.Type,
+		Priority:    opts.Priority,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create issue: %w", err)
+	}
+
+	fmt.Printf("Created issue: %s\n", taskID)
+	return nil
+}
+
+func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
+		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
+	}
+	fmt.Printf("Closed issue: %s\n", opts.IssueID)
+	return nil
+}
+
 func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 	for _, task := range tasks {
 		if task.ID == id {
@@ -342,6 +428,33 @@ func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 		}
 	}
 	return domain.Task{}, false
+}
+
+func parseTaskType(raw string) (domain.TaskType, error) {
+	tt := domain.TaskType(raw)
+	switch tt {
+	case domain.TypeTask, domain.TypeBug, domain.TypeFeature, domain.TypeEpic, domain.TypeChore:
+		return tt, nil
+	default:
+		return "", fmt.Errorf("invalid issue type: %s", raw)
+	}
+}
+
+func parsePriority(raw string) (domain.Priority, error) {
+	switch raw {
+	case "P0":
+		return domain.P0, nil
+	case "P1":
+		return domain.P1, nil
+	case "P2":
+		return domain.P2, nil
+	case "P3":
+		return domain.P3, nil
+	case "P4":
+		return domain.P4, nil
+	default:
+		return 0, fmt.Errorf("invalid priority: %s", raw)
+	}
 }
 
 // RestartDaemonCommand forces daemon replacement and verifies client re-attach.
@@ -372,6 +485,8 @@ Commands:
   status [issue-id]     Show session status (all or specific issue)
   issue list [--json]  List issues from daemon-backed store
   issue get <id> [--json]  Show a single issue from daemon-backed store
+  issue create <title> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue close <id>      Close an issue (sets status=closed)
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
@@ -385,6 +500,8 @@ Examples:
   az status az-123     # Show status for az-123
   az issue list
   az issue get az-123 --json
+  az issue create "New task" --type task --priority P2
+  az issue close az-123
   az export --format json
   az export --format json --out snapshot.json
   az daemon restart

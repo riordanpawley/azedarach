@@ -105,10 +105,12 @@ func main() {
 		issueCommand := commandArgs[0]
 		issueArgs := commandArgs[1:]
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
-			fmt.Printf("Usage: az issue <list|get> [arguments]\n\n")
+			fmt.Printf("Usage: az issue <list|get|create|close> [arguments]\n\n")
 			fmt.Printf("Commands:\n")
 			fmt.Printf("  list [--json]          List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json]  Show a single issue by ID\n")
+			fmt.Printf("  create <title> [--type ...] [--priority ...] [--description ...]  Create an issue\n")
+			fmt.Printf("  close <issue-id>       Close an issue (sets status=closed)\n")
 			os.Exit(0)
 		}
 		switch issueCommand {
@@ -140,9 +142,37 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "create":
+			opts, err := cli.ParseIssueCreateArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue create <title> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueCreateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "close":
+			opts, err := cli.ParseIssueCloseArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue close <issue-id>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueCloseCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|close> [arguments]\n")
 			os.Exit(1)
 		}
 
