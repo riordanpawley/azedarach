@@ -105,9 +105,18 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
 	_, err := db.Exec(`
 		UPDATE issue_dependencies
-		SET dependency_type = ?
+		SET dependency_type = CASE
+			WHEN dependency_type = 'parent_child' THEN 'parent-child'
+			WHEN dependency_type = 'blocked_by' THEN 'blocked-by'
+			WHEN dependency_type = 'related_to' THEN 'related'
+			WHEN dependency_type = 'discovered_from' THEN 'discovered-from'
+			ELSE dependency_type
+		END
 		WHERE dependency_type = 'parent_child'
-	`, string(domain.DependencyParentChild))
+			OR dependency_type = 'blocked_by'
+			OR dependency_type = 'related_to'
+			OR dependency_type = 'discovered_from'
+	`)
 	if err != nil {
 		return fmt.Errorf("normalize dependency enum rows: %w", err)
 	}
@@ -659,15 +668,17 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 }
 
 func normalizeDependencyType(value string) string {
-	switch value {
-	case "blocked_by":
+	switch strings.TrimSpace(value) {
+	case "blocked_by", "blocked-by":
 		return string(domain.DependencyBlockedBy)
 	case "blocks":
 		return string(domain.DependencyBlocks)
-	case "related_to", "related":
+	case "related_to", "related-to", "related":
 		return string(domain.DependencyRelatedTo)
 	case "parent_child", "parent-child":
 		return string(domain.DependencyParentChild)
+	case "discovered_from", "discovered-from":
+		return string(domain.DependencyDiscovered)
 	default:
 		return value
 	}
@@ -681,6 +692,8 @@ func canonicalDependencyType(value string) (string, error) {
 		return string(domain.DependencyParentChild), nil
 	case string(domain.DependencyRelatedTo):
 		return string(domain.DependencyRelatedTo), nil
+	case string(domain.DependencyDiscovered):
+		return string(domain.DependencyDiscovered), nil
 	default:
 		return "", fmt.Errorf("unsupported dependency type %q", strings.TrimSpace(value))
 	}

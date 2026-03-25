@@ -1034,6 +1034,7 @@ func formatDependencySummary(deps []domain.Dependency) string {
 		domain.DependencyBlocks,
 		domain.DependencyBlockedBy,
 		domain.DependencyRelatedTo,
+		domain.DependencyDiscovered,
 		domain.DependencyParentChild,
 	}
 	parts := make([]string, 0, len(ordered))

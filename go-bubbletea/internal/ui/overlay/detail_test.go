@@ -158,7 +158,7 @@ func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 	assert.Contains(t, view, "Outgoing")
 	assert.Contains(t, view, "blocks -> az-downstream")
 	assert.Contains(t, view, "Incoming")
-	assert.Contains(t, view, "related_to <- az-upstream")
+	assert.Contains(t, view, "related <- az-upstream")
 }
 
 func TestDetailPanelScrolling(t *testing.T) {

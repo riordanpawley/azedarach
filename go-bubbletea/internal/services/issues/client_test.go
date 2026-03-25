@@ -225,7 +225,7 @@ func TestClient_AddDependencyCanonicalizesLegacyAliasesOnNonEpicTasks(t *testing
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, client.AddDependency(ctx, blockedID, sourceID, "blocked_by"))
+	require.NoError(t, client.AddDependency(ctx, blockedID, sourceID, "blocked-by"))
 	require.NoError(t, client.AddDependency(ctx, relatedID, sourceID, "related"))
 
 	tasks, err := client.List(ctx)

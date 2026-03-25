@@ -7,9 +7,10 @@ type DependencyType string
 
 const (
 	DependencyBlocks      DependencyType = "blocks"
-	DependencyBlockedBy   DependencyType = "blocked_by"
-	DependencyRelatedTo   DependencyType = "related_to"
+	DependencyBlockedBy   DependencyType = "blocked-by"
+	DependencyRelatedTo   DependencyType = "related"
 	DependencyParentChild DependencyType = "parent-child"
+	DependencyDiscovered  DependencyType = "discovered-from"
 )
 
 // Dependency represents a task dependency relationship

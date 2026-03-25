@@ -419,7 +419,7 @@ func TestComputeDependencyPhases_EmptyInput(t *testing.T) {
 
 func TestComputeDependencyPhases_OnlyBlockedByDependencies(t *testing.T) {
 	// Test that only "blocks" dependencies are considered
-	// "blocked_by", "related_to", and "parent_child" should be ignored
+	// "blocked-by", "related", and "parent-child" should be ignored
 	task1 := makeTask("az-1", "Task 1")
 	task2 := domain.Task{
 		ID:     "az-2",

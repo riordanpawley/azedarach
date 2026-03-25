@@ -946,7 +946,7 @@ func TestIssueListCommandDepsProjection(t *testing.T) {
 	if !strings.Contains(output, "DEPS") {
 		t.Fatalf("deps output missing DEPS column: %q", output)
 	}
-	if !strings.Contains(output, "blocks:1,blocked_by:2") {
+	if !strings.Contains(output, "blocks:1,blocked-by:2") {
 		t.Fatalf("deps output missing summary: %q", output)
 	}
 }
@@ -1074,7 +1074,7 @@ func TestIssueGetCommandDepsProjection(t *testing.T) {
 	if !strings.Contains(output, "Dependency edges:") {
 		t.Fatalf("deps output missing dependency section: %q", output)
 	}
-	if !strings.Contains(output, "- az-2 (blocks)") || !strings.Contains(output, "- az-5 (related_to)") {
+	if !strings.Contains(output, "- az-2 (blocks)") || !strings.Contains(output, "- az-5 (related)") {
 		t.Fatalf("deps output missing dependency rows: %q", output)
 	}
 }
