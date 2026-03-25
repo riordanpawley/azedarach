@@ -755,6 +755,32 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueBulkArgs(t *testing.T) {
+	create, err := ParseIssueBulkCreateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-create.json", "--dry-run"})
+	if err != nil {
+		t.Fatalf("ParseIssueBulkCreateArgs() error = %v", err)
+	}
+	if create.Implementation != "go-bubbletea" || create.InputPath != "bulk-create.json" || !create.DryRun {
+		t.Fatalf("ParseIssueBulkCreateArgs() = %+v", create)
+	}
+	_, err = ParseIssueBulkCreateArgs([]string{"--input", "bulk-create.json"})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
+		t.Fatalf("expected missing impl error for bulk-create, got %v", err)
+	}
+
+	update, err := ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-update.json"})
+	if err != nil {
+		t.Fatalf("ParseIssueBulkUpdateArgs() error = %v", err)
+	}
+	if update.Implementation != "go-bubbletea" || update.InputPath != "bulk-update.json" || update.DryRun {
+		t.Fatalf("ParseIssueBulkUpdateArgs() = %+v", update)
+	}
+	_, err = ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea"})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --input") {
+		t.Fatalf("expected missing input error for bulk-update, got %v", err)
+	}
+}
+
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	tasks := []domain.Task{
@@ -1252,6 +1278,127 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	bulkCreatePath := filepath.Join(tempDir, "bulk-create.json")
+	bulkUpdatePath := filepath.Join(tempDir, "bulk-update.json")
+	if err := os.WriteFile(bulkCreatePath, []byte(`[{"title":"Bulk one","description":"Desc","type":"task","priority":"P2"}]`), 0o644); err != nil {
+		t.Fatalf("write bulk-create file: %v", err)
+	}
+	if err := os.WriteFile(bulkUpdatePath, []byte(`[{"task_id":"az-1","title":"Renamed"}]`), 0o644); err != nil {
+		t.Fatalf("write bulk-update file: %v", err)
+	}
+
+	var commands []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{{
+						ID:          "az-1",
+						Title:       "Old",
+						Description: "Desc",
+						Type:        domain.TypeTask,
+						Priority:    domain.P2,
+						Status:      domain.StatusOpen,
+					}})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case protocol.CommandTaskBulkApply:
+					body, err := json.Marshal(applyExecutionResultBody{
+						Summary: applyExecutionSummaryBody{Total: 1, Succeeded: 1, Failed: 0},
+					})
+					if err != nil {
+						t.Fatalf("marshal apply response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	_ = captureStdout(t, func() error {
+		return IssueBulkCreateCommand(deps, IssueBulkCreateOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      bulkCreatePath,
+			DryRun:         false,
+		})
+	})
+	_ = captureStdout(t, func() error {
+		return IssueBulkUpdateCommand(deps, IssueBulkUpdateOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      bulkUpdatePath,
+			DryRun:         true,
+		})
+	})
+
+	applyReqs := make([]protocol.RequestEnvelope, 0, 2)
+	for _, req := range commands {
+		if req.Command == protocol.CommandTaskBulkApply {
+			applyReqs = append(applyReqs, req)
+		}
+	}
+	if len(applyReqs) != 2 {
+		t.Fatalf("bulk apply command count = %d, want 2", len(applyReqs))
+	}
+	var createBody protocol.ApplyRequestBody
+	if err := json.Unmarshal(applyReqs[0].Body, &createBody); err != nil {
+		t.Fatalf("unmarshal create apply body: %v", err)
+	}
+	if createBody.DryRun {
+		t.Fatalf("create body dry_run = true, want false")
+	}
+	if len(createBody.Operations) != 1 || createBody.Operations[0].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("create operations = %+v", createBody.Operations)
+	}
+	var updateBody protocol.ApplyRequestBody
+	if err := json.Unmarshal(applyReqs[1].Body, &updateBody); err != nil {
+		t.Fatalf("unmarshal update apply body: %v", err)
+	}
+	if !updateBody.DryRun {
+		t.Fatalf("update body dry_run = false, want true")
+	}
+	if len(updateBody.Operations) != 1 || updateBody.Operations[0].Command != daemonclient.CommandTaskUpdate {
+		t.Fatalf("update operations = %+v", updateBody.Operations)
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -1287,6 +1434,12 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue dep remove <issue-id> <depends-on-id>") {
 		t.Fatalf("usage missing issue dep remove command: %q", output)
+	}
+	if !strings.Contains(output, "issue bulk-create --impl <implementation> --input <path>") {
+		t.Fatalf("usage missing issue bulk-create command: %q", output)
+	}
+	if !strings.Contains(output, "issue bulk-update --impl <implementation> --input <path>") {
+		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
 	if !strings.Contains(output, "--impl <implementation>") {
 		t.Fatalf("usage missing implementation targeting hint: %q", output)

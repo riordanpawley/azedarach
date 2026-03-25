@@ -111,6 +111,18 @@ type IssueDependencyRemoveOptions struct {
 	Confirm        bool
 }
 
+type IssueBulkCreateOptions struct {
+	Implementation string
+	InputPath      string
+	DryRun         bool
+}
+
+type IssueBulkUpdateOptions struct {
+	Implementation string
+	InputPath      string
+	DryRun         bool
+}
+
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
@@ -423,6 +435,50 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	return opts, nil
 }
 
+func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
+	opts := IssueBulkCreateOptions{}
+	fs := flag.NewFlagSet("issue bulk-create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&opts.InputPath, "input", "", "path to JSON array input")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "validate and preview without mutating")
+	if err := fs.Parse(args); err != nil {
+		return IssueBulkCreateOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueBulkCreateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Implementation == "" {
+		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	if strings.TrimSpace(opts.InputPath) == "" {
+		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --input")
+	}
+	return opts, nil
+}
+
+func ParseIssueBulkUpdateArgs(args []string) (IssueBulkUpdateOptions, error) {
+	opts := IssueBulkUpdateOptions{}
+	fs := flag.NewFlagSet("issue bulk-update", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&opts.InputPath, "input", "", "path to JSON array input")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "validate and preview without mutating")
+	if err := fs.Parse(args); err != nil {
+		return IssueBulkUpdateOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueBulkUpdateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Implementation == "" {
+		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	if strings.TrimSpace(opts.InputPath) == "" {
+		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --input")
+	}
+	return opts, nil
+}
+
 func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -685,6 +741,155 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 	return nil
 }
 
+func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	inputBytes, err := os.ReadFile(opts.InputPath)
+	if err != nil {
+		return fmt.Errorf("read bulk-create input %s: %w", opts.InputPath, err)
+	}
+	var input []struct {
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Type        string  `json:"type"`
+		Priority    string  `json:"priority"`
+		ParentID    *string `json:"parent_id,omitempty"`
+	}
+	if err := json.Unmarshal(inputBytes, &input); err != nil {
+		return fmt.Errorf("parse bulk-create input %s: %w", opts.InputPath, err)
+	}
+	if len(input) == 0 {
+		return fmt.Errorf("bulk-create input must contain at least one item")
+	}
+
+	ops := make([]protocol.ApplyOperationBody, 0, len(input))
+	for i, item := range input {
+		taskType, err := parseTaskType(item.Type)
+		if err != nil {
+			return fmt.Errorf("bulk-create item %d: %w", i, err)
+		}
+		priority, err := parsePriority(item.Priority)
+		if err != nil {
+			return fmt.Errorf("bulk-create item %d: %w", i, err)
+		}
+		body, err := json.Marshal(daemonclient.TaskCreateParams{
+			Title:       item.Title,
+			Description: item.Description,
+			Type:        taskType,
+			Priority:    priority,
+			ParentID:    item.ParentID,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal bulk-create item %d: %w", i, err)
+		}
+		ops = append(ops, protocol.ApplyOperationBody{
+			Command: daemonclient.CommandTaskCreate,
+			Body:    body,
+		})
+	}
+
+	return executeBulkApply(deps, opts.DryRun, ops)
+}
+
+func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	inputBytes, err := os.ReadFile(opts.InputPath)
+	if err != nil {
+		return fmt.Errorf("read bulk-update input %s: %w", opts.InputPath, err)
+	}
+	var input []struct {
+		TaskID      string `json:"task_id,omitempty"`
+		ID          string `json:"id,omitempty"`
+		Title       string `json:"title,omitempty"`
+		Description string `json:"description,omitempty"`
+		Type        string `json:"type,omitempty"`
+		Priority    string `json:"priority,omitempty"`
+	}
+	if err := json.Unmarshal(inputBytes, &input); err != nil {
+		return fmt.Errorf("parse bulk-update input %s: %w", opts.InputPath, err)
+	}
+	if len(input) == 0 {
+		return fmt.Errorf("bulk-update input must contain at least one item")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("load issues for bulk-update: %w", err)
+	}
+	tasksByID := map[string]domain.Task{}
+	for _, task := range snapshot.Tasks {
+		tasksByID[task.ID] = task
+	}
+
+	ops := make([]protocol.ApplyOperationBody, 0, len(input))
+	for i, item := range input {
+		taskID := strings.TrimSpace(item.TaskID)
+		if taskID == "" {
+			taskID = strings.TrimSpace(item.ID)
+		}
+		if taskID == "" {
+			return fmt.Errorf("bulk-update item %d: missing task_id", i)
+		}
+		current, ok := tasksByID[taskID]
+		if !ok {
+			return fmt.Errorf("bulk-update item %d: issue not found: %s", i, taskID)
+		}
+
+		update := daemonclient.TaskUpdateParams{
+			Title:       current.Title,
+			Description: current.Description,
+			Type:        current.Type,
+			Priority:    current.Priority,
+		}
+		if item.Title != "" {
+			update.Title = item.Title
+		}
+		if item.Description != "" {
+			update.Description = item.Description
+		}
+		if item.Type != "" {
+			taskType, err := parseTaskType(item.Type)
+			if err != nil {
+				return fmt.Errorf("bulk-update item %d: %w", i, err)
+			}
+			update.Type = taskType
+		}
+		if item.Priority != "" {
+			priority, err := parsePriority(item.Priority)
+			if err != nil {
+				return fmt.Errorf("bulk-update item %d: %w", i, err)
+			}
+			update.Priority = priority
+		}
+
+		body, err := json.Marshal(struct {
+			TaskID string `json:"task_id"`
+			daemonclient.TaskUpdateParams
+		}{
+			TaskID:           taskID,
+			TaskUpdateParams: update,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal bulk-update item %d: %w", i, err)
+		}
+		ops = append(ops, protocol.ApplyOperationBody{
+			Command: daemonclient.CommandTaskUpdate,
+			Body:    body,
+		})
+	}
+
+	return executeBulkApply(deps, opts.DryRun, ops)
+}
+
 func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 	for _, task := range tasks {
 		if task.ID == id {
@@ -728,6 +933,66 @@ func printDependencies(deps []domain.Dependency) {
 	for _, dep := range deps {
 		fmt.Printf("- %s (%s)\n", dep.ID, dep.Type)
 	}
+}
+
+func executeBulkApply(deps *Dependencies, dryRun bool, operations []protocol.ApplyOperationBody) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("load snapshot revision for bulk apply: %w", err)
+	}
+	snapshotRevision := snapshot.Revision
+	if snapshotRevision == 0 {
+		snapshotRevision = 1
+	}
+
+	body, err := json.Marshal(protocol.ApplyRequestBody{
+		SchemaVersion:    protocol.ApplySchemaVersion,
+		SnapshotRevision: snapshotRevision,
+		DryRun:           dryRun,
+		Operations:       operations,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal bulk apply request: %w", err)
+	}
+
+	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       fmt.Sprintf("%s-%d", protocol.CommandTaskBulkApply, time.Now().UTC().UnixNano()),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta: protocol.Metadata{
+			ProjectID: deps.ProjectID,
+		},
+		Command: protocol.CommandTaskBulkApply,
+		SentAt:  time.Now().UTC(),
+		Body:    body,
+	})
+	if err != nil {
+		return fmt.Errorf("execute bulk apply: %w", err)
+	}
+	if err := responseError(resp, "execute bulk apply"); err != nil {
+		return err
+	}
+
+	if len(resp.Body) == 0 {
+		fmt.Println("Bulk apply completed.")
+		return nil
+	}
+	var pretty any
+	if err := json.Unmarshal(resp.Body, &pretty); err != nil {
+		return fmt.Errorf("decode bulk apply response: %w", err)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(pretty); err != nil {
+		return fmt.Errorf("print bulk apply response: %w", err)
+	}
+	if applyResponseExitCode(resp) == exitCodePartialFailure {
+		return fmt.Errorf("bulk apply completed with partial failures")
+	}
+	return nil
 }
 
 func parseTaskType(raw string) (domain.TaskType, error) {
@@ -807,6 +1072,8 @@ Commands:
   issue close <id> --impl <implementation>      Close an issue (sets status=closed)
   issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type ...]  Add a dependency edge
   issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type ...] [--confirm]  Remove a dependency edge
+  issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
+  issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
@@ -828,6 +1095,8 @@ Examples:
   az issue close az-123 --impl go-bubbletea
   az issue dep add az-456 az-123 --impl go-bubbletea --type blocks
   az issue dep remove az-456 az-123 --impl go-bubbletea --type blocks --confirm
+  az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
+  az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
   az export --format json
   az export --format json --out snapshot.json
   az daemon restart

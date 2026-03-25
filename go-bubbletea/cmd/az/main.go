@@ -93,13 +93,13 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep|bulk-create|bulk-update> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
 		issueArgs := commandArgs[1:]
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
-			fmt.Printf("Usage: az issue <list|get|create|update|status|close|dep> [arguments]\n\n")
+			fmt.Printf("Usage: az issue <list|get|create|update|status|close|dep|bulk-create|bulk-update> [arguments]\n\n")
 			fmt.Printf("Commands:\n")
 			fmt.Printf("  list [--json] [--deps]  List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json] [--deps]  Show a single issue by ID\n")
@@ -109,6 +109,8 @@ func main() {
 			fmt.Printf("  close <issue-id> --impl <implementation>       Close an issue (sets status=closed)\n")
 			fmt.Printf("  dep add <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from]  Add a dependency edge\n")
 			fmt.Printf("  dep remove <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from] [--confirm]  Remove a dependency edge\n")
+			fmt.Printf("  bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations\n")
+			fmt.Printf("  bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations\n")
 			os.Exit(0)
 		}
 		switch issueCommand {
@@ -236,9 +238,37 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "bulk-create":
+			opts, err := cli.ParseIssueBulkCreateArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create --impl <implementation> --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueBulkCreateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+		case "bulk-update":
+			opts, err := cli.ParseIssueBulkUpdateArgs(issueArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update --impl <implementation> --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.IssueBulkUpdateCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|create|update|status|close|dep|bulk-create|bulk-update> [arguments]\n")
 			os.Exit(1)
 		}
 
