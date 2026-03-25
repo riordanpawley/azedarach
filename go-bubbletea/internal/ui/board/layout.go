@@ -2,7 +2,7 @@ package board
 
 const (
 	BoardStatusBarLines = 1
-	ColumnHeaderLines   = 2
+	ColumnHeaderLines   = 1
 	ColumnContentInsetX = 2
 	DefaultColumnCount  = 4
 	MinVisibleColumns   = 2
