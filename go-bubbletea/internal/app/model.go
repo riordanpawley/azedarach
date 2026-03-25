@@ -607,19 +607,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Close overlay
 		m.overlayStack.Pop()
 
-		// Switch to selected project
-		m.currentProject = msg.Project.Name
+		// Switch project runtime context and reload issues.
+		return m, m.switchProjectCmd(msg.Project)
+
+	case projectSwitchResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Project switch failed: %v", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+
+		m.currentProject = msg.project.Name
+		m.repoDir = msg.project.Path
 		if m.daemonClient != nil {
 			m.daemonClient.WithProjectID(m.daemonProjectID())
 		}
+
+		// Reuse the normal loaded-state reducer path.
+		m.tasks = msg.tasks
+		m.sessions = m.projectSessionProjection(msg.tasks)
+		m.editor.ReconcileSelection(msg.tasks)
+		m.reconcileCursorAfterIssuesRefresh()
+		if msg.revision > m.daemonRevision {
+			m.daemonRevision = msg.revision
+		}
+		m.loading = false
+		m.lastRefresh = time.Now()
+		m.daemonEvents = msg.events
+
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Switched to project: %s", msg.Project.Name),
+			Message: fmt.Sprintf("Switched to project: %s", msg.project.Name),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-
-		// Reload issues for new project
-		return m, m.loadIssuesCmd()
+		return m, m.waitForDaemonEventCmd()
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
@@ -1440,6 +1464,14 @@ type issuesErrorMsg struct {
 	err error
 }
 
+type projectSwitchResultMsg struct {
+	project  config.Project
+	tasks    []domain.Task
+	revision uint64
+	events   <-chan protocol.EventEnvelope
+	err      error
+}
+
 type daemonStreamEventMsg struct {
 	event protocol.EventEnvelope
 }
@@ -1488,6 +1520,79 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		return issuesLoadedMsg{
 			tasks:    snapshot.Tasks,
 			revision: snapshot.Revision,
+		}
+	}
+}
+
+func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     fmt.Errorf("daemon client unavailable"),
+			}
+		}
+		if strings.TrimSpace(project.Path) == "" {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     fmt.Errorf("project %q has empty path", project.Name),
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		launcher := daemonprocess.NewLauncher(project.Path, config.GlobalDaemonSocketPath())
+		if err := launcher.Replace(ctx); err != nil {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
+			}
+		}
+
+		hello := protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      "tui",
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		}
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		ack, err := orch.EnsureAttached(ctx, hello)
+		if err != nil {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
+			}
+		}
+		if !ack.Accepted {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
+			}
+		}
+
+		m.daemonClient.WithProjectID(project.Name)
+
+		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		if err != nil {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     err,
+			}
+		}
+		events, err := m.daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
+		if err != nil {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     err,
+			}
+		}
+
+		return projectSwitchResultMsg{
+			project:  project,
+			tasks:    snapshot.Tasks,
+			revision: snapshot.Revision,
+			events:   events,
 		}
 	}
 }
