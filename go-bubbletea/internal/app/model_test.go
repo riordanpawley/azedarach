@@ -3,6 +3,8 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +130,31 @@ func TestHelperMethods(t *testing.T) {
 		half = m.halfPage()
 		if half != 1 {
 			t.Errorf("Expected minimum of 1, got %d", half)
+		}
+	})
+}
+
+func TestResolveDaemonBinaryForRepo(t *testing.T) {
+	t.Run("returns empty when bin does not exist", func(t *testing.T) {
+		repoDir := t.TempDir()
+		if got := resolveDaemonBinaryForRepo(repoDir); got != "" {
+			t.Fatalf("expected empty path, got %q", got)
+		}
+	})
+
+	t.Run("returns repo local bin azd when present", func(t *testing.T) {
+		repoDir := t.TempDir()
+		binDir := filepath.Join(repoDir, "bin")
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			t.Fatalf("mkdir bin dir: %v", err)
+		}
+		azdPath := filepath.Join(binDir, "azd")
+		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write azd binary fixture: %v", err)
+		}
+
+		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
+			t.Fatalf("expected %q, got %q", azdPath, got)
 		}
 	})
 }

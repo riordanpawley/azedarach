@@ -1543,6 +1543,9 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		defer cancel()
 
 		launcher := daemonprocess.NewLauncher(project.Path, config.GlobalDaemonSocketPath())
+		if bin := resolveDaemonBinaryForRepo(m.repoDir); bin != "" {
+			launcher.BinPath = bin
+		}
 		if err := launcher.Replace(ctx); err != nil {
 			return projectSwitchResultMsg{
 				project: project,
@@ -1607,6 +1610,9 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		defer cancel()
 
 		launcher := daemonprocess.NewLauncher(m.repoDir, config.GlobalDaemonSocketPath())
+		if bin := resolveDaemonBinaryForRepo(m.repoDir); bin != "" {
+			launcher.BinPath = bin
+		}
 		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
@@ -1678,6 +1684,17 @@ func (m Model) daemonProjectID() string {
 		return filepath.Base(cwd)
 	}
 	return "default"
+}
+
+func resolveDaemonBinaryForRepo(repoDir string) string {
+	if strings.TrimSpace(repoDir) == "" {
+		return ""
+	}
+	bin := filepath.Join(repoDir, "bin", "azd")
+	if _, err := os.Stat(bin); err == nil {
+		return bin
+	}
+	return ""
 }
 
 func resolveInitialProjectName(registry *config.ProjectsRegistry, cwd string) string {
