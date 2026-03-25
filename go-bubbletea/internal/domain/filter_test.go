@@ -333,6 +333,13 @@ func TestFilter_Matches_HideEpicChildren(t *testing.T) {
 			matches: false,
 		},
 		{
+			name: "task with hyphenated parent-child dependency is hidden",
+			dependencies: []Dependency{
+				{ID: parentID, Type: DependencyType("parent-child")},
+			},
+			matches: false,
+		},
+		{
 			name:     "task without parent is shown",
 			parentID: nil,
 			matches:  true,

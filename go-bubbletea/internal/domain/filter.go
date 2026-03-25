@@ -176,11 +176,12 @@ func (f *Filter) ToggleSessionState(s SessionState) {
 }
 
 func taskIsChildIssue(t Task) bool {
-	if t.ParentID != nil {
+	if t.ParentID != nil && strings.TrimSpace(*t.ParentID) != "" {
 		return true
 	}
 	for _, dep := range t.Dependencies {
-		if dep.Type == DependencyParentChild && dep.ID != "" {
+		depType := strings.TrimSpace(string(dep.Type))
+		if (depType == string(DependencyParentChild) || depType == "parent-child") && strings.TrimSpace(dep.ID) != "" {
 			return true
 		}
 	}
