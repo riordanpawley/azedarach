@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -46,6 +48,7 @@ type Daemon struct {
 	issues   *issues.Client
 	tmux     *tmux.Client
 	worktree *git.WorktreeManager
+	session  *daemonhandlers.SessionHandler
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -79,6 +82,8 @@ func New(cfg Config) *Daemon {
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
+	sessionStore := daemonstate.NewStore()
+	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 
 	d := &Daemon{
 		cfg:      cfg,
@@ -87,10 +92,11 @@ func New(cfg Config) *Daemon {
 		issues:   issues.NewClient(cfg.RepoDir, cfg.Logger),
 		tmux:     tmux.NewClient(tmuxRunner, cfg.Logger),
 		worktree: git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
+		session:  sessionHandler,
 		revision: map[string]uint64{},
 	}
 	d.router = daemonhandlers.NewDispatcher(
-		nil,
+		sessionHandler,
 		daemonhandlers.NewWorktreeHandler(worktreeServiceAdapter{manager: d.worktree}),
 		daemonhandlers.NewDevServerHandler(devServerManager),
 	)
@@ -162,6 +168,44 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 	}
+}
+
+func (d *Daemon) applySessionLifecycleTransition(
+	ctx context.Context,
+	req protocol.RequestEnvelope,
+	projectID string,
+	sessionID string,
+	command string,
+) error {
+	if d.session == nil {
+		return nil
+	}
+
+	body, err := json.Marshal(struct {
+		ProjectID string `json:"project_id"`
+		SessionID string `json:"session_id"`
+		IssueID   string `json:"issue_id"`
+	}{
+		ProjectID: projectID,
+		SessionID: sessionID,
+		IssueID:   sessionID,
+	})
+	if err != nil {
+		return err
+	}
+
+	sessionReq := req
+	sessionReq.Command = command
+	sessionReq.Body = body
+
+	resp := d.session.Handle(ctx, sessionReq)
+	if resp.OK {
+		return nil
+	}
+	if resp.Error != nil {
+		return errors.New(resp.Error.Message)
+	}
+	return errors.New("session lifecycle transition failed")
 }
 
 func (d *Daemon) successResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {

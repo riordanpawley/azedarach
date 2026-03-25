@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -67,6 +68,15 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	_ = d.issues.Update(ctx, cmd.SessionID, domain.StatusInProgress)
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		daemonhandlers.CommandSessionStart,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
+	}
 
 	output := strings.Join([]string{
 		fmt.Sprintf("Starting session for: %s - %s", tasks[0].ID, tasks[0].Title),
@@ -99,6 +109,15 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 		"(Press Ctrl+B then D to detach)",
 		"",
 	}, "\n")
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		daemonhandlers.CommandSessionAttach,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session attach transition: %v", err)), nil
+	}
 	return d.commandOutput(req, output), nil
 }
 
@@ -116,6 +135,15 @@ func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnve
 	}
 	if err := d.tmux.KillSession(ctx, cmd.SessionID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		daemonhandlers.CommandSessionStop,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
 	}
 	output := strings.Join([]string{
 		fmt.Sprintf("Killing session: %s", cmd.SessionID),
