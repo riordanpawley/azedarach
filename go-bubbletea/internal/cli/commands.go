@@ -66,27 +66,31 @@ type IssueGetOptions struct {
 }
 
 type IssueCreateOptions struct {
-	Title       string
-	Description string
-	Type        domain.TaskType
-	Priority    domain.Priority
+	Implementation string
+	Title          string
+	Description    string
+	Type           domain.TaskType
+	Priority       domain.Priority
 }
 
 type IssueCloseOptions struct {
-	IssueID string
+	Implementation string
+	IssueID        string
 }
 
 type IssueUpdateOptions struct {
-	IssueID     string
-	Title       string
-	Description string
-	Type        *domain.TaskType
-	Priority    *domain.Priority
+	Implementation string
+	IssueID        string
+	Title          string
+	Description    string
+	Type           *domain.TaskType
+	Priority       *domain.Priority
 }
 
 type IssueStatusOptions struct {
-	IssueID string
-	Status  domain.Status
+	Implementation string
+	IssueID        string
+	Status         domain.Status
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
@@ -246,6 +250,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	var typeRaw string
 	fs := flag.NewFlagSet("issue create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
 	fs.StringVar(&opts.Description, "description", "", "issue description")
 	fs.StringVar(&priorityRaw, "priority", "P2", "issue priority (P0-P4)")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
@@ -253,9 +258,12 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create <title> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
 	}
 	opts.Title = fs.Arg(0)
+	if opts.Implementation == "" {
+		return IssueCreateOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
 
 	taskType, err := parseTaskType(typeRaw)
 	if err != nil {
@@ -271,10 +279,21 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 }
 
 func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
-	if len(args) != 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close <issue-id>")
+	opts := IssueCloseOptions{}
+	fs := flag.NewFlagSet("issue close", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	if err := fs.Parse(args); err != nil {
+		return IssueCloseOptions{}, err
 	}
-	return IssueCloseOptions{IssueID: args[0]}, nil
+	if fs.NArg() != 1 {
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close <issue-id> --impl <implementation>")
+	}
+	if opts.Implementation == "" {
+		return IssueCloseOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	opts.IssueID = fs.Arg(0)
+	return opts, nil
 }
 
 func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
@@ -283,6 +302,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	var priorityRaw string
 	fs := flag.NewFlagSet("issue update", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
 	fs.StringVar(&opts.Title, "title", "", "updated issue title")
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
 	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
@@ -291,7 +311,10 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update <issue-id> [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update <issue-id> --impl <implementation> [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+	}
+	if opts.Implementation == "" {
+		return IssueUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
 	}
 	opts.IssueID = fs.Arg(0)
 	if typeRaw != "" {
@@ -315,16 +338,27 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 }
 
 func ParseIssueStatusArgs(args []string) (IssueStatusOptions, error) {
-	if len(args) != 2 {
-		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status <issue-id> <open|in_progress|blocked|closed>")
+	opts := IssueStatusOptions{}
+	fs := flag.NewFlagSet("issue status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	if err := fs.Parse(args); err != nil {
+		return IssueStatusOptions{}, err
 	}
-	status, err := parseStatus(args[1])
+	if fs.NArg() != 2 {
+		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>")
+	}
+	if opts.Implementation == "" {
+		return IssueStatusOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	status, err := parseStatus(fs.Arg(1))
 	if err != nil {
 		return IssueStatusOptions{}, err
 	}
 	return IssueStatusOptions{
-		IssueID: args[0],
-		Status:  status,
+		Implementation: opts.Implementation,
+		IssueID:        fs.Arg(0),
+		Status:         status,
 	}, nil
 }
 
@@ -620,10 +654,10 @@ Commands:
   status [issue-id]     Show session status (all or specific issue)
   issue list [--json]  List issues from daemon-backed store
   issue get <id> [--json]  Show a single issue from daemon-backed store
-  issue create <title> [--type ...] [--priority ...] [--description ...]  Create an issue
-  issue update <id> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
-  issue status <id> <open|in_progress|blocked|closed>  Set issue status
-  issue close <id>      Close an issue (sets status=closed)
+  issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue update <id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
+  issue status <id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status
+  issue close <id> --impl <implementation>      Close an issue (sets status=closed)
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
@@ -637,10 +671,10 @@ Examples:
   az status az-123     # Show status for az-123
   az issue list
   az issue get az-123 --json
-  az issue create "New task" --type task --priority P2
-  az issue update az-123 --title "Renamed task" --priority P1
-  az issue status az-123 in_progress
-  az issue close az-123
+  az issue create "New task" --impl go-bubbletea --type task --priority P2
+  az issue update az-123 --impl go-bubbletea --title "Renamed task" --priority P1
+  az issue status az-123 in_progress --impl go-bubbletea
+  az issue close az-123 --impl go-bubbletea
   az export --format json
   az export --format json --out snapshot.json
   az daemon restart

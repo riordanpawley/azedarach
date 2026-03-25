@@ -517,26 +517,33 @@ func TestParseIssueCreateArgs(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			args: []string{"Title"},
+			args: []string{"--impl", "go-bubbletea", "Title"},
 			want: IssueCreateOptions{
-				Title:    "Title",
-				Type:     domain.TypeTask,
-				Priority: domain.P2,
+				Implementation: "go-bubbletea",
+				Title:          "Title",
+				Type:           domain.TypeTask,
+				Priority:       domain.P2,
 			},
 		},
 		{
 			name: "explicit options",
-			args: []string{"--type", "bug", "--priority", "P0", "--description", "details", "Title"},
+			args: []string{"--impl", "go-bubbletea", "--type", "bug", "--priority", "P0", "--description", "details", "Title"},
 			want: IssueCreateOptions{
-				Title:       "Title",
-				Description: "details",
-				Type:        domain.TypeBug,
-				Priority:    domain.P0,
+				Implementation: "go-bubbletea",
+				Title:          "Title",
+				Description:    "details",
+				Type:           domain.TypeBug,
+				Priority:       domain.P0,
 			},
 		},
 		{
+			name:        "missing impl",
+			args:        []string{"Title"},
+			errContains: "missing required flag: --impl",
+		},
+		{
 			name:        "invalid priority",
-			args:        []string{"--priority", "high", "Title"},
+			args:        []string{"--impl", "go-bubbletea", "--priority", "high", "Title"},
 			errContains: "invalid priority: high",
 		},
 		{
@@ -574,8 +581,13 @@ func TestParseIssueCloseArgs(t *testing.T) {
 	}{
 		{
 			name: "valid",
-			args: []string{"az-1"},
-			want: IssueCloseOptions{IssueID: "az-1"},
+			args: []string{"--impl", "go-bubbletea", "az-1"},
+			want: IssueCloseOptions{Implementation: "go-bubbletea", IssueID: "az-1"},
+		},
+		{
+			name:        "missing impl",
+			args:        []string{"az-1"},
+			errContains: "missing required flag: --impl",
 		},
 		{
 			name:        "missing id",
@@ -617,28 +629,35 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 	}{
 		{
 			name: "update title",
-			args: []string{"--title", "Renamed", "az-1"},
+			args: []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
 			want: IssueUpdateOptions{
-				IssueID: "az-1",
-				Title:   "Renamed",
+				Implementation: "go-bubbletea",
+				IssueID:        "az-1",
+				Title:          "Renamed",
 			},
 		},
 		{
 			name: "update type and priority",
-			args: []string{"--type", "epic", "--priority", "P0", "az-1"},
+			args: []string{"--impl", "go-bubbletea", "--type", "epic", "--priority", "P0", "az-1"},
 			want: func() IssueUpdateOptions {
 				tt := domain.TypeEpic
 				p := domain.P0
 				return IssueUpdateOptions{
-					IssueID:  "az-1",
-					Type:     &tt,
-					Priority: &p,
+					Implementation: "go-bubbletea",
+					IssueID:        "az-1",
+					Type:           &tt,
+					Priority:       &p,
 				}
 			}(),
 		},
 		{
+			name:        "missing impl",
+			args:        []string{"--title", "Renamed", "az-1"},
+			errContains: "missing required flag: --impl",
+		},
+		{
 			name:        "no update fields",
-			args:        []string{"az-1"},
+			args:        []string{"--impl", "go-bubbletea", "az-1"},
 			errContains: "no update fields provided",
 		},
 		{
@@ -659,7 +678,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueUpdateArgs() error = %v", err)
 			}
-			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description {
+			if got.Implementation != tt.want.Implementation || got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description {
 				t.Fatalf("ParseIssueUpdateArgs() = %+v, want %+v", got, tt.want)
 			}
 			if (got.Type == nil) != (tt.want.Type == nil) {
@@ -679,18 +698,22 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 }
 
 func TestParseIssueStatusArgs(t *testing.T) {
-	got, err := ParseIssueStatusArgs([]string{"az-1", "blocked"})
+	got, err := ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", "blocked"})
 	if err != nil {
 		t.Fatalf("ParseIssueStatusArgs() error = %v", err)
 	}
-	if got.IssueID != "az-1" || got.Status != domain.StatusBlocked {
+	if got.Implementation != "go-bubbletea" || got.IssueID != "az-1" || got.Status != domain.StatusBlocked {
 		t.Fatalf("ParseIssueStatusArgs() = %+v", got)
 	}
-	_, err = ParseIssueStatusArgs([]string{"az-1"})
+	_, err = ParseIssueStatusArgs([]string{"az-1", "blocked"})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
+		t.Fatalf("expected missing impl error, got %v", err)
+	}
+	_, err = ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1"})
 	if err == nil || !strings.Contains(err.Error(), "usage: az issue status <issue-id> <open|in_progress|blocked|closed>") {
 		t.Fatalf("expected usage error, got %v", err)
 	}
-	_, err = ParseIssueStatusArgs([]string{"az-1", "done"})
+	_, err = ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", "done"})
 	if err == nil || !strings.Contains(err.Error(), "invalid status: done") {
 		t.Fatalf("expected invalid status error, got %v", err)
 	}
@@ -845,10 +868,11 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 			name: "create",
 			run: func(deps *Dependencies) error {
 				return IssueCreateCommand(deps, IssueCreateOptions{
-					Title:       "New issue",
-					Description: "Context",
-					Type:        domain.TypeFeature,
-					Priority:    domain.P1,
+					Implementation: "go-bubbletea",
+					Title:          "New issue",
+					Description:    "Context",
+					Type:           domain.TypeFeature,
+					Priority:       domain.P1,
 				})
 			},
 			wantCommand: daemonclient.CommandTaskCreate,
@@ -857,7 +881,10 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 		{
 			name: "close",
 			run: func(deps *Dependencies) error {
-				return IssueCloseCommand(deps, IssueCloseOptions{IssueID: "az-9"})
+				return IssueCloseCommand(deps, IssueCloseOptions{
+					Implementation: "go-bubbletea",
+					IssueID:        "az-9",
+				})
 			},
 			wantCommand: daemonclient.CommandTaskUpdateStatus,
 			wantText:    "Closed issue: az-9",
@@ -981,8 +1008,9 @@ func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 
 	updateOut := captureStdout(t, func() error {
 		return IssueUpdateCommand(deps, IssueUpdateOptions{
-			IssueID: "az-1",
-			Title:   "New",
+			Implementation: "go-bubbletea",
+			IssueID:        "az-1",
+			Title:          "New",
 		})
 	})
 	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
@@ -994,8 +1022,9 @@ func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 
 	statusOut := captureStdout(t, func() error {
 		return IssueStatusCommand(deps, IssueStatusOptions{
-			IssueID: "az-1",
-			Status:  domain.StatusBlocked,
+			Implementation: "go-bubbletea",
+			IssueID:        "az-1",
+			Status:         domain.StatusBlocked,
 		})
 	})
 	if gotStatusReq.Command != daemonclient.CommandTaskUpdateStatus {
@@ -1035,6 +1064,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue close <id>") {
 		t.Fatalf("usage missing issue close command: %q", output)
+	}
+	if !strings.Contains(output, "--impl <implementation>") {
+		t.Fatalf("usage missing implementation targeting hint: %q", output)
 	}
 }
 

@@ -109,10 +109,10 @@ func main() {
 			fmt.Printf("Commands:\n")
 			fmt.Printf("  list [--json]          List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json]  Show a single issue by ID\n")
-			fmt.Printf("  create <title> [--type ...] [--priority ...] [--description ...]  Create an issue\n")
-			fmt.Printf("  update <issue-id> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
-			fmt.Printf("  status <issue-id> <open|in_progress|blocked|closed>  Set issue status\n")
-			fmt.Printf("  close <issue-id>       Close an issue (sets status=closed)\n")
+			fmt.Printf("  create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue\n")
+			fmt.Printf("  update <issue-id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
+			fmt.Printf("  status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status\n")
+			fmt.Printf("  close <issue-id> --impl <implementation>       Close an issue (sets status=closed)\n")
 			os.Exit(0)
 		}
 		switch issueCommand {
@@ -147,7 +147,7 @@ func main() {
 		case "create":
 			opts, err := cli.ParseIssueCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue create <title> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue create <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -161,7 +161,7 @@ func main() {
 		case "update":
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue update <issue-id> [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue update <issue-id> --impl <implementation> [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -175,7 +175,7 @@ func main() {
 		case "status":
 			opts, err := cli.ParseIssueStatusArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue status <issue-id> <open|in_progress|blocked|closed>\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -189,7 +189,7 @@ func main() {
 		case "close":
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue close <issue-id>\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue close <issue-id> --impl <implementation>\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
