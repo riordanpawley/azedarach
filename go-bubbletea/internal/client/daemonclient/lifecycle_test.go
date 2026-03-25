@@ -53,8 +53,12 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	if _, err := client.StartSession(context.Background(), "az-1", "main"); err != nil {
+	got, err := client.StartSession(context.Background(), "az-1", "main")
+	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("StartSession output = %q, want ok", got)
 	}
 	if transport.lastReq.Command != CommandSessionStart {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionStart)
@@ -63,11 +67,95 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
 	}
 
-	if _, err := client.StopSession(context.Background(), "az-1"); err != nil {
+	got, err = client.StopSession(context.Background(), "az-1")
+	if err != nil {
 		t.Fatalf("StopSession error: %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("StopSession output = %q, want ok", got)
 	}
 	if transport.lastReq.Command != CommandSessionStop {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionStop)
+	}
+}
+
+func TestSessionAttachAndStatusCommandsRouteThroughDaemon(t *testing.T) {
+	tests := []struct {
+		name        string
+		wantCommand string
+		sessionID   string
+		output      string
+	}{
+		{
+			name:        "attach",
+			wantCommand: CommandSessionAttach,
+			sessionID:   "az-1",
+			output:      "attached",
+		},
+		{
+			name:        "status",
+			wantCommand: CommandSessionStatus,
+			sessionID:   "",
+			output:      "Active Sessions (1)\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotReq protocol.RequestEnvelope
+			transport := &lifecycleRecordingTransport{
+				replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					gotReq = req
+					body, err := json.Marshal(commandOutputBody{Output: tt.output})
+					if err != nil {
+						t.Fatalf("marshal response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            body,
+					}, nil
+				},
+			}
+			client := New(transport).WithProjectID("proj-a")
+
+			var (
+				got string
+				err error
+			)
+			switch tt.wantCommand {
+			case CommandSessionAttach:
+				got, err = client.AttachSession(context.Background(), tt.sessionID)
+			case CommandSessionStatus:
+				got, err = client.SessionStatus(context.Background(), tt.sessionID)
+			default:
+				t.Fatalf("unexpected command %q", tt.wantCommand)
+			}
+			if err != nil {
+				t.Fatalf("%s error: %v", tt.name, err)
+			}
+			if got != tt.output {
+				t.Fatalf("output = %q, want %q", got, tt.output)
+			}
+			if gotReq.Command != tt.wantCommand {
+				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
+			}
+			if gotReq.Meta.ProjectID != "proj-a" {
+				t.Fatalf("project_id = %q, want proj-a", gotReq.Meta.ProjectID)
+			}
+			var body sessionCommandBody
+			if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if body.ProjectID != "proj-a" {
+				t.Fatalf("body project_id = %q, want proj-a", body.ProjectID)
+			}
+			if body.SessionID != tt.sessionID {
+				t.Fatalf("body session_id = %q, want %q", body.SessionID, tt.sessionID)
+			}
+		})
 	}
 }
 

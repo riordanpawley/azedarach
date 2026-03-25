@@ -12,7 +12,9 @@ import (
 
 const (
 	CommandSessionStart    = "session.start"
+	CommandSessionAttach   = "session.attach"
 	CommandSessionStop     = "session.stop"
+	CommandSessionStatus   = "session.status"
 	CommandDevServerStart  = "devserver.start"
 	CommandDevServerStop   = "devserver.stop"
 	CommandDevServerStatus = "devserver.status"
@@ -83,6 +85,22 @@ func (c *Client) StartSession(ctx context.Context, issueID string, baseBranch st
 // StopSession asks the daemon to stop one session for issue/task id.
 func (c *Client) StopSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStop, sessionCommandBody{
+		ProjectID: c.projectID,
+		SessionID: issueID,
+	})
+}
+
+// AttachSession asks the daemon to attach to one session for issue/task id.
+func (c *Client) AttachSession(ctx context.Context, issueID string) (string, error) {
+	return c.commandOutput(ctx, CommandSessionAttach, sessionCommandBody{
+		ProjectID: c.projectID,
+		SessionID: issueID,
+	})
+}
+
+// SessionStatus asks the daemon for the current session status view.
+func (c *Client) SessionStatus(ctx context.Context, issueID string) (string, error) {
+	return c.commandOutput(ctx, CommandSessionStatus, sessionCommandBody{
 		ProjectID: c.projectID,
 		SessionID: issueID,
 	})
