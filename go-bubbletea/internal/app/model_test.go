@@ -996,6 +996,35 @@ func TestModeTransitions(t *testing.T) {
 	})
 }
 
+func TestActionModeOperationalKeysFailFastWithGuidance(t *testing.T) {
+	keys := []string{"u", "m", "P"}
+
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			m := newTestModel()
+			m.editor.EnterAction()
+
+			before := len(m.toasts)
+			result, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+			newModel := result.(Model)
+
+			if cmd != nil {
+				t.Fatalf("expected no command for action key %q, got %T", key, cmd)
+			}
+			if got := len(newModel.toasts); got != before+1 {
+				t.Fatalf("expected one toast for key %q, got %d", key, got-before)
+			}
+			last := newModel.toasts[len(newModel.toasts)-1]
+			if !strings.Contains(last.Message, "no git operation was started") {
+				t.Fatalf("toast for %q missing no-op guidance: %q", key, last.Message)
+			}
+			if !strings.Contains(last.Message, "continue/abort") {
+				t.Fatalf("toast for %q missing continue/abort guidance: %q", key, last.Message)
+			}
+		})
+	}
+}
+
 func TestLoadingStateAcceptsImmediateInteraction(t *testing.T) {
 	m := newTestModel()
 	m.loading = true
@@ -1227,6 +1256,26 @@ func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
 	}
 	if _, ok := validTaskIDs[cursor.TaskID]; !ok {
 		t.Fatalf("cursor task %q not present in refreshed task set", cursor.TaskID)
+	}
+}
+
+func TestIssuesLoadedStartsPeriodicRefreshLoop(t *testing.T) {
+	m := newTestModel()
+	m.hasRefreshLoop = false
+
+	result, cmd := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 11,
+	})
+	newModel := result.(Model)
+
+	if !newModel.hasRefreshLoop {
+		t.Fatal("expected issuesLoaded to start periodic refresh loop")
+	}
+	if cmd == nil {
+		t.Fatal("expected periodic refresh command batch after issuesLoaded")
 	}
 }
 

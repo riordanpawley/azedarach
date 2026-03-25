@@ -1228,8 +1228,16 @@ func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleActionMode processes keyboard input in action mode
 func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// TODO: Implement action mode handling
-	// For now, just allow escape to exit
+	switch msg.String() {
+	case "u", "m", "P":
+		m.toasts = append(m.toasts, Toast{
+			Level: ToastWarning,
+			Message: "Action unavailable in go-bubbletea action mode; no git operation was started. " +
+				"If your repository has an active merge/rebase/cherry-pick/revert state, run git status and continue/abort it first.",
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
+	}
 	return m, nil
 }
 
