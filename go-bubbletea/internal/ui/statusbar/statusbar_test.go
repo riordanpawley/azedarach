@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -111,6 +113,64 @@ func TestStatusBar_FillsWidth(t *testing.T) {
 	// Note: This is a basic check - lipgloss rendering may add ANSI codes
 	if result == "" {
 		t.Error("Expected non-empty status bar")
+	}
+}
+
+func TestStatusBar_RenderLatestEventTicker(t *testing.T) {
+	style := styles.New()
+	ring := eventticker.NewRing(4)
+	ring.Push("daemon.event.publish")
+	sb := New(types.ModeNormal, 80, style)
+	sb.SetEventTicker(ring)
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "daemon.event.publish") {
+		t.Fatalf("Expected status bar to contain latest event ticker, got: %s", result)
+	}
+	if !strings.Contains(result, "NORMAL") {
+		t.Fatalf("Expected status bar to keep mode badge, got: %s", result)
+	}
+}
+
+func TestStatusBar_RenderFallsBackToSelectionSummary(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 80, style)
+	sb.SetSelectionSummary("Selected: 3")
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "Selected: 3") {
+		t.Fatalf("Expected status bar to contain selection summary, got: %s", result)
+	}
+	if strings.Contains(result, "daemon.event.") {
+		t.Fatalf("Expected no event ticker content, got: %s", result)
+	}
+}
+
+func TestStatusBar_RenderFallsBackAndTruncatesEventTicker(t *testing.T) {
+	style := styles.New()
+	ring := eventticker.NewRing(2)
+	ring.Push("daemon.event.publish.with.an.extremely.long.event.name")
+	sb := New(types.ModeNormal, 32, style)
+	sb.SetEventTicker(ring)
+
+	result := sb.Render()
+
+	if strings.Contains(result, "\n") {
+		t.Fatalf("Expected single-line status bar, got newline in: %q", result)
+	}
+	if !strings.Contains(result, "daemon.event.") {
+		t.Fatalf("Expected truncated ticker to stay visible, got: %s", result)
+	}
+	if strings.Contains(result, "extremely.long.event.name") {
+		t.Fatalf("Expected ticker to be truncated, got: %s", result)
+	}
+	if !strings.Contains(result, "NORMAL") {
+		t.Fatalf("Expected status bar to keep mode badge, got: %s", result)
+	}
+	if got := lipgloss.Height(result); got != 1 {
+		t.Fatalf("Expected single-line status bar, got height %d: %q", got, result)
 	}
 }
 
