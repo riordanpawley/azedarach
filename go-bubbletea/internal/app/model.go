@@ -1043,8 +1043,8 @@ func (m Model) buildColumns() []board.Column {
 		return board.CreatePlaceholderData()
 	}
 
-	// Apply filter to tasks
-	filteredTasks := m.editor.ApplyFilter(m.tasks)
+	// Apply filter to tasks and enforce board-level child hiding semantics.
+	filteredTasks := m.boardVisibleTasks(m.tasks)
 
 	// Build columns from filtered tasks
 	return []board.Column{
@@ -1053,6 +1053,29 @@ func (m Model) buildColumns() []board.Column {
 		{Title: "Blocked", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusBlocked)},
 		{Title: "Done", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusDone)},
 	}
+}
+
+func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
+	filtered := m.editor.ApplyFilter(tasks)
+	result := make([]domain.Task, 0, len(filtered))
+	for _, task := range filtered {
+		if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
+			continue
+		}
+		childByDependency := false
+		for _, dep := range task.Dependencies {
+			depType := strings.TrimSpace(string(dep.Type))
+			if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID) != "" {
+				childByDependency = true
+				break
+			}
+		}
+		if childByDependency {
+			continue
+		}
+		result = append(result, task)
+	}
+	return result
 }
 
 // handleKey processes keyboard input based on current mode
@@ -3752,7 +3775,7 @@ func (m Model) renderBoardView() string {
 // renderCompactView renders the compact list view
 func (m Model) renderCompactView() string {
 	// Get all filtered and sorted tasks
-	filteredTasks := m.editor.ApplyFilter(m.tasks)
+	filteredTasks := m.boardVisibleTasks(m.tasks)
 	sortedTasks := m.editor.ApplySort(filteredTasks)
 
 	// Create compact view

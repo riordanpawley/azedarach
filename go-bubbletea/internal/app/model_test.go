@@ -1526,6 +1526,60 @@ func TestEnterOnNonParentDependenciesDoesNotOpenChildDrillDown(t *testing.T) {
 	}
 }
 
+func TestBuildColumns_HidesParentChildEvenWhenFilterToggleIsOff(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+
+	parentID := "az-parent"
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-child-parent-id", Title: "Child by parent_id", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{
+			ID:       "az-child-dep",
+			Title:    "Child by parent-child dep",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: parentID, Type: domain.DependencyParentChild},
+			},
+		},
+		{
+			ID:       "az-blocks-only",
+			Title:    "Blocks-only issue",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: parentID, Type: domain.DependencyBlocks},
+			},
+		},
+	}
+
+	// Simulate user turning hide-child filter option off.
+	m.editor.ToggleHideEpicChildren()
+
+	columns := m.buildColumns()
+	openTasks := columns[domain.StatusOpen.Column()].Tasks
+	ids := make(map[string]struct{}, len(openTasks))
+	for _, task := range openTasks {
+		ids[task.ID] = struct{}{}
+	}
+
+	if _, ok := ids[parentID]; !ok {
+		t.Fatalf("parent task unexpectedly hidden: %+v", openTasks)
+	}
+	if _, ok := ids["az-blocks-only"]; !ok {
+		t.Fatalf("blocks-only task unexpectedly hidden: %+v", openTasks)
+	}
+	if _, ok := ids["az-child-parent-id"]; ok {
+		t.Fatalf("child by parent_id should be hidden from board: %+v", openTasks)
+	}
+	if _, ok := ids["az-child-dep"]; ok {
+		t.Fatalf("child by parent-child dependency should be hidden from board: %+v", openTasks)
+	}
+}
+
 func TestModeStrings(t *testing.T) {
 	tests := []struct {
 		mode     Mode
