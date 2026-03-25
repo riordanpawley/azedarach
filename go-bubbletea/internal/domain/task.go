@@ -9,7 +9,7 @@ const (
 	DependencyBlocks      DependencyType = "blocks"
 	DependencyBlockedBy   DependencyType = "blocked_by"
 	DependencyRelatedTo   DependencyType = "related_to"
-	DependencyParentChild DependencyType = "parent_child"
+	DependencyParentChild DependencyType = "parent-child"
 )
 
 // Dependency represents a task dependency relationship

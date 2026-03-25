@@ -181,7 +181,7 @@ func taskIsChildIssue(t Task) bool {
 	}
 	for _, dep := range t.Dependencies {
 		depType := strings.TrimSpace(string(dep.Type))
-		if (depType == string(DependencyParentChild) || depType == "parent-child") && strings.TrimSpace(dep.ID) != "" {
+		if (depType == string(DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID) != "" {
 			return true
 		}
 	}

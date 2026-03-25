@@ -89,12 +89,29 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 			c.openErr = err
 			return
 		}
+		if err := c.normalizeDependencyEnumRows(db); err != nil {
+			_ = db.Close()
+			c.openErr = err
+			return
+		}
 		c.db = db
 	})
 	if c.openErr != nil {
 		return nil, c.wrapError("open-db", "", c.openErr)
 	}
 	return c.db, nil
+}
+
+func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
+	_, err := db.Exec(`
+		UPDATE issue_dependencies
+		SET dependency_type = ?
+		WHERE dependency_type = 'parent_child'
+	`, string(domain.DependencyParentChild))
+	if err != nil {
+		return fmt.Errorf("normalize dependency enum rows: %w", err)
+	}
+	return nil
 }
 
 // List fetches all active issues from local SQLite store.
@@ -314,10 +331,10 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
-			VALUES (?, ?, 'parent-child', NULL)
+			VALUES (?, ?, ?, NULL)
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
-		`, issueID, strings.TrimSpace(*params.ParentID)); err != nil {
+		`, issueID, strings.TrimSpace(*params.ParentID), string(domain.DependencyParentChild)); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
 	}
@@ -624,7 +641,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		if task == nil {
 			continue
 		}
-		if dependencyType == "parent-child" {
+		if normalizeDependencyType(dependencyType) == string(domain.DependencyParentChild) {
 			parentID := dependsOnID
 			task.ParentID = &parentID
 			continue
@@ -685,13 +702,13 @@ func (c *Client) wouldCreateDependencyCycle(ctx context.Context, db *sql.DB, iss
 			FROM issue_dependencies
 			WHERE issue_id = ?
 				AND tombstoned_at IS NULL
-				AND dependency_type IN ('blocks', 'parent-child')
+				AND dependency_type IN ('blocks', 'parent-child', 'parent_child')
 			UNION
 			SELECT d.depends_on_id
 			FROM issue_dependencies d
 			JOIN reachable r ON d.issue_id = r.id
 			WHERE d.tombstoned_at IS NULL
-				AND d.dependency_type IN ('blocks', 'parent-child')
+				AND d.dependency_type IN ('blocks', 'parent-child', 'parent_child')
 		)
 		SELECT 1
 		FROM reachable
