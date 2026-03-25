@@ -225,15 +225,47 @@ func TestResolveDaemonBinaryForRepo(t *testing.T) {
 		origExecutablePath := executablePath
 		origProcessArgs := processArgs
 		origLookupPath := lookupPath
+		origWorkingDir := workingDir
 		t.Cleanup(func() { executablePath = origExecutablePath })
 		t.Cleanup(func() { processArgs = origProcessArgs })
 		t.Cleanup(func() { lookupPath = origLookupPath })
+		t.Cleanup(func() { workingDir = origWorkingDir })
 		processArgs = func() []string { return []string{"az"} }
 		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
 		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
+		workingDir = func() (string, error) { return t.TempDir(), nil }
 
 		if got := resolveDaemonBinaryForRepo(repoDir); got != "" {
 			t.Fatalf("expected empty path, got %q", got)
+		}
+	})
+
+	t.Run("falls back to cwd bin azd for just run workflows", func(t *testing.T) {
+		repoDir := t.TempDir()
+		cwd := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cwd, "bin"), 0o755); err != nil {
+			t.Fatalf("mkdir cwd bin: %v", err)
+		}
+		cwdAzd := filepath.Join(cwd, "bin", "azd")
+		if err := os.WriteFile(cwdAzd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write cwd azd fixture: %v", err)
+		}
+
+		origExecutablePath := executablePath
+		origProcessArgs := processArgs
+		origLookupPath := lookupPath
+		origWorkingDir := workingDir
+		t.Cleanup(func() { executablePath = origExecutablePath })
+		t.Cleanup(func() { processArgs = origProcessArgs })
+		t.Cleanup(func() { lookupPath = origLookupPath })
+		t.Cleanup(func() { workingDir = origWorkingDir })
+		processArgs = func() []string { return []string{"az"} }
+		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
+		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
+		workingDir = func() (string, error) { return cwd, nil }
+
+		if got := resolveDaemonBinaryForRepo(repoDir); got != cwdAzd {
+			t.Fatalf("expected %q, got %q", cwdAzd, got)
 		}
 	})
 }

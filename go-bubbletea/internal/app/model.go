@@ -68,6 +68,7 @@ var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 var executablePath = os.Executable
 var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
+var workingDir = os.Getwd
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -1698,6 +1699,9 @@ func resolveDaemonBinaryForRepo(repoDir string) string {
 	if sibling := resolveDaemonBinaryNearExecutable(); sibling != "" {
 		return sibling
 	}
+	if cwdBin := resolveDaemonBinaryFromWorkingDir(); cwdBin != "" {
+		return cwdBin
+	}
 	if strings.TrimSpace(repoDir) == "" {
 		return ""
 	}
@@ -1741,6 +1745,18 @@ func resolveDaemonBinaryNearInvokedAz() string {
 		}
 	}
 
+	return ""
+}
+
+func resolveDaemonBinaryFromWorkingDir() string {
+	cwd, err := workingDir()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	candidate := filepath.Join(cwd, "bin", "azd")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
 	return ""
 }
 
