@@ -1079,6 +1079,69 @@ func TestIssueGetCommandDepsProjection(t *testing.T) {
 	}
 }
 
+func TestIssueGetCommandDepsProjectionCanonicalTypes(t *testing.T) {
+	now := time.Date(2026, 3, 25, 11, 30, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:          "az-9",
+			Title:       "Dependency matrix",
+			Description: "Ensure deps output labels are canonical",
+			Status:      domain.StatusOpen,
+			Priority:    domain.P2,
+			Type:        domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: "az-a", Type: domain.DependencyBlocks},
+				{ID: "az-b", Type: domain.DependencyParentChild},
+				{ID: "az-c", Type: domain.DependencyRelatedTo},
+				{ID: "az-d", Type: domain.DependencyDiscovered},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        5,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-9", Deps: true})
+	})
+	if !strings.Contains(output, "Dependency edges:") {
+		t.Fatalf("deps output missing dependency section: %q", output)
+	}
+	for _, want := range []string{
+		"- az-a (blocks)",
+		"- az-b (parent-child)",
+		"- az-c (related)",
+		"- az-d (discovered-from)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("deps output missing %q: %q", want, output)
+		}
+	}
+}
+
 func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	tests := []struct {
 		name        string

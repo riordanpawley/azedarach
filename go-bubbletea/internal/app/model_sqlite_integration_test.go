@@ -14,6 +14,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/daemon"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 )
 
@@ -82,6 +83,50 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 	}
 }
 
+func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
+	repoDir := t.TempDir()
+	seedModelIssueStore(t, repoDir, "az-parent", "Parent issue", "open", 1, "epic")
+	seedModelIssueStore(t, repoDir, "az-child", "Child issue", "open", 2, "task")
+	seedModelIssueStore(t, repoDir, "az-blocks-only", "Blocks-only issue", "open", 2, "task")
+	seedModelIssueDependency(t, repoDir, "az-child", "az-parent", "parent-child")
+	seedModelIssueDependency(t, repoDir, "az-blocks-only", "az-parent", "blocks")
+
+	runtimeDir, err := os.MkdirTemp(".", "azd-model-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	socketPath := filepath.Join(runtimeDir, "daemon.sock")
+	lockPath := filepath.Join(runtimeDir, "daemon.lock")
+	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
+	defer stop()
+
+	model := newTestModel()
+	model.daemonClient = daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	msg := model.loadIssuesCmd()()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+
+	model.tasks = loaded.tasks
+	columns := model.buildColumns()
+
+	openIDs := make(map[string]struct{})
+	for _, task := range columns[domain.StatusOpen.Column()].Tasks {
+		openIDs[task.ID] = struct{}{}
+	}
+	if _, ok := openIDs["az-parent"]; !ok {
+		t.Fatalf("expected parent issue to remain visible in open column: %+v", columns[domain.StatusOpen.Column()].Tasks)
+	}
+	if _, ok := openIDs["az-blocks-only"]; !ok {
+		t.Fatalf("expected blocks-only issue to remain visible in open column: %+v", columns[domain.StatusOpen.Column()].Tasks)
+	}
+	if _, ok := openIDs["az-child"]; ok {
+		t.Fatalf("expected parent-child issue to be hidden from board open column: %+v", columns[domain.StatusOpen.Column()].Tasks)
+	}
+}
+
 func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priority int, issueType string) {
 	t.Helper()
 	dbDir := filepath.Join(repoDir, ".azedarach")
@@ -139,6 +184,23 @@ func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priori
 		id, title, "", status, priority, issueType, now, now,
 	); err != nil {
 		t.Fatalf("insert issue: %v", err)
+	}
+}
+
+func seedModelIssueDependency(t *testing.T, repoDir, issueID, dependsOnID, dependencyType string) {
+	t.Helper()
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(
+		`INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at) VALUES (?, ?, ?, NULL)`,
+		issueID, dependsOnID, dependencyType,
+	); err != nil {
+		t.Fatalf("insert dependency: %v", err)
 	}
 }
 
