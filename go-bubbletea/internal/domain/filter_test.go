@@ -117,10 +117,23 @@ func TestFilter_Apply_DefaultHidesChildIssues(t *testing.T) {
 				{ID: parentID, Type: DependencyParentChild},
 			},
 		},
+		{
+			ID:       "az-blocks-only",
+			Title:    "Blocks-only relation is not a child",
+			Status:   StatusOpen,
+			Priority: P2,
+			Type:     TypeTask,
+			Dependencies: []Dependency{
+				{ID: parentID, Type: DependencyBlocks},
+			},
+		},
 	}
 
 	got := f.Apply(tasks)
-	if len(got) != 1 || got[0].ID != parentID {
+	if len(got) != 2 {
+		t.Fatalf("Apply() with default filter should hide only parent-child tasks, got %+v", got)
+	}
+	if got[0].ID != parentID || got[1].ID != "az-blocks-only" {
 		t.Fatalf("Apply() with default filter should hide children, got %+v", got)
 	}
 }

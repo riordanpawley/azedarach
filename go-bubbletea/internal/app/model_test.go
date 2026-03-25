@@ -1493,6 +1493,39 @@ func TestEnterOnLeafTaskShowsDrillDownGuidanceToast(t *testing.T) {
 	}
 }
 
+func TestEnterOnNonParentDependenciesDoesNotOpenChildDrillDown(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+
+	taskID := "az-non-parent-rel"
+	m.tasks = append(m.tasks, domain.Task{
+		ID:       taskID,
+		Title:    "Task with blocks dependency only",
+		Status:   domain.StatusOpen,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: "az-upstream", Type: domain.DependencyBlocks},
+		},
+	})
+	m.nav.SelectTask(taskID, 0)
+
+	beforeToasts := len(m.toasts)
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	newModel := result.(Model)
+
+	if !newModel.overlayStack.IsEmpty() {
+		t.Fatalf("expected no drill-down overlay for non-parent dependency, got %T", newModel.overlayStack.Current())
+	}
+	if len(newModel.toasts) != beforeToasts+1 {
+		t.Fatalf("expected one guidance toast, got %d new toasts", len(newModel.toasts)-beforeToasts)
+	}
+	last := newModel.toasts[len(newModel.toasts)-1]
+	if !strings.Contains(last.Message, "No children to drill into") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+}
+
 func TestModeStrings(t *testing.T) {
 	tests := []struct {
 		mode     Mode
