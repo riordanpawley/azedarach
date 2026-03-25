@@ -1,8 +1,0 @@
-id:
-  prefix: az
-defaults:
-  priority: 2
-  type: task
-# sync:
-#   auto_flush: 'false'
-# no-auto-flush: 'true'

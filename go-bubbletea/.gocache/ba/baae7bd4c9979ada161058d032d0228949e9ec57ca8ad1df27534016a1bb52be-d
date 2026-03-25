@@ -1,3 +1,0 @@
-# test log
-open testdata/request_envelope.hex.golden
-open testdata/fuzz/FuzzDecodeFrame

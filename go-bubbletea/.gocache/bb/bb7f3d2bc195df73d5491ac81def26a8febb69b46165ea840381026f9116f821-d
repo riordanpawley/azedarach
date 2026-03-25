@@ -1,9 +1,0 @@
-# test log
-getenv TMPDIR
-getenv TMPDIR
-stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T//azd-ipc-1774360878117751000.sock
-stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T//azd-ipc-1774360878117731000.sock
-stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T
-stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T
-stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T//azd-ipc-1774360878117751000.sock
-stat /var/folders/45/r67jp_3d1zgg1vfdtyg72x8w0000gn/T//azd-ipc-1774360878117731000.sock

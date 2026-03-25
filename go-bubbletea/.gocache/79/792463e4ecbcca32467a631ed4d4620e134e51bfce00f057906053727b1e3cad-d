@@ -1,8 +1,0 @@
-./config.go
-./daemon_paths.go
-./projects.go
-./version.go
-./config_test.go
-./daemon_paths_test.go
-./projects_test.go
-./version_test.go

@@ -1,8 +1,0 @@
-./harness.go
-./harness_test.go
-./idle_shutdown_recovery_test.go
-./multi_client_coherence_test.go
-./multiproject_isolation_test.go
-./roundtrip_happy_path_test.go
-./startup_reconnect_test.go
-./stream_failure_fallback_test.go

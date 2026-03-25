@@ -1,3 +1,0 @@
-# test log
-open testdata/snapshot_payload_current_revision.json.golden
-open testdata/snapshot_payload_default_revision.json.golden

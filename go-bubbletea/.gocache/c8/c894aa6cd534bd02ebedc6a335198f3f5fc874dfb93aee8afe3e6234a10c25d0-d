@@ -1,6 +1,0 @@
-./client.go
-./runner.go
-./sync.go
-./worktree.go
-./client_test.go
-./worktree_test.go

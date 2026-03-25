@@ -84,6 +84,9 @@ ts-opentui/.codanna/
 /go-bubbletea/bin/
 /go-bubbletea/azd
 /.beads
+/go-bubbletea/.beads/
+/go-bubbletea/.gocache/
+/go-bubbletea/.gopath/
 /ts-opentui/az
 /.agents/memories/overview.md
 /.azedarach.schema.json
