@@ -1149,14 +1149,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editor.EnterGoto()
 		return m, nil
 
-	case " ": // Space - open details + action menu
+	case " ": // Space - open task panel (details + actions)
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
-			detail := overlay.NewDetailPanel(*task, session).WithRelatedTasks(m.tasks)
-			return m, tea.Batch(
-				m.overlayStack.Push(detail),
-				m.overlayStack.Push(overlay.NewActionMenu(*task, session)),
-			)
+			return m, m.overlayStack.Push(overlay.NewActionMenu(*task, session).WithRelatedTasks(m.tasks))
 		}
 		return m, nil
 

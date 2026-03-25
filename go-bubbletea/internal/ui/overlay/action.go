@@ -17,11 +17,12 @@ type Action struct {
 
 // ActionMenu is a menu overlay for task actions
 type ActionMenu struct {
-	task    domain.Task
-	session *domain.Session
-	actions []Action
-	cursor  int
-	styles  *Styles
+	task         domain.Task
+	relatedTasks []domain.Task
+	session      *domain.Session
+	actions      []Action
+	cursor       int
+	styles       *Styles
 }
 
 // NewActionMenu creates a new action menu for the given task
@@ -34,6 +35,13 @@ func NewActionMenu(task domain.Task, session *domain.Session) *ActionMenu {
 	}
 	menu.actions = menu.buildActions()
 	return menu
+}
+
+// WithRelatedTasks attaches the task list so details can show dependency and
+// child summary information for the selected task.
+func (m *ActionMenu) WithRelatedTasks(tasks []domain.Task) *ActionMenu {
+	m.relatedTasks = append([]domain.Task(nil), tasks...)
+	return m
 }
 
 // buildActions creates the action list based on task and session state
@@ -128,6 +136,32 @@ func (m *ActionMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *ActionMenu) View() string {
 	var b strings.Builder
 
+	// Task details section
+	b.WriteString(m.styles.MenuItemActive.Render(fmt.Sprintf("[%s] %s", m.task.ID, m.task.Title)))
+	b.WriteString("\n")
+	b.WriteString(m.styles.MenuItem.Render(
+		fmt.Sprintf("status: %s  priority: %s  type: %s", m.task.Status, m.task.Priority, m.task.Type),
+	))
+	b.WriteString("\n")
+	if m.task.ParentID != nil {
+		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("parent: %s", *m.task.ParentID)))
+		b.WriteString("\n")
+	}
+	if total, done := m.childProgress(); total > 0 {
+		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("children: %d total (%d done)", total, done)))
+		b.WriteString("\n")
+	}
+	outgoing := len(m.task.Dependencies)
+	incoming := len(m.incomingDependencies())
+	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("dependencies: out %d / in %d", outgoing, incoming)))
+	b.WriteString("\n")
+	if m.session != nil {
+		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("session: %s %s", m.session.State.Icon(), m.session.State)))
+		b.WriteString("\n")
+	}
+	b.WriteString(m.styles.Separator.Render("───────────────────"))
+	b.WriteString("\n")
+
 	for i, action := range m.actions {
 		// Skip rendering logic for separators
 		if action.Key == "" {
@@ -156,14 +190,22 @@ func (m *ActionMenu) View() string {
 
 // Title returns the overlay title
 func (m *ActionMenu) Title() string {
-	return "Actions"
+	return "Task"
 }
 
 // Size returns the overlay dimensions
 func (m *ActionMenu) Size() (width, height int) {
-	// Width: enough for longest action line
-	// Height: number of actions + padding
-	return 36, len(m.actions) + 4
+	baseLines := 5 // title+meta+deps+separator (parent/session/children may add more)
+	if m.task.ParentID != nil {
+		baseLines++
+	}
+	if total, _ := m.childProgress(); total > 0 {
+		baseLines++
+	}
+	if m.session != nil {
+		baseLines++
+	}
+	return 72, baseLines + len(m.actions) + 4
 }
 
 // moveCursorDown moves the cursor to the next enabled action
@@ -406,4 +448,50 @@ func (m *BulkActionMenu) selectByKey(key string) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *ActionMenu) incomingDependencies() []domain.Dependency {
+	if len(m.relatedTasks) == 0 {
+		return nil
+	}
+	var incoming []domain.Dependency
+	for _, task := range m.relatedTasks {
+		if task.ID == m.task.ID {
+			continue
+		}
+		for _, dep := range task.Dependencies {
+			if dep.ID == m.task.ID {
+				incoming = append(incoming, domain.Dependency{ID: task.ID, Type: dep.Type})
+			}
+		}
+	}
+	return incoming
+}
+
+func (m *ActionMenu) childProgress() (total int, done int) {
+	if len(m.relatedTasks) == 0 {
+		return 0, 0
+	}
+	for _, task := range m.relatedTasks {
+		if task.ID == m.task.ID {
+			continue
+		}
+		if task.ParentID != nil && *task.ParentID == m.task.ID {
+			total++
+			if task.Status == domain.StatusDone {
+				done++
+			}
+			continue
+		}
+		for _, dep := range task.Dependencies {
+			if dep.Type == domain.DependencyParentChild && dep.ID == m.task.ID {
+				total++
+				if task.Status == domain.StatusDone {
+					done++
+				}
+				break
+			}
+		}
+	}
+	return total, done
 }

@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,8 +31,8 @@ func TestActionMenu_Title(t *testing.T) {
 	menu := NewActionMenu(task, nil)
 
 	title := menu.Title()
-	if title != "Actions" {
-		t.Errorf("expected title 'Actions', got %s", title)
+	if title != "Task" {
+		t.Errorf("expected title 'Task', got %s", title)
 	}
 }
 
@@ -40,8 +41,8 @@ func TestActionMenu_Size(t *testing.T) {
 	menu := NewActionMenu(task, nil)
 
 	width, height := menu.Size()
-	if width != 36 {
-		t.Errorf("expected width 36, got %d", width)
+	if width < 60 {
+		t.Errorf("expected width >= 60 for combined task panel, got %d", width)
 	}
 
 	if height <= 0 {
@@ -322,7 +323,7 @@ func TestActionMenu_Update_Enter(t *testing.T) {
 }
 
 func TestActionMenu_View(t *testing.T) {
-	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
+	task := domain.Task{ID: "az-123", Title: "Test Task", Status: domain.StatusOpen}
 	menu := NewActionMenu(task, nil)
 
 	view := menu.View()
@@ -334,6 +335,12 @@ func TestActionMenu_View(t *testing.T) {
 	// Should contain at least some action keys
 	if len(menu.actions) == 0 {
 		t.Error("expected menu to have actions")
+	}
+	if !strings.Contains(view, "[az-123]") ||
+		!strings.Contains(view, "Test Task") ||
+		!strings.Contains(view, "status:") ||
+		!strings.Contains(view, "dependencies:") {
+		t.Errorf("expected task detail section in view, got: %s", view)
 	}
 }
 

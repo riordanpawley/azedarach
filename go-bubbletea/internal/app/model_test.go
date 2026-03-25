@@ -1430,38 +1430,16 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	newModel := result.(Model)
 
 	current := newModel.overlayStack.Current()
-	if _, ok := current.(*overlay.ActionMenu); !ok {
+	actionMenu, ok := current.(*overlay.ActionMenu)
+	if !ok {
 		t.Fatalf("expected ActionMenu overlay on top, got %T", current)
 	}
-
-	updated, closeCmd := newModel.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
-	if closeCmd == nil {
-		t.Fatal("expected escape to emit a close command")
+	view := actionMenu.View()
+	if !strings.Contains(view, "dependencies: out 1 / in 1") {
+		t.Fatalf("expected dependency summary in task panel, got %q", view)
 	}
-	closeMsg := closeCmd()
-	if _, ok := closeMsg.(overlay.CloseOverlayMsg); !ok {
-		t.Fatalf("escape command emitted %T, want CloseOverlayMsg", closeMsg)
-	}
-
-	afterClose := updated.(Model)
-	afterClose.overlayStack.Update(closeMsg)
-	current = afterClose.overlayStack.Current()
-	detail, ok := current.(*overlay.DetailPanel)
-	if !ok {
-		t.Fatalf("expected DetailPanel overlay beneath action menu, got %T", current)
-	}
-	view := detail.View()
-	if !strings.Contains(view, "Dependencies") {
-		t.Fatalf("expected dependency section in view, got %q", view)
-	}
-	if !strings.Contains(view, "Outgoing") || !strings.Contains(view, "blocks -> az-downstream") {
-		t.Fatalf("expected outgoing dependency edge in view, got %q", view)
-	}
-	if !strings.Contains(view, "Incoming") || !strings.Contains(view, "related_to <- az-upstream") {
-		t.Fatalf("expected incoming dependency edge in view, got %q", view)
-	}
-	if strings.Index(view, "Outgoing") > strings.Index(view, "Incoming") {
-		t.Fatalf("expected outgoing dependencies to render before incoming dependencies, got %q", view)
+	if !strings.Contains(view, "Current task") {
+		t.Fatalf("expected task title in task panel, got %q", view)
 	}
 }
 
