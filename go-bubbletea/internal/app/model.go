@@ -349,6 +349,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesLoadedMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
 		wasLoading := m.loading
 		m.tasks = msg.tasks
 		m.sessions = m.projectSessionProjection(msg.tasks)
@@ -382,6 +385,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case issuesErrorMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: msg.err.Error(),
@@ -1462,13 +1468,15 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
-	tasks    []domain.Task
-	revision uint64
-	events   <-chan protocol.EventEnvelope
+	projectID string
+	tasks     []domain.Task
+	revision  uint64
+	events    <-chan protocol.EventEnvelope
 }
 
 type issuesErrorMsg struct {
-	err error
+	projectID string
+	err       error
 }
 
 type projectSwitchResultMsg struct {
@@ -1512,21 +1520,23 @@ type sessionErrorMsg struct {
 
 // loadIssuesCmd returns a command that fetches issues from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		if m.daemonClient == nil {
-			return issuesErrorMsg{err: fmt.Errorf("daemon client unavailable")}
+			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
-			return issuesErrorMsg{err: err}
+			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			tasks:    snapshot.Tasks,
-			revision: snapshot.Revision,
+			projectID: projectID,
+			tasks:     snapshot.Tasks,
+			revision:  snapshot.Revision,
 		}
 	}
 }
@@ -1608,9 +1618,10 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 }
 
 func (m Model) attachDaemonCmd() tea.Cmd {
+	projectID := m.daemonProjectID()
 	return func() tea.Msg {
 		if m.daemonClient == nil {
-			return issuesErrorMsg{err: fmt.Errorf("daemon client unavailable")}
+			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1628,26 +1639,27 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if err != nil {
-			return issuesErrorMsg{err: fmt.Errorf("daemon attach: %w", err)}
+			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon attach: %w", err)}
 		}
 		if !ack.Accepted {
-			return issuesErrorMsg{err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
+			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
-			return issuesErrorMsg{err: err}
+			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
-		events, err := m.daemonClient.Subscribe(context.Background(), m.daemonProjectID(), snapshot.Revision)
+		events, err := m.daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
 		if err != nil {
-			return issuesErrorMsg{err: err}
+			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
 		return issuesLoadedMsg{
-			tasks:    snapshot.Tasks,
-			revision: snapshot.Revision,
-			events:   events,
+			projectID: projectID,
+			tasks:     snapshot.Tasks,
+			revision:  snapshot.Revision,
+			events:    events,
 		}
 	}
 }

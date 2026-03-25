@@ -1607,6 +1607,29 @@ func TestIssuesLoadedStartsPeriodicRefreshLoop(t *testing.T) {
 	}
 }
 
+func TestIssuesLoaded_IgnoresStaleProjectResponses(t *testing.T) {
+	m := newTestModel()
+	m.currentProject = "azedarach"
+	originalTasks := append([]domain.Task(nil), m.tasks...)
+	originalRevision := m.daemonRevision
+
+	result, _ := m.Update(issuesLoadedMsg{
+		projectID: "chefy",
+		tasks: []domain.Task{
+			{ID: "chefy-1", Title: "Chefy Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 99,
+	})
+	newModel := result.(Model)
+
+	if len(newModel.tasks) != len(originalTasks) {
+		t.Fatalf("stale response should not replace tasks; got len=%d want=%d", len(newModel.tasks), len(originalTasks))
+	}
+	if newModel.daemonRevision != originalRevision {
+		t.Fatalf("stale response should not update revision; got=%d want=%d", newModel.daemonRevision, originalRevision)
+	}
+}
+
 func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	t.Setenv("TMUX", "")
 
