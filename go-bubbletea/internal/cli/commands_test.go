@@ -70,43 +70,39 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	if body.ProjectID != "proj" || body.SessionID != "issue-1" || body.BaseBranch != "main" {
 		t.Fatalf("body = %+v", body)
 	}
-	if !strings.Contains(output, "Session started successfully") {
-		t.Fatalf("output missing success text: %q", output)
+	if output != "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n" {
+		t.Fatalf("output = %q", output)
 	}
 }
 
 func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	tests := []struct {
-		name         string
-		command      func(*Dependencies, string) error
-		sessionID    string
-		wantCommand  string
-		wantContains string
-		response     string
+		name        string
+		command     func(*Dependencies, string) error
+		sessionID   string
+		wantCommand string
+		response    string
 	}{
 		{
-			name:         "attach",
-			command:      AttachCommand,
-			sessionID:    "issue-2",
-			wantCommand:  commandSessionAttach,
-			wantContains: "Attaching to session: issue-2",
-			response:     "Attaching to session: issue-2\n(Press Ctrl+B then D to detach)\n",
+			name:        "attach",
+			command:     AttachCommand,
+			sessionID:   "issue-2",
+			wantCommand: commandSessionAttach,
+			response:    "Attaching to session: issue-2\n(Press Ctrl+B then D to detach)\n",
 		},
 		{
-			name:         "kill",
-			command:      KillCommand,
-			sessionID:    "issue-3",
-			wantCommand:  commandSessionStop,
-			wantContains: "Session killed: issue-3",
-			response:     "Killing session: issue-3\n✓ Session killed: issue-3\n  Note: Worktree is preserved. Use 'git worktree remove' to clean up.\n",
+			name:        "kill",
+			command:     KillCommand,
+			sessionID:   "issue-3",
+			wantCommand: commandSessionStop,
+			response:    "Killing session: issue-3\n✓ Session killed: issue-3\n  Note: Worktree is preserved. Use 'git worktree remove' to clean up.\n",
 		},
 		{
-			name:         "status",
-			command:      StatusCommand,
-			sessionID:    "",
-			wantCommand:  commandSessionStatus,
-			wantContains: "Active Sessions (1):",
-			response:     "Active Sessions (1):\n\nISSUE ID  STATUS   TITLE\n-------  ------   -----\nbead-4   active   Example task\n\nUse 'az attach <issue-id>' to attach to a session\n",
+			name:        "status",
+			command:     StatusCommand,
+			sessionID:   "",
+			wantCommand: commandSessionStatus,
+			response:    "Active Sessions (1):\n\nISSUE ID  STATUS   TITLE\n-------  ------   -----\nbead-4   active   Example task\n\nUse 'az attach <issue-id>' to attach to a session\n",
 		},
 	}
 
@@ -135,8 +131,8 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 			if gotReq.Meta.ProjectID != "proj" {
 				t.Fatalf("meta project_id = %q, want proj", gotReq.Meta.ProjectID)
 			}
-			if !strings.Contains(output, tt.wantContains) {
-				t.Fatalf("output missing %q: %q", tt.wantContains, output)
+			if output != tt.response {
+				t.Fatalf("output = %q, want %q", output, tt.response)
 			}
 		})
 	}
