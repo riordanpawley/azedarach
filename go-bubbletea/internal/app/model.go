@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
+	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -52,8 +53,6 @@ const (
 )
 
 const (
-	defaultPaneCaptureLines  = 100
-	defaultDevserverBasePort = 3000
 	diffPreviewMaxCharacters = 200
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
@@ -139,12 +138,12 @@ type Model struct {
 	daemonRevision uint64
 
 	// Session management services
-	sessionMonitor sessionMonitorService
+	sessionMonitor appdeps.SessionMonitorService
 	tmuxAvailable  bool
 
 	// Git services
 	gitClient      diff.DiffClient
-	gitSyncService gitSyncService
+	gitSyncService appdeps.GitSyncService
 	isOnline       bool
 
 	// Project registry
@@ -181,7 +180,7 @@ func New(cfg *config.Config) Model {
 	}
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonClient := daemonclient.New(transport.NewClient(socketPath))
-	deps := buildAppServiceDeps(cfg, repoDir, logger)
+	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
 		tasks:              []domain.Task{},
@@ -198,18 +197,18 @@ func New(cfg *config.Config) Model {
 		loading:            true, // Start with loading state
 		spinner:            s,
 		daemonClient:       daemonClient,
-		sessionMonitor:     deps.sessionMonitor,
-		gitClient:          deps.gitDiffClient,
-		gitSyncService:     deps.gitSyncService,
-		projectRegistry:    deps.projectRegistry,
-		isOnline:           deps.isOnline,
-		attachmentService:  deps.attachmentService,
-		diagnosticsService: deps.diagnosticsService,
+		sessionMonitor:     deps.SessionMonitor,
+		gitClient:          deps.GitDiffClient,
+		gitSyncService:     deps.GitSyncService,
+		projectRegistry:    deps.ProjectRegistry,
+		isOnline:           deps.IsOnline,
+		attachmentService:  deps.AttachmentService,
+		diagnosticsService: deps.DiagnosticsService,
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from local issue store
-		tmuxAvailable:      deps.tmuxAvailable,
+		tmuxAvailable:      deps.TmuxAvailable,
 		repoDir:            repoDir,
-		currentProject:     resolveInitialProjectName(deps.projectRegistry, repoDir),
+		currentProject:     resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m

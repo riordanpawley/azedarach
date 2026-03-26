@@ -1,4 +1,4 @@
-package app
+package appdeps
 
 import (
 	"context"
@@ -19,29 +19,31 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
-type sessionMonitorService interface {
+const defaultPaneCaptureLines = 100
+const defaultDevserverBasePort = 3000
+
+type SessionMonitorService interface {
 	Stop(issueID string)
 	StopAll()
 }
 
-type gitSyncService interface {
+type GitSyncService interface {
 	FetchAndCheck() tea.Cmd
 	Pull() tea.Cmd
 	ShouldNotify(count int) bool
 }
 
-type appServiceDeps struct {
-	sessionMonitor     sessionMonitorService
-	gitSyncService     gitSyncService
-	gitDiffClient      diff.DiffClient
-	attachmentService  overlay.ImageAttachmentService
-	diagnosticsService overlay.DiagnosticsCollector
-	projectRegistry    *config.ProjectsRegistry
-	isOnline           bool
-	tmuxAvailable      bool
+type Deps struct {
+	SessionMonitor     SessionMonitorService
+	GitSyncService     GitSyncService
+	GitDiffClient      diff.DiffClient
+	AttachmentService  overlay.ImageAttachmentService
+	DiagnosticsService overlay.DiagnosticsCollector
+	ProjectRegistry    *config.ProjectsRegistry
+	IsOnline           bool
+	TmuxAvailable      bool
 }
 
-// tmuxAdapter adapts tmux.Client to satisfy monitor.TmuxClient interface
 type tmuxAdapter struct {
 	client *tmux.Client
 }
@@ -50,7 +52,7 @@ func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (stri
 	return a.client.CapturePane(ctx, sessionName, defaultPaneCaptureLines)
 }
 
-func buildAppServiceDeps(cfg *config.Config, repoDir string, logger *slog.Logger) appServiceDeps {
+func Build(cfg *config.Config, repoDir string, logger *slog.Logger) Deps {
 	tmuxRunner := &tmux.ExecRunner{}
 	tmuxClient := tmux.NewClient(tmuxRunner, logger)
 
@@ -77,14 +79,14 @@ func buildAppServiceDeps(cfg *config.Config, repoDir string, logger *slog.Logger
 	attachmentSvc := attachment.NewService(issuesPath, logger)
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
 
-	return appServiceDeps{
-		sessionMonitor:     sessionMonitor,
-		gitSyncService:     gitSync,
-		gitDiffClient:      gitClient,
-		attachmentService:  attachmentSvc,
-		diagnosticsService: diagService,
-		projectRegistry:    registry,
-		isOnline:           true,
-		tmuxAvailable:      os.Getenv("TMUX") != "",
+	return Deps{
+		SessionMonitor:     sessionMonitor,
+		GitSyncService:     gitSync,
+		GitDiffClient:      gitClient,
+		AttachmentService:  attachmentSvc,
+		DiagnosticsService: diagService,
+		ProjectRegistry:    registry,
+		IsOnline:           true,
+		TmuxAvailable:      os.Getenv("TMUX") != "",
 	}
 }
