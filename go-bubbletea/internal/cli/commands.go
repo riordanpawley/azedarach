@@ -35,6 +35,7 @@ const (
 	commandSessionStatus      = "session.status"
 	commandTaskSnapshotExport = "task.snapshot.export"
 	defaultExportFormat       = "json"
+	defaultIssueListLimit     = 200
 	exitCodeHardFailure       = 1
 	exitCodePartialFailure    = 2
 )
@@ -60,6 +61,7 @@ type ExportOptions struct {
 type IssueListOptions struct {
 	JSON bool
 	Deps bool
+	Limit int
 }
 
 type IssueGetOptions struct {
@@ -259,16 +261,20 @@ func ParseExportArgs(args []string) (ExportOptions, error) {
 }
 
 func ParseIssueListArgs(args []string) (IssueListOptions, error) {
-	opts := IssueListOptions{}
+	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
+	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
 	if fs.NArg() != 0 {
 		return IssueListOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Limit < 1 {
+		return IssueListOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	return opts, nil
 }
@@ -595,6 +601,15 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		}
 		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
 	})
+	total := len(tasks)
+	limit := opts.Limit
+	if limit < 1 {
+		limit = defaultIssueListLimit
+	}
+	truncated := total > limit
+	if truncated {
+		tasks = tasks[:limit]
+	}
 
 	if opts.JSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -629,7 +644,32 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", task.ID, task.Status, task.Priority.String(), task.Type, task.Title)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	truncatedText := "no"
+	if truncated {
+		truncatedText = "yes"
+	}
+	fmt.Printf("\nList window: listed=%d limit=%d total=%d truncated=%s\n", len(tasks), limit, total, truncatedText)
+	if opts.Deps {
+		topLevel, links := buildListDependencyContext(tasks)
+		if len(topLevel) == 0 {
+			fmt.Println("Top-level issues: (none)")
+		} else {
+			fmt.Printf("Top-level issues: %s\n", strings.Join(topLevel, ", "))
+		}
+		if len(links) == 0 {
+			fmt.Println("Dependency links (listed issues): (none)")
+		} else {
+			fmt.Println("Dependency links (listed issues):")
+			for _, link := range links {
+				fmt.Printf("- %s -> %s (%s)\n", link.From, link.To, link.Type)
+			}
+		}
+	}
+	return nil
 }
 
 func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
@@ -1071,6 +1111,70 @@ func printDependents(deps []domain.Dependency) {
 	}
 }
 
+type dependencyLink struct {
+	From string
+	To   string
+	Type domain.DependencyType
+}
+
+func buildListDependencyContext(tasks []domain.Task) ([]string, []dependencyLink) {
+	idSet := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		idSet[task.ID] = struct{}{}
+	}
+
+	topLevel := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		topLevel[task.ID] = struct{}{}
+	}
+
+	links := make([]dependencyLink, 0, len(tasks))
+	seenLinks := map[string]struct{}{}
+	addLink := func(from, to string, depType domain.DependencyType) {
+		if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+			return
+		}
+		key := from + "|" + to + "|" + string(depType)
+		if _, ok := seenLinks[key]; ok {
+			return
+		}
+		seenLinks[key] = struct{}{}
+		links = append(links, dependencyLink{From: from, To: to, Type: depType})
+		delete(topLevel, from)
+	}
+
+	for _, task := range tasks {
+		if task.ParentID != nil {
+			parentID := strings.TrimSpace(*task.ParentID)
+			if _, ok := idSet[parentID]; ok {
+				addLink(task.ID, parentID, domain.DependencyParentChild)
+			}
+		}
+		for _, dep := range task.Dependencies {
+			depID := strings.TrimSpace(dep.ID)
+			if _, ok := idSet[depID]; ok {
+				addLink(task.ID, depID, dep.Type)
+			}
+		}
+	}
+
+	topLevelIDs := make([]string, 0, len(topLevel))
+	for issueID := range topLevel {
+		topLevelIDs = append(topLevelIDs, issueID)
+	}
+	sort.Strings(topLevelIDs)
+	sort.Slice(links, func(i, j int) bool {
+		if links[i].From != links[j].From {
+			return links[i].From < links[j].From
+		}
+		if links[i].To != links[j].To {
+			return links[i].To < links[j].To
+		}
+		return links[i].Type < links[j].Type
+	})
+	return topLevelIDs, links
+}
+
 func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]domain.Dependency, []domain.Dependency) {
 	dependencies := make([]domain.Dependency, 0, len(task.Dependencies)+1)
 	seenDependencies := make(map[string]struct{}, len(task.Dependencies)+1)
@@ -1265,7 +1369,7 @@ Commands:
   attach <issue-id>     Alias for 'az session attach <issue-id>'
   kill <issue-id>       Alias for 'az session kill <issue-id>'
   status [issue-id]     Alias for 'az session status [issue-id]'
-  issue list [--json] [--deps]  List issues from daemon-backed store
+  issue list [--json] [--deps] [--limit N]  List issues from daemon-backed store
   issue get <id> [--json] [--deps]  Show a single issue from daemon-backed store
   issue check <id> [--json] [--deps]  Alias for issue get
   issue doctor <id>  Run integrity checks for one issue

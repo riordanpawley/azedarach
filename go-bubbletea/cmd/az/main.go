@@ -101,7 +101,7 @@ func main() {
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
 			fmt.Printf("Usage: az issue <list|get|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n\n")
 			fmt.Printf("Commands:\n")
-			fmt.Printf("  list [--json] [--deps]  List issues from daemon-backed store\n")
+			fmt.Printf("  list [--json] [--deps] [--limit N]  List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json] [--deps]  Show a single issue by ID\n")
 			fmt.Printf("  check <issue-id> [--json] [--deps]  Alias for get\n")
 			fmt.Printf("  doctor <issue-id>  Run integrity checks for one issue\n")
@@ -120,7 +120,7 @@ func main() {
 		case "list":
 			opts, err := cli.ParseIssueListArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue list [--json] [--deps]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue list [--json] [--deps] [--limit N]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

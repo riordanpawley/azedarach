@@ -423,17 +423,27 @@ func TestParseIssueListArgs(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			want: IssueListOptions{JSON: false, Deps: false},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit},
 		},
 		{
 			name: "json output",
 			args: []string{"--json"},
-			want: IssueListOptions{JSON: true, Deps: false},
+			want: IssueListOptions{JSON: true, Deps: false, Limit: defaultIssueListLimit},
 		},
 		{
 			name: "deps projection",
 			args: []string{"--deps"},
-			want: IssueListOptions{JSON: false, Deps: true},
+			want: IssueListOptions{JSON: false, Deps: true, Limit: defaultIssueListLimit},
+		},
+		{
+			name: "limit override",
+			args: []string{"--limit", "25"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: 25},
+		},
+		{
+			name:        "invalid limit",
+			args:        []string{"--limit", "0"},
+			errContains: "limit must be >= 1",
 		},
 		{
 			name:        "rejects extra args",
@@ -948,6 +958,137 @@ func TestIssueListCommandDepsProjection(t *testing.T) {
 	}
 	if !strings.Contains(output, "blocks:1,blocked-by:2") {
 		t.Fatalf("deps output missing summary: %q", output)
+	}
+}
+
+func TestIssueListCommand_IncludesListWindowMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:        "az-1",
+			Title:     "Newest issue",
+			Status:    domain.StatusInProgress,
+			Priority:  domain.P1,
+			Type:      domain.TypeFeature,
+			CreatedAt: now,
+			UpdatedAt: now.Add(1 * time.Hour),
+		},
+		{
+			ID:        "az-2",
+			Title:     "Older issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        3,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Limit: 1})
+	})
+	if !strings.Contains(output, "List window: listed=1 limit=1 total=2 truncated=yes") {
+		t.Fatalf("list metadata missing expected window summary: %q", output)
+	}
+}
+
+func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 10, 0, 0, time.UTC)
+	parentID := "az-parent"
+	tasks := []domain.Task{
+		{
+			ID:        parentID,
+			Title:     "Parent issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeEpic,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "az-child",
+			Title:     "Child issue",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			ParentID:  &parentID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{
+			ID:       "az-dependent",
+			Title:    "Depends on parent via blocks",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			Dependencies: []domain.Dependency{
+				{ID: parentID, Type: domain.DependencyBlocks},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        3,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{Deps: true, Limit: 10})
+	})
+	for _, want := range []string{
+		"Top-level issues:",
+		"Dependency links (listed issues):",
+		"- az-child -> az-parent (parent-child)",
+		"- az-dependent -> az-parent (blocks)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("deps graph context missing %q: %q", want, output)
+		}
 	}
 }
 
