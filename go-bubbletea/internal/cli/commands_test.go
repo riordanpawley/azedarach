@@ -2426,16 +2426,9 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
 	t.Setenv("AZEDARACH_PRIME_MODE", "question-first")
-	repoDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{"spec":{"enabled":true}}`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
 
 	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{RepoDir: repoDir})
+		return PrimeCommand(&Dependencies{Config: &config.Config{Spec: config.SpecConfig{Enabled: true}}})
 	})
 
 	if !strings.Contains(output, "Question-first execution rules") {
@@ -2448,16 +2441,9 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 
 func TestPrimeCommandSpecBlockDisabled(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	repoDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{"spec":{"enabled":false}}`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
 
 	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{RepoDir: repoDir})
+		return PrimeCommand(&Dependencies{Config: &config.Config{Spec: config.SpecConfig{Enabled: false}}})
 	})
 
 	if strings.Contains(output, "- Spec workflow:") {

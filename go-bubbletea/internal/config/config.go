@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config represents the full Azedarach configuration
@@ -19,6 +20,7 @@ type Config struct {
 	Network       NetworkConfig   `json:"network"`
 	DevServer     DevServerConfig `json:"devServer"`
 	Worktree      WorktreeConfig  `json:"worktree"`
+	Spec          SpecConfig      `json:"spec"`
 }
 
 // GitConfig contains Git-related settings
@@ -81,10 +83,15 @@ type DevServerConfig struct {
 
 // WorktreeConfig contains git worktree settings
 type WorktreeConfig struct {
-	BasePath    string `json:"basePath"`
-	NameFormat  string `json:"nameFormat"`
-	AutoCleanup bool   `json:"autoCleanup"`
-	KeepDays    int    `json:"keepDays"`
+	BasePath     string   `json:"basePath"`
+	NameFormat   string   `json:"nameFormat"`
+	AutoCleanup  bool     `json:"autoCleanup"`
+	KeepDays     int      `json:"keepDays"`
+	InitCommands []string `json:"initCommands"`
+}
+
+type SpecConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // DefaultConfig returns a Config with sensible defaults
@@ -136,61 +143,74 @@ func DefaultConfig() *Config {
 			Environments: make(map[string]string),
 		},
 		Worktree: WorktreeConfig{
-			BasePath:    "../",
-			NameFormat:  "{project}-{issueID}",
-			AutoCleanup: true,
-			KeepDays:    7,
+			BasePath:     "../",
+			NameFormat:   "{project}-{issueID}",
+			AutoCleanup:  true,
+			KeepDays:     7,
+			InitCommands: []string{},
+		},
+		Spec: SpecConfig{
+			Enabled: true,
 		},
 	}
 }
 
-// LoadConfig loads configuration from project path with priority:
-// 1. CLI flags (not implemented yet)
-// 2. .azedarach.json in project root (with version migration support)
-// 3. package.json "azedarach" key
-// 4. Defaults
+const (
+	ConfigDirName        = ".azedarach"
+	ConfigFileName       = "config.json"
+	ConfigSchemaFileName = "config.schema.json"
+	CurrentConfigVersion = 7
+)
+
+type configFileMetadata struct {
+	Schema  string `json:"$schema,omitempty"`
+	Version int    `json:"$version,omitempty"`
+}
+
+// LoadConfig loads configuration from the nearest project/worktree base containing
+// .azedarach/config.json. If no config file exists, defaults are returned.
 func LoadConfig(projectPath string) (*Config, error) {
-	// Start with defaults
-	defaultCfg := DefaultConfig()
-
-	// Try loading from .azedarach.json with version migration
-	azedarachPath := filepath.Join(projectPath, ".azedarach.json")
-	if data, err := os.ReadFile(azedarachPath); err == nil {
-		cfg, err := ParseVersionedConfig(data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse .azedarach.json: %w", err)
+	baseDir, err := ResolveConfigBase(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	configPath := filepath.Join(baseDir, ConfigDirName, ConfigFileName)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return DefaultConfig(), nil
 		}
-		return MergeWithDefaults(cfg), nil
+		return nil, fmt.Errorf("failed to read %s: %w", configPath, err)
 	}
 
-	// Try loading from package.json
-	packagePath := filepath.Join(projectPath, "package.json")
-	if data, err := os.ReadFile(packagePath); err == nil {
-		var packageJSON struct {
-			Azedarach json.RawMessage `json:"azedarach"`
-		}
-		if err := json.Unmarshal(data, &packageJSON); err == nil && packageJSON.Azedarach != nil {
-			// Parse with version migration support
-			cfg, err := ParseVersionedConfig(packageJSON.Azedarach)
-			if err != nil {
-				// Fall back to direct parsing for backwards compat
-				var cfgDirect Config
-				if err := json.Unmarshal(packageJSON.Azedarach, &cfgDirect); err == nil {
-					return MergeWithDefaults(&cfgDirect), nil
-				}
-				return nil, fmt.Errorf("failed to parse package.json azedarach config: %w", err)
-			}
-			return MergeWithDefaults(cfg), nil
-		}
+	var meta configFileMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("failed to parse %s metadata: %w", configPath, err)
+	}
+	if meta.Version > CurrentConfigVersion {
+		return nil, fmt.Errorf("unsupported config version %d in %s (max supported %d)", meta.Version, configPath, CurrentConfigVersion)
 	}
 
-	// Return defaults if no config files found
-	return defaultCfg, nil
+	cfg := DefaultConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", configPath, err)
+	}
+
+	// ts-opentui stores init commands under worktree.initCommands; map for Go runtime.
+	if len(cfg.Worktree.InitCommands) > 0 {
+		cfg.Session.InitCommands = append([]string(nil), cfg.Worktree.InitCommands...)
+	}
+
+	return MergeWithDefaults(cfg), nil
 }
 
 // SaveConfig saves configuration to the specified path with version information
 func SaveConfig(cfg *Config, path string) error {
-	data, err := MarshalVersionedConfig(cfg)
+	cfgCopy := *cfg
+	if len(cfgCopy.Session.InitCommands) > 0 {
+		cfgCopy.Worktree.InitCommands = append([]string(nil), cfgCopy.Session.InitCommands...)
+	}
+	data, err := marshalConfigFile(&cfgCopy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
@@ -200,6 +220,51 @@ func SaveConfig(cfg *Config, path string) error {
 	}
 
 	return nil
+}
+
+func marshalConfigFile(cfg *Config) ([]byte, error) {
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(cfgJSON, &raw); err != nil {
+		return nil, err
+	}
+	raw["$schema"] = "./" + ConfigSchemaFileName
+	raw["$version"] = CurrentConfigVersion
+	return json.MarshalIndent(raw, "", "  ")
+}
+
+func ResolveConfigBase(startPath string) (string, error) {
+	if strings.TrimSpace(startPath) == "" {
+		var err error
+		startPath, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve cwd: %w", err)
+		}
+	}
+	abs, err := filepath.Abs(startPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve config base from %q: %w", startPath, err)
+	}
+	info, err := os.Stat(abs)
+	if err == nil && !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+
+	dir := abs
+	for {
+		configPath := filepath.Join(dir, ConfigDirName, ConfigFileName)
+		if _, err := os.Stat(configPath); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return abs, nil
+		}
+		dir = parent
+	}
 }
 
 // MergeWithDefaults fills in missing values with defaults
@@ -280,6 +345,9 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Worktree.KeepDays == 0 {
 		cfg.Worktree.KeepDays = defaults.Worktree.KeepDays
+	}
+	if cfg.Worktree.InitCommands == nil {
+		cfg.Worktree.InitCommands = defaults.Worktree.InitCommands
 	}
 
 	// Merge Notifications config

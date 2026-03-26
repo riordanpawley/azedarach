@@ -2035,7 +2035,7 @@ func PrimeCommand(deps *Dependencies) error {
   - MUST improve the current issue title and description before implementation work begins.
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 	}
-	if isSpecEnabled(deps.RepoDir) {
+	if deps.Config != nil && deps.Config.Spec.Enabled {
 		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means ` + "`az spec`" + ` requirement/link records, not README.md, AGENTS.md, or other internal docs.
   - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
   - Before implementing behavior changes, inspect relevant ` + "`az spec`" + ` requirements/links and align the plan.
@@ -2120,31 +2120,6 @@ func formatPrimeDependencyLines(deps []domain.Dependency) string {
 		return "(none)"
 	}
 	return strings.Join(lines, "\n")
-}
-
-func isSpecEnabled(repoDir string) bool {
-	candidates := []string{
-		filepath.Join(repoDir, ".azedarach", "config.json"),
-		filepath.Join(repoDir, "..", ".azedarach", "config.json"),
-	}
-	for _, path := range candidates {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var payload struct {
-			Spec struct {
-				Enabled *bool `json:"enabled"`
-			} `json:"spec"`
-		}
-		if err := json.Unmarshal(data, &payload); err != nil {
-			continue
-		}
-		if payload.Spec.Enabled != nil {
-			return *payload.Spec.Enabled
-		}
-	}
-	return false
 }
 
 func PrintUsage() {
