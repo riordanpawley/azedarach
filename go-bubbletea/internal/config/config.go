@@ -253,6 +253,11 @@ func ResolveConfigBase(startPath string) (string, error) {
 		abs = filepath.Dir(abs)
 	}
 
+	if baseRoot, err := ResolveBaseGitRoot(abs); err == nil {
+		return baseRoot, nil
+	}
+
+	// Fallback for non-git test/directories.
 	dir := abs
 	for {
 		configPath := filepath.Join(dir, ConfigDirName, ConfigFileName)

@@ -17,6 +17,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -948,13 +949,7 @@ func resolveDBPath(repoDir string) (string, error) {
 }
 
 func resolveBaseGitRoot(startDir string) (string, error) {
-	if root, err := resolveBaseGitRootWithGitExec(startDir); err == nil {
-		return root, nil
-	}
-	if root, err := resolveBaseGitRootFromGitMarker(startDir); err == nil {
-		return root, nil
-	}
-	return "", fmt.Errorf("unable to resolve git root from %s", startDir)
+	return config.ResolveBaseGitRoot(startDir)
 }
 
 func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
