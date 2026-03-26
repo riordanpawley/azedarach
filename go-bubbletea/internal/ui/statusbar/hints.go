@@ -6,16 +6,15 @@ import "github.com/riordanpawley/azedarach/internal/types"
 func GetHints(mode types.Mode) string {
 	switch mode {
 	case types.ModeNormal:
-		return "h/l: columns  j/k: tasks  Enter: drill  Space: details+actions  ?: help  q: quit"
+		return "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  c: create  s: settings  r: refresh  Tab: view  ?: help  q: quit"
 	case types.ModeGoto:
-		return "g: top  e: end  h: first col  l: last col  Esc: cancel"
+		return "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"
 	case types.ModeSelect:
-		return "Space: toggle  a: all  n: none  Esc: cancel"
+		return "Space/a: toggle  A: column  %: all  *: invert  x: clear  Enter: bulk  v/Esc: exit"
 	case types.ModeSearch:
-		return "Type to search  Enter: confirm  Esc: cancel"
+		return "Type: search  Enter: confirm  Esc: cancel"
 	case types.ModeAction:
-		// Action mode hints will come from the action menu
-		return ""
+		return "h/l: move  s/S: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m: merge  P: PR  f: diff  w/W: cleanup  e: edit  c: child  d: delete  Esc/q: cancel"
 	default:
 		return ""
 	}
