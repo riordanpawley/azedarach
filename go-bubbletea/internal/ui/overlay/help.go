@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -79,27 +80,25 @@ func (h *HelpOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the help overlay
 func (h *HelpOverlay) View() string {
 	categories := h.getCategories()
+	keyWidth := h.keyColumnWidth(categories)
 
-	// Build full content
 	var content strings.Builder
 	for i, cat := range categories {
 		if i > 0 {
 			content.WriteString("\n")
 		}
 
-		// Category header
 		categoryStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#89b4fa")).
 			Bold(true)
 		content.WriteString(categoryStyle.Render(cat.Name + ":"))
 		content.WriteString("\n")
+		content.WriteString(h.styles.Separator.Render(strings.Repeat("─", keyWidth+28)))
+		content.WriteString("\n")
 
-		// Bindings in this category
 		for _, binding := range cat.Bindings {
-			keyStyle := h.styles.MenuKey
-			descStyle := h.styles.MenuItem
-
-			line := "  " + keyStyle.Render(binding.Key) + "  " + descStyle.Render(binding.Description)
+			keyLabel := fmt.Sprintf("%-*s", keyWidth, binding.Key)
+			line := "  " + h.styles.MenuKey.Render(keyLabel) + "  " + h.styles.MenuItem.Render(binding.Description)
 			content.WriteString(line)
 			content.WriteString("\n")
 		}
@@ -143,7 +142,7 @@ func (h *HelpOverlay) Title() string {
 // Size returns the overlay dimensions
 func (h *HelpOverlay) Size() (width, height int) {
 	h.viewHeight = 20 // Content viewing area
-	return 50, 24     // Total overlay size including padding and borders
+	return 72, 24     // Total overlay size including padding and borders
 }
 
 // getCategories returns all keybinding categories
@@ -154,17 +153,20 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 			Bindings: []KeyBinding{
 				{Key: "h/l", Description: "Move between columns"},
 				{Key: "j/k", Description: "Move up/down in column"},
-				{Key: "gg", Description: "Jump to top of column"},
-				{Key: "ge", Description: "Jump to bottom of column"},
-				{Key: "gh", Description: "Jump to first column"},
-				{Key: "gl", Description: "Jump to last column"},
+				{Key: "ctrl+u / ctrl+d", Description: "Half-page scroll"},
+				{Key: "g then g/e/h/l", Description: "Jump in board"},
+				{Key: "g then w/p/s", Description: "Jump / projects / spec"},
+				{Key: "Enter", Description: "Drill into children"},
 			},
 		},
 		{
 			Name: "Actions",
 			Bindings: []KeyBinding{
-				{Key: "Space", Description: "Open task panel (details+actions)"},
-				{Key: "Enter", Description: "Drill into children"},
+				{Key: "Space", Description: "Open task workspace"},
+				{Key: "space then i", Description: "Image attachments"},
+				{Key: "space then s/S/a/x", Description: "Session actions"},
+				{Key: "space then u/m/P/f", Description: "Git actions"},
+				{Key: "space then c/e/d/h/l", Description: "Task status/edit actions"},
 			},
 		},
 		{
@@ -180,20 +182,36 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		{
 			Name: "Selection",
 			Bindings: []KeyBinding{
-				{Key: "v", Description: "Toggle selection on current task"},
-				{Key: "%", Description: "Select all"},
-				{Key: "A", Description: "Clear selection"},
+				{Key: "space / a", Description: "Toggle selection"},
+				{Key: "A", Description: "Select current column"},
+				{Key: "%", Description: "Select all visible"},
+				{Key: "*", Description: "Invert selection"},
+				{Key: "x", Description: "Clear selection"},
+				{Key: "Enter", Description: "Bulk action menu"},
 			},
 		},
 		{
 			Name: "Other",
 			Bindings: []KeyBinding{
 				{Key: "Tab", Description: "Toggle compact/kanban view"},
+				{Key: "esc", Description: "Close overlay / exit mode"},
 				{Key: "q", Description: "Quit"},
-				{Key: "Ctrl+L", Description: "Refresh screen"},
+				{Key: "ctrl+l", Description: "Refresh screen"},
 			},
 		},
 	}
+}
+
+func (h *HelpOverlay) keyColumnWidth(categories []KeyCategory) int {
+	width := 8
+	for _, category := range categories {
+		for _, binding := range category.Bindings {
+			if len(binding.Key) > width {
+				width = len(binding.Key)
+			}
+		}
+	}
+	return width
 }
 
 // min returns the minimum of two integers
