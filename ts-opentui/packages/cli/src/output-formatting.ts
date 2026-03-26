@@ -28,7 +28,7 @@ export interface PrimeIssueContext {
 	readonly showImplementations?: boolean
 }
 
-export type PrimeMode = "default" | "question-first"
+export type PrimeMode = "default" | "question-first" | "subagent"
 
 export const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
 
@@ -373,6 +373,14 @@ const renderQuestionFirstGuardrails =
   - MUST improve the current issue title and description before implementation work begins.
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 
+const renderSubagentGuardrails = (): string => `- Subagent execution rules:
+  - You are a leaf worker, not the orchestrator.
+  - Keep work scoped to the assigned child issue and keep updates concise.
+  - Do not fan out to additional subagents unless explicitly instructed.
+  - If the task still needs decomposition, stop and return the boundary to the orchestrator.
+  - If you need a fresh primer, run \`az prime subagent\` instead of \`az prime\`.
+  - If asked to split work, use the \`single-window fanout\` rule: split until each child fits in one subagent context window, then hand the plan back up.`
+
 export const buildPrimeOutput = (
 	issueId: string | undefined,
 	issueContext: PrimeIssueContext | undefined,
@@ -386,6 +394,16 @@ export const buildPrimeOutput = (
 	const specCheckStep = specEnabled
 		? "`az spec` (inspect linked requirements before behavior changes)"
 		: "Spec workflows are disabled for this project (skip spec checks)."
+	const primerTitle =
+		primeMode === "subagent" ? "Azedarach Subagent Primer" : "Azedarach Session Primer"
+	const firstCommandsHeader =
+		primeMode === "subagent"
+			? "- First 3 commands for this subagent:"
+			: "- First 3 commands for this session:"
+	const issueChildStep =
+		primeMode === "subagent"
+			? '`az issue child "Title"` (only when explicitly told to split work further)'
+			: '`az issue child "Title"` (when you need follow-up scope under the active parent)'
 
 	const contextGuardrail =
 		issueId === undefined
@@ -396,20 +414,24 @@ export const buildPrimeOutput = (
 		specEnabled,
 	)
 	const specGuardrails = specEnabled ? renderPrimeSpecGuardrails() : undefined
-	const questionFirstGuardrails =
-		primeMode === "question-first" ? renderQuestionFirstGuardrails() : undefined
+	const modeGuardrails =
+		primeMode === "question-first"
+			? renderQuestionFirstGuardrails()
+			: primeMode === "subagent"
+				? renderSubagentGuardrails()
+				: undefined
 
-	return `Azedarach Session Primer
+	return `${primerTitle}
 
-- First 3 commands for this session:
+- ${firstCommandsHeader}
   - ${issueFetchCommand}
   - ${specCheckStep}
-  - \`az issue child "Title"\` (when you need follow-up scope under the active parent)
+  - ${issueChildStep}
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
 ${issueSection}
-${questionFirstGuardrails === undefined ? "" : `${questionFirstGuardrails}\n`}
+${modeGuardrails === undefined ? "" : `${modeGuardrails}\n`}
 - Follow-up and dependency rules:
   - When working under a parent issue, create follow-up work with \`az issue child "Title"\`.
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.

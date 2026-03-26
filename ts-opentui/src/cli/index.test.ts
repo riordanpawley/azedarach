@@ -158,6 +158,9 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("`az issue bulk-update --input updates.json --json`")
 		expect(output).toContain('`[{"id":"az-123","status":"blocked"}]`')
 		expect(output).not.toContain("Start each session with: `az prime`")
+		expect(output).not.toContain(
+			"If you need a fresh primer, run `az prime subagent` instead of `az prime`.",
+		)
 		expect(output).not.toContain("Implementation guardrails:")
 	})
 
@@ -317,6 +320,34 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("MUST record unknowns/open questions in the issue description")
 	})
 
+	it("adds subagent guardrails when prime mode is subagent", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Prepare leaf-worker handoff",
+				}),
+			},
+			undefined,
+			true,
+			"subagent",
+		)
+
+		expect(output).toContain("Azedarach Subagent Primer")
+		expect(output).toContain("First 3 commands for this subagent:")
+		expect(output).toContain(
+			'`az issue child "Title"` (only when explicitly told to split work further)',
+		)
+		expect(output).toContain("Subagent execution rules:")
+		expect(output).toContain("You are a leaf worker, not the orchestrator.")
+		expect(output).toContain("Do not fan out to additional subagents unless explicitly instructed.")
+		expect(output).toContain(
+			"If you need a fresh primer, run `az prime subagent` instead of `az prime`.",
+		)
+		expect(output).toContain("single-window fanout")
+		expect(output).not.toContain("Azedarach Session Primer")
+	})
+
 	it("applies --config overrides to command-layer AppConfig reads", async () => {
 		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-${crypto.randomUUID()}.json`
 		await Bun.write(
@@ -335,6 +366,16 @@ describe("buildPrimeOutput", () => {
 		)
 
 		expect(specEnabled).toBe(false)
+	})
+
+	it("accepts prime subagent as a command subcommand", async () => {
+		const exit = await Effect.runPromiseExit(
+			cliRunner(["bun", "az", "prime", "subagent", "--help"]).pipe(
+				Effect.provide(BunContext.layer),
+			),
+		)
+
+		expect(Exit.isSuccess(exit)).toBe(true)
 	})
 
 	it("writes spec.enabled through az config set", async () => {
