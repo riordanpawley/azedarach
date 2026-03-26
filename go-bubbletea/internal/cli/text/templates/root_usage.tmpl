@@ -7,6 +7,11 @@ Commands:
   attach <issue-id>     Alias for 'az session attach <issue-id>'
   kill <issue-id>       Alias for 'az session kill <issue-id>'
   status [issue-id]     Alias for 'az session status [issue-id]'
+  notify <event> <issue-id>  Handle Claude Code hook notifications
+  hooks install <issue-id>    Install Claude Code hook configuration
+  gate <issue-id>            Run quality gates for an issue
+  dev gate <issue-id>        Dev-family gate alias
+  opencode <init|plugin>     Manage OpenCode integration
   issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
   issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
@@ -56,6 +61,12 @@ Examples:
   az config set spec.enabled true --project-dir .
   az sync
   az sync --all
+  az notify idle_prompt az-123
+  az hooks install az-123
+  az gate az-123
+  az dev gate az-123
+  az opencode init
+  az opencode plugin install
   az prime
   az export --format json
   az export --format json --out snapshot.json

@@ -208,6 +208,36 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "notify":
+		if err := runNotifyCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "hooks":
+		if err := runHooksCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "gate":
+		if err := runGateCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "dev":
+		if err := runDevCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "opencode":
+		if err := runOpenCodeCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "prime":
 		if len(commandArgs) > 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az prime\n")
