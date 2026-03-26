@@ -112,9 +112,9 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the event log overlay content.
 func (o *EventLogOverlay) View() string {
-	lines := o.renderContentLines()
-	lines = append(lines, o.footerLine(len(lines)+1 > o.viewHeight))
-	o.maxScroll = max(0, len(lines)-o.viewHeight)
+	contentLines := o.renderContentLines()
+	contentHeight := max(1, o.viewHeight-1)
+	o.maxScroll = max(0, len(contentLines)-contentHeight)
 	if o.scroll > o.maxScroll {
 		o.scroll = o.maxScroll
 	}
@@ -123,15 +123,20 @@ func (o *EventLogOverlay) View() string {
 	}
 
 	start := o.scroll
-	end := min(o.scroll+o.viewHeight, len(lines))
-	if start > len(lines) {
-		start = len(lines)
+	end := min(o.scroll+contentHeight, len(contentLines))
+	if start > len(contentLines) {
+		start = len(contentLines)
 	}
 	if end < start {
 		end = start
 	}
 
-	return strings.Join(lines[start:end], "\n")
+	visibleContent := append([]string{}, contentLines[start:end]...)
+	for len(visibleContent) < contentHeight {
+		visibleContent = append(visibleContent, "")
+	}
+	visibleContent = append(visibleContent, o.footerLine(o.maxScroll > 0))
+	return strings.Join(visibleContent, "\n")
 }
 
 // Title returns the overlay title.
