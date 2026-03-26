@@ -2473,7 +2473,7 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch); err != nil {
+		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch, m.sessionImagePaths(ctx, issueID)); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
 			}
@@ -2482,6 +2482,29 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 
 		return sessionStartedMsg{issueID: issueID}
 	}
+}
+
+func (m Model) sessionImagePaths(ctx context.Context, issueID string) []string {
+	if m.attachmentService == nil {
+		return nil
+	}
+	attachments, err := m.attachmentService.List(ctx, issueID)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("failed to list issue image attachments for session start", "issue_id", issueID, "error", err)
+		}
+		return nil
+	}
+
+	paths := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		path := strings.TrimSpace(attachment.Path)
+		if path == "" {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 // stopSessionCmd requests daemon-owned lifecycle stop and lets daemon snapshots rebuild the local projection.

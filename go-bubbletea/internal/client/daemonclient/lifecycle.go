@@ -24,9 +24,10 @@ const (
 )
 
 type sessionCommandBody struct {
-	ProjectID  string `json:"project_id"`
-	SessionID  string `json:"session_id"`
-	BaseBranch string `json:"base_branch,omitempty"`
+	ProjectID  string   `json:"project_id"`
+	SessionID  string   `json:"session_id"`
+	BaseBranch string   `json:"base_branch,omitempty"`
+	ImagePaths []string `json:"image_paths,omitempty"`
 }
 
 type commandOutputBody struct {
@@ -97,11 +98,12 @@ func (c *Client) projectRoute() string {
 }
 
 // StartSession asks the daemon to start one session for issue/task id.
-func (c *Client) StartSession(ctx context.Context, issueID string, baseBranch string) (string, error) {
+func (c *Client) StartSession(ctx context.Context, issueID string, baseBranch string, imagePaths []string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
 		ProjectID:  c.projectID,
 		SessionID:  issueID,
 		BaseBranch: baseBranch,
+		ImagePaths: imagePaths,
 	})
 }
 
