@@ -7,9 +7,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
+
+type DiffClient interface {
+	Diff(ctx context.Context, worktree string) (string, error)
+}
 
 // DiffViewer displays git diff output with file navigation and syntax highlighting
 type DiffViewer struct {
@@ -50,7 +53,7 @@ type LoadDiffMsg struct {
 }
 
 // LoadDiff loads the git diff for the worktree
-func (d *DiffViewer) LoadDiff(ctx context.Context, gitClient *git.Client) tea.Cmd {
+func (d *DiffViewer) LoadDiff(ctx context.Context, gitClient DiffClient) tea.Cmd {
 	return func() tea.Msg {
 		output, err := gitClient.Diff(ctx, d.worktree)
 		return LoadDiffMsg{Output: output, Err: err}

@@ -24,7 +24,7 @@ const (
 // ImageAttachOverlay manages image attachments for a task
 type ImageAttachOverlay struct {
 	issueID     string
-	service     *attachment.Service
+	service     ImageAttachmentService
 	mode        imageAttachMode
 	files       []attachment.Attachment
 	cursor      int
@@ -32,6 +32,13 @@ type ImageAttachOverlay struct {
 	inputActive bool
 	error       string
 	styles      *Styles
+}
+
+type ImageAttachmentService interface {
+	List(ctx context.Context, issueID string) ([]attachment.Attachment, error)
+	AttachFromClipboard(ctx context.Context, issueID string) (*attachment.Attachment, error)
+	Attach(ctx context.Context, issueID, imagePath string) (*attachment.Attachment, error)
+	Delete(ctx context.Context, issueID, attachmentID string) error
 }
 
 // AttachmentActionMsg is sent when an attachment action is performed
@@ -47,7 +54,7 @@ type OpenImagePreviewMsg struct {
 }
 
 // NewImageAttachOverlay creates a new image attachment overlay
-func NewImageAttachOverlay(issueID string, service *attachment.Service) *ImageAttachOverlay {
+func NewImageAttachOverlay(issueID string, service ImageAttachmentService) *ImageAttachOverlay {
 	ti := textinput.New()
 	ti.Placeholder = "Enter file path..."
 	ti.CharLimit = 500
@@ -118,12 +125,12 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-        case "d", "x":
-            // Delete attachment
-            if i.mode == imageAttachModeList && len(i.files) > 0 {
-                return i, i.deleteAttachment()
-            }
-            return i, nil
+		case "d", "x":
+			// Delete attachment
+			if i.mode == imageAttachModeList && len(i.files) > 0 {
+				return i, i.deleteAttachment()
+			}
+			return i, nil
 
 		case "enter", "p":
 			// Open full image preview overlay
@@ -270,13 +277,13 @@ func (i *ImageAttachOverlay) renderList() string {
 		i.styles.MenuKey.Render("p/v") + " " + i.styles.Footer.Render("Paste from clipboard"),
 		i.styles.MenuKey.Render("f") + " " + i.styles.Footer.Render("Attach from file"),
 	}
-    if len(i.files) > 0 {
-        hints = append(hints,
-            i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
-            i.styles.MenuKey.Render("d/x")+" "+i.styles.Footer.Render("Delete"),
-            i.styles.MenuKey.Render("Enter")+" "+i.styles.Footer.Render("Preview"),
-        )
-    }
+	if len(i.files) > 0 {
+		hints = append(hints,
+			i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
+			i.styles.MenuKey.Render("d/x")+" "+i.styles.Footer.Render("Delete"),
+			i.styles.MenuKey.Render("Enter")+" "+i.styles.Footer.Render("Preview"),
+		)
+	}
 	hints = append(hints,
 		i.styles.MenuKey.Render("r")+" "+i.styles.Footer.Render("Refresh"),
 		i.styles.MenuKey.Render("Esc")+" "+i.styles.Footer.Render("Close"),

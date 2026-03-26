@@ -25,16 +25,11 @@ import (
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
-	"github.com/riordanpawley/azedarach/internal/services/attachment"
-	"github.com/riordanpawley/azedarach/internal/services/devserver"
-	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
 	"github.com/riordanpawley/azedarach/internal/services/network"
-	"github.com/riordanpawley/azedarach/internal/services/pr"
-	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/compact"
@@ -80,15 +75,6 @@ const (
 	ToastWarning = types.ToastWarning
 	ToastError   = types.ToastError
 )
-
-// tmuxAdapter adapts tmux.Client to satisfy monitor.TmuxClient interface
-type tmuxAdapter struct {
-	client *tmux.Client
-}
-
-func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (string, error) {
-	return a.client.CapturePane(ctx, sessionName, defaultPaneCaptureLines)
-}
 
 // Re-export navigation types for compatibility
 type Position = navigation.Position
@@ -153,27 +139,22 @@ type Model struct {
 	daemonRevision uint64
 
 	// Session management services
-	sessionMonitor *monitor.SessionMonitor
-	tmuxClient     *tmux.Client
+	sessionMonitor sessionMonitorService
 	tmuxAvailable  bool
 
 	// Git services
-	gitClient      *git.Client
-	gitSyncService *git.GitSyncService
-	networkChecker *network.StatusChecker
+	gitClient      diff.DiffClient
+	gitSyncService gitSyncService
 	isOnline       bool
 
 	// Project registry
 	projectRegistry *config.ProjectsRegistry
 
 	// Image attachment service
-	attachmentService *attachment.Service
-
-	// PR workflow service
-	prWorkflow *pr.PRWorkflow
+	attachmentService overlay.ImageAttachmentService
 
 	// Diagnostics service
-	diagnosticsService *diagnostics.Service
+	diagnosticsService overlay.DiagnosticsCollector
 
 	// Logger
 	logger *slog.Logger
@@ -200,49 +181,7 @@ func New(cfg *config.Config) Model {
 	}
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonClient := daemonclient.New(transport.NewClient(socketPath))
-
-	// Initialize tmux client
-	tmuxRunner := &tmux.ExecRunner{}
-	tmuxClient := tmux.NewClient(tmuxRunner, logger)
-
-	gitRunner := git.NewExecRunner(repoDir)
-
-	// Initialize session monitor with tmux adapter
-	adapter := &tmuxAdapter{client: tmuxClient}
-	sessionMonitor := monitor.NewSessionMonitor(adapter)
-
-	// Local allocator remains for diagnostics context only; lifecycle authority is daemon-owned.
-	portAllocator := devserver.NewPortAllocator(defaultDevserverBasePort)
-
-	// Initialize network checker
-	networkChecker := network.NewStatusChecker()
-
-	// Initialize git client (uses same runner as worktree manager)
-	gitClient := git.NewClient(gitRunner, logger)
-
-	gitSyncService := git.NewGitSyncService(gitClient, networkChecker, cfg, repoDir, logger)
-
-	// Load project registry
-	registry, err := config.LoadProjectsRegistry()
-	if err != nil {
-		logger.Error("failed to load project registry", "error", err)
-		// Continue with empty registry
-		registry = &config.ProjectsRegistry{
-			Projects:       []config.Project{},
-			DefaultProject: "",
-		}
-	}
-
-	// Initialize attachment service
-	issuesPath := filepath.Join(repoDir, ".azedarach")
-	attachmentSvc := attachment.NewService(issuesPath, logger)
-
-	// Initialize PR workflow
-	prRunner := &pr.ExecRunner{}
-	prWorkflow := pr.NewPRWorkflow(prRunner, logger)
-
-	// Initialize diagnostics service
-	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
+	deps := buildAppServiceDeps(cfg, repoDir, logger)
 
 	m := Model{
 		tasks:              []domain.Task{},
@@ -259,21 +198,18 @@ func New(cfg *config.Config) Model {
 		loading:            true, // Start with loading state
 		spinner:            s,
 		daemonClient:       daemonClient,
-		sessionMonitor:     sessionMonitor,
-		tmuxClient:         tmuxClient,
-		gitClient:          gitClient,
-		gitSyncService:     gitSyncService,
-		networkChecker:     networkChecker,
-		projectRegistry:    registry,
-		isOnline:           true, // Optimistically assume online
-		attachmentService:  attachmentSvc,
-		prWorkflow:         prWorkflow,
-		diagnosticsService: diagService,
+		sessionMonitor:     deps.sessionMonitor,
+		gitClient:          deps.gitDiffClient,
+		gitSyncService:     deps.gitSyncService,
+		projectRegistry:    deps.projectRegistry,
+		isOnline:           deps.isOnline,
+		attachmentService:  deps.attachmentService,
+		diagnosticsService: deps.diagnosticsService,
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from local issue store
-		tmuxAvailable:      os.Getenv("TMUX") != "",
+		tmuxAvailable:      deps.tmuxAvailable,
 		repoDir:            repoDir,
-		currentProject:     resolveInitialProjectName(registry, repoDir),
+		currentProject:     resolveInitialProjectName(deps.projectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
