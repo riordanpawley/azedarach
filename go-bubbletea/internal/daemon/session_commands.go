@@ -10,12 +10,20 @@ import (
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 type sessionCommandBody struct {
 	ProjectID  string `json:"project_id"`
 	SessionID  string `json:"session_id"`
 	BaseBranch string `json:"base_branch,omitempty"`
+}
+
+type resolvedSessionTarget struct {
+	ProjectID  string
+	IssueID    string
+	SessionID  string
+	BaseBranch string
 }
 
 type sessionRecoveryResult struct {
@@ -27,10 +35,10 @@ func sessionKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
-func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope) (sessionCommandBody, protocol.ResponseEnvelope, bool) {
+func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSession bool) (resolvedSessionTarget, protocol.ResponseEnvelope, bool) {
 	var cmd sessionCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
-		return sessionCommandBody{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), false
+		return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), false
 	}
 	if cmd.ProjectID == "" {
 		cmd.ProjectID = req.Meta.ProjectID
@@ -38,14 +46,30 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope) (sessionComm
 	if cmd.ProjectID == "" {
 		cmd.ProjectID = "default"
 	}
-	if cmd.SessionID == "" {
-		return sessionCommandBody{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: project_id/session_id"), false
+	if requireSession && cmd.SessionID == "" {
+		return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: project_id/session_id"), false
 	}
-	return cmd, protocol.ResponseEnvelope{}, true
+
+	issueID := strings.TrimSpace(cmd.SessionID)
+	if issueID != "" {
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(issueID, d.cfg.RepoDir); ok {
+			issueID = parsedIssueID
+		}
+	}
+	sessionID := ""
+	if issueID != "" {
+		sessionID = naming.CanonicalSessionID(d.cfg.RepoDir, issueID)
+	}
+	return resolvedSessionTarget{
+		ProjectID:  cmd.ProjectID,
+		IssueID:    issueID,
+		SessionID:  sessionID,
+		BaseBranch: cmd.BaseBranch,
+	}, protocol.ResponseEnvelope{}, true
 }
 
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	cmd, _, ok := d.decodeSessionRequest(req)
+	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
@@ -54,20 +78,20 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if exists {
-		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.SessionID, cmd.SessionID)), nil
+		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	tasks, err := d.issues.Search(ctx, cmd.SessionID)
+	tasks, err := d.issues.Search(ctx, cmd.IssueID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if len(tasks) == 0 {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.SessionID)), nil
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.IssueID)), nil
 	}
 	baseBranch := cmd.BaseBranch
 	if baseBranch == "" {
 		baseBranch = d.cfg.BaseBranch
 	}
-	worktree, err := d.worktree.Create(ctx, cmd.SessionID, baseBranch)
+	worktree, err := d.worktree.CreateWithTitle(ctx, cmd.IssueID, tasks[0].Title, baseBranch)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -77,12 +101,13 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, d.cfg.CLITool); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	_ = d.issues.Update(ctx, cmd.SessionID, domain.StatusInProgress)
+	_ = d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress)
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
 		cmd.ProjectID,
 		cmd.SessionID,
+		cmd.IssueID,
 		daemonhandlers.CommandSessionStart,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
@@ -95,7 +120,7 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
 		"",
 		"✓ Session started successfully",
-		fmt.Sprintf("  To attach: az attach %s", cmd.SessionID),
+		fmt.Sprintf("  To attach: az attach %s", cmd.IssueID),
 		fmt.Sprintf("  Or run:    tmux attach-session -t %s", cmd.SessionID),
 		"",
 	}, "\n")
@@ -103,7 +128,7 @@ func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnv
 }
 
 func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	cmd, _, ok := d.decodeSessionRequest(req)
+	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
@@ -112,7 +137,7 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if !exists {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.SessionID, cmd.SessionID)), nil
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s (use 'az start %s' to create)", cmd.IssueID, cmd.IssueID)), nil
 	}
 	output := strings.Join([]string{
 		fmt.Sprintf("Attaching to session: %s", cmd.SessionID),
@@ -124,6 +149,7 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 		req,
 		cmd.ProjectID,
 		cmd.SessionID,
+		cmd.IssueID,
 		daemonhandlers.CommandSessionAttach,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session attach transition: %v", err)), nil
@@ -132,7 +158,7 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 }
 
 func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	cmd, _, ok := d.decodeSessionRequest(req)
+	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
@@ -151,13 +177,14 @@ func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnve
 		req,
 		cmd.ProjectID,
 		cmd.SessionID,
+		cmd.IssueID,
 		daemonhandlers.CommandSessionStop,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
 	}
 	output := strings.Join([]string{
-		fmt.Sprintf("Killing session: %s", cmd.SessionID),
-		fmt.Sprintf("✓ Session killed: %s", cmd.SessionID),
+		fmt.Sprintf("Killing session: %s", cmd.IssueID),
+		fmt.Sprintf("✓ Session killed: %s", cmd.IssueID),
 		"  Note: Worktree is preserved. Use 'git worktree remove' to clean up.",
 		"",
 	}, "\n")
@@ -165,12 +192,12 @@ func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnve
 }
 
 func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	cmd, _, ok := d.decodeSessionRequest(req)
+	cmd, _, ok := d.decodeSessionRequest(req, false)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
-	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, cmd.ProjectID, cmd.SessionID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("session reconciliation during session.status failed", "project_id", cmd.ProjectID, "session_id", cmd.SessionID, "error", err)
+	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, cmd.ProjectID, cmd.IssueID); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("session reconciliation during session.status failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", err)
 	}
 	tmuxSessions, err := d.tmux.ListSessions(ctx)
 	if err != nil {
@@ -184,18 +211,17 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	for _, task := range tasks {
 		taskMap[sessionKey(task.ID)] = task
 	}
-	if cmd.SessionID != "" {
-		found := false
+	if cmd.IssueID != "" {
+		matching := make([]string, 0, 1)
 		for _, name := range tmuxSessions {
-			if name == cmd.SessionID {
-				found = true
-				break
+			if issueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir); ok && naming.IssueIDsEqual(issueID, cmd.IssueID) {
+				matching = append(matching, name)
 			}
 		}
-		if !found {
-			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("no active session found for issue: %s", cmd.SessionID)), nil
+		if len(matching) == 0 {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("no active session found for issue: %s", cmd.IssueID)), nil
 		}
-		tmuxSessions = []string{cmd.SessionID}
+		tmuxSessions = matching
 	}
 	if len(tmuxSessions) == 0 {
 		return d.commandOutput(req, "No active sessions\n"), nil
@@ -206,7 +232,11 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	b.WriteString("ISSUE ID\tSTATUS\tTITLE\n")
 	b.WriteString("-------\t------\t-----\n")
 	for _, name := range tmuxSessions {
-		task, ok := taskMap[sessionKey(name)]
+		issueID := name
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir); ok {
+			issueID = parsedIssueID
+		}
+		task, ok := taskMap[sessionKey(issueID)]
 		status := "unknown"
 		title := "(not in issues)"
 		if ok {
@@ -216,7 +246,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 				title = title[:57] + "..."
 			}
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", name, status, title)
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", issueID, status, title)
 	}
 	b.WriteString("\nUse 'az attach <issue-id>' to attach to a session\n")
 	return d.commandOutput(req, b.String()), nil
@@ -236,8 +266,12 @@ func (d *Daemon) handleSessionRecover(ctx context.Context, req protocol.RequestE
 	if cmd.ProjectID == "" {
 		cmd.ProjectID = "default"
 	}
+	targetIssueID := strings.TrimSpace(cmd.SessionID)
+	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(targetIssueID, d.cfg.RepoDir); ok {
+		targetIssueID = parsedIssueID
+	}
 
-	result, err := d.reconcileTmuxAndDaemonSessions(ctx, cmd.ProjectID, cmd.SessionID)
+	result, err := d.reconcileTmuxAndDaemonSessions(ctx, cmd.ProjectID, targetIssueID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -262,83 +296,97 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		return result, err
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
-	tmuxNameByKey := make(map[string]string, len(tmuxSessions))
+	tmuxNameByIssueKey := make(map[string]string, len(tmuxSessions))
+	targetIssueKey := sessionKey(sessionID)
 	for _, name := range tmuxSessions {
-		key := sessionKey(name)
+		issueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir)
+		if !ok {
+			continue
+		}
+		key := sessionKey(issueID)
 		if key == "" {
 			continue
 		}
-		if sessionID != "" && key != sessionKey(sessionID) {
+		if targetIssueKey != "" && key != targetIssueKey {
 			continue
 		}
 		tmuxSet[key] = struct{}{}
-		tmuxNameByKey[key] = name
+		tmuxNameByIssueKey[key] = name
 	}
 
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
-	for id, session := range snapshot.Sessions {
-		idKey := sessionKey(id)
-		if sessionID != "" && idKey != sessionKey(sessionID) {
+	for _, session := range snapshot.Sessions {
+		issueID := strings.TrimSpace(session.IssueID)
+		if issueID == "" {
+			issueID = session.ID
+		}
+		issueKey := sessionKey(issueID)
+		if targetIssueKey != "" && issueKey != targetIssueKey {
 			continue
 		}
 		if session.State == daemonstate.SessionStateStopped {
 			continue
 		}
-		if _, ok := tmuxSet[idKey]; ok {
+		if _, ok := tmuxSet[issueKey]; ok {
 			continue
-		}
-		issueID := session.IssueID
-		if issueID == "" {
-			issueID = id
 		}
 		wt, getErr := d.worktree.Get(ctx, issueID)
 		if getErr != nil {
 			continue
 		}
-		if newErr := d.tmux.NewSession(ctx, id, wt.Path); newErr != nil {
+		canonicalSessionID := naming.CanonicalSessionID(d.cfg.RepoDir, issueID)
+		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
 			continue
 		}
-		_ = d.tmux.SendKeys(ctx, id, d.cfg.CLITool)
-		tmuxSet[idKey] = struct{}{}
-		tmuxNameByKey[idKey] = id
+		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.cfg.CLITool)
+		tmuxSet[issueKey] = struct{}{}
+		tmuxNameByIssueKey[issueKey] = canonicalSessionID
 		result.RecreatedTmuxSessions++
 	}
 
-	for idKey := range tmuxSet {
-		id := tmuxNameByKey[idKey]
-		session, ok := snapshot.Sessions[id]
-		if !ok {
-			for snapID, candidate := range snapshot.Sessions {
-				if sessionKey(snapID) == idKey {
-					session = candidate
-					ok = true
-					id = snapID
-					break
-				}
-			}
+	snapshotByIssueKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
+	for _, session := range snapshot.Sessions {
+		issueID := strings.TrimSpace(session.IssueID)
+		if issueID == "" {
+			issueID = session.ID
 		}
-		issueID := id
-		if ok && session.IssueID != "" {
-			issueID = session.IssueID
+		issueKey := sessionKey(issueID)
+		if issueKey == "" {
+			continue
+		}
+		snapshotByIssueKey[issueKey] = session
+	}
+
+	for issueKey := range tmuxSet {
+		sessionIDInTmux := tmuxNameByIssueKey[issueKey]
+		session, ok := snapshotByIssueKey[issueKey]
+		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionIDInTmux, d.cfg.RepoDir)
+		if !parsed {
+			issueID = sessionIDInTmux
 		}
 		if !ok {
-			if _, err := d.sessionStore.UpsertSession(projectID, id, issueID, daemonstate.SessionStateStarting); err == nil {
-				if _, err := d.sessionStore.UpsertSession(projectID, id, issueID, daemonstate.SessionStateAttached); err == nil {
+			if _, err := d.sessionStore.UpsertSession(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
+				if _, err := d.sessionStore.UpsertSession(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
 				}
 			}
 			continue
+		}
+
+		canonicalSessionID := session.ID
+		if canonicalSessionID == "" {
+			canonicalSessionID = naming.CanonicalSessionID(d.cfg.RepoDir, issueID)
 		}
 
 		switch session.State {
 		case daemonstate.SessionStateStopped:
-			if _, err := d.sessionStore.UpsertSession(projectID, id, issueID, daemonstate.SessionStateStarting); err == nil {
-				if _, err := d.sessionStore.UpsertSession(projectID, id, issueID, daemonstate.SessionStateAttached); err == nil {
+			if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
+				if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
 				}
 			}
 		case daemonstate.SessionStateStarting:
-			if _, err := d.sessionStore.UpsertSession(projectID, id, issueID, daemonstate.SessionStateAttached); err == nil {
+			if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 				result.AlignedDaemonSessions++
 			}
 		}
@@ -358,16 +406,26 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
 	for _, name := range tmuxSessions {
-		key := sessionKey(name)
-		if key == "" {
-			continue
+		if issueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir); ok {
+			key := sessionKey(issueID)
+			if key == "" {
+				continue
+			}
+			tmuxSet[key] = struct{}{}
 		}
-		tmuxSet[key] = struct{}{}
 	}
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
 	snapshotByKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
-	for id, session := range snapshot.Sessions {
-		snapshotByKey[sessionKey(id)] = session
+	for _, session := range snapshot.Sessions {
+		issueID := strings.TrimSpace(session.IssueID)
+		if issueID == "" {
+			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, d.cfg.RepoDir); ok {
+				issueID = parsedIssueID
+			} else {
+				issueID = session.ID
+			}
+		}
+		snapshotByKey[sessionKey(issueID)] = session
 	}
 
 	for i := range tasks {

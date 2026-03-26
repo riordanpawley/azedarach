@@ -3881,7 +3881,7 @@ func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) 
 		if worktreePath != "" && wt.Path == worktreePath {
 			return wt, true
 		}
-		if issueID != "" && wt.IssueID == issueID {
+		if issueID != "" && strings.EqualFold(wt.IssueID, issueID) {
 			return wt, true
 		}
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -227,7 +228,7 @@ func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 
-	body := buildTaskSnapshotExportBody(projectID, d.currentRevision(projectID), tasks, sessions)
+	body := buildTaskSnapshotExportBody(projectID, d.currentRevision(projectID), tasks, sessions, d.cfg.RepoDir)
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal snapshot export body: %v", err)), nil
@@ -239,7 +240,7 @@ func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.Requ
 	return resp, nil
 }
 
-func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []domain.Task, tmuxSessions []string) taskSnapshotExportBody {
+func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []domain.Task, tmuxSessions []string, projectPath string) taskSnapshotExportBody {
 	taskCopy := make([]domain.Task, len(tasks))
 	copy(taskCopy, tasks)
 	sort.SliceStable(taskCopy, func(i, j int) bool {
@@ -252,7 +253,10 @@ func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []doma
 
 	sessionSet := make(map[string]struct{}, len(sessionCopy))
 	for _, session := range sessionCopy {
-		sessionSet[session] = struct{}{}
+		sessionSet[sessionKey(session)] = struct{}{}
+		if issueID, ok := naming.ParseIssueIDFromSessionName(session, projectPath); ok {
+			sessionSet[sessionKey(issueID)] = struct{}{}
+		}
 	}
 
 	out := taskSnapshotExportBody{
@@ -268,7 +272,7 @@ func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []doma
 	}
 
 	for _, task := range taskCopy {
-		_, hasSession := sessionSet[task.ID]
+		_, hasSession := sessionSet[sessionKey(task.ID)]
 		out.Tasks = append(out.Tasks, taskSnapshotExportTask{
 			ID:              task.ID,
 			Title:           task.Title,

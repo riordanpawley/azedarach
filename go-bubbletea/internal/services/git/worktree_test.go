@@ -54,6 +54,10 @@ func TestWorktreeManager_Create(t *testing.T) {
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		// Mock git user config for deterministic branch author
+		if len(args) > 1 && args[0] == "config" && args[1] == "user.name" {
+			return "Riordan Pawley\n", nil
+		}
 		// Mock 'worktree list' to return empty (no existing worktrees)
 		if len(args) > 0 && args[0] == "worktree" && args[1] == "list" {
 			return "", nil
@@ -73,11 +77,11 @@ func TestWorktreeManager_Create(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, worktree)
 	assert.Equal(t, issueID, worktree.IssueID)
-	assert.Equal(t, "az/issue-123", worktree.Branch)
+	assert.Equal(t, "riordanpawley/issue-123/issue-123", worktree.Branch)
 	assert.Equal(t, "/home/user/test-repo-issue-123", worktree.Path)
 
 	// Verify the command was called correctly
-	expectedCmd := "worktree add -b az/issue-123 /home/user/test-repo-issue-123 main"
+	expectedCmd := "worktree add -b riordanpawley/issue-123/issue-123 /home/user/test-repo-issue-123 main"
 	mock.AssertCommand(t, expectedCmd)
 }
 
@@ -89,6 +93,9 @@ func TestWorktreeManager_Create_AlreadyExists(t *testing.T) {
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "config" && args[1] == "user.name" {
+			return "Riordan Pawley\n", nil
+		}
 		// Mock 'worktree list' to return existing worktree
 		if len(args) > 0 && args[0] == "worktree" && args[1] == "list" {
 			return `worktree /home/user/test-repo
@@ -110,6 +117,32 @@ branch refs/heads/az/issue-123
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
+}
+
+func TestWorktreeManager_CreateWithTitle_UsesDeterministicBranchName(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "CHE-3002"
+	baseBranch := "main"
+	issueTitle := "Migrate prep lists to db with this title being way too long"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "config" && args[1] == "user.name" {
+			return "Riordan Pawley\n", nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+	worktree, err := manager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
+	require.NoError(t, err)
+
+	assert.Equal(t, "riordanpawley/che-3002/migrate-prep-lists-to-db", worktree.Branch)
+	mock.AssertCommand(t, "worktree add -b riordanpawley/che-3002/migrate-prep-lists-to-db /home/user/test-repo-CHE-3002 main")
 }
 
 func TestWorktreeManager_Delete(t *testing.T) {
@@ -274,7 +307,7 @@ branch refs/heads/feature/something
 	worktrees, err := manager.List(ctx)
 
 	require.NoError(t, err)
-	assert.Len(t, worktrees, 2) // Only az/ branches
+	assert.Len(t, worktrees, 2) // Only issue-linked branch naming formats
 
 	// Check first worktree
 	assert.Equal(t, "issue-123", worktrees[0].IssueID)
@@ -510,6 +543,20 @@ branch refs/heads/az/issue-123`,
 					Path:    "/home/user/test-repo-issue-123",
 					Branch:  "az/issue-123",
 					IssueID: "issue-123",
+				},
+			},
+		},
+		{
+			name: "deterministic author issue slug branch",
+			output: `worktree /home/user/test-repo-che-3002
+HEAD abc123
+branch refs/heads/riordanpawley/che-3002/migrate-prep-lists-to-db
+`,
+			expected: []Worktree{
+				{
+					Path:    "/home/user/test-repo-che-3002",
+					Branch:  "riordanpawley/che-3002/migrate-prep-lists-to-db",
+					IssueID: "che-3002",
 				},
 			},
 		},

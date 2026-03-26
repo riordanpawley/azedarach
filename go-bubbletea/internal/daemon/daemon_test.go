@@ -32,20 +32,20 @@ func TestNewWiresSessionHandlerAndStore(t *testing.T) {
 		},
 	}
 
-	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", daemonhandlers.CommandSessionStart); err != nil {
+	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", "issue-1", daemonhandlers.CommandSessionStart); err != nil {
 		t.Fatalf("start transition failed: %v", err)
 	}
-	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", daemonhandlers.CommandSessionAttach); err != nil {
+	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", "issue-1", daemonhandlers.CommandSessionAttach); err != nil {
 		t.Fatalf("attach transition failed: %v", err)
 	}
-	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", daemonhandlers.CommandSessionPause); err != nil {
+	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", "issue-1", daemonhandlers.CommandSessionPause); err != nil {
 		t.Fatalf("pause transition failed: %v", err)
 	}
-	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", daemonhandlers.CommandSessionStop); err != nil {
+	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", "issue-1", daemonhandlers.CommandSessionStop); err != nil {
 		t.Fatalf("stop transition failed: %v", err)
 	}
 
-	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", daemonhandlers.CommandSessionStart); err != nil {
+	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", "issue-1", daemonhandlers.CommandSessionStart); err != nil {
 		t.Fatalf("restart transition after stop failed: %v", err)
 	}
 }
@@ -58,7 +58,7 @@ func TestApplySessionLifecycleTransitionRequiresHandler(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 	}
 
-	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", daemonhandlers.CommandSessionStart); err == nil {
+	if err := d.applySessionLifecycleTransition(context.Background(), req, "proj", "s1", "issue-1", daemonhandlers.CommandSessionStart); err == nil {
 		t.Fatal("expected missing session handler to return an error")
 	}
 }

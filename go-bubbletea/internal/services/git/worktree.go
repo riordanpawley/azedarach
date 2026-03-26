@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // WorktreeManager manages git worktrees for Claude Code sessions.
@@ -18,7 +21,7 @@ type WorktreeManager struct {
 // Worktree represents a git worktree associated with a issue.
 type Worktree struct {
 	Path    string // Absolute path to the worktree
-	Branch  string // Branch name (e.g., "az/issue-123")
+	Branch  string // Branch name (e.g., "author/issue-id/title-slug")
 	IssueID string // Associated issue ID
 }
 
@@ -35,16 +38,25 @@ func NewWorktreeManager(runner CommandRunner, repoDir string, logger *slog.Logge
 }
 
 // Create creates a new worktree for the given issue ID.
-// It creates the worktree at ../RepoName-issueID/ with branch az/issueID.
 func (w *WorktreeManager) Create(ctx context.Context, issueID string, baseBranch string) (*Worktree, error) {
+	return w.CreateWithTitle(ctx, issueID, "", baseBranch)
+}
+
+// CreateWithTitle creates a new worktree and derives a deterministic branch name
+// from git user, issue ID, and issue title.
+func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTitle, baseBranch string) (*Worktree, error) {
 	// Get repository name from repoDir
 	repoName := filepath.Base(w.repoDir)
 
 	// Calculate worktree path: ../RepoName-issueID/
 	worktreePath := filepath.Join(filepath.Dir(w.repoDir), fmt.Sprintf("%s-%s", repoName, issueID))
 
-	// Branch name: az/issueID
-	branchName := fmt.Sprintf("az/%s", issueID)
+	branchAuthor := w.resolveBranchAuthor(ctx)
+	branchTitle := strings.TrimSpace(issueTitle)
+	if branchTitle == "" {
+		branchTitle = issueID
+	}
+	branchName := naming.ComposeIssueBranchName(branchAuthor, issueID, branchTitle, 24)
 
 	w.logger.Info("creating worktree",
 		"issueID", issueID,
@@ -62,8 +74,7 @@ func (w *WorktreeManager) Create(ctx context.Context, issueID string, baseBranch
 		return nil, fmt.Errorf("worktree for issue %s already exists", issueID)
 	}
 
-	// Create worktree with new branch from baseBranch
-	// git worktree add -b az/issueID ../RepoName-issueID baseBranch
+	// Create worktree with new branch from baseBranch.
 	_, err = w.runner.Run(ctx, "worktree", "add", "-b", branchName, worktreePath, baseBranch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worktree: %w", err)
@@ -116,7 +127,7 @@ func (w *WorktreeManager) Get(ctx context.Context, issueID string) (*Worktree, e
 	}
 
 	for _, wt := range worktrees {
-		if wt.IssueID == issueID {
+		if naming.IssueIDsEqual(wt.IssueID, issueID) {
 			return &wt, nil
 		}
 	}
@@ -125,7 +136,6 @@ func (w *WorktreeManager) Get(ctx context.Context, issueID string) (*Worktree, e
 }
 
 // List returns all worktrees managed by this WorktreeManager.
-// It filters for worktrees that match the az/issueID pattern.
 func (w *WorktreeManager) List(ctx context.Context) ([]Worktree, error) {
 	// git worktree list --porcelain
 	output, err := w.runner.Run(ctx, "worktree", "list", "--porcelain")
@@ -140,7 +150,7 @@ func (w *WorktreeManager) List(ctx context.Context) ([]Worktree, error) {
 func (w *WorktreeManager) Exists(ctx context.Context, issueID string) (bool, error) {
 	_, err := w.Get(ctx, issueID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
 			return false, nil
 		}
 		return false, err
@@ -149,15 +159,6 @@ func (w *WorktreeManager) Exists(ctx context.Context, issueID string) (bool, err
 }
 
 // parseWorktreeList parses the output of 'git worktree list --porcelain'.
-// Example output:
-//
-//	worktree /home/user/repo
-//	HEAD abc123
-//	branch refs/heads/main
-//
-//	worktree /home/user/repo-issue-123
-//	HEAD def456
-//	branch refs/heads/az/issue-123
 func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	worktrees := make([]Worktree, 0)
 
@@ -174,26 +175,25 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 			branchRef := strings.TrimPrefix(line, "branch ")
 			currentBranch = strings.TrimPrefix(branchRef, "refs/heads/")
 		} else if line == "" && currentPath != "" && currentBranch != "" {
-			// End of worktree entry
-			// Only include worktrees with az/ branches
-			if strings.HasPrefix(currentBranch, "az/") {
-				issueID := strings.TrimPrefix(currentBranch, "az/")
+			issueID, ok := naming.ExtractIssueIDFromBranchName(currentBranch)
+			if ok {
 				worktrees = append(worktrees, Worktree{
 					Path:    currentPath,
 					Branch:  currentBranch,
 					IssueID: issueID,
 				})
 			}
-
-			// Reset for next entry
 			currentPath = ""
 			currentBranch = ""
 		}
 	}
 
-	// Handle last entry if output doesn't end with blank line
-	if currentPath != "" && currentBranch != "" && strings.HasPrefix(currentBranch, "az/") {
-		issueID := strings.TrimPrefix(currentBranch, "az/")
+	// Handle last entry if output doesn't end with blank line.
+	if currentPath != "" && currentBranch != "" {
+		issueID, ok := naming.ExtractIssueIDFromBranchName(currentBranch)
+		if !ok {
+			return worktrees
+		}
 		worktrees = append(worktrees, Worktree{
 			Path:    currentPath,
 			Branch:  currentBranch,
@@ -202,4 +202,16 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	}
 
 	return worktrees
+}
+
+func (w *WorktreeManager) resolveBranchAuthor(ctx context.Context) string {
+	if configuredName, err := w.runner.Run(ctx, "config", "user.name"); err == nil {
+		if author := naming.SanitizeBranchAuthor(configuredName); author != "" {
+			return author
+		}
+	}
+	if envUser := naming.SanitizeBranchAuthor(os.Getenv("USER")); envUser != "" {
+		return envUser
+	}
+	return "author"
 }

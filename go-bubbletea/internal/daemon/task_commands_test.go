@@ -43,6 +43,7 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 			},
 		},
 		[]string{"b-task", "a-task"},
+		"/tmp/proj",
 	)
 
 	if got, want := body.SchemaVersion, uint16(1); got != want {

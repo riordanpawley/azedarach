@@ -192,6 +192,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 	req protocol.RequestEnvelope,
 	projectID string,
 	sessionID string,
+	issueID string,
 	command string,
 ) error {
 	if d.session == nil {
@@ -205,7 +206,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 	}{
 		ProjectID: projectID,
 		SessionID: sessionID,
-		IssueID:   sessionID,
+		IssueID:   issueID,
 	})
 	if err != nil {
 		return err
