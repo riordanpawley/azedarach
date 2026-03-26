@@ -21,6 +21,8 @@ Commands:
   issue dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
   issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  config set spec.enabled <true|false> [--project-dir <dir>]  Update project config
+  sync [--all] [<directory>] [--project-dir <dir>]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
@@ -50,6 +52,10 @@ Examples:
   az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
   az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
   az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
+  az config set spec.enabled false
+  az config set spec.enabled true --project-dir .
+  az sync
+  az sync --all
   az prime
   az export --format json
   az export --format json --out snapshot.json

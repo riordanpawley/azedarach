@@ -23,6 +23,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 var newLauncher = func(repoDir, socketPath string) daemonStarter {
@@ -58,6 +59,17 @@ type daemonStarter interface {
 type ExportOptions struct {
 	Format string
 	Out    string
+}
+
+type ConfigSetOptions struct {
+	Key        string
+	Value      string
+	ProjectDir string
+}
+
+type SyncOptions struct {
+	All        bool
+	ProjectDir string
 }
 
 type IssueListOptions struct {
@@ -175,14 +187,25 @@ type OperationCancelOptions struct {
 }
 
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
-	logger := slog.Default()
-
 	repoDir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
+	return NewDependenciesAt(cfg, repoDir)
+}
 
-	projectID := filepath.Base(repoDir)
+func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error) {
+	logger := slog.Default()
+
+	if strings.TrimSpace(repoDir) == "" {
+		return nil, fmt.Errorf("failed to get current directory: empty repo dir")
+	}
+	absRepoDir, err := filepath.Abs(repoDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve repo directory %q: %w", repoDir, err)
+	}
+
+	projectID := filepath.Base(absRepoDir)
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonTransport := transport.NewClient(socketPath)
 
@@ -191,7 +214,7 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 		DaemonClient: daemonclient.New(daemonTransport).WithProjectID(projectID),
 		Logger:       logger,
 		ProjectID:    projectID,
-		RepoDir:      repoDir,
+		RepoDir:      absRepoDir,
 	}, nil
 }
 
@@ -354,6 +377,47 @@ func ParseExportArgs(args []string) (ExportOptions, error) {
 		return ExportOptions{}, fmt.Errorf("unsupported export format: %s", opts.Format)
 	}
 
+	return opts, nil
+}
+
+func ParseConfigSetArgs(args []string) (ConfigSetOptions, error) {
+	opts := ConfigSetOptions{}
+	fs := flag.NewFlagSet("config set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	if err := fs.Parse(args); err != nil {
+		return ConfigSetOptions{}, err
+	}
+	if fs.NArg() != 2 {
+		return ConfigSetOptions{}, fmt.Errorf("usage: az config set spec.enabled <true|false> [--project-dir <dir>]")
+	}
+	opts.Key = strings.TrimSpace(fs.Arg(0))
+	opts.Value = strings.TrimSpace(fs.Arg(1))
+	if opts.Key == "" {
+		return ConfigSetOptions{}, fmt.Errorf("config key is required")
+	}
+	return opts, nil
+}
+
+func ParseSyncArgs(args []string) (SyncOptions, error) {
+	opts := SyncOptions{}
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.All, "all", false, "sync all worktrees")
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	if err := fs.Parse(args); err != nil {
+		return SyncOptions{}, err
+	}
+	switch fs.NArg() {
+	case 0:
+	case 1:
+		if strings.TrimSpace(opts.ProjectDir) != "" {
+			return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+		}
+		opts.ProjectDir = strings.TrimSpace(fs.Arg(0))
+	default:
+		return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+	}
 	return opts, nil
 }
 
@@ -899,6 +963,151 @@ func ParseIssueBulkUpdateArgs(args []string) (IssueBulkUpdateOptions, error) {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
 	return opts, nil
+}
+
+func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
+	if deps == nil {
+		return fmt.Errorf("config set: missing dependencies")
+	}
+
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		projectDir = deps.RepoDir
+	}
+
+	configPath, err := resolveWritableConfigPath(projectDir)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	renderedValue, err := setConfigValue(cfg, opts.Key, opts.Value)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	if err := config.SaveConfig(cfg, configPath); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	fmt.Printf("Updated %s: %s=%s\n", configPath, opts.Key, renderedValue)
+	if opts.Key == "spec.enabled" {
+		if renderedValue == "true" {
+			fmt.Println("Spec workflows are enabled.")
+		} else {
+			fmt.Println("Spec workflows are disabled. `az prime` will stop mentioning spec and `az spec` commands will fail until re-enabled.")
+		}
+	}
+
+	return nil
+}
+
+type syncWorktreeLister interface {
+	List(context.Context) ([]gitservice.Worktree, error)
+}
+
+var newSyncWorktreeLister = func(repoDir string, logger *slog.Logger) syncWorktreeLister {
+	return gitservice.NewWorktreeManager(gitservice.NewExecRunner(repoDir), repoDir, logger)
+}
+
+func SyncCommand(deps *Dependencies, opts SyncOptions) error {
+	if deps == nil {
+		return fmt.Errorf("sync: missing dependencies")
+	}
+
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	projectDir := strings.TrimSpace(opts.ProjectDir)
+	if projectDir == "" {
+		projectDir = deps.RepoDir
+	}
+
+	targetPaths := []string{projectDir}
+	if opts.All {
+		lister := newSyncWorktreeLister(projectDir, deps.Logger)
+		worktrees, err := lister.List(ctx)
+		if err != nil {
+			return fmt.Errorf("list git worktrees: %w", err)
+		}
+		targetPaths = targetPaths[:0]
+		seen := make(map[string]struct{}, len(worktrees))
+		for _, worktree := range worktrees {
+			path := strings.TrimSpace(worktree.Path)
+			if path == "" {
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			targetPaths = append(targetPaths, path)
+		}
+		if len(targetPaths) == 0 {
+			targetPaths = []string{projectDir}
+		}
+	}
+
+	fmt.Println("Syncing issue tracker state...")
+	fmt.Printf("Project: %s\n", projectDir)
+	if opts.All {
+		fmt.Printf("Targets: %d worktree(s)\n", len(targetPaths))
+		for _, targetPath := range targetPaths {
+			fmt.Printf("  %s\n", targetPath)
+		}
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("refresh issue tracker snapshot: %w", err)
+	}
+
+	fmt.Println("")
+	fmt.Printf("Snapshot: tasks=%d revision=%d\n", len(snapshot.Tasks), snapshot.Revision)
+	fmt.Printf("Sync summary: targets=%d, tasks=%d, revision=%d\n", len(targetPaths), len(snapshot.Tasks), snapshot.Revision)
+	return nil
+}
+
+func resolveWritableConfigPath(projectDir string) (string, error) {
+	baseDir, err := config.ResolveConfigBase(projectDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(baseDir, config.ConfigDirName, config.ConfigFileName), nil
+}
+
+func setConfigValue(cfg *config.Config, key, value string) (string, error) {
+	switch strings.TrimSpace(key) {
+	case "spec.enabled":
+		parsed, ok := parseBooleanConfigValue(value)
+		if !ok {
+			return "", fmt.Errorf("Invalid boolean value '%s' for spec.enabled. Use true/false, on/off, yes/no, or 1/0.", value)
+		}
+		cfg.Spec.Enabled = parsed
+		return fmt.Sprintf("%t", parsed), nil
+	default:
+		return "", fmt.Errorf("Unsupported config key '%s'. Supported keys: spec.enabled", key)
+	}
+}
+
+func parseBooleanConfigValue(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true, true
+	case "false", "0", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func ExportCommand(deps *Dependencies, opts ExportOptions) error {
