@@ -3,6 +3,7 @@ package attachment
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +44,13 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		attempts = append(attempts, "pngpaste not installed")
 	}
 
+	// Mirror ts-opentui environment assumptions: pbpaste can expose clipboard payload bytes.
+	if data, err := readClipboardMacOSPBPasteRaw(ctx); err == nil && len(data) > 0 {
+		return data, nil
+	} else if err != nil {
+		attempts = append(attempts, "pbpaste raw failed: "+compactWhitespace(err.Error()))
+	}
+
 	// Try the same direct PNG AppleScript flow used in ts-opentui.
 	if data, err := readClipboardMacOSPNGScript(ctx); err == nil && len(data) > 0 {
 		return data, nil
@@ -62,6 +70,13 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		return data, nil
 	} else if err != nil {
 		attempts = append(attempts, "file alias fallback failed: "+compactWhitespace(err.Error()))
+	}
+
+	// Some clipboard flows expose an image file path as plain text.
+	if data, err := readClipboardMacOSTextPath(ctx); err == nil && len(data) > 0 {
+		return data, nil
+	} else if err != nil {
+		attempts = append(attempts, "text path fallback failed: "+compactWhitespace(err.Error()))
 	}
 
 	// Fallback to osascript for PNG/TIFF/JPEG.
@@ -245,9 +260,9 @@ function isImageLikeType(t) {
 `
 
 	cmd := exec.CommandContext(ctx, "osascript", "-l", "JavaScript", "-e", script)
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("jxa pasteboard read failed: %w", err)
+		return nil, fmt.Errorf("jxa pasteboard read failed: %w: %s", err, compactWhitespace(string(output)))
 	}
 
 	result := strings.TrimSpace(string(output))
@@ -268,6 +283,39 @@ function isImageLikeType(t) {
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("jxa pasteboard image file was empty")
+	}
+	return data, nil
+}
+
+func readClipboardMacOSTextPath(ctx context.Context) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "pbpaste")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("pbpaste failed: %w", err)
+	}
+	raw := strings.TrimSpace(string(output))
+	if raw == "" {
+		return nil, fmt.Errorf("clipboard text is empty")
+	}
+
+	path := raw
+	if strings.HasPrefix(raw, "file://") {
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse file url: %w", parseErr)
+		}
+		path = u.Path
+	}
+	path = filepath.Clean(path)
+	if !isLikelyImagePath(path) {
+		return nil, fmt.Errorf("clipboard text is not image path: %q", raw)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil, fmt.Errorf("read image path from clipboard text: %w", readErr)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("clipboard text image path file is empty")
 	}
 	return data, nil
 }
@@ -299,6 +347,22 @@ func readClipboardMacOSPNGScript(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("png applescript produced empty file")
 	}
 	return data, nil
+}
+
+func readClipboardMacOSPBPasteRaw(ctx context.Context) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "pbpaste")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("pbpaste execution failed: %w", err)
+	}
+	if len(output) == 0 {
+		return nil, fmt.Errorf("pbpaste returned empty output")
+	}
+	mime := detectMimeType(output)
+	if !strings.HasPrefix(mime, "image/") {
+		return nil, fmt.Errorf("pbpaste returned non-image mime %s", mime)
+	}
+	return output, nil
 }
 
 // readClipboardLinux reads clipboard on Linux using wl-paste or xclip
