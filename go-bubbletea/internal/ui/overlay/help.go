@@ -127,6 +127,9 @@ func (h *HelpOverlay) getCategories() []keybinds.Category {
 			Bindings: []keybinds.Binding{
 				{Key: "h/l", Description: "Move between columns"},
 				{Key: "j/k", Description: "Move up/down in column"},
+				{Key: "ctrl+u / ctrl+d", Description: "Half-page scroll"},
+				{Key: "g then g/e/h/l", Description: "Jump in board"},
+				{Key: "g then w/p/s", Description: "Jump / projects / spec"},
 				{Key: "gg/ge", Description: "Jump to top/bottom of column"},
 				{Key: "gh/gl", Description: "Jump to first/last column"},
 			},
@@ -136,6 +139,16 @@ func (h *HelpOverlay) getCategories() []keybinds.Category {
 			Bindings: []keybinds.Binding{
 				{Key: "Space", Description: "Open task workspace (details + actions)"},
 				{Key: "Enter", Description: "Drill into epic children"},
+			},
+		},
+		{
+			Name: "Actions",
+			Bindings: []keybinds.Binding{
+				{Key: "Space", Description: "Open task workspace"},
+				{Key: "space then i", Description: "Image attachments"},
+				{Key: "space then s/S/a/x", Description: "Session actions"},
+				{Key: "space then u/m/P/f", Description: "Git actions"},
+				{Key: "space then c/e/d/h/l", Description: "Task status/edit actions"},
 			},
 		},
 		{
