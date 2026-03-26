@@ -1640,7 +1640,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 			if wt.IssueID == "" || wt.Path == "" {
 				continue
 			}
-			worktreeByIssue[wt.IssueID] = wt.Path
+			worktreeByIssue[taskIDKey(wt.IssueID)] = wt.Path
 		}
 
 		signalsByTask := make(map[string]board.RuntimeSignals, len(tasks))
@@ -1649,7 +1649,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 			signals := board.RuntimeSignals{
 				HasTmuxSession: task.Session != nil,
 			}
-			worktreePath, hasWorktree := worktreeByIssue[task.ID]
+			worktreePath, hasWorktree := worktreeByIssue[taskIDKey(task.ID)]
 			if hasWorktree {
 				signals.HasWorktree = true
 
@@ -1707,6 +1707,10 @@ func parseDiffStatTotals(diffStat string) (int, int) {
 		}
 	}
 	return additions, deletions
+}
+
+func taskIDKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {

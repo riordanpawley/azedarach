@@ -23,6 +23,10 @@ type sessionRecoveryResult struct {
 	AlignedDaemonSessions int `json:"aligned_daemon_sessions"`
 }
 
+func sessionKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
 func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope) (sessionCommandBody, protocol.ResponseEnvelope, bool) {
 	var cmd sessionCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -178,7 +182,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	}
 	taskMap := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
-		taskMap[task.ID] = task
+		taskMap[sessionKey(task.ID)] = task
 	}
 	if cmd.SessionID != "" {
 		found := false
@@ -202,7 +206,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	b.WriteString("ISSUE ID\tSTATUS\tTITLE\n")
 	b.WriteString("-------\t------\t-----\n")
 	for _, name := range tmuxSessions {
-		task, ok := taskMap[name]
+		task, ok := taskMap[sessionKey(name)]
 		status := "unknown"
 		title := "(not in issues)"
 		if ok {
@@ -258,25 +262,29 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		return result, err
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
+	tmuxNameByKey := make(map[string]string, len(tmuxSessions))
 	for _, name := range tmuxSessions {
-		if strings.TrimSpace(name) == "" {
+		key := sessionKey(name)
+		if key == "" {
 			continue
 		}
-		if sessionID != "" && name != sessionID {
+		if sessionID != "" && key != sessionKey(sessionID) {
 			continue
 		}
-		tmuxSet[name] = struct{}{}
+		tmuxSet[key] = struct{}{}
+		tmuxNameByKey[key] = name
 	}
 
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
 	for id, session := range snapshot.Sessions {
-		if sessionID != "" && id != sessionID {
+		idKey := sessionKey(id)
+		if sessionID != "" && idKey != sessionKey(sessionID) {
 			continue
 		}
 		if session.State == daemonstate.SessionStateStopped {
 			continue
 		}
-		if _, ok := tmuxSet[id]; ok {
+		if _, ok := tmuxSet[idKey]; ok {
 			continue
 		}
 		issueID := session.IssueID
@@ -291,12 +299,24 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			continue
 		}
 		_ = d.tmux.SendKeys(ctx, id, d.cfg.CLITool)
-		tmuxSet[id] = struct{}{}
+		tmuxSet[idKey] = struct{}{}
+		tmuxNameByKey[idKey] = id
 		result.RecreatedTmuxSessions++
 	}
 
-	for id := range tmuxSet {
+	for idKey := range tmuxSet {
+		id := tmuxNameByKey[idKey]
 		session, ok := snapshot.Sessions[id]
+		if !ok {
+			for snapID, candidate := range snapshot.Sessions {
+				if sessionKey(snapID) == idKey {
+					session = candidate
+					ok = true
+					id = snapID
+					break
+				}
+			}
+		}
 		issueID := id
 		if ok && session.IssueID != "" {
 			issueID = session.IssueID
@@ -338,21 +358,27 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
 	for _, name := range tmuxSessions {
-		if strings.TrimSpace(name) == "" {
+		key := sessionKey(name)
+		if key == "" {
 			continue
 		}
-		tmuxSet[name] = struct{}{}
+		tmuxSet[key] = struct{}{}
 	}
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
+	snapshotByKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
+	for id, session := range snapshot.Sessions {
+		snapshotByKey[sessionKey(id)] = session
+	}
 
 	for i := range tasks {
 		taskID := tasks[i].ID
-		if _, ok := tmuxSet[taskID]; !ok {
+		taskKey := sessionKey(taskID)
+		if _, ok := tmuxSet[taskKey]; !ok {
 			continue
 		}
 
 		state := domain.SessionBusy
-		if session, ok := snapshot.Sessions[taskID]; ok {
+		if session, ok := snapshotByKey[taskKey]; ok {
 			switch session.State {
 			case daemonstate.SessionStatePaused:
 				state = domain.SessionPaused
