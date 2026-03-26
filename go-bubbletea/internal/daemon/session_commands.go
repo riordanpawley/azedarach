@@ -31,8 +31,63 @@ type sessionRecoveryResult struct {
 	AlignedDaemonSessions int `json:"aligned_daemon_sessions"`
 }
 
+type SessionLongRunningExecutor interface {
+	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) (protocol.ResponseEnvelope, error)) (protocol.ResponseEnvelope, error)
+}
+
 func sessionKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func sessionStopPendingKey(projectID, issueID string) string {
+	project := strings.TrimSpace(projectID)
+	if project == "" {
+		project = "default"
+	}
+	issueKey := sessionKey(issueID)
+	if issueKey == "" {
+		return ""
+	}
+	return strings.ToLower(project) + ":" + issueKey
+}
+
+func (d *Daemon) markSessionStopPending(projectID, issueID string) func() {
+	key := sessionStopPendingKey(projectID, issueID)
+	if key == "" {
+		return func() {}
+	}
+
+	d.sessionStopMu.Lock()
+	if d.sessionStopPending == nil {
+		d.sessionStopPending = map[string]int{}
+	}
+	d.sessionStopPending[key]++
+	d.sessionStopMu.Unlock()
+
+	return func() {
+		d.sessionStopMu.Lock()
+		defer d.sessionStopMu.Unlock()
+		if d.sessionStopPending == nil {
+			return
+		}
+		next := d.sessionStopPending[key] - 1
+		if next <= 0 {
+			delete(d.sessionStopPending, key)
+			return
+		}
+		d.sessionStopPending[key] = next
+	}
+}
+
+func (d *Daemon) isSessionStopPending(projectID, issueID string) bool {
+	key := sessionStopPendingKey(projectID, issueID)
+	if key == "" {
+		return false
+	}
+
+	d.sessionStopMu.Lock()
+	defer d.sessionStopMu.Unlock()
+	return d.sessionStopPending[key] > 0
 }
 
 func (d *Daemon) sessionNamingScope(projectID string) string {
@@ -78,6 +133,15 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 }
 
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if d.sessionLongRunning != nil {
+		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
+			return d.handleSessionStartDirect(execCtx, req)
+		})
+	}
+	return d.handleSessionStartDirect(ctx, req)
+}
+
+func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
@@ -167,6 +231,15 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 }
 
 func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if d.sessionLongRunning != nil {
+		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
+			return d.handleSessionStopDirect(execCtx, req)
+		})
+	}
+	return d.handleSessionStopDirect(ctx, req)
+}
+
+func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
@@ -178,6 +251,8 @@ func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnve
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s", cmd.SessionID)), nil
 	}
+	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
+	defer clearStopPending()
 	if err := d.tmux.KillSession(ctx, cmd.SessionID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -333,6 +408,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		}
 		issueKey := sessionKey(issueID)
 		if targetIssueKey != "" && issueKey != targetIssueKey {
+			continue
+		}
+		if d.isSessionStopPending(projectID, issueID) {
 			continue
 		}
 		if session.State == daemonstate.SessionStateStopped {

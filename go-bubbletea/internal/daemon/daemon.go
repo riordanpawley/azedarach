@@ -46,15 +46,22 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues       *issues.Client
-	tmux         *tmux.Client
-	git          *git.Client
-	worktree     *git.WorktreeManager
-	session      *daemonhandlers.SessionHandler
-	sessionStore *daemonstate.Store
+	issues             *issues.Client
+	tmux               *tmux.Client
+	git                *git.Client
+	worktree           *git.WorktreeManager
+	session            *daemonhandlers.SessionHandler
+	sessionStore       *daemonstate.Store
+	sessionLongRunning SessionLongRunningExecutor
+	sessionStopMu      sync.Mutex
+	sessionStopPending map[string]int
 
 	revMu    sync.Mutex
 	revision map[string]uint64
+
+	shutdownMu       sync.Mutex
+	shuttingDown     bool
+	inFlightCommands sync.WaitGroup
 }
 
 // New constructs a runnable daemon runtime.
@@ -92,16 +99,17 @@ func New(cfg Config) *Daemon {
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
 
 	d := &Daemon{
-		cfg:          cfg,
-		lock:         lifecycle.NewLockManager(cfg.LockPath),
-		hub:          publish.NewHub(512, 64, cfg.Logger),
-		issues:       issues.NewClient(cfg.RepoDir, cfg.Logger),
-		tmux:         tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:          gitClient,
-		worktree:     git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
-		session:      sessionHandler,
-		sessionStore: sessionStore,
-		revision:     map[string]uint64{},
+		cfg:                cfg,
+		lock:               lifecycle.NewLockManager(cfg.LockPath),
+		hub:                publish.NewHub(512, 64, cfg.Logger),
+		issues:             issues.NewClient(cfg.RepoDir, cfg.Logger),
+		tmux:               tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:                gitClient,
+		worktree:           git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
+		session:            sessionHandler,
+		sessionStore:       sessionStore,
+		sessionStopPending: map[string]int{},
+		revision:           map[string]uint64{},
 	}
 	d.router = daemonhandlers.NewDispatcher(
 		sessionHandler,
@@ -126,7 +134,26 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	shutdownDone := make(chan struct{})
+	shutdownStop := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			d.drainInFlightCommands()
+			cancelServe()
+			close(shutdownDone)
+		case <-shutdownStop:
+		}
+	}()
 	defer func() {
+		close(shutdownStop)
+		select {
+		case <-shutdownDone:
+		default:
+			cancelServe()
+		}
 		if d.issues != nil {
 			if closeErr := d.issues.CloseDB(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
@@ -135,7 +162,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
-	return d.serve.Serve(ctx)
+	err = d.serve.Serve(serveCtx)
+	if ctx.Err() != nil {
+		<-shutdownDone
+	}
+	return err
 }
 
 func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
@@ -148,6 +179,11 @@ func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uin
 }
 
 func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if err := d.beginCommand(); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+	}
+	defer d.endCommand()
+
 	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") {
 		return d.router.Handle(ctx, req), nil
 	}
@@ -184,6 +220,49 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleSessionRecover(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
+	}
+}
+
+func (d *Daemon) beginCommand() error {
+	d.shutdownMu.Lock()
+	defer d.shutdownMu.Unlock()
+	if d.shuttingDown {
+		return errors.New("daemon shutting down")
+	}
+	d.inFlightCommands.Add(1)
+	return nil
+}
+
+func (d *Daemon) endCommand() {
+	d.inFlightCommands.Done()
+}
+
+func (d *Daemon) drainInFlightCommands() {
+	d.shutdownMu.Lock()
+	if d.shuttingDown {
+		d.shutdownMu.Unlock()
+		return
+	}
+	d.shuttingDown = true
+	d.shutdownMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		d.inFlightCommands.Wait()
+		close(done)
+	}()
+
+	timeout := d.cfg.IdleTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("daemon shutdown drain timed out", "timeout", timeout.String())
+		}
 	}
 }
 
@@ -288,6 +367,10 @@ func (d *Daemon) commandOutput(req protocol.RequestEnvelope, output string) prot
 	}{Output: output})
 	resp.Body = payload
 	return resp
+}
+
+func (d *Daemon) SetSessionLongRunningExecutor(executor SessionLongRunningExecutor) {
+	d.sessionLongRunning = executor
 }
 
 type applyRevisionAdapter struct {
