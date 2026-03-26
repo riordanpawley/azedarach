@@ -3,40 +3,47 @@ package overlay
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// homeRow defines the home row keys for jump labels
-var homeRow = []rune{'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';'}
-
-// alphabet for double-char labels when we need more than 10
-var alphabet = []rune("abcdefghijklmnopqrstuvwxyz")
+const defaultJumpLabelChars = "abcdefghijklmnopqrstuvwxyz"
 
 // GenerateLabels generates jump labels for the given count
-// Uses single home row characters first, then double alpha characters
+// using the default label character set.
 func GenerateLabels(count int) []string {
+	return GenerateLabelsWithChars(count, defaultJumpLabelChars)
+}
+
+// GenerateLabelsWithChars generates jump labels for the given count using
+// single-character labels first, then double-character combinations.
+func GenerateLabelsWithChars(count int, chars string) []string {
 	if count <= 0 {
 		return []string{}
+	}
+	normalizedChars := normalizeJumpChars(chars)
+	if len(normalizedChars) == 0 {
+		normalizedChars = []rune(defaultJumpLabelChars)
 	}
 
 	labels := make([]string, 0, count)
 
-	// Single character labels using home row (fast access)
-	for i := 0; i < count && i < len(homeRow); i++ {
-		labels = append(labels, string(homeRow[i]))
+	// Single-character labels first (fast access).
+	for i := 0; i < count && i < len(normalizedChars); i++ {
+		labels = append(labels, string(normalizedChars[i]))
 	}
 
 	if len(labels) >= count {
 		return labels
 	}
 
-	// Double character labels using full alphabet (26*26 = 676 combinations)
-	for first := 0; first < len(alphabet) && len(labels) < count; first++ {
-		for second := 0; second < len(alphabet) && len(labels) < count; second++ {
-			label := string(alphabet[first]) + string(alphabet[second])
+	// Double-character labels using the configured set.
+	for first := 0; first < len(normalizedChars) && len(labels) < count; first++ {
+		for second := 0; second < len(normalizedChars) && len(labels) < count; second++ {
+			label := string(normalizedChars[first]) + string(normalizedChars[second])
 			labels = append(labels, label)
 		}
 	}
@@ -46,10 +53,12 @@ func GenerateLabels(count int) []string {
 
 // JumpMode is an overlay that shows jump labels for quick navigation
 type JumpMode struct {
-	labels map[string]int // label -> task index (flat across all columns)
-	input  string         // accumulated input
-	maxLen int            // maximum label length
-	styles *Styles
+	labels      map[string]int // label -> task index (flat across all columns)
+	indexLabels []string       // task index -> label
+	input       string         // accumulated input
+	maxLen      int            // maximum label length
+	allowedKeys map[rune]struct{}
+	styles      *Styles
 }
 
 // JumpSelectedMsg is sent when a jump target is selected
@@ -59,22 +68,40 @@ type JumpSelectedMsg struct {
 
 // NewJumpMode creates a new jump mode overlay with labels
 func NewJumpMode(taskCount int) *JumpMode {
-	labels := GenerateLabels(taskCount)
+	return NewJumpModeWithChars(taskCount, defaultJumpLabelChars)
+}
+
+// NewJumpModeWithChars creates a new jump mode overlay with labels using the provided key set.
+func NewJumpModeWithChars(taskCount int, chars string) *JumpMode {
+	labels := GenerateLabelsWithChars(taskCount, chars)
 	labelMap := make(map[string]int)
+	indexLabels := make([]string, 0, len(labels))
+	allowedKeys := make(map[rune]struct{})
 
 	maxLen := 1
 	for i, label := range labels {
 		labelMap[label] = i
+		indexLabels = append(indexLabels, label)
 		if len(label) > maxLen {
 			maxLen = len(label)
 		}
 	}
+	for _, r := range normalizeJumpChars(chars) {
+		allowedKeys[r] = struct{}{}
+	}
+	if len(allowedKeys) == 0 {
+		for _, r := range defaultJumpLabelChars {
+			allowedKeys[r] = struct{}{}
+		}
+	}
 
 	return &JumpMode{
-		labels: labelMap,
-		input:  "",
-		maxLen: maxLen,
-		styles: New(),
+		labels:      labelMap,
+		indexLabels: indexLabels,
+		input:       "",
+		maxLen:      maxLen,
+		allowedKeys: allowedKeys,
+		styles:      New(),
 	}
 }
 
@@ -100,8 +127,12 @@ func (j *JumpMode) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			// Accumulate input
 			key := msg.String()
-			if len(key) == 1 && isHomeRowKey(rune(key[0])) {
-				j.input += key
+			if len(key) == 1 {
+				r := unicode.ToLower(rune(key[0]))
+				if _, ok := j.allowedKeys[r]; !ok {
+					return j, nil
+				}
+				j.input += string(r)
 
 				// Check for exact match
 				if index, ok := j.labels[j.input]; ok {
@@ -201,12 +232,10 @@ func (j *JumpMode) Size() (width, height int) {
 
 // GetLabel returns the label for a given task index
 func (j *JumpMode) GetLabel(index int) string {
-	for label, idx := range j.labels {
-		if idx == index {
-			return label
-		}
+	if index < 0 || index >= len(j.indexLabels) {
+		return ""
 	}
-	return ""
+	return j.indexLabels[index]
 }
 
 // getLabelList returns a sorted list of labels
@@ -242,19 +271,30 @@ func (j *JumpMode) hasLongerMatch() bool {
 
 // isJumpKey checks if a rune is valid for jump labels (home row or alphabet)
 func isJumpKey(r rune) bool {
-	// Check home row (includes semicolon)
-	for _, hr := range homeRow {
-		if hr == r {
-			return true
-		}
-	}
-	// Check full alphabet for double-char labels
+	r = unicode.ToLower(r)
 	return r >= 'a' && r <= 'z'
 }
 
 // isHomeRowKey is kept for backwards compatibility
 func isHomeRowKey(r rune) bool {
 	return isJumpKey(r)
+}
+
+func normalizeJumpChars(chars string) []rune {
+	seen := make(map[rune]struct{})
+	out := make([]rune, 0, len(chars))
+	for _, raw := range chars {
+		r := unicode.ToLower(raw)
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if _, exists := seen[r]; exists {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	return out
 }
 
 // RenderLabel renders a jump label with styling

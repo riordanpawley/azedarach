@@ -1064,10 +1064,11 @@ func TestGotoMode(t *testing.T) {
 		jumpModel := newTestModel()
 		jumpModel.width = 120
 		jumpModel.height = 120
+		jumpModel.config.Keyboard.JumpLabelChars = "abc"
 		jumpModel.editor.EnterGoto()
 		jumpModel.nav.SelectTask("az-1", 0)
 
-		for i := 0; i < 9; i++ {
+		for i := 0; i < 5; i++ {
 			jumpModel.tasks = append(jumpModel.tasks, domain.Task{
 				ID:       fmt.Sprintf("jump-%02d", i),
 				Title:    fmt.Sprintf("Jump Task %02d", i),
@@ -1091,12 +1092,12 @@ func TestGotoMode(t *testing.T) {
 		if got, want := jump.GetLabel(0), "a"; got != want {
 			t.Fatalf("label 0 = %q, want %q", got, want)
 		}
-		if got, want := jump.GetLabel(10), "aa"; got != want {
-			t.Fatalf("label 10 = %q, want %q", got, want)
+		if got, want := jump.GetLabel(3), "aa"; got != want {
+			t.Fatalf("label 3 = %q, want %q", got, want)
 		}
 
-		seen := make(map[string]int, 11)
-		for i := 0; i < 11; i++ {
+		seen := make(map[string]int, 7)
+		for i := 0; i < 7; i++ {
 			label := jump.GetLabel(i)
 			if label == "" {
 				t.Fatalf("label %d is empty", i)
@@ -1106,8 +1107,8 @@ func TestGotoMode(t *testing.T) {
 			}
 			seen[label] = i
 		}
-		if got := len(seen); got != 11 {
-			t.Fatalf("unique label count = %d, want 11", got)
+		if got := len(seen); got != 7 {
+			t.Fatalf("unique label count = %d, want 7", got)
 		}
 
 		if cmd := newModel.overlayStack.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); cmd != nil {
@@ -1122,15 +1123,15 @@ func TestGotoMode(t *testing.T) {
 		if !ok {
 			t.Fatalf("jump command emitted %T, want overlay.JumpSelectedMsg", msg)
 		}
-		if got, want := selected.TaskIndex, 10; got != want {
+		if got, want := selected.TaskIndex, 3; got != want {
 			t.Fatalf("selected task index = %d, want %d", got, want)
 		}
 
 		result, _ = newModel.Update(msg)
 		finalModel := result.(Model)
 		pos := getCursorPosition(finalModel)
-		if pos.Column != 0 || pos.Task != 10 {
-			t.Fatalf("expected cursor on jump target at (0,10), got (%d,%d)", pos.Column, pos.Task)
+		if pos.Column != 0 || pos.Task != 3 {
+			t.Fatalf("expected cursor on jump target at (0,3), got (%d,%d)", pos.Column, pos.Task)
 		}
 		if !finalModel.overlayStack.IsEmpty() {
 			t.Fatal("expected jump overlay to close after selection")

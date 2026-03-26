@@ -19,19 +19,26 @@ func EventLogHotkeyHint() string {
 
 // EventLogOverlay renders daemon/client runtime events with newest entries first.
 type EventLogOverlay struct {
-	events     []protocol.EventEnvelope
-	scroll     int
-	maxScroll  int
-	viewHeight int
-	styles     *Styles
+	logFilePath string
+	events      []protocol.EventEnvelope
+	scroll      int
+	maxScroll   int
+	viewHeight  int
+	styles      *Styles
 }
 
 // NewEventLogOverlay creates an event log overlay from chronologically ordered events.
 func NewEventLogOverlay(events []protocol.EventEnvelope) *EventLogOverlay {
+	return NewEventLogOverlayWithLogFile(events, "")
+}
+
+// NewEventLogOverlayWithLogFile creates an event log overlay with optional az.log path.
+func NewEventLogOverlayWithLogFile(events []protocol.EventEnvelope, logFilePath string) *EventLogOverlay {
 	overlay := &EventLogOverlay{
-		scroll:     0,
-		viewHeight: 18,
-		styles:     New(),
+		logFilePath: logFilePath,
+		scroll:      0,
+		viewHeight:  18,
+		styles:      New(),
 	}
 	overlay.SetEvents(events)
 	return overlay
@@ -77,6 +84,26 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "G":
 			o.scroll = o.maxScroll
 			return o, nil
+		case "s":
+			if strings.TrimSpace(o.logFilePath) != "" {
+				return o, func() tea.Msg {
+					return SelectionMsg{
+						Key:   "event-log-stream",
+						Value: o.logFilePath,
+					}
+				}
+			}
+			return o, nil
+		case "e":
+			if strings.TrimSpace(o.logFilePath) != "" {
+				return o, func() tea.Msg {
+					return SelectionMsg{
+						Key:   "event-log-editor",
+						Value: o.logFilePath,
+					}
+				}
+			}
+			return o, nil
 		}
 	}
 
@@ -113,6 +140,11 @@ func (o *EventLogOverlay) Title() string {
 	return "Event Log"
 }
 
+// UsesInternalTitle indicates this overlay renders its own internal title line.
+func (o *EventLogOverlay) UsesInternalTitle() bool {
+	return true
+}
+
 // Size returns the overlay dimensions.
 func (o *EventLogOverlay) Size() (width, height int) {
 	o.viewHeight = 18
@@ -124,7 +156,10 @@ func (o *EventLogOverlay) renderContentLines() []string {
 
 	lines = append(lines, o.styles.Title.Render("Event Log"))
 	lines = append(lines, o.styles.MenuHeader.Render("Newest runtime events first"))
-	lines = append(lines, o.styles.Footer.Render("Board hotkey scaffold: "+EventLogHotkeyHint()))
+	if strings.TrimSpace(o.logFilePath) != "" {
+		lines = append(lines, o.styles.MenuItemDisabled.Render("Log file: "+o.logFilePath))
+	}
+	lines = append(lines, o.styles.Footer.Render("s: stream log • e: edit log file • "+EventLogHotkeyHint()))
 	lines = append(lines, "")
 
 	if len(o.events) == 0 {
@@ -141,7 +176,7 @@ func (o *EventLogOverlay) renderContentLines() []string {
 }
 
 func (o *EventLogOverlay) footerLine(scrollable bool) string {
-	footer := "Esc/q/backspace: close"
+	footer := "s: stream • e: edit • Esc/q/backspace: close"
 	if scrollable {
 		footer = "j/k: scroll • g/G: top/bottom • " + footer
 	}

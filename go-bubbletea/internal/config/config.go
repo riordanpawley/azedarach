@@ -12,6 +12,7 @@ import (
 type Config struct {
 	CLITool       string          `json:"cliTool"`
 	Git           GitConfig       `json:"git"`
+	Keyboard      KeyboardConfig  `json:"keyboard"`
 	Session       SessionConfig   `json:"session"`
 	PR            PRConfig        `json:"pr"`
 	Merge         MergeConfig     `json:"merge"`
@@ -29,6 +30,11 @@ type GitConfig struct {
 	WorkflowMode         string `json:"workflowMode"`
 	ShowLineChanges      bool   `json:"showLineChanges"`
 	DefaultMergeStrategy string `json:"defaultMergeStrategy"`
+}
+
+// KeyboardConfig contains keyboard-related settings
+type KeyboardConfig struct {
+	JumpLabelChars string `json:"jumpLabelChars"`
 }
 
 // SessionConfig contains session management settings
@@ -105,6 +111,9 @@ func DefaultConfig() *Config {
 			WorkflowMode:         "worktree",
 			ShowLineChanges:      true,
 			DefaultMergeStrategy: "merge",
+		},
+		Keyboard: KeyboardConfig{
+			JumpLabelChars: "abcdefghijklmnopqrstuvwxyz",
 		},
 		Session: SessionConfig{
 			Shell:        "zsh",
@@ -290,6 +299,9 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.Git.DefaultMergeStrategy == "" {
 		cfg.Git.DefaultMergeStrategy = defaults.Git.DefaultMergeStrategy
+	}
+	if cfg.Keyboard.JumpLabelChars == "" {
+		cfg.Keyboard.JumpLabelChars = defaults.Keyboard.JumpLabelChars
 	}
 
 	// Merge Session config

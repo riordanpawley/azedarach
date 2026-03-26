@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/config"
 )
 
 // SettingType represents the type of a setting
@@ -25,29 +27,38 @@ const (
 
 // SettingItem represents a single setting in the settings menu
 type SettingItem struct {
-	Key      string
-	Label    string
-	Type     SettingType
-	Value    any
-	Choices  []string       // For SettingChoice type
-	OnChange func(any)      // Callback when value changes
-	OnAction func() tea.Cmd // Callback for SettingAction type
+	Key        string
+	Group      string
+	Label      string
+	Type       SettingType
+	Value      any
+	Choices    []string       // For SettingChoice type
+	ActionHint string         // Optional display hint for action rows
+	OnChange   func(any)      // Callback when value changes
+	OnAction   func() tea.Cmd // Callback for SettingAction type
 }
 
 // SettingsOverlay is a settings menu overlay
 type SettingsOverlay struct {
-	items  []SettingItem
-	cursor int
-	styles *Styles
+	items        []SettingItem
+	cursor       int
+	configSource string
+	styles       *Styles
 }
 
 // NewSettingsOverlay creates a new settings overlay with the given items
 func NewSettingsOverlay(items []SettingItem) *SettingsOverlay {
+	return NewSettingsOverlayWithSource(items, "")
+}
+
+// NewSettingsOverlayWithSource creates a settings overlay with optional config source path.
+func NewSettingsOverlayWithSource(items []SettingItem, configSource string) *SettingsOverlay {
 	s := New()
 	menu := &SettingsOverlay{
-		items:  items,
-		cursor: 0,
-		styles: s,
+		items:        items,
+		cursor:       0,
+		configSource: configSource,
+		styles:       s,
 	}
 	// Position cursor on first selectable item
 	menu.moveCursorToNextSelectable()
@@ -59,6 +70,7 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 	items := []SettingItem{
 		{
 			Key:   "refresh",
+			Group: "General",
 			Label: "Auto-refresh issues",
 			Type:  SettingToggle,
 			Value: true,
@@ -68,6 +80,7 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 		},
 		{
 			Key:   "compact",
+			Group: "General",
 			Label: "Compact card view",
 			Type:  SettingToggle,
 			Value: false,
@@ -77,6 +90,7 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 		},
 		{
 			Key:   "theme",
+			Group: "General",
 			Label: "Theme",
 			Type:  SettingChoice,
 			Value: "macchiato",
@@ -92,25 +106,30 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 		},
 		{
 			Key:      "",
+			Group:    "Actions",
 			Label:    "───────────────────",
 			Type:     SettingSeparator,
 			Value:    nil,
 			OnChange: nil,
 		},
 		{
-			Key:   "editor",
-			Label: "Open config in $EDITOR",
-			Type:  SettingAction,
-			Value: nil,
+			Key:        "editor",
+			Group:      "Actions",
+			Label:      "Open config in $EDITOR",
+			Type:       SettingAction,
+			Value:      nil,
+			ActionHint: "open",
 			OnAction: func() tea.Cmd {
 				return openConfigInEditor()
 			},
 		},
 		{
-			Key:   "projects",
-			Label: "Manage projects",
-			Type:  SettingAction,
-			Value: nil,
+			Key:        "projects",
+			Group:      "Actions",
+			Label:      "Manage projects",
+			Type:       SettingAction,
+			Value:      nil,
+			ActionHint: "open",
 			OnAction: func() tea.Cmd {
 				// This will be handled by the app to open project selector
 				return func() tea.Msg {
@@ -158,6 +177,12 @@ func (m *SettingsOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			return m, m.activateCurrent()
+
+		case "e":
+			if cmd := m.activateByKey("editor"); cmd != nil {
+				return m, cmd
+			}
+			return m, nil
 		}
 	}
 
@@ -168,7 +193,22 @@ func (m *SettingsOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *SettingsOverlay) View() string {
 	var b strings.Builder
 
+	if strings.TrimSpace(m.configSource) != "" {
+		b.WriteString(m.styles.MenuItemDisabled.Render("Config source: " + m.configSource))
+		b.WriteString("\n\n")
+	}
+
+	lastGroup := ""
 	for i, item := range m.items {
+		if item.Group != "" && item.Group != lastGroup {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(m.styles.MenuHeader.Render(item.Group))
+			b.WriteString("\n")
+			lastGroup = item.Group
+		}
+
 		// Separators
 		if item.Type == SettingSeparator {
 			b.WriteString(m.styles.Separator.Render(item.Label))
@@ -177,41 +217,51 @@ func (m *SettingsOverlay) View() string {
 		}
 
 		// Determine style based on cursor position
-		var style, keyStyle = m.styles.MenuItem, m.styles.MenuKey
+		var style = m.styles.MenuItem
 		if i == m.cursor {
 			style = m.styles.MenuItemActive
 		}
 
 		// Format line based on type
-		var line string
+		prefix := "  "
+		if i == m.cursor {
+			prefix = "▶ "
+		}
+		label := item.Label
+		if item.Group != "" {
+			label = "  " + label
+		}
+		dots := strings.Repeat(".", max(1, 36-len([]rune(label))))
+
+		var line, value string
 		switch item.Type {
 		case SettingToggle:
-			valueStr := "off"
+			valueStr := "no"
 			if v, ok := item.Value.(bool); ok && v {
-				valueStr = "on"
+				valueStr = "yes"
 			}
-			line = fmt.Sprintf("%s %s [%s]",
-				keyStyle.Render("["+item.Key+"]"),
-				style.Render(item.Label),
-				style.Render(valueStr),
-			)
+			value = valueStr
 
 		case SettingChoice:
 			valueStr := ""
 			if v, ok := item.Value.(string); ok {
 				valueStr = v
 			}
-			line = fmt.Sprintf("%s %s <%s>",
-				keyStyle.Render("["+item.Key+"]"),
-				style.Render(item.Label),
-				style.Render(valueStr),
-			)
+			value = valueStr
 
 		case SettingAction:
-			line = fmt.Sprintf("%s %s",
-				keyStyle.Render("["+item.Key+"]"),
-				style.Render(item.Label),
-			)
+			value = item.ActionHint
+			if value == "" {
+				value = "run"
+			}
+		}
+
+		line = style.Render(prefix+label) +
+			m.styles.MenuItemDisabled.Render(dots) +
+			m.styles.MenuKey.Render(value)
+
+		if item.Key != "" {
+			line = line + " " + m.styles.MenuItemDisabled.Render("["+item.Key+"]")
 		}
 
 		b.WriteString(line)
@@ -220,7 +270,7 @@ func (m *SettingsOverlay) View() string {
 
 	// Add footer hint
 	b.WriteString("\n")
-	b.WriteString(m.styles.Footer.Render("j/k: navigate • h/l: change choice • space/enter: toggle/activate • esc: close"))
+	b.WriteString(m.styles.Footer.Render("j/k: move • h/l: cycle • Enter/Space: toggle/activate • e: edit config • Esc: close"))
 
 	return b.String()
 }
@@ -234,7 +284,7 @@ func (m *SettingsOverlay) Title() string {
 func (m *SettingsOverlay) Size() (width, height int) {
 	// Width: enough for longest setting line
 	// Height: number of items + footer + padding
-	return 60, len(m.items) + 6
+	return 72, len(m.items) + 9
 }
 
 // moveCursorDown moves the cursor to the next selectable item
@@ -323,6 +373,19 @@ func (m *SettingsOverlay) activateCurrent() tea.Cmd {
 	}
 }
 
+func (m *SettingsOverlay) activateByKey(key string) tea.Cmd {
+	for i := range m.items {
+		if m.items[i].Key != key {
+			continue
+		}
+		if m.items[i].Type != SettingAction || m.items[i].OnAction == nil {
+			return nil
+		}
+		return m.items[i].OnAction()
+	}
+	return nil
+}
+
 // incrementChoice increments the choice value (wrapping around)
 func (m *SettingsOverlay) incrementChoice() tea.Cmd {
 	if m.cursor < 0 || m.cursor >= len(m.items) {
@@ -404,19 +467,24 @@ func openConfigInEditor() tea.Cmd {
 	return func() tea.Msg {
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
+			editor = os.Getenv("VISUAL")
+		}
+		if editor == "" {
 			editor = "vim" // Default to vim
 		}
 
-		// Get config path
-		home, err := os.UserHomeDir()
+		cwd, err := os.Getwd()
 		if err != nil {
 			return SelectionMsg{
 				Key:   "editor-error",
-				Value: fmt.Errorf("failed to get home directory: %w", err),
+				Value: fmt.Errorf("failed to resolve cwd: %w", err),
 			}
 		}
-
-		configPath := home + "/.config/azedarach/config.toml"
+		baseDir, err := config.ResolveConfigBase(cwd)
+		if err != nil {
+			baseDir = cwd
+		}
+		configPath := filepath.Join(baseDir, config.ConfigDirName, config.ConfigFileName)
 
 		// Create the command
 		cmd := exec.Command(editor, configPath)
@@ -439,14 +507,24 @@ func openConfigInEditor() tea.Cmd {
 	}
 }
 
-// NewSettingsOverlayWithEditor creates a settings overlay with editor service integration
+// NewSettingsOverlayWithEditor creates a settings overlay with editor service integration.
 func NewSettingsOverlayWithEditor(editor interface {
 	GetShowPhases() bool
 	ToggleShowPhases()
 }) *SettingsOverlay {
+	return NewSettingsOverlayWithEditorAndSource(editor, "")
+}
+
+// NewSettingsOverlayWithEditorAndSource creates a settings overlay with editor service integration.
+// configSource is rendered as informational context near the top of the overlay.
+func NewSettingsOverlayWithEditorAndSource(editor interface {
+	GetShowPhases() bool
+	ToggleShowPhases()
+}, configSource string) *SettingsOverlay {
 	items := []SettingItem{
 		{
 			Key:   "phases",
+			Group: "General",
 			Label: "Show dependency phases",
 			Type:  SettingToggle,
 			Value: editor.GetShowPhases(),
@@ -456,6 +534,7 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 		{
 			Key:   "refresh",
+			Group: "General",
 			Label: "Auto-refresh issues",
 			Type:  SettingToggle,
 			Value: true,
@@ -465,6 +544,7 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 		{
 			Key:   "compact",
+			Group: "General",
 			Label: "Compact card view",
 			Type:  SettingToggle,
 			Value: false,
@@ -474,6 +554,7 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 		{
 			Key:   "theme",
+			Group: "General",
 			Label: "Theme",
 			Type:  SettingChoice,
 			Value: "macchiato",
@@ -489,25 +570,30 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 		{
 			Key:      "",
+			Group:    "Actions",
 			Label:    "───────────────────",
 			Type:     SettingSeparator,
 			Value:    nil,
 			OnChange: nil,
 		},
 		{
-			Key:   "editor",
-			Label: "Open config in $EDITOR",
-			Type:  SettingAction,
-			Value: nil,
+			Key:        "editor",
+			Group:      "Actions",
+			Label:      "Open config in $EDITOR",
+			Type:       SettingAction,
+			Value:      nil,
+			ActionHint: "open",
 			OnAction: func() tea.Cmd {
 				return openConfigInEditor()
 			},
 		},
 		{
-			Key:   "projects",
-			Label: "Manage projects",
-			Type:  SettingAction,
-			Value: nil,
+			Key:        "projects",
+			Group:      "Actions",
+			Label:      "Manage projects",
+			Type:       SettingAction,
+			Value:      nil,
+			ActionHint: "open",
 			OnAction: func() tea.Cmd {
 				// This will be handled by the app to open project selector
 				return func() tea.Msg {
@@ -520,5 +606,5 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 	}
 
-	return NewSettingsOverlay(items)
+	return NewSettingsOverlayWithSource(items, configSource)
 }

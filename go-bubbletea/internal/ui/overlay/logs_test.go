@@ -72,8 +72,11 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	if !strings.Contains(view, "Event Log") {
 		t.Fatalf("View() missing title: %s", view)
 	}
-	if !strings.Contains(view, "Board hotkey scaffold: L: logs") {
-		t.Fatalf("View() missing hotkey scaffold hint: %s", view)
+	if !strings.Contains(view, "s: stream log") {
+		t.Fatalf("View() missing stream hint: %s", view)
+	}
+	if !strings.Contains(view, "L: logs") {
+		t.Fatalf("View() missing board hotkey hint: %s", view)
 	}
 
 	newerIdx := strings.Index(view, newer.Event)

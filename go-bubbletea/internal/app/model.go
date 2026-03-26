@@ -879,7 +879,7 @@ func (m Model) View() string {
 			view = lipgloss.JoinVertical(lipgloss.Left, view, overlayView)
 		} else {
 			title := current.Title()
-			if title != "" {
+			if title != "" && !overlayUsesInternalTitle(current) {
 				titleView := m.styles.OverlayTitle.Render(title)
 				overlayView = lipgloss.JoinVertical(lipgloss.Left, titleView, overlayView)
 			}
@@ -910,6 +910,13 @@ func (m Model) View() string {
 
 func (m Model) layer(bottom, top string) string {
 	return m.layerWithinHeight(bottom, top, m.height)
+}
+
+func overlayUsesInternalTitle(current overlay.Overlay) bool {
+	internalTitleOverlay, ok := current.(interface {
+		UsesInternalTitle() bool
+	})
+	return ok && internalTitleOverlay.UsesInternalTitle()
 }
 
 func (m Model) layerWithinHeight(bottom, top string, height int) string {
@@ -1168,7 +1175,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
 
 	case overlay.EventLogHotkey:
-		return m, m.overlayStack.Push(overlay.NewEventLogOverlay(m.runtimeEvents))
+		return m, m.overlayStack.Push(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
 
 	case "enter": // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
@@ -1199,7 +1206,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlayWithParent(parentID))
 
 	case "s": // Settings
-		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditor(m.editor))
+		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndSource(m.editor, m.configSourcePath()))
 
 	case "D": // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
@@ -1293,7 +1300,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			visibleCount += colVisible
 		}
-		return m, m.overlayStack.Push(overlay.NewJumpMode(visibleCount))
+		return m, m.overlayStack.Push(overlay.NewJumpModeWithChars(visibleCount, m.config.Keyboard.JumpLabelChars))
 	case "p":
 		// Project selector
 		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
@@ -2156,6 +2163,27 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
 		))
+	case "event-log-stream":
+		if path, ok := msg.Value.(string); ok {
+			return m, m.openLogStreamCmd(path)
+		}
+		return m, nil
+	case "event-log-editor":
+		if path, ok := msg.Value.(string); ok {
+			return m, m.openLogEditorCmd(path)
+		}
+		return m, nil
+	case "event-log-error":
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Log action failed: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+	case "event-log-opened":
+		return m, nil
 	case "editor-error":
 		// Editor open error
 		m.overlayStack.Pop()
@@ -2401,6 +2429,87 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) eventLogFilePath() string {
+	base := m.repoDir
+	if strings.TrimSpace(base) == "" {
+		base = "."
+	}
+	return filepath.Join(base, "az.log")
+}
+
+func (m Model) configSourcePath() string {
+	base, err := config.ResolveConfigBase(m.repoDir)
+	if err != nil {
+		base = m.repoDir
+	}
+	if strings.TrimSpace(base) == "" {
+		base = "."
+	}
+	return filepath.Join(base, config.ConfigDirName, config.ConfigFileName)
+}
+
+func (m Model) openLogStreamCmd(logPath string) tea.Cmd {
+	return func() tea.Msg {
+		path := strings.TrimSpace(logPath)
+		if path == "" {
+			return overlay.SelectionMsg{Key: "event-log-error", Value: errors.New("log file path is empty")}
+		}
+		if _, err := os.Stat(path); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "event-log-error",
+				Value: fmt.Errorf("log file unavailable: %w", err),
+			}
+		}
+
+		cmd := exec.Command("less", "+F", path)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "event-log-error",
+				Value: fmt.Errorf("stream logs: %w", err),
+			}
+		}
+		return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
+	}
+}
+
+func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
+	return func() tea.Msg {
+		path := strings.TrimSpace(logPath)
+		if path == "" {
+			return overlay.SelectionMsg{Key: "event-log-error", Value: errors.New("log file path is empty")}
+		}
+		if _, err := os.Stat(path); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "event-log-error",
+				Value: fmt.Errorf("log file unavailable: %w", err),
+			}
+		}
+
+		editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+		if editorName == "" {
+			editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+		}
+		if editorName == "" {
+			editorName = "vim"
+		}
+
+		cmd := exec.Command(editorName, path)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return overlay.SelectionMsg{
+				Key:   "event-log-error",
+				Value: fmt.Errorf("open log editor: %w", err),
+			}
+		}
+		return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
+	}
 }
 
 type taskDeletedResultMsg struct {
