@@ -19,6 +19,7 @@ const (
 	CommandDevServerStop   = "devserver.stop"
 	CommandDevServerStatus = "devserver.status"
 	CommandWorktreeList    = "worktree.list"
+	CommandWorktreeRemove  = "worktree.remove"
 )
 
 type sessionCommandBody struct {
@@ -49,6 +50,11 @@ type worktreePayload struct {
 	Path    string `json:"path"`
 	Branch  string `json:"branch"`
 	IssueID string `json:"issue_id"`
+}
+
+type worktreeCommandBody struct {
+	ProjectID string `json:"project_id"`
+	IssueID   string `json:"issue_id,omitempty"`
 }
 
 func (c *Client) commandOutput(ctx context.Context, command string, body any) (string, error) {
@@ -179,6 +185,14 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 		})
 	}
 	return worktrees, nil
+}
+
+// RemoveWorktree asks the daemon to remove one worktree for an issue in the current project route.
+func (c *Client) RemoveWorktree(ctx context.Context, issueID string) error {
+	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
+		ProjectID: c.projectRoute(),
+		IssueID:   issueID,
+	}, nil)
 }
 
 // CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.

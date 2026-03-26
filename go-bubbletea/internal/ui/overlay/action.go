@@ -86,6 +86,8 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
+		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasWorktree},
+		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasWorktree},
 	)
 
 	// Task actions separator

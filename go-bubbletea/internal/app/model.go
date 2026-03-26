@@ -793,6 +793,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, m.loadIssuesCmd()
 
+	case worktreeCleanupResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Worktree cleanup failed: %v", msg.err),
+				Expires: time.Now().Add(4 * time.Second),
+			})
+			return m, nil
+		}
+
+		message := fmt.Sprintf("Worktree cleaned for %s", msg.taskID)
+		if msg.deletedTask {
+			message = fmt.Sprintf("Task %s deleted and worktree cleaned", msg.taskID)
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: message,
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, m.loadIssuesCmd()
+
 	case taskStatusResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -2639,6 +2660,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		viewer := diff.NewDiffViewer(session.Worktree)
 		cmd := m.overlayStack.Push(viewer)
 		return m, tea.Batch(cmd, viewer.LoadDiff(context.Background(), m.gitClient))
+	case "w":
+		// Cleanup worktree and keep task.
+		return m, m.cleanupWorktreeCmd(task.ID, false)
+	case "W":
+		// Delete task and cleanup worktree.
+		return m, m.cleanupWorktreeCmd(task.ID, true)
 
 	case "i":
 		// Image attachments
@@ -2818,6 +2845,12 @@ type taskDeletedResultMsg struct {
 	err    error
 }
 
+type worktreeCleanupResultMsg struct {
+	taskID      string
+	deletedTask bool
+	err         error
+}
+
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2829,6 +2862,36 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 
 		err := m.daemonClient.DeleteTask(ctx, taskID)
 		return taskDeletedResultMsg{taskID: taskID, err: err}
+	}
+}
+
+func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if m.daemonClient == nil {
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		if session, ok := m.sessions[taskID]; ok && session != nil {
+			m.sessionMonitor.Stop(taskID)
+			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
+			}
+		}
+
+		if err := m.daemonClient.RemoveWorktree(ctx, taskID); err != nil {
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
+		}
+
+		if deleteTask {
+			if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, err: err}
+			}
+		}
+
+		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask}
 	}
 }
 

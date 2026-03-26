@@ -752,6 +752,139 @@ func TestGitWorkflowCommandsUseDaemonClient(t *testing.T) {
 	}
 }
 
+func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
+	t.Run("cleanup worktree only", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandSessionStop:
+					var body struct {
+						ProjectID string `json:"project_id"`
+						SessionID string `json:"session_id"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal session stop request: %v", err)
+					}
+					if body.SessionID != "az-1" {
+						t.Fatalf("session stop body = %+v, want session_id=az-1", body)
+					}
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						ProjectID string `json:"project_id"`
+						IssueID   string `json:"issue_id"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove request: %v", err)
+					}
+					if body.IssueID != "az-1" {
+						t.Fatalf("worktree remove body = %+v, want issue_id=az-1", body)
+					}
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+		}
+		m.sessions["az-1"] = &domain.Session{
+			IssueID:  "az-1",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-1",
+		}
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
+		if _, ok := updated.(Model); !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+		if cmd == nil {
+			t.Fatal("expected worktree cleanup command")
+		}
+
+		msg := cmd()
+		result, ok := msg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+		}
+		if result.err != nil {
+			t.Fatalf("cleanup result err = %v", result.err)
+		}
+		if result.deletedTask {
+			t.Fatalf("deletedTask = true, want false")
+		}
+		if got := transport.requests; len(got) != 2 ||
+			got[0] != daemonclient.CommandSessionStop ||
+			got[1] != daemonclient.CommandWorktreeRemove {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
+	t.Run("delete task and cleanup worktree", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskDelete:
+					// expected commands
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+		}
+		m.sessions["az-1"] = &domain.Session{
+			IssueID:  "az-1",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-1",
+		}
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "W"})
+		if _, ok := updated.(Model); !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+		if cmd == nil {
+			t.Fatal("expected full cleanup command")
+		}
+
+		msg := cmd()
+		result, ok := msg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+		}
+		if result.err != nil {
+			t.Fatalf("cleanup result err = %v", result.err)
+		}
+		if !result.deletedTask {
+			t.Fatalf("deletedTask = false, want true")
+		}
+		if got := transport.requests; len(got) != 3 ||
+			got[0] != daemonclient.CommandSessionStop ||
+			got[1] != daemonclient.CommandWorktreeRemove ||
+			got[2] != daemonclient.CommandTaskDelete {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+}
+
 func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

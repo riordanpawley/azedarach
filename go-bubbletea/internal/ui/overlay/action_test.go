@@ -82,7 +82,7 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	// Git actions should be disabled
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "w" || action.Key == "W" {
 			if action.Enabled {
 				t.Errorf("expected git action '%s' to be disabled without session", action.Key)
 			}
@@ -145,7 +145,7 @@ func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 
 	// Git actions should be enabled with worktree
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "f" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "f" || action.Key == "w" || action.Key == "W" {
 			if !action.Enabled {
 				t.Errorf("expected git action '%s' to be enabled with worktree", action.Key)
 			}

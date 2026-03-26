@@ -249,6 +249,29 @@ func TestListWorktreesUsesProjectRoute(t *testing.T) {
 	}
 }
 
+func TestRemoveWorktreeUsesProjectRoute(t *testing.T) {
+	transport := &lifecycleRecordingTransport{}
+	client := New(transport).WithProjectID("proj-a")
+
+	if err := client.RemoveWorktree(context.Background(), "az-1"); err != nil {
+		t.Fatalf("RemoveWorktree error: %v", err)
+	}
+	if transport.lastReq.Command != CommandWorktreeRemove {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandWorktreeRemove)
+	}
+	if transport.lastReq.Meta.ProjectID != "proj-a" {
+		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+	}
+
+	var body worktreeCommandBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.ProjectID != "proj-a" || body.IssueID != "az-1" {
+		t.Fatalf("request body = %+v, want project_id=proj-a issue_id=az-1", body)
+	}
+}
+
 func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
