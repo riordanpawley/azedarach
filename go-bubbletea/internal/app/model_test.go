@@ -155,6 +155,33 @@ func TestHelperMethods(t *testing.T) {
 	})
 }
 
+func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
+	evt := protocol.EventEnvelope{
+		Event: "clipboard.error",
+		Body:  []byte("line one\nline   two\r\nline three"),
+	}
+
+	summary := runtimeEventSummary(evt)
+	if strings.Contains(summary, "\n") || strings.Contains(summary, "\r") {
+		t.Fatalf("summary contains line breaks: %q", summary)
+	}
+	if !strings.Contains(summary, "line one line two line three") {
+		t.Fatalf("summary was not compacted as expected: %q", summary)
+	}
+
+	longBody := strings.Repeat("x", eventSummaryMaxRunes+50)
+	longSummary := runtimeEventSummary(protocol.EventEnvelope{
+		Event: "ui.toast",
+		Body:  []byte(longBody),
+	})
+	if len([]rune(longSummary)) > eventSummaryMaxRunes {
+		t.Fatalf("long summary was not truncated: len=%d summary=%q", len([]rune(longSummary)), longSummary)
+	}
+	if !strings.HasSuffix(longSummary, "…") {
+		t.Fatalf("truncated summary must end with ellipsis: %q", longSummary)
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()

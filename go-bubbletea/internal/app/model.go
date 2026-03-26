@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -59,6 +60,7 @@ const (
 	diffPreviewMaxCharacters = 200
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
+	eventSummaryMaxRunes     = 140
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -195,14 +197,14 @@ func New(cfg *config.Config) Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(styles.Blue)
 
-	// Initialize logger
-	logger := slog.Default()
-
 	// Resolve repository directory for local services and daemon routing.
 	repoDir, err := os.Getwd()
 	if err != nil {
-		logger.Error("failed to get current directory", "error", err)
 		repoDir = "."
+	}
+	logger := newTUILogger(repoDir)
+	if err != nil {
+		logger.Error("failed to get current directory", "error", err)
 	}
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonClient := daemonclient.New(transport.NewClient(socketPath))
@@ -2978,11 +2980,24 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) eventLogFilePath() string {
-	base := m.repoDir
-	if strings.TrimSpace(base) == "" {
+	return tuiLogFilePath(m.repoDir)
+}
+
+func tuiLogFilePath(repoDir string) string {
+	base := strings.TrimSpace(repoDir)
+	if base == "" {
 		base = "."
 	}
 	return filepath.Join(base, "az.log")
+}
+
+func newTUILogger(repoDir string) *slog.Logger {
+	logPath := tuiLogFilePath(repoDir)
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
 func (m Model) configSourcePath() string {
@@ -3380,17 +3395,29 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 
 func runtimeEventSummary(evt protocol.EventEnvelope) string {
 	eventName := strings.TrimSpace(evt.Event)
-	body := strings.TrimSpace(string(evt.Body))
+	body := compactSummaryText(string(evt.Body))
 	switch {
 	case eventName != "" && body != "":
-		return eventName + ": " + body
+		return truncateSummary(eventName + ": " + body)
 	case eventName != "":
-		return eventName
+		return truncateSummary(eventName)
 	case body != "":
-		return body
+		return truncateSummary(body)
 	default:
-		return strings.TrimSpace(string(evt.Kind))
+		return truncateSummary(strings.TrimSpace(string(evt.Kind)))
 	}
+}
+
+func compactSummaryText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func truncateSummary(value string) string {
+	runes := []rune(value)
+	if len(runes) <= eventSummaryMaxRunes {
+		return value
+	}
+	return string(runes[:eventSummaryMaxRunes-1]) + "…"
 }
 
 // expireToasts removes expired toasts from the list
