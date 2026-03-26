@@ -3569,11 +3569,11 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
 
-	sourceSession, hasSource := m.sessions[msg.SourceID]
-	if !hasSource {
+	sourceSession := m.sessionForIssue(msg.SourceID)
+	if sourceSession == nil || sourceSession.Worktree == "" {
 		m.addToast(Toast{
 			Level:   ToastError,
-			Message: "Source session not found",
+			Message: "Source session worktree not found",
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
@@ -3583,17 +3583,17 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 		return m, m.mergeToMainCmd(sourceSession.Worktree, msg.SourceID)
 	}
 
-	targetSession, hasTarget := m.sessions[msg.TargetID]
-	if !hasTarget {
+	targetSession := m.sessionForIssue(msg.TargetID)
+	if targetSession == nil || targetSession.Worktree == "" {
 		m.addToast(Toast{
 			Level:   ToastError,
-			Message: "Target session not found",
+			Message: "Target session worktree not found",
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
 	}
 
-	return m, m.mergeFeatureIntoFeatureCmd(sourceSession.Worktree, targetSession.Worktree, msg.SourceID, msg.TargetID)
+	return m, m.followOnMergeIntoTargetCmd(sourceSession.Worktree, targetSession.Worktree, msg.SourceID, msg.TargetID, targetSession.State)
 }
 
 type mergeResultMsg struct {
@@ -3661,6 +3661,31 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 	}
 }
 
+func shouldStopBeforeFollowOnMerge(state domain.SessionState) bool {
+	return state == domain.SessionBusy || state == domain.SessionWaiting
+}
+
+func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState) tea.Cmd {
+	return func() tea.Msg {
+		if shouldStopBeforeFollowOnMerge(targetState) {
+			ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+			defer cancel()
+			if m.daemonClient == nil {
+				return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
+			}
+			m.sessionMonitor.Stop(targetID)
+			if _, err := m.daemonClient.StopSession(ctx, targetID); err != nil {
+				return mergeResultMsg{
+					sourceID: sourceID,
+					targetID: targetID,
+					err:      fmt.Errorf("stop target session %s before merge: %w", targetID, err),
+				}
+			}
+		}
+		return m.mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID)()
+	}
+}
+
 func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
 	if task == nil {
 		m.addToast(Toast{
@@ -3671,9 +3696,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 		return nil
 	}
 	if session == nil {
-		if fallbackSession, ok := m.sessions[task.ID]; ok {
-			session = fallbackSession
-		}
+		session = m.sessionForIssue(task.ID)
 	}
 	if session == nil || session.Worktree == "" {
 		m.addToast(Toast{
@@ -3695,8 +3718,8 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 
 	if len(candidates) == 1 {
-		sourceSession, ok := m.sessions[candidates[0].target.ID]
-		if !ok || sourceSession == nil || sourceSession.Worktree == "" {
+		sourceSession := m.sessionForIssue(candidates[0].target.ID)
+		if sourceSession == nil || sourceSession.Worktree == "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "Selected upstream source has no active worktree",
@@ -3710,7 +3733,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
-		return m.mergeFeatureIntoFeatureCmd(sourceSession.Worktree, session.Worktree, candidates[0].target.ID, task.ID)
+		return m.followOnMergeIntoTargetCmd(sourceSession.Worktree, session.Worktree, candidates[0].target.ID, task.ID, session.State)
 	}
 
 	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
@@ -3719,6 +3742,21 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
 	return m.overlayStack.Push(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+}
+
+func (m Model) sessionForIssue(issueID string) *domain.Session {
+	if issueID == "" {
+		return nil
+	}
+	if session, ok := m.sessions[issueID]; ok && session != nil {
+		return session
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID == issueID && m.tasks[i].Session != nil {
+			return m.tasks[i].Session
+		}
+	}
+	return nil
 }
 
 type followOnMergeCandidate struct {

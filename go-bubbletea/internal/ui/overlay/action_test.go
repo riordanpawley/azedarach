@@ -180,6 +180,107 @@ func TestActionMenu_BuildActions_PausedSession(t *testing.T) {
 	}
 }
 
+func TestActionMenu_FollowOnMergeAvailabilityBySessionState(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-123",
+		Title:  "Task",
+		Status: domain.StatusInProgress,
+	}
+
+	tests := []struct {
+		name    string
+		session *domain.Session
+		want    bool
+	}{
+		{
+			name: "idle with worktree enabled",
+			session: &domain.Session{
+				IssueID:  "az-123",
+				State:    domain.SessionIdle,
+				Worktree: "/tmp/az-123",
+			},
+			want: true,
+		},
+		{
+			name: "busy with worktree enabled",
+			session: &domain.Session{
+				IssueID:  "az-123",
+				State:    domain.SessionBusy,
+				Worktree: "/tmp/az-123",
+			},
+			want: true,
+		},
+		{
+			name: "waiting with worktree enabled",
+			session: &domain.Session{
+				IssueID:  "az-123",
+				State:    domain.SessionWaiting,
+				Worktree: "/tmp/az-123",
+			},
+			want: true,
+		},
+		{
+			name: "paused with worktree enabled",
+			session: &domain.Session{
+				IssueID:  "az-123",
+				State:    domain.SessionPaused,
+				Worktree: "/tmp/az-123",
+			},
+			want: true,
+		},
+		{
+			name: "session without worktree disabled",
+			session: &domain.Session{
+				IssueID: "az-123",
+				State:   domain.SessionBusy,
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			menu := NewActionMenu(task, tt.session)
+			found := false
+			for _, action := range menu.actions {
+				if action.Key == "m" {
+					found = true
+					if action.Enabled != tt.want {
+						t.Fatalf("follow-on merge enabled = %v, want %v", action.Enabled, tt.want)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("expected follow-on merge action")
+			}
+		})
+	}
+}
+
+func TestActionMenu_FollowOnMergeAvailability_TaskWorktreeFallback(t *testing.T) {
+	taskWithSessionWorktree := domain.Task{
+		ID:      "az-123",
+		Title:   "Task",
+		Status:  domain.StatusInProgress,
+		Session: &domain.Session{IssueID: "az-123", Worktree: "/tmp/az-123"},
+	}
+	menu := NewActionMenu(taskWithSessionWorktree, nil)
+	if cmd := menu.selectByKey("m"); cmd == nil {
+		t.Fatal("expected follow-on merge enabled from task session worktree fallback")
+	}
+
+	taskWithRuntimeWorktree := domain.Task{
+		ID:          "az-456",
+		Title:       "Task",
+		Status:      domain.StatusInProgress,
+		HasWorktree: true,
+	}
+	menu = NewActionMenu(taskWithRuntimeWorktree, nil)
+	if cmd := menu.selectByKey("m"); cmd == nil {
+		t.Fatal("expected follow-on merge enabled from task hasWorktree fallback")
+	}
+}
+
 func TestActionMenu_MoveActions(t *testing.T) {
 	tests := []struct {
 		name            string

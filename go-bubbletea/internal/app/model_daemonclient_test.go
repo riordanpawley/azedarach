@@ -617,7 +617,7 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 	}
 }
 
-func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
+func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
 
@@ -699,7 +699,7 @@ func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
 			Type:   domain.TypeEpic,
 		},
 	}
-	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionBusy, Worktree: "/tmp/child"}
+	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"}
 	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
 	m.nav.SelectTask(childID, 1)
 
@@ -709,6 +709,264 @@ func TestFollowOnMergeSelectionDirectMerge(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected direct follow-on merge command")
+	}
+
+	msg := cmd()
+	mergeMsg, ok := msg.(mergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergeResultMsg", msg)
+	}
+	if mergeMsg.sourceID != parentID || mergeMsg.targetID != childID {
+		t.Fatalf("merge result = %+v, want source=%s target=%s", mergeMsg, parentID, childID)
+	}
+	if mergeMsg.err != nil {
+		t.Fatalf("merge err = %v", mergeMsg.err)
+	}
+	if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandGitMerge {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
+	tests := []struct {
+		name  string
+		state domain.SessionState
+	}{
+		{name: "busy session", state: domain.SessionBusy},
+		{name: "waiting session", state: domain.SessionWaiting},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parentID := "az-parent"
+			childID := "az-child"
+
+			transport := &recordingDaemonTransport{
+				replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					switch req.Command {
+					case daemonclient.CommandWorktreeList:
+						respBody, err := json.Marshal(struct {
+							ProjectID string `json:"project_id"`
+							Worktrees []struct {
+								Path    string `json:"path"`
+								Branch  string `json:"branch"`
+								IssueID string `json:"issue_id"`
+							} `json:"worktrees"`
+						}{
+							ProjectID: "default",
+							Worktrees: []struct {
+								Path    string `json:"path"`
+								Branch  string `json:"branch"`
+								IssueID string `json:"issue_id"`
+							}{
+								{Path: "/tmp/parent", Branch: "az/az-parent", IssueID: parentID},
+							},
+						})
+						if err != nil {
+							t.Fatalf("marshal worktree response: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              true,
+							Body:            respBody,
+						}, nil
+					case daemonclient.CommandSessionStop:
+						var body struct {
+							ProjectID string `json:"project_id"`
+							SessionID string `json:"session_id"`
+						}
+						if err := json.Unmarshal(req.Body, &body); err != nil {
+							t.Fatalf("unmarshal session stop request: %v", err)
+						}
+						if body.SessionID != childID {
+							t.Fatalf("session stop body = %+v, want session_id=%s", body, childID)
+						}
+						respBody, err := json.Marshal(struct {
+							Output string `json:"output"`
+						}{Output: "stopped"})
+						if err != nil {
+							t.Fatalf("marshal session stop response: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              true,
+							Body:            respBody,
+						}, nil
+					case daemonclient.CommandGitMerge:
+						var body daemonclient.GitCommandRequest
+						if err := json.Unmarshal(req.Body, &body); err != nil {
+							t.Fatalf("unmarshal merge request: %v", err)
+						}
+						if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+							t.Fatalf("merge body = %+v", body)
+						}
+						respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+							Worktree: body.Worktree,
+							Branch:   body.Branch,
+							Result:   git.MergeResult{Success: true},
+						})
+						if err != nil {
+							t.Fatalf("marshal merge response: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              true,
+							Body:            respBody,
+						}, nil
+					default:
+						t.Fatalf("unexpected command: %s", req.Command)
+					}
+					return protocol.ResponseEnvelope{}, nil
+				},
+			}
+
+			m := newTestModel()
+			m.daemonClient = daemonclient.New(transport)
+			m.tasks = []domain.Task{
+				{
+					ID:       childID,
+					Title:    "Child task",
+					Status:   domain.StatusInProgress,
+					Type:     domain.TypeTask,
+					ParentID: &parentID,
+				},
+				{
+					ID:     parentID,
+					Title:  "Parent epic",
+					Status: domain.StatusInProgress,
+					Type:   domain.TypeEpic,
+				},
+			}
+			m.sessions[childID] = &domain.Session{IssueID: childID, State: tt.state, Worktree: "/tmp/child"}
+			m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+			m.nav.SelectTask(childID, 1)
+
+			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+			if _, ok := updated.(Model); !ok {
+				t.Fatalf("updated model type = %T, want Model", updated)
+			}
+			if cmd == nil {
+				t.Fatal("expected follow-on merge command")
+			}
+
+			msg := cmd()
+			mergeMsg, ok := msg.(mergeResultMsg)
+			if !ok {
+				t.Fatalf("message type = %T, want mergeResultMsg", msg)
+			}
+			if mergeMsg.sourceID != parentID || mergeMsg.targetID != childID {
+				t.Fatalf("merge result = %+v, want source=%s target=%s", mergeMsg, parentID, childID)
+			}
+			if mergeMsg.err != nil {
+				t.Fatalf("merge err = %v", mergeMsg.err)
+			}
+			if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandSessionStop || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandGitMerge {
+				t.Fatalf("requests = %v", got)
+			}
+		})
+	}
+}
+
+func TestFollowOnMergeSelectionUsesTaskSessionFallbackWhenProjectionMissing(t *testing.T) {
+	parentID := "az-parent"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/parent", Branch: "az/az-parent", IssueID: parentID},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+					t.Fatalf("merge body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+					Worktree: body.Worktree,
+					Branch:   body.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+	m.tasks = []domain.Task{
+		{
+			ID:       childID,
+			Title:    "Child task",
+			Status:   domain.StatusInProgress,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+			Session:  &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"},
+		},
+		{
+			ID:      parentID,
+			Title:   "Parent epic",
+			Status:  domain.StatusInProgress,
+			Type:    domain.TypeEpic,
+			Session: &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"},
+		},
+	}
+	// Simulate stale projection: m.sessions map does not yet contain hydrated sessions.
+	m.sessions = map[string]*domain.Session{}
+	m.nav.SelectTask(childID, 1)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-on merge command")
 	}
 
 	msg := cmd()
