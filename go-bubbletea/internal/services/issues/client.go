@@ -187,6 +187,7 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			status,
 			priority,
 			issue_type,
+			COALESCE(implementations_json, '[]'),
 			created_at,
 			updated_at
 		FROM issues
@@ -219,6 +220,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 			status,
 			priority,
 			issue_type,
+			COALESCE(implementations_json, '[]'),
 			created_at,
 			updated_at
 		FROM issues
@@ -248,6 +250,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 			i.status,
 			i.priority,
 			i.issue_type,
+			COALESCE(i.implementations_json, '[]'),
 			i.created_at,
 			i.updated_at
 		FROM issues i
@@ -676,6 +679,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		var statusRaw string
 		var typeRaw string
 		var priorityRaw int
+		var implementationsRaw string
 		if err := rows.Scan(
 			&task.ID,
 			&task.Title,
@@ -683,6 +687,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 			&statusRaw,
 			&priorityRaw,
 			&typeRaw,
+			&implementationsRaw,
 			&createdRaw,
 			&updatedRaw,
 		); err != nil {
@@ -693,6 +698,7 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		task.Type = domain.TaskType(typeRaw)
 		task.CreatedAt = parseTimestamp(createdRaw)
 		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.Implementations = decodeImplementationsJSON(implementationsRaw)
 
 		tasks = append(tasks, task)
 		taskIDs = append(taskIDs, task.ID)
@@ -710,6 +716,20 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 	}
 
 	return tasks, nil
+}
+
+func decodeImplementationsJSON(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var impls []string
+	if err := json.Unmarshal([]byte(raw), &impls); err != nil {
+		return nil
+	}
+	if len(impls) == 0 {
+		return nil
+	}
+	return impls
 }
 
 func (c *Client) loadDependenciesForTasks(

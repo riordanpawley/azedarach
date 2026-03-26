@@ -2080,12 +2080,13 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 	if strings.TrimSpace(task.Description) != "" {
 		description = fmt.Sprintf("\nDescription: %s", task.Description)
 	}
+	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
 	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
 		parent = fmt.Sprintf("\nParent: %s", strings.TrimSpace(*task.ParentID))
 	}
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s]%s%s\nDependencies:\n%s\n```\n",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n",
 		issueID,
 		issueID,
 		task.ID,
@@ -2093,10 +2094,30 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		task.Status,
 		task.Priority.String(),
 		task.Type,
+		implementations,
 		parent,
 		description,
 		formatPrimeDependencyLines(task.Dependencies),
 	)
+}
+
+func formatPrimeImplementations(implementations []string) string {
+	if len(implementations) == 0 {
+		return "(none)"
+	}
+	normalized := make([]string, 0, len(implementations))
+	for _, impl := range implementations {
+		trimmed := strings.TrimSpace(impl)
+		if trimmed == "" {
+			continue
+		}
+		normalized = append(normalized, trimmed)
+	}
+	if len(normalized) == 0 {
+		return "(none)"
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, ",")
 }
 
 func formatPrimeDependencyLines(deps []domain.Dependency) string {

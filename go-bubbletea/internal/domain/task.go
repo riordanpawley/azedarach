@@ -29,6 +29,7 @@ type Task struct {
 	Type                  TaskType     `json:"issue_type"`
 	ParentID              *string      `json:"parent_id,omitempty"`
 	Dependencies          []Dependency `json:"dependencies,omitempty"`
+	Implementations       []string     `json:"implementations,omitempty"`
 	Session               *Session     `json:"session,omitempty"`
 	HasTmuxSession        bool         `json:"has_tmux_session,omitempty"`
 	HasWorktree           bool         `json:"has_worktree,omitempty"`

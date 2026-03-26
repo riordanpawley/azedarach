@@ -2380,13 +2380,14 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 					}, nil
 				}
 				body, err := json.Marshal([]domain.Task{{
-					ID:        "az-1",
-					Title:     "Prime issue",
-					Status:    domain.StatusOpen,
-					Priority:  domain.P2,
-					Type:      domain.TypeTask,
-					CreatedAt: now,
-					UpdatedAt: now,
+					ID:              "az-1",
+					Title:           "Prime issue",
+					Status:          domain.StatusOpen,
+					Priority:        domain.P2,
+					Type:            domain.TypeTask,
+					Implementations: []string{"go-bubbletea"},
+					CreatedAt:       now,
+					UpdatedAt:       now,
 					Dependencies: []domain.Dependency{
 						{ID: "az-2", Type: domain.DependencyBlocks},
 					},
@@ -2415,7 +2416,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Active issue context (AZEDARACH_ISSUE_ID=az-1)") {
 		t.Fatalf("prime output missing active issue section: %q", output)
 	}
-	if !strings.Contains(output, "az-1: Prime issue [status=open priority=P2 type=task]") {
+	if !strings.Contains(output, "az-1: Prime issue [status=open priority=P2 type=task impl=go-bubbletea]") {
 		t.Fatalf("prime output missing issue summary: %q", output)
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
