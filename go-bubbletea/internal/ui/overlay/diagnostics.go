@@ -633,13 +633,13 @@ func (d *DiagnosticsPanel) renderSystem(b *strings.Builder) {
 func (d *DiagnosticsPanel) renderFooter() string {
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
-	footer := keybinds.RenderInline([]keybinds.Binding{
+	footer := keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Tab", Description: "Switch section"},
 		{Key: "1-6", Description: "Jump to section"},
 		{Key: "j/k", Description: "Scroll"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "q/Esc", Description: "Close"},
-	}, "  ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         keyStyle,
 		DescriptionStyle: hintStyle,
 		FooterStyle:      hintStyle,

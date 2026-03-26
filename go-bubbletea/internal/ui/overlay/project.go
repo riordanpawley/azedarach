@@ -161,11 +161,11 @@ func (m *ProjectSelector) viewList() string {
 	if len(m.registry.Projects) == 0 {
 		b.WriteString(m.styles.MenuItem.Render("No projects registered"))
 		b.WriteString("\n\n")
-		b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 			{Key: "Esc", Description: "close"},
 			{Key: "a", Description: "add"},
 			{Key: "D", Description: "detect"},
-		}, " • ", keybinds.Theme{
+		}, 0, keybinds.Theme{
 			KeyStyle:         m.styles.MenuKey,
 			DescriptionStyle: m.styles.Footer,
 			FooterStyle:      m.styles.Footer,
@@ -203,7 +203,7 @@ func (m *ProjectSelector) viewList() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "1-9", Description: "switch"},
 		{Key: "Enter", Description: "switch"},
 		{Key: "d", Description: "default"},
@@ -211,7 +211,7 @@ func (m *ProjectSelector) viewList() string {
 		{Key: "a", Description: "add"},
 		{Key: "D", Description: "detect"},
 		{Key: "Esc", Description: "close"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,
@@ -245,10 +245,10 @@ func (m *ProjectSelector) viewActions() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Enter", Description: "select"},
 		{Key: "Esc", Description: "back"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,

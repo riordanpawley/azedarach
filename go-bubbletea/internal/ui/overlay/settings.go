@@ -271,13 +271,13 @@ func (m *SettingsOverlay) View() string {
 
 	// Add footer hint
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "j/k", Description: "move"},
 		{Key: "h/l", Description: "cycle"},
 		{Key: "Enter/Space", Description: "toggle/activate"},
 		{Key: "e", Description: "edit config"},
 		{Key: "Esc", Description: "close"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,

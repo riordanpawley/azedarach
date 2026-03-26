@@ -112,11 +112,11 @@ func (c *ConfirmDialog) View() string {
 
 	// Footer hint
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "←/→/Tab", Description: "Switch"},
 		{Key: "Enter", Description: "Confirm"},
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         c.styles.MenuKey,
 		DescriptionStyle: c.styles.Footer,
 		FooterStyle:      c.styles.Footer,

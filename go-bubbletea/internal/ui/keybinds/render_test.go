@@ -78,3 +78,21 @@ func TestRenderPlain(t *testing.T) {
 		t.Fatalf("RenderPlain = %q, want %q", rendered, want)
 	}
 }
+
+func TestRenderKeyTable(t *testing.T) {
+	theme := Theme{
+		KeyStyle:         lipgloss.NewStyle(),
+		DescriptionStyle: lipgloss.NewStyle(),
+		FooterStyle:      lipgloss.NewStyle(),
+	}
+	rendered := RenderKeyTable([]Binding{
+		{Key: "j/k", Description: "move"},
+		{Key: "Esc", Description: "close"},
+	}, 8, theme)
+	if !strings.Contains(rendered, "j/k") || !strings.Contains(rendered, "move") {
+		t.Fatalf("rendered = %q, want key table entries", rendered)
+	}
+	if !strings.Contains(rendered, "\n") {
+		t.Fatalf("rendered = %q, want multiline table", rendered)
+	}
+}

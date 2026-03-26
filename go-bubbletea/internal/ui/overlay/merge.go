@@ -142,11 +142,11 @@ func (m *MergeSelectOverlay) View() string {
 
 	// Footer with help text
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "j/k", Description: "navigate"},
 		{Key: "Enter", Description: "select"},
 		{Key: "Esc", Description: "cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.overlayStyles.MenuKey,
 		DescriptionStyle: m.overlayStyles.Footer,
 		FooterStyle:      m.overlayStyles.Footer,

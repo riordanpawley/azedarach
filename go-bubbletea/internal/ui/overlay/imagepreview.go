@@ -194,9 +194,9 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 		b.WriteString("\n\n")
 		b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
 		b.WriteString("\n\n")
-		b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 			{Key: "Esc", Description: "Close"},
-		}, " • ", keybinds.Theme{
+		}, 0, keybinds.Theme{
 			KeyStyle:         i.styles.MenuKey,
 			DescriptionStyle: i.styles.Footer,
 			FooterStyle:      i.styles.Footer,
@@ -292,7 +292,7 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 		keybinds.Binding{Key: "r", Description: "Refresh"},
 		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
-	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
 		KeyStyle:         i.styles.MenuKey,
 		DescriptionStyle: i.styles.Footer,
 		FooterStyle:      i.styles.Footer,
@@ -335,10 +335,10 @@ func (i *ImagePreviewOverlay) renderDeleteConfirmation() string {
 	b.WriteString("\n\n")
 
 	// Footer hint
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Y", Description: "Delete"},
 		{Key: "N/Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         i.styles.MenuKey,
 		DescriptionStyle: i.styles.Footer,
 		FooterStyle:      i.styles.Footer,

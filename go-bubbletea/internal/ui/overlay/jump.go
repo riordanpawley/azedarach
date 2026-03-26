@@ -215,11 +215,11 @@ func (j *JumpMode) View() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Type label", Description: ""},
 		{Key: "Backspace", Description: "delete"},
 		{Key: "Esc", Description: "cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         j.styles.MenuKey,
 		DescriptionStyle: j.styles.Footer,
 		FooterStyle:      j.styles.Footer,

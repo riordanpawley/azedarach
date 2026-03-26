@@ -204,12 +204,12 @@ func (p *PRCreateOverlay) View() string {
 	b.WriteString("\n\n")
 
 	// Footer hints
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Tab", Description: "Switch fields"},
 		{Key: "d", Description: "Toggle draft"},
 		{Key: "Ctrl+S", Description: "Submit"},
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         p.styles.MenuKey,
 		DescriptionStyle: p.styles.Footer,
 		FooterStyle:      p.styles.Footer,

@@ -329,14 +329,14 @@ func (c *BulkCleanupOverlay) renderCategoryList() string {
 	b.WriteString("\n\n")
 
 	// Help text
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "j/k", Description: "Navigate"},
 		{Key: "Space", Description: "Toggle"},
 		{Key: "a", Description: "Select all"},
 		{Key: "A", Description: "Deselect all"},
 		{Key: "Enter", Description: "Execute"},
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         c.styles.MenuKey,
 		DescriptionStyle: c.styles.Footer,
 		FooterStyle:      c.styles.Footer,
@@ -391,11 +391,11 @@ func (c *BulkCleanupOverlay) renderConfirmDialog() string {
 	b.WriteString("\n\n")
 
 	// Footer hint
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "←/→/Tab", Description: "Switch"},
 		{Key: "Enter", Description: "Confirm"},
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         c.styles.MenuKey,
 		DescriptionStyle: c.styles.Footer,
 		FooterStyle:      c.styles.Footer,

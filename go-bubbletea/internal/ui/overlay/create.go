@@ -346,17 +346,17 @@ func (c *CreateTaskOverlay) View() string {
 		DescriptionStyle: hintTextStyle,
 		FooterStyle:      hintTextStyle,
 	}
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Tab / Shift+Tab", Description: "Switch fields"},
 		{Key: "T/B/F/E/C", Description: "Set type"},
 		{Key: "0/1/2/3/4", Description: "Set priority"},
-	}, "\n", hintTheme))
+	}, 0, hintTheme))
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Enter", Description: "Create task"},
 		{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
 		{Key: "Esc", Description: "Cancel"},
-	}, "\n", hintTheme))
+	}, 0, hintTheme))
 	if c.editorError != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
 		b.WriteString("\n")

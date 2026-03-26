@@ -290,7 +290,7 @@ func (i *ImageAttachOverlay) renderList() string {
 		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
 
-	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
 		KeyStyle:         i.styles.MenuKey,
 		DescriptionStyle: i.styles.Footer,
 		FooterStyle:      i.styles.Footer,
@@ -362,7 +362,7 @@ func (i *ImageAttachOverlay) renderPreview() string {
 		{Key: "o", Description: "Open in viewer"},
 		{Key: "Esc", Description: "Back to list"},
 	}
-	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
 		KeyStyle:         i.styles.MenuKey,
 		DescriptionStyle: i.styles.Footer,
 		FooterStyle:      i.styles.Footer,
@@ -390,7 +390,7 @@ func (i *ImageAttachOverlay) renderFileInput() string {
 		{Key: "Enter", Description: "Attach"},
 		{Key: "Esc", Description: "Cancel"},
 	}
-	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
 		KeyStyle:         i.styles.MenuKey,
 		DescriptionStyle: i.styles.Footer,
 		FooterStyle:      i.styles.Footer,

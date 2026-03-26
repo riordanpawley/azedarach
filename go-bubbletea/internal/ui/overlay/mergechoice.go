@@ -71,9 +71,9 @@ func (m *MergeChoiceOverlay) View() string {
 	b.WriteString(sOption + "\n")
 
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,

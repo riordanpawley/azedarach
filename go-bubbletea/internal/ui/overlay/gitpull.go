@@ -76,11 +76,11 @@ func (g *GitPullOverlay) View() string {
 	b.WriteString("\n")
 
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "←/→/Tab", Description: "Switch"},
 		{Key: "Enter", Description: "Confirm"},
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         g.styles.MenuKey,
 		DescriptionStyle: g.styles.Footer,
 		FooterStyle:      g.styles.Footer,

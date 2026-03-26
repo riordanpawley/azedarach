@@ -163,12 +163,12 @@ func (m *DevServerOverlay) View() string {
 
 	// Add footer with keybindings
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Enter", Description: "toggle"},
 		{Key: "v", Description: "view output"},
 		{Key: "r", Description: "restart"},
 		{Key: "Esc", Description: "close"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,

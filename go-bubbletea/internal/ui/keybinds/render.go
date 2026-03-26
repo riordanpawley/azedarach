@@ -82,6 +82,34 @@ func RenderInline(bindings []Binding, delimiter string, theme Theme) string {
 	return footerStyle.Render(strings.Join(parts, delimiter))
 }
 
+func RenderKeyTable(bindings []Binding, keyWidth int, theme Theme) string {
+	keyStyle := normalizeInlineStyle(theme.KeyStyle)
+	descriptionStyle := normalizeInlineStyle(theme.DescriptionStyle)
+	footerStyle := normalizeInlineStyle(theme.FooterStyle)
+	if keyWidth <= 0 {
+		keyWidth = 8
+		for _, binding := range bindings {
+			if len(binding.Key) > keyWidth {
+				keyWidth = len(binding.Key)
+			}
+		}
+	}
+
+	lines := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.Key) == "" {
+			continue
+		}
+		keyLabel := fmt.Sprintf("%-*s", keyWidth, binding.Key)
+		if strings.TrimSpace(binding.Description) == "" {
+			lines = append(lines, "  "+keyStyle.Render(keyLabel))
+			continue
+		}
+		lines = append(lines, "  "+keyStyle.Render(keyLabel)+"  "+descriptionStyle.Render(binding.Description))
+	}
+	return footerStyle.Render(strings.Join(lines, "\n"))
+}
+
 func RenderPlain(bindings []Binding, delimiter string) string {
 	if delimiter == "" {
 		delimiter = "  "

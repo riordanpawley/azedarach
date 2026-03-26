@@ -289,12 +289,12 @@ func (p *PlanningOverlay) renderInputPhase() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Tab", Description: "Switch fields"},
 		{Key: "Enter", Description: "Generate"},
 		{Key: "Ctrl+U", Description: "Clear"},
 		{Key: "Esc", Description: "Cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         p.styles.MenuKey,
 		DescriptionStyle: p.styles.Footer,
 		FooterStyle:      p.styles.Footer,
@@ -338,9 +338,9 @@ func (p *PlanningOverlay) renderProgressPhase() string {
 	}
 
 	// Footer
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Esc", Description: "cancel"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         p.styles.MenuKey,
 		DescriptionStyle: p.styles.Footer,
 		FooterStyle:      p.styles.Footer,
@@ -397,10 +397,10 @@ func (p *PlanningOverlay) renderCompletePhase() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Enter/Esc", Description: "Close"},
 		{Key: "r", Description: "Plan another"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         p.styles.MenuKey,
 		DescriptionStyle: p.styles.Footer,
 		FooterStyle:      p.styles.Footer,
@@ -424,10 +424,10 @@ func (p *PlanningOverlay) renderErrorPhase() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "r", Description: "Retry"},
 		{Key: "Esc", Description: "Close"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         p.styles.MenuKey,
 		DescriptionStyle: p.styles.Footer,
 		FooterStyle:      p.styles.Footer,

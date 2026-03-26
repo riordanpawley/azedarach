@@ -156,12 +156,12 @@ func (w *TaskWorkspaceOverlay) View() string {
 		Padding(0, 1).
 		Render(actionsBody)
 
-	footer := keybinds.RenderInline([]keybinds.Binding{
+	footer := keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Tab/h/l", Description: "switch pane"},
 		{Key: "j/k", Description: "scroll or navigate"},
 		{Key: "Enter/action key", Description: "run"},
 		{Key: "Esc", Description: "close"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         w.styles.MenuKey,
 		DescriptionStyle: w.styles.Footer,
 		FooterStyle:      w.styles.Footer,

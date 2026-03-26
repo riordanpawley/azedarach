@@ -77,11 +77,11 @@ func (m *SpecWorkspaceOverlay) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.renderSectionBody())
 	b.WriteString("\n\n")
-	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "Tab", Description: "next section"},
 		{Key: "Shift+Tab", Description: "previous"},
 		{Key: "Esc", Description: "close"},
-	}, " • ", keybinds.Theme{
+	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,
