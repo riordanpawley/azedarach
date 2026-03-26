@@ -151,8 +151,16 @@ func (o *EventLogOverlay) UsesInternalTitle() bool {
 
 // Size returns the overlay dimensions.
 func (o *EventLogOverlay) Size() (width, height int) {
-	o.viewHeight = 18
-	return 92, 24
+	const (
+		minViewHeight = 8
+		maxViewHeight = 18
+		chromeHeight  = 6
+	)
+
+	// Keep footer pinned to bottom while avoiding oversized empty interiors.
+	neededViewHeight := len(o.renderContentLines()) + 1 // + footer row
+	o.viewHeight = min(maxViewHeight, max(minViewHeight, neededViewHeight))
+	return 92, o.viewHeight + chromeHeight
 }
 
 func (o *EventLogOverlay) renderContentLines() []string {
