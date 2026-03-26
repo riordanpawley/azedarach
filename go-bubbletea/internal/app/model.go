@@ -4083,10 +4083,11 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 				return taskCreatedResultMsg{taskID: msg.ID, err: fmt.Errorf("daemon client unavailable"), isUpdate: true}
 			}
 			err := m.daemonClient.UpdateTaskDetails(ctx, msg.ID, daemonclient.TaskUpdateParams{
-				Title:       msg.Title,
-				Description: msg.Description,
-				Type:        msg.Type,
-				Priority:    msg.Priority,
+				Title:           msg.Title,
+				Description:     msg.Description,
+				Type:            msg.Type,
+				Priority:        msg.Priority,
+				Implementations: msg.Implementations,
 			})
 			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
 		}
@@ -4096,11 +4097,19 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 		}
 
 		taskID, err := m.daemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-			Title:       msg.Title,
-			Description: msg.Description,
-			Type:        msg.Type,
-			Priority:    msg.Priority,
-			ParentID:    msg.ParentID,
+			Title:           msg.Title,
+			Description:     msg.Description,
+			Type:            msg.Type,
+			Priority:        msg.Priority,
+			Status:          msg.Status,
+			Assignee:        msg.Assignee,
+			Labels:          msg.Labels,
+			Implementations: msg.Implementations,
+			Design:          msg.Design,
+			Notes:           msg.Notes,
+			Acceptance:      msg.Acceptance,
+			Estimate:        msg.Estimate,
+			ParentID:        msg.ParentID,
 		})
 		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
 	}

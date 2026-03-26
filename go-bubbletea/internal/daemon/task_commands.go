@@ -72,21 +72,37 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	var cmd struct {
-		Title       string          `json:"title"`
-		Description string          `json:"description"`
-		Type        domain.TaskType `json:"type"`
-		Priority    domain.Priority `json:"priority"`
-		ParentID    *string         `json:"parent_id,omitempty"`
+		Title           string          `json:"title"`
+		Description     string          `json:"description"`
+		Type            domain.TaskType `json:"type"`
+		Priority        domain.Priority `json:"priority"`
+		Status          domain.Status   `json:"status,omitempty"`
+		Assignee        string          `json:"assignee,omitempty"`
+		Labels          []string        `json:"labels,omitempty"`
+		Implementations []string        `json:"implementations,omitempty"`
+		Design          string          `json:"design,omitempty"`
+		Notes           string          `json:"notes,omitempty"`
+		Acceptance      string          `json:"acceptance,omitempty"`
+		Estimate        *int            `json:"estimate,omitempty"`
+		ParentID        *string         `json:"parent_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	taskID, err := d.issues.Create(ctx, issues.CreateTaskParams{
-		Title:       cmd.Title,
-		Description: cmd.Description,
-		Type:        cmd.Type,
-		Priority:    cmd.Priority,
-		ParentID:    cmd.ParentID,
+		Title:           cmd.Title,
+		Description:     cmd.Description,
+		Type:            cmd.Type,
+		Priority:        cmd.Priority,
+		Status:          cmd.Status,
+		Assignee:        cmd.Assignee,
+		Labels:          cmd.Labels,
+		Implementations: cmd.Implementations,
+		Design:          cmd.Design,
+		Notes:           cmd.Notes,
+		Acceptance:      cmd.Acceptance,
+		Estimate:        cmd.Estimate,
+		ParentID:        cmd.ParentID,
 	})
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
