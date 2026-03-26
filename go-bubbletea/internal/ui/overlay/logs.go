@@ -159,7 +159,7 @@ func (o *EventLogOverlay) renderContentLines() []string {
 	if strings.TrimSpace(o.logFilePath) != "" {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("Log file: "+o.logFilePath))
 	}
-	lines = append(lines, o.styles.Footer.Render("s: stream log • e: edit log file • "+EventLogHotkeyHint()))
+	lines = append(lines, o.styles.Footer.Render("s: stream log (Ctrl+C then q) • e: edit log file • "+EventLogHotkeyHint()))
 	lines = append(lines, "")
 
 	if len(o.events) == 0 {
@@ -176,7 +176,7 @@ func (o *EventLogOverlay) renderContentLines() []string {
 }
 
 func (o *EventLogOverlay) footerLine(scrollable bool) string {
-	footer := "s: stream • e: edit • Esc/q/backspace: close"
+	footer := "s: stream (Ctrl+C then q) • e: edit • Esc/q/backspace: close"
 	if scrollable {
 		footer = "j/k: scroll • g/G: top/bottom • " + footer
 	}
