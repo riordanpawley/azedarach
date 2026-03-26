@@ -96,12 +96,20 @@ type drillDownContext struct {
 	parentName string
 }
 
+type pendingTaskStatus struct {
+	previousStatus domain.Status
+	targetStatus   domain.Status
+	operationID    string
+	state          protocol.OperationState
+}
+
 // Model is the main application state
 type Model struct {
 	// Core data
 	tasks           []domain.Task
 	sessions        map[string]*domain.Session
 	suppressedTasks map[string]struct{}
+	pendingStatuses map[string]pendingTaskStatus
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -203,6 +211,7 @@ func New(cfg *config.Config) Model {
 	m := Model{
 		tasks:                []domain.Task{},
 		sessions:             make(map[string]*domain.Session),
+		pendingStatuses:      make(map[string]pendingTaskStatus),
 		nav:                  navigation.NewService(),
 		editor:               editor.NewService(),
 		overlayStack:         overlay.NewStack(),
@@ -329,9 +338,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		m.applyPendingStatusOverlays()
 		m.sessions = m.projectSessionProjection(tasks)
 		m.applyRuntimeSignals()
-		m.editor.ReconcileSelection(tasks)
+		m.editor.ReconcileSelection(m.tasks)
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
@@ -868,6 +878,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskStatusResultMsg:
 		if msg.err != nil {
+			if pending, ok := pendingOperationDetails(msg.err); ok {
+				m.markTaskStatusPending(msg.taskID, msg.previousStatus, msg.newStatus, pending.OperationID, pending.State)
+				m.addToast(Toast{
+					Level:   ToastInfo,
+					Message: formatPendingOperationMessage("Task move", msg.taskID, pending.OperationID, pending.State),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, m.loadIssuesCmd()
+			}
+			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
@@ -875,6 +895,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		m.clearPendingTaskStatus(msg.taskID)
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Task moved to %s", msg.newStatus),
@@ -2882,7 +2903,17 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.moveTaskStatusCmd(task.ID, -1)
+		newStatus, ok := shiftedTaskStatus(task.Status, -1)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Failed to compute previous status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		m.applyOptimisticTaskStatus(task.ID, newStatus)
+		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 
 	case "l":
 		// Move task right (to next status)
@@ -2894,7 +2925,17 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.moveTaskStatusCmd(task.ID, 1)
+		newStatus, ok := shiftedTaskStatus(task.Status, 1)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Failed to compute next status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		m.applyOptimisticTaskStatus(task.ID, newStatus)
+		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
 		return m, m.overlayStack.Push(overlay.NewEditTaskOverlay(*task))
 	case "d":
@@ -4094,68 +4135,118 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 
 // Single task status result
 type taskStatusResultMsg struct {
-	taskID    string
-	newStatus domain.Status
-	err       error
+	taskID         string
+	previousStatus domain.Status
+	newStatus      domain.Status
+	err            error
 }
 
-// moveTaskStatusCmd moves a single task's status by delta
-func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
+// moveTaskStatusCmd updates a single task's status.
+func (m Model) moveTaskStatusCmd(taskID string, previousStatus, newStatus domain.Status) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		statusOrder := []domain.Status{
-			domain.StatusOpen,
-			domain.StatusInProgress,
-			domain.StatusBlocked,
-			domain.StatusDone,
-		}
-
-		// Find the task to get current status
-		var currentTask *domain.Task
-		for i := range m.tasks {
-			if m.tasks[i].ID == taskID {
-				currentTask = &m.tasks[i]
-				break
-			}
-		}
-
-		if currentTask == nil {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("task not found")}
-		}
-
-		// Find current status index
-		currentIdx := -1
-		for i, s := range statusOrder {
-			if s == currentTask.Status {
-				currentIdx = i
-				break
-			}
-		}
-
-		if currentIdx == -1 {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("invalid status")}
-		}
-
-		// Calculate new status
-		newIdx := currentIdx + delta
-		if newIdx < 0 || newIdx >= len(statusOrder) {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("cannot move beyond status bounds")}
-		}
-
-		newStatus := statusOrder[newIdx]
-
 		// Update via daemon client
 		if m.daemonClient == nil {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
+			return taskStatusResultMsg{
+				taskID:         taskID,
+				previousStatus: previousStatus,
+				newStatus:      newStatus,
+				err:            fmt.Errorf("daemon client unavailable"),
+			}
 		}
 		err := m.daemonClient.UpdateTaskStatus(ctx, taskID, newStatus)
 		if err != nil {
-			return taskStatusResultMsg{taskID: taskID, err: err}
+			return taskStatusResultMsg{
+				taskID:         taskID,
+				previousStatus: previousStatus,
+				newStatus:      newStatus,
+				err:            err,
+			}
 		}
 
-		return taskStatusResultMsg{taskID: taskID, newStatus: newStatus}
+		return taskStatusResultMsg{
+			taskID:         taskID,
+			previousStatus: previousStatus,
+			newStatus:      newStatus,
+		}
+	}
+}
+
+func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
+	statusOrder := []domain.Status{
+		domain.StatusOpen,
+		domain.StatusInProgress,
+		domain.StatusBlocked,
+		domain.StatusDone,
+	}
+	currentIdx := -1
+	for i, status := range statusOrder {
+		if status == current {
+			currentIdx = i
+			break
+		}
+	}
+	if currentIdx == -1 {
+		return "", false
+	}
+	newIdx := currentIdx + delta
+	if newIdx < 0 || newIdx >= len(statusOrder) {
+		return "", false
+	}
+	return statusOrder[newIdx], true
+}
+
+func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {
+	for i := range m.tasks {
+		if m.tasks[i].ID == taskID {
+			m.tasks[i].Status = status
+			break
+		}
+	}
+	m.reconcileCursorAfterIssuesRefresh()
+}
+
+func (m *Model) rollbackTaskStatus(taskID string, previousStatus domain.Status) {
+	m.applyOptimisticTaskStatus(taskID, previousStatus)
+	m.clearPendingTaskStatus(taskID)
+}
+
+func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatus domain.Status, operationID string, state protocol.OperationState) {
+	if m.pendingStatuses == nil {
+		m.pendingStatuses = make(map[string]pendingTaskStatus)
+	}
+	m.pendingStatuses[taskIDKey(taskID)] = pendingTaskStatus{
+		previousStatus: previousStatus,
+		targetStatus:   targetStatus,
+		operationID:    operationID,
+		state:          state,
+	}
+}
+
+func (m *Model) clearPendingTaskStatus(taskID string) {
+	if len(m.pendingStatuses) == 0 {
+		return
+	}
+	delete(m.pendingStatuses, taskIDKey(taskID))
+}
+
+func (m *Model) applyPendingStatusOverlays() {
+	if len(m.pendingStatuses) == 0 {
+		return
+	}
+	for i := range m.tasks {
+		key := taskIDKey(m.tasks[i].ID)
+		pending, ok := m.pendingStatuses[key]
+		if !ok {
+			continue
+		}
+		if m.tasks[i].Status == pending.targetStatus {
+			delete(m.pendingStatuses, key)
+			continue
+		}
+		m.tasks[i].Status = pending.targetStatus
 	}
 }
 

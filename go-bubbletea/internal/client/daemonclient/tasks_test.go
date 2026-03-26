@@ -188,6 +188,44 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("status update pending operation", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskUpdateStatus {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskUpdateStatus)
+				}
+				respBody, err := json.Marshal(map[string]any{
+					"operation_id": "op-status",
+					"state":        string(protocol.OperationStateQueued),
+				})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		err := client.UpdateTaskStatus(context.Background(), "az-3", domain.StatusDone)
+		var pending *OperationPendingError
+		if !errors.As(err, &pending) {
+			t.Fatalf("UpdateTaskStatus error = %v, want OperationPendingError", err)
+		}
+		if pending.OperationID != "op-status" {
+			t.Fatalf("operation id = %q, want op-status", pending.OperationID)
+		}
+		if pending.State != protocol.OperationStateQueued {
+			t.Fatalf("state = %q, want queued", pending.State)
+		}
+	})
+
 	t.Run("details update", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

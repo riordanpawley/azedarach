@@ -131,9 +131,20 @@ func (c *Client) commandJSON(ctx context.Context, command string, body any, out 
 	if err != nil {
 		return err
 	}
-	if out != nil && len(resp.Body) > 0 {
-		if err := json.Unmarshal(resp.Body, out); err != nil {
-			return fmt.Errorf("decode %s response: %w", command, err)
+	if len(resp.Body) == 0 {
+		return nil
+	}
+	if out != nil {
+		if err := decodeLongRunningJSON(command, resp.Body, out); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	var envelope longRunningResultEnvelope
+	if err := json.Unmarshal(resp.Body, &envelope); err == nil {
+		if pending := pendingOperationError(command, envelope); pending != nil {
+			return pending
 		}
 	}
 	return nil
