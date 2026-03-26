@@ -622,6 +622,26 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		return nil
 	}
 
+	var topLevel []string
+	var links []dependencyLink
+	if opts.Deps {
+		topLevel, links = buildListDependencyContext(tasks)
+		if len(topLevel) == 0 {
+			fmt.Println("Top-level issues: (none)")
+		} else {
+			fmt.Printf("Top-level issues: %s\n", strings.Join(topLevel, ", "))
+		}
+		if len(links) == 0 {
+			fmt.Println("Dependency links (listed issues): (none)")
+		} else {
+			fmt.Println("Dependency links (listed issues):")
+			for _, link := range links {
+				fmt.Printf("- %s -> %s (%s)\n", link.From, link.To, link.Type)
+			}
+		}
+		fmt.Println()
+	}
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 	if opts.Deps {
 		fmt.Fprintln(w, "ID\tSTATUS\tPRIORITY\tTYPE\tDEPS\tTITLE")
@@ -653,21 +673,10 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		truncatedText = "yes"
 	}
 	fmt.Printf("\nList window: listed=%d limit=%d total=%d truncated=%s\n", len(tasks), limit, total, truncatedText)
-	if opts.Deps {
-		topLevel, links := buildListDependencyContext(tasks)
-		if len(topLevel) == 0 {
-			fmt.Println("Top-level issues: (none)")
-		} else {
-			fmt.Printf("Top-level issues: %s\n", strings.Join(topLevel, ", "))
-		}
-		if len(links) == 0 {
-			fmt.Println("Dependency links (listed issues): (none)")
-		} else {
-			fmt.Println("Dependency links (listed issues):")
-			for _, link := range links {
-				fmt.Printf("- %s -> %s (%s)\n", link.From, link.To, link.Type)
-			}
-		}
+	if truncated {
+		fmt.Println("Window note: additional matching issues may exist beyond current limit.")
+	} else {
+		fmt.Println("Window note: all matching issues are shown.")
 	}
 	return nil
 }

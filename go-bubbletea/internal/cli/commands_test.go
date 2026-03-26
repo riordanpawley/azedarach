@@ -1014,6 +1014,9 @@ func TestIssueListCommand_IncludesListWindowMetadata(t *testing.T) {
 	if !strings.Contains(output, "List window: listed=1 limit=1 total=2 truncated=yes") {
 		t.Fatalf("list metadata missing expected window summary: %q", output)
 	}
+	if !strings.Contains(output, "Window note: additional matching issues may exist beyond current limit.") {
+		t.Fatalf("list metadata missing truncated window note: %q", output)
+	}
 }
 
 func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.T) {
@@ -1080,11 +1083,17 @@ func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.
 	output := captureStdout(t, func() error {
 		return IssueListCommand(deps, IssueListOptions{Deps: true, Limit: 10})
 	})
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "Top-level issues:") {
+		t.Fatalf("deps output should start with top-level context, got: %q", output)
+	}
 	for _, want := range []string{
 		"Top-level issues:",
 		"Dependency links (listed issues):",
 		"- az-child -> az-parent (parent-child)",
 		"- az-dependent -> az-parent (blocks)",
+		"List window: listed=3 limit=10 total=3 truncated=no",
+		"Window note: all matching issues are shown.",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("deps graph context missing %q: %q", want, output)
