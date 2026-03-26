@@ -665,6 +665,37 @@ type UpdateTaskParams struct {
 	Implementations []string
 }
 
+// AppendNotes appends a single line to task notes.
+func (c *Client) AppendNotes(ctx context.Context, id, line string) error {
+	db, err := c.dbHandle()
+	if err != nil {
+		return err
+	}
+	noteLine := strings.TrimSpace(line)
+	if noteLine == "" {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := db.ExecContext(ctx, `
+		UPDATE issues
+		SET
+			notes = CASE
+				WHEN notes IS NULL OR TRIM(notes) = '' THEN ?
+				ELSE notes || CHAR(10) || ?
+			END,
+			updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, noteLine, noteLine, now, id)
+	if err != nil {
+		return c.wrapError("append-notes", id, err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return c.wrapError("append-notes", id, domain.ErrNotFound)
+	}
+	return nil
+}
+
 // UpdateDetails updates non-status issue metadata.
 func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
 	db, err := c.dbHandle()

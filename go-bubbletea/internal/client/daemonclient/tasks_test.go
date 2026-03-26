@@ -262,6 +262,35 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("append notes", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskAppendNotes {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskAppendNotes)
+				}
+				var body TaskAppendNotesRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.TaskID != "az-4" || body.Line != "📎 [img.png](.azedarach/images/az-4/img.png)" {
+					t.Fatalf("request body = %+v", body)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		if err := client.AppendTaskNotes(context.Background(), "az-4", "📎 [img.png](.azedarach/images/az-4/img.png)"); err != nil {
+			t.Fatalf("AppendTaskNotes error: %v", err)
+		}
+	})
+
 	t.Run("delete and archive", func(t *testing.T) {
 		commands := make([]string, 0, 2)
 		transport := &taskRecordingTransport{

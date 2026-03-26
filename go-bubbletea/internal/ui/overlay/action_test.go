@@ -71,13 +71,20 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 	}
 
 	hasCreateChild := false
+	hasImageAttachments := false
 	for _, action := range menu.actions {
 		if action.Key == "c" && action.Label == "Create child task" && action.Enabled {
 			hasCreateChild = true
 		}
+		if action.Key == "i" && action.Label == "Image attachments" && action.Enabled {
+			hasImageAttachments = true
+		}
 	}
 	if !hasCreateChild {
 		t.Error("expected 'Create child task' action in action menu")
+	}
+	if !hasImageAttachments {
+		t.Error("expected 'Image attachments' action in action menu")
 	}
 
 	// Git actions should be disabled
@@ -411,8 +418,8 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
 	menu := NewActionMenu(task, nil)
 
-	// Try selecting start session with 's'
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	// Try selecting image attachments with 'i'
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}
 	_, cmd := menu.Update(msg)
 
 	if cmd == nil {
@@ -425,8 +432,8 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 		t.Fatalf("expected SelectionMsg, got %T", result)
 	}
 
-	if selectionMsg.Key != "s" {
-		t.Errorf("expected key 's', got %s", selectionMsg.Key)
+	if selectionMsg.Key != "i" {
+		t.Errorf("expected key 'i', got %s", selectionMsg.Key)
 	}
 }
 

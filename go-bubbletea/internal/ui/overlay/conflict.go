@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -178,8 +179,12 @@ func (c *ConflictOverlay) View() string {
 
 	// Footer hint
 	b.WriteString("\n")
-	footer := c.overlayStyles.Footer.Render("j/k: navigate • Esc: close")
-	b.WriteString(footer)
+	b.WriteString(c.overlayStyles.Footer.Render(
+		keybinds.RenderPlain([]keybinds.Binding{
+			{Key: "j/k", Description: "navigate"},
+			{Key: "Esc", Description: "close"},
+		}, " • "),
+	))
 
 	return b.String()
 }

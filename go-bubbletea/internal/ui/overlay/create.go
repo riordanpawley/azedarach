@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 const (
@@ -340,15 +341,22 @@ func (c *CreateTaskOverlay) View() string {
 	b.WriteString("\n\n")
 
 	// Footer hints
-	hints := []string{
-		c.styles.MenuKey.Render("Tab / Shift+Tab") + " " + hintTextStyle.Render("Switch fields"),
-		c.styles.MenuKey.Render("T/B/F/E/C") + " " + hintTextStyle.Render("Set type"),
-		c.styles.MenuKey.Render("0/1/2/3/4") + " " + hintTextStyle.Render("Set priority"),
-		c.styles.MenuKey.Render("Enter") + " " + hintTextStyle.Render("Create task"),
-		c.styles.MenuKey.Render("Ctrl+E") + " " + hintTextStyle.Render("Edit in $EDITOR"),
-		c.styles.MenuKey.Render("Esc") + " " + hintTextStyle.Render("Cancel"),
+	hintTheme := keybinds.Theme{
+		KeyStyle:         c.styles.MenuKey,
+		DescriptionStyle: hintTextStyle,
+		FooterStyle:      hintTextStyle,
 	}
-	b.WriteString(strings.Join(hints, "\n"))
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "Tab / Shift+Tab", Description: "Switch fields"},
+		{Key: "T/B/F/E/C", Description: "Set type"},
+		{Key: "0/1/2/3/4", Description: "Set priority"},
+	}, 0, hintTheme))
+	b.WriteString("\n")
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "Enter", Description: "Create task"},
+		{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
+		{Key: "Esc", Description: "Cancel"},
+	}, 0, hintTheme))
 	if c.editorError != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
 		b.WriteString("\n")

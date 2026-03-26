@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // EventLogHotkey is the board hotkey scaffold for opening the event log overlay.
@@ -184,11 +185,19 @@ func (o *EventLogOverlay) renderContentLines() []string {
 }
 
 func (o *EventLogOverlay) footerLine(scrollable bool) string {
-	footer := "s: stream (Ctrl+C then q) • e: edit • Esc/q/backspace: close"
+	bindings := make([]keybinds.Binding, 0, 5)
 	if scrollable {
-		footer = "j/k: scroll • g/G: top/bottom • " + footer
+		bindings = append(bindings,
+			keybinds.Binding{Key: "j/k", Description: "scroll"},
+			keybinds.Binding{Key: "g/G", Description: "top/bottom"},
+		)
 	}
-	return o.styles.Footer.Render(footer)
+	bindings = append(bindings,
+		keybinds.Binding{Key: "s", Description: "stream (Ctrl+C then q)"},
+		keybinds.Binding{Key: "e", Description: "edit"},
+		keybinds.Binding{Key: "Esc/q/backspace", Description: "close"},
+	)
+	return o.styles.Footer.Render(keybinds.RenderPlain(bindings, " • "))
 }
 
 func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope) []string {

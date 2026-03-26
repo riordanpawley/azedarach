@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -214,8 +215,15 @@ func (j *JumpMode) View() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	footer := j.styles.Footer.Render("Type label • Backspace: delete • Esc: cancel")
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "Type label", Description: ""},
+		{Key: "Backspace", Description: "delete"},
+		{Key: "Esc", Description: "cancel"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         j.styles.MenuKey,
+		DescriptionStyle: j.styles.Footer,
+		FooterStyle:      j.styles.Footer,
+	}))
 
 	return b.String()
 }

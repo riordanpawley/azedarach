@@ -26,6 +26,25 @@ type mockTmuxService struct {
 	popupFn  func(ctx context.Context, title, width, height, command string) error
 }
 
+type probeOverlay struct {
+	updated bool
+	lastMsg tea.Msg
+}
+
+func (p *probeOverlay) Init() tea.Cmd { return nil }
+
+func (p *probeOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	p.updated = true
+	p.lastMsg = msg
+	return p, nil
+}
+
+func (p *probeOverlay) View() string { return "probe" }
+
+func (p *probeOverlay) Title() string { return "probe" }
+
+func (p *probeOverlay) Size() (width, height int) { return 10, 5 }
+
 func (m mockTmuxService) SwitchClient(ctx context.Context, name string) error {
 	if m.switchFn != nil {
 		return m.switchFn(ctx, name)
@@ -153,6 +172,89 @@ func TestHelperMethods(t *testing.T) {
 			t.Errorf("Expected minimum of 1, got %d", half)
 		}
 	})
+}
+
+func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
+	evt := protocol.EventEnvelope{
+		Event: "clipboard.error",
+		Body:  []byte("line one\nline   two\r\nline three"),
+	}
+
+	summary := runtimeEventSummary(evt)
+	if strings.Contains(summary, "\n") || strings.Contains(summary, "\r") {
+		t.Fatalf("summary contains line breaks: %q", summary)
+	}
+	if !strings.Contains(summary, "line one line two line three") {
+		t.Fatalf("summary was not compacted as expected: %q", summary)
+	}
+
+	longBody := strings.Repeat("x", eventSummaryMaxRunes+50)
+	longSummary := runtimeEventSummary(protocol.EventEnvelope{
+		Event: "ui.toast",
+		Body:  []byte(longBody),
+	})
+	if len([]rune(longSummary)) > eventSummaryMaxRunes {
+		t.Fatalf("long summary was not truncated: len=%d summary=%q", len([]rune(longSummary)), longSummary)
+	}
+	if !strings.HasSuffix(longSummary, "…") {
+		t.Fatalf("truncated summary must end with ellipsis: %q", longSummary)
+	}
+}
+
+func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
+	cfg := &config.Config{
+		Session: config.SessionConfig{
+			LogDir: "/tmp/azedarach-user-logs",
+		},
+	}
+
+	got := resolveTUILogFilePath(cfg)
+	want := filepath.Join("/tmp/azedarach-user-logs", "az.log")
+	if got != want {
+		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
+	m := newTestModel()
+	probe := &probeOverlay{}
+	m.overlayStack.Push(probe)
+
+	customMsg := struct{ name string }{name: "async-result"}
+	updatedModel, _ := m.Update(customMsg)
+	next, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updatedModel)
+	}
+
+	current, ok := next.overlayStack.Current().(*probeOverlay)
+	if !ok {
+		t.Fatalf("expected probe overlay on stack, got %T", next.overlayStack.Current())
+	}
+	if !current.updated {
+		t.Fatal("expected non-key message to be forwarded to active overlay")
+	}
+	if got, ok := current.lastMsg.(struct{ name string }); !ok || got.name != customMsg.name {
+		t.Fatalf("overlay received wrong message: %#v", current.lastMsg)
+	}
+}
+
+func TestUpdate_OpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewImageAttachOverlay("axu", m.attachmentService))
+
+	updated, _ := m.Update(overlay.OpenImagePreviewMsg{
+		IssueID:      "axu",
+		InitialIndex: 0,
+	})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if _, ok := next.overlayStack.Current().(*overlay.ImagePreviewOverlay); !ok {
+		t.Fatalf("expected image preview overlay on stack, got %T", next.overlayStack.Current())
+	}
 }
 
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
