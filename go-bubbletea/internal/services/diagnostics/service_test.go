@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 )
 
 // Mock TmuxClient for testing
@@ -490,6 +491,58 @@ func TestFormatDiagnostics(t *testing.T) {
 	// Verify health status is included
 	if !contains(output, "HEALTHY") {
 		t.Error("FormatDiagnostics() missing health status")
+	}
+}
+
+func TestFormatDiagnosticsIncludesWebhookFallbackStatus(t *testing.T) {
+	now := time.Now()
+	status := &linearsync.WebhookFallbackStatus{
+		Mode:    "misconfigured",
+		Healthy: false,
+		Reason:  "Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export LINEAR_WEBHOOK_PUBLIC_URL, or run \"tailscale funnel --bg --yes 9000\"",
+	}
+	diag := &SystemDiagnostics{
+		Timestamp:    now,
+		OverallState: HealthDegraded,
+		Operations:   OperationInfo{},
+		Ports:        []PortInfo{},
+		Sessions:     []SessionInfo{},
+		Worktrees:    []WorktreeInfo{},
+		Network: NetworkInfo{
+			IsOnline:  true,
+			LastCheck: now,
+		},
+		System: SystemInfo{
+			GoVersion:    "go1.21",
+			OS:           "linux",
+			Arch:         "amd64",
+			NumGoroutine: 10,
+			MemoryUsage:  1024 * 1024,
+		},
+		WebhookFallback: status,
+		Warnings:        []string{},
+		Errors:          []string{},
+	}
+
+	tmux := &mockTmuxClient{}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{}
+
+	service := NewService(tmux, ports, network)
+
+	output := service.FormatDiagnostics(diag)
+
+	if !contains(output, "LINEAR WEBHOOK FALLBACK:") {
+		t.Fatalf("FormatDiagnostics() missing webhook fallback section: %s", output)
+	}
+	if !contains(output, status.ToastMessage()) {
+		t.Fatalf("FormatDiagnostics() missing fallback toast message: %s", output)
+	}
+	if !contains(output, status.HealthMessage()) {
+		t.Fatalf("FormatDiagnostics() missing fallback health message: %s", output)
+	}
+	if !contains(output, "LINEAR_WEBHOOK_PUBLIC_URL") {
+		t.Fatalf("FormatDiagnostics() missing concrete cause detail: %s", output)
 	}
 }
 

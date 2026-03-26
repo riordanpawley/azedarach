@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 )
 
 // HealthStatus represents the overall health state
@@ -80,16 +81,17 @@ type SystemInfo struct {
 
 // SystemDiagnostics contains all diagnostic information
 type SystemDiagnostics struct {
-	Timestamp    time.Time
-	OverallState HealthStatus
-	Operations   OperationInfo
-	Ports        []PortInfo
-	Sessions     []SessionInfo
-	Worktrees    []WorktreeInfo
-	Network      NetworkInfo
-	System       SystemInfo
-	Warnings     []string
-	Errors       []string
+	Timestamp       time.Time
+	OverallState    HealthStatus
+	Operations      OperationInfo
+	Ports           []PortInfo
+	Sessions        []SessionInfo
+	Worktrees       []WorktreeInfo
+	Network         NetworkInfo
+	System          SystemInfo
+	WebhookFallback *linearsync.WebhookFallbackStatus
+	Warnings        []string
+	Errors          []string
 }
 
 // TmuxClient interface for tmux operations
@@ -126,6 +128,7 @@ type Service struct {
 	// Cached diagnostics
 	lastDiagnostics *SystemDiagnostics
 	lastUpdate      time.Time
+	webhookFallback *linearsync.WebhookFallbackStatus
 }
 
 // NewService creates a new diagnostics service
@@ -141,6 +144,13 @@ func NewService(tmux TmuxClient, ports PortAllocator, network NetworkChecker) *S
 func (s *Service) GetSystemStatus(ctx context.Context, sessions map[string]*domain.Session) HealthStatus {
 	diag := s.CollectDiagnostics(ctx, sessions, nil)
 	return diag.OverallState
+}
+
+// SetWebhookFallback stores the current Linear webhook fallback status for diagnostics emission.
+func (s *Service) SetWebhookFallback(status *linearsync.WebhookFallbackStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.webhookFallback = status
 }
 
 // GetPortConflicts returns a list of ports that are allocated but not available
@@ -332,16 +342,17 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 	}
 
 	diag := &SystemDiagnostics{
-		Timestamp:    now,
-		OverallState: overallState,
-		Operations:   ops,
-		Ports:        ports,
-		Sessions:     sessionInfos,
-		Worktrees:    worktreeInfos,
-		Network:      network,
-		System:       system,
-		Warnings:     warnings,
-		Errors:       errors,
+		Timestamp:       now,
+		OverallState:    overallState,
+		Operations:      ops,
+		Ports:           ports,
+		Sessions:        sessionInfos,
+		Worktrees:       worktreeInfos,
+		Network:         network,
+		System:          system,
+		WebhookFallback: s.webhookFallback,
+		Warnings:        warnings,
+		Errors:          errors,
 	}
 
 	s.lastDiagnostics = diag
@@ -383,6 +394,17 @@ func (s *Service) FormatDiagnostics(diag *SystemDiagnostics) string {
 			b.WriteString(fmt.Sprintf("  ⚠ %s\n", warn))
 		}
 		b.WriteString("\n")
+	}
+
+	if diag.WebhookFallback != nil {
+		b.WriteString("LINEAR WEBHOOK FALLBACK:\n")
+		b.WriteString(fmt.Sprintf("  Mode: %s\n", diag.WebhookFallback.Mode))
+		b.WriteString(fmt.Sprintf("  Healthy: %t\n", diag.WebhookFallback.Healthy))
+		if reason := diag.WebhookFallback.NormalizedReason(); reason != "" {
+			b.WriteString(fmt.Sprintf("  Reason: %s\n", reason))
+		}
+		b.WriteString(fmt.Sprintf("  Toast: %s\n", diag.WebhookFallback.ToastMessage()))
+		b.WriteString(fmt.Sprintf("  Health: %s\n\n", diag.WebhookFallback.HealthMessage()))
 	}
 
 	// Network

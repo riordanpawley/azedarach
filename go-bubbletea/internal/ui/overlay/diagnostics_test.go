@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
+	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 )
 
 // Mock diagnostics service for testing
@@ -405,6 +406,53 @@ func TestDiagnosticsPanel_View_ShowsOperationSummaryAndErrors(t *testing.T) {
 	}
 	if !strings.Contains(view, "inspect recent output or restart the session") {
 		t.Fatalf("View() missing retry guidance: %s", view)
+	}
+}
+
+func TestDiagnosticsPanel_View_ShowsWebhookFallbackReason(t *testing.T) {
+	now := time.Now()
+	status := &linearsync.WebhookFallbackStatus{
+		Mode:    "misconfigured",
+		Healthy: false,
+		Reason:  "Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export LINEAR_WEBHOOK_PUBLIC_URL, or run \"tailscale funnel --bg --yes 9000\"",
+	}
+	mockService := &mockDiagnosticsService{
+		diagnostics: &diagnostics.SystemDiagnostics{
+			Timestamp:    now,
+			OverallState: diagnostics.HealthDegraded,
+			Operations:   diagnostics.OperationInfo{},
+			Sessions:     []diagnostics.SessionInfo{},
+			Ports:        []diagnostics.PortInfo{},
+			Worktrees:    []diagnostics.WorktreeInfo{},
+			Network: diagnostics.NetworkInfo{
+				IsOnline:  true,
+				LastCheck: now,
+			},
+			System: diagnostics.SystemInfo{
+				GoVersion:    "go1.21",
+				OS:           "linux",
+				Arch:         "amd64",
+				NumGoroutine: 10,
+				MemoryUsage:  1024 * 1024,
+			},
+			WebhookFallback: status,
+		},
+	}
+	sessions := make(map[string]*domain.Session)
+
+	panel := NewDiagnosticsPanel(mockService, sessions)
+	panel.currentDiagnostics = mockService.diagnostics
+	panel.activeSection = SectionOverview
+
+	view := panel.View()
+	if !strings.Contains(view, "LINEAR WEBHOOK FALLBACK") {
+		t.Fatalf("View() missing webhook fallback section: %s", view)
+	}
+	if !strings.Contains(view, status.ToastMessage()) {
+		t.Fatalf("View() missing webhook fallback toast: %s", view)
+	}
+	if !strings.Contains(view, "LINEAR_WEBHOOK_PUBLIC_URL") {
+		t.Fatalf("View() missing concrete public URL cause: %s", view)
 	}
 }
 

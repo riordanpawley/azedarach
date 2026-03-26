@@ -278,6 +278,33 @@ func (d *DiagnosticsPanel) renderOverview(b *strings.Builder) {
 		b.WriteString("\n")
 	}
 
+	if diag.WebhookFallback != nil {
+		b.WriteString(headerStyle.Render("LINEAR WEBHOOK FALLBACK"))
+		b.WriteString("\n")
+
+		b.WriteString(labelStyle.Render("Mode:"))
+		b.WriteString("  ")
+		b.WriteString(d.styles.MenuItem.Render(diag.WebhookFallback.Mode))
+		b.WriteString("\n")
+
+		b.WriteString(labelStyle.Render("Healthy:"))
+		b.WriteString("  ")
+		b.WriteString(d.styles.MenuItem.Render(fmt.Sprintf("%t", diag.WebhookFallback.Healthy)))
+		b.WriteString("\n")
+
+		if reason := diag.WebhookFallback.NormalizedReason(); reason != "" {
+			b.WriteString(labelStyle.Render("Reason:"))
+			b.WriteString("  ")
+			b.WriteString(d.styles.MenuItem.Render(reason))
+			b.WriteString("\n")
+		}
+
+		b.WriteString(labelStyle.Render("Toast:"))
+		b.WriteString("  ")
+		b.WriteString(d.styles.MenuItem.Render(diag.WebhookFallback.ToastMessage()))
+		b.WriteString("\n\n")
+	}
+
 	// Summary stats
 	b.WriteString(headerStyle.Render("SUMMARY"))
 	b.WriteString("\n")
