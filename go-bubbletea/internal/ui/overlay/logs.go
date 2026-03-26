@@ -152,9 +152,9 @@ func (o *EventLogOverlay) UsesInternalTitle() bool {
 // Size returns the overlay dimensions.
 func (o *EventLogOverlay) Size() (width, height int) {
 	const (
-		minViewHeight = 8
-		maxViewHeight = 18
-		chromeHeight  = 6
+		minViewHeight = 5
+		maxViewHeight = 16
+		chromeHeight  = 4
 	)
 
 	// Keep footer pinned to bottom while avoiding oversized empty interiors.
@@ -170,7 +170,6 @@ func (o *EventLogOverlay) renderContentLines() []string {
 	if strings.TrimSpace(o.logFilePath) != "" {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("Log file: "+o.logFilePath))
 	}
-	lines = append(lines, "")
 
 	if len(o.events) == 0 {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("No runtime events yet."))
