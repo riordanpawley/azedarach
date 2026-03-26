@@ -32,10 +32,11 @@ type TaskCreateParams struct {
 
 // TaskUpdateParams contains the payload used to update task details through the shared daemon client.
 type TaskUpdateParams struct {
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	Type        domain.TaskType `json:"type"`
-	Priority    domain.Priority `json:"priority"`
+	Title           string          `json:"title"`
+	Description     string          `json:"description"`
+	Type            domain.TaskType `json:"type"`
+	Priority        domain.Priority `json:"priority"`
+	Implementations []string        `json:"implementations,omitempty"`
 }
 
 // TaskStatusRequest contains the payload used to update a task status.

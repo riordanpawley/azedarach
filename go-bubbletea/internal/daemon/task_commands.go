@@ -113,20 +113,22 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 
 func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd struct {
-		TaskID      string          `json:"task_id"`
-		Title       string          `json:"title"`
-		Description string          `json:"description"`
-		Type        domain.TaskType `json:"type"`
-		Priority    domain.Priority `json:"priority"`
+		TaskID          string          `json:"task_id"`
+		Title           string          `json:"title"`
+		Description     string          `json:"description"`
+		Type            domain.TaskType `json:"type"`
+		Priority        domain.Priority `json:"priority"`
+		Implementations []string        `json:"implementations,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	if err := d.issues.UpdateDetails(ctx, cmd.TaskID, issues.UpdateTaskParams{
-		Title:       cmd.Title,
-		Description: cmd.Description,
-		Type:        cmd.Type,
-		Priority:    cmd.Priority,
+		Title:           cmd.Title,
+		Description:     cmd.Description,
+		Type:            cmd.Type,
+		Priority:        cmd.Priority,
+		Implementations: cmd.Implementations,
 	}); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
