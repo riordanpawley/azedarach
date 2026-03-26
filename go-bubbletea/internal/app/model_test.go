@@ -1999,6 +1999,51 @@ func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	}
 }
 
+func TestTaskDeletionSuppressesHydratedResurrection(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug},
+	}
+
+	updated, cmd := m.Update(taskDeletedResultMsg{taskID: "az-1"})
+	if cmd == nil {
+		t.Fatal("expected refresh command after delete")
+	}
+	deletedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if !deletedModel.isTaskHydrationSuppressed("az-1") {
+		t.Fatal("expected deleted task to be tombstoned for later hydrates")
+	}
+	if len(deletedModel.tasks) != 1 || deletedModel.tasks[0].ID != "az-2" {
+		t.Fatalf("tasks after delete = %+v, want only az-2", deletedModel.tasks)
+	}
+
+	result, _ := deletedModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1 resurrected", Status: domain.StatusBlocked, Priority: domain.P0, Type: domain.TypeTask},
+			{ID: "az-2", Title: "Task 2 refreshed", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeBug},
+			{ID: "az-3", Title: "Task 3", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeFeature},
+		},
+		revision: 14,
+	})
+	refreshed := result.(Model)
+
+	if len(refreshed.tasks) != 2 {
+		t.Fatalf("tasks after hydrate = %+v, want 2 tasks", refreshed.tasks)
+	}
+	for _, task := range refreshed.tasks {
+		if task.ID == "az-1" {
+			t.Fatalf("deleted task resurrected by hydrate: %+v", refreshed.tasks)
+		}
+	}
+	if refreshed.tasks[0].ID != "az-2" || refreshed.tasks[1].ID != "az-3" {
+		t.Fatalf("refreshed tasks = %+v, want az-2 and az-3", refreshed.tasks)
+	}
+}
+
 func TestIssuesLoadedStartsPeriodicRefreshLoop(t *testing.T) {
 	m := newTestModel()
 	m.hasRefreshLoop = false
