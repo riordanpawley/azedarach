@@ -243,19 +243,7 @@ func renderChildProgress(progress ChildProgress, s *styles.Styles) string {
 	if progress.Total <= 0 {
 		return ""
 	}
-	percent := float64(progress.Done) / float64(progress.Total)
-	barWidth := 4
-	filled := int(percent * float64(barWidth))
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > barWidth {
-		filled = barWidth
-	}
-	empty := barWidth - filled
-
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
-	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d]%s", progress.Done, progress.Total, bar))
+	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d]", progress.Done, progress.Total))
 }
 
 // RenderCard is the exported version for testing

@@ -282,14 +282,12 @@ func TestRenderCard_WithChildProgress(t *testing.T) {
 		t.Errorf("Card should contain progress brackets, got: %s", stripped)
 	}
 
-	// Should contain progress bar characters
-	if !strings.Contains(stripped, "█") && !strings.Contains(stripped, "░") {
-		t.Errorf("Card should contain progress bar, got: %s", stripped)
-	}
-
 	// Should contain ratio (from placeholder values)
 	if !strings.Contains(stripped, "/") {
 		t.Errorf("Card should contain completion ratio, got: %s", stripped)
+	}
+	if strings.Contains(stripped, "█") || strings.Contains(stripped, "░") {
+		t.Errorf("Card should not contain bar glyphs, got: %s", stripped)
 	}
 }
 
@@ -415,14 +413,8 @@ func TestRenderChildProgress(t *testing.T) {
 		t.Error("Child progress should contain completion counts")
 	}
 
-	// Should contain filled blocks
-	if !strings.Contains(result, "█") {
-		t.Error("Child progress should contain filled blocks")
-	}
-
-	// Should contain empty blocks
-	if !strings.Contains(result, "░") {
-		t.Error("Child progress should contain empty blocks")
+	if strings.Contains(result, "█") || strings.Contains(result, "░") {
+		t.Error("Child progress should not contain bar glyphs")
 	}
 }
 
