@@ -50,6 +50,13 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		attempts = append(attempts, "png applescript failed: "+compactWhitespace(err.Error()))
 	}
 
+	// Some apps place a file alias on the clipboard instead of raw image bytes.
+	if data, err := readClipboardMacOSFileAlias(ctx); err == nil && len(data) > 0 {
+		return data, nil
+	} else if err != nil {
+		attempts = append(attempts, "file alias fallback failed: "+compactWhitespace(err.Error()))
+	}
+
 	// Fallback to osascript for PNG/TIFF/JPEG.
 	script := `
 		set tmpDir to POSIX path of (path to temporary items folder)
@@ -94,10 +101,16 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 	result := compactWhitespace(strings.TrimSpace(string(output)))
 	if strings.HasPrefix(result, "ERROR:") {
 		attempts = append(attempts, strings.TrimSpace(strings.TrimPrefix(result, "ERROR:")))
+		if clipboardInfo := readClipboardMacOSInfo(ctx); clipboardInfo != "" {
+			attempts = append(attempts, "clipboard info: "+clipboardInfo)
+		}
 		return nil, fmt.Errorf("no image found in clipboard (%s)", compactWhitespace(strings.Join(attempts, "; ")))
 	}
 	if result == "" {
 		attempts = append(attempts, "osascript returned empty path")
+		if clipboardInfo := readClipboardMacOSInfo(ctx); clipboardInfo != "" {
+			attempts = append(attempts, "clipboard info: "+clipboardInfo)
+		}
 		return nil, fmt.Errorf("no image found in clipboard (%s)", compactWhitespace(strings.Join(attempts, "; ")))
 	}
 
@@ -110,6 +123,41 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 	// Clean up
 	_ = os.Remove(tmpFile)
 
+	return data, nil
+}
+
+func readClipboardMacOSFileAlias(ctx context.Context) ([]byte, error) {
+	script := `
+		try
+			set aliasPath to POSIX path of (the clipboard as alias)
+			return aliasPath
+		on error errMsg
+			return "ERROR:" & errMsg
+		end try
+	`
+	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("osascript alias read failed: %w", err)
+	}
+	result := strings.TrimSpace(string(output))
+	if strings.HasPrefix(result, "ERROR:") {
+		return nil, fmt.Errorf(strings.TrimPrefix(result, "ERROR:"))
+	}
+	if result == "" {
+		return nil, fmt.Errorf("clipboard alias path was empty")
+	}
+	path := filepath.Clean(result)
+	if !isLikelyImagePath(path) {
+		return nil, fmt.Errorf("clipboard file is not an image: %s", filepath.Ext(path))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read clipboard alias image: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("clipboard alias image file was empty")
+	}
 	return data, nil
 }
 
@@ -215,6 +263,24 @@ func findPNGPastePath() (string, bool) {
 
 func compactWhitespace(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func readClipboardMacOSInfo(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "osascript", "-e", "clipboard info")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return compactWhitespace(string(output))
+}
+
+func isLikelyImagePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif":
+		return true
+	default:
+		return false
+	}
 }
 
 func applescriptStringLiteral(value string) string {

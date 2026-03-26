@@ -252,6 +252,16 @@ func TestDetectMimeType(t *testing.T) {
 			expected: "image/webp",
 		},
 		{
+			name:     "TIFF little-endian",
+			data:     []byte{0x49, 0x49, 0x2A, 0x00},
+			expected: "image/tiff",
+		},
+		{
+			name:     "BMP",
+			data:     []byte{0x42, 0x4D, 0x36, 0x00},
+			expected: "image/bmp",
+		},
+		{
 			name:     "Unknown",
 			data:     []byte{0x00, 0x01, 0x02, 0x03},
 			expected: "application/octet-stream",
@@ -282,6 +292,8 @@ func TestMimeTypeToExt(t *testing.T) {
 		{"image/jpeg", ".jpg"},
 		{"image/gif", ".gif"},
 		{"image/webp", ".webp"},
+		{"image/tiff", ".tiff"},
+		{"image/bmp", ".bmp"},
 		{"application/octet-stream", ".bin"},
 		{"unknown/type", ".bin"},
 	}

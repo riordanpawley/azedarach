@@ -256,6 +256,19 @@ func detectMimeType(data []byte) string {
 		return "image/webp"
 	}
 
+	// TIFF signature (4 bytes): little-endian II*\x00 or big-endian MM\x00*
+	if len(data) >= 4 {
+		if (data[0] == 0x49 && data[1] == 0x49 && data[2] == 0x2A && data[3] == 0x00) ||
+			(data[0] == 0x4D && data[1] == 0x4D && data[2] == 0x00 && data[3] == 0x2A) {
+			return "image/tiff"
+		}
+	}
+
+	// BMP signature (2 bytes)
+	if len(data) >= 2 && data[0] == 0x42 && data[1] == 0x4D {
+		return "image/bmp"
+	}
+
 	return "application/octet-stream"
 }
 
@@ -292,6 +305,10 @@ func mimeTypeToExt(mimeType string) string {
 		return ".gif"
 	case "image/webp":
 		return ".webp"
+	case "image/tiff":
+		return ".tiff"
+	case "image/bmp":
+		return ".bmp"
 	default:
 		return ".bin"
 	}
