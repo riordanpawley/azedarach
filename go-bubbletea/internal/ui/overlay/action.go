@@ -80,7 +80,14 @@ func (m *ActionMenu) buildActions() []Action {
 	}
 
 	// Git actions (enabled when session exists and has worktree)
-	hasWorktree := m.session != nil && m.session.Worktree != ""
+	hasWorktree := false
+	if m.session != nil && m.session.Worktree != "" {
+		hasWorktree = true
+	} else if m.task.Session != nil && m.task.Session.Worktree != "" {
+		hasWorktree = true
+	} else if m.task.HasWorktree {
+		hasWorktree = true
+	}
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
 		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
