@@ -129,6 +129,12 @@ func (m *ActionMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m, m.selectCurrentAction()
 
+		case "left":
+			return m, m.selectByKey("h")
+
+		case "right":
+			return m, m.selectByKey("l")
+
 		default:
 			// Try direct key selection
 			return m, m.selectByKey(msg.String())
@@ -350,6 +356,12 @@ func (m *BulkActionMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			return m, m.selectCurrentAction()
+
+		case "left":
+			return m, m.selectByKey("h")
+
+		case "right":
+			return m, m.selectByKey("l")
 
 		default:
 			// Try direct key selection

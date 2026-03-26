@@ -329,6 +329,35 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 	}
 }
 
+func TestActionMenu_Update_ArrowSelection(t *testing.T) {
+	task := domain.Task{ID: "az-123", Status: domain.StatusInProgress}
+	menu := NewActionMenu(task, nil)
+
+	_, leftCmd := menu.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if leftCmd == nil {
+		t.Fatal("expected command from left arrow key")
+	}
+	leftMsg, ok := leftCmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg for left arrow, got %T", leftCmd())
+	}
+	if leftMsg.Key != "h" {
+		t.Fatalf("left arrow selected %q, want %q", leftMsg.Key, "h")
+	}
+
+	_, rightCmd := menu.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if rightCmd == nil {
+		t.Fatal("expected command from right arrow key")
+	}
+	rightMsg, ok := rightCmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg for right arrow, got %T", rightCmd())
+	}
+	if rightMsg.Key != "l" {
+		t.Fatalf("right arrow selected %q, want %q", rightMsg.Key, "l")
+	}
+}
+
 func TestActionMenu_Update_Enter(t *testing.T) {
 	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
 	menu := NewActionMenu(task, nil)
@@ -387,5 +416,33 @@ func TestActionMenu_SelectByKey_Disabled(t *testing.T) {
 
 	if cmd != nil {
 		t.Error("expected nil command when selecting disabled action")
+	}
+}
+
+func TestBulkActionMenu_Update_ArrowSelection(t *testing.T) {
+	menu := NewBulkActionMenu([]string{"az-1", "az-2"}, 2)
+
+	_, leftCmd := menu.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if leftCmd == nil {
+		t.Fatal("expected command from left arrow key")
+	}
+	leftMsg, ok := leftCmd().(BulkActionMsg)
+	if !ok {
+		t.Fatalf("expected BulkActionMsg for left arrow, got %T", leftCmd())
+	}
+	if leftMsg.Action != "h" {
+		t.Fatalf("left arrow action = %q, want %q", leftMsg.Action, "h")
+	}
+
+	_, rightCmd := menu.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if rightCmd == nil {
+		t.Fatal("expected command from right arrow key")
+	}
+	rightMsg, ok := rightCmd().(BulkActionMsg)
+	if !ok {
+		t.Fatalf("expected BulkActionMsg for right arrow, got %T", rightCmd())
+	}
+	if rightMsg.Action != "l" {
+		t.Fatalf("right arrow action = %q, want %q", rightMsg.Action, "l")
 	}
 }
