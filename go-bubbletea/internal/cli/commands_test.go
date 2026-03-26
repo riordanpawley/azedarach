@@ -2437,6 +2437,15 @@ func TestPrimeCommandQuestionFirstAndSpecBlock(t *testing.T) {
 	if !strings.Contains(output, "- Spec workflow:") {
 		t.Fatalf("prime output missing spec workflow block: %q", output)
 	}
+	if !strings.Contains(output, "ALWAYS check `az spec` requirements/links before starting behavior work.") {
+		t.Fatalf("prime output missing mandatory pre-work spec check guardrail: %q", output)
+	}
+	if !strings.Contains(output, "If implementation is not aligned with spec, update spec first, then implement.") {
+		t.Fatalf("prime output missing spec-first update guardrail: %q", output)
+	}
+	if !strings.Contains(output, "Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.") {
+		t.Fatalf("prime output missing issue/spec linking guardrail: %q", output)
+	}
 }
 
 func TestPrimeCommandSpecBlockDisabled(t *testing.T) {
