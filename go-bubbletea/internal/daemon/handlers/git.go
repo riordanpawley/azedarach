@@ -91,13 +91,14 @@ type gitMergeResultBody struct {
 func (h *GitHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
 	if h.longRunning != nil && isGitLongRunningCommand(req.Command) {
 		return h.longRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) protocol.ResponseEnvelope {
-			return h.handleDirect(execCtx, req)
+			return h.HandleDirect(execCtx, req)
 		})
 	}
-	return h.handleDirect(ctx, req)
+	return h.HandleDirect(ctx, req)
 }
 
-func (h *GitHandler) handleDirect(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+// HandleDirect executes a git command without passing through the long-running wrapper.
+func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
 	resp := protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		RequestID:       req.RequestID,

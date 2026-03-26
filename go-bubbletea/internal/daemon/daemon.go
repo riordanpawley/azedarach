@@ -50,9 +50,12 @@ type Daemon struct {
 	tmux               *tmux.Client
 	git                *git.Client
 	worktree           *git.WorktreeManager
+	gitHandler         *daemonhandlers.GitHandler
+	worktreeHandler    *daemonhandlers.WorktreeHandler
 	session            *daemonhandlers.SessionHandler
 	sessionStore       *daemonstate.Store
 	sessionLongRunning SessionLongRunningExecutor
+	operationRuntime   *operationRuntime
 	sessionStopMu      sync.Mutex
 	sessionStopPending map[string]int
 
@@ -97,6 +100,7 @@ func New(cfg Config) *Daemon {
 	sessionStore := daemonstate.NewStore()
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
+	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
 
 	d := &Daemon{
 		cfg:                cfg,
@@ -111,12 +115,34 @@ func New(cfg Config) *Daemon {
 		sessionStopPending: map[string]int{},
 		revision:           map[string]uint64{},
 	}
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      cfg.RepoDir,
+		logger:       cfg.Logger,
+		hub:          d.hub,
+		nextRevision: d.nextRevision,
+		sessionStart: d.handleSessionStartDirect,
+		sessionStop:  d.handleSessionStopDirect,
+	})
+	commandExecutor := operationCommandExecutor{runtime: runtime}
+	sessionExecutor := sessionOperationExecutor{runtime: runtime}
+	gitHandler := daemonhandlers.NewGitHandler(gitClient, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
+	worktreeHandler := daemonhandlers.NewWorktreeHandler(
+		worktreeServiceAdapter{manager: d.worktree},
+		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
+	)
+	runtime.gitHandler = gitHandler
+	runtime.worktreeHandler = worktreeHandler
+	d.gitHandler = gitHandler
+	d.worktreeHandler = worktreeHandler
+	d.operationRuntime = runtime
+	d.sessionLongRunning = sessionExecutor
 	d.router = daemonhandlers.NewDispatcher(
 		sessionHandler,
-		daemonhandlers.NewGitHandler(gitClient),
-		daemonhandlers.NewWorktreeHandler(worktreeServiceAdapter{manager: d.worktree}),
-		daemonhandlers.NewDevServerHandler(devServerManager),
+		gitHandler,
+		worktreeHandler,
+		devServerHandler,
 		prHandler,
+		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d.issues, applyRevisionAdapter{daemon: d})
 
@@ -154,6 +180,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		default:
 			cancelServe()
 		}
+		if d.operationRuntime != nil {
+			if closeErr := d.operationRuntime.Close(); closeErr != nil {
+				d.cfg.Logger.Warn("failed to close operation runtime", "error", closeErr)
+			}
+		}
 		if d.issues != nil {
 			if closeErr := d.issues.CloseDB(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
@@ -184,7 +215,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 	}
 	defer d.endCommand()
 
-	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") {
+	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") {
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {
@@ -246,16 +277,42 @@ func (d *Daemon) drainInFlightCommands() {
 	d.shuttingDown = true
 	d.shutdownMu.Unlock()
 
-	done := make(chan struct{})
-	go func() {
-		d.inFlightCommands.Wait()
-		close(done)
-	}()
-
 	timeout := d.cfg.IdleTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if d.operationRuntime != nil {
+			if err := d.operationRuntime.StopIntake(); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("daemon operation intake stop failed", "error", err)
+			}
+			if err := d.operationRuntime.CancelQueued(context.Background(), "daemon shutting down"); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("daemon queued operation cancellation failed", "error", err)
+			}
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.inFlightCommands.Wait()
+		}()
+		if d.operationRuntime != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				drainCtx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				if err := d.operationRuntime.Drain(drainCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) && d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("daemon operation drain failed", "error", err)
+				}
+			}()
+		}
+		wg.Wait()
+	}()
 
 	select {
 	case <-done:
