@@ -16,14 +16,30 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
+const (
+	taskTemplateAnchorTitle       = "TITLE"
+	taskTemplateAnchorDescription = "DESCRIPTION"
+	taskTemplateAnchorDesign      = "DESIGN"
+	taskTemplateAnchorNotes       = "NOTES"
+	taskTemplateAnchorAcceptance  = "ACCEPTANCE"
+)
+
 // TaskCreatedMsg is emitted when a new task is created
 type TaskCreatedMsg struct {
-	ID          string
-	Title       string
-	Description string
-	Type        domain.TaskType
-	Priority    domain.Priority
-	ParentID    *string
+	ID              string
+	Title           string
+	Description     string
+	Type            domain.TaskType
+	Priority        domain.Priority
+	Status          domain.Status
+	Assignee        string
+	Labels          []string
+	Implementations []string
+	Design          string
+	Notes           string
+	Acceptance      string
+	Estimate        *int
+	ParentID        *string
 }
 
 // CreateTaskOverlay provides a form to create a new task
@@ -33,6 +49,14 @@ type CreateTaskOverlay struct {
 	description textarea.Model
 	taskType    domain.TaskType
 	priority    domain.Priority
+	status      domain.Status
+	assignee    string
+	labels      []string
+	impls       []string
+	design      string
+	notes       string
+	acceptance  string
+	estimate    *int
 	parentID    *string
 	focusIndex  int
 	styles      *Styles
@@ -73,10 +97,12 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 		description: ta,
 		taskType:    task.Type,
 		priority:    task.Priority,
+		status:      task.Status,
+		impls:       task.Implementations,
 		parentID:    task.ParentID,
 		focusIndex:  focusTitle,
 		styles:      New(),
-		editorFlow:  runTaskTemplateInHelix,
+		editorFlow:  runTaskTemplateInEditor,
 	}
 }
 
@@ -100,10 +126,11 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 		description: ta,
 		taskType:    domain.TypeTask,
 		priority:    domain.P2,
+		status:      domain.StatusOpen,
 		parentID:    parentID,
 		focusIndex:  focusTitle,
 		styles:      New(),
-		editorFlow:  runTaskTemplateInHelix,
+		editorFlow:  runTaskTemplateInEditor,
 	}
 }
 
@@ -135,7 +162,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.submit()
 
 		case "ctrl+e":
-			return c, c.editInHelixCmd()
+			return c, c.editInEditorCmd()
 
 		case "tab", "shift+tab":
 			// Tab through fields
@@ -218,6 +245,14 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.description.SetValue(msg.msg.Description)
 		c.taskType = msg.msg.Type
 		c.priority = msg.msg.Priority
+		c.status = msg.msg.Status
+		c.assignee = msg.msg.Assignee
+		c.labels = append([]string(nil), msg.msg.Labels...)
+		c.impls = append([]string(nil), msg.msg.Implementations...)
+		c.design = msg.msg.Design
+		c.notes = msg.msg.Notes
+		c.acceptance = msg.msg.Acceptance
+		c.estimate = msg.msg.Estimate
 		return c, tea.Batch(
 			func() tea.Msg { return msg.msg },
 			func() tea.Msg { return CloseOverlayMsg{} },
@@ -310,7 +345,7 @@ func (c *CreateTaskOverlay) View() string {
 		c.styles.MenuKey.Render("T/B/F/E/C") + " " + hintTextStyle.Render("Set type"),
 		c.styles.MenuKey.Render("0/1/2/3/4") + " " + hintTextStyle.Render("Set priority"),
 		c.styles.MenuKey.Render("Enter") + " " + hintTextStyle.Render("Create task"),
-		c.styles.MenuKey.Render("Ctrl+E") + " " + hintTextStyle.Render("Edit in Helix"),
+		c.styles.MenuKey.Render("Ctrl+E") + " " + hintTextStyle.Render("Edit in $EDITOR"),
 		c.styles.MenuKey.Render("Esc") + " " + hintTextStyle.Render("Cancel"),
 	}
 	b.WriteString(strings.Join(hints, "\n"))
@@ -391,19 +426,27 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 	return tea.Batch(
 		func() tea.Msg {
 			return TaskCreatedMsg{
-				ID:          c.id,
-				Title:       title,
-				Description: strings.TrimSpace(c.description.Value()),
-				Type:        c.taskType,
-				Priority:    c.priority,
-				ParentID:    c.parentID,
+				ID:              c.id,
+				Title:           title,
+				Description:     strings.TrimSpace(c.description.Value()),
+				Type:            c.taskType,
+				Priority:        c.priority,
+				Status:          domain.StatusOpen,
+				Assignee:        strings.TrimSpace(c.assignee),
+				Labels:          append([]string(nil), c.labels...),
+				Implementations: append([]string(nil), c.impls...),
+				Design:          strings.TrimSpace(c.design),
+				Notes:           strings.TrimSpace(c.notes),
+				Acceptance:      strings.TrimSpace(c.acceptance),
+				Estimate:        c.estimate,
+				ParentID:        c.parentID,
 			}
 		},
 		func() tea.Msg { return CloseOverlayMsg{} },
 	)
 }
 
-func (c *CreateTaskOverlay) editInHelixCmd() tea.Cmd {
+func (c *CreateTaskOverlay) editInEditorCmd() tea.Cmd {
 	return func() tea.Msg {
 		template := serializeTaskTemplate(
 			c.id,
@@ -411,10 +454,18 @@ func (c *CreateTaskOverlay) editInHelixCmd() tea.Cmd {
 			c.description.Value(),
 			c.taskType,
 			c.priority,
+			c.status,
+			c.assignee,
+			c.labels,
+			c.impls,
+			c.design,
+			c.notes,
+			c.acceptance,
+			c.estimate,
 		)
 		editorFlow := c.editorFlow
 		if editorFlow == nil {
-			editorFlow = runTaskTemplateInHelix
+			editorFlow = runTaskTemplateInEditor
 		}
 		edited, err := editorFlow(template)
 		if err != nil {
@@ -428,28 +479,85 @@ func (c *CreateTaskOverlay) editInHelixCmd() tea.Cmd {
 	}
 }
 
-func serializeTaskTemplate(id, title, description string, taskType domain.TaskType, priority domain.Priority) string {
+func serializeTaskTemplate(
+	id, title, description string,
+	taskType domain.TaskType,
+	priority domain.Priority,
+	status domain.Status,
+	assignee string,
+	labels []string,
+	implementations []string,
+	design string,
+	notes string,
+	acceptance string,
+	estimate *int,
+) string {
 	if strings.TrimSpace(title) == "" {
-		title = "TITLE"
+		title = taskTemplateAnchorTitle
 	}
 	if strings.TrimSpace(description) == "" {
-		description = "DESCRIPTION"
+		description = taskTemplateAnchorDescription
+	}
+	if strings.TrimSpace(string(taskType)) == "" {
+		taskType = domain.TypeTask
+	}
+	if strings.TrimSpace(string(status)) == "" {
+		status = domain.StatusOpen
+	}
+	if strings.TrimSpace(design) == "" {
+		design = taskTemplateAnchorDesign
+	}
+	if strings.TrimSpace(notes) == "" {
+		notes = taskTemplateAnchorNotes
+	}
+	if strings.TrimSpace(acceptance) == "" {
+		acceptance = taskTemplateAnchorAcceptance
+	}
+	labelsValue := strings.Join(labels, ", ")
+	implValue := strings.Join(implementations, ", ")
+	if strings.TrimSpace(implValue) == "" {
+		implValue = "default"
+	}
+	estimateValue := ""
+	if estimate != nil {
+		estimateValue = strconv.Itoa(*estimate)
 	}
 	lines := []string{
 		"# " + title,
-		"---------------------------------------------------",
+		"───────────────────────────────────────────────────",
 		"",
-		fmt.Sprintf("Type: %s", string(taskType)),
-		fmt.Sprintf("Priority: P%d", int(priority)),
+		fmt.Sprintf("Type:     %s        (task | bug | feature | epic | chore)", string(taskType)),
+		fmt.Sprintf("Priority: P%d          (P0 = highest, P4 = lowest)", int(priority)),
+		fmt.Sprintf("Status:   %s        (open | in_progress | blocked | closed)", string(status)),
+		"Assignee: " + strings.TrimSpace(assignee),
+		"Labels:   " + labelsValue,
+		"Impl:     " + implValue,
+		"Estimate: " + estimateValue,
 		"",
+		"───────────────────────────────────────────────────",
 		"## Description",
 		"",
 		description,
 		"",
+		"───────────────────────────────────────────────────",
+		"## Design",
+		"",
+		design,
+		"",
+		"───────────────────────────────────────────────────",
+		"## Notes",
+		"",
+		notes,
+		"",
+		"───────────────────────────────────────────────────",
+		"## Acceptance Criteria",
+		"",
+		acceptance,
+		"",
 	}
 	if id != "" {
 		lines = append(lines,
-			"---------------------------------------------------",
+			"───────────────────────────────────────────────────",
 			fmt.Sprintf("ID: %s (read-only)", id),
 			"",
 		)
@@ -463,16 +571,23 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 		return TaskCreatedMsg{}, fmt.Errorf("missing title header (# ...)")
 	}
 	title := strings.TrimSpace(strings.TrimPrefix(lines[0], "# "))
-	if title == "" || title == "TITLE" {
+	if title == "" || title == taskTemplateAnchorTitle {
 		return TaskCreatedMsg{}, fmt.Errorf("title is required")
 	}
 
 	taskType := domain.TypeTask
 	priority := domain.P2
+	status := domain.StatusOpen
+	var estimate *int
+	var assignee string
+	var labels []string
+	var implementations []string
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "Type:") {
 			raw := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "Type:")))
+			raw = strings.SplitN(raw, "(", 2)[0]
+			raw = strings.TrimSpace(raw)
 			switch raw {
 			case "task":
 				taskType = domain.TypeTask
@@ -490,6 +605,8 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 		}
 		if strings.HasPrefix(line, "Priority:") {
 			raw := strings.TrimSpace(strings.TrimPrefix(line, "Priority:"))
+			raw = strings.SplitN(raw, "(", 2)[0]
+			raw = strings.TrimSpace(raw)
 			raw = strings.TrimPrefix(strings.ToUpper(raw), "P")
 			n, err := strconv.Atoi(raw)
 			if err != nil || n < 0 || n > 4 {
@@ -497,21 +614,97 @@ func parseTaskTemplate(markdown, id string, parentID *string) (TaskCreatedMsg, e
 			}
 			priority = domain.Priority(n)
 		}
+		if strings.HasPrefix(line, "Status:") {
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "Status:"))
+			raw = strings.SplitN(raw, "(", 2)[0]
+			raw = strings.TrimSpace(raw)
+			switch raw {
+			case string(domain.StatusOpen):
+				status = domain.StatusOpen
+			case string(domain.StatusInProgress):
+				status = domain.StatusInProgress
+			case string(domain.StatusBlocked):
+				status = domain.StatusBlocked
+			case string(domain.StatusDone):
+				status = domain.StatusDone
+			default:
+				return TaskCreatedMsg{}, fmt.Errorf("invalid status %q", raw)
+			}
+		}
+		if strings.HasPrefix(line, "Assignee:") {
+			assignee = strings.TrimSpace(strings.TrimPrefix(line, "Assignee:"))
+		}
+		if strings.HasPrefix(line, "Labels:") {
+			labels = splitCSV(strings.TrimSpace(strings.TrimPrefix(line, "Labels:")))
+		}
+		if strings.HasPrefix(line, "Impl:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "Impl:"))
+			value = strings.SplitN(value, "(", 2)[0]
+			implementations = splitCSV(strings.TrimSpace(value))
+		}
+		if strings.HasPrefix(line, "Estimate:") {
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "Estimate:"))
+			if raw != "" {
+				n, err := strconv.Atoi(raw)
+				if err != nil {
+					return TaskCreatedMsg{}, fmt.Errorf("invalid estimate %q", raw)
+				}
+				estimate = &n
+			}
+		}
 	}
 
 	description := parseSection(markdown, "Description")
-	if description == "DESCRIPTION" {
+	if description == taskTemplateAnchorDescription {
 		description = ""
+	}
+	design := parseSection(markdown, "Design")
+	if design == taskTemplateAnchorDesign {
+		design = ""
+	}
+	notes := parseSection(markdown, "Notes")
+	if notes == taskTemplateAnchorNotes {
+		notes = ""
+	}
+	acceptance := parseSection(markdown, "Acceptance Criteria")
+	if acceptance == taskTemplateAnchorAcceptance {
+		acceptance = ""
 	}
 
 	return TaskCreatedMsg{
-		ID:          id,
-		Title:       title,
-		Description: strings.TrimSpace(description),
-		Type:        taskType,
-		Priority:    priority,
-		ParentID:    parentID,
+		ID:              id,
+		Title:           title,
+		Description:     strings.TrimSpace(description),
+		Type:            taskType,
+		Priority:        priority,
+		Status:          status,
+		Assignee:        assignee,
+		Labels:          labels,
+		Implementations: implementations,
+		Design:          strings.TrimSpace(design),
+		Notes:           strings.TrimSpace(notes),
+		Acceptance:      strings.TrimSpace(acceptance),
+		Estimate:        estimate,
+		ParentID:        parentID,
 	}, nil
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }
 
 func parseSection(markdown, sectionName string) string {
@@ -534,20 +727,28 @@ func parseSection(markdown, sectionName string) string {
 	return strings.TrimSpace(strings.Join(content, "\n"))
 }
 
-func runTaskTemplateInHelix(template string) (string, error) {
+func runTaskTemplateInEditor(template string) (string, error) {
 	tempFile := filepath.Join(os.TempDir(), fmt.Sprintf("azedarach-task-%d.md", time.Now().UnixNano()))
 	if err := os.WriteFile(tempFile, []byte(template), 0600); err != nil {
 		return "", fmt.Errorf("write temp file: %w", err)
 	}
 	defer os.Remove(tempFile)
 
-	cmd := exec.Command("hx", tempFile)
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
+
+	cmd := exec.Command("sh", "-c", fmt.Sprintf(`%s %q`, editorName, tempFile))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("open helix: %w", err)
+		return "", fmt.Errorf("open editor: %w", err)
 	}
 
 	edited, err := os.ReadFile(tempFile)

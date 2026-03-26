@@ -44,11 +44,13 @@ func main() {
 	defer cancel()
 
 	d := daemon.New(daemon.Config{
-		RepoDir:    repoDir,
-		SocketPath: socketPath,
-		LockPath:   lockPath,
-		BaseBranch: cfg.Git.BaseBranch,
-		CLITool:    cfg.CLITool,
+		RepoDir:             repoDir,
+		SocketPath:          socketPath,
+		LockPath:            lockPath,
+		BaseBranch:          cfg.Git.BaseBranch,
+		CLITool:             cfg.CLITool,
+		SessionShell:        cfg.Session.Shell,
+		SessionInitCommands: cfg.Session.InitCommands,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

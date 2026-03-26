@@ -24,11 +24,19 @@ const (
 
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	Type        domain.TaskType `json:"type"`
-	Priority    domain.Priority `json:"priority"`
-	ParentID    *string         `json:"parent_id,omitempty"`
+	Title           string          `json:"title"`
+	Description     string          `json:"description"`
+	Type            domain.TaskType `json:"type"`
+	Priority        domain.Priority `json:"priority"`
+	Status          domain.Status   `json:"status,omitempty"`
+	Assignee        string          `json:"assignee,omitempty"`
+	Labels          []string        `json:"labels,omitempty"`
+	Implementations []string        `json:"implementations,omitempty"`
+	Design          string          `json:"design,omitempty"`
+	Notes           string          `json:"notes,omitempty"`
+	Acceptance      string          `json:"acceptance,omitempty"`
+	Estimate        *int            `json:"estimate,omitempty"`
+	ParentID        *string         `json:"parent_id,omitempty"`
 }
 
 // TaskUpdateParams contains the payload used to update task details through the shared daemon client.
