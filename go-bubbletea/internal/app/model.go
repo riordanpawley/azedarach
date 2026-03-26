@@ -834,6 +834,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.overlayStack.Push(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
 
+	case openPRResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to open PR: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Opened PR for %s", msg.issueID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case helixOpenResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to open Helix: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.opened {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Opened Helix for %s", msg.issueID),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: msg.commandHint,
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
+
 	case taskDeletedResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -2843,6 +2883,39 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		// Get current branch name and open PR creation overlay
 		return m, m.openPROverlayCmd(session.Worktree, task.ID)
+	case "O":
+		// Open PR in browser for current branch
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openPRCmd(session.Worktree, task.ID)
+	case "M":
+		// Abort in-progress merge in worktree
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.abortMergeCmd(session.Worktree)
+	case "H":
+		// Open Helix in the task worktree.
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openHelixCmd(session.Worktree, task.ID)
 
 	case "f":
 		// Show diff viewer
@@ -2950,6 +3023,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
 		return m, m.overlayStack.Push(overlay.NewEditTaskOverlay(*task))
+	case "T":
+		return m, m.deleteTaskCmd(task.ID)
 	case "d":
 		return m, m.deleteTaskCmd(task.ID)
 	case "c":
@@ -3402,6 +3477,18 @@ type createPRResultMsg struct {
 	err     error
 }
 
+type openPRResultMsg struct {
+	issueID string
+	err     error
+}
+
+type helixOpenResultMsg struct {
+	issueID     string
+	opened      bool
+	commandHint string
+	err         error
+}
+
 type showDiffResultMsg struct {
 	diff string
 	err  error
@@ -3543,6 +3630,43 @@ func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 			issueID: issueID,
 			cmd:     cmd,
 			err:     nil,
+		}
+	}
+}
+
+func (m Model) openPRCmd(worktree, issueID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
+		if err != nil {
+			return openPRResultMsg{issueID: issueID, err: fmt.Errorf("resolve branch: %w", err)}
+		}
+		cmd := exec.CommandContext(ctx, "gh", "pr", "view", "--head", branch, "--web")
+		cmd.Dir = worktree
+		if err := cmd.Run(); err != nil {
+			return openPRResultMsg{issueID: issueID, err: err}
+		}
+		return openPRResultMsg{issueID: issueID}
+	}
+}
+
+func (m Model) openHelixCmd(worktree, issueID string) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(worktree) == "" {
+			return helixOpenResultMsg{issueID: issueID, err: fmt.Errorf("worktree path is empty")}
+		}
+		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
+			popupCommand := fmt.Sprintf("cd %s && hx", shellSingleQuote(worktree))
+			if err := m.tmuxClient.DisplayPopup(context.Background(), "hx-"+issueID, "90%", "90%", popupCommand); err != nil {
+				return helixOpenResultMsg{issueID: issueID, err: err}
+			}
+			return helixOpenResultMsg{issueID: issueID, opened: true}
+		}
+		return helixOpenResultMsg{
+			issueID:     issueID,
+			commandHint: fmt.Sprintf("Run: cd %s && hx", worktree),
 		}
 	}
 }

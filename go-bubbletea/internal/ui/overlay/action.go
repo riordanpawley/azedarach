@@ -93,6 +93,9 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
 		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
+		Action{Key: "O", Label: "Open PR", Enabled: hasWorktree},
+		Action{Key: "M", Label: "Abort merge", Enabled: hasWorktree},
+		Action{Key: "H", Label: "Open Helix", Enabled: hasWorktree},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
 		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasWorktree},
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasWorktree},
@@ -107,6 +110,7 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
 		Action{Key: "c", Label: "Create child task", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
+		Action{Key: "T", Label: "Tombstone task", Enabled: true},
 		Action{Key: "d", Label: "Delete task", Enabled: true},
 	)
 
