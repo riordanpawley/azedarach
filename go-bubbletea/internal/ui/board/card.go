@@ -114,7 +114,7 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if childProgress != nil && childProgress.Total > 0 {
 		auxParts = append(auxParts, renderChildProgress(*childProgress, s))
 	}
-	auxLine := strings.Join(auxParts, " • ")
+	auxLine := strings.Join(auxParts, " ")
 
 	// Compose fixed content rows to guarantee stable card height.
 	lines := []string{
@@ -171,7 +171,7 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	stateStyle := s.SessionState(session.State)
 	var value string
 	if elapsed != "" {
-		value = fmt.Sprintf("%s %s", icon, elapsed)
+		value = fmt.Sprintf("%s%s", icon, elapsed)
 	} else {
 		value = icon
 	}
@@ -219,7 +219,7 @@ func renderChildProgress(progress ChildProgress, s *styles.Styles) string {
 		return ""
 	}
 	percent := float64(progress.Done) / float64(progress.Total)
-	barWidth := 6
+	barWidth := 4
 	filled := int(percent * float64(barWidth))
 	if filled < 0 {
 		filled = 0
@@ -230,7 +230,7 @@ func renderChildProgress(progress ChildProgress, s *styles.Styles) string {
 	empty := barWidth - filled
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
-	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d] %s", progress.Done, progress.Total, bar))
+	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d]%s", progress.Done, progress.Total, bar))
 }
 
 // RenderCard is the exported version for testing
