@@ -20,10 +20,6 @@ fail() {
   failures=$((failures + 1))
 }
 
-warn() {
-  printf 'WARN: %s\n' "$1" >&2
-}
-
 require_marker() {
   local marker="$1"
   local ref_file="$2"
@@ -58,7 +54,7 @@ forbidden_scan() {
   fi
 }
 
-advisory_app_scan() {
+strict_app_scan() {
   local description="$1"
   local pattern="$2"
   shift 2
@@ -67,12 +63,12 @@ advisory_app_scan() {
     --glob 'go-bubbletea/internal/app/**' \
     --glob '!**/*_test.go' \
     "$pattern" "$@" >/dev/null; then
-    warn "$description"
+    fail "$description"
     rg -n -P \
       --glob 'go-bubbletea/internal/app/**' \
       --glob '!**/*_test.go' \
       "$pattern" "$@" >&2 || true
-    printf '      Advisory only. Enable strict app checks once migration slice is complete.\n' >&2
+    printf '      Move authority ownership back to daemon snapshot projection paths.\n' >&2
   else
     pass "$description"
   fi
@@ -104,18 +100,18 @@ forbidden_scan \
   go-bubbletea/internal/cli \
   go-bubbletea/internal/ui
 
-advisory_app_scan \
-  'advisory: internal/app/model.go still starts a local session monitor' \
+strict_app_scan \
+  'no internal/app/model.go local session monitor starts' \
   'sessionMonitor\.Start\(' \
   go-bubbletea/internal/app/model.go
 
-advisory_app_scan \
-  'advisory: internal/app/model.go still writes session projection entries directly' \
+strict_app_scan \
+  'no internal/app/model.go direct session projection writes' \
   '^\s*m\.sessions\[[^]]+\]\s*=' \
   go-bubbletea/internal/app/model.go
 
-advisory_app_scan \
-  'advisory: internal/app/model.go still deletes session projection entries directly' \
+strict_app_scan \
+  'no internal/app/model.go direct session projection deletes' \
   'delete\(m\.sessions,' \
   go-bubbletea/internal/app/model.go
 
