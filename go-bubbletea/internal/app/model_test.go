@@ -239,6 +239,24 @@ func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
 	}
 }
 
+func TestUpdate_OpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewImageAttachOverlay("axu", m.attachmentService))
+
+	updated, _ := m.Update(overlay.OpenImagePreviewMsg{
+		IssueID:      "axu",
+		InitialIndex: 0,
+	})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if _, ok := next.overlayStack.Current().(*overlay.ImagePreviewOverlay); !ok {
+		t.Fatalf("expected image preview overlay on stack, got %T", next.overlayStack.Current())
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()

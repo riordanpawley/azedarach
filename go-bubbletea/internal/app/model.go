@@ -29,6 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
@@ -763,6 +764,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+
+	case overlay.OpenImagePreviewMsg:
+		imageService, ok := m.attachmentService.(*attachment.Service)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Image preview unavailable: unsupported attachment service",
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		preview := overlay.NewImagePreviewOverlay(msg.IssueID, imageService, msg.InitialIndex)
+		return m, m.overlayStack.Push(preview)
 
 	// Cleanup executed result
 	case overlay.CleanupExecutedMsg:
