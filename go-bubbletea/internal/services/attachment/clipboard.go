@@ -50,6 +50,13 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		attempts = append(attempts, "png applescript failed: "+compactWhitespace(err.Error()))
 	}
 
+	// Native screenshot clipboard payloads can require direct NSPasteboard access.
+	if data, err := readClipboardMacOSPasteboardData(ctx); err == nil && len(data) > 0 {
+		return data, nil
+	} else if err != nil {
+		attempts = append(attempts, "pasteboard fallback failed: "+compactWhitespace(err.Error()))
+	}
+
 	// Some apps place a file alias on the clipboard instead of raw image bytes.
 	if data, err := readClipboardMacOSFileAlias(ctx); err == nil && len(data) > 0 {
 		return data, nil
@@ -157,6 +164,89 @@ func readClipboardMacOSFileAlias(ctx context.Context) ([]byte, error) {
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("clipboard alias image file was empty")
+	}
+	return data, nil
+}
+
+func readClipboardMacOSPasteboardData(ctx context.Context) ([]byte, error) {
+	script := `
+ObjC.import("AppKit");
+ObjC.import("Foundation");
+
+function extForType(t) {
+	switch (t) {
+		case "public.png": return "png";
+		case "public.tiff": return "tiff";
+		case "public.jpeg": return "jpg";
+		case "public.heic": return "heic";
+		case "public.heif": return "heif";
+		case "com.compuserve.gif": return "gif";
+		case "org.webmproject.webp": return "webp";
+		default: return "img";
+	}
+}
+
+(function () {
+	const pb = $.NSPasteboard.generalPasteboard;
+	const typeObjs = pb.types;
+	const types = [];
+	if (typeObjs) {
+		const count = typeObjs.count;
+		for (let i = 0; i < count; i++) {
+			types.push(ObjC.unwrap(typeObjs.objectAtIndex(i)));
+		}
+	}
+
+	const candidates = [
+		"public.png",
+		"public.tiff",
+		"public.jpeg",
+		"public.heic",
+		"public.heif",
+		"com.compuserve.gif",
+		"org.webmproject.webp"
+	];
+
+	const tmpDir = ObjC.unwrap($.NSTemporaryDirectory());
+	const pid = ObjC.unwrap($.NSProcessInfo.processInfo.processIdentifier);
+
+	for (let i = 0; i < candidates.length; i++) {
+		const t = candidates[i];
+		const data = pb.dataForType(t);
+		if (!data) continue;
+		const filePath = tmpDir + "azedarach-clipboard-" + pid + "." + extForType(t);
+		const ok = data.writeToFileAtomically($(filePath), true);
+		if (ok) return filePath;
+	}
+
+	return "ERROR:no supported image data in pasteboard; types=" + types.join(",");
+})();
+`
+
+	cmd := exec.CommandContext(ctx, "osascript", "-l", "JavaScript", "-e", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("jxa pasteboard read failed: %w", err)
+	}
+
+	result := strings.TrimSpace(string(output))
+	if strings.HasPrefix(result, "ERROR:") {
+		return nil, fmt.Errorf(strings.TrimPrefix(result, "ERROR:"))
+	}
+	if result == "" {
+		return nil, fmt.Errorf("jxa pasteboard fallback returned empty path")
+	}
+
+	path := filepath.Clean(result)
+	defer func() {
+		_ = os.Remove(path)
+	}()
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil, fmt.Errorf("read jxa pasteboard image: %w", readErr)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("jxa pasteboard image file was empty")
 	}
 	return data, nil
 }
