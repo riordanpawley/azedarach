@@ -384,6 +384,17 @@ func TestRenderCard_TitleTruncation(t *testing.T) {
 	}
 }
 
+func TestRenderTitleLines_UsesTwoLinesBeforeTruncation(t *testing.T) {
+	first, second := renderTitleLines("", "az-1", "abcdefghijABCDEFGHIJklmnop", 14)
+
+	if first != "az-1 abcdefghi" {
+		t.Fatalf("first line = %q, want %q", first, "az-1 abcdefghi")
+	}
+	if second != "jABCDEFGHIJkl…" {
+		t.Fatalf("second line = %q, want %q", second, "jABCDEFGHIJkl…")
+	}
+}
+
 func TestRenderChildProgress(t *testing.T) {
 	s := styles.New()
 	result := renderChildProgress(ChildProgress{Total: 5, Done: 3}, s)

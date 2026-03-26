@@ -13,7 +13,7 @@ import (
 )
 
 // CardContentHeight is the single source of truth for rendered card content height.
-const CardContentHeight = 3
+const CardContentHeight = 4
 
 // ChildProgress summarizes completion progress for a parent task's children.
 type ChildProgress struct {
@@ -75,7 +75,7 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, chi
 	}
 
 	// Build the card content. Keep issue ID at the start so it is always visible.
-	titleLine := cursor + task.ID + " " + task.Title
+	titleLine1, titleLine2 := renderTitleLines(cursor, task.ID, task.Title, maxLineLen)
 
 	// Badge line: priority • type [• phase]
 	badgeLine := lipgloss.JoinHorizontal(lipgloss.Left, priorityBadge, " • ", typeBadge)
@@ -100,13 +100,43 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, chi
 
 	// Compose fixed content rows to guarantee stable card height.
 	lines := []string{
-		ansi.Truncate(titleLine, maxLineLen, "…"),
+		ansi.Truncate(titleLine1, maxLineLen, "…"),
+		ansi.Truncate(titleLine2, maxLineLen, "…"),
 		ansi.Truncate(badgeLine, maxLineLen, "…"),
 		ansi.Truncate(auxLine, maxLineLen, "…"),
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Render(content)
+}
+
+func renderTitleLines(cursor string, issueID string, title string, maxLineLen int) (string, string) {
+	if maxLineLen < 1 {
+		return "", ""
+	}
+
+	prefix := cursor + issueID + " "
+	prefixRunes := []rune(prefix)
+	titleRunes := []rune(title)
+
+	firstLineCapacity := maxLineLen - len(prefixRunes)
+	if firstLineCapacity <= 0 {
+		return string(prefixRunes[:maxLineLen]), ""
+	}
+
+	if len(titleRunes) <= firstLineCapacity {
+		return prefix + title, ""
+	}
+
+	firstLine := prefix + string(titleRunes[:firstLineCapacity])
+	remaining := titleRunes[firstLineCapacity:]
+	if len(remaining) <= maxLineLen {
+		return firstLine, string(remaining)
+	}
+	if maxLineLen == 1 {
+		return firstLine, "…"
+	}
+	return firstLine, string(remaining[:maxLineLen-1]) + "…"
 }
 
 // renderSessionStatus renders the session status line with icon and elapsed time
