@@ -244,6 +244,25 @@ func TestHelpOverlay_GetCategories(t *testing.T) {
 	}
 }
 
+func TestHelpOverlay_ParityDriftGuards(t *testing.T) {
+	help := NewHelpOverlay()
+	help.viewHeight = 100
+	view := help.View()
+
+	if strings.Contains(view, "Ctrl+L") {
+		t.Fatalf("help drift: Ctrl+L refresh should not be advertised, got %q", view)
+	}
+	if !strings.Contains(view, "w/W") {
+		t.Fatalf("help drift: canonical cleanup keys w/W missing, got %q", view)
+	}
+	if !strings.Contains(view, "r (board)") {
+		t.Fatalf("help drift: board refresh key r missing, got %q", view)
+	}
+	if !strings.Contains(view, "r (workspace)") {
+		t.Fatalf("help drift: workspace dev-server key r missing, got %q", view)
+	}
+}
+
 func TestHelpOverlay_ScrollIndicator(t *testing.T) {
 	help := NewHelpOverlay()
 	help.viewHeight = 3 // Very small viewport to force scrolling
