@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -486,6 +487,37 @@ func TestClient_ErrorWrapping(t *testing.T) {
 	assert.Equal(t, "does-not-exist", storeErr.TaskID)
 }
 
+func TestClient_DBHandleReusedUntilExplicitClose(t *testing.T) {
+	client := newTestClient(t)
+
+	first, err := client.dbHandle()
+	require.NoError(t, err)
+
+	second, err := client.dbHandle()
+	require.NoError(t, err)
+	assert.Same(t, first, second)
+
+	require.NoError(t, client.CloseDB())
+
+	third, err := client.dbHandle()
+	require.NoError(t, err)
+	assert.NotSame(t, first, third)
+}
+
+func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	var foreignKeys int
+	require.NoError(t, db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys))
+	assert.Equal(t, 1, foreignKeys)
+
+	var journalMode string
+	require.NoError(t, db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
+	assert.Equal(t, "wal", strings.ToLower(journalMode))
+}
+
 func newTestClient(t *testing.T) *Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
@@ -530,7 +562,11 @@ func newTestClient(t *testing.T) *Client {
 		require.NoError(t, err)
 	}
 
-	return NewClientAtPath(dbPath, slog.Default())
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+	return client
 }
 
 func TestResolveDBPathUsesEnvOverride(t *testing.T) {

@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,9 +46,8 @@ type Client struct {
 	dbPath string
 	logger *slog.Logger
 
-	openOnce sync.Once
-	db       *sql.DB
-	openErr  error
+	mu sync.Mutex
+	db *sql.DB
 }
 
 // NewClient creates a SQLite-backed issue store client rooted at the repository.
@@ -75,31 +75,69 @@ func NewClientAtPath(dbPath string, logger *slog.Logger) *Client {
 }
 
 func (c *Client) dbHandle() (*sql.DB, error) {
-	c.openOnce.Do(func() {
-		dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(c.dbPath))
-		db, err := sql.Open("sqlite", dsn)
-		if err != nil {
-			c.openErr = err
-			return
-		}
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-		if err := db.Ping(); err != nil {
-			_ = db.Close()
-			c.openErr = err
-			return
-		}
-		if err := c.normalizeDependencyEnumRows(db); err != nil {
-			_ = db.Close()
-			c.openErr = err
-			return
-		}
-		c.db = db
-	})
-	if c.openErr != nil {
-		return nil, c.wrapError("open-db", "", c.openErr)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db != nil {
+		return c.db, nil
 	}
+
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(c.dbPath))
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, c.wrapError("open-db", "", err)
+	}
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+
+	if err := c.configureSQLite(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
+	if err := c.normalizeDependencyEnumRows(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
+
+	c.db = db
 	return c.db, nil
+}
+
+func (c *Client) CloseDB() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db == nil {
+		return nil
+	}
+	err := c.db.Close()
+	c.db = nil
+	if err != nil {
+		return c.wrapError("close-db", "", err)
+	}
+	return nil
+}
+
+func (c *Client) configureSQLite(db *sql.DB) error {
+	pragmas := []string{
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+	}
+
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			return fmt.Errorf("apply %s: %w", pragma, err)
+		}
+	}
+	return nil
 }
 
 func (c *Client) normalizeDependencyEnumRows(db *sql.DB) error {
@@ -549,10 +587,11 @@ func (c *Client) Archive(ctx context.Context, id string) error {
 }
 
 type UpdateTaskParams struct {
-	Title       string
-	Description string
-	Type        domain.TaskType
-	Priority    domain.Priority
+	Title           string
+	Description     string
+	Type            domain.TaskType
+	Priority        domain.Priority
+	Implementations []string
 }
 
 // UpdateDetails updates non-status issue metadata.
@@ -562,6 +601,31 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if params.Implementations != nil {
+		implsJSON, err := json.Marshal(params.Implementations)
+		if err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+		res, err := db.ExecContext(ctx, `
+		UPDATE issues
+		SET
+			title = ?,
+			description = ?,
+			issue_type = ?,
+			priority = ?,
+			implementations_json = ?,
+			updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, params.Title, nullableString(params.Description), string(params.Type), int(params.Priority), string(implsJSON), now, id)
+		if err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return c.wrapError("update-details", id, domain.ErrNotFound)
+		}
+		return nil
+	}
 	res, err := db.ExecContext(ctx, `
 		UPDATE issues
 		SET

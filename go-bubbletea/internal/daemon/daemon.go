@@ -125,6 +125,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer func() {
+		if d.issues != nil {
+			if closeErr := d.issues.CloseDB(); closeErr != nil {
+				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
+			}
+		}
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
