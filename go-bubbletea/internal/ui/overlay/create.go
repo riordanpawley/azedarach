@@ -59,13 +59,13 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 	ti.SetValue(task.Title)
 	ti.Focus()
 	ti.CharLimit = 200
-	ti.Width = 60
+	ti.Width = 56
 
 	ta := textarea.New()
 	ta.SetValue(task.Description)
 	ta.CharLimit = 2000
-	ta.SetWidth(60)
-	ta.SetHeight(5)
+	ta.SetWidth(56)
+	ta.SetHeight(4)
 
 	return &CreateTaskOverlay{
 		id:          task.ID,
@@ -86,14 +86,14 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 	ti.Placeholder = "Task title..."
 	ti.Focus()
 	ti.CharLimit = 200
-	ti.Width = 60
+	ti.Width = 56
 
 	// Initialize description textarea
 	ta := textarea.New()
 	ta.Placeholder = "Task description (optional)..."
 	ta.CharLimit = 2000
-	ta.SetWidth(60)
-	ta.SetHeight(5)
+	ta.SetWidth(56)
+	ta.SetHeight(4)
 
 	return &CreateTaskOverlay{
 		title:       ti,
@@ -160,29 +160,31 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, nil
 
 		case "enter":
-			// Submit if on submit button, otherwise handle in active field
-			if c.focusIndex == focusSubmit {
+			if c.focusIndex == focusDescription {
+				break
+			}
+			// Enter submits from non-description fields so submit does not depend on Ctrl+S.
+			if c.focusIndex == focusSubmit || c.focusIndex == focusTitle || c.focusIndex == focusType || c.focusIndex == focusPriority {
 				return c, c.submit()
 			}
-			// Let the active field handle enter
 		}
 
 		// Handle type selection when focused
 		if c.focusIndex == focusType {
 			switch msg.String() {
-			case "T":
+			case "t", "T":
 				c.taskType = domain.TypeTask
 				return c, nil
-			case "B":
+			case "b", "B":
 				c.taskType = domain.TypeBug
 				return c, nil
-			case "F":
+			case "f", "F":
 				c.taskType = domain.TypeFeature
 				return c, nil
-			case "E":
+			case "e", "E":
 				c.taskType = domain.TypeEpic
 				return c, nil
-			case "C":
+			case "c", "C":
 				c.taskType = domain.TypeChore
 				return c, nil
 			}
@@ -243,13 +245,12 @@ func (c *CreateTaskOverlay) View() string {
 	var b strings.Builder
 
 	labelStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#94e2d5")).
-		Width(12).
-		Align(lipgloss.Right)
+		Foreground(lipgloss.Color("#94e2d5"))
 
 	focusStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#89b4fa")).
 		Bold(true)
+	hintTextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
 
 	// Title field
 	if c.focusIndex == focusTitle {
@@ -257,9 +258,9 @@ func (c *CreateTaskOverlay) View() string {
 	} else {
 		b.WriteString(labelStyle.Render("Title:"))
 	}
-	b.WriteString("  ")
+	b.WriteString(" ")
 	b.WriteString(c.title.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Description field
 	if c.focusIndex == focusDescription {
@@ -269,7 +270,7 @@ func (c *CreateTaskOverlay) View() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(c.description.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Type selector
 	if c.focusIndex == focusType {
@@ -277,9 +278,9 @@ func (c *CreateTaskOverlay) View() string {
 	} else {
 		b.WriteString(labelStyle.Render("Type:"))
 	}
-	b.WriteString("  ")
+	b.WriteString(" ")
 	b.WriteString(c.renderTypeSelector())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Priority selector
 	if c.focusIndex == focusPriority {
@@ -287,12 +288,12 @@ func (c *CreateTaskOverlay) View() string {
 	} else {
 		b.WriteString(labelStyle.Render("Priority:"))
 	}
-	b.WriteString("  ")
+	b.WriteString(" ")
 	b.WriteString(c.renderPrioritySelector())
 	b.WriteString("\n\n")
 
 	// Separator
-	b.WriteString(c.styles.Separator.Render(strings.Repeat("─", 60)))
+	b.WriteString(c.styles.Separator.Render(strings.Repeat("─", 58)))
 	b.WriteString("\n\n")
 
 	// Submit button
@@ -305,12 +306,14 @@ func (c *CreateTaskOverlay) View() string {
 
 	// Footer hints
 	hints := []string{
-		c.styles.MenuKey.Render("Tab") + " " + c.styles.Footer.Render("Switch fields"),
-		c.styles.MenuKey.Render("Ctrl+E") + " " + c.styles.Footer.Render("Edit in Helix"),
-		c.styles.MenuKey.Render("Ctrl+S") + " " + c.styles.Footer.Render("Submit"),
-		c.styles.MenuKey.Render("Esc") + " " + c.styles.Footer.Render("Cancel"),
+		c.styles.MenuKey.Render("Tab / Shift+Tab") + " " + hintTextStyle.Render("Switch fields"),
+		c.styles.MenuKey.Render("T/B/F/E/C") + " " + hintTextStyle.Render("Set type"),
+		c.styles.MenuKey.Render("0/1/2/3/4") + " " + hintTextStyle.Render("Set priority"),
+		c.styles.MenuKey.Render("Enter") + " " + hintTextStyle.Render("Create task"),
+		c.styles.MenuKey.Render("Ctrl+E") + " " + hintTextStyle.Render("Edit in Helix"),
+		c.styles.MenuKey.Render("Esc") + " " + hintTextStyle.Render("Cancel"),
 	}
-	b.WriteString(c.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(strings.Join(hints, "\n"))
 	if c.editorError != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
 		b.WriteString("\n")
@@ -561,5 +564,5 @@ func (c *CreateTaskOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (c *CreateTaskOverlay) Size() (width, height int) {
-	return 70, 25
+	return 72, 22
 }

@@ -27,8 +27,8 @@ func TestCreateTaskOverlayTitle(t *testing.T) {
 func TestCreateTaskOverlaySize(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	width, height := overlay.Size()
-	assert.Equal(t, 70, width)
-	assert.Equal(t, 25, height)
+	assert.Equal(t, 72, width)
+	assert.Equal(t, 22, height)
 }
 
 func TestCreateTaskOverlayView(t *testing.T) {
@@ -41,6 +41,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Type:")
 	assert.Contains(t, view, "Priority:")
 	assert.Contains(t, view, "Create Task")
+	assert.Contains(t, view, "Enter")
 	assert.Contains(t, view, "Ctrl+E")
 }
 
@@ -291,6 +292,35 @@ func TestCreateTaskOverlayEnterOnSubmitButton(t *testing.T) {
 	taskMsg, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, "Test Task", taskMsg.Title)
+}
+
+func TestCreateTaskOverlayEnterOnTitleSubmits(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Quick submit")
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "Quick submit", taskMsg.Title)
+}
+
+func TestCreateTaskOverlayLowercaseTypeSelection(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+
+	m, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, focusType, overlay.focusIndex)
+
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, domain.TypeBug, overlay.taskType)
 }
 
 func TestCreateTaskOverlayRenderTypeSelector(t *testing.T) {
