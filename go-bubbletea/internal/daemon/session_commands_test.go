@@ -191,7 +191,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "axt-123")
+	command := d.buildSessionLaunchCommand("axt-123", "axt-123", false)
 	if !strings.Contains(command, "zsh -i -c") {
 		t.Fatalf("command = %q, want interactive shell launch", command)
 	}
@@ -211,7 +211,7 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123")
+	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", false)
 	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex SessionStart hook override", command)
 	}
@@ -223,5 +223,19 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	}
 	if !strings.Contains(command, "az notify session_end axt-123 codex-axt-123") {
 		t.Fatalf("command = %q, want codex session_end notify command", command)
+	}
+}
+
+func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "codex",
+			SessionShell: "zsh",
+		},
+	}
+
+	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true)
+	if !strings.Contains(command, "--dangerously-skip-permissions") {
+		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
 	}
 }

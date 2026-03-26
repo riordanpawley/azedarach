@@ -60,14 +60,21 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	// Should have start session actions
 	hasStartSession := false
+	hasYoloStart := false
 	for _, action := range menu.actions {
 		if action.Key == "s" && action.Label == "Start session" {
 			hasStartSession = true
+		}
+		if action.Key == "!" && action.Label == "Start session (yolo)" {
+			hasYoloStart = true
 		}
 	}
 
 	if !hasStartSession {
 		t.Error("expected 'Start session' action when no session exists")
+	}
+	if !hasYoloStart {
+		t.Error("expected 'Start session (yolo)' action when no session exists")
 	}
 
 	hasCreateChild := false

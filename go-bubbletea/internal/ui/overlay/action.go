@@ -53,6 +53,7 @@ func (m *ActionMenu) buildActions() []Action {
 	if !hasTmuxSession {
 		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
 		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
+		actions = append(actions, Action{Key: "!", Label: "Start session (yolo)", Enabled: true})
 	} else {
 		// Attach action when a tmux session is known to exist.
 		actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
