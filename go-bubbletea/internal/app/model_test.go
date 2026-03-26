@@ -182,6 +182,20 @@ func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
 	}
 }
 
+func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
+	cfg := &config.Config{
+		Session: config.SessionConfig{
+			LogDir: "/tmp/azedarach-user-logs",
+		},
+	}
+
+	got := resolveTUILogFilePath(cfg)
+	want := filepath.Join("/tmp/azedarach-user-logs", "az.log")
+	if got != want {
+		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()

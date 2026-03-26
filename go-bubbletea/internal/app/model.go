@@ -135,6 +135,7 @@ type Model struct {
 	currentProject string
 	projects       []domain.Project
 	repoDir        string
+	logFilePath    string
 
 	// Toasts
 	toasts []Toast
@@ -202,7 +203,8 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
-	logger := newTUILogger(repoDir)
+	logFilePath := resolveTUILogFilePath(cfg)
+	logger := newTUILogger(logFilePath)
 	if err != nil {
 		logger.Error("failed to get current directory", "error", err)
 	}
@@ -239,6 +241,7 @@ func New(cfg *config.Config) Model {
 		tmuxAvailable:        deps.TmuxAvailable,
 		tmuxClient:           deps.TmuxClient,
 		repoDir:              repoDir,
+		logFilePath:          logFilePath,
 		currentProject:       resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
@@ -2980,19 +2983,31 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) eventLogFilePath() string {
-	return tuiLogFilePath(m.repoDir)
-}
-
-func tuiLogFilePath(repoDir string) string {
-	base := strings.TrimSpace(repoDir)
-	if base == "" {
-		base = "."
+	if strings.TrimSpace(m.logFilePath) != "" {
+		return m.logFilePath
 	}
-	return filepath.Join(base, "az.log")
+	return resolveTUILogFilePath(m.config)
 }
 
-func newTUILogger(repoDir string) *slog.Logger {
-	logPath := tuiLogFilePath(repoDir)
+func resolveTUILogFilePath(cfg *config.Config) string {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	baseDir := strings.TrimSpace(cfg.Session.LogDir)
+	if baseDir == "" {
+		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+			baseDir = filepath.Join(homeDir, ".azedarach", "logs")
+		} else {
+			baseDir = filepath.Join(".", ".azedarach", "logs")
+		}
+	}
+	return filepath.Join(baseDir, "az.log")
+}
+
+func newTUILogger(logPath string) *slog.Logger {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
