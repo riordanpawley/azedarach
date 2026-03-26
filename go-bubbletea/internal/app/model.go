@@ -103,6 +103,8 @@ type Model struct {
 	viewMode            ViewMode
 	viewportStarts      [board.DefaultColumnCount]int
 	columnViewportStart int
+	drillDownParentID   string
+	drillDownParentName string
 
 	// Project
 	currentProject string
@@ -991,6 +993,20 @@ func (m Model) buildColumns() []board.Column {
 }
 
 func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
+	if m.isDrillDownActive() {
+		filter := *m.editor.GetFilter()
+		filter.HideEpicChildren = false
+		filtered := filter.Apply(tasks)
+		parentID := strings.TrimSpace(m.drillDownParentID)
+		result := make([]domain.Task, 0, len(filtered))
+		for _, task := range filtered {
+			if isChildOfParent(task, parentID) {
+				result = append(result, task)
+			}
+		}
+		return result
+	}
+
 	filtered := m.editor.ApplyFilter(tasks)
 	result := make([]domain.Task, 0, len(filtered))
 	for _, task := range filtered {
@@ -1013,6 +1029,22 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 	return result
 }
 
+func isChildOfParent(task domain.Task, parentID string) bool {
+	if parentID == "" {
+		return false
+	}
+	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) == parentID {
+		return true
+	}
+	for _, dep := range task.Dependencies {
+		depType := strings.TrimSpace(string(dep.Type))
+		if (depType == string(domain.DependencyParentChild) || depType == "parent_child") && strings.TrimSpace(dep.ID) == parentID {
+			return true
+		}
+	}
+	return false
+}
+
 // handleKey processes keyboard input based on current mode
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Global keys (work in any mode)
@@ -1030,6 +1062,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "esc" {
 		if !m.overlayStack.IsEmpty() {
 			m.overlayStack.Pop()
+			return m, nil
+		}
+		if m.isDrillDownActive() {
+			m.clearDrillDown()
 			return m, nil
 		}
 		if m.editor.IsSelect() {
@@ -1110,7 +1146,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case " ": // Space - open task panel (details + actions)
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
-			return m, m.overlayStack.Push(overlay.NewActionMenu(*task, session).WithRelatedTasks(m.tasks))
+			return m, m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.width, m.height))
 		}
 		return m, nil
 
@@ -1139,8 +1175,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			children := m.getTaskChildren(task.ID)
 			if len(children) > 0 {
-				// Child drill-down for any issue type with children.
-				return m, m.overlayStack.Push(overlay.NewEpicDrillDown(*task, children))
+				m.drillDownParentID = task.ID
+				m.drillDownParentName = task.Title
+				columns := m.buildColumns()
+				m.nav.JumpToTaskByID(columns, children[0].ID)
+				m.ensureCursorVisible(columns)
+				return m, nil
 			}
 			m.addToast(Toast{
 				Level:   ToastInfo,
@@ -3692,8 +3732,17 @@ func (m Model) renderBoardView() string {
 		phaseData = m.computePhases()
 	}
 
-	// Render board (takes full height minus 1 for statusbar)
-	return board.Render(
+	contentHeight := board.BoardContentHeight(m.height)
+	toolbar := ""
+	if m.isDrillDownActive() {
+		toolbar = m.renderDrillDownToolbar()
+		contentHeight -= lipgloss.Height(toolbar) + 1
+		if contentHeight < 6 {
+			contentHeight = 6
+		}
+	}
+
+	boardView := board.Render(
 		visibleColumns,
 		cursor,
 		m.editor.GetSelectedTasks(),
@@ -3703,8 +3752,12 @@ func (m Model) renderBoardView() string {
 		activeViewportStart,
 		m.styles,
 		m.width,
-		board.BoardContentHeight(m.height),
+		contentHeight,
 	)
+	if toolbar == "" {
+		return boardView
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, toolbar, boardView)
 }
 
 // renderCompactView renders the compact list view
@@ -3739,6 +3792,28 @@ func (m Model) getFlatIndexFromPosition(pos navigation.Position, columns []board
 		index += pos.Task
 	}
 	return index
+}
+
+func (m Model) isDrillDownActive() bool {
+	return strings.TrimSpace(m.drillDownParentID) != ""
+}
+
+func (m *Model) clearDrillDown() {
+	m.drillDownParentID = ""
+	m.drillDownParentName = ""
+}
+
+func (m Model) renderDrillDownToolbar() string {
+	parentID := strings.TrimSpace(m.drillDownParentID)
+	parentName := strings.TrimSpace(m.drillDownParentName)
+	target := parentID
+	if parentName != "" {
+		target = fmt.Sprintf("%s %s", parentID, parentName)
+	}
+	left := m.styles.OverlayTitle.Render("Drill-down")
+	body := m.styles.MenuItem.Render("Children of " + target)
+	right := m.styles.StatusHint.Render("Esc: back to board  Space: details+actions")
+	return lipgloss.JoinHorizontal(lipgloss.Left, left+"  ", body+"  ", right)
 }
 
 // openOrchestrationOverlay creates and opens the orchestration overlay

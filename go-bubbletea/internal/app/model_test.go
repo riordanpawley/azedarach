@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1357,6 +1358,7 @@ func TestLoadingStateAcceptsImmediateInteraction(t *testing.T) {
 func TestEpicDrillDownFlow(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
+	m.loading = false
 
 	epicID := "az-epic"
 	childID := "az-epic-child"
@@ -1379,39 +1381,44 @@ func TestEpicDrillDownFlow(t *testing.T) {
 	)
 
 	m.nav.SelectTask(epicID, 0)
-	before := getCursorPosition(m)
 
 	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
 	newModel := result.(Model)
 
-	current := newModel.overlayStack.Current()
-	drillDown, ok := current.(*overlay.EpicDrillDown)
-	if !ok {
-		t.Fatalf("expected EpicDrillDown overlay, got %T", current)
+	if !newModel.overlayStack.IsEmpty() {
+		t.Fatalf("expected drill-down board mode instead of overlay, got %T", newModel.overlayStack.Current())
 	}
-	if got := drillDown.Title(); got != "Children: az-epic" {
-		t.Fatalf("child drill-down title = %q, want Children: az-epic", got)
+	if newModel.drillDownParentID != epicID {
+		t.Fatalf("drillDownParentID = %q, want %q", newModel.drillDownParentID, epicID)
 	}
-	if got := drillDown.View(); !strings.Contains(got, "Parent Epic") || !strings.Contains(got, "Epic Child") {
-		t.Fatalf("epic drill-down view does not render expected content: %q", got)
+	view := newModel.View()
+	if !strings.Contains(view, "Children of "+epicID) {
+		t.Fatalf("expected drill-down toolbar in view, got %q", view)
+	}
+	columns := newModel.buildColumns()
+	var renderedIDs []string
+	for _, column := range columns {
+		for _, task := range column.Tasks {
+			renderedIDs = append(renderedIDs, task.ID)
+		}
+	}
+	if slices.Contains(renderedIDs, "az-1") {
+		t.Fatalf("expected drill-down board to hide unrelated parent tasks, rendered IDs=%v", renderedIDs)
+	}
+	if !slices.Contains(renderedIDs, childID) {
+		t.Fatalf("expected drill-down board to include child task, rendered IDs=%v", renderedIDs)
+	}
+	if pos := getCursorPosition(newModel); pos.Column != 0 || pos.Task != 0 {
+		t.Fatalf("expected drill-down cursor to jump to first child, got %+v", pos)
 	}
 
-	updated, closeCmd := newModel.handleOverlayKey(tea.KeyMsg{Type: tea.KeyEsc})
-	if closeCmd == nil {
-		t.Fatal("expected escape to emit a close command")
-	}
-	closeMsg := closeCmd()
-	if _, ok := closeMsg.(overlay.CloseOverlayMsg); !ok {
-		t.Fatalf("escape command emitted %T, want CloseOverlayMsg", closeMsg)
-	}
-
+	updated, _ := newModel.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 	closed := updated.(Model)
-	closed.overlayStack.Update(closeMsg)
-	if !closed.overlayStack.IsEmpty() {
-		t.Fatal("expected epic drill-down overlay to close on escape")
+	if closed.isDrillDownActive() {
+		t.Fatal("expected esc to exit drill-down board mode")
 	}
-	if finalPos := getCursorPosition(closed); finalPos != before {
-		t.Fatalf("cursor position changed across epic drill-down flow: before=%+v after=%+v", before, finalPos)
+	if finalPos := getCursorPosition(closed); finalPos.Column < 0 || finalPos.Task < 0 {
+		t.Fatalf("cursor should remain on a valid board position after drill-down exit, got %+v", finalPos)
 	}
 }
 
@@ -1459,16 +1466,19 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	newModel := result.(Model)
 
 	current := newModel.overlayStack.Current()
-	actionMenu, ok := current.(*overlay.ActionMenu)
+	taskWorkspace, ok := current.(*overlay.TaskWorkspaceOverlay)
 	if !ok {
-		t.Fatalf("expected ActionMenu overlay on top, got %T", current)
+		t.Fatalf("expected TaskWorkspaceOverlay on top, got %T", current)
 	}
-	view := actionMenu.View()
-	if !strings.Contains(view, "dependencies: out 1 / in 1") {
-		t.Fatalf("expected dependency summary in task panel, got %q", view)
+	view := taskWorkspace.View()
+	if !strings.Contains(view, "Outgoing") || !strings.Contains(view, "related <- az-upstream") {
+		t.Fatalf("expected typed dependency detail in task panel, got %q", view)
 	}
 	if !strings.Contains(view, "Current task") {
 		t.Fatalf("expected task title in task panel, got %q", view)
+	}
+	if !strings.Contains(view, "Actions") {
+		t.Fatalf("expected action panel to render in task workspace, got %q", view)
 	}
 }
 

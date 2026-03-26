@@ -134,33 +134,43 @@ func (m *ActionMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the menu
 func (m *ActionMenu) View() string {
+	return m.renderActionList(true)
+}
+
+func (m *ActionMenu) viewActionsOnly() string {
+	return m.renderActionList(false)
+}
+
+func (m *ActionMenu) renderActionList(includeTaskSummary bool) string {
 	var b strings.Builder
 
-	// Task details section
-	b.WriteString(m.styles.MenuItemActive.Render(fmt.Sprintf("[%s] %s", m.task.ID, m.task.Title)))
-	b.WriteString("\n")
-	b.WriteString(m.styles.MenuItem.Render(
-		fmt.Sprintf("status: %s  priority: %s  type: %s", m.task.Status, m.task.Priority, m.task.Type),
-	))
-	b.WriteString("\n")
-	if m.task.ParentID != nil {
-		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("parent: %s", *m.task.ParentID)))
+	if includeTaskSummary {
+		b.WriteString(m.styles.MenuItemActive.Render(fmt.Sprintf("[%s] %s", m.task.ID, m.task.Title)))
+		b.WriteString("\n")
+
+		b.WriteString(m.styles.MenuItem.Render(
+			fmt.Sprintf("status: %s  priority: %s  type: %s", m.task.Status, m.task.Priority, m.task.Type),
+		))
+		b.WriteString("\n")
+		if m.task.ParentID != nil {
+			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("parent: %s", *m.task.ParentID)))
+			b.WriteString("\n")
+		}
+		if total, done := m.childProgress(); total > 0 {
+			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("children: %d total (%d done)", total, done)))
+			b.WriteString("\n")
+		}
+		outgoing := len(m.task.Dependencies)
+		incoming := len(m.incomingDependencies())
+		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("dependencies: out %d / in %d", outgoing, incoming)))
+		b.WriteString("\n")
+		if m.session != nil {
+			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("session: %s %s", m.session.State.Icon(), m.session.State)))
+			b.WriteString("\n")
+		}
+		b.WriteString(m.styles.Separator.Render("───────────────────"))
 		b.WriteString("\n")
 	}
-	if total, done := m.childProgress(); total > 0 {
-		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("children: %d total (%d done)", total, done)))
-		b.WriteString("\n")
-	}
-	outgoing := len(m.task.Dependencies)
-	incoming := len(m.incomingDependencies())
-	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("dependencies: out %d / in %d", outgoing, incoming)))
-	b.WriteString("\n")
-	if m.session != nil {
-		b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("session: %s %s", m.session.State.Icon(), m.session.State)))
-		b.WriteString("\n")
-	}
-	b.WriteString(m.styles.Separator.Render("───────────────────"))
-	b.WriteString("\n")
 
 	for i, action := range m.actions {
 		// Skip rendering logic for separators
