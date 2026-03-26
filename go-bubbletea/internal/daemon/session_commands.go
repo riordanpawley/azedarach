@@ -35,6 +35,14 @@ func sessionKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func (d *Daemon) sessionNamingScope(projectID string) string {
+	trimmed := strings.TrimSpace(projectID)
+	if trimmed == "" || trimmed == "default" {
+		return d.cfg.RepoDir
+	}
+	return trimmed
+}
+
 func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSession bool) (resolvedSessionTarget, protocol.ResponseEnvelope, bool) {
 	var cmd sessionCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
@@ -51,14 +59,15 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 	}
 
 	issueID := strings.TrimSpace(cmd.SessionID)
+	namingScope := d.sessionNamingScope(cmd.ProjectID)
 	if issueID != "" {
-		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(issueID, d.cfg.RepoDir); ok {
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(issueID, namingScope); ok {
 			issueID = parsedIssueID
 		}
 	}
 	sessionID := ""
 	if issueID != "" {
-		sessionID = naming.CanonicalSessionID(d.cfg.RepoDir, issueID)
+		sessionID = naming.CanonicalSessionID(namingScope, issueID)
 	}
 	return resolvedSessionTarget{
 		ProjectID:  cmd.ProjectID,
@@ -213,8 +222,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	}
 	if cmd.IssueID != "" {
 		matching := make([]string, 0, 1)
+		namingScope := d.sessionNamingScope(cmd.ProjectID)
 		for _, name := range tmuxSessions {
-			if issueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir); ok && naming.IssueIDsEqual(issueID, cmd.IssueID) {
+			if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok && naming.IssueIDsEqual(issueID, cmd.IssueID) {
 				matching = append(matching, name)
 			}
 		}
@@ -233,7 +243,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	b.WriteString("-------\t------\t-----\n")
 	for _, name := range tmuxSessions {
 		issueID := name
-		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir); ok {
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, d.sessionNamingScope(cmd.ProjectID)); ok {
 			issueID = parsedIssueID
 		}
 		task, ok := taskMap[sessionKey(issueID)]
@@ -267,7 +277,7 @@ func (d *Daemon) handleSessionRecover(ctx context.Context, req protocol.RequestE
 		cmd.ProjectID = "default"
 	}
 	targetIssueID := strings.TrimSpace(cmd.SessionID)
-	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(targetIssueID, d.cfg.RepoDir); ok {
+	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(targetIssueID, d.sessionNamingScope(cmd.ProjectID)); ok {
 		targetIssueID = parsedIssueID
 	}
 
@@ -298,8 +308,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
 	tmuxNameByIssueKey := make(map[string]string, len(tmuxSessions))
 	targetIssueKey := sessionKey(sessionID)
+	namingScope := d.sessionNamingScope(projectID)
 	for _, name := range tmuxSessions {
-		issueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir)
+		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
 		}
@@ -334,7 +345,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if getErr != nil {
 			continue
 		}
-		canonicalSessionID := naming.CanonicalSessionID(d.cfg.RepoDir, issueID)
+		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
 		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
 			continue
 		}
@@ -360,7 +371,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	for issueKey := range tmuxSet {
 		sessionIDInTmux := tmuxNameByIssueKey[issueKey]
 		session, ok := snapshotByIssueKey[issueKey]
-		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionIDInTmux, d.cfg.RepoDir)
+		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionIDInTmux, namingScope)
 		if !parsed {
 			issueID = sessionIDInTmux
 		}
@@ -375,7 +386,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 
 		canonicalSessionID := session.ID
 		if canonicalSessionID == "" {
-			canonicalSessionID = naming.CanonicalSessionID(d.cfg.RepoDir, issueID)
+			canonicalSessionID = naming.CanonicalSessionID(namingScope, issueID)
 		}
 
 		switch session.State {
@@ -405,8 +416,9 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		return tasks
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
+	namingScope := d.sessionNamingScope(projectID)
 	for _, name := range tmuxSessions {
-		if issueID, ok := naming.ParseIssueIDFromSessionName(name, d.cfg.RepoDir); ok {
+		if issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope); ok {
 			key := sessionKey(issueID)
 			if key == "" {
 				continue
@@ -419,7 +431,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	for _, session := range snapshot.Sessions {
 		issueID := strings.TrimSpace(session.IssueID)
 		if issueID == "" {
-			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, d.cfg.RepoDir); ok {
+			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
 				issueID = parsedIssueID
 			} else {
 				issueID = session.ID

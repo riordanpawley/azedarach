@@ -228,7 +228,7 @@ func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 
-	body := buildTaskSnapshotExportBody(projectID, d.currentRevision(projectID), tasks, sessions, d.cfg.RepoDir)
+	body := buildTaskSnapshotExportBody(projectID, d.currentRevision(projectID), tasks, sessions, d.sessionNamingScope(projectID))
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal snapshot export body: %v", err)), nil

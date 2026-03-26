@@ -104,3 +104,28 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 		t.Fatalf("marshal snapshot body: %v", err)
 	}
 }
+
+func TestBuildTaskSnapshotExportBody_ProjectScopedSessionPrefixMatchesIssue(t *testing.T) {
+	body := buildTaskSnapshotExportBody(
+		"Chefy",
+		1,
+		[]domain.Task{
+			{
+				ID:       "em",
+				Title:    "Issue with tmux session",
+				Status:   domain.StatusInProgress,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			},
+		},
+		[]string{"ch-em"},
+		"Chefy",
+	)
+
+	if got, want := len(body.Tasks), 1; got != want {
+		t.Fatalf("len(Tasks) = %d, want %d", got, want)
+	}
+	if !body.Tasks[0].SessionAttached {
+		t.Fatalf("SessionAttached = false, want true")
+	}
+}
