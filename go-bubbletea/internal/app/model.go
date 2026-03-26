@@ -622,6 +622,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if msg.projectConfig != nil {
+			m.config = msg.projectConfig
+		}
 		m.currentProject = msg.project.Name
 		m.repoDir = msg.project.Path
 		if m.daemonClient != nil {
@@ -1672,11 +1675,12 @@ type issuesErrorMsg struct {
 }
 
 type projectSwitchResultMsg struct {
-	project  config.Project
-	tasks    []domain.Task
-	revision uint64
-	events   <-chan protocol.EventEnvelope
-	err      error
+	project       config.Project
+	projectConfig *config.Config
+	tasks         []domain.Task
+	revision      uint64
+	events        <-chan protocol.EventEnvelope
+	err           error
 }
 
 type daemonStreamEventMsg struct {
@@ -1948,6 +1952,13 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:     fmt.Errorf("project %q has empty path", project.Name),
 			}
 		}
+		projectConfig, err := config.LoadConfig(project.Path)
+		if err != nil {
+			return projectSwitchResultMsg{
+				project: project,
+				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
+			}
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -2002,10 +2013,11 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		}
 
 		return projectSwitchResultMsg{
-			project:  project,
-			tasks:    snapshot.Tasks,
-			revision: snapshot.Revision,
-			events:   events,
+			project:       project,
+			projectConfig: projectConfig,
+			tasks:         snapshot.Tasks,
+			revision:      snapshot.Revision,
+			events:        events,
 		}
 	}
 }

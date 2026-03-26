@@ -113,3 +113,34 @@ func TestActiveProjectPath(t *testing.T) {
 		}
 	})
 }
+
+func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {
+	m := newTestModel()
+	m.config = &config.Config{
+		Git: config.GitConfig{BaseBranch: "main"},
+	}
+
+	next, _ := m.Update(projectSwitchResultMsg{
+		project: config.Project{
+			Name: "Chefy",
+			Path: "/work/Chefy",
+		},
+		projectConfig: &config.Config{
+			Git: config.GitConfig{BaseBranch: "preview"},
+		},
+	})
+
+	updated, ok := next.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", next)
+	}
+	if got := updated.resolveBaseBranch(); got != "preview" {
+		t.Fatalf("resolveBaseBranch() = %q, want %q", got, "preview")
+	}
+	if updated.currentProject != "Chefy" {
+		t.Fatalf("currentProject = %q, want %q", updated.currentProject, "Chefy")
+	}
+	if updated.repoDir != "/work/Chefy" {
+		t.Fatalf("repoDir = %q, want %q", updated.repoDir, "/work/Chefy")
+	}
+}
