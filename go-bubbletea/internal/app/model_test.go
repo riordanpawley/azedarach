@@ -1966,6 +1966,39 @@ func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
 	}
 }
 
+func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
+	m := newTestModel()
+	m.tasks[0].HasTmuxSession = true
+	m.tasks[0].HasWorktree = true
+	m.tasks[0].GitBehindCount = 7
+	m.tasks[0].HasUncommittedChanges = true
+	m.tasks[0].GitAdditions = 11
+	m.tasks[0].GitDeletions = 4
+
+	result, _ := m.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1 refreshed", Status: domain.StatusBlocked, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-6", Title: "Task 6", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeBug},
+		},
+		revision: 13,
+	})
+	newModel := result.(Model)
+
+	task := newModel.tasks[0]
+	if task.ID != "az-1" || task.Title != "Task 1 refreshed" || task.Status != domain.StatusBlocked {
+		t.Fatalf("refreshed task = %+v", task)
+	}
+	if !task.HasTmuxSession || !task.HasWorktree || task.GitBehindCount != 7 || !task.HasUncommittedChanges || task.GitAdditions != 11 || task.GitDeletions != 4 {
+		t.Fatalf("local overlay fields were not preserved: %+v", task)
+	}
+	if len(newModel.tasks) != 2 {
+		t.Fatalf("task count = %d, want 2", len(newModel.tasks))
+	}
+	if newModel.tasks[1].ID != "az-6" {
+		t.Fatalf("unexpected second task: %+v", newModel.tasks[1])
+	}
+}
+
 func TestIssuesLoadedStartsPeriodicRefreshLoop(t *testing.T) {
 	m := newTestModel()
 	m.hasRefreshLoop = false

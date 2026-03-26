@@ -30,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
 	"github.com/riordanpawley/azedarach/internal/services/network"
@@ -306,7 +307,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		wasLoading := m.loading
-		m.tasks = msg.tasks
+		if msg.stale {
+			m.loading = false
+			if msg.freshnessHint != "" {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: msg.freshnessHint,
+					Expires: time.Now().Add(8 * time.Second),
+				})
+			}
+			var cmds []tea.Cmd
+			if !m.hasRefreshLoop {
+				m.hasRefreshLoop = true
+				cmds = append(cmds, tickEvery(2*time.Second))
+			}
+			if len(cmds) == 0 {
+				return m, nil
+			}
+			return m, tea.Batch(cmds...)
+		}
+		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, msg.tasks)
 		m.sessions = m.projectSessionProjection(msg.tasks)
 		m.applyRuntimeSignals()
 		m.editor.ReconcileSelection(msg.tasks)
@@ -607,7 +627,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Reuse the normal loaded-state reducer path.
-		m.tasks = msg.tasks
+		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, msg.tasks)
 		m.sessions = m.projectSessionProjection(msg.tasks)
 		m.editor.ReconcileSelection(msg.tasks)
 		m.reconcileCursorAfterIssuesRefresh()
@@ -1630,10 +1650,12 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
-	projectID string
-	tasks     []domain.Task
-	revision  uint64
-	events    <-chan protocol.EventEnvelope
+	projectID     string
+	tasks         []domain.Task
+	revision      uint64
+	events        <-chan protocol.EventEnvelope
+	stale         bool
+	freshnessHint string
 }
 
 type issuesErrorMsg struct {
@@ -1700,6 +1722,14 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
+			var timeoutErr *daemonclient.ReadWaitTimeoutError
+			if errors.As(err, &timeoutErr) {
+				return issuesLoadedMsg{
+					projectID:     projectID,
+					stale:         true,
+					freshnessHint: timeoutErr.Hint,
+				}
+			}
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
@@ -2258,10 +2288,17 @@ func (m Model) sessionOriginCandidates(task *domain.Task) ([]overlay.MergeTarget
 	return candidates, upstreamCount
 }
 
+func (m Model) daemonCommandTimeout() time.Duration {
+	if m.config != nil && m.config.Session.TimeoutMs > 0 {
+		return time.Duration(m.config.Session.TimeoutMs) * time.Millisecond
+	}
+	return 30 * time.Second
+}
+
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
 func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
 
 		if baseBranch == "" {
@@ -3189,7 +3226,8 @@ type showDiffResultMsg struct {
 // fetchAndMergeCmd fetches and merges from the specified branch
 func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bool) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
 		if branch == "" {
 			branch = "main"
 		}
@@ -3635,7 +3673,8 @@ type abortMergeResultMsg struct {
 // abortMergeCmd aborts an ongoing merge
 func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
 
 		if m.daemonClient == nil {
 			return abortMergeResultMsg{
