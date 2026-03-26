@@ -1,0 +1,40 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - depguard
+
+linters-settings:
+  depguard:
+    rules:
+      frontend-no-daemon-imports:
+        files:
+          - "internal/(app|cli)/.*\\.go"
+        deny:
+          - pkg: "github.com/riordanpawley/azedarach/internal/daemon"
+            desc: "frontend paths must route daemon interactions through internal/client"
+
+      cli-ui-no-authority-services:
+        files:
+          - "internal/(cli|ui)/.*\\.go"
+        deny:
+          - pkg: "github.com/riordanpawley/azedarach/internal/services/worktree"
+            desc: "worktree authority belongs to daemon/client boundary"
+          - pkg: "github.com/riordanpawley/azedarach/internal/services/tmux"
+            desc: "tmux authority belongs to daemon/client boundary"
+          - pkg: "github.com/riordanpawley/azedarach/internal/services/devserver"
+            desc: "devserver authority belongs to daemon/client boundary"
+          - pkg: "github.com/riordanpawley/azedarach/internal/services/pr"
+            desc: "PR authority belongs to daemon/client boundary"
+
+      contracts-transport-agnostic:
+        files:
+          - "internal/contracts/.*\\.go"
+        deny:
+          - pkg: "github.com/riordanpawley/azedarach/internal/app"
+            desc: "contracts must remain frontend/runtime agnostic"
+          - pkg: "github.com/riordanpawley/azedarach/internal/daemon"
+            desc: "contracts must not depend on daemon implementation"
+          - pkg: "github.com/riordanpawley/azedarach/internal/ui"
+            desc: "contracts must not depend on UI packages"

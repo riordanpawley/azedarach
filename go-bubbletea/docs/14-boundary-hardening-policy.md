@@ -39,30 +39,28 @@ Hard dependency direction:
 
 ## Enforcement Levels
 
-### Level 0 (now)
+### Level 0 (current baseline)
 
 - Existing sentinel checks in `scripts/afv-drift-sentinel.sh` are required.
-- App-path checks run in advisory mode (warnings only).
+- Session projection checks in `internal/app/model.go` run in hard-fail mode.
 
-### Level 1 (next)
+### Level 1 (implemented)
 
-- Upgrade app-path service-import checks to hard-fail.
-- Add explicit forbidden scans for direct authority write patterns in `internal/app`.
-- Wire sentinel into CI as required status check.
+- Dedicated depguard lint config in `go-bubbletea/.golangci-boundary.yml`.
+- Go package graph verifier in `go-bubbletea/scripts/check-go-boundaries.sh`.
+- `just boundary-check` runs depguard + graph verifier before tests.
 
 ### Level 2 (next)
 
-- Add compile-time package guard tests for import graph expectations.
-- Add whitelist-based boundary exceptions with expiry dates.
+- Add explicit exception allowlist entries with issue IDs and expiry dates.
+- Wire boundary-check as a required CI status gate for all Go boundary-touching PRs.
 
 ## Mandatory Guardrail Checks
 
 Run in repo root:
 
 ```bash
-./scripts/afv-drift-sentinel.sh
-cd go-bubbletea && go test ./internal/app ./internal/cli
-cd go-bubbletea && go test ./internal/daemon/... ./internal/client/...
+cd go-bubbletea && just boundary-check
 ```
 
 If socket tests fail in sandbox, rerun with elevated permissions and record it in issue notes.
