@@ -1,24 +1,12 @@
 package overlay
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
-
-// KeyBinding represents a single keybinding entry
-type KeyBinding struct {
-	Key         string
-	Description string
-}
-
-// KeyCategory represents a category of keybindings
-type KeyCategory struct {
-	Name     string
-	Bindings []KeyBinding
-}
 
 // HelpOverlay displays keybinding reference
 type HelpOverlay struct {
@@ -80,32 +68,18 @@ func (h *HelpOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the help overlay
 func (h *HelpOverlay) View() string {
 	categories := h.getCategories()
-	keyWidth := h.keyColumnWidth(categories)
-
-	var content strings.Builder
-	for i, cat := range categories {
-		if i > 0 {
-			content.WriteString("\n")
-		}
-
-		categoryStyle := lipgloss.NewStyle().
+	keyWidth := keybinds.KeyColumnWidth(categories, 8)
+	content := keybinds.RenderCategories(categories, keyWidth, keybinds.Theme{
+		HeaderStyle: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#89b4fa")).
-			Bold(true)
-		content.WriteString(categoryStyle.Render(cat.Name + ":"))
-		content.WriteString("\n")
-		content.WriteString(h.styles.Separator.Render(strings.Repeat("─", keyWidth+28)))
-		content.WriteString("\n")
-
-		for _, binding := range cat.Bindings {
-			keyLabel := fmt.Sprintf("%-*s", keyWidth, binding.Key)
-			line := "  " + h.styles.MenuKey.Render(keyLabel) + "  " + h.styles.MenuItem.Render(binding.Description)
-			content.WriteString(line)
-			content.WriteString("\n")
-		}
-	}
+			Bold(true),
+		SeparatorStyle:   h.styles.Separator,
+		KeyStyle:         h.styles.MenuKey,
+		DescriptionStyle: h.styles.MenuItem,
+	})
 
 	// Calculate scroll limits
-	lines := strings.Split(content.String(), "\n")
+	lines := strings.Split(content, "\n")
 	totalLines := len(lines)
 	h.maxScroll = max(0, totalLines-h.viewHeight)
 
@@ -146,11 +120,11 @@ func (h *HelpOverlay) Size() (width, height int) {
 }
 
 // getCategories returns all keybinding categories
-func (h *HelpOverlay) getCategories() []KeyCategory {
-	return []KeyCategory{
+func (h *HelpOverlay) getCategories() []keybinds.Category {
+	return []keybinds.Category{
 		{
 			Name: "Navigation",
-			Bindings: []KeyBinding{
+			Bindings: []keybinds.Binding{
 				{Key: "h/l", Description: "Move between columns"},
 				{Key: "j/k", Description: "Move up/down in column"},
 				{Key: "ctrl+u / ctrl+d", Description: "Half-page scroll"},
@@ -161,7 +135,7 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		},
 		{
 			Name: "Actions",
-			Bindings: []KeyBinding{
+			Bindings: []keybinds.Binding{
 				{Key: "Space", Description: "Open task workspace"},
 				{Key: "space then i", Description: "Image attachments"},
 				{Key: "space then s/S/a/x", Description: "Session actions"},
@@ -171,7 +145,7 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		},
 		{
 			Name: "Modes",
-			Bindings: []KeyBinding{
+			Bindings: []keybinds.Binding{
 				{Key: "/", Description: "Search"},
 				{Key: "f", Description: "Filter menu"},
 				{Key: ",", Description: "Sort menu"},
@@ -181,7 +155,7 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		},
 		{
 			Name: "Selection",
-			Bindings: []KeyBinding{
+			Bindings: []keybinds.Binding{
 				{Key: "space / a", Description: "Toggle selection"},
 				{Key: "A", Description: "Select current column"},
 				{Key: "%", Description: "Select all visible"},
@@ -192,7 +166,7 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		},
 		{
 			Name: "Other",
-			Bindings: []KeyBinding{
+			Bindings: []keybinds.Binding{
 				{Key: "Tab", Description: "Toggle compact/kanban view"},
 				{Key: "esc", Description: "Close overlay / exit mode"},
 				{Key: "q", Description: "Quit"},
@@ -200,18 +174,6 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 			},
 		},
 	}
-}
-
-func (h *HelpOverlay) keyColumnWidth(categories []KeyCategory) int {
-	width := 8
-	for _, category := range categories {
-		for _, binding := range category.Bindings {
-			if len(binding.Key) > width {
-				width = len(binding.Key)
-			}
-		}
-	}
-	return width
 }
 
 // min returns the minimum of two integers

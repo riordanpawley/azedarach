@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // imageAttachMode represents the current mode of the overlay
@@ -273,23 +274,27 @@ func (i *ImageAttachOverlay) renderList() string {
 	b.WriteString("\n\n")
 
 	// Help text
-	hints := []string{
-		i.styles.MenuKey.Render("V/y") + " " + i.styles.Footer.Render("Paste from clipboard"),
-		i.styles.MenuKey.Render("f") + " " + i.styles.Footer.Render("Attach from file"),
+	hints := []keybinds.Binding{
+		{Key: "V/y", Description: "Paste from clipboard"},
+		{Key: "f", Description: "Attach from file"},
 	}
 	if len(i.files) > 0 {
 		hints = append(hints,
-			i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
-			i.styles.MenuKey.Render("d/x")+" "+i.styles.Footer.Render("Delete"),
-			i.styles.MenuKey.Render("Enter/v/p")+" "+i.styles.Footer.Render("Preview"),
+			keybinds.Binding{Key: "o", Description: "Open"},
+			keybinds.Binding{Key: "d/x", Description: "Delete"},
+			keybinds.Binding{Key: "Enter/v/p", Description: "Preview"},
 		)
 	}
 	hints = append(hints,
-		i.styles.MenuKey.Render("r")+" "+i.styles.Footer.Render("Refresh"),
-		i.styles.MenuKey.Render("Esc")+" "+i.styles.Footer.Render("Close"),
+		keybinds.Binding{Key: "r", Description: "Refresh"},
+		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
 
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -353,11 +358,15 @@ func (i *ImageAttachOverlay) renderPreview() string {
 	b.WriteString("\n\n")
 
 	// Help
-	hints := []string{
-		i.styles.MenuKey.Render("o") + " " + i.styles.Footer.Render("Open in viewer"),
-		i.styles.MenuKey.Render("Esc") + " " + i.styles.Footer.Render("Back to list"),
+	hints := []keybinds.Binding{
+		{Key: "o", Description: "Open in viewer"},
+		{Key: "Esc", Description: "Back to list"},
 	}
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -377,11 +386,15 @@ func (i *ImageAttachOverlay) renderFileInput() string {
 	b.WriteString("\n\n")
 
 	// Help
-	hints := []string{
-		i.styles.MenuKey.Render("Enter") + " " + i.styles.Footer.Render("Attach"),
-		i.styles.MenuKey.Render("Esc") + " " + i.styles.Footer.Render("Cancel"),
+	hints := []keybinds.Binding{
+		{Key: "Enter", Description: "Attach"},
+		{Key: "Esc", Description: "Cancel"},
 	}
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline(hints, " • ", keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }
