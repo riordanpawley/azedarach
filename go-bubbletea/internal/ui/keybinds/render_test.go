@@ -66,3 +66,15 @@ func TestRenderCategoriesContainsHeadersAndRows(t *testing.T) {
 		t.Fatalf("rendered = %q, want binding row", rendered)
 	}
 }
+
+func TestRenderPlain(t *testing.T) {
+	rendered := RenderPlain([]Binding{
+		{Key: "h/l", Description: "columns"},
+		{Key: "j/k", Description: "tasks"},
+		{Key: "", Description: "skip"},
+	}, "  ")
+	want := "h/l: columns  j/k: tasks"
+	if rendered != want {
+		t.Fatalf("RenderPlain = %q, want %q", rendered, want)
+	}
+}

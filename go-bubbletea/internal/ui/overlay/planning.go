@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // PlanningStartMsg signals that planning should start
@@ -288,13 +289,16 @@ func (p *PlanningOverlay) renderInputPhase() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	hints := []string{
-		p.styles.MenuKey.Render("Tab") + " " + p.styles.Footer.Render("Switch fields"),
-		p.styles.MenuKey.Render("Enter") + " " + p.styles.Footer.Render("Generate"),
-		p.styles.MenuKey.Render("Ctrl+U") + " " + p.styles.Footer.Render("Clear"),
-		p.styles.MenuKey.Render("Esc") + " " + p.styles.Footer.Render("Cancel"),
-	}
-	b.WriteString(p.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Tab", Description: "Switch fields"},
+		{Key: "Enter", Description: "Generate"},
+		{Key: "Ctrl+U", Description: "Clear"},
+		{Key: "Esc", Description: "Cancel"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         p.styles.MenuKey,
+		DescriptionStyle: p.styles.Footer,
+		FooterStyle:      p.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -334,7 +338,13 @@ func (p *PlanningOverlay) renderProgressPhase() string {
 	}
 
 	// Footer
-	b.WriteString(p.styles.Footer.Render("Esc: cancel"))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Esc", Description: "cancel"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         p.styles.MenuKey,
+		DescriptionStyle: p.styles.Footer,
+		FooterStyle:      p.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -387,11 +397,14 @@ func (p *PlanningOverlay) renderCompletePhase() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	hints := []string{
-		p.styles.MenuKey.Render("Enter/Esc") + " " + p.styles.Footer.Render("Close"),
-		p.styles.MenuKey.Render("r") + " " + p.styles.Footer.Render("Plan another"),
-	}
-	b.WriteString(p.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Enter/Esc", Description: "Close"},
+		{Key: "r", Description: "Plan another"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         p.styles.MenuKey,
+		DescriptionStyle: p.styles.Footer,
+		FooterStyle:      p.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -411,11 +424,14 @@ func (p *PlanningOverlay) renderErrorPhase() string {
 	b.WriteString("\n\n")
 
 	// Footer
-	hints := []string{
-		p.styles.MenuKey.Render("r") + " " + p.styles.Footer.Render("Retry"),
-		p.styles.MenuKey.Render("Esc") + " " + p.styles.Footer.Render("Close"),
-	}
-	b.WriteString(p.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "r", Description: "Retry"},
+		{Key: "Esc", Description: "Close"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         p.styles.MenuKey,
+		DescriptionStyle: p.styles.Footer,
+		FooterStyle:      p.styles.Footer,
+	}))
 
 	return b.String()
 }

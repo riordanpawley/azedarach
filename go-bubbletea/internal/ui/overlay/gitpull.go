@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 type GitPullOverlay struct {
@@ -74,9 +75,16 @@ func (g *GitPullOverlay) View() string {
 	b.WriteString(pull + "    " + no)
 	b.WriteString("\n")
 
-	footer := g.styles.Footer.Render("← → / Tab: Switch • Enter: Confirm • Esc: Cancel")
 	b.WriteString("\n")
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "←/→/Tab", Description: "Switch"},
+		{Key: "Enter", Description: "Confirm"},
+		{Key: "Esc", Description: "Cancel"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         g.styles.MenuKey,
+		DescriptionStyle: g.styles.Footer,
+		FooterStyle:      g.styles.Footer,
+	}))
 
 	return b.String()
 }

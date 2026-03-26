@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 type MergeChoiceOverlay struct {
@@ -70,8 +71,13 @@ func (m *MergeChoiceOverlay) View() string {
 	b.WriteString(sOption + "\n")
 
 	b.WriteString("\n")
-	footer := m.styles.Footer.Render("Esc: Cancel")
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Esc", Description: "Cancel"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }

@@ -70,3 +70,21 @@ func RenderInline(bindings []Binding, delimiter string, theme Theme) string {
 	}
 	return theme.FooterStyle.Render(strings.Join(parts, delimiter))
 }
+
+func RenderPlain(bindings []Binding, delimiter string) string {
+	if delimiter == "" {
+		delimiter = "  "
+	}
+	parts := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.Key) == "" {
+			continue
+		}
+		if strings.TrimSpace(binding.Description) == "" {
+			parts = append(parts, binding.Key)
+			continue
+		}
+		parts = append(parts, binding.Key+": "+binding.Description)
+	}
+	return strings.Join(parts, delimiter)
+}

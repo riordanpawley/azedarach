@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // SettingType represents the type of a setting
@@ -270,7 +271,17 @@ func (m *SettingsOverlay) View() string {
 
 	// Add footer hint
 	b.WriteString("\n")
-	b.WriteString(m.styles.Footer.Render("j/k: move • h/l: cycle • Enter/Space: toggle/activate • e: edit config • Esc: close"))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "j/k", Description: "move"},
+		{Key: "h/l", Description: "cycle"},
+		{Key: "Enter/Space", Description: "toggle/activate"},
+		{Key: "e", Description: "edit config"},
+		{Key: "Esc", Description: "close"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }

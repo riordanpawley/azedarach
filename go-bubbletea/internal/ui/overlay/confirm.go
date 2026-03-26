@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // ConfirmDialog is a confirmation dialog overlay with Yes/No options
@@ -110,9 +111,16 @@ func (c *ConfirmDialog) View() string {
 	b.WriteString("\n")
 
 	// Footer hint
-	footer := c.styles.Footer.Render("← → / Tab: Switch • Enter: Confirm • Esc: Cancel")
 	b.WriteString("\n")
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "←/→/Tab", Description: "Switch"},
+		{Key: "Enter", Description: "Confirm"},
+		{Key: "Esc", Description: "Cancel"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         c.styles.MenuKey,
+		DescriptionStyle: c.styles.Footer,
+		FooterStyle:      c.styles.Footer,
+	}))
 
 	return b.String()
 }

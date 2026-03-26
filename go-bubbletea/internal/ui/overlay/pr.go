@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // PRCreatedMsg is emitted when a PR is created
@@ -203,13 +204,16 @@ func (p *PRCreateOverlay) View() string {
 	b.WriteString("\n\n")
 
 	// Footer hints
-	hints := []string{
-		p.styles.MenuKey.Render("Tab") + " " + p.styles.Footer.Render("Switch fields"),
-		p.styles.MenuKey.Render("d") + " " + p.styles.Footer.Render("Toggle draft"),
-		p.styles.MenuKey.Render("Ctrl+S") + " " + p.styles.Footer.Render("Submit"),
-		p.styles.MenuKey.Render("Esc") + " " + p.styles.Footer.Render("Cancel"),
-	}
-	b.WriteString(p.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Tab", Description: "Switch fields"},
+		{Key: "d", Description: "Toggle draft"},
+		{Key: "Ctrl+S", Description: "Submit"},
+		{Key: "Esc", Description: "Cancel"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         p.styles.MenuKey,
+		DescriptionStyle: p.styles.Footer,
+		FooterStyle:      p.styles.Footer,
+	}))
 
 	return b.String()
 }

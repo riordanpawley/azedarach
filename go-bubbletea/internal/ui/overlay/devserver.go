@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -162,10 +163,16 @@ func (m *DevServerOverlay) View() string {
 
 	// Add footer with keybindings
 	b.WriteString("\n")
-	footer := m.styles.Footer.Render(
-		"Enter: toggle • v: view output • r: restart • Esc: close",
-	)
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Enter", Description: "toggle"},
+		{Key: "v", Description: "view output"},
+		{Key: "r", Description: "restart"},
+		{Key: "Esc", Description: "close"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }

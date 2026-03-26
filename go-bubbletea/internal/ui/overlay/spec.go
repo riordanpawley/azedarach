@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // SpecWorkspaceSection identifies the active Spec workspace subview.
@@ -76,7 +77,15 @@ func (m *SpecWorkspaceOverlay) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.renderSectionBody())
 	b.WriteString("\n\n")
-	b.WriteString(m.styles.Footer.Render("Tab: next section • Shift+Tab: previous • Esc: close"))
+	b.WriteString(keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Tab", Description: "next section"},
+		{Key: "Shift+Tab", Description: "previous"},
+		{Key: "Esc", Description: "close"},
+	}, " • ", keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }

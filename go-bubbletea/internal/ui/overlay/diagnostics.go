@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // DiagnosticsCollector defines the interface for collecting diagnostics
@@ -630,26 +631,19 @@ func (d *DiagnosticsPanel) renderSystem(b *strings.Builder) {
 }
 
 func (d *DiagnosticsPanel) renderFooter() string {
-	hints := []string{
-		"[Tab] Switch section",
-		"[1-6] Jump to section",
-		"[j/k] Scroll",
-		"[r] Refresh",
-		"[q/Esc] Close",
-	}
-
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
-
-	var parts []string
-	for _, hint := range hints {
-		// Split on brackets to style keys differently
-		styledHint := strings.ReplaceAll(hint, "[", keyStyle.Render("["))
-		styledHint = strings.ReplaceAll(styledHint, "]", keyStyle.Render("]"))
-		parts = append(parts, styledHint)
-	}
-
-	footer := hintStyle.Render(strings.Join(parts, "  "))
+	footer := keybinds.RenderInline([]keybinds.Binding{
+		{Key: "Tab", Description: "Switch section"},
+		{Key: "1-6", Description: "Jump to section"},
+		{Key: "j/k", Description: "Scroll"},
+		{Key: "r", Description: "Refresh"},
+		{Key: "q/Esc", Description: "Close"},
+	}, "  ", keybinds.Theme{
+		KeyStyle:         keyStyle,
+		DescriptionStyle: hintStyle,
+		FooterStyle:      hintStyle,
+	})
 
 	// Add scroll indicator if needed
 	if d.maxScroll() > 0 {
