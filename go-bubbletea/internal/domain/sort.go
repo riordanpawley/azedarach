@@ -73,8 +73,8 @@ func (s *Sort) Apply(tasks []Task) []Task {
 
 	case SortBySession:
 		sort.SliceStable(result, func(i, j int) bool {
-			pi := sessionStatePriority(getSessionState(result[i]))
-			pj := sessionStatePriority(getSessionState(result[j]))
+			pi := sessionPriority(result[i])
+			pj := sessionPriority(result[j])
 
 			if s.Order == SortAsc {
 				return pi > pj // Higher priority first in ascending
@@ -92,6 +92,22 @@ func getSessionState(t Task) SessionState {
 		return "" // Empty string for nil session
 	}
 	return t.Session.State
+}
+
+func sessionPriority(t Task) int {
+	if t.Session != nil {
+		return sessionStatePriority(t.Session.State)
+	}
+	// Runtime tmux signal should still sort as active even when state projection
+	// has not been hydrated yet.
+	if t.HasTmuxSession {
+		return sessionStatePriority(SessionBusy)
+	}
+	// Worktree-only should be above fully idle/no-session tasks.
+	if t.HasWorktree {
+		return 1
+	}
+	return 0
 }
 
 // sessionStatePriority returns the priority value for session states

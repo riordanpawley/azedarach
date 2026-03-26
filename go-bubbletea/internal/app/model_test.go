@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -368,6 +369,110 @@ func TestView_ShowsHiddenSelectionCount(t *testing.T) {
 	}
 	if !strings.Contains(view, "NORMAL") {
 		t.Fatalf("view = %q, want normal mode badge", view)
+	}
+}
+
+func TestView_ShowsRuntimeSignalLoadingIndicator(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.runtimeSignalsBusy = true
+
+	view := m.View()
+	if !strings.Contains(view, "Loading runtime status...") {
+		t.Fatalf("view = %q, want runtime loading indicator in status bar", view)
+	}
+}
+
+func TestRuntimeSignalRefreshTasks_BoardUsesRenderedWindow(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.viewMode = ViewModeBoard
+	m.width = 80
+	m.height = 9
+	m.tasks = make([]domain.Task, 0, 12)
+	for i := 1; i <= 12; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       fmt.Sprintf("az-%d", i),
+			Title:    fmt.Sprintf("Task %d", i),
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		})
+	}
+	m.nav.SelectTask("az-6", 0)
+	m.viewportStarts[0] = 4
+
+	columns := m.buildColumns()
+	openColumn := columns[domain.StatusOpen.Column()].Tasks
+	bodyHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
+	columnCount := m.boardVisibleColumnCount(len(columns))
+	columnWidth := m.width / columnCount
+	linesPerCard := board.CardLineFootprint(m.styles, board.CardContentWidth(columnWidth))
+	start, end := board.VisibleTaskWindow(len(openColumn), m.viewportStarts[0], bodyHeight, linesPerCard)
+
+	got := m.runtimeSignalRefreshTasks()
+	if len(got) != end-start {
+		t.Fatalf("runtimeSignalRefreshTasks len = %d, want %d", len(got), end-start)
+	}
+	for i := start; i < end; i++ {
+		if got[i-start].ID != openColumn[i].ID {
+			t.Fatalf("runtimeSignalRefreshTasks[%d] = %q, want %q", i-start, got[i-start].ID, openColumn[i].ID)
+		}
+	}
+	if start > 0 && got[0].ID == openColumn[0].ID {
+		t.Fatalf("expected off-screen head task %q to be excluded, got first %q", openColumn[0].ID, got[0].ID)
+	}
+}
+
+func TestRuntimeSignalRefreshTasks_CompactUsesVisibleRows(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.viewMode = ViewModeCompact
+	m.width = 100
+	m.height = 10
+	m.tasks = make([]domain.Task, 0, 16)
+	for i := 1; i <= 16; i++ {
+		m.tasks = append(m.tasks, domain.Task{
+			ID:       fmt.Sprintf("az-%02d", i),
+			Title:    fmt.Sprintf("Task %d", i),
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		})
+	}
+	m.nav.SelectTask("az-12", 0)
+
+	filtered := m.editor.ApplySort(m.boardVisibleTasks(m.tasks))
+	visibleRows := board.BoardContentHeight(m.height) - 2
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	cursorIdx := 11
+	scrollOffset := 0
+	if cursorIdx >= visibleRows {
+		scrollOffset = cursorIdx - visibleRows + 1
+	}
+	maxOffset := len(filtered) - visibleRows
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+	end := scrollOffset + visibleRows
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+
+	got := m.runtimeSignalRefreshTasks()
+	want := filtered[scrollOffset:end]
+	if len(got) != len(want) {
+		t.Fatalf("runtimeSignalRefreshTasks len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID {
+			t.Fatalf("runtimeSignalRefreshTasks[%d] = %q, want %q", i, got[i].ID, want[i].ID)
+		}
 	}
 }
 
@@ -1845,5 +1950,104 @@ func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	}
 	if !strings.Contains(lastToast.Message, "unavailable outside tmux") {
 		t.Fatalf("conflict resolution toast message = %q, want tmux-unavailable guidance", lastToast.Message)
+	}
+}
+
+func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	originalExecCommand := execCommand
+	t.Cleanup(func() {
+		execCommand = originalExecCommand
+	})
+
+	var commands [][]string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		commands = append(commands, append([]string{name}, args...))
+		if len(commands) == 1 {
+			// First candidate (`issueID`) fails.
+			return exec.Command("false")
+		}
+		return exec.Command("true")
+	}
+
+	msg := m.attachSessionCmd("em")()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attachSessionCmd returned %T, want sessionAttachedMsg", msg)
+	}
+	if !attached.switchedTmux {
+		t.Fatal("expected tmux client to switch")
+	}
+	if len(commands) < 2 {
+		t.Fatalf("expected fallback switch-client attempts, got %v", commands)
+	}
+	if got, want := strings.Join(commands[0], " "), "tmux switch-client -t em"; got != want {
+		t.Fatalf("first switch command = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(commands[1], " "), "tmux switch-client -t ch-em"; got != want {
+		t.Fatalf("second switch command = %q, want %q", got, want)
+	}
+}
+
+func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testing.T) {
+	t.Setenv("TMUX", "")
+	m := newTestModel()
+	m.tasks[0].HasTmuxSession = true
+	m.tasks[0].Session = nil
+	m.tmuxAvailable = false
+	m.nav.SelectTask(m.tasks[0].ID, 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "a"})
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+	msg := cmd()
+	if _, ok := msg.(sessionAttachedMsg); !ok {
+		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
 	}
 }

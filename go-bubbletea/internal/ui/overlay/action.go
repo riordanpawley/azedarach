@@ -49,25 +49,28 @@ func (m *ActionMenu) buildActions() []Action {
 	actions := []Action{}
 
 	// Session actions
-	if m.session == nil {
+	hasTmuxSession := m.task.HasTmuxSession || m.session != nil
+	if !hasTmuxSession {
 		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
 		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
 	} else {
-		// Attach action (always available when session exists)
+		// Attach action when a tmux session is known to exist.
 		actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
 
 		// State-specific actions
-		switch m.session.State {
-		case domain.SessionIdle:
-			actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
-		case domain.SessionBusy, domain.SessionWaiting:
-			actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: true})
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
-		case domain.SessionPaused:
-			actions = append(actions, Action{Key: "R", Label: "Resume session", Enabled: true})
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
-		case domain.SessionDone, domain.SessionError:
-			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+		if m.session != nil {
+			switch m.session.State {
+			case domain.SessionIdle:
+				actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
+			case domain.SessionBusy, domain.SessionWaiting:
+				actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: true})
+				actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+			case domain.SessionPaused:
+				actions = append(actions, Action{Key: "R", Label: "Resume session", Enabled: true})
+				actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+			case domain.SessionDone, domain.SessionError:
+				actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})
+			}
 		}
 	}
 

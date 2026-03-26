@@ -80,6 +80,25 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 	}
 }
 
+func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.T) {
+	task := domain.Task{
+		ID:             "az-123",
+		Status:         domain.StatusInProgress,
+		HasTmuxSession: true,
+	}
+
+	menu := NewActionMenu(task, nil)
+	hasAttach := false
+	for _, action := range menu.actions {
+		if action.Key == "a" && action.Enabled {
+			hasAttach = true
+		}
+	}
+	if !hasAttach {
+		t.Fatal("expected attach action when task has tmux presence")
+	}
+}
+
 func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-123",

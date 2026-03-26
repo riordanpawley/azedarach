@@ -27,6 +27,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
@@ -64,6 +65,7 @@ var diffStatInsertionsPattern = regexp.MustCompile(`(\d+)\s+insertion`)
 var diffStatDeletionsPattern = regexp.MustCompile(`(\d+)\s+deletion`)
 var executablePath = os.Executable
 var lookupPath = exec.LookPath
+var execCommand = exec.Command
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
 
@@ -326,7 +328,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.shouldRefreshRuntimeSignals() {
 			m.runtimeSignalsBusy = true
-			cmds = append(cmds, m.refreshRuntimeSignalsCmd(msg.tasks))
+			cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
 		}
 		if len(cmds) == 0 {
 			return m, nil
@@ -746,9 +748,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.attachSessionCmd(msg.issueID)
 
 	case sessionAttachedMsg:
+		message := fmt.Sprintf("Attached to session: %s", msg.issueID)
+		if msg.switchedTmux {
+			message = fmt.Sprintf("Switched to session: %s", msg.issueID)
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Attached to session: %s", msg.issueID),
+			Message: message,
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
@@ -882,6 +888,9 @@ func (m Model) View() string {
 	sb.SetEventTicker(m.eventTicker)
 	sb.SetCurrentProject(m.daemonProjectID())
 	sb.SetSelectionSummary(m.selectionSummary())
+	if m.runtimeSignalsBusy {
+		sb.SetLoadingIndicator("Loading runtime status...")
+	}
 	statusBarView := sb.Render()
 
 	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
@@ -1056,6 +1065,103 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 		result = append(result, task)
 	}
 	return result
+}
+
+func (m Model) runtimeSignalRefreshTasks() []domain.Task {
+	if m.viewMode == ViewModeCompact {
+		return m.compactRenderedTasks()
+	}
+	return m.boardRenderedTasks()
+}
+
+func (m Model) boardRenderedTasks() []domain.Task {
+	columns := m.buildColumns()
+	if len(columns) == 0 {
+		return nil
+	}
+	visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
+	visibleColumns := columns[visibleStart:visibleEnd]
+	if len(visibleColumns) == 0 {
+		return nil
+	}
+
+	bodyHeight := board.ColumnBodyHeight(board.BoardContentHeight(m.height))
+	if bodyHeight < 1 {
+		bodyHeight = 1
+	}
+	columnCount := m.boardVisibleColumnCount(len(columns))
+	if columnCount < 1 {
+		columnCount = board.DefaultColumnCount
+	}
+	columnWidth := m.width / columnCount
+	if columnWidth < 1 {
+		columnWidth = 1
+	}
+	cardWidth := board.CardContentWidth(columnWidth)
+	linesPerCard := board.CardLineFootprint(m.styles, cardWidth)
+	if linesPerCard < 1 {
+		linesPerCard = 1
+	}
+
+	rendered := make([]domain.Task, 0, len(m.tasks))
+	seen := make(map[string]struct{}, len(m.tasks))
+	for localColumn, col := range visibleColumns {
+		globalColumn := visibleStart + localColumn
+		viewportStart := 0
+		if globalColumn >= 0 && globalColumn < len(m.viewportStarts) {
+			viewportStart = m.viewportStarts[globalColumn]
+		}
+		start, end := board.VisibleTaskWindow(len(col.Tasks), viewportStart, bodyHeight, linesPerCard)
+		for i := start; i < end; i++ {
+			task := col.Tasks[i]
+			if _, exists := seen[task.ID]; exists {
+				continue
+			}
+			seen[task.ID] = struct{}{}
+			rendered = append(rendered, task)
+		}
+	}
+	return rendered
+}
+
+func (m Model) compactRenderedTasks() []domain.Task {
+	filtered := m.editor.ApplySort(m.boardVisibleTasks(m.tasks))
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	columns := m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	cursor := m.getFlatIndexFromPosition(pos, columns)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(filtered) {
+		cursor = len(filtered) - 1
+	}
+
+	visibleRows := board.BoardContentHeight(m.height) - 2
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+
+	scrollOffset := 0
+	if cursor >= visibleRows {
+		scrollOffset = cursor - visibleRows + 1
+	}
+	maxOffset := len(filtered) - visibleRows
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if scrollOffset > maxOffset {
+		scrollOffset = maxOffset
+	}
+
+	end := scrollOffset + visibleRows
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[scrollOffset:end]
 }
 
 func isChildOfParent(task domain.Task, parentID string) bool {
@@ -2446,6 +2552,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			// Check if branch is behind main
 			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
+		} else if task.HasTmuxSession {
+			// We still have tmux presence, so attempt direct attach even when
+			// the session projection is stale or not yet hydrated.
+			return m, m.attachSessionCmd(task.ID)
 		} else {
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -3046,7 +3156,8 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 }
 
 type sessionAttachedMsg struct {
-	issueID string
+	issueID      string
+	switchedTmux bool
 }
 
 func (m Model) attachSessionCmd(issueID string) tea.Cmd {
@@ -3062,7 +3173,37 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
-		return sessionAttachedMsg{issueID: issueID}
+		if m.tmuxAvailable || strings.TrimSpace(os.Getenv("TMUX")) != "" {
+			targets := []string{
+				issueID,
+				naming.CanonicalSessionID(m.daemonProjectID(), issueID),
+			}
+			seen := map[string]struct{}{}
+			var lastErr error
+			for _, target := range targets {
+				target = strings.TrimSpace(target)
+				if target == "" {
+					continue
+				}
+				if _, exists := seen[target]; exists {
+					continue
+				}
+				seen[target] = struct{}{}
+				if err := execCommand("tmux", "switch-client", "-t", target).Run(); err == nil {
+					return sessionAttachedMsg{issueID: issueID, switchedTmux: true}
+				} else {
+					lastErr = err
+				}
+			}
+			if lastErr != nil {
+				return sessionErrorMsg{
+					issueID: issueID,
+					err:     fmt.Errorf("attached in daemon but failed to switch tmux client: %w", lastErr),
+				}
+			}
+		}
+
+		return sessionAttachedMsg{issueID: issueID, switchedTmux: false}
 	}
 }
 

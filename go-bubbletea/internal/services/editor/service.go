@@ -34,7 +34,7 @@ func NewService() *Service {
 		filter: domain.NewFilter(),
 		sort: &domain.Sort{
 			Field: domain.SortBySession,
-			Order: domain.SortDesc,
+			Order: domain.SortAsc,
 		},
 		selectedTasks: make(map[string]bool),
 		showPhases:    false, // Disabled by default
