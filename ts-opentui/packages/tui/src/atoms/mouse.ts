@@ -11,7 +11,6 @@ import { KeyboardService } from "../../../../src/services/KeyboardService.js"
 import { NavigationService } from "../../../../src/services/NavigationService.js"
 import { OverlayService } from "../../../../src/services/OverlayService.js"
 import type { TaskWithSession } from "../types.js"
-import { COLUMNS } from "../types.js"
 import { appRuntime } from "./runtime.js"
 
 type MouseButtonType = "left" | "right"
@@ -28,6 +27,24 @@ export interface ColumnPagerInteractionParams {
 	columnIndex: number
 	taskIndex: number
 	tasksByColumn: readonly (readonly TaskWithSession[])[]
+}
+
+export const findNextNonEmptyColumnIndex = (
+	tasksByColumn: readonly (readonly TaskWithSession[])[],
+	columnIndex: number,
+	delta: -1 | 1,
+): number | undefined => {
+	for (
+		let candidateIndex = columnIndex + delta;
+		candidateIndex >= 0 && candidateIndex < tasksByColumn.length;
+		candidateIndex += delta
+	) {
+		if ((tasksByColumn[candidateIndex]?.length ?? 0) > 0) {
+			return candidateIndex
+		}
+	}
+
+	return undefined
 }
 
 const openActionPalette = Effect.gen(function* () {
@@ -92,11 +109,12 @@ export const handleColumnPagerMouseInteractionAtom = appRuntime.fn(
 			const currentOverlay = yield* overlay.current()
 			if (currentOverlay) return
 
-			const nextColumn = Math.max(
-				0,
-				Math.min(COLUMNS.length - 1, params.columnIndex + params.delta),
+			const nextColumn = findNextNonEmptyColumnIndex(
+				params.tasksByColumn,
+				params.columnIndex,
+				params.delta,
 			)
-			if (nextColumn === params.columnIndex) return
+			if (nextColumn === undefined) return
 
 			const nextColumnTasks = params.tasksByColumn[nextColumn] ?? []
 			const nextTask = Math.min(params.taskIndex, Math.max(0, nextColumnTasks.length - 1))
