@@ -70,6 +70,16 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 		t.Error("expected 'Start session' action when no session exists")
 	}
 
+	hasCreateChild := false
+	for _, action := range menu.actions {
+		if action.Key == "c" && action.Label == "Create child task" && action.Enabled {
+			hasCreateChild = true
+		}
+	}
+	if !hasCreateChild {
+		t.Error("expected 'Create child task' action in action menu")
+	}
+
 	// Git actions should be disabled
 	for _, action := range menu.actions {
 		if action.Key == "u" || action.Key == "m" || action.Key == "P" {

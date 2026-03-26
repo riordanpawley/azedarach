@@ -618,6 +618,34 @@ func TestNormalModeNavigation(t *testing.T) {
 	})
 }
 
+func TestNormalModeCOpensCreateOverlay(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("expected CreateTaskOverlay on normal-mode c, got %T", current)
+	}
+}
+
+func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.handleSelection(overlay.SelectionMsg{Key: "c"})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	if _, ok := current.(*overlay.CreateTaskOverlay); !ok {
+		t.Fatalf("expected CreateTaskOverlay from action selection c, got %T", current)
+	}
+}
+
 func TestHalfPageScroll(t *testing.T) {
 	m := newTestModel()
 

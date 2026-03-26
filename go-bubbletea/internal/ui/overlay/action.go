@@ -95,6 +95,7 @@ func (m *ActionMenu) buildActions() []Action {
 	actions = append(actions,
 		Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
 		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
+		Action{Key: "c", Label: "Create child task", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
 		Action{Key: "d", Label: "Delete task", Enabled: true},
 	)

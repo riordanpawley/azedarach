@@ -1337,12 +1337,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "c": // Create task
-		task, _ := m.getCurrentTaskAndSession()
-		var parentID *string
-		if task != nil {
-			parentID = &task.ID
-		}
-		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlayWithParent(parentID))
+		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
 
 	case "s": // Settings
 		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndSource(m.editor, m.configSourcePath()))
@@ -2712,6 +2707,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewEditTaskOverlay(*task))
 	case "d":
 		return m, m.deleteTaskCmd(task.ID)
+	case "c":
+		parentID := task.ID
+		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlayWithParent(&parentID))
 	}
 
 	return m, nil
