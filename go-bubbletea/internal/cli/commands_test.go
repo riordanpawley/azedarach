@@ -2591,8 +2591,11 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "No active issue is preselected") {
 		t.Fatalf("prime output missing no-issue guardrail: %q", output)
 	}
-	if !strings.Contains(output, "ensure each leaf sub-task fits within a single subagent context window") {
-		t.Fatalf("prime output missing subagent leaf sizing guardrail: %q", output)
+	if !strings.Contains(output, "single-window fanout") {
+		t.Fatalf("prime output missing orchestration shorthand: %q", output)
+	}
+	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
+		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
 	}
 }
 

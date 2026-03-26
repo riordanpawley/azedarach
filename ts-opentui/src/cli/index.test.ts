@@ -108,7 +108,10 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("Do not go on history/log hunting tangents")
 		expect(output).toContain(
-			"When fanning out to subagents, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent; reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.",
+			"When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.",
+		)
+		expect(output).toContain(
+			"Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.",
 		)
 		expect(output).toContain(
 			'`az issue create "Title"` defaults to the active parent context (including `AZEDARACH_ISSUE_ID`) unless `--deferred` is set.',
