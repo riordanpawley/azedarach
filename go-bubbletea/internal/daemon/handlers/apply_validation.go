@@ -13,6 +13,8 @@ const (
 	applyCommandTaskUpdate       = "task.update_details"
 	applyCommandTaskDelete       = "task.delete"
 	applyCommandTaskArchive      = "task.archive"
+	applyCommandDependencyAdd    = "task.dependency.add"
+	applyCommandDependencyRemove = "task.dependency.remove"
 )
 
 type applyTaskCreateBody struct {
@@ -38,6 +40,19 @@ type applyTaskStatusBody struct {
 
 type applyTaskIDBody struct {
 	TaskID string `json:"task_id"`
+}
+
+type applyDependencyBody struct {
+	TaskID      string `json:"task_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"type"`
+}
+
+type applyDependencyRemoveBody struct {
+	TaskID      string `json:"task_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"type"`
+	Confirm     bool   `json:"confirm"`
 }
 
 // ValidateApplyRequestBody parses and validates a bulk apply request payload.
@@ -169,6 +184,28 @@ func validateApplyOperation(index int, op protocol.ApplyOperationBody) []protoco
 			}}
 		}
 		return missingTaskIDDiagnostics(index, payload)
+	case applyCommandDependencyAdd:
+		var payload applyDependencyBody
+		if err := json.Unmarshal(op.Body, &payload); err != nil {
+			return []protocol.ApplyValidationDiagnostic{{
+				Index:   index,
+				Code:    protocol.ApplyValidationCodeInvalidOperationBody,
+				Field:   "body",
+				Message: fmt.Sprintf("invalid dependency add body: %v", err),
+			}}
+		}
+		return missingDependencyDiagnostics(index, payload)
+	case applyCommandDependencyRemove:
+		var payload applyDependencyRemoveBody
+		if err := json.Unmarshal(op.Body, &payload); err != nil {
+			return []protocol.ApplyValidationDiagnostic{{
+				Index:   index,
+				Code:    protocol.ApplyValidationCodeInvalidOperationBody,
+				Field:   "body",
+				Message: fmt.Sprintf("invalid dependency remove body: %v", err),
+			}}
+		}
+		return missingDependencyRemoveDiagnostics(index, payload)
 	default:
 		return []protocol.ApplyValidationDiagnostic{{
 			Index:   index,
@@ -185,11 +222,39 @@ func isSupportedApplyCommand(command string) bool {
 		applyCommandTaskUpdateStatus,
 		applyCommandTaskUpdate,
 		applyCommandTaskDelete,
-		applyCommandTaskArchive:
+		applyCommandTaskArchive,
+		applyCommandDependencyAdd,
+		applyCommandDependencyRemove:
 		return true
 	default:
 		return false
 	}
+}
+
+func missingDependencyDiagnostics(index int, payload applyDependencyBody) []protocol.ApplyValidationDiagnostic {
+	diagnostics := make([]protocol.ApplyValidationDiagnostic, 0, 3)
+	if payload.TaskID == "" {
+		diagnostics = append(diagnostics, missingFieldDiagnostic(index, "task_id"))
+	}
+	if payload.DependsOnID == "" {
+		diagnostics = append(diagnostics, missingFieldDiagnostic(index, "depends_on_id"))
+	}
+	if payload.Type == "" {
+		diagnostics = append(diagnostics, missingFieldDiagnostic(index, "type"))
+	}
+	return diagnostics
+}
+
+func missingDependencyRemoveDiagnostics(index int, payload applyDependencyRemoveBody) []protocol.ApplyValidationDiagnostic {
+	diagnostics := missingDependencyDiagnostics(index, applyDependencyBody{
+		TaskID:      payload.TaskID,
+		DependsOnID: payload.DependsOnID,
+		Type:        payload.Type,
+	})
+	if !payload.Confirm {
+		diagnostics = append(diagnostics, missingFieldDiagnostic(index, "confirm"))
+	}
+	return diagnostics
 }
 
 func missingCreateDiagnostics(index int, payload applyTaskCreateBody) []protocol.ApplyValidationDiagnostic {

@@ -188,6 +188,30 @@ func TestValidateApplyRequest_CommandBodyDiagnostics(t *testing.T) {
 			},
 			fields: []string{"task_id", "title", "description", "type", "priority"},
 		},
+		{
+			name: "dependency add",
+			req: protocol.ApplyRequestBody{
+				SchemaVersion:    protocol.ApplySchemaVersion,
+				SnapshotRevision: 8,
+				Operations: []protocol.ApplyOperationBody{{
+					Command: applyCommandDependencyAdd,
+					Body:    mustApplyJSON(t, map[string]string{}),
+				}},
+			},
+			fields: []string{"task_id", "depends_on_id", "type"},
+		},
+		{
+			name: "dependency remove",
+			req: protocol.ApplyRequestBody{
+				SchemaVersion:    protocol.ApplySchemaVersion,
+				SnapshotRevision: 8,
+				Operations: []protocol.ApplyOperationBody{{
+					Command: applyCommandDependencyRemove,
+					Body:    mustApplyJSON(t, map[string]any{"confirm": false}),
+				}},
+			},
+			fields: []string{"task_id", "depends_on_id", "type", "confirm"},
+		},
 	}
 
 	for _, tc := range tests {

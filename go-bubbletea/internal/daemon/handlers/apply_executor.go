@@ -19,6 +19,8 @@ type ApplyTaskService interface {
 	Create(context.Context, issues.CreateTaskParams) (string, error)
 	Update(context.Context, string, domain.Status) error
 	UpdateDetails(context.Context, string, issues.UpdateTaskParams) error
+	AddDependency(context.Context, string, string, string) error
+	RemoveDependency(context.Context, string, string, string) error
 	Delete(context.Context, string) error
 	Archive(context.Context, string) error
 }
@@ -301,6 +303,28 @@ func (h *ApplyHandler) executeOperation(ctx context.Context, index int, op proto
 			return ApplyExecutionOperation{}, err
 		}
 
+		operation.TaskID = payload.TaskID
+		return operation, nil
+
+	case applyCommandDependencyAdd:
+		var payload applyDependencyBody
+		if err := json.Unmarshal(op.Body, &payload); err != nil {
+			return ApplyExecutionOperation{}, fmt.Errorf("decode apply dependency add payload: %w", err)
+		}
+		if err := h.service.AddDependency(ctx, payload.TaskID, payload.DependsOnID, payload.Type); err != nil {
+			return ApplyExecutionOperation{}, err
+		}
+		operation.TaskID = payload.TaskID
+		return operation, nil
+
+	case applyCommandDependencyRemove:
+		var payload applyDependencyRemoveBody
+		if err := json.Unmarshal(op.Body, &payload); err != nil {
+			return ApplyExecutionOperation{}, fmt.Errorf("decode apply dependency remove payload: %w", err)
+		}
+		if err := h.service.RemoveDependency(issues.WithDependencyRemovalConfirmation(ctx), payload.TaskID, payload.DependsOnID, payload.Type); err != nil {
+			return ApplyExecutionOperation{}, err
+		}
 		operation.TaskID = payload.TaskID
 		return operation, nil
 

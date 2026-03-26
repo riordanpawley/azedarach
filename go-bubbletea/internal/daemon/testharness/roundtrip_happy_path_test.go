@@ -75,6 +75,16 @@ func (s *roundtripApplyService) UpdateDetails(_ context.Context, id string, para
 	return nil
 }
 
+func (s *roundtripApplyService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+	s.calls = append(s.calls, fmt.Sprintf("dep-add:%s:%s:%s", issueID, dependsOnID, dependencyType))
+	return nil
+}
+
+func (s *roundtripApplyService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+	s.calls = append(s.calls, fmt.Sprintf("dep-remove:%s:%s:%s", issueID, dependsOnID, dependencyType))
+	return nil
+}
+
 func (s *roundtripApplyService) Delete(_ context.Context, id string) error {
 	s.calls = append(s.calls, "delete:"+id)
 	return nil

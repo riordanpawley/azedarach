@@ -64,6 +64,16 @@ func (s *applyIntegrationService) Archive(_ context.Context, id string) error {
 	return nil
 }
 
+func (s *applyIntegrationService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+	s.calls = append(s.calls, fmt.Sprintf("dep-add:%s:%s:%s", issueID, dependsOnID, dependencyType))
+	return nil
+}
+
+func (s *applyIntegrationService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+	s.calls = append(s.calls, fmt.Sprintf("dep-remove:%s:%s:%s", issueID, dependsOnID, dependencyType))
+	return nil
+}
+
 type applyIntegrationRevisions struct {
 	current   uint64
 	published []string

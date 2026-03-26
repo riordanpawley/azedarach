@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -441,6 +442,11 @@ func TestParseIssueListArgs(t *testing.T) {
 			want: IssueListOptions{JSON: false, Deps: false, Limit: 25},
 		},
 		{
+			name: "id filters",
+			args: []string{"--id", "az-1", "--id", "az-2", "--ids", "az-3,az-4"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, IDs: []string{"az-1", "az-2", "az-3", "az-4"}},
+		},
+		{
 			name:        "invalid limit",
 			args:        []string{"--limit", "0"},
 			errContains: "limit must be >= 1",
@@ -464,7 +470,7 @@ func TestParseIssueListArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueListArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseIssueListArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -496,12 +502,17 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get <issue-id> [--json] [--deps]",
+			errContains: "usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get <issue-id> [--json] [--deps]",
+			errContains: "usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]",
+		},
+		{
+			name: "named id",
+			args: []string{"--id", "az-4"},
+			want: IssueGetOptions{IssueID: "az-4", JSON: false, Deps: false},
 		},
 	}
 
@@ -533,7 +544,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check <issue-id> [--json] [--deps]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--id <issue-id>] [--json] [--deps] [<issue-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -544,9 +555,39 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 	if doctor.IssueID != "az-2" {
 		t.Fatalf("ParseIssueDoctorArgs() = %+v", doctor)
 	}
+	doctor, err = ParseIssueDoctorArgs([]string{"--id", "az-3"})
+	if err != nil {
+		t.Fatalf("ParseIssueDoctorArgs() named id error = %v", err)
+	}
+	if doctor.IssueID != "az-3" {
+		t.Fatalf("ParseIssueDoctorArgs() named id = %+v", doctor)
+	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor <issue-id>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--id <issue-id>] [<issue-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
+	}
+}
+
+func TestParseIssueGetManyArgs(t *testing.T) {
+	got, err := ParseIssueGetManyArgs([]string{"--id", "az-1", "--id", "az-2", "--ids", "az-3,az-4", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIssueGetManyArgs() error = %v", err)
+	}
+	if !got.JSON {
+		t.Fatalf("expected json output flag to be set")
+	}
+	if !reflect.DeepEqual(got.IssueIDs, []string{"az-1", "az-2", "az-3", "az-4"}) {
+		t.Fatalf("ParseIssueGetManyArgs() ids = %+v", got.IssueIDs)
+	}
+
+	_, err = ParseIssueGetManyArgs([]string{"az-1"})
+	if err == nil || !strings.Contains(err.Error(), "unexpected argument: az-1") {
+		t.Fatalf("expected positional arg rejection, got %v", err)
+	}
+
+	_, err = ParseIssueGetManyArgs([]string{"--json"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue get-many --id <issue-id>") {
+		t.Fatalf("expected usage error for missing ids, got %v", err)
 	}
 }
 
@@ -634,12 +675,17 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close <issue-id>",
+			errContains: "missing required flag: --impl",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close <issue-id>",
+			errContains: "usage: az issue close --impl <implementation>",
+		},
+		{
+			name: "named id",
+			args: []string{"--impl", "go-bubbletea", "--id", "az-2"},
+			want: IssueCloseOptions{Implementation: "go-bubbletea", IssueID: "az-2"},
 		},
 	}
 
@@ -719,7 +765,16 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 		{
 			name:        "invalid status arg count",
 			args:        []string{},
-			errContains: "usage: az issue update <issue-id>",
+			errContains: "missing required flag: --impl",
+		},
+		{
+			name: "named id",
+			args: []string{"--impl", "go-bubbletea", "--id", "az-9", "--title", "Renamed"},
+			want: IssueUpdateOptions{
+				Implementation: "go-bubbletea",
+				IssueID:        "az-9",
+				Title:          "Renamed",
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -782,8 +837,15 @@ func TestParseIssueStatusArgs(t *testing.T) {
 		t.Fatalf("expected missing impl error, got %v", err)
 	}
 	_, err = ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue status <issue-id> <open|in_progress|blocked|closed>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]") {
 		t.Fatalf("expected usage error, got %v", err)
+	}
+	statusOpts, err := ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "--id", "az-1", "--status", "blocked"})
+	if err != nil {
+		t.Fatalf("expected named status parse success, got %v", err)
+	}
+	if statusOpts.IssueID != "az-1" || statusOpts.Status != domain.StatusBlocked {
+		t.Fatalf("status opts = %+v", statusOpts)
 	}
 	_, err = ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", "done"})
 	if err == nil || !strings.Contains(err.Error(), "invalid status: done") {
@@ -803,6 +865,13 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
 		t.Fatalf("expected missing impl error for add, got %v", err)
 	}
+	add, err = ParseIssueDependencyAddArgs([]string{"--impl", "go-bubbletea", "--issue-id", "az-1", "--depends-on-id", "az-2"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs() named flags error = %v", err)
+	}
+	if add.IssueID != "az-1" || add.DependsOnID != "az-2" {
+		t.Fatalf("ParseIssueDependencyAddArgs() named flags = %+v", add)
+	}
 
 	remove, err := ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "--type", "blocks", "--confirm", "az-3", "az-4"})
 	if err != nil {
@@ -812,8 +881,15 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() = %+v", remove)
 	}
 	_, err = ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "az-3"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue dep remove <issue-id> <depends-on-id>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue dep remove --impl <implementation>") {
 		t.Fatalf("expected usage error for remove, got %v", err)
+	}
+	remove, err = ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "--issue-id", "az-3", "--depends-on-id", "az-4"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyRemoveArgs() named flags error = %v", err)
+	}
+	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" {
+		t.Fatalf("ParseIssueDependencyRemoveArgs() named flags = %+v", remove)
 	}
 }
 
@@ -840,6 +916,18 @@ func TestParseIssueBulkArgs(t *testing.T) {
 	_, err = ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea"})
 	if err == nil || !strings.Contains(err.Error(), "missing required flag: --input") {
 		t.Fatalf("expected missing input error for bulk-update, got %v", err)
+	}
+
+	depBulk, err := ParseIssueDependencyBulkApplyArgs([]string{"--impl", "go-bubbletea", "--input", "dep-bulk.json", "--dry-run", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyBulkApplyArgs() error = %v", err)
+	}
+	if depBulk.Implementation != "go-bubbletea" || depBulk.InputPath != "dep-bulk.json" || !depBulk.DryRun || !depBulk.JSON {
+		t.Fatalf("ParseIssueDependencyBulkApplyArgs() = %+v", depBulk)
+	}
+	_, err = ParseIssueDependencyBulkApplyArgs([]string{"--input", "dep-bulk.json"})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
+		t.Fatalf("expected missing impl error for dep bulk apply, got %v", err)
 	}
 }
 
@@ -1016,6 +1104,49 @@ func TestIssueListCommand_IncludesListWindowMetadata(t *testing.T) {
 	}
 	if !strings.Contains(output, "Window note: additional matching issues may exist beyond current limit.") {
 		t.Fatalf("list metadata missing truncated window note: %q", output)
+	}
+}
+
+func TestIssueListCommand_IDSetFilter(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "One", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
+		{ID: "az-2", Title: "Two", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-3", Title: "Three", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        2,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{IDs: []string{"az-3", "az-1"}})
+	})
+	if strings.Contains(output, "az-2") {
+		t.Fatalf("id-set filter should exclude az-2: %q", output)
+	}
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-3") {
+		t.Fatalf("id-set filter should include requested issues: %q", output)
 	}
 }
 
@@ -1366,6 +1497,260 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 			t.Fatalf("deps projection missing %q: %q", want, output)
 		}
 	}
+}
+
+func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
+	now := time.Date(2026, 3, 26, 3, 15, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "First", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "az-2", Title: "Second", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeFeature, CreatedAt: now, UpdatedAt: now},
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        3,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueGetManyCommand(deps, IssueGetManyOptions{
+			IssueIDs: []string{"az-2", "az-missing", "az-1"},
+			JSON:     true,
+		})
+	})
+	var got issueGetManyResult
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("unmarshal get-many output: %v", err)
+	}
+	if got.Requested != 3 || got.Found != 2 || got.Missing != 1 {
+		t.Fatalf("unexpected summary: %+v", got)
+	}
+	if len(got.Results) != 3 {
+		t.Fatalf("results length = %d, want 3", len(got.Results))
+	}
+	if got.Results[0].ID != "az-2" || got.Results[0].Status != "found" {
+		t.Fatalf("result[0] = %+v", got.Results[0])
+	}
+	if got.Results[1].ID != "az-missing" || got.Results[1].Status != "not_found" {
+		t.Fatalf("result[1] = %+v", got.Results[1])
+	}
+	if got.Results[2].ID != "az-1" || got.Results[2].Status != "found" {
+		t.Fatalf("result[2] = %+v", got.Results[2])
+	}
+}
+
+func TestIssueDependencyBulkApplyCommand_DryRunOutcomes(t *testing.T) {
+	now := time.Date(2026, 3, 26, 4, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:        "az-a",
+			Title:     "A",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+			Dependencies: []domain.Dependency{
+				{ID: "az-b", Type: domain.DependencyBlocks},
+			},
+		},
+		{ID: "az-b", Title: "B", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "az-c", Title: "C", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        4,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "dep-bulk.json")
+	payload := `{
+  "mutations": [
+    {"action":"add","issue_id":"az-a","depends_on_id":"az-b","type":"blocks"},
+    {"action":"add","issue_id":"az-a","depends_on_id":"az-c","type":"blocks"},
+    {"action":"remove","issue_id":"az-a","depends_on_id":"az-z","type":"blocks"},
+    {"action":"retarget","issue_id":"az-a","from_id":"az-b","to_id":"az-c","type":"blocks"},
+    {"action":"add","issue_id":"az-missing","depends_on_id":"az-b","type":"blocks"}
+  ]
+}`
+	if err := os.WriteFile(inputPath, []byte(payload), 0644); err != nil {
+		t.Fatalf("write dep bulk file: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueDependencyBulkApplyCommand(deps, IssueDependencyBulkApplyOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      inputPath,
+			DryRun:         true,
+			JSON:           true,
+		})
+	})
+	var result dependencyBulkResult
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal dry-run output: %v", err)
+	}
+	if result.Summary.Requested != 5 || result.Summary.Planned != 2 || result.Summary.NoOp != 2 || result.Summary.Invalid != 1 {
+		t.Fatalf("unexpected dry-run summary: %+v", result.Summary)
+	}
+	statuses := make([]string, 0, len(result.Outcomes))
+	for _, outcome := range result.Outcomes {
+		statuses = append(statuses, outcome.Status)
+	}
+	if !reflect.DeepEqual(statuses, []string{"no-op", "planned", "no-op", "planned", "invalid"}) {
+		t.Fatalf("unexpected dry-run statuses: %+v", statuses)
+	}
+}
+
+func TestIssueDependencyBulkApplyCommand_IdempotentReplayNoOp(t *testing.T) {
+	now := time.Date(2026, 3, 26, 4, 45, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{
+			ID:        "az-a",
+			Title:     "A",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P2,
+			Type:      domain.TypeTask,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		{ID: "az-b", Title: "B", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+	applyCalls := 0
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal(tasks)
+					if err != nil {
+						t.Fatalf("marshal tasks: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        5,
+						Body:            body,
+					}, nil
+				case protocol.CommandTaskBulkApply:
+					applyCalls++
+					tasks[0].Dependencies = append(tasks[0].Dependencies, domain.Dependency{
+						ID:   "az-b",
+						Type: domain.DependencyBlocks,
+					})
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        6,
+						Body:            []byte(`{}`),
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "dep-bulk-apply.json")
+	payload := `{"mutations":[{"action":"add","issue_id":"az-a","depends_on_id":"az-b","type":"blocks"}]}`
+	if err := os.WriteFile(inputPath, []byte(payload), 0644); err != nil {
+		t.Fatalf("write dep bulk file: %v", err)
+	}
+
+	first := captureStdout(t, func() error {
+		return IssueDependencyBulkApplyCommand(deps, IssueDependencyBulkApplyOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      inputPath,
+			JSON:           true,
+		})
+	})
+	var firstResult dependencyBulkResult
+	firstJSON := extractTrailingJSONResult(first)
+	if err := json.Unmarshal([]byte(firstJSON), &firstResult); err != nil {
+		t.Fatalf("unmarshal first result: %v", err)
+	}
+	if firstResult.Summary.Planned != 1 || firstResult.Summary.Applied != 1 || applyCalls != 1 {
+		t.Fatalf("unexpected first apply result=%+v calls=%d", firstResult.Summary, applyCalls)
+	}
+
+	second := captureStdout(t, func() error {
+		return IssueDependencyBulkApplyCommand(deps, IssueDependencyBulkApplyOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      inputPath,
+			JSON:           true,
+		})
+	})
+	var secondResult dependencyBulkResult
+	secondJSON := extractTrailingJSONResult(second)
+	if err := json.Unmarshal([]byte(secondJSON), &secondResult); err != nil {
+		t.Fatalf("unmarshal second result: %v", err)
+	}
+	if secondResult.Summary.NoOp != 1 || secondResult.Summary.Applied != 0 || applyCalls != 1 {
+		t.Fatalf("unexpected second apply result=%+v calls=%d", secondResult.Summary, applyCalls)
+	}
+}
+
+func extractTrailingJSONResult(output string) string {
+	needle := "{\n  \"dry_run\""
+	idx := strings.LastIndex(output, needle)
+	if idx < 0 {
+		return output
+	}
+	return output[idx:]
 }
 
 func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
@@ -1854,6 +2239,130 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 	}
 }
 
+func TestIssueBulkUpdateCommand_DependencyRetargetBuildsApplyOps(t *testing.T) {
+	tempDir := t.TempDir()
+	bulkUpdatePath := filepath.Join(tempDir, "bulk-update-retarget.json")
+	if err := os.WriteFile(
+		bulkUpdatePath,
+		[]byte(`[{"task_id":"az-1","dependency_retargets":[{"from_id":"az-old","to_id":"az-new","type":"blocks"}]}]`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write bulk-update file: %v", err)
+	}
+
+	var commands []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{{
+						ID:          "az-1",
+						Title:       "Existing",
+						Description: "Desc",
+						Type:        domain.TypeTask,
+						Priority:    domain.P2,
+						Status:      domain.StatusOpen,
+					}})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case protocol.CommandTaskBulkApply:
+					body, err := json.Marshal(applyExecutionResultBody{
+						Summary: applyExecutionSummaryBody{Total: 2, Succeeded: 2, Failed: 0},
+					})
+					if err != nil {
+						t.Fatalf("marshal apply response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	_ = captureStdout(t, func() error {
+		return IssueBulkUpdateCommand(deps, IssueBulkUpdateOptions{
+			Implementation: "go-bubbletea",
+			InputPath:      bulkUpdatePath,
+			DryRun:         true,
+		})
+	})
+
+	var applyReq *protocol.RequestEnvelope
+	for i := range commands {
+		if commands[i].Command == protocol.CommandTaskBulkApply {
+			applyReq = &commands[i]
+			break
+		}
+	}
+	if applyReq == nil {
+		t.Fatalf("expected bulk apply command")
+	}
+	var body protocol.ApplyRequestBody
+	if err := json.Unmarshal(applyReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal apply body: %v", err)
+	}
+	if !body.DryRun {
+		t.Fatalf("dry_run = false, want true")
+	}
+	if len(body.Operations) != 2 {
+		t.Fatalf("operation count = %d, want 2", len(body.Operations))
+	}
+	if body.Operations[0].Command != daemonclient.CommandTaskDependencyRemove {
+		t.Fatalf("operation[0] command = %q, want %q", body.Operations[0].Command, daemonclient.CommandTaskDependencyRemove)
+	}
+	if body.Operations[1].Command != daemonclient.CommandTaskDependencyAdd {
+		t.Fatalf("operation[1] command = %q, want %q", body.Operations[1].Command, daemonclient.CommandTaskDependencyAdd)
+	}
+
+	var removeBody daemonclient.TaskDependencyRemoveParams
+	if err := json.Unmarshal(body.Operations[0].Body, &removeBody); err != nil {
+		t.Fatalf("unmarshal remove body: %v", err)
+	}
+	if removeBody.TaskID != "az-1" || removeBody.DependsOnID != "az-old" || removeBody.Type != "blocks" || !removeBody.Confirm {
+		t.Fatalf("remove body = %+v", removeBody)
+	}
+
+	var addBody daemonclient.TaskDependencyParams
+	if err := json.Unmarshal(body.Operations[1].Body, &addBody); err != nil {
+		t.Fatalf("unmarshal add body: %v", err)
+	}
+	if addBody.TaskID != "az-1" || addBody.DependsOnID != "az-new" || addBody.Type != "blocks" {
+		t.Fatalf("add body = %+v", addBody)
+	}
+}
+
 func TestPrintUsageIncludesExport(t *testing.T) {
 	output := captureStdout(t, func() error {
 		PrintUsage()
@@ -1869,35 +2378,41 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue list [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
-	if !strings.Contains(output, "issue get <id> [--json] [--deps]") {
+	if !strings.Contains(output, "issue get [--id <id>] [--json] [--deps] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
-	if !strings.Contains(output, "issue check <id> [--json] [--deps]") {
+	if !strings.Contains(output, "issue get-many --id <id>") {
+		t.Fatalf("usage missing issue get-many command: %q", output)
+	}
+	if !strings.Contains(output, "issue check [--id <id>] [--json] [--deps] [<id>]") {
 		t.Fatalf("usage missing issue check command: %q", output)
 	}
-	if !strings.Contains(output, "issue doctor <id>") {
+	if !strings.Contains(output, "issue doctor [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue doctor command: %q", output)
 	}
 	if !strings.Contains(output, "issue create <title>") {
 		t.Fatalf("usage missing issue create command: %q", output)
 	}
-	if !strings.Contains(output, "issue update <id>") {
+	if !strings.Contains(output, "issue update --impl <implementation> --id <id>") {
 		t.Fatalf("usage missing issue update command: %q", output)
 	}
-	if !strings.Contains(output, "issue status <id>") {
+	if !strings.Contains(output, "issue status --impl <implementation> --id <id> --status <open|in_progress|blocked|closed>") {
 		t.Fatalf("usage missing issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close <id>") {
+	if !strings.Contains(output, "issue close --impl <implementation> --id <id>") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
-	if !strings.Contains(output, "issue delete <id> --impl <implementation> --confirm") {
+	if !strings.Contains(output, "issue delete --impl <implementation> --id <id> --confirm") {
 		t.Fatalf("usage missing issue delete command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep add <issue-id> <depends-on-id>") {
+	if !strings.Contains(output, "issue dep add --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id>") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep remove <issue-id> <depends-on-id>") {
+	if !strings.Contains(output, "issue dep remove --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id>") {
 		t.Fatalf("usage missing issue dep remove command: %q", output)
+	}
+	if !strings.Contains(output, "issue dep bulk apply --impl <implementation> --input <path>") {
+		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
 	}
 	if !strings.Contains(output, "issue bulk-create --impl <implementation> --input <path>") {
 		t.Fatalf("usage missing issue bulk-create command: %q", output)
@@ -1907,6 +2422,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "--impl <implementation>") {
 		t.Fatalf("usage missing implementation targeting hint: %q", output)
+	}
+	if !strings.Contains(output, "Argument ordering: place flags/options before positional arguments for deterministic parsing.") {
+		t.Fatalf("usage missing canonical argument ordering hint: %q", output)
 	}
 }
 

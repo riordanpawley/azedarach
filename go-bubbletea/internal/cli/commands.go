@@ -59,15 +59,21 @@ type ExportOptions struct {
 }
 
 type IssueListOptions struct {
-	JSON bool
-	Deps bool
+	JSON  bool
+	Deps  bool
 	Limit int
+	IDs   []string
 }
 
 type IssueGetOptions struct {
 	IssueID string
 	JSON    bool
 	Deps    bool
+}
+
+type IssueGetManyOptions struct {
+	IssueIDs []string
+	JSON     bool
 }
 
 type IssueCheckOptions struct {
@@ -127,6 +133,13 @@ type IssueDependencyRemoveOptions struct {
 	DependsOnID    string
 	Type           string
 	Confirm        bool
+}
+
+type IssueDependencyBulkApplyOptions struct {
+	Implementation string
+	InputPath      string
+	DryRun         bool
+	JSON           bool
 }
 
 type IssueBulkCreateOptions struct {
@@ -262,11 +275,22 @@ func ParseExportArgs(args []string) (ExportOptions, error) {
 
 func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
+	ids := make([]string, 0, 4)
+	idsCSV := ""
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
 	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
+	fs.Func("id", "restrict list to specific issue ids (repeatable)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty issue id")
+		}
+		ids = append(ids, trimmed)
+		return nil
+	})
+	fs.StringVar(&idsCSV, "ids", "", "comma-separated issue ids to include")
 	if err := fs.Parse(args); err != nil {
 		return IssueListOptions{}, err
 	}
@@ -276,22 +300,81 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	if opts.Limit < 1 {
 		return IssueListOptions{}, fmt.Errorf("limit must be >= 1")
 	}
+	if strings.TrimSpace(idsCSV) != "" {
+		for _, raw := range strings.Split(idsCSV, ",") {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				continue
+			}
+			ids = append(ids, trimmed)
+		}
+	}
+	opts.IDs = dedupeOrderedIDs(ids)
 	return opts, nil
 }
 
 func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	opts := IssueGetOptions{}
+	issueIDFlag := ""
 	fs := flag.NewFlagSet("issue get", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency details")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := fs.Parse(args); err != nil {
 		return IssueGetOptions{}, err
 	}
-	if fs.NArg() != 1 {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get <issue-id> [--json] [--deps]")
+	if fs.NArg() > 1 {
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]")
 	}
-	opts.IssueID = fs.Arg(0)
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]")
+	}
+	return opts, nil
+}
+
+func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
+	opts := IssueGetManyOptions{}
+	ids := make([]string, 0, 4)
+	idsCSV := ""
+	fs := flag.NewFlagSet("issue get-many", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output issue lookup results as JSON")
+	fs.Func("id", "issue id to fetch (repeatable)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty issue id")
+		}
+		ids = append(ids, trimmed)
+		return nil
+	})
+	fs.StringVar(&idsCSV, "ids", "", "comma-separated issue ids to fetch")
+	if err := fs.Parse(args); err != nil {
+		return IssueGetManyOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueGetManyOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if strings.TrimSpace(idsCSV) != "" {
+		for _, raw := range strings.Split(idsCSV, ",") {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				continue
+			}
+			ids = append(ids, trimmed)
+		}
+	}
+	ids = dedupeOrderedIDs(ids)
+	if len(ids) == 0 {
+		return IssueGetManyOptions{}, fmt.Errorf("usage: az issue get-many --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]")
+	}
+	opts.IssueIDs = ids
 	return opts, nil
 }
 
@@ -335,7 +418,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
 	getOpts, err := ParseIssueGetArgs(args)
 	if err != nil {
-		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check <issue-id> [--json] [--deps]")
+		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check [--id <issue-id>] [--json] [--deps] [<issue-id>]")
 	}
 	return IssueCheckOptions{
 		IssueID: getOpts.IssueID,
@@ -345,46 +428,70 @@ func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
 }
 
 func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
+	issueIDFlag := ""
 	fs := flag.NewFlagSet("issue doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := fs.Parse(args); err != nil {
 		return IssueDoctorOptions{}, err
 	}
-	if fs.NArg() != 1 {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor <issue-id>")
+	if fs.NArg() > 1 {
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--id <issue-id>] [<issue-id>]")
 	}
-	return IssueDoctorOptions{IssueID: fs.Arg(0)}, nil
+	issueID := ""
+	if fs.NArg() == 1 {
+		issueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		issueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(issueID) == "" {
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--id <issue-id>] [<issue-id>]")
+	}
+	return IssueDoctorOptions{IssueID: issueID}, nil
 }
 
 func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	opts := IssueCloseOptions{}
+	issueIDFlag := ""
 	fs := flag.NewFlagSet("issue close", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := fs.Parse(args); err != nil {
 		return IssueCloseOptions{}, err
 	}
-	if fs.NArg() != 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close <issue-id> --impl <implementation>")
+	if fs.NArg() > 1 {
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close --impl <implementation> [--id <issue-id>] [<issue-id>]")
 	}
 	if opts.Implementation == "" {
 		return IssueCloseOptions{}, fmt.Errorf("missing required flag: --impl")
 	}
-	opts.IssueID = fs.Arg(0)
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close --impl <implementation> [--id <issue-id>] [<issue-id>]")
+	}
 	return opts, nil
 }
 
 func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	opts := IssueDeleteOptions{}
+	issueIDFlag := ""
 	fs := flag.NewFlagSet("issue delete", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm permanent issue deletion")
 	if err := fs.Parse(args); err != nil {
 		return IssueDeleteOptions{}, err
 	}
-	if fs.NArg() != 1 {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete <issue-id> --impl <implementation> --confirm")
+	if fs.NArg() > 1 {
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete --impl <implementation> --confirm [--id <issue-id>] [<issue-id>]")
 	}
 	if opts.Implementation == "" {
 		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --impl")
@@ -392,12 +499,21 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	if !opts.Confirm {
 		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")
 	}
-	opts.IssueID = fs.Arg(0)
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete --impl <implementation> --confirm [--id <issue-id>] [<issue-id>]")
+	}
 	return opts, nil
 }
 
 func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	opts := IssueUpdateOptions{}
+	issueIDFlag := ""
 	var typeRaw string
 	var priorityRaw string
 	fs := flag.NewFlagSet("issue update", flag.ContinueOnError)
@@ -405,18 +521,27 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
 	fs.StringVar(&opts.Title, "title", "", "updated issue title")
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
 	fs.StringVar(&priorityRaw, "priority", "", "updated priority (P0-P4)")
 	if err := fs.Parse(args); err != nil {
 		return IssueUpdateOptions{}, err
 	}
-	if fs.NArg() != 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update <issue-id> --impl <implementation> [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+	if fs.NArg() > 1 {
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
 	}
 	if opts.Implementation == "" {
 		return IssueUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
 	}
-	opts.IssueID = fs.Arg(0)
+	if fs.NArg() == 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" {
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
 		if err != nil {
@@ -439,67 +564,145 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 
 func ParseIssueStatusArgs(args []string) (IssueStatusOptions, error) {
 	opts := IssueStatusOptions{}
+	issueIDFlag := ""
+	statusFlag := ""
 	fs := flag.NewFlagSet("issue status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&statusFlag, "status", "", "status value (open|in_progress|blocked|closed)")
 	if err := fs.Parse(args); err != nil {
 		return IssueStatusOptions{}, err
 	}
-	if fs.NArg() != 2 {
-		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>")
+	if fs.NArg() > 2 {
+		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]")
 	}
 	if opts.Implementation == "" {
 		return IssueStatusOptions{}, fmt.Errorf("missing required flag: --impl")
 	}
-	status, err := parseStatus(fs.Arg(1))
+	issueID := ""
+	statusRaw := ""
+	if fs.NArg() >= 1 {
+		issueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		statusRaw = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		issueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(statusFlag) != "" {
+		statusRaw = strings.TrimSpace(statusFlag)
+	}
+	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(statusRaw) == "" {
+		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]")
+	}
+	status, err := parseStatus(statusRaw)
 	if err != nil {
 		return IssueStatusOptions{}, err
 	}
 	return IssueStatusOptions{
 		Implementation: opts.Implementation,
-		IssueID:        fs.Arg(0),
+		IssueID:        issueID,
 		Status:         status,
 	}, nil
 }
 
 func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, error) {
 	opts := IssueDependencyAddOptions{Type: "blocks"}
+	issueIDFlag := ""
+	dependsOnIDFlag := ""
 	fs := flag.NewFlagSet("issue dep add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
+	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
 	if err := fs.Parse(args); err != nil {
 		return IssueDependencyAddOptions{}, err
 	}
-	if fs.NArg() != 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from]")
+	if fs.NArg() > 2 {
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
 	}
 	if opts.Implementation == "" {
 		return IssueDependencyAddOptions{}, fmt.Errorf("missing required flag: --impl")
 	}
-	opts.IssueID = fs.Arg(0)
-	opts.DependsOnID = fs.Arg(1)
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.DependsOnID = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(dependsOnIDFlag) != "" {
+		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
+	}
 	return opts, nil
 }
 
 func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions, error) {
 	opts := IssueDependencyRemoveOptions{Type: "blocks"}
+	issueIDFlag := ""
+	dependsOnIDFlag := ""
 	fs := flag.NewFlagSet("issue dep remove", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
+	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
 	if err := fs.Parse(args); err != nil {
 		return IssueDependencyRemoveOptions{}, err
 	}
-	if fs.NArg() != 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type blocks|related|parent-child|discovered-from] [--confirm]")
+	if fs.NArg() > 2 {
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
 	}
 	if opts.Implementation == "" {
 		return IssueDependencyRemoveOptions{}, fmt.Errorf("missing required flag: --impl")
 	}
-	opts.IssueID = fs.Arg(0)
-	opts.DependsOnID = fs.Arg(1)
+	if fs.NArg() >= 1 {
+		opts.IssueID = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		opts.DependsOnID = fs.Arg(1)
+	}
+	if strings.TrimSpace(issueIDFlag) != "" {
+		opts.IssueID = strings.TrimSpace(issueIDFlag)
+	}
+	if strings.TrimSpace(dependsOnIDFlag) != "" {
+		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
+	}
+	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
+	}
+	return opts, nil
+}
+
+func ParseIssueDependencyBulkApplyArgs(args []string) (IssueDependencyBulkApplyOptions, error) {
+	opts := IssueDependencyBulkApplyOptions{}
+	fs := flag.NewFlagSet("issue dep bulk apply", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&opts.InputPath, "input", "", "path to JSON payload")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "validate and preview without mutating")
+	fs.BoolVar(&opts.JSON, "json", false, "output dependency mutation results as JSON")
+	if err := fs.Parse(args); err != nil {
+		return IssueDependencyBulkApplyOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Implementation == "" {
+		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("missing required flag: --impl")
+	}
+	if strings.TrimSpace(opts.InputPath) == "" {
+		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("missing required flag: --input")
+	}
 	return opts, nil
 }
 
@@ -595,6 +798,9 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
 	tasks := snapshot.Tasks
+	if len(opts.IDs) > 0 {
+		tasks = filterTasksByIDs(tasks, opts.IDs)
+	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
 			return tasks[i].ID < tasks[j].ID
@@ -678,6 +884,78 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	} else {
 		fmt.Println("Window note: all matching issues are shown.")
 	}
+	return nil
+}
+
+type issueGetManyItem struct {
+	ID     string       `json:"id"`
+	Status string       `json:"status"`
+	Issue  *domain.Task `json:"issue,omitempty"`
+	Error  string       `json:"error,omitempty"`
+}
+
+type issueGetManyResult struct {
+	Requested int                `json:"requested"`
+	Found     int                `json:"found"`
+	Missing   int                `json:"missing"`
+	Results   []issueGetManyItem `json:"results"`
+}
+
+func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get issues: %w", err)
+	}
+	tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
+	for _, task := range snapshot.Tasks {
+		tasksByID[task.ID] = task
+	}
+
+	result := issueGetManyResult{
+		Requested: len(opts.IssueIDs),
+		Results:   make([]issueGetManyItem, 0, len(opts.IssueIDs)),
+	}
+	for _, issueID := range opts.IssueIDs {
+		task, ok := tasksByID[issueID]
+		if !ok {
+			result.Missing++
+			result.Results = append(result.Results, issueGetManyItem{
+				ID:     issueID,
+				Status: "not_found",
+				Error:  "issue not found",
+			})
+			continue
+		}
+		result.Found++
+		taskCopy := task
+		result.Results = append(result.Results, issueGetManyItem{
+			ID:     issueID,
+			Status: "found",
+			Issue:  &taskCopy,
+		})
+	}
+
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	for _, item := range result.Results {
+		switch item.Status {
+		case "found":
+			fmt.Printf("%s found: %s [%s]\n", item.ID, item.Issue.Title, item.Issue.Status)
+		default:
+			fmt.Printf("%s not_found: %s\n", item.ID, item.Error)
+		}
+	}
+	fmt.Printf("Summary: requested=%d found=%d missing=%d\n", result.Requested, result.Found, result.Missing)
 	return nil
 }
 
@@ -915,6 +1193,136 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 	return nil
 }
 
+type dependencyBulkMutationPayload struct {
+	Mutations []dependencyBulkMutation `json:"mutations"`
+}
+
+type dependencyBulkMutation struct {
+	Action      string `json:"action"`
+	IssueID     string `json:"issue_id,omitempty"`
+	ID          string `json:"id,omitempty"`
+	DependsOnID string `json:"depends_on_id,omitempty"`
+	FromID      string `json:"from_id,omitempty"`
+	ToID        string `json:"to_id,omitempty"`
+	Type        string `json:"type,omitempty"`
+}
+
+type dependencyBulkOutcome struct {
+	Index      int    `json:"index"`
+	Action     string `json:"action"`
+	IssueID    string `json:"issue_id"`
+	Dependency string `json:"dependency,omitempty"`
+	FromID     string `json:"from_id,omitempty"`
+	ToID       string `json:"to_id,omitempty"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+type dependencyBulkSummary struct {
+	Requested int `json:"requested"`
+	Planned   int `json:"planned"`
+	NoOp      int `json:"no_op"`
+	Invalid   int `json:"invalid"`
+	Applied   int `json:"applied"`
+}
+
+type dependencyBulkResult struct {
+	DryRun   bool                    `json:"dry_run"`
+	Summary  dependencyBulkSummary   `json:"summary"`
+	Outcomes []dependencyBulkOutcome `json:"outcomes"`
+}
+
+func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBulkApplyOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	inputBytes, err := os.ReadFile(opts.InputPath)
+	if err != nil {
+		return fmt.Errorf("read dependency bulk input %s: %w", opts.InputPath, err)
+	}
+	var payload dependencyBulkMutationPayload
+	if err := json.Unmarshal(inputBytes, &payload); err != nil {
+		return fmt.Errorf("parse dependency bulk input %s: %w", opts.InputPath, err)
+	}
+	if len(payload.Mutations) == 0 {
+		return fmt.Errorf("dependency bulk input must contain at least one mutation")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("load issues for dependency bulk apply: %w", err)
+	}
+	taskEdges := buildTaskDependencyEdgeSet(snapshot.Tasks)
+	taskIDs := make(map[string]struct{}, len(snapshot.Tasks))
+	for _, task := range snapshot.Tasks {
+		taskIDs[task.ID] = struct{}{}
+	}
+
+	ops := make([]protocol.ApplyOperationBody, 0, len(payload.Mutations)*2)
+	outcomes := make([]dependencyBulkOutcome, 0, len(payload.Mutations))
+	summary := dependencyBulkSummary{Requested: len(payload.Mutations)}
+
+	for i, mutation := range payload.Mutations {
+		outcome, plannedOps, err := planDependencyMutation(i, mutation, taskIDs, taskEdges)
+		if err != nil {
+			outcome.Status = "invalid"
+			outcome.Reason = err.Error()
+			summary.Invalid++
+			outcomes = append(outcomes, outcome)
+			continue
+		}
+		switch outcome.Status {
+		case "planned":
+			summary.Planned++
+			ops = append(ops, plannedOps...)
+		case "no-op":
+			summary.NoOp++
+		}
+		outcomes = append(outcomes, outcome)
+	}
+
+	if !opts.DryRun && len(ops) > 0 {
+		if err := executeBulkApply(deps, false, ops); err != nil {
+			return err
+		}
+		summary.Applied = summary.Planned
+	}
+
+	result := dependencyBulkResult{
+		DryRun:   opts.DryRun,
+		Summary:  summary,
+		Outcomes: outcomes,
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	for _, outcome := range outcomes {
+		switch outcome.Status {
+		case "planned":
+			fmt.Printf("[%d] planned %s %s (%s)\n", outcome.Index, outcome.Action, outcome.IssueID, outcome.Type)
+		case "no-op":
+			fmt.Printf("[%d] no-op %s %s (%s): %s\n", outcome.Index, outcome.Action, outcome.IssueID, outcome.Type, outcome.Reason)
+		default:
+			fmt.Printf("[%d] invalid %s %s (%s): %s\n", outcome.Index, outcome.Action, outcome.IssueID, outcome.Type, outcome.Reason)
+		}
+	}
+	fmt.Printf("Summary: requested=%d planned=%d no-op=%d invalid=%d applied=%d\n",
+		summary.Requested,
+		summary.Planned,
+		summary.NoOp,
+		summary.Invalid,
+		summary.Applied,
+	)
+	return nil
+}
+
 func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -981,12 +1389,17 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		return fmt.Errorf("read bulk-update input %s: %w", opts.InputPath, err)
 	}
 	var input []struct {
-		TaskID      string `json:"task_id,omitempty"`
-		ID          string `json:"id,omitempty"`
-		Title       string `json:"title,omitempty"`
-		Description string `json:"description,omitempty"`
-		Type        string `json:"type,omitempty"`
-		Priority    string `json:"priority,omitempty"`
+		TaskID              string `json:"task_id,omitempty"`
+		ID                  string `json:"id,omitempty"`
+		Title               string `json:"title,omitempty"`
+		Description         string `json:"description,omitempty"`
+		Type                string `json:"type,omitempty"`
+		Priority            string `json:"priority,omitempty"`
+		DependencyRetargets []struct {
+			FromID string `json:"from_id"`
+			ToID   string `json:"to_id"`
+			Type   string `json:"type"`
+		} `json:"dependency_retargets,omitempty"`
 	}
 	if err := json.Unmarshal(inputBytes, &input); err != nil {
 		return fmt.Errorf("parse bulk-update input %s: %w", opts.InputPath, err)
@@ -1024,11 +1437,14 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 			Type:        current.Type,
 			Priority:    current.Priority,
 		}
+		needsUpdate := false
 		if item.Title != "" {
 			update.Title = item.Title
+			needsUpdate = true
 		}
 		if item.Description != "" {
 			update.Description = item.Description
+			needsUpdate = true
 		}
 		if item.Type != "" {
 			taskType, err := parseTaskType(item.Type)
@@ -1036,6 +1452,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 				return fmt.Errorf("bulk-update item %d: %w", i, err)
 			}
 			update.Type = taskType
+			needsUpdate = true
 		}
 		if item.Priority != "" {
 			priority, err := parsePriority(item.Priority)
@@ -1043,22 +1460,65 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 				return fmt.Errorf("bulk-update item %d: %w", i, err)
 			}
 			update.Priority = priority
+			needsUpdate = true
+		}
+		if needsUpdate {
+			body, err := json.Marshal(struct {
+				TaskID string `json:"task_id"`
+				daemonclient.TaskUpdateParams
+			}{
+				TaskID:           taskID,
+				TaskUpdateParams: update,
+			})
+			if err != nil {
+				return fmt.Errorf("marshal bulk-update item %d: %w", i, err)
+			}
+			ops = append(ops, protocol.ApplyOperationBody{
+				Command: daemonclient.CommandTaskUpdate,
+				Body:    body,
+			})
 		}
 
-		body, err := json.Marshal(struct {
-			TaskID string `json:"task_id"`
-			daemonclient.TaskUpdateParams
-		}{
-			TaskID:           taskID,
-			TaskUpdateParams: update,
-		})
-		if err != nil {
-			return fmt.Errorf("marshal bulk-update item %d: %w", i, err)
+		for _, retarget := range item.DependencyRetargets {
+			depType := strings.TrimSpace(retarget.Type)
+			if depType == "" {
+				depType = string(domain.DependencyBlocks)
+			}
+			fromID := strings.TrimSpace(retarget.FromID)
+			toID := strings.TrimSpace(retarget.ToID)
+			if fromID == "" || toID == "" {
+				return fmt.Errorf("bulk-update item %d: dependency_retargets requires from_id and to_id", i)
+			}
+			removeBody, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+				TaskID:      taskID,
+				DependsOnID: fromID,
+				Type:        depType,
+				Confirm:     true,
+			})
+			if err != nil {
+				return fmt.Errorf("marshal bulk-update item %d dependency retarget remove: %w", i, err)
+			}
+			ops = append(ops, protocol.ApplyOperationBody{
+				Command: daemonclient.CommandTaskDependencyRemove,
+				Body:    removeBody,
+			})
+
+			addBody, err := json.Marshal(daemonclient.TaskDependencyParams{
+				TaskID:      taskID,
+				DependsOnID: toID,
+				Type:        depType,
+			})
+			if err != nil {
+				return fmt.Errorf("marshal bulk-update item %d dependency retarget add: %w", i, err)
+			}
+			ops = append(ops, protocol.ApplyOperationBody{
+				Command: daemonclient.CommandTaskDependencyAdd,
+				Body:    addBody,
+			})
 		}
-		ops = append(ops, protocol.ApplyOperationBody{
-			Command: daemonclient.CommandTaskUpdate,
-			Body:    body,
-		})
+	}
+	if len(ops) == 0 {
+		return fmt.Errorf("bulk-update input produced no operations")
 	}
 
 	return executeBulkApply(deps, opts.DryRun, ops)
@@ -1071,6 +1531,226 @@ func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 		}
 	}
 	return domain.Task{}, false
+}
+
+func filterTasksByIDs(tasks []domain.Task, ids []string) []domain.Task {
+	if len(ids) == 0 {
+		return tasks
+	}
+	idSet := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		idSet[id] = struct{}{}
+	}
+	filtered := make([]domain.Task, 0, len(ids))
+	for _, task := range tasks {
+		if _, ok := idSet[task.ID]; ok {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+func dedupeOrderedIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	deduped := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		deduped = append(deduped, id)
+	}
+	return deduped
+}
+
+func buildTaskDependencyEdgeSet(tasks []domain.Task) map[string]map[string]struct{} {
+	edges := make(map[string]map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		if _, ok := edges[task.ID]; !ok {
+			edges[task.ID] = map[string]struct{}{}
+		}
+		for _, dep := range task.Dependencies {
+			edges[task.ID][dependencyEdgeKey(dep.ID, dep.Type)] = struct{}{}
+		}
+		if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
+			edges[task.ID][dependencyEdgeKey(strings.TrimSpace(*task.ParentID), domain.DependencyParentChild)] = struct{}{}
+		}
+	}
+	return edges
+}
+
+func dependencyEdgeKey(depID string, depType domain.DependencyType) string {
+	return strings.TrimSpace(depID) + "|" + string(depType)
+}
+
+func dependencyTypeOrDefault(raw string) (domain.DependencyType, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return domain.DependencyBlocks, nil
+	}
+	switch domain.DependencyType(trimmed) {
+	case domain.DependencyBlocks, domain.DependencyRelatedTo, domain.DependencyParentChild, domain.DependencyDiscovered:
+		return domain.DependencyType(trimmed), nil
+	default:
+		return "", fmt.Errorf("invalid dependency type: %s", raw)
+	}
+}
+
+func planDependencyMutation(
+	index int,
+	mutation dependencyBulkMutation,
+	taskIDs map[string]struct{},
+	taskEdges map[string]map[string]struct{},
+) (dependencyBulkOutcome, []protocol.ApplyOperationBody, error) {
+	issueID := strings.TrimSpace(mutation.IssueID)
+	if issueID == "" {
+		issueID = strings.TrimSpace(mutation.ID)
+	}
+	action := strings.TrimSpace(strings.ToLower(mutation.Action))
+	depType, err := dependencyTypeOrDefault(mutation.Type)
+	if err != nil {
+		return dependencyBulkOutcome{}, nil, err
+	}
+	outcome := dependencyBulkOutcome{
+		Index:   index,
+		Action:  action,
+		IssueID: issueID,
+		Type:    string(depType),
+	}
+	if issueID == "" {
+		return outcome, nil, fmt.Errorf("missing issue_id")
+	}
+	if _, ok := taskIDs[issueID]; !ok {
+		return outcome, nil, fmt.Errorf("issue not found: %s", issueID)
+	}
+	edges := taskEdges[issueID]
+	if edges == nil {
+		edges = map[string]struct{}{}
+	}
+
+	switch action {
+	case "add":
+		depID := strings.TrimSpace(mutation.DependsOnID)
+		outcome.Dependency = depID
+		if depID == "" {
+			return outcome, nil, fmt.Errorf("missing depends_on_id")
+		}
+		if _, ok := taskIDs[depID]; !ok {
+			return outcome, nil, fmt.Errorf("depends_on issue not found: %s", depID)
+		}
+		key := dependencyEdgeKey(depID, depType)
+		if _, exists := edges[key]; exists {
+			outcome.Status = "no-op"
+			outcome.Reason = "edge already exists"
+			return outcome, nil, nil
+		}
+		edges[key] = struct{}{}
+		outcome.Status = "planned"
+		body, err := json.Marshal(daemonclient.TaskDependencyParams{
+			TaskID:      issueID,
+			DependsOnID: depID,
+			Type:        string(depType),
+		})
+		if err != nil {
+			return outcome, nil, fmt.Errorf("marshal add payload: %w", err)
+		}
+		return outcome, []protocol.ApplyOperationBody{{
+			Command: daemonclient.CommandTaskDependencyAdd,
+			Body:    body,
+		}}, nil
+	case "remove":
+		depID := strings.TrimSpace(mutation.DependsOnID)
+		outcome.Dependency = depID
+		if depID == "" {
+			return outcome, nil, fmt.Errorf("missing depends_on_id")
+		}
+		key := dependencyEdgeKey(depID, depType)
+		if _, exists := edges[key]; !exists {
+			outcome.Status = "no-op"
+			outcome.Reason = "edge already absent"
+			return outcome, nil, nil
+		}
+		delete(edges, key)
+		outcome.Status = "planned"
+		body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+			TaskID:      issueID,
+			DependsOnID: depID,
+			Type:        string(depType),
+			Confirm:     true,
+		})
+		if err != nil {
+			return outcome, nil, fmt.Errorf("marshal remove payload: %w", err)
+		}
+		return outcome, []protocol.ApplyOperationBody{{
+			Command: daemonclient.CommandTaskDependencyRemove,
+			Body:    body,
+		}}, nil
+	case "retarget":
+		fromID := strings.TrimSpace(mutation.FromID)
+		toID := strings.TrimSpace(mutation.ToID)
+		outcome.FromID = fromID
+		outcome.ToID = toID
+		if fromID == "" || toID == "" {
+			return outcome, nil, fmt.Errorf("retarget requires from_id and to_id")
+		}
+		if _, ok := taskIDs[toID]; !ok {
+			return outcome, nil, fmt.Errorf("to issue not found: %s", toID)
+		}
+		removeKey := dependencyEdgeKey(fromID, depType)
+		addKey := dependencyEdgeKey(toID, depType)
+		needsRemove := false
+		needsAdd := false
+		if _, exists := edges[removeKey]; exists {
+			needsRemove = true
+		}
+		if _, exists := edges[addKey]; !exists {
+			needsAdd = true
+		}
+		if !needsRemove && !needsAdd {
+			outcome.Status = "no-op"
+			outcome.Reason = "retarget already applied"
+			return outcome, nil, nil
+		}
+		plannedOps := make([]protocol.ApplyOperationBody, 0, 2)
+		if needsRemove {
+			delete(edges, removeKey)
+			body, err := json.Marshal(daemonclient.TaskDependencyRemoveParams{
+				TaskID:      issueID,
+				DependsOnID: fromID,
+				Type:        string(depType),
+				Confirm:     true,
+			})
+			if err != nil {
+				return outcome, nil, fmt.Errorf("marshal retarget remove payload: %w", err)
+			}
+			plannedOps = append(plannedOps, protocol.ApplyOperationBody{
+				Command: daemonclient.CommandTaskDependencyRemove,
+				Body:    body,
+			})
+		}
+		if needsAdd {
+			edges[addKey] = struct{}{}
+			body, err := json.Marshal(daemonclient.TaskDependencyParams{
+				TaskID:      issueID,
+				DependsOnID: toID,
+				Type:        string(depType),
+			})
+			if err != nil {
+				return outcome, nil, fmt.Errorf("marshal retarget add payload: %w", err)
+			}
+			plannedOps = append(plannedOps, protocol.ApplyOperationBody{
+				Command: daemonclient.CommandTaskDependencyAdd,
+				Body:    body,
+			})
+		}
+		outcome.Status = "planned"
+		return outcome, plannedOps, nil
+	default:
+		return outcome, nil, fmt.Errorf("unsupported action: %s", action)
+	}
 }
 
 func formatDependencySummary(deps []domain.Dependency) string {
@@ -1378,17 +2058,19 @@ Commands:
   attach <issue-id>     Alias for 'az session attach <issue-id>'
   kill <issue-id>       Alias for 'az session kill <issue-id>'
   status [issue-id]     Alias for 'az session status [issue-id]'
-  issue list [--json] [--deps] [--limit N]  List issues from daemon-backed store
-  issue get <id> [--json] [--deps]  Show a single issue from daemon-backed store
-  issue check <id> [--json] [--deps]  Alias for issue get
-  issue doctor <id>  Run integrity checks for one issue
+  issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
+  issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
+  issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
+  issue check [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
+  issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
   issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
-  issue update <id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
-  issue status <id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status
-  issue close <id> --impl <implementation>      Close an issue (sets status=closed)
-  issue delete <id> --impl <implementation> --confirm  Permanently delete an issue
-  issue dep add <issue-id> <depends-on-id> --impl <implementation> [--type ...]  Add a dependency edge
-  issue dep remove <issue-id> <depends-on-id> --impl <implementation> [--type ...] [--confirm]  Remove a dependency edge
+  issue update --impl <implementation> --id <id> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
+  issue status --impl <implementation> --id <id> --status <open|in_progress|blocked|closed>  Set issue status
+  issue close --impl <implementation> --id <id>      Close an issue (sets status=closed)
+  issue delete --impl <implementation> --id <id> --confirm  Permanently delete an issue
+  issue dep add --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
+  issue dep remove --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
+  issue dep bulk apply --impl <implementation> --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
   issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
   export               Export a snapshot (use --format json [--out <path>])
@@ -1403,18 +2085,21 @@ Examples:
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
   az issue list
+  az issue list --id az-1 --id az-2
   az issue list --deps
-  az issue get az-123 --json
-  az issue get az-123 --deps
-  az issue check az-123 --deps
-  az issue doctor az-123
+  az issue get --id az-123 --json
+  az issue get-many --id az-123 --id az-456 --json
+  az issue get --id az-123 --deps
+  az issue check --id az-123 --deps
+  az issue doctor --id az-123
   az issue create "New task" --impl go-bubbletea --type task --priority P2
-  az issue update az-123 --impl go-bubbletea --title "Renamed task" --priority P1
-  az issue status az-123 in_progress --impl go-bubbletea
-  az issue close az-123 --impl go-bubbletea
-  az issue delete az-123 --impl go-bubbletea --confirm
-  az issue dep add az-456 az-123 --impl go-bubbletea --type blocks
-  az issue dep remove az-456 az-123 --impl go-bubbletea --type blocks --confirm
+  az issue update --impl go-bubbletea --id az-123 --title "Renamed task" --priority P1
+  az issue status --impl go-bubbletea --id az-123 --status in_progress
+  az issue close --impl go-bubbletea --id az-123
+  az issue delete --impl go-bubbletea --id az-123 --confirm
+  az issue dep add --impl go-bubbletea --issue-id az-456 --depends-on-id az-123 --type blocks
+  az issue dep remove --impl go-bubbletea --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
+  az issue dep bulk apply --impl go-bubbletea --input ./dep-bulk.json --dry-run --json
   az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
   az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
   az export --format json
@@ -1423,6 +2108,7 @@ Examples:
 
 For more information, see: https://github.com/riordanpawley/azedarach
 `
+	fmt.Println("Argument ordering: place flags/options before positional arguments for deterministic parsing.")
 	fmt.Print(usage)
 }
 

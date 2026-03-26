@@ -16,6 +16,8 @@ type recordingApplyService struct {
 	createErr        error
 	updateErr        error
 	updateDetailsErr error
+	addDepErr        error
+	removeDepErr     error
 	deleteErr        error
 	archiveErr       error
 }
@@ -40,6 +42,16 @@ func (r *recordingApplyService) Update(_ context.Context, id string, status doma
 func (r *recordingApplyService) UpdateDetails(_ context.Context, id string, params issues.UpdateTaskParams) error {
 	r.calls = append(r.calls, fmt.Sprintf("update:%s:%s:%s:%s", id, params.Title, params.Priority.String(), params.Type))
 	return r.updateDetailsErr
+}
+
+func (r *recordingApplyService) AddDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+	r.calls = append(r.calls, fmt.Sprintf("dep-add:%s:%s:%s", issueID, dependsOnID, dependencyType))
+	return r.addDepErr
+}
+
+func (r *recordingApplyService) RemoveDependency(_ context.Context, issueID, dependsOnID, dependencyType string) error {
+	r.calls = append(r.calls, fmt.Sprintf("dep-remove:%s:%s:%s", issueID, dependsOnID, dependencyType))
+	return r.removeDepErr
 }
 
 func (r *recordingApplyService) Delete(_ context.Context, id string) error {
