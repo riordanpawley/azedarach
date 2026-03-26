@@ -46,11 +46,12 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues   *issues.Client
-	tmux     *tmux.Client
-	git      *git.Client
-	worktree *git.WorktreeManager
-	session  *daemonhandlers.SessionHandler
+	issues       *issues.Client
+	tmux         *tmux.Client
+	git          *git.Client
+	worktree     *git.WorktreeManager
+	session      *daemonhandlers.SessionHandler
+	sessionStore *daemonstate.Store
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -91,15 +92,16 @@ func New(cfg Config) *Daemon {
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
 
 	d := &Daemon{
-		cfg:      cfg,
-		lock:     lifecycle.NewLockManager(cfg.LockPath),
-		hub:      publish.NewHub(512, 64, cfg.Logger),
-		issues:   issues.NewClient(cfg.RepoDir, cfg.Logger),
-		tmux:     tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:      gitClient,
-		worktree: git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
-		session:  sessionHandler,
-		revision: map[string]uint64{},
+		cfg:          cfg,
+		lock:         lifecycle.NewLockManager(cfg.LockPath),
+		hub:          publish.NewHub(512, 64, cfg.Logger),
+		issues:       issues.NewClient(cfg.RepoDir, cfg.Logger),
+		tmux:         tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:          gitClient,
+		worktree:     git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
+		session:      sessionHandler,
+		sessionStore: sessionStore,
+		revision:     map[string]uint64{},
 	}
 	d.router = daemonhandlers.NewDispatcher(
 		sessionHandler,
@@ -178,6 +180,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleSessionStop(ctx, req)
 	case "session.status":
 		return d.handleSessionStatus(ctx, req)
+	case "session.recover":
+		return d.handleSessionRecover(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 	}

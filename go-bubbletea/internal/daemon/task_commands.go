@@ -50,16 +50,21 @@ type taskSnapshotExportSession struct {
 
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
+	projectID := d.projectID(req.Meta)
+	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, ""); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("session reconciliation during task list failed", "project_id", projectID, "error", err)
+	}
 	tasks, err := d.issues.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
 	body, err := json.Marshal(tasks)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp.Body = body
-	resp.Revision = d.currentRevision(d.projectID(req.Meta))
+	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
 }
 
