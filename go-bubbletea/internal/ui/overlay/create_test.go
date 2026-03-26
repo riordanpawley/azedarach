@@ -472,14 +472,31 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	overlay.editorFlow = func(_ string) (string, error) {
 		return strings.Join([]string{
 			"# Edited Task",
-			"---------------------------------------------------",
+			"───────────────────────────────────────────────────",
 			"",
-			"Type: feature",
-			"Priority: P0",
+			"Type:     feature        (task | bug | feature | epic | chore)",
+			"Priority: P0          (P0 = highest, P4 = lowest)",
+			"Status:   blocked        (open | in_progress | blocked | closed)",
+			"Assignee: jane",
+			"Labels:   ui, editor",
+			"Impl:     ts-opentui, go-bubbletea",
+			"Estimate: 13",
 			"",
 			"## Description",
 			"",
-			"Edited from helix",
+			"Edited from editor",
+			"",
+			"## Design",
+			"",
+			"Update parser",
+			"",
+			"## Notes",
+			"",
+			"Be careful with defaults",
+			"",
+			"## Acceptance Criteria",
+			"",
+			"All fields parse and persist",
 			"",
 		}, "\n"), nil
 	}
@@ -496,9 +513,66 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	created, ok := msgs[0].(TaskCreatedMsg)
 	require.True(t, ok)
 	assert.Equal(t, "Edited Task", created.Title)
-	assert.Equal(t, "Edited from helix", created.Description)
+	assert.Equal(t, "Edited from editor", created.Description)
 	assert.Equal(t, domain.TypeFeature, created.Type)
 	assert.Equal(t, domain.P0, created.Priority)
+	assert.Equal(t, domain.StatusBlocked, created.Status)
+	assert.Equal(t, "jane", created.Assignee)
+	assert.Equal(t, []string{"ui", "editor"}, created.Labels)
+	assert.Equal(t, []string{"ts-opentui", "go-bubbletea"}, created.Implementations)
+	assert.Equal(t, "Update parser", created.Design)
+	assert.Equal(t, "Be careful with defaults", created.Notes)
+	assert.Equal(t, "All fields parse and persist", created.Acceptance)
+	require.NotNil(t, created.Estimate)
+	assert.Equal(t, 13, *created.Estimate)
+}
+
+func TestParseTaskTemplateFullMetadata(t *testing.T) {
+	markdown := strings.Join([]string{
+		"# Metadata Task",
+		"───────────────────────────────────────────────────",
+		"",
+		"Type:     chore        (task | bug | feature | epic | chore)",
+		"Priority: P4          (P0 = highest, P4 = lowest)",
+		"Status:   in_progress        (open | in_progress | blocked | closed)",
+		"Assignee: sam",
+		"Labels:   alpha, beta",
+		"Impl:     ts-opentui, go-bubbletea",
+		"Estimate: 5",
+		"",
+		"## Description",
+		"",
+		"Ship this",
+		"",
+		"## Design",
+		"",
+		"Design section",
+		"",
+		"## Notes",
+		"",
+		"Notes section",
+		"",
+		"## Acceptance Criteria",
+		"",
+		"Acceptance section",
+		"",
+	}, "\n")
+
+	msg, err := parseTaskTemplate(markdown, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "Metadata Task", msg.Title)
+	assert.Equal(t, domain.TypeChore, msg.Type)
+	assert.Equal(t, domain.P4, msg.Priority)
+	assert.Equal(t, domain.StatusInProgress, msg.Status)
+	assert.Equal(t, "sam", msg.Assignee)
+	assert.Equal(t, []string{"alpha", "beta"}, msg.Labels)
+	assert.Equal(t, []string{"ts-opentui", "go-bubbletea"}, msg.Implementations)
+	assert.Equal(t, "Ship this", msg.Description)
+	assert.Equal(t, "Design section", msg.Design)
+	assert.Equal(t, "Notes section", msg.Notes)
+	assert.Equal(t, "Acceptance section", msg.Acceptance)
+	require.NotNil(t, msg.Estimate)
+	assert.Equal(t, 5, *msg.Estimate)
 }
 
 func TestCreateTaskOverlayCtrlESetsError(t *testing.T) {

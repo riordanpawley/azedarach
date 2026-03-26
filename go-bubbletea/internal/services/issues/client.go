@@ -307,11 +307,19 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 
 // CreateTaskParams contains parameters for creating a new issue.
 type CreateTaskParams struct {
-	Title       string
-	Description string
-	Type        domain.TaskType
-	Priority    domain.Priority
-	ParentID    *string
+	Title           string
+	Description     string
+	Type            domain.TaskType
+	Priority        domain.Priority
+	Status          domain.Status
+	Assignee        string
+	Labels          []string
+	Implementations []string
+	Design          string
+	Notes           string
+	Acceptance      string
+	Estimate        *int
+	ParentID        *string
 }
 
 // Create inserts a new issue and returns its generated id.
@@ -364,6 +372,26 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 	if issueType == "" {
 		issueType = domain.TypeTask
 	}
+	status := params.Status
+	if status == "" {
+		status = domain.StatusOpen
+	}
+	labelsJSON, err := marshalOptionalStringSlice(params.Labels)
+	if err != nil {
+		return "", c.wrapError("create", issueID, err)
+	}
+	implementationsJSON, err := marshalOptionalStringSlice(params.Implementations)
+	if err != nil {
+		return "", c.wrapError("create", issueID, err)
+	}
+	var closedAt any
+	if status == domain.StatusDone {
+		closedAt = now
+	}
+	var estimate any
+	if params.Estimate != nil {
+		estimate = *params.Estimate
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO issues (
@@ -385,8 +413,8 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 			estimate,
 			deleted_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
-	`, issueID, params.Title, nullableString(params.Description), string(domain.StatusOpen), int(params.Priority), string(issueType), now, now); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`, issueID, params.Title, nullableString(params.Description), string(status), int(params.Priority), string(issueType), now, now, closedAt, nullableString(params.Assignee), labelsJSON, implementationsJSON, nullableString(params.Design), nullableString(params.Notes), nullableString(params.Acceptance), estimate); err != nil {
 		return "", c.wrapError("create", issueID, err)
 	}
 
@@ -888,6 +916,27 @@ func nullableString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func marshalOptionalStringSlice(values []string) (any, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, err
+	}
+	return string(payload), nil
 }
 
 func (c *Client) getMetaValue(ctx context.Context, tx *sql.Tx, key string) (string, error) {
