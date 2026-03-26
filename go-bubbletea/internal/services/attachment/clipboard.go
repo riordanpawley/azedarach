@@ -174,16 +174,30 @@ ObjC.import("AppKit");
 ObjC.import("Foundation");
 
 function extForType(t) {
-	switch (t) {
-		case "public.png": return "png";
-		case "public.tiff": return "tiff";
-		case "public.jpeg": return "jpg";
-		case "public.heic": return "heic";
-		case "public.heif": return "heif";
-		case "com.compuserve.gif": return "gif";
-		case "org.webmproject.webp": return "webp";
-		default: return "img";
-	}
+	const lower = String(t || "").toLowerCase();
+	if (lower.includes("png")) return "png";
+	if (lower.includes("tiff")) return "tiff";
+	if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
+	if (lower.includes("heic")) return "heic";
+	if (lower.includes("heif")) return "heif";
+	if (lower.includes("gif")) return "gif";
+	if (lower.includes("webp")) return "webp";
+	return "img";
+}
+
+function isImageLikeType(t) {
+	const lower = String(t || "").toLowerCase();
+	return (
+		lower.includes("image") ||
+		lower.includes("png") ||
+		lower.includes("tiff") ||
+		lower.includes("jpeg") ||
+		lower.includes("jpg") ||
+		lower.includes("heic") ||
+		lower.includes("heif") ||
+		lower.includes("gif") ||
+		lower.includes("webp")
+	);
 }
 
 (function () {
@@ -197,7 +211,7 @@ function extForType(t) {
 		}
 	}
 
-	const candidates = [
+	const preferred = [
 		"public.png",
 		"public.tiff",
 		"public.jpeg",
@@ -206,6 +220,13 @@ function extForType(t) {
 		"com.compuserve.gif",
 		"org.webmproject.webp"
 	];
+	const candidates = preferred.slice();
+	for (let i = 0; i < types.length; i++) {
+		const t = types[i];
+		if (isImageLikeType(t) && candidates.indexOf(t) === -1) {
+			candidates.push(t);
+		}
+	}
 
 	const tmpDir = ObjC.unwrap($.NSTemporaryDirectory());
 	const pid = ObjC.unwrap($.NSProcessInfo.processInfo.processIdentifier);

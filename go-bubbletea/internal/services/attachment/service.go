@@ -71,9 +71,11 @@ func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string)
 // AttachFromClipboard reads an image from the clipboard and attaches it
 func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Attachment, error) {
 	s.logger.Info("attaching image from clipboard", "issue_id", issueID)
+	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 
 	// Read image from clipboard
-	data, err := ReadImageFromClipboard(ctx)
+	data, err := ReadImageFromClipboard(readCtx)
 	if err != nil {
 		s.logger.Warn("clipboard image read failed", "issue_id", issueID, "error", err)
 		return nil, fmt.Errorf("failed to read clipboard: %w", err)
@@ -90,8 +92,14 @@ func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Att
 
 	// Generate filename with timestamp
 	filename := fmt.Sprintf("clipboard-%s%s", time.Now().Format("20060102-150405"), ext)
-
-	return s.createAttachment(ctx, issueID, filename, data, int64(len(data)))
+	s.logger.Info("clipboard image read succeeded", "issue_id", issueID, "bytes", len(data), "mime_type", mimeType, "filename", filename)
+	attachment, err := s.createAttachment(ctx, issueID, filename, data, int64(len(data)))
+	if err != nil {
+		s.logger.Warn("clipboard attachment write failed", "issue_id", issueID, "filename", filename, "error", err)
+		return nil, err
+	}
+	s.logger.Info("clipboard image attached", "issue_id", issueID, "attachment_id", attachment.ID, "path", attachment.Path)
+	return attachment, nil
 }
 
 // List returns all attachments for a given issue
