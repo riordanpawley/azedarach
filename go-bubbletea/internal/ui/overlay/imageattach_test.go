@@ -11,6 +11,34 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
 
+type mockClipboardAttachService struct {
+	attachments []attachment.Attachment
+	attachCalls int
+}
+
+func (m *mockClipboardAttachService) List(context.Context, string) ([]attachment.Attachment, error) {
+	return m.attachments, nil
+}
+
+func (m *mockClipboardAttachService) AttachFromClipboard(context.Context, string) (*attachment.Attachment, error) {
+	m.attachCalls++
+	attached := &attachment.Attachment{
+		ID:       "from-clipboard",
+		IssueID:  "az-123",
+		Filename: "clipboard.png",
+	}
+	m.attachments = append(m.attachments, *attached)
+	return attached, nil
+}
+
+func (m *mockClipboardAttachService) Attach(context.Context, string, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (m *mockClipboardAttachService) Delete(context.Context, string, string) error {
+	return nil
+}
+
 func TestNewImageAttachOverlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -228,6 +256,26 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	closeMsg := cmd()
 	if _, ok := closeMsg.(CloseOverlayMsg); !ok {
 		t.Errorf("expected CloseOverlayMsg from preview q, got %T", closeMsg)
+	}
+}
+
+func TestImageAttachOverlay_PasteKeysTriggerClipboardAttach(t *testing.T) {
+	service := &mockClipboardAttachService{}
+	overlay := NewImageAttachOverlay("az-123", service)
+
+	for _, key := range []rune{'v', 'y'} {
+		_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		if cmd == nil {
+			t.Fatalf("expected paste command for key %q", string(key))
+		}
+		msg := cmd()
+		if _, ok := msg.(attachmentAddedMsg); !ok {
+			t.Fatalf("expected attachmentAddedMsg for key %q, got %T", string(key), msg)
+		}
+	}
+
+	if service.attachCalls != 2 {
+		t.Fatalf("attach calls = %d, want 2", service.attachCalls)
 	}
 }
 

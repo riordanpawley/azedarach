@@ -750,6 +750,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Image attached: %s", msg.Attachment.Filename),
 				Expires: time.Now().Add(3 * time.Second),
 			})
+		} else if msg.Action == "error" && msg.Error != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Image attachment failed: %v", msg.Error),
+				Expires: time.Now().Add(5 * time.Second),
+			})
 		}
 		return m, nil
 

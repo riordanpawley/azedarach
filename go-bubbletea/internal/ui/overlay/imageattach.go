@@ -46,6 +46,7 @@ type ImageAttachmentService interface {
 type AttachmentActionMsg struct {
 	Action     string // "attached", "deleted"
 	Attachment *attachment.Attachment
+	Error      error
 }
 
 // OpenImagePreviewMsg is sent to open the image preview overlay
@@ -175,7 +176,12 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errorMsg:
 		i.error = msg.err.Error()
-		return i, nil
+		return i, func() tea.Msg {
+			return AttachmentActionMsg{
+				Action: "error",
+				Error:  msg.err,
+			}
+		}
 	}
 
 	return i, nil
@@ -257,7 +263,7 @@ func (i *ImageAttachOverlay) renderList() string {
 
 	// Help text
 	hints := []keybinds.Binding{
-		{Key: "v/y", Description: "Paste from clipboard"},
+		{Key: "v/y/Ctrl+V", Description: "Paste from clipboard"},
 		{Key: "f", Description: "Attach from file"},
 	}
 	if len(i.files) > 0 {
