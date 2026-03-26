@@ -63,12 +63,12 @@ advisory_app_scan() {
   local pattern="$2"
   shift 2
 
-  if rg -n -F \
+  if rg -n -P \
     --glob 'go-bubbletea/internal/app/**' \
     --glob '!**/*_test.go' \
     "$pattern" "$@" >/dev/null; then
     warn "$description"
-    rg -n -F \
+    rg -n -P \
       --glob 'go-bubbletea/internal/app/**' \
       --glob '!**/*_test.go' \
       "$pattern" "$@" >&2 || true
@@ -105,17 +105,23 @@ forbidden_scan \
   go-bubbletea/internal/ui
 
 advisory_app_scan \
-  'advisory: internal/app still imports daemon-owned mutation services directly' \
-  'github.com/riordanpawley/azedarach/internal/services/'
+  'advisory: internal/app/model.go still starts a local session monitor' \
+  'sessionMonitor\.Start\(' \
+  go-bubbletea/internal/app/model.go
 
 advisory_app_scan \
-  'advisory: internal/app still uses direct session map writes/deletes (authority-risk marker)' \
-  'm.sessions[' \
-  go-bubbletea/internal/app
+  'advisory: internal/app/model.go still writes session projection entries directly' \
+  '^\s*m\.sessions\[[^]]+\]\s*=' \
+  go-bubbletea/internal/app/model.go
+
+advisory_app_scan \
+  'advisory: internal/app/model.go still deletes session projection entries directly' \
+  'delete\(m\.sessions,' \
+  go-bubbletea/internal/app/model.go
 
 if (( failures > 0 )); then
   printf 'Drift sentinel failed: %d check(s) failed.\n' "$failures" >&2
   exit 1
 fi
 
-printf 'Drift sentinel passed: %d checks verified.\n' 7
+printf 'Drift sentinel passed: %d checks verified.\n' 11
