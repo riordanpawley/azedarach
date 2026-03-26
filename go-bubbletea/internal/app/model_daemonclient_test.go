@@ -1154,148 +1154,7 @@ func TestMergeSourceOverlaySelectsUpstreamSource(t *testing.T) {
 	}
 }
 
-func TestStartSessionPlusWorkUsesSelectedOriginBranch(t *testing.T) {
-	baseBranch := "develop"
-	parentID := "az-parent"
-	childID := "az-child"
-
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandSessionStart:
-				var body struct {
-					ProjectID  string `json:"project_id"`
-					SessionID  string `json:"session_id"`
-					BaseBranch string `json:"base_branch,omitempty"`
-				}
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal session start request: %v", err)
-				}
-				if body.SessionID != childID {
-					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
-				}
-				if body.BaseBranch != "az/"+parentID {
-					t.Fatalf("base branch = %q, want %q", body.BaseBranch, "az/"+parentID)
-				}
-				respBody, _ := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "started"})
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.config.Git.BaseBranch = baseBranch
-	m.tasks = []domain.Task{
-		{
-			ID:       childID,
-			Title:    "Child task",
-			Status:   domain.StatusInProgress,
-			Type:     domain.TypeTask,
-			ParentID: &parentID,
-		},
-		{
-			ID:     parentID,
-			Title:  "Parent task",
-			Status: domain.StatusDone,
-			Type:   domain.TypeTask,
-		},
-	}
-	m.sessions[parentID] = &domain.Session{
-		IssueID:  parentID,
-		State:    domain.SessionBusy,
-		Worktree: "/tmp/parent",
-	}
-	m.nav.SelectTask(childID, 0)
-
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
-	if cmd != nil {
-		t.Fatalf("expected overlay push command to be nil, got %T", cmd)
-	}
-	updatedModel, ok := updated.(Model)
-	if !ok {
-		t.Fatalf("updated model type = %T, want Model", updated)
-	}
-	current := updatedModel.overlayStack.Current()
-	originOverlay, ok := current.(*overlay.MergeSelectOverlay)
-	if !ok {
-		t.Fatalf("overlay type = %T, want *overlay.MergeSelectOverlay", current)
-	}
-	if got := originOverlay.Title(); got != "Select Upstream Source" {
-		t.Fatalf("title = %q, want Select Upstream Source", got)
-	}
-	view := originOverlay.View()
-	if !strings.Contains(view, baseBranch) {
-		t.Fatalf("view = %q, want base branch %q", view, baseBranch)
-	}
-	if !strings.Contains(view, parentID) {
-		t.Fatalf("view = %q, want upstream issue %q", view, parentID)
-	}
-
-	moved, _ := originOverlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	originOverlay = moved.(*overlay.MergeSelectOverlay)
-
-	_, selectCmd := originOverlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if selectCmd == nil {
-		t.Fatal("expected selection command")
-	}
-	selectMsg := selectCmd()
-	selection, ok := selectMsg.(overlay.SelectionMsg)
-	if !ok {
-		t.Fatalf("selection type = %T, want SelectionMsg", selectMsg)
-	}
-	if selection.Key != "session_origin" {
-		t.Fatalf("selection key = %q, want session_origin", selection.Key)
-	}
-
-	nextModel, startCmd := updatedModel.Update(selection)
-	if startCmd == nil {
-		t.Fatal("expected session start command")
-	}
-	nextModelValue, ok := nextModel.(Model)
-	if !ok {
-		t.Fatalf("next model type = %T, want Model", nextModel)
-	}
-	if !nextModelValue.overlayStack.IsEmpty() {
-		t.Fatal("expected origin overlay to close after selection")
-	}
-
-	startMsg := startCmd()
-	started, ok := startMsg.(sessionStartedMsg)
-	if !ok {
-		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
-	}
-	if started.issueID != childID {
-		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
-	}
-
-	finalModel, finalCmd := nextModelValue.Update(startMsg)
-	if finalCmd != nil {
-		t.Fatalf("final update command = %T, want nil", finalCmd)
-	}
-	finalModelValue, ok := finalModel.(Model)
-	if !ok {
-		t.Fatalf("final model type = %T, want Model", finalModel)
-	}
-	if _, ok := finalModelValue.sessions[childID]; ok {
-		t.Fatalf("session projection unexpectedly populated from start command: %+v", finalModelValue.sessions[childID])
-	}
-	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
-		t.Fatalf("requests = %v", transport.requests)
-	}
-}
-
-func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
+func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 	baseBranch := "develop"
 	childID := "az-child"
 
@@ -1346,45 +1205,7 @@ func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
 	}
 	m.nav.SelectTask(childID, 0)
 
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
-	if cmd != nil {
-		t.Fatalf("expected overlay push command to be nil, got %T", cmd)
-	}
-	updatedModel, ok := updated.(Model)
-	if !ok {
-		t.Fatalf("updated model type = %T, want Model", updated)
-	}
-	if len(updatedModel.toasts) == 0 || !strings.Contains(updatedModel.toasts[len(updatedModel.toasts)-1].Message, "No eligible upstream sources") {
-		t.Fatalf("toasts = %+v, want no-upstream warning", updatedModel.toasts)
-	}
-
-	current := updatedModel.overlayStack.Current()
-	originOverlay, ok := current.(*overlay.MergeSelectOverlay)
-	if !ok {
-		t.Fatalf("overlay type = %T, want *overlay.MergeSelectOverlay", current)
-	}
-	view := originOverlay.View()
-	if !strings.Contains(view, baseBranch) {
-		t.Fatalf("view = %q, want base branch %q", view, baseBranch)
-	}
-	if strings.Contains(view, "az-parent") {
-		t.Fatalf("view = %q, did not expect upstream sources", view)
-	}
-
-	_, selectCmd := originOverlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if selectCmd == nil {
-		t.Fatal("expected selection command")
-	}
-	selectMsg := selectCmd()
-	selection, ok := selectMsg.(overlay.SelectionMsg)
-	if !ok {
-		t.Fatalf("selection type = %T, want SelectionMsg", selectMsg)
-	}
-	if selection.Key != "session_origin" {
-		t.Fatalf("selection key = %q, want session_origin", selection.Key)
-	}
-
-	nextModel, startCmd := updatedModel.Update(selection)
+	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
 	if startCmd == nil {
 		t.Fatal("expected session start command")
 	}
@@ -1395,18 +1216,6 @@ func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
 	}
 	if started.issueID != childID {
 		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
-	}
-
-	finalModel, finalCmd := nextModel.(Model).Update(startMsg)
-	if finalCmd != nil {
-		t.Fatalf("final update command = %T, want nil", finalCmd)
-	}
-	finalModelValue, ok := finalModel.(Model)
-	if !ok {
-		t.Fatalf("final model type = %T, want Model", finalModel)
-	}
-	if _, ok := finalModelValue.sessions[childID]; ok {
-		t.Fatalf("session projection unexpectedly populated from start command: %+v", finalModelValue.sessions[childID])
 	}
 	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
 		t.Fatalf("requests = %v", transport.requests)
@@ -1509,7 +1318,7 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 	}
 }
 
-func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *testing.T) {
+func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 	baseBranch := "develop"
 	parentA := "az-parent-a"
 	parentB := "az-parent-b"
@@ -1530,8 +1339,8 @@ func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *t
 				if body.SessionID != childID {
 					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
 				}
-				if body.BaseBranch != "az/"+parentB {
-					t.Fatalf("base branch = %q, want %q", body.BaseBranch, "az/"+parentB)
+				if body.BaseBranch != baseBranch {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
 				}
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
@@ -1594,50 +1403,7 @@ func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *t
 		t.Fatalf("candidates = %+v, want base branch plus two upstream sources", candidates)
 	}
 
-	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
-	if cmd != nil {
-		t.Fatalf("expected overlay push command to be nil, got %T", cmd)
-	}
-	updatedModel, ok := updated.(Model)
-	if !ok {
-		t.Fatalf("updated model type = %T, want Model", updated)
-	}
-	current := updatedModel.overlayStack.Current()
-	originOverlay, ok := current.(*overlay.MergeSelectOverlay)
-	if !ok {
-		t.Fatalf("overlay type = %T, want *overlay.MergeSelectOverlay", current)
-	}
-	view := originOverlay.View()
-	if !strings.Contains(view, baseBranch) || !strings.Contains(view, parentA) || !strings.Contains(view, parentB) {
-		t.Fatalf("view = %q, want base branch and both upstream sources", view)
-	}
-
-	moved, _ := originOverlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	originOverlay = moved.(*overlay.MergeSelectOverlay)
-	moved, _ = originOverlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	originOverlay = moved.(*overlay.MergeSelectOverlay)
-
-	_, selectCmd := originOverlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if selectCmd == nil {
-		t.Fatal("expected selection command")
-	}
-	selectMsg := selectCmd()
-	selection, ok := selectMsg.(overlay.SelectionMsg)
-	if !ok {
-		t.Fatalf("selection type = %T, want SelectionMsg", selectMsg)
-	}
-	if selection.Key != "session_origin" {
-		t.Fatalf("selection key = %q, want session_origin", selection.Key)
-	}
-	source, ok := selection.Value.(overlay.MergeTargetSelectedMsg)
-	if !ok {
-		t.Fatalf("selection value type = %T, want MergeTargetSelectedMsg", selection.Value)
-	}
-	if source.SourceID != parentB || source.TargetID != childID {
-		t.Fatalf("selection = %+v, want source %q target %q", source, parentB, childID)
-	}
-
-	nextModel, startCmd := updatedModel.Update(selection)
+	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
 	if startCmd == nil {
 		t.Fatal("expected session start command")
 	}
@@ -1648,18 +1414,6 @@ func TestStartSessionPlusWorkRequiresExplicitSelectionWithMultipleUpstreams(t *t
 	}
 	if started.issueID != childID {
 		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
-	}
-
-	finalModel, finalCmd := nextModel.(Model).Update(startMsg)
-	if finalCmd != nil {
-		t.Fatalf("final update command = %T, want nil", finalCmd)
-	}
-	finalModelValue, ok := finalModel.(Model)
-	if !ok {
-		t.Fatalf("final model type = %T, want Model", finalModel)
-	}
-	if _, ok := finalModelValue.sessions[childID]; ok {
-		t.Fatalf("session projection unexpectedly populated from start command: %+v", finalModelValue.sessions[childID])
 	}
 	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
 		t.Fatalf("requests = %v", transport.requests)

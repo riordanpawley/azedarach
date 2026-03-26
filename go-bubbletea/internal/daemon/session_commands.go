@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 type sessionCommandBody struct {
@@ -165,13 +167,22 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		baseBranch = d.cfg.BaseBranch
 	}
 	worktree, err := d.worktree.CreateWithTitle(ctx, cmd.IssueID, tasks[0].Title, baseBranch)
+	reusedWorktree := false
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		worktree, err = d.worktree.Get(ctx, cmd.IssueID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", err)), nil
+		}
+		reusedWorktree = true
 	}
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	if err := d.tmux.SendKeys(ctx, cmd.SessionID, d.cfg.CLITool); err != nil {
+	launchCommand := d.buildSessionLaunchCommand(cmd.IssueID, cmd.SessionID)
+	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	_ = d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress)
@@ -186,10 +197,14 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
 	}
 
+	worktreeLine := fmt.Sprintf("Worktree created: %s", worktree.Path)
+	if reusedWorktree {
+		worktreeLine = fmt.Sprintf("Worktree reused: %s", worktree.Path)
+	}
 	output := strings.Join([]string{
 		fmt.Sprintf("Starting session for: %s - %s", tasks[0].ID, tasks[0].Title),
 		fmt.Sprintf("Creating worktree from branch: %s", baseBranch),
-		fmt.Sprintf("Worktree created: %s", worktree.Path),
+		worktreeLine,
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
 		"",
 		"✓ Session started successfully",
@@ -427,7 +442,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
 			continue
 		}
-		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.cfg.CLITool)
+		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID))
 		tmuxSet[issueKey] = struct{}{}
 		tmuxNameByIssueKey[issueKey] = canonicalSessionID
 		result.RecreatedTmuxSessions++
@@ -543,4 +558,62 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 
 	return tasks
+}
+
+func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string) string {
+	toolCommand := d.buildCLIToolCommand(issueID, sessionID)
+	commands := make([]string, 0, len(d.cfg.SessionInitCommands)+2)
+	for _, initCmd := range d.cfg.SessionInitCommands {
+		trimmed := strings.TrimSpace(initCmd)
+		if trimmed != "" {
+			commands = append(commands, trimmed)
+		}
+	}
+	commands = append(commands, toolCommand)
+
+	shell := strings.TrimSpace(d.cfg.SessionShell)
+	if shell == "" {
+		shell = "zsh"
+	}
+	inner := strings.Join(commands, "; ")
+	inner = inner + "; exec " + shell
+	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+func (d *Daemon) buildCLIToolCommand(issueID, sessionID string) string {
+	tool := strings.TrimSpace(d.cfg.CLITool)
+	if tool == "" {
+		tool = "claude"
+	}
+
+	parts := []string{
+		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
+		tool,
+	}
+
+	if strings.EqualFold(tool, "codex") {
+		startCommand := fmt.Sprintf("az notify user_prompt %s %s", issueID, sessionID)
+		stopCommand := fmt.Sprintf("az notify session_end %s %s", issueID, sessionID)
+		parts = append(parts,
+			buildCodexConfigOverrideArg("hooks.SessionStart", startCommand),
+			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
+		)
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func buildCodexConfigOverrideArg(key, command string) string {
+	tomlCommand := strings.ReplaceAll(strings.ReplaceAll(command, `\`, `\\`), `"`, `\"`)
+	override := fmt.Sprintf(`%s=[{hooks=[{command="%s"}]}]`, key, tomlCommand)
+	return fmt.Sprintf(`-c "%s"`, escapeForShellDoubleQuotes(override))
+}
+
+func escapeForShellDoubleQuotes(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	return strings.ReplaceAll(escaped, `"`, `\"`)
+}
+
+func singleQuoteForShell(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
