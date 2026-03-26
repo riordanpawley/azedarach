@@ -72,11 +72,11 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	if !strings.Contains(view, "Event Log") {
 		t.Fatalf("View() missing title: %s", view)
 	}
-	if !strings.Contains(view, "s: stream log") {
+	if !strings.Contains(view, "s: stream (Ctrl+C then q)") {
 		t.Fatalf("View() missing stream hint: %s", view)
 	}
-	if !strings.Contains(view, "L: logs") {
-		t.Fatalf("View() missing board hotkey hint: %s", view)
+	if strings.Contains(view, "Newest runtime events first") {
+		t.Fatalf("View() still contains legacy header: %s", view)
 	}
 
 	newerIdx := strings.Index(view, newer.Event)

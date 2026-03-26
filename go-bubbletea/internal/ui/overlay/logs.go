@@ -113,7 +113,6 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the event log overlay content.
 func (o *EventLogOverlay) View() string {
 	lines := o.renderContentLines()
-	lines = append(lines, "")
 	lines = append(lines, o.footerLine(len(lines)+1 > o.viewHeight))
 	o.maxScroll = max(0, len(lines)-o.viewHeight)
 	if o.scroll > o.maxScroll {
@@ -155,16 +154,13 @@ func (o *EventLogOverlay) renderContentLines() []string {
 	lines := make([]string, 0, len(o.events)*4+6)
 
 	lines = append(lines, o.styles.Title.Render("Event Log"))
-	lines = append(lines, o.styles.MenuHeader.Render("Newest runtime events first"))
 	if strings.TrimSpace(o.logFilePath) != "" {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("Log file: "+o.logFilePath))
 	}
-	lines = append(lines, o.styles.Footer.Render("s: stream log (Ctrl+C then q) • e: edit log file • "+EventLogHotkeyHint()))
 	lines = append(lines, "")
 
 	if len(o.events) == 0 {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("No runtime events yet."))
-		lines = append(lines, "")
 		return lines
 	}
 
@@ -184,7 +180,7 @@ func (o *EventLogOverlay) footerLine(scrollable bool) string {
 }
 
 func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope) []string {
-	lines := make([]string, 0, 4)
+	lines := make([]string, 0, 3)
 
 	headerParts := []string{
 		o.renderTimestamp(evt.EmittedAt),
@@ -217,8 +213,6 @@ func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope) []string {
 	for _, bodyLine := range o.renderBodyLines(evt.Body) {
 		lines = append(lines, o.styles.MenuItem.Render("  "+bodyLine))
 	}
-
-	lines = append(lines, "")
 	return lines
 }
 
