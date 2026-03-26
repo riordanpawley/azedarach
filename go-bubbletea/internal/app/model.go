@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,8 @@ const (
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+var diffStatInsertionsPattern = regexp.MustCompile(`(\d+)\s+insertion`)
+var diffStatDeletionsPattern = regexp.MustCompile(`(\d+)\s+deletion`)
 var executablePath = os.Executable
 var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
@@ -99,12 +102,15 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack        *overlay.Stack
-	viewMode            ViewMode
-	viewportStarts      [board.DefaultColumnCount]int
-	columnViewportStart int
-	drillDownParentID   string
-	drillDownParentName string
+	overlayStack         *overlay.Stack
+	viewMode             ViewMode
+	viewportStarts       [board.DefaultColumnCount]int
+	columnViewportStart  int
+	drillDownParentID    string
+	drillDownParentName  string
+	runtimeSignalsByTask map[string]board.RuntimeSignals
+	runtimeSignalsBusy   bool
+	lastRuntimeRefresh   time.Time
 
 	// Project
 	currentProject string
@@ -185,32 +191,33 @@ func New(cfg *config.Config) Model {
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
-		tasks:              []domain.Task{},
-		sessions:           make(map[string]*domain.Session),
-		nav:                navigation.NewService(),
-		editor:             editor.NewService(),
-		overlayStack:       overlay.NewStack(),
-		viewMode:           ViewModeBoard, // Start with board view
-		toasts:             []Toast{},
-		eventTicker:        eventticker.NewRing(eventTickerCapacity),
-		runtimeEvents:      []protocol.EventEnvelope{},
-		styles:             styles.New(),
-		config:             cfg,
-		loading:            true, // Start with loading state
-		spinner:            s,
-		daemonClient:       daemonClient,
-		sessionMonitor:     deps.SessionMonitor,
-		gitClient:          deps.GitDiffClient,
-		gitSyncService:     deps.GitSyncService,
-		projectRegistry:    deps.ProjectRegistry,
-		isOnline:           deps.IsOnline,
-		attachmentService:  deps.AttachmentService,
-		diagnosticsService: deps.DiagnosticsService,
-		logger:             logger,
-		usePlaceholder:     false, // Use real data from local issue store
-		tmuxAvailable:      deps.TmuxAvailable,
-		repoDir:            repoDir,
-		currentProject:     resolveInitialProjectName(deps.ProjectRegistry, repoDir),
+		tasks:                []domain.Task{},
+		sessions:             make(map[string]*domain.Session),
+		nav:                  navigation.NewService(),
+		editor:               editor.NewService(),
+		overlayStack:         overlay.NewStack(),
+		viewMode:             ViewModeBoard, // Start with board view
+		runtimeSignalsByTask: make(map[string]board.RuntimeSignals),
+		toasts:               []Toast{},
+		eventTicker:          eventticker.NewRing(eventTickerCapacity),
+		runtimeEvents:        []protocol.EventEnvelope{},
+		styles:               styles.New(),
+		config:               cfg,
+		loading:              true, // Start with loading state
+		spinner:              s,
+		daemonClient:         daemonClient,
+		sessionMonitor:       deps.SessionMonitor,
+		gitClient:            deps.GitDiffClient,
+		gitSyncService:       deps.GitSyncService,
+		projectRegistry:      deps.ProjectRegistry,
+		isOnline:             deps.IsOnline,
+		attachmentService:    deps.AttachmentService,
+		diagnosticsService:   deps.DiagnosticsService,
+		logger:               logger,
+		usePlaceholder:       false, // Use real data from local issue store
+		tmuxAvailable:        deps.TmuxAvailable,
+		repoDir:              repoDir,
+		currentProject:       resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
@@ -292,6 +299,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasLoading := m.loading
 		m.tasks = msg.tasks
 		m.sessions = m.projectSessionProjection(msg.tasks)
+		m.applyRuntimeSignals()
 		m.editor.ReconcileSelection(msg.tasks)
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
@@ -316,10 +324,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonEvents = msg.events
 			cmds = append(cmds, m.waitForDaemonEventCmd())
 		}
+		if m.shouldRefreshRuntimeSignals() {
+			m.runtimeSignalsBusy = true
+			cmds = append(cmds, m.refreshRuntimeSignalsCmd(msg.tasks))
+		}
 		if len(cmds) == 0 {
 			return m, nil
 		}
 		return m, tea.Batch(cmds...)
+
+	case runtimeSignalsLoadedMsg:
+		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
+			return m, nil
+		}
+		m.runtimeSignalsBusy = false
+		m.runtimeSignalsByTask = msg.signalsByTask
+		m.lastRuntimeRefresh = msg.refreshedAt
+		m.applyRuntimeSignals()
+		return m, nil
 
 	case issuesErrorMsg:
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
@@ -1523,6 +1545,13 @@ type sessionErrorMsg struct {
 	err     error
 }
 
+type runtimeSignalsLoadedMsg struct {
+	projectID           string
+	signalsByTask       map[string]board.RuntimeSignals
+	refreshedAt         time.Time
+	partialFailureCount int
+}
+
 // Commands
 
 // loadIssuesCmd returns a command that fetches issues from the CLI
@@ -1546,6 +1575,138 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			revision:  snapshot.Revision,
 		}
 	}
+}
+
+func (m Model) shouldRefreshRuntimeSignals() bool {
+	if m.runtimeSignalsBusy {
+		return false
+	}
+	if len(m.tasks) == 0 {
+		return false
+	}
+	if len(m.runtimeSignalsByTask) == 0 {
+		return true
+	}
+	return time.Since(m.lastRuntimeRefresh) >= 15*time.Second
+}
+
+func (m *Model) applyRuntimeSignals() {
+	if len(m.runtimeSignalsByTask) == 0 || len(m.tasks) == 0 {
+		return
+	}
+	for i := range m.tasks {
+		signals, ok := m.runtimeSignalsByTask[m.tasks[i].ID]
+		if !ok {
+			continue
+		}
+		m.tasks[i].HasTmuxSession = signals.HasTmuxSession
+		m.tasks[i].HasWorktree = signals.HasWorktree
+		m.tasks[i].GitBehindCount = signals.GitBehindCount
+		m.tasks[i].HasUncommittedChanges = signals.HasUncommittedChanges
+		m.tasks[i].GitAdditions = signals.GitAdditions
+		m.tasks[i].GitDeletions = signals.GitDeletions
+	}
+}
+
+func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
+	projectID := m.daemonProjectID()
+	baseBranch := strings.TrimSpace(m.config.Git.BaseBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return runtimeSignalsLoadedMsg{
+				projectID:     projectID,
+				signalsByTask: map[string]board.RuntimeSignals{},
+				refreshedAt:   time.Now(),
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+
+		worktrees, err := m.daemonClient.ListWorktrees(ctx)
+		if err != nil {
+			return runtimeSignalsLoadedMsg{
+				projectID:     projectID,
+				signalsByTask: map[string]board.RuntimeSignals{},
+				refreshedAt:   time.Now(),
+			}
+		}
+
+		worktreeByIssue := make(map[string]string, len(worktrees))
+		for _, wt := range worktrees {
+			if wt.IssueID == "" || wt.Path == "" {
+				continue
+			}
+			worktreeByIssue[wt.IssueID] = wt.Path
+		}
+
+		signalsByTask := make(map[string]board.RuntimeSignals, len(tasks))
+		partialFailures := 0
+		for _, task := range tasks {
+			signals := board.RuntimeSignals{
+				HasTmuxSession: task.Session != nil,
+			}
+			worktreePath, hasWorktree := worktreeByIssue[task.ID]
+			if hasWorktree {
+				signals.HasWorktree = true
+
+				status, statusErr := m.daemonClient.GitStatus(ctx, worktreePath)
+				if statusErr == nil {
+					signals.HasUncommittedChanges = status.HasChanges
+				} else {
+					partialFailures++
+				}
+
+				diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath)
+				if diffErr == nil {
+					signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
+				} else {
+					partialFailures++
+				}
+
+				if m.isOnline {
+					behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
+						Worktree:   worktreePath,
+						BaseBranch: baseBranch,
+						Remote:     "origin",
+					})
+					if behindErr == nil {
+						signals.GitBehindCount = behind.CommitsBehind
+					} else {
+						partialFailures++
+					}
+				}
+			}
+			signalsByTask[task.ID] = signals
+		}
+
+		return runtimeSignalsLoadedMsg{
+			projectID:           projectID,
+			signalsByTask:       signalsByTask,
+			refreshedAt:         time.Now(),
+			partialFailureCount: partialFailures,
+		}
+	}
+}
+
+func parseDiffStatTotals(diffStat string) (int, int) {
+	var additions, deletions int
+	insertionMatch := diffStatInsertionsPattern.FindStringSubmatch(diffStat)
+	if len(insertionMatch) == 2 {
+		if parsed, err := strconv.Atoi(insertionMatch[1]); err == nil {
+			additions = parsed
+		}
+	}
+	deletionMatch := diffStatDeletionsPattern.FindStringSubmatch(diffStat)
+	if len(deletionMatch) == 2 {
+		if parsed, err := strconv.Atoi(deletionMatch[1]); err == nil {
+			deletions = parsed
+		}
+	}
+	return additions, deletions
 }
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
@@ -2183,7 +2344,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "event-log-opened":
-		return m, nil
+		return m, tea.ClearScreen
 	case "editor-error":
 		// Editor open error
 		m.overlayStack.Pop()
@@ -2463,7 +2624,19 @@ func (m Model) openLogStreamCmd(logPath string) tea.Cmd {
 			}
 		}
 
-		cmd := exec.Command("less", "+F", path)
+		cmd := exec.Command("less", "--intr=^C", "+F", path)
+		if strings.TrimSpace(os.Getenv("TMUX")) != "" {
+			popupCommand := fmt.Sprintf("less --intr=^C +F %s", shellSingleQuote(path))
+			cmd = exec.Command(
+				"tmux",
+				"display-popup",
+				"-E",
+				"-w", "90%",
+				"-h", "90%",
+				"-T", "az.log",
+				popupCommand,
+			)
+		}
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -2475,6 +2648,13 @@ func (m Model) openLogStreamCmd(logPath string) tea.Cmd {
 		}
 		return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
 	}
+}
+
+func shellSingleQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
@@ -3855,6 +4035,7 @@ func (m Model) renderBoardView() string {
 		visibleColumns,
 		cursor,
 		m.editor.GetSelectedTasks(),
+		m.runtimeSignalsByTask,
 		board.BuildChildProgress(m.tasks),
 		phaseData,
 		m.editor.GetShowPhases(),

@@ -18,7 +18,7 @@ func TestRenderColumn_DoesNotScrollImmediatelyOnNextTask(t *testing.T) {
 
 	// Height allows ~2 cards. Cursor on second task should stay in view without
 	// snapping the viewport to the second card at the top.
-	out := renderColumn("Open", tasks, 1, true, 0, map[string]bool{}, nil, nil, false, 36, 16, s)
+	out := renderColumn("Open", tasks, 1, true, 0, map[string]bool{}, map[string]RuntimeSignals{}, nil, nil, false, 36, 16, s)
 
 	if !strings.Contains(out, "Task One") {
 		t.Fatalf("expected first task to remain visible when cursor moves to second task")
@@ -38,7 +38,7 @@ func TestRenderColumn_ShowsTopAndBottomScrollIndicatorsConditionally(t *testing.
 		{ID: "az-5", Title: "Task Five", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 
-	topOut := renderColumn("Open", tasks, 0, true, 0, map[string]bool{}, nil, nil, false, 36, 16, s)
+	topOut := renderColumn("Open", tasks, 0, true, 0, map[string]bool{}, map[string]RuntimeSignals{}, nil, nil, false, 36, 16, s)
 	if strings.Contains(topOut, "more ^") {
 		t.Fatalf("top indicator should not render at origin viewport")
 	}
@@ -46,7 +46,7 @@ func TestRenderColumn_ShowsTopAndBottomScrollIndicatorsConditionally(t *testing.
 		t.Fatalf("bottom indicator should render when additional tasks exist below viewport")
 	}
 
-	midOut := renderColumn("Open", tasks, 2, true, 2, map[string]bool{}, nil, nil, false, 36, 16, s)
+	midOut := renderColumn("Open", tasks, 2, true, 2, map[string]bool{}, map[string]RuntimeSignals{}, nil, nil, false, 36, 16, s)
 	if !strings.Contains(midOut, "more ^") {
 		t.Fatalf("top indicator should render when viewport is scrolled down")
 	}

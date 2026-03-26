@@ -12,6 +12,7 @@ const (
 	CommandGitCheckout   = "git.checkout"
 	CommandGitAbortMerge = "git.abort_merge"
 	CommandGitDiffStat   = "git.diff_stat"
+	CommandGitStatus     = "git.status"
 )
 
 // GitCommandRequest captures the daemon request body for git workflow commands.
@@ -37,6 +38,10 @@ type GitMergeCommandResponse struct {
 
 type gitOutputBody struct {
 	Output string `json:"output"`
+}
+
+type gitStatusBody struct {
+	Status git.GitStatus `json:"status"`
 }
 
 // GitFetch asks the daemon to fetch updates for a worktree from the requested remote.
@@ -95,4 +100,15 @@ func (c *Client) GitDiffStat(ctx context.Context, worktree string) (string, erro
 		return "", err
 	}
 	return resp.Output, nil
+}
+
+// GitStatus asks the daemon to get git status for the requested worktree.
+func (c *Client) GitStatus(ctx context.Context, worktree string) (git.GitStatus, error) {
+	var resp gitStatusBody
+	if err := c.commandJSON(ctx, CommandGitStatus, GitCommandRequest{
+		Worktree: worktree,
+	}, &resp); err != nil {
+		return git.GitStatus{}, err
+	}
+	return resp.Status, nil
 }

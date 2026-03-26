@@ -21,17 +21,23 @@ type Dependency struct {
 
 // Task represents a issue
 type Task struct {
-	ID           string       `json:"id"`
-	Title        string       `json:"title"`
-	Description  string       `json:"description,omitempty"`
-	Status       Status       `json:"status"`
-	Priority     Priority     `json:"priority"`
-	Type         TaskType     `json:"issue_type"`
-	ParentID     *string      `json:"parent_id,omitempty"`
-	Dependencies []Dependency `json:"dependencies,omitempty"`
-	Session      *Session     `json:"session,omitempty"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	ID                    string       `json:"id"`
+	Title                 string       `json:"title"`
+	Description           string       `json:"description,omitempty"`
+	Status                Status       `json:"status"`
+	Priority              Priority     `json:"priority"`
+	Type                  TaskType     `json:"issue_type"`
+	ParentID              *string      `json:"parent_id,omitempty"`
+	Dependencies          []Dependency `json:"dependencies,omitempty"`
+	Session               *Session     `json:"session,omitempty"`
+	HasTmuxSession        bool         `json:"has_tmux_session,omitempty"`
+	HasWorktree           bool         `json:"has_worktree,omitempty"`
+	GitBehindCount        int          `json:"git_behind_count,omitempty"`
+	HasUncommittedChanges bool         `json:"has_uncommitted_changes,omitempty"`
+	GitAdditions          int          `json:"git_additions,omitempty"`
+	GitDeletions          int          `json:"git_deletions,omitempty"`
+	CreatedAt             time.Time    `json:"created_at"`
+	UpdatedAt             time.Time    `json:"updated_at"`
 }
 
 // Status represents task status

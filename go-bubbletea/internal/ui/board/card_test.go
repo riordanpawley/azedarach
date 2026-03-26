@@ -137,12 +137,6 @@ func TestRenderCard_WithSession(t *testing.T) {
 		t.Errorf("Card should contain elapsed time for busy session, got: %s", stripped)
 	}
 
-	if !strings.Contains(stripped, tmuxSessionToken) {
-		t.Errorf("Card should contain tmux token, got: %s", stripped)
-	}
-	if !strings.Contains(stripped, worktreeToken) {
-		t.Errorf("Card should contain worktree token when session has worktree, got: %s", stripped)
-	}
 }
 
 func TestRenderCard_FixedHeightAcrossTypes(t *testing.T) {
@@ -275,7 +269,7 @@ func TestRenderCard_WithChildProgress(t *testing.T) {
 		Type:     domain.TypeTask,
 	}
 
-	result := renderCard(task, false, false, 30, &ChildProgress{Total: 5, Done: 3}, nil, false, s)
+	result := renderCard(task, nil, false, false, 30, &ChildProgress{Total: 5, Done: 3}, nil, false, s)
 	stripped := stripANSI(result)
 
 	// Should contain epic progress bar
@@ -311,7 +305,7 @@ func TestRenderCard_WithChildProgressAndSession(t *testing.T) {
 		},
 	}
 
-	result := renderCard(task, false, false, 35, &ChildProgress{Total: 2, Done: 1}, nil, false, s)
+	result := renderCard(task, nil, false, false, 35, &ChildProgress{Total: 2, Done: 1}, nil, false, s)
 	stripped := stripANSI(result)
 
 	// Should contain both session status and child progress
@@ -443,9 +437,6 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
 			t.Errorf("Busy session should show elapsed time, got: %s", stripped)
 		}
-		if !strings.Contains(stripped, tmuxSessionToken) {
-			t.Errorf("Busy session should contain tmux token, got: %s", stripped)
-		}
 	})
 
 	t.Run("done without elapsed time", func(t *testing.T) {
@@ -482,25 +473,57 @@ func TestRenderSessionStatus(t *testing.T) {
 	})
 }
 
-func TestRenderSessionMeta(t *testing.T) {
-	t.Run("nil session", func(t *testing.T) {
-		if got := renderSessionMeta(nil); got != "" {
-			t.Fatalf("renderSessionMeta(nil) = %q, want empty", got)
+func TestRenderCard_WithRuntimeSignals(t *testing.T) {
+	s := styles.New()
+	task := domain.Task{
+		ID:       "az-runtime-1",
+		Title:    "Runtime signal task",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+	}
+	signals := &RuntimeSignals{
+		HasTmuxSession:        true,
+		HasWorktree:           true,
+		GitBehindCount:        4,
+		HasUncommittedChanges: true,
+		GitAdditions:          8,
+		GitDeletions:          2,
+	}
+
+	result := renderCard(task, signals, false, false, 40, nil, nil, false, s)
+	stripped := stripANSI(result)
+
+	for _, token := range []string{tmuxSessionToken, worktreeToken, "G:↓4", "G:✎", "+8/-2"} {
+		if !strings.Contains(stripped, token) {
+			t.Fatalf("card should contain %q, got: %s", token, stripped)
+		}
+	}
+}
+
+func TestRenderRuntimeSignals(t *testing.T) {
+	t.Run("nil runtime signals", func(t *testing.T) {
+		if got := renderRuntimeSignals(nil); got != "" {
+			t.Fatalf("renderRuntimeSignals(nil) = %q, want empty", got)
 		}
 	})
 
-	t.Run("session without worktree", func(t *testing.T) {
-		session := &domain.Session{IssueID: "az-1", State: domain.SessionBusy}
-		if got := renderSessionMeta(session); got != tmuxSessionToken {
-			t.Fatalf("renderSessionMeta(without worktree) = %q, want %q", got, tmuxSessionToken)
+	t.Run("session and worktree signals", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			HasTmuxSession:        true,
+			HasWorktree:           true,
+			GitBehindCount:        2,
+			HasUncommittedChanges: true,
+			GitAdditions:          10,
+			GitDeletions:          3,
 		}
-	})
-
-	t.Run("session with worktree", func(t *testing.T) {
-		session := &domain.Session{IssueID: "az-1", State: domain.SessionBusy, Worktree: "/tmp/az-1"}
-		want := tmuxSessionToken + " " + worktreeToken
-		if got := renderSessionMeta(session); got != want {
-			t.Fatalf("renderSessionMeta(with worktree) = %q, want %q", got, want)
+		got := renderRuntimeSignals(signals)
+		if !strings.Contains(got, tmuxSessionToken) ||
+			!strings.Contains(got, worktreeToken) ||
+			!strings.Contains(got, "G:↓2") ||
+			!strings.Contains(got, "G:✎") ||
+			!strings.Contains(got, "+10/-3") {
+			t.Fatalf("renderRuntimeSignals(...) = %q, missing expected token(s)", got)
 		}
 	})
 }

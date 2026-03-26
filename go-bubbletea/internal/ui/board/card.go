@@ -18,6 +18,17 @@ const CardContentHeight = 4
 const tmuxSessionToken = "T:Y"
 const worktreeToken = "W:Y"
 
+// RuntimeSignals represents runtime metadata rendered for a task card.
+// These values are computed independently from session state.
+type RuntimeSignals struct {
+	HasTmuxSession        bool
+	HasWorktree           bool
+	GitBehindCount        int
+	HasUncommittedChanges bool
+	GitAdditions          int
+	GitDeletions          int
+}
+
 // ChildProgress summarizes completion progress for a parent task's children.
 type ChildProgress struct {
 	Total int
@@ -25,7 +36,7 @@ type ChildProgress struct {
 }
 
 // renderCard renders a task card
-func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
+func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool, isSelected bool, width int, childProgress *ChildProgress, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
 	if width < 1 {
 		width = 1
 	}
@@ -91,10 +102,14 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, chi
 	if task.Session != nil {
 		sessionRow = renderSessionStatus(task.Session, s)
 	}
+	runtimeRow := renderRuntimeSignals(runtimeSignals)
 
-	auxParts := make([]string, 0, 2)
+	auxParts := make([]string, 0, 3)
 	if sessionRow != "" {
 		auxParts = append(auxParts, sessionRow)
+	}
+	if runtimeRow != "" {
+		auxParts = append(auxParts, runtimeRow)
 	}
 	if childProgress != nil && childProgress.Total > 0 {
 		auxParts = append(auxParts, renderChildProgress(*childProgress, s))
@@ -154,27 +169,36 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	}
 
 	stateStyle := s.SessionState(session.State)
-	meta := renderSessionMeta(session)
 	var value string
 	if elapsed != "" {
 		value = fmt.Sprintf("%s %s", icon, elapsed)
 	} else {
 		value = icon
 	}
-	if meta != "" {
-		value = value + " " + meta
-	}
 	return stateStyle.Render(value)
 }
 
-func renderSessionMeta(session *domain.Session) string {
-	if session == nil {
+func renderRuntimeSignals(signals *RuntimeSignals) string {
+	if signals == nil {
 		return ""
 	}
-	parts := []string{tmuxSessionToken}
-	if session.Worktree != "" {
+	parts := make([]string, 0, 5)
+	if signals.HasTmuxSession {
+		parts = append(parts, tmuxSessionToken)
+	}
+	if signals.HasWorktree {
 		parts = append(parts, worktreeToken)
 	}
+	if signals.GitBehindCount > 0 {
+		parts = append(parts, fmt.Sprintf("G:↓%d", signals.GitBehindCount))
+	}
+	if signals.HasUncommittedChanges {
+		parts = append(parts, "G:✎")
+	}
+	if signals.GitAdditions > 0 || signals.GitDeletions > 0 {
+		parts = append(parts, fmt.Sprintf("+%d/-%d", signals.GitAdditions, signals.GitDeletions))
+	}
+
 	return strings.Join(parts, " ")
 }
 
@@ -211,7 +235,7 @@ func renderChildProgress(progress ChildProgress, s *styles.Styles) string {
 
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, isCursor, isSelected, width, nil, nil, false, s)
+	return renderCard(task, nil, isCursor, isSelected, width, nil, nil, false, s)
 }
 
 // CardLineFootprint returns the number of terminal lines consumed by one card.
@@ -228,7 +252,7 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 	}
-	cardLines := lipgloss.Height(renderCard(sample, false, false, width, nil, nil, false, s))
+	cardLines := lipgloss.Height(renderCard(sample, nil, false, false, width, nil, nil, false, s))
 	if cardLines < 1 {
 		cardLines = 1
 	}

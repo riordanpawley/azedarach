@@ -16,6 +16,7 @@ type fakeGitService struct {
 	checkoutFn   func(context.Context, string, string) error
 	abortMergeFn func(context.Context, string) error
 	diffStatFn   func(context.Context, string) (string, error)
+	statusFn     func(context.Context, string) (*git.GitStatus, error)
 }
 
 func (f *fakeGitService) Fetch(ctx context.Context, worktree, remote string) error {
@@ -51,6 +52,13 @@ func (f *fakeGitService) DiffStat(ctx context.Context, worktree string) (string,
 		return f.diffStatFn(ctx, worktree)
 	}
 	return "", nil
+}
+
+func (f *fakeGitService) Status(ctx context.Context, worktree string) (*git.GitStatus, error) {
+	if f.statusFn != nil {
+		return f.statusFn(ctx, worktree)
+	}
+	return &git.GitStatus{}, nil
 }
 
 func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope {
@@ -105,6 +113,12 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			}
 			return " README.md | 2 ++\n 1 file changed, 2 insertions(+)", nil
 		},
+		statusFn: func(_ context.Context, worktree string) (*git.GitStatus, error) {
+			if worktree != "/tmp/az-1" {
+				t.Fatalf("status args = %q", worktree)
+			}
+			return &git.GitStatus{HasChanges: true, Modified: []string{"README.md"}}, nil
+		},
 	})
 
 	for _, tc := range []struct {
@@ -136,6 +150,11 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			name:    "diff stat",
 			req:     gitRequest(t, CommandGitDiffStat, gitCommandBody{Worktree: "/tmp/az-1"}),
 			wantCmd: CommandGitDiffStat,
+		},
+		{
+			name:    "status",
+			req:     gitRequest(t, CommandGitStatus, gitCommandBody{Worktree: "/tmp/az-1"}),
+			wantCmd: CommandGitStatus,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -187,6 +206,14 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				if body.Worktree != "/tmp/az-1" || body.Output == "" {
 					t.Fatalf("response body = %+v", body)
 				}
+			case CommandGitStatus:
+				var body gitStatusResultBody
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" || !body.Status.HasChanges {
+					t.Fatalf("response body = %+v", body)
+				}
 			}
 		})
 	}
@@ -208,6 +235,9 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 		},
 		diffStatFn: func(context.Context, string) (string, error) {
 			return "", context.DeadlineExceeded
+		},
+		statusFn: func(context.Context, string) (*git.GitStatus, error) {
+			return nil, context.DeadlineExceeded
 		},
 	})
 
@@ -257,5 +287,21 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("unexpected diff stat validation error: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{Worktree: "/tmp/az-1"}))
+	if resp.OK {
+		t.Fatal("expected status failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeTimeout || !resp.Error.Retryable {
+		t.Fatalf("unexpected status timeout mapping: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{}))
+	if resp.OK {
+		t.Fatal("expected status validation failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected status validation error: %+v", resp.Error)
 	}
 }
