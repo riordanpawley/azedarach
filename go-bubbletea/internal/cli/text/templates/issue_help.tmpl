@@ -2,10 +2,10 @@ Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|b
 
 Commands:
   list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
-  get <issue-id> [--json] [--deps]  Show a single issue by ID
+  get [--id <issue-id>] [--json] [--deps] [<issue-id>]  Show a single issue by ID
   get-many --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
-  check <issue-id> [--json] [--deps]  Alias for get
-  doctor <issue-id>  Run integrity checks for one issue
+  check [--id <issue-id>] [--json] [--deps] [<issue-id>]  Alias for get
+  doctor [--id <issue-id>] [<issue-id>]  Run integrity checks for one issue
   create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
   update [--id <issue-id>] [<issue-id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   close [--id <issue-id>] [<issue-id>]       Close an issue (sets status=closed)
@@ -15,3 +15,5 @@ Commands:
   dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
   bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+
+Argument ordering: place flags/options before positional arguments for deterministic parsing.
