@@ -2013,14 +2013,35 @@ func RestartDaemonCommand(deps *Dependencies) error {
 }
 
 type primeTemplateData struct {
-	IssueSection     string
-	ContextGuardrail string
+	IssueSection             string
+	ContextGuardrail         string
+	QuestionFirstGuardrails  string
+	ImplementationGuardrails string
+	SpecGuardrails           string
 }
 
 func PrimeCommand(deps *Dependencies) error {
 	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	primeMode := strings.TrimSpace(os.Getenv("AZEDARACH_PRIME_MODE"))
 	guardrail := "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
 	issueSection := ""
+	specGuardrails := ""
+	questionFirstGuardrails := ""
+	implementationGuardrails := "- Implementation context: implementation registry guidance is not yet available in go-bubbletea prime output; use `az impl list` from ts-opentui when needed."
+
+	if primeMode == "question-first" {
+		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
+  - MUST ask follow-up questions immediately when the issue is underspecified or ambiguous.
+  - MUST improve the current issue title and description before implementation work begins.
+  - MUST record unknowns/open questions in the issue description so scope is explicit.`
+	}
+
+	if isSpecEnabled(deps.RepoDir) {
+		specGuardrails = `  - In this repo, when guidance says ` + "`spec`" + `, it means ` + "`az spec`" + ` requirement/link records, not README.md, AGENTS.md, or other internal docs.
+  - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
+  - Before implementing behavior changes, inspect relevant ` + "`az spec`" + ` requirements/links and align the plan.
+  - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + `.`
+	}
 
 	if issueID != "" {
 		guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
@@ -2035,8 +2056,11 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 
 	output, err := clitext.Render("prime_output", primeTemplateData{
-		IssueSection:     issueSection,
-		ContextGuardrail: guardrail,
+		IssueSection:             issueSection,
+		ContextGuardrail:         guardrail,
+		QuestionFirstGuardrails:  questionFirstGuardrails,
+		ImplementationGuardrails: implementationGuardrails,
+		SpecGuardrails:           specGuardrails,
 	})
 	if err != nil {
 		return fmt.Errorf("render prime output: %w", err)
@@ -2046,8 +2070,16 @@ func PrimeCommand(deps *Dependencies) error {
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task) string {
+	description := ""
+	if strings.TrimSpace(task.Description) != "" {
+		description = fmt.Sprintf("\nDescription: %s", task.Description)
+	}
+	parent := ""
+	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
+		parent = fmt.Sprintf("\nParent: %s", strings.TrimSpace(*task.ParentID))
+	}
 	return fmt.Sprintf(
-		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s]\nDependencies: %s\n```\n",
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s]%s%s\nDependencies:\n%s\n```\n",
 		issueID,
 		issueID,
 		task.ID,
@@ -2055,8 +2087,65 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 		task.Status,
 		task.Priority.String(),
 		task.Type,
-		formatDependencySummary(task.Dependencies),
+		parent,
+		description,
+		formatPrimeDependencyLines(task.Dependencies),
 	)
+}
+
+func formatPrimeDependencyLines(deps []domain.Dependency) string {
+	if len(deps) == 0 {
+		return "(none)"
+	}
+	grouped := map[domain.DependencyType][]string{}
+	for _, dep := range deps {
+		grouped[dep.Type] = append(grouped[dep.Type], dep.ID)
+	}
+	lines := make([]string, 0, len(grouped))
+	order := []domain.DependencyType{
+		domain.DependencyBlocks,
+		domain.DependencyParentChild,
+		domain.DependencyRelatedTo,
+		domain.DependencyDiscovered,
+		domain.DependencyBlockedBy,
+	}
+	for _, typ := range order {
+		ids := grouped[typ]
+		if len(ids) == 0 {
+			continue
+		}
+		sort.Strings(ids)
+		lines = append(lines, fmt.Sprintf("- %s: %s", typ, strings.Join(ids, ", ")))
+	}
+	if len(lines) == 0 {
+		return "(none)"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func isSpecEnabled(repoDir string) bool {
+	candidates := []string{
+		filepath.Join(repoDir, ".azedarach.json"),
+		filepath.Join(repoDir, "..", ".azedarach.json"),
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var payload struct {
+			Spec struct {
+				Enabled *bool `json:"enabled"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			continue
+		}
+		if payload.Spec.Enabled != nil {
+			return *payload.Spec.Enabled
+		}
+	}
+	return false
 }
 
 func PrintUsage() {

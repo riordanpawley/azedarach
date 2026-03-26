@@ -2418,8 +2418,31 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "az-1: Prime issue [status=open priority=P2 type=task]") {
 		t.Fatalf("prime output missing issue summary: %q", output)
 	}
-	if !strings.Contains(output, "Dependencies: blocks:1") {
+	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+}
+
+func TestPrimeCommandQuestionFirstAndSpecBlocks(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	t.Setenv("AZEDARACH_PRIME_MODE", "question-first")
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach.json"), []byte(`{"spec":{"enabled":true}}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(&Dependencies{RepoDir: repoDir})
+	})
+
+	if !strings.Contains(output, "Question-first execution rules") {
+		t.Fatalf("prime output missing question-first block: %q", output)
+	}
+	if !strings.Contains(output, "- Spec workflow:") {
+		t.Fatalf("prime output missing spec workflow header: %q", output)
+	}
+	if !strings.Contains(output, "`az spec` requirement/link records") {
+		t.Fatalf("prime output missing spec guardrails: %q", output)
 	}
 }
 
