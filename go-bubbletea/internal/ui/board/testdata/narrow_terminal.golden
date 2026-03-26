@@ -1,20 +1,20 @@
  Open (3)            In Progress (2)     Blocked (1)         Done (2)           
 ╭──────────────────╮╭──────────────────╮╭──────────────────╮╭──────────────────╮
-│ ▶az-1 Implemen   ││ az-3 API endpo   ││ az-6 Deploy to   ││ az-7 Setup CI/   │
-│ t user authen…   ││ int refactor     ││  production      ││ CD pipeline      │
-│  P2  •  T        ││  P1  •  B        ││  P0  •  T        ││  P3  •  T        │
-│                  ││                  ││                  ││                  │
+│  P2  ▶az-1 [t…   ││  P1  az-3 [bu…   ││  P0  az-6 [ta…   ││  P3  az-7 [ta…   │
+│ Implement user   ││ API endpoint r   ││ Deploy to prod   ││ Setup CI/CD pi   │
+│  authenticatio   ││ efactor          ││ uction           ││ peline           │
+│ n                ││                  ││                  ││                  │
 ╰──────────────────╯╰──────────────────╯╰──────────────────╯╰──────────────────╯
 ╭──────────────────╮╭──────────────────╮                    ╭──────────────────╮
-│ az-2 Fix login   ││ az-4 Database    │                    │ az-8 Configure   │
-│  redirect bug    ││ migration epic   │                    │  monitoring      │
-│  P1  •  F        ││  P2  •  E        │                    │  P4  •  T        │
+│  P1  az-2 [fe…   ││  P2  az-4 [ep…   │                    │  P4  az-8 [ta…   │
+│ Fix login redi   ││ Database migra   │                    │ Configure moni   │
+│ rect bug         ││ tion epic        │                    │ toring           │
 │                  ││                  │                    │                  │
 ╰──────────────────╯╰──────────────────╯                    ╰──────────────────╯
 ╭──────────────────╮                                                            
-│ az-5 Add passw   │                                                            
-│ ord reset flow   │                                                            
-│  P3  •  T        │                                                            
+│  P3  az-5 [ta…   │                                                            
+│ Add password r   │                                                            
+│ eset flow        │                                                            
 │                  │                                                            
 ╰──────────────────╯                                                            
                                                                                 

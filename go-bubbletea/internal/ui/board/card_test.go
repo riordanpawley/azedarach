@@ -42,6 +42,11 @@ func TestFormatDuration(t *testing.T) {
 			want:     "5h 15m",
 		},
 		{
+			name:     "days and hours",
+			duration: 50 * time.Hour,
+			want:     "2d 2h",
+		},
+		{
 			name:     "less than one minute",
 			duration: 30 * time.Second,
 			want:     "0m",
@@ -68,7 +73,7 @@ func TestRenderCard_Basic(t *testing.T) {
 		Type:     domain.TypeTask,
 	}
 
-	result := RenderCard(task, false, false, 30, s)
+	result := RenderCard(task, false, false, 56, s)
 	stripped := stripANSI(result)
 
 	// Should contain title
@@ -84,9 +89,9 @@ func TestRenderCard_Basic(t *testing.T) {
 		t.Errorf("Card should contain priority badge, got: %s", stripped)
 	}
 
-	// Should contain type badge
-	if !strings.Contains(stripped, "T") {
-		t.Errorf("Card should contain type badge, got: %s", stripped)
+	// Should contain type token
+	if !strings.Contains(stripped, "[task]") {
+		t.Errorf("Card should contain type token, got: %s", stripped)
 	}
 }
 
@@ -123,7 +128,7 @@ func TestRenderCard_WithSession(t *testing.T) {
 		},
 	}
 
-	result := RenderCard(task, false, false, 30, s)
+	result := RenderCard(task, false, false, 64, s)
 	stripped := stripANSI(result)
 
 	// Should contain session icon
@@ -242,7 +247,7 @@ func TestRenderCard_WithSessionNoElapsed(t *testing.T) {
 				},
 			}
 
-			result := RenderCard(task, false, false, 30, s)
+			result := RenderCard(task, false, false, 56, s)
 			stripped := stripANSI(result)
 
 			// Should contain session icon
@@ -269,7 +274,7 @@ func TestRenderCard_WithChildProgress(t *testing.T) {
 		Type:     domain.TypeTask,
 	}
 
-	result := renderCard(task, nil, false, false, 30, &ChildProgress{Total: 5, Done: 3}, nil, false, s)
+	result := renderCard(task, nil, false, false, 56, &ChildProgress{Total: 5, Done: 3}, nil, false, s)
 	stripped := stripANSI(result)
 
 	// Should contain epic progress bar
@@ -385,14 +390,19 @@ func TestRenderCard_TitleTruncation(t *testing.T) {
 	}
 }
 
-func TestRenderTitleLines_UsesTwoLinesBeforeTruncation(t *testing.T) {
-	first, second := renderTitleLines("", "az-1", "abcdefghijABCDEFGHIJklmnop", 14)
-
-	if first != "az-1 abcdefghi" {
-		t.Fatalf("first line = %q, want %q", first, "az-1 abcdefghi")
+func TestRenderTitleBodyLines_UsesRemainingRows(t *testing.T) {
+	lines := renderTitleBodyLines("abcdefghijABCDEFGHIJklmnop", 14, 3)
+	if len(lines) != 3 {
+		t.Fatalf("len(lines) = %d, want 3", len(lines))
 	}
-	if second != "jABCDEFGHIJkl…" {
-		t.Fatalf("second line = %q, want %q", second, "jABCDEFGHIJkl…")
+	if lines[0] != "abcdefghijABCD" {
+		t.Fatalf("line[0] = %q", lines[0])
+	}
+	if lines[1] != "EFGHIJklmnop" {
+		t.Fatalf("line[1] = %q", lines[1])
+	}
+	if lines[2] != "" {
+		t.Fatalf("line[2] = %q, want empty", lines[2])
 	}
 }
 
@@ -433,6 +443,9 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "●") {
 			t.Errorf("Busy session should contain busy icon, got: %s", stripped)
 		}
+		if !strings.Contains(stripped, "BUSY") {
+			t.Errorf("Busy session should contain BUSY label, got: %s", stripped)
+		}
 
 		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
 			t.Errorf("Busy session should show elapsed time, got: %s", stripped)
@@ -450,6 +463,9 @@ func TestRenderSessionStatus(t *testing.T) {
 
 		if !strings.Contains(stripped, "✓") {
 			t.Errorf("Done session should contain done icon, got: %s", stripped)
+		}
+		if !strings.Contains(stripped, "DONE") {
+			t.Errorf("Done session should contain DONE label, got: %s", stripped)
 		}
 
 		// Should NOT contain time format
@@ -491,12 +507,73 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		GitDeletions:          2,
 	}
 
-	result := renderCard(task, signals, false, false, 40, nil, nil, false, s)
+	result := renderCard(task, signals, false, false, 72, nil, nil, false, s)
 	stripped := stripANSI(result)
+	var headerLine string
+	for _, line := range strings.Split(stripped, "\n") {
+		if strings.Contains(line, "az-runtime-1") {
+			headerLine = line
+			break
+		}
+	}
+	if headerLine == "" {
+		t.Fatalf("expected header line in card, got: %s", stripped)
+	}
 
 	for _, token := range []string{tmuxSessionToken, worktreeToken, "G:↓4", "G:✎", "+8/-2"} {
-		if !strings.Contains(stripped, token) {
-			t.Fatalf("card should contain %q, got: %s", token, stripped)
+		if !strings.Contains(headerLine, token) {
+			t.Fatalf("header should contain %q, got: %s", token, headerLine)
+		}
+	}
+}
+
+func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-50 * time.Hour)
+	task := domain.Task{
+		ID:       "CHE-3002",
+		Title:    "migrate prep lists to db",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-3002",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasTmuxSession:        true,
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          12,
+		GitDeletions:          3,
+	}
+
+	result := stripANSI(renderCard(task, signals, false, false, 90, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	lines := strings.Split(result, "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected rendered lines, got %q", result)
+	}
+
+	first := ""
+	for _, line := range lines {
+		if strings.Contains(line, "CHE-3002") {
+			first = line
+			break
+		}
+	}
+	if first == "" {
+		t.Fatalf("expected metadata line containing issue id, got: %s", result)
+	}
+	for _, token := range []string{"P2", "CHE-3002", "[task]", "WAIT", "2d 2h", tmuxSessionToken, worktreeToken, "G:✎", "+12/-3", "[1/7]"} {
+		if !strings.Contains(first, token) {
+			t.Fatalf("first line should contain %q, got: %s", token, first)
+		}
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "migrate prep lists to db") && strings.Contains(line, "CHE-3002") {
+			t.Fatalf("title rows should not include issue id, line=%s", line)
 		}
 	}
 }

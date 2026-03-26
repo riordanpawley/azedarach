@@ -56,9 +56,6 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	priorityText := task.Priority.String()
 	priorityBadge := s.PriorityBadge(int(task.Priority)).Render(priorityText)
 
-	// Type badge (first letter: T, B, F, E, C)
-	typeBadge := s.TypeBadge.Render(task.Type.Short())
-
 	// Phase badge (if enabled and phase info available)
 	var phaseBadge string
 	if showPhases && phaseInfo != nil {
@@ -88,13 +85,17 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 		cursor = "▶"
 	}
 
-	// Build the card content. Keep issue ID at the start so it is always visible.
-	titleLine1, titleLine2 := renderTitleLines(cursor, task.ID, task.Title, maxLineLen)
-
-	// Badge line: priority • type [• phase]
-	badgeLine := lipgloss.JoinHorizontal(lipgloss.Left, priorityBadge, " • ", typeBadge)
+	issueToken := task.ID
+	if cursor != "" {
+		issueToken = cursor + task.ID
+	}
+	headerParts := []string{
+		priorityBadge,
+		issueToken,
+		fmt.Sprintf("[%s]", task.Type.String()),
+	}
 	if phaseBadge != "" {
-		badgeLine = lipgloss.JoinHorizontal(lipgloss.Left, badgeLine, " • ", phaseBadge)
+		headerParts = append(headerParts, phaseBadge)
 	}
 
 	// Session status row (if session exists)
@@ -114,66 +115,82 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if childProgress != nil && childProgress.Total > 0 {
 		auxParts = append(auxParts, renderChildProgress(*childProgress, s))
 	}
-	auxLine := strings.Join(auxParts, " ")
+	headerLine := strings.Join(headerParts, " ")
+	if len(auxParts) > 0 {
+		headerLine = headerLine + " " + strings.Join(auxParts, " ")
+	}
+
+	titleLines := renderTitleBodyLines(task.Title, maxLineLen, CardContentHeight-1)
 
 	// Compose fixed content rows to guarantee stable card height.
-	lines := []string{
-		ansi.Truncate(titleLine1, maxLineLen, "…"),
-		ansi.Truncate(titleLine2, maxLineLen, "…"),
-		ansi.Truncate(badgeLine, maxLineLen, "…"),
-		ansi.Truncate(auxLine, maxLineLen, "…"),
+	lines := make([]string, 0, CardContentHeight)
+	lines = append(lines, ansi.Truncate(headerLine, maxLineLen, "…"))
+	for _, line := range titleLines {
+		lines = append(lines, ansi.Truncate(line, maxLineLen, "…"))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Render(content)
 }
 
-func renderTitleLines(cursor string, issueID string, title string, maxLineLen int) (string, string) {
+func renderTitleBodyLines(title string, maxLineLen int, maxLines int) []string {
+	if maxLines <= 0 {
+		return []string{}
+	}
+	lines := make([]string, 0, maxLines)
 	if maxLineLen < 1 {
-		return "", ""
+		for len(lines) < maxLines {
+			lines = append(lines, "")
+		}
+		return lines
 	}
 
-	prefix := cursor + issueID + " "
-	prefixRunes := []rune(prefix)
-	titleRunes := []rune(title)
-
-	firstLineCapacity := maxLineLen - len(prefixRunes)
-	if firstLineCapacity <= 0 {
-		return string(prefixRunes[:maxLineLen]), ""
+	runes := []rune(title)
+	for len(lines) < maxLines {
+		if len(runes) == 0 {
+			lines = append(lines, "")
+			continue
+		}
+		if len(runes) <= maxLineLen {
+			lines = append(lines, string(runes))
+			runes = nil
+			continue
+		}
+		if len(lines) == maxLines-1 {
+			if maxLineLen == 1 {
+				lines = append(lines, "…")
+				break
+			}
+			lines = append(lines, string(runes[:maxLineLen-1])+"…")
+			break
+		}
+		lines = append(lines, string(runes[:maxLineLen]))
+		runes = runes[maxLineLen:]
 	}
-
-	if len(titleRunes) <= firstLineCapacity {
-		return prefix + title, ""
-	}
-
-	firstLine := prefix + string(titleRunes[:firstLineCapacity])
-	remaining := titleRunes[firstLineCapacity:]
-	if len(remaining) <= maxLineLen {
-		return firstLine, string(remaining)
-	}
-	if maxLineLen == 1 {
-		return firstLine, "…"
-	}
-	return firstLine, string(remaining[:maxLineLen-1]) + "…"
+	return lines
 }
 
 // renderSessionStatus renders the session status line with icon and elapsed time
 func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	icon := session.State.Icon()
 
-	// Elapsed time if active and started
+	// Elapsed time if active/waiting and started.
 	var elapsed string
-	if session.StartedAt != nil && session.State == domain.SessionBusy {
+	if session.StartedAt != nil && (session.State == domain.SessionBusy || session.State == domain.SessionWaiting) {
 		d := time.Since(*session.StartedAt)
 		elapsed = formatDuration(d)
 	}
 
 	stateStyle := s.SessionState(session.State)
+	label := strings.ToUpper(session.State.String())
+	if session.State == domain.SessionWaiting {
+		label = "WAIT"
+	}
 	var value string
 	if elapsed != "" {
-		value = fmt.Sprintf("%s%s", icon, elapsed)
+		value = fmt.Sprintf("%s %s %s", icon, label, elapsed)
 	} else {
-		value = icon
+		value = fmt.Sprintf("%s %s", icon, label)
 	}
 	return stateStyle.Render(value)
 }
@@ -202,11 +219,19 @@ func renderRuntimeSignals(signals *RuntimeSignals) string {
 	return strings.Join(parts, " ")
 }
 
-// formatDuration formats a duration as "2h 34m" or "45m"
+// formatDuration formats a duration as "2d 2h", "2h 34m", or "45m".
 func formatDuration(d time.Duration) string {
-	h := int(d.Hours())
+	if d < 0 {
+		d = 0
+	}
+	totalHours := int(d.Hours())
+	days := totalHours / 24
+	h := totalHours % 24
 	m := int(d.Minutes()) % 60
 
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh", days, h)
+	}
 	if h > 0 {
 		return fmt.Sprintf("%dh %dm", h, m)
 	}
