@@ -146,4 +146,8 @@ go-bubbletea/
 
 - go docs: `docs/`
 
+## Todos
+
+- look into incorporating good code from this git integration https://github.com/pingdotgg/t3code/blob/main/apps/server/src/git/Layers/GitCore.ts
+
 </ai_context>
