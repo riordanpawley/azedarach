@@ -86,28 +86,41 @@ func (c *Cursor) MoveVertical(columns []board.Column, delta int) string {
 
 // MoveHorizontal moves left or right to adjacent column
 func (c *Cursor) MoveHorizontal(columns []board.Column, delta int) string {
+	if len(columns) == 0 || delta == 0 {
+		return c.TaskID
+	}
+
 	pos := c.FindPosition(columns)
-
-	newCol := pos.Column + delta
-	if newCol < 0 {
-		newCol = 0
+	startCol := pos.Column
+	if startCol < 0 {
+		startCol = 0
 	}
-	if newCol >= len(columns) {
-		newCol = len(columns) - 1
+	if startCol >= len(columns) {
+		startCol = len(columns) - 1
 	}
 
-	c.FallbackColumn = newCol
-
-	// Try to select task at same row index, or last task if column is shorter
-	if newCol < len(columns) && len(columns[newCol].Tasks) > 0 {
-		taskIdx := pos.Task
-		if taskIdx >= len(columns[newCol].Tasks) {
-			taskIdx = len(columns[newCol].Tasks) - 1
+	targetCol := -1
+	for nextCol := startCol + delta; nextCol >= 0 && nextCol < len(columns); nextCol += delta {
+		if len(columns[nextCol].Tasks) > 0 {
+			targetCol = nextCol
+			break
 		}
-		c.TaskID = columns[newCol].Tasks[taskIdx].ID
-	} else {
-		c.TaskID = "" // No task in new column
 	}
+
+	if targetCol == -1 {
+		// No non-empty column in the requested direction.
+		return c.TaskID
+	}
+
+	c.FallbackColumn = targetCol
+	taskIdx := pos.Task
+	if taskIdx >= len(columns[targetCol].Tasks) {
+		taskIdx = len(columns[targetCol].Tasks) - 1
+	}
+	if taskIdx < 0 {
+		taskIdx = 0
+	}
+	c.TaskID = columns[targetCol].Tasks[taskIdx].ID
 	return c.TaskID
 }
 

@@ -37,6 +37,32 @@ func makeTestColumns() []board.Column {
 	}
 }
 
+func makeColumnsWithEmptyMiddle() []board.Column {
+	return []board.Column{
+		{
+			Title: "Open",
+			Tasks: []domain.Task{
+				{ID: "az-open-1", Title: "Open 1", Status: domain.StatusOpen},
+				{ID: "az-open-2", Title: "Open 2", Status: domain.StatusOpen},
+			},
+		},
+		{
+			Title: "In Progress",
+			Tasks: []domain.Task{},
+		},
+		{
+			Title: "Blocked",
+			Tasks: []domain.Task{
+				{ID: "az-blocked-1", Title: "Blocked 1", Status: domain.StatusBlocked},
+			},
+		},
+		{
+			Title: "Done",
+			Tasks: []domain.Task{},
+		},
+	}
+}
+
 func TestNewService(t *testing.T) {
 	svc := NewService()
 	if svc == nil {
@@ -130,6 +156,40 @@ func TestService_MoveLeftRight(t *testing.T) {
 	pos = svc.GetPosition(columns)
 	if pos.Column != 0 {
 		t.Errorf("Expected column 0 at boundary, got %d", pos.Column)
+	}
+}
+
+func TestService_MoveLeftRight_SkipsEmptyColumns(t *testing.T) {
+	svc := NewService()
+	columns := makeColumnsWithEmptyMiddle()
+
+	svc.SelectTask("az-open-2", 0)
+
+	svc.MoveRight(columns)
+	pos := svc.GetPosition(columns)
+	if pos.Column != 2 {
+		t.Fatalf("expected move right to skip empty middle column and land on 2, got %d", pos.Column)
+	}
+	if svc.GetCursor().TaskID != "az-blocked-1" {
+		t.Fatalf("expected cursor on az-blocked-1, got %q", svc.GetCursor().TaskID)
+	}
+
+	svc.MoveRight(columns)
+	pos = svc.GetPosition(columns)
+	if pos.Column != 2 {
+		t.Fatalf("expected move right at edge with only empty columns ahead to stay on 2, got %d", pos.Column)
+	}
+	if svc.GetCursor().TaskID != "az-blocked-1" {
+		t.Fatalf("expected cursor to stay on az-blocked-1, got %q", svc.GetCursor().TaskID)
+	}
+
+	svc.MoveLeft(columns)
+	pos = svc.GetPosition(columns)
+	if pos.Column != 0 {
+		t.Fatalf("expected move left to skip empty middle column and land on 0, got %d", pos.Column)
+	}
+	if svc.GetCursor().TaskID != "az-open-1" {
+		t.Fatalf("expected cursor on az-open-1 after clamping row, got %q", svc.GetCursor().TaskID)
 	}
 }
 
