@@ -170,6 +170,21 @@ func TestStatusBar_RenderFallsBackToSelectionSummary(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderShowsLoadingIndicator(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 80, style)
+	sb.SetLoadingIndicator("Loading runtime status...")
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "Loading runtime status...") {
+		t.Fatalf("Expected status bar to contain loading indicator, got: %s", result)
+	}
+	if !strings.Contains(result, "NORMAL") {
+		t.Fatalf("Expected status bar to keep mode badge, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderFallsBackAndTruncatesEventTicker(t *testing.T) {
 	style := styles.New()
 	ring := eventticker.NewRing(2)

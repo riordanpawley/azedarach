@@ -16,6 +16,7 @@ type StatusBar struct {
 	width            int
 	currentProject   string
 	selectionSummary string
+	loadingIndicator string
 	eventTicker      *eventticker.Ring
 	styles           *styles.Styles
 }
@@ -32,6 +33,11 @@ func New(mode types.Mode, width int, styles *styles.Styles) StatusBar {
 // SetSelectionSummary sets the optional selection summary rendered in the status bar.
 func (sb *StatusBar) SetSelectionSummary(summary string) {
 	sb.selectionSummary = summary
+}
+
+// SetLoadingIndicator sets the loading label rendered before other status hints.
+func (sb *StatusBar) SetLoadingIndicator(indicator string) {
+	sb.loadingIndicator = indicator
 }
 
 // SetCurrentProject sets the project name rendered at the left of the status bar.
@@ -106,7 +112,10 @@ func (sb StatusBar) Render() string {
 		return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
 	}
 
-	slots := make([]statusSlot, 0, 3)
+	slots := make([]statusSlot, 0, 4)
+	if sb.loadingIndicator != "" {
+		slots = append(slots, statusSlot{style: sb.styles.StatusHint, text: sb.loadingIndicator})
+	}
 	if sb.eventTicker != nil {
 		if latest := sb.eventTicker.Latest(); latest != "" {
 			slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: latest})
