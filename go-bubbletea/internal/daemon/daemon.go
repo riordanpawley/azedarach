@@ -28,13 +28,15 @@ const daemonVersion = "dev"
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir     string
-	SocketPath  string
-	LockPath    string
-	BaseBranch  string
-	CLITool     string
-	Logger      *slog.Logger
-	IdleTimeout time.Duration
+	RepoDir             string
+	SocketPath          string
+	LockPath            string
+	BaseBranch          string
+	CLITool             string
+	SessionShell        string
+	SessionInitCommands []string
+	Logger              *slog.Logger
+	IdleTimeout         time.Duration
 }
 
 // Daemon is the daemon runtime root.
@@ -84,6 +86,9 @@ func New(cfg Config) *Daemon {
 	}
 	if cfg.CLITool == "" {
 		cfg.CLITool = "claude"
+	}
+	if strings.TrimSpace(cfg.SessionShell) == "" {
+		cfg.SessionShell = "zsh"
 	}
 	if cfg.SocketPath == "" {
 		cfg.SocketPath = appconfig.GlobalDaemonSocketPath()

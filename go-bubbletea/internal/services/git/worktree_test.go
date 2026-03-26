@@ -116,6 +116,7 @@ branch refs/heads/az/issue-123
 	_, err := manager.Create(ctx, issueID, baseBranch)
 
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeAlreadyExists)
 	assert.Contains(t, err.Error(), "already exists")
 }
 
@@ -270,6 +271,7 @@ branch refs/heads/main
 	_, err := manager.Get(ctx, issueID)
 
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrWorktreeNotFound)
 	assert.Contains(t, err.Error(), "not found")
 }
 

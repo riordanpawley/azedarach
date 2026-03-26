@@ -178,3 +178,50 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		t.Fatalf("session state after stop = %s, want %s", got, daemonstate.SessionStateStopped)
 	}
 }
+
+func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "claude",
+			SessionShell: "zsh",
+			SessionInitCommands: []string{
+				"direnv allow",
+				"cd ts-opentui && bun install",
+			},
+		},
+	}
+
+	command := d.buildSessionLaunchCommand("axt-123", "axt-123")
+	if !strings.Contains(command, "zsh -i -c") {
+		t.Fatalf("command = %q, want interactive shell launch", command)
+	}
+	if !strings.Contains(command, "direnv allow; cd ts-opentui && bun install;") {
+		t.Fatalf("command = %q, want init command sequence", command)
+	}
+	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123" claude`) {
+		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env injection", command)
+	}
+}
+
+func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "codex",
+			SessionShell: "zsh",
+		},
+	}
+
+	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123")
+	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex SessionStart hook override", command)
+	}
+	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex Stop hook override", command)
+	}
+	if !strings.Contains(command, "az notify user_prompt axt-123 codex-axt-123") {
+		t.Fatalf("command = %q, want codex user_prompt notify command", command)
+	}
+	if !strings.Contains(command, "az notify session_end axt-123 codex-axt-123") {
+		t.Fatalf("command = %q, want codex session_end notify command", command)
+	}
+}

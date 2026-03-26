@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -24,6 +25,11 @@ type Worktree struct {
 	Branch  string // Branch name (e.g., "author/issue-id/title-slug")
 	IssueID string // Associated issue ID
 }
+
+var (
+	ErrWorktreeNotFound      = errors.New("worktree not found")
+	ErrWorktreeAlreadyExists = errors.New("worktree already exists")
+)
 
 // NewWorktreeManager creates a new WorktreeManager.
 func NewWorktreeManager(runner CommandRunner, repoDir string, logger *slog.Logger) *WorktreeManager {
@@ -71,7 +77,7 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 		return nil, fmt.Errorf("failed to check if worktree exists: %w", err)
 	}
 	if exists {
-		return nil, fmt.Errorf("worktree for issue %s already exists", issueID)
+		return nil, fmt.Errorf("%w for issue %s", ErrWorktreeAlreadyExists, issueID)
 	}
 
 	// Create worktree with new branch from baseBranch.
@@ -132,7 +138,7 @@ func (w *WorktreeManager) Get(ctx context.Context, issueID string) (*Worktree, e
 		}
 	}
 
-	return nil, fmt.Errorf("worktree for issue %s not found", issueID)
+	return nil, fmt.Errorf("%w for issue %s", ErrWorktreeNotFound, issueID)
 }
 
 // List returns all worktrees managed by this WorktreeManager.
@@ -150,7 +156,7 @@ func (w *WorktreeManager) List(ctx context.Context) ([]Worktree, error) {
 func (w *WorktreeManager) Exists(ctx context.Context, issueID string) (bool, error) {
 	_, err := w.Get(ctx, issueID)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+		if errors.Is(err, ErrWorktreeNotFound) {
 			return false, nil
 		}
 		return false, err

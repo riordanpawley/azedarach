@@ -2732,31 +2732,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		// Start session
 		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
 	case "S":
-		originCandidates, eligibleUpstreamCount := m.sessionOriginCandidates(task)
-		if eligibleUpstreamCount == 0 {
-			m.addToast(Toast{
-				Level:   ToastInfo,
-				Message: fmt.Sprintf("No eligible upstream sources; using base branch %s", m.resolveBaseBranch()),
-				Expires: time.Now().Add(4 * time.Second),
-			})
-		}
-		originOverlay := overlay.NewMergeSourceSelectOverlay(
-			task,
-			originCandidates,
-			func(targetID string) tea.Cmd {
-				return func() tea.Msg {
-					return overlay.SelectionMsg{
-						Key: "session_origin",
-						Value: overlay.MergeTargetSelectedMsg{
-							SourceID: targetID,
-							TargetID: task.ID,
-						},
-					}
-				}
-			},
-			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-		)
-		return m, m.overlayStack.Push(originOverlay)
+		// Start session directly without origin/base selection prompt.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
 			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID))
