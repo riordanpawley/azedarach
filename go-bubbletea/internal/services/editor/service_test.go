@@ -171,6 +171,9 @@ func TestService_Sort(t *testing.T) {
 	if svc.GetSort().Field != domain.SortBySession {
 		t.Errorf("Expected default sort by session, got %v", svc.GetSort().Field)
 	}
+	if svc.GetSort().Order != domain.SortDesc {
+		t.Errorf("Expected default sort order desc, got %v", svc.GetSort().Order)
+	}
 
 	// Change sort field
 	svc.SetSortField(domain.SortByPriority)

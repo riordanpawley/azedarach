@@ -136,6 +136,13 @@ func TestRenderCard_WithSession(t *testing.T) {
 	if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
 		t.Errorf("Card should contain elapsed time for busy session, got: %s", stripped)
 	}
+
+	if !strings.Contains(stripped, tmuxSessionToken) {
+		t.Errorf("Card should contain tmux token, got: %s", stripped)
+	}
+	if !strings.Contains(stripped, worktreeToken) {
+		t.Errorf("Card should contain worktree token when session has worktree, got: %s", stripped)
+	}
 }
 
 func TestRenderCard_FixedHeightAcrossTypes(t *testing.T) {
@@ -436,6 +443,9 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
 			t.Errorf("Busy session should show elapsed time, got: %s", stripped)
 		}
+		if !strings.Contains(stripped, tmuxSessionToken) {
+			t.Errorf("Busy session should contain tmux token, got: %s", stripped)
+		}
 	})
 
 	t.Run("done without elapsed time", func(t *testing.T) {
@@ -468,6 +478,29 @@ func TestRenderSessionStatus(t *testing.T) {
 
 		if !strings.Contains(stripped, "✗") {
 			t.Errorf("Error session should contain error icon, got: %s", stripped)
+		}
+	})
+}
+
+func TestRenderSessionMeta(t *testing.T) {
+	t.Run("nil session", func(t *testing.T) {
+		if got := renderSessionMeta(nil); got != "" {
+			t.Fatalf("renderSessionMeta(nil) = %q, want empty", got)
+		}
+	})
+
+	t.Run("session without worktree", func(t *testing.T) {
+		session := &domain.Session{IssueID: "az-1", State: domain.SessionBusy}
+		if got := renderSessionMeta(session); got != tmuxSessionToken {
+			t.Fatalf("renderSessionMeta(without worktree) = %q, want %q", got, tmuxSessionToken)
+		}
+	})
+
+	t.Run("session with worktree", func(t *testing.T) {
+		session := &domain.Session{IssueID: "az-1", State: domain.SessionBusy, Worktree: "/tmp/az-1"}
+		want := tmuxSessionToken + " " + worktreeToken
+		if got := renderSessionMeta(session); got != want {
+			t.Fatalf("renderSessionMeta(with worktree) = %q, want %q", got, want)
 		}
 	})
 }

@@ -15,6 +15,9 @@ import (
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
 
+const tmuxSessionToken = "T:Y"
+const worktreeToken = "W:Y"
+
 // ChildProgress summarizes completion progress for a parent task's children.
 type ChildProgress struct {
 	Total int
@@ -151,10 +154,28 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	}
 
 	stateStyle := s.SessionState(session.State)
+	meta := renderSessionMeta(session)
+	var value string
 	if elapsed != "" {
-		return stateStyle.Render(fmt.Sprintf("%s %s", icon, elapsed))
+		value = fmt.Sprintf("%s %s", icon, elapsed)
+	} else {
+		value = icon
 	}
-	return stateStyle.Render(icon)
+	if meta != "" {
+		value = value + " " + meta
+	}
+	return stateStyle.Render(value)
+}
+
+func renderSessionMeta(session *domain.Session) string {
+	if session == nil {
+		return ""
+	}
+	parts := []string{tmuxSessionToken}
+	if session.Worktree != "" {
+		parts = append(parts, worktreeToken)
+	}
+	return strings.Join(parts, " ")
 }
 
 // formatDuration formats a duration as "2h 34m" or "45m"
