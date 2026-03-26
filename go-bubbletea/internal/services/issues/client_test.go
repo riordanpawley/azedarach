@@ -81,6 +81,30 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_AppendNotes(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Attachment notes",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AppendNotes(ctx, taskID, "📎 [one.png](.azedarach/images/axu/one.png)"))
+	require.NoError(t, client.AppendNotes(ctx, taskID, "📎 [two.png](.azedarach/images/axu/two.png)"))
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var notes string
+	err = db.QueryRowContext(ctx, "SELECT COALESCE(notes, '') FROM issues WHERE id = ?", taskID).Scan(&notes)
+	require.NoError(t, err)
+	assert.Equal(t, "📎 [one.png](.azedarach/images/axu/one.png)\n📎 [two.png](.azedarach/images/axu/two.png)", notes)
+}
+
 func TestClient_CreateWithParentDependency(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -105,6 +129,68 @@ func TestClient_CreateWithParentDependency(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.NotNil(t, tasks[0].ParentID)
 	assert.Equal(t, parentID, *tasks[0].ParentID)
+}
+
+func TestClient_UpdatePreventsClosingParentWithOpenChildren(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent issue",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	_, err = client.Create(ctx, CreateTaskParams{
+		Title:    "Open child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+
+	err = client.Update(ctx, parentID, domain.StatusDone)
+	require.Error(t, err)
+
+	var storeErr *domain.TaskStoreError
+	require.ErrorAs(t, err, &storeErr)
+	assert.Equal(t, "update", storeErr.Op)
+	assert.Equal(t, parentID, storeErr.TaskID)
+	assert.ErrorIs(t, storeErr.Err, domain.ErrConflict)
+
+	parentTasks, err := client.Search(ctx, parentID)
+	require.NoError(t, err)
+	require.Len(t, parentTasks, 1)
+	assert.Equal(t, domain.StatusOpen, parentTasks[0].Status)
+}
+
+func TestClient_UpdateAllowsClosingParentWhenChildrenAreClosed(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent issue",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.Update(ctx, childID, domain.StatusDone))
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
+
+	parentTasks, err := client.Search(ctx, parentID)
+	require.NoError(t, err)
+	require.Len(t, parentTasks, 1)
+	assert.Equal(t, domain.StatusDone, parentTasks[0].Status)
 }
 
 func TestClient_AddAndRemoveDependency(t *testing.T) {

@@ -66,7 +66,8 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), "az-1", "main", false)
+	imagePaths := []string{"/tmp/a.png", "/tmp/with space/image.png"}
+	got, err := client.StartSession(context.Background(), "az-1", "main", false, imagePaths)
 	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
@@ -78,6 +79,21 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 	if transport.lastReq.Meta.ProjectID != "proj-a" {
 		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
+	}
+	var body sessionCommandBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.BaseBranch != "main" {
+		t.Fatalf("base branch = %q, want main", body.BaseBranch)
+	}
+	if len(body.ImagePaths) != len(imagePaths) {
+		t.Fatalf("image path count = %d, want %d", len(body.ImagePaths), len(imagePaths))
+	}
+	for i := range imagePaths {
+		if body.ImagePaths[i] != imagePaths[i] {
+			t.Fatalf("image path[%d] = %q, want %q", i, body.ImagePaths[i], imagePaths[i])
+		}
 	}
 
 	got, err = client.StopSession(context.Background(), "az-1")
@@ -110,7 +126,7 @@ func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	if _, err := client.StartSession(context.Background(), "az-1", "main", true); err != nil {
+	if _, err := client.StartSession(context.Background(), "az-1", "main", true, nil); err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
 
@@ -229,7 +245,7 @@ func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), "az-1", "main", false)
+	got, err := client.StartSession(context.Background(), "az-1", "main", false, nil)
 	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
@@ -259,7 +275,7 @@ func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	_, err := client.StartSession(context.Background(), "az-1", "main", false)
+	_, err := client.StartSession(context.Background(), "az-1", "main", false, nil)
 	var pending *OperationPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("StartSession error = %v, want OperationPendingError", err)

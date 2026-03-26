@@ -2,7 +2,7 @@ package statusbar
 
 import "github.com/riordanpawley/azedarach/internal/types"
 
-// GetHints returns the keybinding hints for the given mode
+// GetHints returns the keybinding hints for the given mode.
 func GetHints(mode types.Mode) string {
 	switch mode {
 	case types.ModeNormal:

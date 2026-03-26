@@ -104,6 +104,8 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasWorktree},
 	)
 
+	actions = append(actions, Action{Key: "i", Label: "Image attachments", Enabled: true})
+
 	// Task actions separator
 	actions = append(actions, Action{Key: "", Label: "───────────────────", Enabled: false})
 

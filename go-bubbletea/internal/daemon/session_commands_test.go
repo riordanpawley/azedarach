@@ -191,7 +191,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "axt-123", false)
+	command := d.buildSessionLaunchCommand("axt-123", "axt-123", false, nil)
 	if !strings.Contains(command, "zsh -i -c") {
 		t.Fatalf("command = %q, want interactive shell launch", command)
 	}
@@ -211,7 +211,12 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", false)
+	command := d.buildSessionLaunchCommand(
+		"axt-123",
+		"codex-axt-123",
+		false,
+		[]string{"/tmp/a.png", "/tmp/with space/image.png", "   "},
+	)
 	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex SessionStart hook override", command)
 	}
@@ -224,6 +229,12 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, "az notify session_end axt-123 codex-axt-123") {
 		t.Fatalf("command = %q, want codex session_end notify command", command)
 	}
+	if !strings.Contains(command, `--image "/tmp/a.png"`) {
+		t.Fatalf("command = %q, want codex image argument for /tmp/a.png", command)
+	}
+	if !strings.Contains(command, `--image "/tmp/with space/image.png"`) {
+		t.Fatalf("command = %q, want codex image argument for spaced path", command)
+	}
 }
 
 func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *testing.T) {
@@ -234,7 +245,7 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true)
+	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true, nil)
 	if !strings.Contains(command, "--dangerously-skip-permissions") {
 		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
 	}

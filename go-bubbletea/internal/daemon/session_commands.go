@@ -16,10 +16,11 @@ import (
 )
 
 type sessionCommandBody struct {
-	ProjectID  string `json:"project_id"`
-	SessionID  string `json:"session_id"`
-	BaseBranch string `json:"base_branch,omitempty"`
-	Yolo       bool   `json:"yolo,omitempty"`
+	ProjectID  string   `json:"project_id"`
+	SessionID  string   `json:"session_id"`
+	BaseBranch string   `json:"base_branch,omitempty"`
+	Yolo       bool     `json:"yolo,omitempty"`
+	ImagePaths []string `json:"image_paths,omitempty"`
 }
 
 type resolvedSessionTarget struct {
@@ -28,6 +29,7 @@ type resolvedSessionTarget struct {
 	SessionID  string
 	BaseBranch string
 	Yolo       bool
+	ImagePaths []string
 }
 
 type sessionRecoveryResult struct {
@@ -134,6 +136,7 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 		SessionID:  sessionID,
 		BaseBranch: cmd.BaseBranch,
 		Yolo:       cmd.Yolo,
+		ImagePaths: cmd.ImagePaths,
 	}, protocol.ResponseEnvelope{}, true
 }
 
@@ -184,7 +187,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	launchCommand := d.buildSessionLaunchCommand(cmd.IssueID, cmd.SessionID, cmd.Yolo)
+	launchCommand := d.buildSessionLaunchCommand(cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths)
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -445,7 +448,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
 			continue
 		}
-		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false))
+		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false, nil))
 		tmuxSet[issueKey] = struct{}{}
 		tmuxNameByIssueKey[issueKey] = canonicalSessionID
 		result.RecreatedTmuxSessions++
@@ -563,8 +566,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	return tasks
 }
 
-func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool) string {
-	toolCommand := d.buildCLIToolCommand(issueID, sessionID, yolo)
+func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool, imagePaths []string) string {
+	toolCommand := d.buildCLIToolCommand(issueID, sessionID, yolo, imagePaths)
 	commands := make([]string, 0, len(d.cfg.SessionInitCommands)+2)
 	for _, initCmd := range d.cfg.SessionInitCommands {
 		trimmed := strings.TrimSpace(initCmd)
@@ -583,7 +586,7 @@ func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool)
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
-func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool) string {
+func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, imagePaths []string) string {
 	tool := strings.TrimSpace(d.cfg.CLITool)
 	if tool == "" {
 		tool = "claude"
@@ -601,6 +604,13 @@ func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool) strin
 			buildCodexConfigOverrideArg("hooks.SessionStart", startCommand),
 			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
 		)
+		for _, imagePath := range imagePaths {
+			trimmedPath := strings.TrimSpace(imagePath)
+			if trimmedPath == "" {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf(`--image "%s"`, escapeForShellDoubleQuotes(trimmedPath)))
+		}
 	}
 	if yolo {
 		parts = append(parts, "--dangerously-skip-permissions")

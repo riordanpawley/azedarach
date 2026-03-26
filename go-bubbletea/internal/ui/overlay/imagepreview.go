@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // ImagePreviewOverlay displays and manages image attachments with navigation
@@ -193,7 +194,13 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 		b.WriteString("\n\n")
 		b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
 		b.WriteString("\n\n")
-		b.WriteString(i.styles.Footer.Render(i.styles.MenuKey.Render("Esc") + " Close"))
+		b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+			{Key: "Esc", Description: "Close"},
+		}, 0, keybinds.Theme{
+			KeyStyle:         i.styles.MenuKey,
+			DescriptionStyle: i.styles.Footer,
+			FooterStyle:      i.styles.Footer,
+		}))
 		return b.String()
 	}
 
@@ -272,21 +279,24 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 	b.WriteString("\n\n")
 
 	// Help text
-	hints := []string{}
+	hints := make([]keybinds.Binding, 0, 6)
 	if len(i.images) > 1 {
 		hints = append(hints,
-			i.styles.MenuKey.Render("h/l")+" "+i.styles.Footer.Render("Navigate"),
-			i.styles.MenuKey.Render("g/G")+" "+i.styles.Footer.Render("First/Last"),
+			keybinds.Binding{Key: "h/l", Description: "Navigate"},
+			keybinds.Binding{Key: "g/G", Description: "First/Last"},
 		)
 	}
 	hints = append(hints,
-		i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
-		i.styles.MenuKey.Render("d")+" "+i.styles.Footer.Render("Delete"),
-		i.styles.MenuKey.Render("r")+" "+i.styles.Footer.Render("Refresh"),
-		i.styles.MenuKey.Render("Esc")+" "+i.styles.Footer.Render("Close"),
+		keybinds.Binding{Key: "o", Description: "Open"},
+		keybinds.Binding{Key: "d", Description: "Delete"},
+		keybinds.Binding{Key: "r", Description: "Refresh"},
+		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
-
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -325,8 +335,14 @@ func (i *ImagePreviewOverlay) renderDeleteConfirmation() string {
 	b.WriteString("\n\n")
 
 	// Footer hint
-	footer := i.styles.Footer.Render("Y: Delete • N/Esc: Cancel")
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "Y", Description: "Delete"},
+		{Key: "N/Esc", Description: "Cancel"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }

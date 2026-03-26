@@ -11,6 +11,34 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 )
 
+type mockClipboardAttachService struct {
+	attachments []attachment.Attachment
+	attachCalls int
+}
+
+func (m *mockClipboardAttachService) List(context.Context, string) ([]attachment.Attachment, error) {
+	return m.attachments, nil
+}
+
+func (m *mockClipboardAttachService) AttachFromClipboard(context.Context, string) (*attachment.Attachment, error) {
+	m.attachCalls++
+	attached := &attachment.Attachment{
+		ID:       "from-clipboard",
+		IssueID:  "az-123",
+		Filename: "clipboard.png",
+	}
+	m.attachments = append(m.attachments, *attached)
+	return attached, nil
+}
+
+func (m *mockClipboardAttachService) Attach(context.Context, string, string) (*attachment.Attachment, error) {
+	return nil, nil
+}
+
+func (m *mockClipboardAttachService) Delete(context.Context, string, string) error {
+	return nil
+}
+
 func TestNewImageAttachOverlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -219,6 +247,17 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 		t.Errorf("expected OpenImagePreviewMsg, got %T", resultMsg)
 	}
 
+	// Test v also sends OpenImagePreviewMsg
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if cmd == nil {
+		t.Error("expected command to open image preview via v, got nil")
+		return
+	}
+	resultMsg = cmd()
+	if _, ok := resultMsg.(OpenImagePreviewMsg); !ok {
+		t.Errorf("expected OpenImagePreviewMsg via v, got %T", resultMsg)
+	}
+
 	overlay.mode = imageAttachModePreview
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
@@ -228,6 +267,24 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	closeMsg := cmd()
 	if _, ok := closeMsg.(CloseOverlayMsg); !ok {
 		t.Errorf("expected CloseOverlayMsg from preview q, got %T", closeMsg)
+	}
+}
+
+func TestImageAttachOverlay_PasteKeyPTriggersClipboardAttach(t *testing.T) {
+	service := &mockClipboardAttachService{}
+	overlay := NewImageAttachOverlay("az-123", service)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if cmd == nil {
+		t.Fatal("expected paste command for key p")
+	}
+	msg := cmd()
+	if _, ok := msg.(attachmentAddedMsg); !ok {
+		t.Fatalf("expected attachmentAddedMsg for key p, got %T", msg)
+	}
+
+	if service.attachCalls != 1 {
+		t.Fatalf("attach calls = %d, want 1", service.attachCalls)
 	}
 }
 

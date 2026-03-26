@@ -160,6 +160,23 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	return resp, nil
 }
 
+func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	var cmd struct {
+		TaskID string `json:"task_id"`
+		Line   string `json:"line"`
+	}
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if err := d.issues.AppendNotes(ctx, cmd.TaskID, cmd.Line); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	resp := d.successResponse(req)
+	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	return resp, nil
+}
+
 func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd struct {
 		TaskID string `json:"task_id"`

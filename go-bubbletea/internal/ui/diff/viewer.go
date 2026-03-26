@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -326,12 +327,12 @@ func (d *DiffViewer) renderLine(line DiffLine) string {
 
 // renderFooter renders navigation hints
 func (d *DiffViewer) renderFooter() string {
-	hints := []string{
-		d.styles.KeyHint.Render("j/k") + d.styles.Footer.Render(" navigate"),
-		d.styles.KeyHint.Render("g/G") + d.styles.Footer.Render(" jump top/bottom"),
-		d.styles.KeyHint.Render("Enter") + d.styles.Footer.Render(" expand/collapse"),
-		d.styles.KeyHint.Render("E/C") + d.styles.Footer.Render(" expand/collapse all"),
-		d.styles.KeyHint.Render("q/Esc") + d.styles.Footer.Render(" close"),
+	hints := []keybinds.Binding{
+		{Key: "j/k", Description: "navigate"},
+		{Key: "g/G", Description: "jump top/bottom"},
+		{Key: "Enter", Description: "expand/collapse"},
+		{Key: "E/C", Description: "expand/collapse all"},
+		{Key: "q/Esc", Description: "close"},
 	}
 
 	fileInfo := ""
@@ -341,7 +342,11 @@ func (d *DiffViewer) renderFooter() string {
 
 	return lipgloss.JoinHorizontal(
 		lipgloss.Left,
-		strings.Join(hints, d.styles.Footer.Render(" • ")),
+		keybinds.RenderInline(hints, " • ", keybinds.Theme{
+			KeyStyle:         d.styles.KeyHint,
+			DescriptionStyle: d.styles.Footer,
+			FooterStyle:      d.styles.Footer,
+		}),
 		fileInfo,
 	)
 }

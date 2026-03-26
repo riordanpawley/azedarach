@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -155,7 +156,16 @@ func (w *TaskWorkspaceOverlay) View() string {
 		Padding(0, 1).
 		Render(actionsBody)
 
-	footer := w.styles.Footer.Render("Tab/h/l: switch pane • j/k: scroll or navigate • Enter/action key: run • Esc: close")
+	footer := keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "Tab/h/l", Description: "switch pane"},
+		{Key: "j/k", Description: "scroll or navigate"},
+		{Key: "Enter/action key", Description: "run"},
+		{Key: "Esc", Description: "close"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         w.styles.MenuKey,
+		DescriptionStyle: w.styles.Footer,
+		FooterStyle:      w.styles.Footer,
+	})
 	return lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Top, detailView, actionsView), footer)
 }
 

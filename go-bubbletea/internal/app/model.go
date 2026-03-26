@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -28,6 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
@@ -59,6 +61,7 @@ const (
 	diffPreviewMaxCharacters = 200
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
+	eventSummaryMaxRunes     = 140
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -133,6 +136,7 @@ type Model struct {
 	currentProject string
 	projects       []domain.Project
 	repoDir        string
+	logFilePath    string
 
 	// Toasts
 	toasts []Toast
@@ -195,14 +199,15 @@ func New(cfg *config.Config) Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(styles.Blue)
 
-	// Initialize logger
-	logger := slog.Default()
-
 	// Resolve repository directory for local services and daemon routing.
 	repoDir, err := os.Getwd()
 	if err != nil {
-		logger.Error("failed to get current directory", "error", err)
 		repoDir = "."
+	}
+	logFilePath := resolveTUILogFilePath(cfg)
+	logger := newTUILogger(logFilePath)
+	if err != nil {
+		logger.Error("failed to get current directory", "error", err)
 	}
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonClient := daemonclient.New(transport.NewClient(socketPath))
@@ -237,6 +242,7 @@ func New(cfg *config.Config) Model {
 		tmuxAvailable:        deps.TmuxAvailable,
 		tmuxClient:           deps.TmuxClient,
 		repoDir:              repoDir,
+		logFilePath:          logFilePath,
 		currentProject:       resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
@@ -742,16 +748,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Image attachment messages
+		// Image attachment messages
 	case overlay.AttachmentActionMsg:
 		if msg.Action == "attached" {
+			filename := "image"
+			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
+				filename = msg.Attachment.Filename
+			}
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: fmt.Sprintf("Image attached: %s", msg.Attachment.Filename),
+				Message: fmt.Sprintf("Image attached: %s", filename),
 				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.appendAttachmentNoteCmd(msg.Attachment)
+		} else if msg.Action == "error" && msg.Error != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Image attachment failed: %s", compactErrorMessage(msg.Error)),
+				Expires: time.Now().Add(5 * time.Second),
 			})
 		}
 		return m, nil
+
+	case overlay.OpenImagePreviewMsg:
+		imageService, ok := m.attachmentService.(*attachment.Service)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Image preview unavailable: unsupported attachment service",
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		preview := overlay.NewImagePreviewOverlay(msg.IssueID, imageService, msg.InitialIndex)
+		return m, m.overlayStack.Push(preview)
 
 	// Cleanup executed result
 	case overlay.CleanupExecutedMsg:
@@ -982,6 +1012,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
 		return m, m.loadIssuesCmd()
+	}
+
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg)
 	}
 
 	return m, nil
@@ -2510,7 +2544,7 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch, yolo); err != nil {
+		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch, yolo, m.sessionImagePaths(ctx, issueID)); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
 			}
@@ -2519,6 +2553,29 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea
 
 		return sessionStartedMsg{issueID: issueID}
 	}
+}
+
+func (m Model) sessionImagePaths(ctx context.Context, issueID string) []string {
+	if m.attachmentService == nil {
+		return nil
+	}
+	attachments, err := m.attachmentService.List(ctx, issueID)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("failed to list issue image attachments for session start", "issue_id", issueID, "error", err)
+		}
+		return nil
+	}
+
+	paths := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		path := strings.TrimSpace(attachment.Path)
+		if path == "" {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 // stopSessionCmd requests daemon-owned lifecycle stop and lets daemon snapshots rebuild the local projection.
@@ -3033,11 +3090,36 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) eventLogFilePath() string {
-	base := m.repoDir
-	if strings.TrimSpace(base) == "" {
-		base = "."
+	if strings.TrimSpace(m.logFilePath) != "" {
+		return m.logFilePath
 	}
-	return filepath.Join(base, "az.log")
+	return resolveTUILogFilePath(m.config)
+}
+
+func resolveTUILogFilePath(cfg *config.Config) string {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	baseDir := strings.TrimSpace(cfg.Session.LogDir)
+	if baseDir == "" {
+		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+			baseDir = filepath.Join(homeDir, ".azedarach", "logs")
+		} else {
+			baseDir = filepath.Join(".", ".azedarach", "logs")
+		}
+	}
+	return filepath.Join(baseDir, "az.log")
+}
+
+func newTUILogger(logPath string) *slog.Logger {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
 func (m Model) configSourcePath() string {
@@ -3093,6 +3175,57 @@ func shellSingleQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func compactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
+}
+
+func (m Model) appendAttachmentNoteCmd(att *attachment.Attachment) tea.Cmd {
+	if att == nil || m.daemonClient == nil {
+		return nil
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return nil
+	}
+	line := formatAttachmentNoteLine(att)
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.daemonClient.AppendTaskNotes(ctx, issueID, line); err != nil {
+			return Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Image attached but failed to append notes: %s", compactErrorMessage(err)),
+				Expires: time.Now().Add(6 * time.Second),
+			}
+		}
+		return nil
+	}
+}
+
+func formatAttachmentNoteLine(att *attachment.Attachment) string {
+	if att == nil {
+		return ""
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return ""
+	}
+	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	source := "file"
+	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
+		source = "clipboard"
+	}
+	timestamp := att.Created.Local().Format("2006-01-02 15:04:05")
+	return fmt.Sprintf("📎 [%s](%s) (%s, %s)", filename, relativePath, source, timestamp)
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
@@ -3428,17 +3561,29 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 
 func runtimeEventSummary(evt protocol.EventEnvelope) string {
 	eventName := strings.TrimSpace(evt.Event)
-	body := strings.TrimSpace(string(evt.Body))
+	body := compactSummaryText(string(evt.Body))
 	switch {
 	case eventName != "" && body != "":
-		return eventName + ": " + body
+		return truncateSummary(eventName + ": " + body)
 	case eventName != "":
-		return eventName
+		return truncateSummary(eventName)
 	case body != "":
-		return body
+		return truncateSummary(body)
 	default:
-		return strings.TrimSpace(string(evt.Kind))
+		return truncateSummary(strings.TrimSpace(string(evt.Kind)))
 	}
+}
+
+func compactSummaryText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func truncateSummary(value string) string {
+	runes := []rune(value)
+	if len(runes) <= eventSummaryMaxRunes {
+		return value
+	}
+	return string(runes[:eventSummaryMaxRunes-1]) + "…"
 }
 
 // expireToasts removes expired toasts from the list
