@@ -232,7 +232,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		m := newDaemonTestModel(transport)
 
-		statusMsg := m.moveTaskStatusCmd("az-1", 1)()
+		statusMsg := m.moveTaskStatusCmd("az-1", domain.StatusOpen, domain.StatusInProgress)()
 		status, ok := statusMsg.(taskStatusResultMsg)
 		if !ok || status.newStatus != domain.StatusInProgress || status.err != nil {
 			t.Fatalf("status result = %#v", statusMsg)
@@ -248,6 +248,122 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
+}
+
+func TestTaskStatusMovePendingKeepsOptimisticOverlayAcrossHydration(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdateStatus {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			respBody, _ := json.Marshal(map[string]any{
+				"operation_id": "op-status",
+				"state":        string(protocol.OperationStateQueued),
+			})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+	m.nav.SelectTask("az-1", 0)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if cmd == nil {
+		t.Fatal("expected task move command")
+	}
+	optimistic := updated.(Model)
+	if optimistic.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("optimistic status = %s, want %s", optimistic.tasks[0].Status, domain.StatusInProgress)
+	}
+
+	result := cmd()
+	updatedAfterResult, refreshCmd := optimistic.Update(result)
+	if refreshCmd == nil {
+		t.Fatal("expected refresh command for pending status move")
+	}
+	pendingModel := updatedAfterResult.(Model)
+	if pendingModel.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("pending status = %s, want %s", pendingModel.tasks[0].Status, domain.StatusInProgress)
+	}
+	if len(pendingModel.toasts) == 0 {
+		t.Fatal("expected pending toast")
+	}
+	pendingToast := pendingModel.toasts[len(pendingModel.toasts)-1].Message
+	if !strings.Contains(pendingToast, "Task move queued for az-1 (operation op-status)") {
+		t.Fatalf("toast = %q, want pending task move message", pendingToast)
+	}
+
+	staleHydration, _ := pendingModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-1", Status: domain.StatusOpen}},
+	})
+	staleModel := staleHydration.(Model)
+	if staleModel.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("stale hydration status = %s, want optimistic %s", staleModel.tasks[0].Status, domain.StatusInProgress)
+	}
+
+	confirmedHydration, _ := staleModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-1", Status: domain.StatusInProgress}},
+	})
+	confirmedModel := confirmedHydration.(Model)
+	if confirmedModel.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("confirmed hydration status = %s, want %s", confirmedModel.tasks[0].Status, domain.StatusInProgress)
+	}
+
+	postConfirmHydration, _ := confirmedModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{{ID: "az-1", Status: domain.StatusOpen}},
+	})
+	postConfirmModel := postConfirmHydration.(Model)
+	if postConfirmModel.tasks[0].Status != domain.StatusOpen {
+		t.Fatalf("post-confirm hydration status = %s, want %s after clearing overlay", postConfirmModel.tasks[0].Status, domain.StatusOpen)
+	}
+}
+
+func TestTaskStatusMoveFailureRollsBackOptimisticState(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskUpdateStatus {
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, io.ErrUnexpectedEOF
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Status: domain.StatusOpen}}
+	m.nav.SelectTask("az-1", 0)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "l"})
+	if cmd == nil {
+		t.Fatal("expected task move command")
+	}
+	optimistic := updated.(Model)
+	if optimistic.tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("optimistic status = %s, want %s", optimistic.tasks[0].Status, domain.StatusInProgress)
+	}
+
+	result := cmd()
+	rolledBack, refreshCmd := optimistic.Update(result)
+	if refreshCmd != nil {
+		t.Fatal("unexpected refresh command for terminal task move failure")
+	}
+	rolledBackModel := rolledBack.(Model)
+	if rolledBackModel.tasks[0].Status != domain.StatusOpen {
+		t.Fatalf("rolled back status = %s, want %s", rolledBackModel.tasks[0].Status, domain.StatusOpen)
+	}
+	if len(rolledBackModel.toasts) == 0 {
+		t.Fatal("expected error toast")
+	}
+	lastToast := rolledBackModel.toasts[len(rolledBackModel.toasts)-1].Message
+	if !strings.Contains(lastToast, "Failed to update task") {
+		t.Fatalf("toast = %q, want update failure message", lastToast)
+	}
 }
 
 func TestDaemonCommandsReportMissingDaemonClient(t *testing.T) {
