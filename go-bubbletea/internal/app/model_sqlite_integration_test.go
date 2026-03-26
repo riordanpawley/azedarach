@@ -23,13 +23,7 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 	seedModelIssueStore(t, repoDir, "agm", "Close go-bubbletea parity gaps", "open", 1, "epic")
 	seedModelIssueStore(t, repoDir, "agn", "Finish go-bubbletea parity lane", "closed", 2, "task")
 
-	runtimeDir, err := os.MkdirTemp(".", "azd-model-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
-	socketPath := filepath.Join(runtimeDir, "daemon.sock")
-	lockPath := filepath.Join(runtimeDir, "daemon.lock")
+	socketPath, lockPath := newModelTestRuntimePaths(t)
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
@@ -91,13 +85,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 	seedModelIssueDependency(t, repoDir, "az-child", "az-parent", "parent-child")
 	seedModelIssueDependency(t, repoDir, "az-blocks-only", "az-parent", "blocks")
 
-	runtimeDir, err := os.MkdirTemp(".", "azd-model-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
-	socketPath := filepath.Join(runtimeDir, "daemon.sock")
-	lockPath := filepath.Join(runtimeDir, "daemon.lock")
+	socketPath, lockPath := newModelTestRuntimePaths(t)
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
@@ -247,4 +235,15 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}
+}
+
+func newModelTestRuntimePaths(t *testing.T) (string, string) {
+	t.Helper()
+
+	runtimeDir, err := os.MkdirTemp("/tmp", "azd-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(/tmp): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	return filepath.Join(runtimeDir, "s.sock"), filepath.Join(runtimeDir, "l.lock")
 }
