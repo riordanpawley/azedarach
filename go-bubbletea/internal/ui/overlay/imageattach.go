@@ -108,7 +108,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "V", "y", "ctrl+v":
+		case "v", "V", "y", "ctrl+v":
 			// Paste from clipboard
 			return i, i.pasteFromClipboard()
 
@@ -133,7 +133,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "enter", "p", "v":
+		case "enter", "p":
 			// Open full image preview overlay
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				return i, func() tea.Msg {
@@ -145,9 +145,6 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "r":
-			// Refresh list
-			return i, i.loadAttachments()
 		}
 
 	case attachmentsLoadedMsg:
@@ -227,20 +224,15 @@ func (i *ImageAttachOverlay) View() string {
 
 // renderList renders the attachment list
 func (i *ImageAttachOverlay) renderList() string {
-	var b strings.Builder
-
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#89b4fa")).
-		Bold(true)
-
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.issueID)))
-	b.WriteString("\n\n")
+	var content strings.Builder
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Bold(true)
+	content.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.issueID)))
+	content.WriteString("\n\n")
 
 	if len(i.files) == 0 {
-		b.WriteString(i.styles.Footer.Render("No attachments yet."))
-		b.WriteString("\n\n")
+		content.WriteString(i.styles.Footer.Render("No attachments yet."))
+		content.WriteString("\n\n")
 	} else {
-		// Render file list
 		for idx, file := range i.files {
 			style := i.styles.MenuItem
 			indicator := "  "
@@ -248,55 +240,48 @@ func (i *ImageAttachOverlay) renderList() string {
 				style = i.styles.MenuItemActive
 				indicator = "▶ "
 			}
-
-			// Format size
 			sizeStr := formatFileSize(file.Size)
 			typeStr := strings.TrimPrefix(file.MimeType, "image/")
-
 			line := fmt.Sprintf("%s%-40s %8s  %s", indicator, truncate(file.Filename, 40), sizeStr, typeStr)
-			b.WriteString(style.Render(line))
-			b.WriteString("\n")
+			content.WriteString(style.Render(line))
+			content.WriteString("\n")
 		}
-		b.WriteString("\n")
+		content.WriteString("\n")
 	}
 
-	// Error display
 	if i.error != "" {
-		errorStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#f38ba8")).
-			Bold(true)
-		b.WriteString(errorStyle.Render("Error: " + i.error))
-		b.WriteString("\n\n")
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Bold(true)
+		content.WriteString(errorStyle.Render("Error: " + i.error))
+		content.WriteString("\n\n")
 	}
-
-	// Separator
-	b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
-	b.WriteString("\n\n")
 
 	// Help text
 	hints := []keybinds.Binding{
-		{Key: "V/y", Description: "Paste from clipboard"},
+		{Key: "v/y", Description: "Paste from clipboard"},
 		{Key: "f", Description: "Attach from file"},
 	}
 	if len(i.files) > 0 {
 		hints = append(hints,
 			keybinds.Binding{Key: "o", Description: "Open"},
 			keybinds.Binding{Key: "d/x", Description: "Delete"},
-			keybinds.Binding{Key: "Enter/v/p", Description: "Preview"},
+			keybinds.Binding{Key: "Enter/p", Description: "Preview"},
 		)
 	}
-	hints = append(hints,
-		keybinds.Binding{Key: "r", Description: "Refresh"},
-		keybinds.Binding{Key: "Esc", Description: "Close"},
-	)
-
-	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
+	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "Close"})
+	footer := i.styles.Separator.Render(strings.Repeat("─", 70)) + "\n\n" + keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
 		KeyStyle:         i.styles.MenuKey,
 		DescriptionStyle: i.styles.Footer,
 		FooterStyle:      i.styles.Footer,
-	}))
+	})
 
-	return b.String()
+	overlayBodyHeight := 24
+	contentHeight := lipgloss.Height(content.String())
+	footerHeight := lipgloss.Height(footer)
+	spacerLines := overlayBodyHeight - contentHeight - footerHeight
+	if spacerLines < 1 {
+		spacerLines = 1
+	}
+	return content.String() + strings.Repeat("\n", spacerLines) + footer
 }
 
 // renderPreview renders attachment details

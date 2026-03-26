@@ -219,17 +219,6 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 		t.Errorf("expected OpenImagePreviewMsg, got %T", resultMsg)
 	}
 
-	// Test 'v' also opens OpenImagePreviewMsg.
-	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
-	if cmd == nil {
-		t.Error("expected command to open image preview via v, got nil")
-		return
-	}
-	resultMsg = cmd()
-	if _, ok := resultMsg.(OpenImagePreviewMsg); !ok {
-		t.Errorf("expected OpenImagePreviewMsg via v, got %T", resultMsg)
-	}
-
 	overlay.mode = imageAttachModePreview
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
