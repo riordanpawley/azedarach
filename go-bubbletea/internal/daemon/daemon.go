@@ -232,6 +232,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":
 		return d.handleTaskUpdateDetails(ctx, req)
+	case "task.append_notes":
+		return d.handleTaskAppendNotes(ctx, req)
 	case "task.delete":
 		return d.handleTaskDelete(ctx, req)
 	case "task.archive":

@@ -751,11 +751,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Image attachment messages
 	case overlay.AttachmentActionMsg:
 		if msg.Action == "attached" {
+			filename := "image"
+			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
+				filename = msg.Attachment.Filename
+			}
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: fmt.Sprintf("Image attached: %s", msg.Attachment.Filename),
+				Message: fmt.Sprintf("Image attached: %s", filename),
 				Expires: time.Now().Add(3 * time.Second),
 			})
+			return m, m.appendAttachmentNoteCmd(msg.Attachment)
 		} else if msg.Action == "error" && msg.Error != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -3093,6 +3098,50 @@ func compactErrorMessage(err error) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
+}
+
+func (m Model) appendAttachmentNoteCmd(att *attachment.Attachment) tea.Cmd {
+	if att == nil || m.daemonClient == nil {
+		return nil
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return nil
+	}
+	line := formatAttachmentNoteLine(att)
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.daemonClient.AppendTaskNotes(ctx, issueID, line); err != nil {
+			return Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Image attached but failed to append notes: %s", compactErrorMessage(err)),
+				Expires: time.Now().Add(6 * time.Second),
+			}
+		}
+		return nil
+	}
+}
+
+func formatAttachmentNoteLine(att *attachment.Attachment) string {
+	if att == nil {
+		return ""
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return ""
+	}
+	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	source := "file"
+	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
+		source = "clipboard"
+	}
+	timestamp := att.Created.Local().Format("2006-01-02 15:04:05")
+	return fmt.Sprintf("📎 [%s](%s) (%s, %s)", filename, relativePath, source, timestamp)
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {

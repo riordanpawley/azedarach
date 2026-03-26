@@ -81,6 +81,30 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_AppendNotes(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Attachment notes",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AppendNotes(ctx, taskID, "📎 [one.png](.azedarach/images/axu/one.png)"))
+	require.NoError(t, client.AppendNotes(ctx, taskID, "📎 [two.png](.azedarach/images/axu/two.png)"))
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var notes string
+	err = db.QueryRowContext(ctx, "SELECT COALESCE(notes, '') FROM issues WHERE id = ?", taskID).Scan(&notes)
+	require.NoError(t, err)
+	assert.Equal(t, "📎 [one.png](.azedarach/images/axu/one.png)\n📎 [two.png](.azedarach/images/axu/two.png)", notes)
+}
+
 func TestClient_CreateWithParentDependency(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
