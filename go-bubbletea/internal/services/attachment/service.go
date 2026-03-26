@@ -70,15 +70,17 @@ func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string)
 
 // AttachFromClipboard reads an image from the clipboard and attaches it
 func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Attachment, error) {
-	s.logger.Debug("attaching from clipboard", "issue_id", issueID)
+	s.logger.Info("attaching image from clipboard", "issue_id", issueID)
 
 	// Read image from clipboard
 	data, err := ReadImageFromClipboard(ctx)
 	if err != nil {
+		s.logger.Warn("clipboard image read failed", "issue_id", issueID, "error", err)
 		return nil, fmt.Errorf("failed to read clipboard: %w", err)
 	}
 
 	if len(data) == 0 {
+		s.logger.Warn("clipboard image read returned empty payload", "issue_id", issueID)
 		return nil, fmt.Errorf("clipboard is empty or does not contain an image")
 	}
 

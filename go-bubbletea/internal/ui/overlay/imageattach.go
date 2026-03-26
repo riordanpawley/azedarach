@@ -109,7 +109,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "v", "V", "y", "ctrl+v":
+		case "p":
 			// Paste from clipboard
 			return i, i.pasteFromClipboard()
 
@@ -134,7 +134,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "enter", "p":
+		case "enter", "v":
 			// Open full image preview overlay
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				return i, func() tea.Msg {
@@ -263,14 +263,14 @@ func (i *ImageAttachOverlay) renderList() string {
 
 	// Help text
 	hints := []keybinds.Binding{
-		{Key: "v/y/Ctrl+V", Description: "Paste from clipboard"},
+		{Key: "p", Description: "Paste from clipboard"},
 		{Key: "f", Description: "Attach from file"},
 	}
 	if len(i.files) > 0 {
 		hints = append(hints,
 			keybinds.Binding{Key: "o", Description: "Open"},
 			keybinds.Binding{Key: "d/x", Description: "Delete"},
-			keybinds.Binding{Key: "Enter/p", Description: "Preview"},
+			keybinds.Binding{Key: "Enter/v", Description: "Preview"},
 		)
 	}
 	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "Close"})

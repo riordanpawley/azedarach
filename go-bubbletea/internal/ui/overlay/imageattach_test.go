@@ -247,6 +247,17 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 		t.Errorf("expected OpenImagePreviewMsg, got %T", resultMsg)
 	}
 
+	// Test v also sends OpenImagePreviewMsg
+	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if cmd == nil {
+		t.Error("expected command to open image preview via v, got nil")
+		return
+	}
+	resultMsg = cmd()
+	if _, ok := resultMsg.(OpenImagePreviewMsg); !ok {
+		t.Errorf("expected OpenImagePreviewMsg via v, got %T", resultMsg)
+	}
+
 	overlay.mode = imageAttachModePreview
 	_, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
@@ -259,23 +270,21 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	}
 }
 
-func TestImageAttachOverlay_PasteKeysTriggerClipboardAttach(t *testing.T) {
+func TestImageAttachOverlay_PasteKeyPTriggersClipboardAttach(t *testing.T) {
 	service := &mockClipboardAttachService{}
 	overlay := NewImageAttachOverlay("az-123", service)
 
-	for _, key := range []rune{'v', 'y'} {
-		_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
-		if cmd == nil {
-			t.Fatalf("expected paste command for key %q", string(key))
-		}
-		msg := cmd()
-		if _, ok := msg.(attachmentAddedMsg); !ok {
-			t.Fatalf("expected attachmentAddedMsg for key %q, got %T", string(key), msg)
-		}
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if cmd == nil {
+		t.Fatal("expected paste command for key p")
+	}
+	msg := cmd()
+	if _, ok := msg.(attachmentAddedMsg); !ok {
+		t.Fatalf("expected attachmentAddedMsg for key p, got %T", msg)
 	}
 
-	if service.attachCalls != 2 {
-		t.Fatalf("attach calls = %d, want 2", service.attachCalls)
+	if service.attachCalls != 1 {
+		t.Fatalf("attach calls = %d, want 1", service.attachCalls)
 	}
 }
 
