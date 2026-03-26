@@ -588,12 +588,36 @@ pub fn update_with_context(
 // Helper functions
 
 fn move_cursor(model: Model, dx: Int, dy: Int) -> Model {
-  let new_col = int.clamp(model.cursor.column_index + dx, 0, 3)
+  let new_col = case dx == 0 {
+    True -> model.cursor.column_index
+    False -> {
+      let step = case dx < 0 {
+        True -> -1
+        False -> 1
+      }
+      case find_next_non_empty_column(model, model.cursor.column_index, step) {
+        Some(col) -> col
+        None -> model.cursor.column_index
+      }
+    }
+  }
   let tasks_in_col = model.tasks_in_column(model, new_col)
   let max_idx = int.max(0, list.length(tasks_in_col) - 1)
   let new_idx = int.clamp(model.cursor.task_index + dy, 0, max_idx)
 
   Model(..model, cursor: Cursor(column_index: new_col, task_index: new_idx))
+}
+
+fn find_next_non_empty_column(model: Model, from: Int, step: Int) -> Option(Int) {
+  let next = from + step
+  case next < 0 || next > 3 {
+    True -> None
+    False ->
+      case model.tasks_in_column(model, next) != [] {
+        True -> Some(next)
+        False -> find_next_non_empty_column(model, next, step)
+      }
+  }
 }
 
 fn goto_first(model: Model) -> Model {
