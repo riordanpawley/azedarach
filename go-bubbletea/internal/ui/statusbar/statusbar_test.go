@@ -109,8 +109,8 @@ func TestStatusBar_RenderActionMode(t *testing.T) {
 	if !strings.Contains(result, "h/l: move") {
 		t.Errorf("Expected status bar to contain move hint, got: %s", result)
 	}
-	if !strings.Contains(result, "w/W: cleanup") {
-		t.Errorf("Expected status bar to contain cleanup hint, got: %s", result)
+	if !strings.Contains(result, "m/b: merge") {
+		t.Errorf("Expected status bar to contain merge hint, got: %s", result)
 	}
 }
 
@@ -252,7 +252,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
-		{types.ModeAction, "h/l: move  s/S: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m: merge  P: PR  f: diff  w/W: cleanup  e: edit  c: child  d: delete  Esc/q: cancel"},
+		{types.ModeAction, "h/l: move  s/S/!: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  T/d: tombstone/delete  Esc/q: cancel"},
 	}
 
 	for _, tt := range tests {

@@ -193,7 +193,10 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		{
 			Name: "Task Actions",
 			Bindings: []KeyBinding{
-				{Key: "r", Description: "Refresh board data (board modes)"},
+				{Key: "r (board)", Description: "Refresh board data"},
+				{Key: "i", Description: "Open attachment manager in workspace"},
+				{Key: "b", Description: "Open merge-into selector in workspace"},
+				{Key: "r (workspace)", Description: "Open dev server menu"},
 				{Key: "w/W", Description: "Cleanup worktree / delete + cleanup"},
 			},
 		},

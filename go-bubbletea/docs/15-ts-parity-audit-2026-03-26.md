@@ -129,11 +129,10 @@ Net gap:
 
 ## 8) Help Overlay Accuracy / Drift
 
-Go help overlay (`help.go`) has drift vs actual behavior:
-- It now needs to reflect the real split between `a/5` selection toggles and `Space/Enter` bulk actions.
-- It should keep `w/W` as the canonical cleanup path and avoid advertising `Ctrl+L` as refresh.
-
-This is a documentation/UX inconsistency within Go implementation.
+Go help/status hints now align with runtime behavior for:
+- Select-mode split: `a/5` toggle and `Space/Enter` bulk actions.
+- Refresh: `r` is canonical; `Ctrl+L` is not advertised as refresh.
+- Cleanup: `w/W` is explicitly documented as the canonical cleanup path.
 
 ## Keybinding Delta (High-Signal)
 
@@ -143,13 +142,13 @@ This is a documentation/UX inconsistency within Go implementation.
 - Goto: `gg/ge/gh/gl/gw`
 - View toggle: `Tab`
 
-## TS-documented keys with no current Go equivalent
+## TS-documented keys now covered in Go workspace flow
 - `Space+!` (start yolo)
 - `Space+H` (open Helix)
 - `Space+M` (abort merge)
 - `Space+O` (open PR)
 - `Space+T` (tombstone)
-- Some TS detail-panel attachment management flows as documented are not yet exposed with identical key paths in Go.
+- Attachment management keypaths are exposed in workspace via `Space+i` with navigate/open/remove in attachment overlays.
 
 ## Different semantics / remaps in Go
 - `Space` opens task workspace overlay instead of pure prefix mode.
@@ -163,14 +162,16 @@ This is a documentation/UX inconsistency within Go implementation.
 - Align Go with TS prefix action model for strict key-level parity.
 
 2. Close high-impact keybind gaps first:
-- `!` start yolo, `M` abort merge, `O` open PR, `T` tombstone.
+- Completed in Go workspace flow (`!`, `H`, `M`, `O`, `T`).
 
 3. Resolve Go internal help drift:
-- Sync `help.go` key docs with `model.go` behavior (`A`/`x`, `Ctrl+l`).
+- Completed for select/help/status hints (`A`/`x`, `Space/Enter`, `r` refresh).
 
 4. Expand Go settings overlay toward TS configuration coverage.
+- Expanded for session/git/pr/network tranche.
 
 5. If strict command parity is required, add missing Go CLI command groups or document a phased CLI parity contract.
+- Added parity families for hooks/notify, dev/gate, and opencode lanes.
 
 ## Evidence Pointers
 

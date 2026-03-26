@@ -14,7 +14,7 @@ func GetHints(mode types.Mode) string {
 	case types.ModeSearch:
 		return "Type: search  Enter: confirm  Esc: cancel"
 	case types.ModeAction:
-		return "h/l: move  s/S: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m: merge  P: PR  f: diff  w/W: cleanup  e: edit  c: child  d: delete  Esc/q: cancel"
+		return "h/l: move  s/S/!: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  T/d: tombstone/delete  Esc/q: cancel"
 	default:
 		return ""
 	}

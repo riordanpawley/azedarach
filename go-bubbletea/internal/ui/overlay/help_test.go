@@ -74,6 +74,9 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 		"Space/Enter",              // Selection
 		"Toggle selection",         // Selection
 		"Refresh board data",       // Task actions
+		"Open attachment manager",  // Task actions
+		"Open merge-into selector", // Task actions
+		"Open dev server menu",     // Task actions
 		"Cleanup worktree",         // Task actions
 		"Tab",                      // Other
 		"Quit",                     // Other
