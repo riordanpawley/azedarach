@@ -25,6 +25,12 @@ type Theme struct {
 	FooterStyle      lipgloss.Style
 }
 
+func normalizeInlineStyle(style lipgloss.Style) lipgloss.Style {
+	// Keep color/weight semantics but remove layout-affecting properties
+	// that can inject unexpected line breaks in inline keybind rows.
+	return style.Copy().Margin(0).Padding(0)
+}
+
 func KeyColumnWidth(categories []Category, minWidth int) int {
 	width := minWidth
 	for _, category := range categories {
@@ -38,6 +44,8 @@ func KeyColumnWidth(categories []Category, minWidth int) int {
 }
 
 func RenderCategories(categories []Category, keyWidth int, theme Theme) string {
+	keyStyle := normalizeInlineStyle(theme.KeyStyle)
+	descriptionStyle := normalizeInlineStyle(theme.DescriptionStyle)
 	var content strings.Builder
 	for i, category := range categories {
 		if i > 0 {
@@ -49,7 +57,7 @@ func RenderCategories(categories []Category, keyWidth int, theme Theme) string {
 		content.WriteString("\n")
 		for _, binding := range category.Bindings {
 			keyLabel := fmt.Sprintf("%-*s", keyWidth, binding.Key)
-			line := "  " + theme.KeyStyle.Render(keyLabel) + "  " + theme.DescriptionStyle.Render(binding.Description)
+			line := "  " + keyStyle.Render(keyLabel) + "  " + descriptionStyle.Render(binding.Description)
 			content.WriteString(line)
 			content.WriteString("\n")
 		}
@@ -61,14 +69,17 @@ func RenderInline(bindings []Binding, delimiter string, theme Theme) string {
 	if delimiter == "" {
 		delimiter = " • "
 	}
+	keyStyle := normalizeInlineStyle(theme.KeyStyle)
+	descriptionStyle := normalizeInlineStyle(theme.DescriptionStyle)
+	footerStyle := normalizeInlineStyle(theme.FooterStyle)
 	parts := make([]string, 0, len(bindings))
 	for _, binding := range bindings {
 		if strings.TrimSpace(binding.Key) == "" || strings.TrimSpace(binding.Description) == "" {
 			continue
 		}
-		parts = append(parts, theme.KeyStyle.Render(binding.Key)+" "+theme.DescriptionStyle.Render(binding.Description))
+		parts = append(parts, keyStyle.Render(binding.Key)+" "+descriptionStyle.Render(binding.Description))
 	}
-	return theme.FooterStyle.Render(strings.Join(parts, delimiter))
+	return footerStyle.Render(strings.Join(parts, delimiter))
 }
 
 func RenderPlain(bindings []Binding, delimiter string) string {
