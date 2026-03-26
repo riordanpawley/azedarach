@@ -35,7 +35,7 @@ cfg, err := config.LoadConfig("/path/to/project")
 
 ```go
 // CLI tool to use
-cliTool := cfg.CLITool  // "claude" or "opencode"
+cliTool := cfg.CLITool  // "claude", "opencode", or "codex"
 
 // Git settings
 baseBranch := cfg.Git.BaseBranch
@@ -44,6 +44,7 @@ workflowMode := cfg.Git.WorkflowMode
 // Session settings
 shell := cfg.Session.Shell
 timeout := cfg.Session.TimeoutMs
+skipPermissions := cfg.Session.DangerouslySkipPermissions
 
 // Dev server settings
 port := cfg.DevServer.BasePort
@@ -56,6 +57,7 @@ envVars := cfg.DevServer.Environments
 cfg := config.DefaultConfig()
 cfg.CLITool = "opencode"
 cfg.Git.BaseBranch = "develop"
+cfg.Session.DangerouslySkipPermissions = true
 
 err := config.SaveConfig(cfg, "/path/to/.azedarach.json")
 ```
@@ -78,7 +80,7 @@ cfg = config.MergeWithDefaults(cfg)
 
 ```go
 type Config struct {
-    CLITool       string          // "claude" or "opencode"
+    CLITool       string          // "claude", "opencode", or "codex"
     Git           GitConfig
     Session       SessionConfig
     PR            PRConfig
@@ -106,6 +108,7 @@ type GitConfig struct {
 
 ```go
 type SessionConfig struct {
+    DangerouslySkipPermissions bool   // default: false
     Shell        string    // default: "zsh"
     TimeoutMs    int       // default: 30000
     LogDir       string    // default: "~/.azedarach/logs"

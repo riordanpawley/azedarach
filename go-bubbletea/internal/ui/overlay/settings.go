@@ -43,6 +43,8 @@ type SettingsOverlay struct {
 	items        []SettingItem
 	cursor       int
 	configSource string
+	config       *config.Config
+	configPath   string
 	styles       *Styles
 }
 
@@ -62,6 +64,13 @@ func NewSettingsOverlayWithSource(items []SettingItem, configSource string) *Set
 	}
 	// Position cursor on first selectable item
 	menu.moveCursorToNextSelectable()
+	return menu
+}
+
+func NewSettingsOverlayWithConfig(items []SettingItem, cfg *config.Config, configSource string) *SettingsOverlay {
+	menu := NewSettingsOverlayWithSource(items, configSource)
+	menu.config = cfg
+	menu.configPath = configSource
 	return menu
 }
 
@@ -335,6 +344,7 @@ func (m *SettingsOverlay) toggleOrActivate() tea.Cmd {
 			if item.OnChange != nil {
 				item.OnChange(item.Value)
 			}
+			return m.persistConfig()
 		}
 		return nil
 
@@ -421,7 +431,7 @@ func (m *SettingsOverlay) incrementChoice() tea.Cmd {
 		item.OnChange(item.Value)
 	}
 
-	return nil
+	return m.persistConfig()
 }
 
 // decrementChoice decrements the choice value (wrapping around)
@@ -459,7 +469,25 @@ func (m *SettingsOverlay) decrementChoice() tea.Cmd {
 		item.OnChange(item.Value)
 	}
 
-	return nil
+	return m.persistConfig()
+}
+
+func (m *SettingsOverlay) persistConfig() tea.Cmd {
+	if m.config == nil || strings.TrimSpace(m.configPath) == "" {
+		return nil
+	}
+
+	cfg := m.config
+	path := m.configPath
+	return func() tea.Msg {
+		if err := config.SaveConfig(cfg, path); err != nil {
+			return SelectionMsg{
+				Key:   "settings-save-error",
+				Value: err,
+			}
+		}
+		return nil
+	}
 }
 
 // openConfigInEditor opens the config file in $EDITOR
@@ -521,7 +549,58 @@ func NewSettingsOverlayWithEditorAndSource(editor interface {
 	GetShowPhases() bool
 	ToggleShowPhases()
 }, configSource string) *SettingsOverlay {
+	return NewSettingsOverlayWithEditorAndConfig(editor, nil, configSource)
+}
+
+// NewSettingsOverlayWithEditorAndConfig creates a config-backed settings overlay with editor service integration.
+func NewSettingsOverlayWithEditorAndConfig(editor interface {
+	GetShowPhases() bool
+	ToggleShowPhases()
+}, cfg *config.Config, configSource string) *SettingsOverlay {
+	cliTool := "claude"
+	if cfg != nil && strings.TrimSpace(cfg.CLITool) != "" {
+		cliTool = cfg.CLITool
+	}
+	skipPermissions := false
+	if cfg != nil {
+		skipPermissions = cfg.Session.DangerouslySkipPermissions
+	}
 	items := []SettingItem{
+		{
+			Key:   "cli-tool",
+			Group: "Session",
+			Label: "CLI Tool",
+			Type:  SettingChoice,
+			Value: cliTool,
+			Choices: []string{
+				"claude",
+				"opencode",
+				"codex",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(string); ok {
+					cfg.CLITool = v
+				}
+			},
+		},
+		{
+			Key:   "skip-permissions",
+			Group: "Session",
+			Label: "Skip permissions",
+			Type:  SettingToggle,
+			Value: skipPermissions,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Session.DangerouslySkipPermissions = v
+				}
+			},
+		},
 		{
 			Key:   "phases",
 			Group: "General",
@@ -606,5 +685,5 @@ func NewSettingsOverlayWithEditorAndSource(editor interface {
 		},
 	}
 
-	return NewSettingsOverlayWithSource(items, configSource)
+	return NewSettingsOverlayWithConfig(items, cfg, configSource)
 }

@@ -39,10 +39,11 @@ type KeyboardConfig struct {
 
 // SessionConfig contains session management settings
 type SessionConfig struct {
-	Shell        string   `json:"shell"`
-	TimeoutMs    int      `json:"timeoutMs"`
-	LogDir       string   `json:"logDir"`
-	InitCommands []string `json:"initCommands"`
+	DangerouslySkipPermissions bool     `json:"dangerouslySkipPermissions"`
+	Shell                      string   `json:"shell"`
+	TimeoutMs                  int      `json:"timeoutMs"`
+	LogDir                     string   `json:"logDir"`
+	InitCommands               []string `json:"initCommands"`
 }
 
 // PRConfig contains pull request settings
@@ -222,6 +223,10 @@ func SaveConfig(cfg *Config, path string) error {
 	data, err := marshalConfigFile(&cfgCopy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {

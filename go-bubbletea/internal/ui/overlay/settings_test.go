@@ -1,10 +1,26 @@
 package overlay
 
 import (
+	"path/filepath"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/config"
 )
+
+type mockSettingsEditor struct {
+	showPhases  bool
+	toggleCount int
+}
+
+func (m *mockSettingsEditor) GetShowPhases() bool {
+	return m.showPhases
+}
+
+func (m *mockSettingsEditor) ToggleShowPhases() {
+	m.showPhases = !m.showPhases
+	m.toggleCount++
+}
 
 func TestNewSettingsOverlay(t *testing.T) {
 	items := []SettingItem{
@@ -413,6 +429,53 @@ func TestSettingsOverlay_View(t *testing.T) {
 	// Should contain separator
 	if !contains(view, "---") {
 		t.Error("expected view to contain separator")
+	}
+}
+
+func TestSettingsOverlay_ConfigBackedSessionSettingsPersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.CLITool = "claude"
+	cfg.Session.DangerouslySkipPermissions = false
+
+	menu := NewSettingsOverlayWithEditorAndConfig(&mockSettingsEditor{showPhases: true}, cfg, filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName))
+
+	if got := menu.items[0].Value; got != "claude" {
+		t.Fatalf("cli tool value = %v, want claude", got)
+	}
+	if got := menu.items[1].Value; got != false {
+		t.Fatalf("skip permissions value = %v, want false", got)
+	}
+
+	menu.cursor = 0
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}
+	_, cmd := menu.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected config persistence command after CLI tool change")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	menu.cursor = 1
+	msg = tea.KeyMsg{Type: tea.KeySpace}
+	_, cmd = menu.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected config persistence command after permissions toggle")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if loaded.CLITool != "opencode" {
+		t.Fatalf("loaded cli tool = %q, want opencode", loaded.CLITool)
+	}
+	if !loaded.Session.DangerouslySkipPermissions {
+		t.Fatal("expected loaded permissions setting to be true")
 	}
 }
 

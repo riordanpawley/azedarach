@@ -29,6 +29,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "merge", cfg.Git.DefaultMergeStrategy)
 
 	assert.Equal(t, "zsh", cfg.Session.Shell)
+	assert.False(t, cfg.Session.DangerouslySkipPermissions)
 	assert.Equal(t, 30000, cfg.Session.TimeoutMs)
 	assert.NotEmpty(t, cfg.Session.LogDir)
 	assert.NotNil(t, cfg.Session.InitCommands)
@@ -69,6 +70,7 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
     "workflowMode": "branch"
   },
   "session": {
+    "dangerouslySkipPermissions": true,
     "shell": "bash",
     "timeoutMs": 60000
   },
@@ -91,6 +93,7 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "opencode", cfg.CLITool)
+	assert.True(t, cfg.Session.DangerouslySkipPermissions)
 	assert.Equal(t, "develop", cfg.Git.BaseBranch)
 	assert.Equal(t, "branch", cfg.Git.WorkflowMode)
 	assert.Equal(t, "bash", cfg.Session.Shell)
@@ -148,10 +151,11 @@ func TestLoadConfigRejectsFutureVersion(t *testing.T) {
 
 func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	tmp := t.TempDir()
-	path := filepath.Join(tmp, ConfigFileName)
+	path := filepath.Join(tmp, ConfigDirName, ConfigFileName)
 
 	cfg := DefaultConfig()
 	cfg.CLITool = "codex"
+	cfg.Session.DangerouslySkipPermissions = true
 	cfg.Spec.Enabled = false
 	cfg.Session.InitCommands = []string{"direnv allow", "bun install"}
 
@@ -165,6 +169,10 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &raw))
 	assert.Equal(t, "./config.schema.json", raw["$schema"])
 	assert.Equal(t, float64(CurrentConfigVersion), raw["$version"])
+
+	sessionRaw, ok := raw["session"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, sessionRaw["dangerouslySkipPermissions"])
 
 	worktreeRaw, ok := raw["worktree"].(map[string]any)
 	require.True(t, ok)

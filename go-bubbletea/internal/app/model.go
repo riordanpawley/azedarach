@@ -1434,7 +1434,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
 
 	case "s": // Settings
-		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndSource(m.editor, m.configSourcePath()))
+		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
 
 	case "D": // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
@@ -2462,7 +2462,7 @@ func (m Model) daemonCommandTimeout() time.Duration {
 }
 
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
-func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
+func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -2473,7 +2473,7 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch); err != nil {
+		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch, yolo); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
 			}
@@ -2726,6 +2726,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+	case "settings-save-error":
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to save settings: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
 	case "set-default-error", "remove-error", "add-error", "save-error", "detect-error":
 		// Project registry actions failed
 		if err, ok := msg.Value.(error); ok {
@@ -2751,13 +2760,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start session
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+	case "!":
+		// Start session with dangerous skip-permissions mode.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
-			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID))
+			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false)
 		}
 		return m, nil
 	case "a":

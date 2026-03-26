@@ -646,6 +646,25 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "settings-save-error",
+		Value: fmt.Errorf("boom"),
+	})
+	newModel := updated.(Model)
+
+	if newModel.overlayStack.IsEmpty() {
+		t.Fatal("expected settings overlay to remain open after save error")
+	}
+
+	if got := len(newModel.toasts); got == 0 {
+		t.Fatal("expected a toast to be recorded for settings save error")
+	}
+}
+
 func TestHalfPageScroll(t *testing.T) {
 	m := newTestModel()
 
