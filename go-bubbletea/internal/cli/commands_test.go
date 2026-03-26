@@ -808,51 +808,6 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 	}
 }
 
-func TestParseIssueStatusArgs(t *testing.T) {
-	tests := []struct {
-		name   string
-		status string
-		want   domain.Status
-	}{
-		{name: "open", status: "open", want: domain.StatusOpen},
-		{name: "in progress", status: "in_progress", want: domain.StatusInProgress},
-		{name: "blocked", status: "blocked", want: domain.StatusBlocked},
-		{name: "closed", status: "closed", want: domain.StatusDone},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", tt.status})
-			if err != nil {
-				t.Fatalf("ParseIssueStatusArgs() error = %v", err)
-			}
-			if got.Implementation != "go-bubbletea" || got.IssueID != "az-1" || got.Status != tt.want {
-				t.Fatalf("ParseIssueStatusArgs() = %+v, want status=%s", got, tt.want)
-			}
-		})
-	}
-	var err error
-	_, err = ParseIssueStatusArgs([]string{"az-1", "blocked"})
-	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
-		t.Fatalf("expected missing impl error, got %v", err)
-	}
-	_, err = ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]") {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-	statusOpts, err := ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "--id", "az-1", "--status", "blocked"})
-	if err != nil {
-		t.Fatalf("expected named status parse success, got %v", err)
-	}
-	if statusOpts.IssueID != "az-1" || statusOpts.Status != domain.StatusBlocked {
-		t.Fatalf("status opts = %+v", statusOpts)
-	}
-	_, err = ParseIssueStatusArgs([]string{"--impl", "go-bubbletea", "az-1", "done"})
-	if err == nil || !strings.Contains(err.Error(), "invalid status: done") {
-		t.Fatalf("expected invalid status error, got %v", err)
-	}
-}
-
 func TestParseIssueDependencyArgs(t *testing.T) {
 	add, err := ParseIssueDependencyAddArgs([]string{"--impl", "go-bubbletea", "--type", "related", "az-1", "az-2"})
 	if err != nil {
@@ -1938,10 +1893,9 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
-func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
+func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotUpdateReq protocol.RequestEnvelope
-	var gotStatusReq protocol.RequestEnvelope
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -1983,16 +1937,6 @@ func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 						OK:              true,
 						CompletedAt:     req.SentAt,
 					}, nil
-				case daemonclient.CommandTaskUpdateStatus:
-					gotStatusReq = req
-					return protocol.ResponseEnvelope{
-						ProtocolVersion: req.ProtocolVersion,
-						RequestID:       req.RequestID,
-						Kind:            protocol.EnvelopeKindResponse,
-						Meta:            req.Meta,
-						OK:              true,
-						CompletedAt:     req.SentAt,
-					}, nil
 				default:
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
@@ -2021,27 +1965,6 @@ func TestIssueUpdateAndStatusCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)
-	}
-
-	statusOut := captureStdout(t, func() error {
-		return IssueStatusCommand(deps, IssueStatusOptions{
-			Implementation: "go-bubbletea",
-			IssueID:        "az-1",
-			Status:         domain.StatusBlocked,
-		})
-	})
-	if gotStatusReq.Command != daemonclient.CommandTaskUpdateStatus {
-		t.Fatalf("status command = %q, want %q", gotStatusReq.Command, daemonclient.CommandTaskUpdateStatus)
-	}
-	var statusBody daemonclient.TaskStatusRequest
-	if err := json.Unmarshal(gotStatusReq.Body, &statusBody); err != nil {
-		t.Fatalf("unmarshal status body: %v", err)
-	}
-	if statusBody.TaskID != "az-1" || statusBody.Status != domain.StatusBlocked {
-		t.Fatalf("status body = %+v, want task_id=az-1 status=blocked", statusBody)
-	}
-	if !strings.Contains(statusOut, "Updated status: az-1 -> blocked") {
-		t.Fatalf("status output = %q", statusOut)
 	}
 }
 
@@ -2396,8 +2319,8 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue update --impl <implementation> --id <id>") {
 		t.Fatalf("usage missing issue update command: %q", output)
 	}
-	if !strings.Contains(output, "issue status --impl <implementation> --id <id> --status <open|in_progress|blocked|closed>") {
-		t.Fatalf("usage missing issue status command: %q", output)
+	if strings.Contains(output, "issue status --impl <implementation>") {
+		t.Fatalf("usage should not include issue status command: %q", output)
 	}
 	if !strings.Contains(output, "issue close --impl <implementation> --id <id>") {
 		t.Fatalf("usage missing issue close command: %q", output)

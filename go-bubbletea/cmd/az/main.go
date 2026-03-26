@@ -93,13 +93,13 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
 		issueArgs := commandArgs[1:]
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
-			fmt.Printf("Usage: az issue <list|get|get-many|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n\n")
+			fmt.Printf("Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n\n")
 			fmt.Printf("Commands:\n")
 			fmt.Printf("  list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store\n")
 			fmt.Printf("  get <issue-id> [--json] [--deps]  Show a single issue by ID\n")
@@ -107,8 +107,7 @@ func main() {
 			fmt.Printf("  check <issue-id> [--json] [--deps]  Alias for get\n")
 			fmt.Printf("  doctor <issue-id>  Run integrity checks for one issue\n")
 			fmt.Printf("  create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue\n")
-			fmt.Printf("  update <issue-id> --impl <implementation> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
-			fmt.Printf("  status <issue-id> <open|in_progress|blocked|closed> --impl <implementation>  Set issue status\n")
+			fmt.Printf("  update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
 			fmt.Printf("  close <issue-id> --impl <implementation>       Close an issue (sets status=closed)\n")
 			fmt.Printf("  delete <issue-id> --impl <implementation> --confirm  Permanently delete an issue\n")
 			fmt.Printf("  dep add --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type blocks|related|parent-child|discovered-from]  Add a dependency edge\n")
@@ -212,20 +211,6 @@ func main() {
 			}
 			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 				return cli.IssueUpdateCommand(deps, opts)
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-		case "status":
-			opts, err := cli.ParseIssueStatusArgs(issueArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]\n")
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-				return cli.IssueStatusCommand(deps, opts)
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -346,7 +331,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|status|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
 			os.Exit(1)
 		}
 

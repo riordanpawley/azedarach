@@ -104,12 +104,6 @@ type IssueUpdateOptions struct {
 	Priority       *domain.Priority
 }
 
-type IssueStatusOptions struct {
-	Implementation string
-	IssueID        string
-	Status         domain.Status
-}
-
 type IssueDoctorOptions struct {
 	IssueID string
 }
@@ -560,52 +554,6 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	return opts, nil
-}
-
-func ParseIssueStatusArgs(args []string) (IssueStatusOptions, error) {
-	opts := IssueStatusOptions{}
-	issueIDFlag := ""
-	statusFlag := ""
-	fs := flag.NewFlagSet("issue status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
-	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
-	fs.StringVar(&statusFlag, "status", "", "status value (open|in_progress|blocked|closed)")
-	if err := fs.Parse(args); err != nil {
-		return IssueStatusOptions{}, err
-	}
-	if fs.NArg() > 2 {
-		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]")
-	}
-	if opts.Implementation == "" {
-		return IssueStatusOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
-	issueID := ""
-	statusRaw := ""
-	if fs.NArg() >= 1 {
-		issueID = fs.Arg(0)
-	}
-	if fs.NArg() >= 2 {
-		statusRaw = fs.Arg(1)
-	}
-	if strings.TrimSpace(issueIDFlag) != "" {
-		issueID = strings.TrimSpace(issueIDFlag)
-	}
-	if strings.TrimSpace(statusFlag) != "" {
-		statusRaw = strings.TrimSpace(statusFlag)
-	}
-	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(statusRaw) == "" {
-		return IssueStatusOptions{}, fmt.Errorf("usage: az issue status --impl <implementation> [--id <issue-id>] [--status <state>] [<issue-id>] [<state>]")
-	}
-	status, err := parseStatus(statusRaw)
-	if err != nil {
-		return IssueStatusOptions{}, err
-	}
-	return IssueStatusOptions{
-		Implementation: opts.Implementation,
-		IssueID:        issueID,
-		Status:         status,
-	}, nil
 }
 
 func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, error) {
@@ -1139,20 +1087,6 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		return fmt.Errorf("failed to update issue %s: %w", opts.IssueID, err)
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
-	return nil
-}
-
-func IssueStatusCommand(deps *Dependencies, opts IssueStatusOptions) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
-
-	if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, opts.Status); err != nil {
-		return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
-	}
-	fmt.Printf("Updated status: %s -> %s\n", opts.IssueID, opts.Status)
 	return nil
 }
 
@@ -2016,21 +1950,6 @@ func parsePriority(raw string) (domain.Priority, error) {
 	}
 }
 
-func parseStatus(raw string) (domain.Status, error) {
-	switch raw {
-	case "open":
-		return domain.StatusOpen, nil
-	case "in_progress":
-		return domain.StatusInProgress, nil
-	case "blocked":
-		return domain.StatusBlocked, nil
-	case "closed":
-		return domain.StatusDone, nil
-	default:
-		return "", fmt.Errorf("invalid status: %s", raw)
-	}
-}
-
 // RestartDaemonCommand forces daemon replacement and verifies client re-attach.
 func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -2065,7 +1984,6 @@ Commands:
   issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
   issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
   issue update --impl <implementation> --id <id> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
-  issue status --impl <implementation> --id <id> --status <open|in_progress|blocked|closed>  Set issue status
   issue close --impl <implementation> --id <id>      Close an issue (sets status=closed)
   issue delete --impl <implementation> --id <id> --confirm  Permanently delete an issue
   issue dep add --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
@@ -2094,7 +2012,6 @@ Examples:
   az issue doctor --id az-123
   az issue create "New task" --impl go-bubbletea --type task --priority P2
   az issue update --impl go-bubbletea --id az-123 --title "Renamed task" --priority P1
-  az issue status --impl go-bubbletea --id az-123 --status in_progress
   az issue close --impl go-bubbletea --id az-123
   az issue delete --impl go-bubbletea --id az-123 --confirm
   az issue dep add --impl go-bubbletea --issue-id az-456 --depends-on-id az-123 --type blocks
