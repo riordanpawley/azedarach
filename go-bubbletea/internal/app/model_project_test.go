@@ -1,6 +1,10 @@
 package app
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -142,5 +146,61 @@ func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {
 	}
 	if updated.repoDir != "/work/Chefy" {
 		t.Fatalf("repoDir = %q, want %q", updated.repoDir, "/work/Chefy")
+	}
+}
+
+func TestProjectSwitchResultRebindsProjectScopedServices(t *testing.T) {
+	oldRepo := t.TempDir()
+	newRepo := t.TempDir()
+
+	m := newTestModel()
+	m.config = &config.Config{
+		Git: config.GitConfig{
+			BaseBranch:   "main",
+			WorkflowMode: "origin",
+		},
+	}
+	m.repoDir = oldRepo
+	m.rebuildProjectScopedServices()
+
+	oldGitSync := m.gitSyncService
+	oldAttachment := m.attachmentService
+
+	next, _ := m.Update(projectSwitchResultMsg{
+		project: config.Project{
+			Name: "Chefy",
+			Path: newRepo,
+		},
+		projectConfig: &config.Config{
+			Git: config.GitConfig{
+				BaseBranch:   "preview",
+				WorkflowMode: "origin",
+			},
+		},
+	})
+
+	updated, ok := next.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", next)
+	}
+	if updated.gitSyncService == oldGitSync {
+		t.Fatal("expected gitSyncService to be rebound for switched project")
+	}
+	if updated.attachmentService == oldAttachment {
+		t.Fatal("expected attachmentService to be rebound for switched project")
+	}
+
+	sourceFile := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(sourceFile, []byte{0x89, 0x50, 0x4E, 0x47}, 0o644); err != nil {
+		t.Fatalf("write source attachment: %v", err)
+	}
+
+	attached, err := updated.attachmentService.Attach(context.Background(), "che-1", sourceFile)
+	if err != nil {
+		t.Fatalf("attach image in switched project: %v", err)
+	}
+	wantPrefix := filepath.Join(newRepo, ".azedarach", "images", "che-1") + string(os.PathSeparator)
+	if !strings.HasPrefix(attached.Path, wantPrefix) {
+		t.Fatalf("attachment path = %q, want prefix %q", attached.Path, wantPrefix)
 	}
 }

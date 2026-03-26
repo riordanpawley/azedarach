@@ -412,6 +412,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionStartedMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Session start", msg.issueID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session started: %s", msg.issueID),
@@ -420,6 +428,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionStoppedMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage("Session stop", msg.issueID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
@@ -503,6 +519,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case fetchAndMergeResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			action := "Merge"
+			if msg.stage == "fetch" {
+				action = "Fetch"
+			}
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage(action, msg.issueID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -622,14 +650,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if msg.projectConfig != nil {
-			m.config = msg.projectConfig
-		}
-		m.currentProject = msg.project.Name
-		m.repoDir = msg.project.Path
-		if m.daemonClient != nil {
-			m.daemonClient.WithProjectID(m.daemonProjectID())
-		}
+		m.rebindProjectContext(msg.project, msg.projectConfig)
 
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
@@ -1700,16 +1721,46 @@ const (
 )
 
 type sessionStartedMsg struct {
-	issueID string
+	issueID     string
+	operationID string
+	state       protocol.OperationState
 }
 
 type sessionStoppedMsg struct {
-	issueID string
+	issueID     string
+	operationID string
+	state       protocol.OperationState
 }
 
 type sessionErrorMsg struct {
 	issueID string
 	err     error
+}
+
+func pendingOperationDetails(err error) (*daemonclient.OperationPendingError, bool) {
+	var pending *daemonclient.OperationPendingError
+	if !errors.As(err, &pending) {
+		return nil, false
+	}
+	return pending, true
+}
+
+func operationStateTerminal(state protocol.OperationState) bool {
+	switch state {
+	case protocol.OperationStateDone,
+		protocol.OperationStateFailed,
+		protocol.OperationStateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func formatPendingOperationMessage(action, issueID, operationID string, state protocol.OperationState) string {
+	if issueID != "" {
+		return fmt.Sprintf("%s %s for %s (operation %s)", action, state, issueID, operationID)
+	}
+	return fmt.Sprintf("%s %s (operation %s)", action, state, operationID)
 }
 
 type runtimeSignalsLoadedMsg struct {
@@ -1964,7 +2015,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		defer cancel()
 
 		launcher := daemonprocess.NewLauncher(project.Path, config.GlobalDaemonSocketPath())
-		if bin := resolveDaemonBinaryForRepo(m.repoDir); bin != "" {
+		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
 		if err := launcher.Replace(ctx); err != nil {
@@ -2034,7 +2085,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		defer cancel()
 
 		launcher := daemonprocess.NewLauncher(targetRepoDir, config.GlobalDaemonSocketPath())
-		if bin := resolveDaemonBinaryForRepo(m.repoDir); bin != "" {
+		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}
 
@@ -2088,6 +2139,30 @@ func (m Model) activeProjectPath() string {
 		}
 	}
 	return m.repoDir
+}
+
+func (m *Model) rebindProjectContext(project config.Project, projectConfig *config.Config) {
+	if projectConfig != nil {
+		m.config = projectConfig
+	}
+	if m.config == nil {
+		m.config = config.DefaultConfig()
+	}
+	m.currentProject = project.Name
+	m.repoDir = project.Path
+	m.rebuildProjectScopedServices()
+	if m.daemonClient != nil {
+		m.daemonClient.WithProjectID(m.daemonProjectID())
+	}
+}
+
+func (m *Model) rebuildProjectScopedServices() {
+	deps := appdeps.Build(m.config, m.repoDir, m.logger)
+	m.gitSyncService = deps.GitSyncService
+	m.gitClient = deps.GitDiffClient
+	m.attachmentService = deps.AttachmentService
+	m.diagnosticsService = deps.DiagnosticsService
+	m.projectRegistry = deps.ProjectRegistry
 }
 
 func (m Model) waitForDaemonEventCmd() tea.Cmd {
@@ -2378,6 +2453,9 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
 		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
+			}
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
@@ -2398,6 +2476,9 @@ func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 		m.sessionMonitor.Stop(issueID)
 
 		if _, err := m.daemonClient.StopSession(ctx, issueID); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return sessionStoppedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
+			}
 			return sessionErrorMsg{issueID: issueID, err: err}
 		}
 
@@ -3279,6 +3360,9 @@ type fetchAndMergeResultMsg struct {
 	issueID     string
 	attachAfter bool
 	result      *git.MergeResult
+	stage       string
+	operationID string
+	state       protocol.OperationState
 	err         error
 }
 
@@ -3313,6 +3397,16 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 
 		// Fetch from origin through the daemon command surface.
 		if _, err := m.daemonClient.GitFetch(ctx, worktree, "origin"); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return fetchAndMergeResultMsg{
+					worktree:    worktree,
+					issueID:     issueID,
+					attachAfter: attachAfter,
+					stage:       "fetch",
+					operationID: pending.OperationID,
+					state:       pending.State,
+				}
+			}
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,
 				issueID:     issueID,
@@ -3323,10 +3417,21 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 
 		// Merge origin/branch through the daemon command surface.
 		result, err := m.daemonClient.GitMerge(ctx, worktree, "origin/"+branch)
+		if pending, ok := pendingOperationDetails(err); ok {
+			return fetchAndMergeResultMsg{
+				worktree:    worktree,
+				issueID:     issueID,
+				attachAfter: attachAfter,
+				stage:       "merge",
+				operationID: pending.OperationID,
+				state:       pending.State,
+			}
+		}
 		return fetchAndMergeResultMsg{
 			worktree:    worktree,
 			issueID:     issueID,
 			attachAfter: attachAfter,
+			stage:       "merge",
 			result:      &result.Result,
 			err:         err,
 		}
