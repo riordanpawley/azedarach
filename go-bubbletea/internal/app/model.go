@@ -742,7 +742,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Image attachment messages
+		// Image attachment messages
 	case overlay.AttachmentActionMsg:
 		if msg.Action == "attached" {
 			m.addToast(Toast{
@@ -753,7 +753,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.Action == "error" && msg.Error != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Image attachment failed: %v", msg.Error),
+				Message: fmt.Sprintf("Image attachment failed: %s", compactErrorMessage(msg.Error)),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 		}
@@ -3038,6 +3038,13 @@ func shellSingleQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func compactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {

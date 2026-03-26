@@ -3,7 +3,9 @@ package attachment
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -23,50 +25,120 @@ func ReadImageFromClipboard(ctx context.Context) ([]byte, error) {
 
 // readClipboardMacOS reads clipboard on macOS using osascript/pngpaste
 func readClipboardMacOS(ctx context.Context) ([]byte, error) {
+	var attempts []string
+
 	// Try pngpaste first (faster and more reliable for images)
-	if hasPNGPaste() {
-		cmd := exec.CommandContext(ctx, "pngpaste", "-")
+	if pngpastePath, ok := findPNGPastePath(); ok {
+		cmd := exec.CommandContext(ctx, pngpastePath, "-")
 		output, err := cmd.Output()
 		if err == nil && len(output) > 0 {
 			return output, nil
 		}
+		if err != nil {
+			attempts = append(attempts, "pngpaste failed: "+compactWhitespace(err.Error()))
+		} else {
+			attempts = append(attempts, "pngpaste returned empty output")
+		}
+	} else {
+		attempts = append(attempts, "pngpaste not installed")
 	}
 
-	// Fallback to osascript for PNG
+	// Try the same direct PNG AppleScript flow used in ts-opentui.
+	if data, err := readClipboardMacOSPNGScript(ctx); err == nil && len(data) > 0 {
+		return data, nil
+	} else if err != nil {
+		attempts = append(attempts, "png applescript failed: "+compactWhitespace(err.Error()))
+	}
+
+	// Fallback to osascript for PNG/TIFF/JPEG.
 	script := `
-		set theFile to (path to temporary items folder as text) & "clipboard.png"
+		set tmpDir to POSIX path of (path to temporary items folder)
 		try
-			set theImage to the clipboard as «class PNGf»
-			set theFileRef to open for access file theFile with write permission
-			write theImage to theFileRef
-			close access theFileRef
-			return POSIX path of theFile
-		on error
-			return ""
+			set pngData to the clipboard as «class PNGf»
+			set pngPath to tmpDir & "clipboard-image.png"
+			my writeDataToFile(pngData, pngPath)
+			return pngPath
+		on error pngErr
+			try
+				set tiffData to the clipboard as TIFF picture
+				set tiffPath to tmpDir & "clipboard-image.tiff"
+				my writeDataToFile(tiffData, tiffPath)
+				return tiffPath
+			on error tiffErr
+				try
+					set jpegData to the clipboard as JPEG picture
+					set jpegPath to tmpDir & "clipboard-image.jpg"
+					my writeDataToFile(jpegData, jpegPath)
+					return jpegPath
+				on error jpegErr
+					return "ERROR:" & pngErr & " | " & tiffErr & " | " & jpegErr
+				end try
+			end try
 		end try
+		
+		on writeDataToFile(theData, outPath)
+			set outFile to open for access (POSIX file outPath) with write permission
+			set eof outFile to 0
+			write theData to outFile
+			close access outFile
+		end writeDataToFile
 	`
 
 	cmd := exec.CommandContext(ctx, "osascript", "-e", script)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read clipboard with osascript: %w", err)
+		attempts = append(attempts, "osascript execution failed: "+compactWhitespace(err.Error()))
+		return nil, fmt.Errorf("failed to read clipboard image on macOS (%s)", compactWhitespace(strings.Join(attempts, "; ")))
 	}
 
-	tmpFile := strings.TrimSpace(string(output))
-	if tmpFile == "" {
-		return nil, fmt.Errorf("no image found in clipboard")
+	result := compactWhitespace(strings.TrimSpace(string(output)))
+	if strings.HasPrefix(result, "ERROR:") {
+		attempts = append(attempts, strings.TrimSpace(strings.TrimPrefix(result, "ERROR:")))
+		return nil, fmt.Errorf("no image found in clipboard (%s)", compactWhitespace(strings.Join(attempts, "; ")))
+	}
+	if result == "" {
+		attempts = append(attempts, "osascript returned empty path")
+		return nil, fmt.Errorf("no image found in clipboard (%s)", compactWhitespace(strings.Join(attempts, "; ")))
 	}
 
-	// Read the temporary file
-	cmd = exec.CommandContext(ctx, "cat", tmpFile)
-	data, err := cmd.Output()
+	tmpFile := filepath.Clean(result)
+	data, err := os.ReadFile(tmpFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read temporary file: %w", err)
 	}
 
 	// Clean up
-	exec.CommandContext(ctx, "rm", tmpFile).Run()
+	_ = os.Remove(tmpFile)
 
+	return data, nil
+}
+
+func readClipboardMacOSPNGScript(ctx context.Context) ([]byte, error) {
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("azedarach-clipboard-%d.png", os.Getpid()))
+	defer func() {
+		_ = os.Remove(tmpFile)
+	}()
+	quotedTmpPath := applescriptStringLiteral(tmpFile)
+
+	args := []string{
+		"-e", "set png_data to (the clipboard as «class PNGf»)",
+		"-e", fmt.Sprintf("set fp to open for access POSIX file \"%s\" with write permission", quotedTmpPath),
+		"-e", "set eof fp to 0",
+		"-e", "write png_data to fp",
+		"-e", "close access fp",
+	}
+	cmd := exec.CommandContext(ctx, "osascript", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, compactWhitespace(string(output)))
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return nil, fmt.Errorf("read png applescript output: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("png applescript produced empty file")
+	}
 	return data, nil
 }
 
@@ -118,5 +190,34 @@ func hasPNGPaste() bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	return hasCommand("pngpaste")
+	_, ok := findPNGPastePath()
+	return ok
+}
+
+func findPNGPastePath() (string, bool) {
+	if runtime.GOOS != "darwin" {
+		return "", false
+	}
+	if path, err := exec.LookPath("pngpaste"); err == nil {
+		return path, true
+	}
+	commonPaths := []string{
+		"/opt/homebrew/bin/pngpaste",
+		"/usr/local/bin/pngpaste",
+	}
+	for _, candidate := range commonPaths {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func compactWhitespace(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func applescriptStringLiteral(value string) string {
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	return strings.ReplaceAll(escaped, `"`, `\"`)
 }

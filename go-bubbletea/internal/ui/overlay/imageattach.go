@@ -175,7 +175,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return i, i.loadAttachments()
 
 	case errorMsg:
-		i.error = msg.err.Error()
+		i.error = compactOverlayError(msg.err)
 		return i, func() tea.Msg {
 			return AttachmentActionMsg{
 				Action: "error",
@@ -489,6 +489,13 @@ func (i *ImageAttachOverlay) openInViewer() tea.Cmd {
 		}
 		return nil
 	}
+}
+
+func compactOverlayError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
 }
 
 // Helper functions
