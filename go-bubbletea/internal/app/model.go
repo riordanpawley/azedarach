@@ -955,6 +955,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 	}
 
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg)
+	}
+
 	return m, nil
 }
 

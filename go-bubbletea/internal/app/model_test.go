@@ -26,6 +26,25 @@ type mockTmuxService struct {
 	popupFn  func(ctx context.Context, title, width, height, command string) error
 }
 
+type probeOverlay struct {
+	updated bool
+	lastMsg tea.Msg
+}
+
+func (p *probeOverlay) Init() tea.Cmd { return nil }
+
+func (p *probeOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	p.updated = true
+	p.lastMsg = msg
+	return p, nil
+}
+
+func (p *probeOverlay) View() string { return "probe" }
+
+func (p *probeOverlay) Title() string { return "probe" }
+
+func (p *probeOverlay) Size() (width, height int) { return 10, 5 }
+
 func (m mockTmuxService) SwitchClient(ctx context.Context, name string) error {
 	if m.switchFn != nil {
 		return m.switchFn(ctx, name)
@@ -193,6 +212,30 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	want := filepath.Join("/tmp/azedarach-user-logs", "az.log")
 	if got != want {
 		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
+	m := newTestModel()
+	probe := &probeOverlay{}
+	m.overlayStack.Push(probe)
+
+	customMsg := struct{ name string }{name: "async-result"}
+	updatedModel, _ := m.Update(customMsg)
+	next, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updatedModel)
+	}
+
+	current, ok := next.overlayStack.Current().(*probeOverlay)
+	if !ok {
+		t.Fatalf("expected probe overlay on stack, got %T", next.overlayStack.Current())
+	}
+	if !current.updated {
+		t.Fatal("expected non-key message to be forwarded to active overlay")
+	}
+	if got, ok := current.lastMsg.(struct{ name string }); !ok || got.name != customMsg.name {
+		t.Fatalf("overlay received wrong message: %#v", current.lastMsg)
 	}
 }
 
