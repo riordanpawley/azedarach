@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -516,6 +517,186 @@ func TestClient_ConfiguresSQLitePragmas(t *testing.T) {
 	var journalMode string
 	require.NoError(t, db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode))
 	assert.Equal(t, "wal", strings.ToLower(journalMode))
+}
+
+func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
+	client := newTestClient(t)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+
+	type fkRow struct {
+		table string
+		from  string
+		to    string
+	}
+	fkRows, err := db.Query(`PRAGMA foreign_key_list('issue_dependencies')`)
+	require.NoError(t, err)
+	defer fkRows.Close()
+
+	fks := make([]fkRow, 0, 2)
+	for fkRows.Next() {
+		var (
+			id       int
+			seq      int
+			table    string
+			from     string
+			to       string
+			onUpdate string
+			onDelete string
+			match    string
+		)
+		require.NoError(t, fkRows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match))
+		fks = append(fks, fkRow{table: table, from: from, to: to})
+	}
+	require.NoError(t, fkRows.Err())
+	assert.Contains(t, fks, fkRow{table: "issues", from: "issue_id", to: "id"})
+	assert.Contains(t, fks, fkRow{table: "issues", from: "depends_on_id", to: "id"})
+
+	wantIndexes := []string{
+		"idx_issues_deleted_updated",
+		"idx_issues_status_deleted_priority_updated",
+		"idx_dependencies_issue_active_type",
+		"idx_dependencies_depends_on_active_type",
+		"idx_dependencies_depends_on",
+	}
+	indexRows, err := db.Query(`
+		SELECT name
+		FROM sqlite_master
+		WHERE type = 'index' AND name IN (?, ?, ?, ?, ?)
+		ORDER BY name
+	`, wantIndexes[0], wantIndexes[1], wantIndexes[2], wantIndexes[3], wantIndexes[4])
+	require.NoError(t, err)
+	defer indexRows.Close()
+
+	gotIndexes := make([]string, 0, len(wantIndexes))
+	for indexRows.Next() {
+		var name string
+		require.NoError(t, indexRows.Scan(&name))
+		gotIndexes = append(gotIndexes, name)
+	}
+	require.NoError(t, indexRows.Err())
+	assert.ElementsMatch(t, wantIndexes, gotIndexes)
+
+	_, err = db.Exec(`
+		INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
+		VALUES ('missing-source', 'missing-target', 'blocks', NULL)
+	`)
+	require.Error(t, err)
+}
+
+func TestClient_MigratesTsOpentuiSchemaShape(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE IF NOT EXISTS issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on
+			ON issue_dependencies(depends_on_id, dependency_type, tombstoned_at);
+	`)
+	require.NoError(t, err)
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	_, err = client.Create(ctx, CreateTaskParams{
+		Title:    "ts schema compatibility",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	rows, err := db.Query(`SELECT id FROM schema_migrations ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		got = append(got, id)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{
+		"0001_bootstrap_tables",
+		"0002_dependency_foreign_keys",
+		"0003_issue_indexes",
+	}, got)
+}
+
+func TestClient_CreateWaitsForWriteLockAndSucceedsWithinBusyTimeout(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "warmup",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+
+	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, createErr := client.Create(ctx, CreateTaskParams{
+			Title:    "wait-for-lock",
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+		})
+		done <- createErr
+	}()
+
+	time.Sleep(250 * time.Millisecond)
+	_, err = lockDB.Exec(`COMMIT`)
+	require.NoError(t, err)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("create did not complete after releasing write lock")
+	}
+
+	assert.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
 }
 
 func newTestClient(t *testing.T) *Client {

@@ -82,7 +82,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return c.db, nil
 	}
 
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", filepath.ToSlash(c.dbPath))
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(c.dbPath))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, c.wrapError("open-db", "", err)
@@ -93,11 +93,15 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	if err := c.configureSQLite(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
-	if err := db.Ping(); err != nil {
+	if err := c.runMigrations(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
@@ -123,6 +127,14 @@ func (c *Client) CloseDB() error {
 		return c.wrapError("close-db", "", err)
 	}
 	return nil
+}
+
+func (c *Client) DBStats() (sql.DBStats, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return sql.DBStats{}, err
+	}
+	return db.Stats(), nil
 }
 
 func (c *Client) configureSQLite(db *sql.DB) error {
@@ -693,43 +705,75 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 		return tasks, nil
 	}
 
-	dependencyRows, err := db.QueryContext(ctx, `
-		SELECT issue_id, depends_on_id, dependency_type
-		FROM issue_dependencies
-		WHERE tombstoned_at IS NULL
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer dependencyRows.Close()
-
-	for dependencyRows.Next() {
-		var issueID string
-		var dependsOnID string
-		var dependencyType string
-		if err := dependencyRows.Scan(&issueID, &dependsOnID, &dependencyType); err != nil {
-			return nil, err
-		}
-		taskIndex, ok := taskIndexByID[issueID]
-		if !ok {
-			continue
-		}
-		task := &tasks[taskIndex]
-		if normalizeDependencyType(dependencyType) == string(domain.DependencyParentChild) {
-			parentID := dependsOnID
-			task.ParentID = &parentID
-			continue
-		}
-		task.Dependencies = append(task.Dependencies, domain.Dependency{
-			ID:   dependsOnID,
-			Type: domain.DependencyType(normalizeDependencyType(dependencyType)),
-		})
-	}
-	if err := dependencyRows.Err(); err != nil {
+	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks); err != nil {
 		return nil, err
 	}
 
 	return tasks, nil
+}
+
+func (c *Client) loadDependenciesForTasks(
+	ctx context.Context,
+	db *sql.DB,
+	taskIDs []string,
+	taskIndexByID map[string]int,
+	tasks []domain.Task,
+) error {
+	const maxPlaceholders = 500
+	for start := 0; start < len(taskIDs); start += maxPlaceholders {
+		end := start + maxPlaceholders
+		if end > len(taskIDs) {
+			end = len(taskIDs)
+		}
+		chunk := taskIDs[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		depArgs := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			depArgs = append(depArgs, id)
+		}
+
+		rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id, depends_on_id, dependency_type
+			FROM issue_dependencies
+			WHERE tombstoned_at IS NULL
+				AND issue_id IN (%s)
+		`, placeholders), depArgs...)
+		if err != nil {
+			return err
+		}
+
+		for rows.Next() {
+			var issueID string
+			var dependsOnID string
+			var dependencyType string
+			if err := rows.Scan(&issueID, &dependsOnID, &dependencyType); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			taskIndex, ok := taskIndexByID[issueID]
+			if !ok {
+				continue
+			}
+			task := &tasks[taskIndex]
+			if normalizeDependencyType(dependencyType) == string(domain.DependencyParentChild) {
+				parentID := dependsOnID
+				task.ParentID = &parentID
+				continue
+			}
+			task.Dependencies = append(task.Dependencies, domain.Dependency{
+				ID:   dependsOnID,
+				Type: domain.DependencyType(normalizeDependencyType(dependencyType)),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func normalizeDependencyType(value string) string {
