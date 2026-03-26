@@ -117,10 +117,13 @@ Go settings overlay (`settings.go`) currently exposes mainly:
 - auto-refresh
 - compact card view
 - theme choice
+- Git push/fetch toggles
+- PR defaults: draft-by-default, auto-link, notify-after-create, create-without-merge
+- network autodetect
 - actions: open config in editor, manage projects
 
 Net gap:
-- Most TS configuration controls are not exposed in Go UI yet.
+- Go now exposes the TS-aligned Git push/fetch controls, PR defaults (`draft-by-default`, `auto-link`, `notify-after-create`, `create-without-merge`), and network autodetect. Remaining gaps are the broader TS settings surface beyond this lane.
 
 ## 8) Help Overlay Accuracy / Drift
 

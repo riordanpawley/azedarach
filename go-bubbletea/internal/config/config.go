@@ -30,6 +30,8 @@ type GitConfig struct {
 	WorkflowMode         string `json:"workflowMode"`
 	ShowLineChanges      bool   `json:"showLineChanges"`
 	DefaultMergeStrategy string `json:"defaultMergeStrategy"`
+	PushEnabled          bool   `json:"pushEnabled"`
+	FetchEnabled         bool   `json:"fetchEnabled"`
 }
 
 // KeyboardConfig contains keyboard-related settings
@@ -76,9 +78,10 @@ type IssuesConfig struct {
 
 // NetworkConfig contains network-related settings
 type NetworkConfig struct {
-	CheckInterval  int `json:"checkInterval"`
-	OfflineTimeout int `json:"offlineTimeout"`
-	RetryAttempts  int `json:"retryAttempts"`
+	AutoDetect     bool `json:"autoDetect"`
+	CheckInterval  int  `json:"checkInterval"`
+	OfflineTimeout int  `json:"offlineTimeout"`
+	RetryAttempts  int  `json:"retryAttempts"`
 }
 
 // DevServerConfig contains development server settings
@@ -112,6 +115,8 @@ func DefaultConfig() *Config {
 			WorkflowMode:         "worktree",
 			ShowLineChanges:      true,
 			DefaultMergeStrategy: "merge",
+			PushEnabled:          true,
+			FetchEnabled:         true,
 		},
 		Keyboard: KeyboardConfig{
 			JumpLabelChars: "abcdefghijklmnopqrstuvwxyz",
@@ -143,6 +148,7 @@ func DefaultConfig() *Config {
 			SyncInterval: 300, // 5 minutes
 		},
 		Network: NetworkConfig{
+			AutoDetect:     true,
 			CheckInterval:  60,  // 1 minute
 			OfflineTimeout: 300, // 5 minutes
 			RetryAttempts:  3,

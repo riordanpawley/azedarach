@@ -22,6 +22,15 @@ func (m *mockSettingsEditor) ToggleShowPhases() {
 	m.toggleCount++
 }
 
+func settingIndexByKey(menu *SettingsOverlay, key string) int {
+	for i := range menu.items {
+		if menu.items[i].Key == key {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestNewSettingsOverlay(t *testing.T) {
 	items := []SettingItem{
 		{Key: "test", Label: "Test Setting", Type: SettingToggle, Value: true},
@@ -476,6 +485,80 @@ func TestSettingsOverlay_ConfigBackedSessionSettingsPersist(t *testing.T) {
 	}
 	if !loaded.Session.DangerouslySkipPermissions {
 		t.Fatal("expected loaded permissions setting to be true")
+	}
+}
+
+func TestSettingsOverlay_ConfigBackedGitPrAndNetworkSettingsPersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.PushEnabled = true
+	cfg.Git.FetchEnabled = true
+	cfg.PR.DraftByDefault = true
+	cfg.PR.AutoLink = true
+	cfg.PR.NotifyAfterCreate = true
+	cfg.PR.CreateWithoutMerge = false
+	cfg.Network.AutoDetect = true
+
+	menu := NewSettingsOverlayWithEditorAndConfig(
+		&mockSettingsEditor{showPhases: true},
+		cfg,
+		filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName),
+	)
+
+	toggles := []struct {
+		key      string
+		expected bool
+	}{
+		{key: "git-push-enabled", expected: false},
+		{key: "git-fetch-enabled", expected: false},
+		{key: "pr-draft-by-default", expected: false},
+		{key: "pr-auto-link", expected: false},
+		{key: "pr-notify-after-create", expected: false},
+		{key: "pr-create-without-merge", expected: true},
+		{key: "network-auto-detect", expected: false},
+	}
+
+	for _, tt := range toggles {
+		idx := settingIndexByKey(menu, tt.key)
+		if idx < 0 {
+			t.Fatalf("setting %q not found", tt.key)
+		}
+
+		menu.cursor = idx
+		_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeySpace})
+		if cmd == nil {
+			t.Fatalf("expected config save command after toggling %q", tt.key)
+		}
+		if result := cmd(); result != nil {
+			t.Fatalf("expected nil result from successful config save for %q, got %T", tt.key, result)
+		}
+	}
+
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if loaded.Git.PushEnabled {
+		t.Fatal("expected git push to be disabled after toggle")
+	}
+	if loaded.Git.FetchEnabled {
+		t.Fatal("expected git fetch to be disabled after toggle")
+	}
+	if loaded.PR.DraftByDefault {
+		t.Fatal("expected draft-by-default to be disabled after toggle")
+	}
+	if loaded.PR.AutoLink {
+		t.Fatal("expected auto-link to be disabled after toggle")
+	}
+	if loaded.PR.NotifyAfterCreate {
+		t.Fatal("expected notify-after-create to be disabled after toggle")
+	}
+	if !loaded.PR.CreateWithoutMerge {
+		t.Fatal("expected create-without-merge to be enabled after toggle")
+	}
+	if loaded.Network.AutoDetect {
+		t.Fatal("expected network auto-detect to be disabled after toggle")
 	}
 }
 
