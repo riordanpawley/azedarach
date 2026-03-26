@@ -26,10 +26,7 @@ Azedarach Session Primer
   - `az issue update <issue-id> --status in_progress|blocked|open`
   - `az issue close <issue-id>`
   - `az issue --help`
-{{ if .SpecGuardrails }}- Spec workflow:
-{{ .SpecGuardrails }}
-
-{{ end }}- When work is complete:
+- When work is complete:
   - Commit your changes first (`git add -A && git commit -m "<issue-id>: ..."`).
   - Always include the issue ID in the commit message.
   - Close the issue when implementation is ready for review (`az issue close <issue-id>`).

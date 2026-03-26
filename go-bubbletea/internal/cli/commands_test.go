@@ -2423,26 +2423,19 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 }
 
-func TestPrimeCommandQuestionFirstAndSpecBlocks(t *testing.T) {
+func TestPrimeCommandQuestionFirstBlock(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "")
 	t.Setenv("AZEDARACH_PRIME_MODE", "question-first")
-	repoDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach.json"), []byte(`{"spec":{"enabled":true}}`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
 
 	output := captureStdout(t, func() error {
-		return PrimeCommand(&Dependencies{RepoDir: repoDir})
+		return PrimeCommand(&Dependencies{})
 	})
 
 	if !strings.Contains(output, "Question-first execution rules") {
 		t.Fatalf("prime output missing question-first block: %q", output)
 	}
-	if !strings.Contains(output, "- Spec workflow:") {
-		t.Fatalf("prime output missing spec workflow header: %q", output)
-	}
-	if !strings.Contains(output, "`az spec` requirement/link records") {
-		t.Fatalf("prime output missing spec guardrails: %q", output)
+	if strings.Contains(output, "- Spec workflow:") {
+		t.Fatalf("prime output should not include spec workflow block: %q", output)
 	}
 }
 
