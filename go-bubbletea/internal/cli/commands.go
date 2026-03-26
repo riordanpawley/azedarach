@@ -2013,6 +2013,8 @@ func RestartDaemonCommand(deps *Dependencies) error {
 }
 
 type primeTemplateData struct {
+	ActiveIssueID            string
+	SpecEnabled              bool
 	IssueSection             string
 	ContextGuardrail         string
 	QuestionFirstGuardrails  string
@@ -2042,7 +2044,7 @@ func PrimeCommand(deps *Dependencies) error {
   - Ensure implementation issue(s) are linked to relevant spec requirement(s) before execution.
   - Treat ` + "`az spec link`" + ` records as required traceability for behavior work.
   - Before implementing behavior changes, inspect relevant ` + "`az spec`" + ` requirements/links and align the plan.
-  - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + `.`
+  - If this project should not use spec workflows, disable them with ` + "`az config set spec.enabled false`" + ` (or set ` + "`spec.enabled`" + ` to false in ` + "`.azedarach/config.json`" + `).`
 	}
 
 	if issueID != "" {
@@ -2058,6 +2060,8 @@ func PrimeCommand(deps *Dependencies) error {
 	}
 
 	output, err := clitext.Render("prime_output", primeTemplateData{
+		ActiveIssueID:            issueID,
+		SpecEnabled:              deps.Config != nil && deps.Config.Spec.Enabled,
 		IssueSection:             issueSection,
 		ContextGuardrail:         guardrail,
 		QuestionFirstGuardrails:  questionFirstGuardrails,

@@ -1,5 +1,9 @@
 Azedarach Session Primer
 
+- First 3 commands for this session:
+  - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
+  - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
+  - `az issue child "Title"` (when you need follow-up scope under the active parent)
 - Use `az issue` commands as the task-tracker interface for this repo.
 - Prefer `az issue` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
@@ -22,6 +26,7 @@ Azedarach Session Primer
   - `az issue list --limit 20` (lists the most recently updated issues first)
   - `az issue get <issue-id>` (use `--json` when you need full structured output)
   - `az issue create "Child task"` (manually add parent-child deps when needed)
+  - `az issue update <issue-id> --append-notes "..."` (adds to existing notes without overwriting previous notes)
   - `az issue update <issue-id> --notes "..."`
   - `az issue update <issue-id> --status in_progress|blocked|open`
   - `az issue close <issue-id>`

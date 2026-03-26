@@ -365,7 +365,7 @@ const renderPrimeSpecGuardrails =
   - For \`az spec link add\`, use either explicit refs (\`az spec link add --issue <issue-id> --req <requirement-ref> --type relates --fulfillment-status planned --impl <impl>\`) or place flags before positional refs (\`az spec link add --type relates --fulfillment-status planned --impl <impl> <issue-id> <requirement-ref>\`).
   - For \`az spec req update\`, prefer \`az spec req update --req <requirement-ref> --title "..." --body "..."\` over positional refs.
   - Avoid positional-first ordering like \`az spec link add <issue-id> <requirement-ref> -t relates -f planned\`; Effect CLI parsing can reject late flags as unknown arguments.
-  - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
+  - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach/config.json\`).`
 
 const renderQuestionFirstGuardrails =
 	(): string => `- Question-first execution rules (Space+Q mode):
@@ -381,6 +381,11 @@ export const buildPrimeOutput = (
 	primeMode: PrimeMode = "default",
 ): string => {
 	const issueSection = issueId === undefined ? "" : formatPrimeIssueSection(issueId, issueContext)
+	const issueFetchCommand =
+		issueId === undefined ? "`az issue get <issue-id>`" : `\`az issue get ${issueId}\``
+	const specCheckStep = specEnabled
+		? "`az spec` (inspect linked requirements before behavior changes)"
+		: "Spec workflows are disabled for this project (skip spec checks)."
 
 	const contextGuardrail =
 		issueId === undefined
@@ -396,6 +401,10 @@ export const buildPrimeOutput = (
 
 	return `Azedarach Session Primer
 
+- First 3 commands for this session:
+  - ${issueFetchCommand}
+  - ${specCheckStep}
+  - \`az issue child "Title"\` (when you need follow-up scope under the active parent)
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
@@ -424,7 +433,7 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
   - \`az issue bulk-update --input updates.json --json\` (for example, \`updates.json\` can contain \`[{"id":"az-123","status":"blocked"}]\`)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
-  - \`az issue update <issue-id> --append-notes "..."\`
+  - \`az issue update <issue-id> --append-notes "..."\` (adds to existing notes without overwriting previous notes)
   - \`az issue update <issue-id> --status in_progress|blocked|open\`
   - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
   - \`az issue --help\`
