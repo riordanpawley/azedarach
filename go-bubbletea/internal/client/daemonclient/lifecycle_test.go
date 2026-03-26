@@ -207,6 +207,40 @@ func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-123",
+				"state":        string(protocol.OperationStateRunning),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	_, err := client.StartSession(context.Background(), "az-1", "main")
+	var pending *OperationPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("StartSession error = %v, want OperationPendingError", err)
+	}
+	if pending.OperationID != "op-123" {
+		t.Fatalf("operation id = %q, want op-123", pending.OperationID)
+	}
+	if pending.State != protocol.OperationStateRunning {
+		t.Fatalf("state = %q, want running", pending.State)
+	}
+}
+
 func TestDevServerLifecycleHelpers(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -386,6 +420,40 @@ func TestCleanupOrphanedWorktreesDecodesNestedOperationResult(t *testing.T) {
 	}
 	if removed != 3 {
 		t.Fatalf("removed = %d, want 3", removed)
+	}
+}
+
+func TestCleanupOrphanedWorktreesReturnsPendingOperationError(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-cleanup",
+				"state":        string(protocol.OperationStateQueued),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	_, err := client.CleanupOrphanedWorktrees(context.Background())
+	var pending *OperationPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("CleanupOrphanedWorktrees error = %v, want OperationPendingError", err)
+	}
+	if pending.OperationID != "op-cleanup" {
+		t.Fatalf("operation id = %q, want op-cleanup", pending.OperationID)
+	}
+	if pending.State != protocol.OperationStateQueued {
+		t.Fatalf("state = %q, want queued", pending.State)
 	}
 }
 

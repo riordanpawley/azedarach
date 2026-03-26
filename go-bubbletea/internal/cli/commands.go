@@ -37,6 +37,7 @@ const (
 	commandTaskSnapshotExport = "task.snapshot.export"
 	defaultExportFormat       = "json"
 	defaultIssueListLimit     = 200
+	defaultOperationListLimit = 50
 	exitCodeHardFailure       = 1
 	exitCodePartialFailure    = 2
 )
@@ -145,6 +146,34 @@ type IssueBulkUpdateOptions struct {
 	DryRun         bool
 }
 
+type SessionCommandOptions struct {
+	Wait         bool
+	PollInterval time.Duration
+}
+
+type OperationGetOptions struct {
+	OperationID  string
+	JSON         bool
+	Wait         bool
+	PollInterval time.Duration
+}
+
+type OperationListOptions struct {
+	IssueID string
+	Kind    string
+	States  []protocol.OperationState
+	JSON    bool
+	Limit   int
+}
+
+type OperationCancelOptions struct {
+	OperationID  string
+	Reason       string
+	JSON         bool
+	Wait         bool
+	PollInterval time.Duration
+}
+
 func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
@@ -167,6 +196,10 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 }
 
 func StartCommand(deps *Dependencies, issueID string) error {
+	return StartCommandWithOptions(deps, issueID, SessionCommandOptions{})
+}
+
+func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -182,7 +215,7 @@ func StartCommand(deps *Dependencies, issueID string) error {
 		return err
 	}
 
-	return printCommandOutput(resp)
+	return printCommandOutputWithWait(ctx, deps, resp, opts)
 }
 
 func AttachCommand(deps *Dependencies, issueID string) error {
@@ -205,6 +238,10 @@ func AttachCommand(deps *Dependencies, issueID string) error {
 }
 
 func KillCommand(deps *Dependencies, issueID string) error {
+	return KillCommandWithOptions(deps, issueID, SessionCommandOptions{})
+}
+
+func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
@@ -220,7 +257,7 @@ func KillCommand(deps *Dependencies, issueID string) error {
 		return err
 	}
 
-	return printCommandOutput(resp)
+	return printCommandOutputWithWait(ctx, deps, resp, opts)
 }
 
 func StatusCommand(deps *Dependencies, issueID string) error {
@@ -243,6 +280,62 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
+func OperationGetCommand(deps *Dependencies, opts OperationGetOptions) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	record, err := deps.DaemonClient.GetOperation(ctx, opts.OperationID)
+	if err != nil {
+		return fmt.Errorf("failed to get operation: %w", err)
+	}
+	if opts.Wait && !operationStateTerminal(record.State) {
+		record, err = deps.DaemonClient.WaitForOperation(ctx, opts.OperationID, opts.PollInterval)
+		if err != nil {
+			return fmt.Errorf("failed while waiting for operation %s: %w", opts.OperationID, err)
+		}
+	}
+	return printOperationRecord(record, opts.JSON)
+}
+
+func OperationListCommand(deps *Dependencies, opts OperationListOptions) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	records, err := deps.DaemonClient.ListOperations(ctx, daemonclient.OperationListOptions{
+		IssueID: opts.IssueID,
+		Kind:    opts.Kind,
+		States:  opts.States,
+		Limit:   opts.Limit,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list operations: %w", err)
+	}
+	return printOperationList(records, opts.JSON)
+}
+
+func OperationCancelCommand(deps *Dependencies, opts OperationCancelOptions) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	record, err := deps.DaemonClient.CancelOperation(ctx, opts.OperationID, opts.Reason)
+	if err != nil {
+		return fmt.Errorf("failed to cancel operation: %w", err)
+	}
+	if opts.Wait && !operationStateTerminal(record.State) {
+		record, err = deps.DaemonClient.WaitForOperation(ctx, record.OperationID, opts.PollInterval)
+		if err != nil {
+			return fmt.Errorf("failed while waiting for operation %s: %w", record.OperationID, err)
+		}
+	}
+	return printOperationRecord(record, opts.JSON)
+}
+
 func ParseExportArgs(args []string) (ExportOptions, error) {
 	opts := ExportOptions{Format: defaultExportFormat}
 
@@ -261,6 +354,94 @@ func ParseExportArgs(args []string) (ExportOptions, error) {
 		return ExportOptions{}, fmt.Errorf("unsupported export format: %s", opts.Format)
 	}
 
+	return opts, nil
+}
+
+func ParseOperationGetArgs(args []string) (OperationGetOptions, error) {
+	opts := OperationGetOptions{}
+	fs := flag.NewFlagSet("operation get", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output operation as JSON")
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for the operation to reach a terminal state")
+	fs.DurationVar(&opts.PollInterval, "poll-interval", 250*time.Millisecond, "poll interval while waiting")
+	fs.StringVar(&opts.OperationID, "id", "", "operation id")
+	if err := fs.Parse(args); err != nil {
+		return OperationGetOptions{}, err
+	}
+	if opts.OperationID == "" {
+		switch fs.NArg() {
+		case 0:
+			return OperationGetOptions{}, fmt.Errorf("operation id is required")
+		case 1:
+			opts.OperationID = fs.Arg(0)
+		default:
+			return OperationGetOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(1))
+		}
+	} else if fs.NArg() != 0 {
+		return OperationGetOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	return opts, nil
+}
+
+func ParseOperationListArgs(args []string) (OperationListOptions, error) {
+	opts := OperationListOptions{Limit: defaultOperationListLimit}
+	stateInputs := make([]string, 0, 4)
+	statesCSV := ""
+	fs := flag.NewFlagSet("operation list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output operations as JSON")
+	fs.StringVar(&opts.IssueID, "issue", "", "filter by issue id")
+	fs.StringVar(&opts.Kind, "kind", "", "filter by operation kind")
+	fs.IntVar(&opts.Limit, "limit", defaultOperationListLimit, "maximum operations to return")
+	fs.Func("state", "restrict to a specific operation state (repeatable)", func(v string) error {
+		stateInputs = append(stateInputs, v)
+		return nil
+	})
+	fs.StringVar(&statesCSV, "states", "", "comma-separated operation states")
+	if err := fs.Parse(args); err != nil {
+		return OperationListOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OperationListOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	if opts.Limit < 1 {
+		return OperationListOptions{}, fmt.Errorf("limit must be >= 1")
+	}
+	if strings.TrimSpace(statesCSV) != "" {
+		stateInputs = append(stateInputs, strings.Split(statesCSV, ",")...)
+	}
+	states, err := parseOperationStates(stateInputs)
+	if err != nil {
+		return OperationListOptions{}, err
+	}
+	opts.States = states
+	return opts, nil
+}
+
+func ParseOperationCancelArgs(args []string) (OperationCancelOptions, error) {
+	opts := OperationCancelOptions{}
+	fs := flag.NewFlagSet("operation cancel", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output operation as JSON")
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for the operation to reach a terminal state")
+	fs.DurationVar(&opts.PollInterval, "poll-interval", 250*time.Millisecond, "poll interval while waiting")
+	fs.StringVar(&opts.OperationID, "id", "", "operation id")
+	fs.StringVar(&opts.Reason, "reason", "", "cancellation reason")
+	if err := fs.Parse(args); err != nil {
+		return OperationCancelOptions{}, err
+	}
+	if opts.OperationID == "" {
+		switch fs.NArg() {
+		case 0:
+			return OperationCancelOptions{}, fmt.Errorf("operation id is required")
+		case 1:
+			opts.OperationID = fs.Arg(0)
+		default:
+			return OperationCancelOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(1))
+		}
+	} else if fs.NArg() != 0 {
+		return OperationCancelOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 	return opts, nil
 }
 
@@ -2171,8 +2352,16 @@ type commandOutputBody struct {
 }
 
 type commandOutputEnvelope struct {
-	Output *string         `json:"output,omitempty"`
-	Result json.RawMessage `json:"result,omitempty"`
+	OperationID *string         `json:"operation_id,omitempty"`
+	State       *string         `json:"state,omitempty"`
+	Output      *string         `json:"output,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+}
+
+type decodedCommandOutput struct {
+	Output      string
+	OperationID string
+	State       protocol.OperationState
 }
 
 type applyExecutionResultBody struct {
@@ -2217,6 +2406,10 @@ func responseError(resp protocol.ResponseEnvelope, prefix string) error {
 }
 
 func printCommandOutput(resp protocol.ResponseEnvelope) error {
+	return printCommandOutputWithWait(context.Background(), nil, resp, SessionCommandOptions{})
+}
+
+func printCommandOutputWithWait(ctx context.Context, deps *Dependencies, resp protocol.ResponseEnvelope, opts SessionCommandOptions) error {
 	if len(resp.Body) == 0 {
 		return nil
 	}
@@ -2225,34 +2418,211 @@ func printCommandOutput(resp protocol.ResponseEnvelope) error {
 	if err != nil {
 		return fmt.Errorf("failed to decode daemon response: %w", err)
 	}
-
-	if out != "" {
-		fmt.Print(out)
+	if opts.Wait && deps != nil && out.OperationID != "" && !operationStateTerminal(out.State) {
+		record, err := deps.DaemonClient.WaitForOperation(ctx, out.OperationID, opts.PollInterval)
+		if err != nil {
+			return fmt.Errorf("wait for operation %s: %w", out.OperationID, err)
+		}
+		if err := printOperationOutcome(record); err != nil {
+			return err
+		}
+		return nil
 	}
-
-	return nil
+	return printDecodedCommandOutput(out)
 }
 
-func decodeCommandOutput(body []byte) (string, error) {
+func decodeCommandOutput(body []byte) (decodedCommandOutput, error) {
 	var envelope commandOutputEnvelope
 	if err := json.Unmarshal(body, &envelope); err == nil {
 		if envelope.Output != nil {
-			return *envelope.Output, nil
+			return decodedCommandOutput{Output: *envelope.Output}, nil
 		}
 		if len(envelope.Result) > 0 {
 			var nested commandOutputBody
 			if err := json.Unmarshal(envelope.Result, &nested); err != nil {
-				return "", err
+				return decodedCommandOutput{}, err
 			}
-			return nested.Output, nil
+			return decodedCommandOutput{Output: nested.Output}, nil
+		}
+		state := operationStateFromString(stringValue(envelope.State))
+		if envelope.OperationID != nil && state != "" && !operationStateTerminal(state) {
+			return decodedCommandOutput{
+				OperationID: stringValue(envelope.OperationID),
+				State:       state,
+			}, nil
 		}
 	}
 
 	var out commandOutputBody
 	if err := json.Unmarshal(body, &out); err != nil {
-		return "", err
+		return decodedCommandOutput{}, err
 	}
-	return out.Output, nil
+	return decodedCommandOutput{Output: out.Output}, nil
+}
+
+func printDecodedCommandOutput(out decodedCommandOutput) error {
+	if out.Output != "" {
+		fmt.Print(out.Output)
+		return nil
+	}
+	if out.OperationID != "" && out.State != "" {
+		fmt.Printf("Operation %s: %s\n", out.State, out.OperationID)
+	}
+	return nil
+}
+
+func printOperationOutcome(record protocol.OperationRecord) error {
+	if err := operationRecordError(record); err != nil {
+		return err
+	}
+	if len(record.Result) > 0 {
+		out, err := decodeCommandOutput(record.Result)
+		if err != nil {
+			return fmt.Errorf("decode operation result: %w", err)
+		}
+		return printDecodedCommandOutput(out)
+	}
+	fmt.Printf("Operation %s: %s\n", record.State, record.OperationID)
+	return nil
+}
+
+func printOperationRecord(record protocol.OperationRecord, asJSON bool) error {
+	if asJSON {
+		return printJSON(record)
+	}
+	return printOperationList([]protocol.OperationRecord{record}, false)
+}
+
+func printOperationList(records []protocol.OperationRecord, asJSON bool) error {
+	if asJSON {
+		return printJSON(records)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATE\tKIND\tISSUE\tENQUEUED")
+	for _, record := range records {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			record.OperationID,
+			record.State,
+			record.Kind,
+			record.IssueID,
+			record.EnqueuedAt.Format(time.RFC3339),
+		)
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if len(records) == 1 {
+		if progress := operationProgressSummary(records[0]); progress != "" {
+			fmt.Printf("\nProgress: %s\n", progress)
+		}
+		if errMsg := operationRecordMessage(records[0]); errMsg != "" {
+			fmt.Printf("\nError: %s\n", errMsg)
+		}
+		if len(records[0].Result) > 0 {
+			if out, err := decodeCommandOutput(records[0].Result); err == nil && out.Output != "" {
+				if !strings.HasSuffix(out.Output, "\n") {
+					out.Output += "\n"
+				}
+				fmt.Printf("\n%s", out.Output)
+			}
+		}
+	}
+	return nil
+}
+
+func printJSON(v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func parseOperationStates(values []string) ([]protocol.OperationState, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	states := make([]protocol.OperationState, 0, len(values))
+	seen := make(map[protocol.OperationState]struct{}, len(values))
+	for _, raw := range values {
+		for _, part := range strings.Split(raw, ",") {
+			state := operationStateFromString(strings.TrimSpace(part))
+			if state == "" {
+				continue
+			}
+			if !state.Valid() {
+				return nil, fmt.Errorf("invalid operation state: %s", part)
+			}
+			if _, ok := seen[state]; ok {
+				continue
+			}
+			seen[state] = struct{}{}
+			states = append(states, state)
+		}
+	}
+	return states, nil
+}
+
+func operationStateFromString(raw string) protocol.OperationState {
+	state := protocol.OperationState(strings.TrimSpace(raw))
+	if !state.Valid() {
+		return ""
+	}
+	return state
+}
+
+func operationStateTerminal(state protocol.OperationState) bool {
+	switch state {
+	case protocol.OperationStateDone,
+		protocol.OperationStateFailed,
+		protocol.OperationStateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func operationRecordError(record protocol.OperationRecord) error {
+	switch record.State {
+	case protocol.OperationStateFailed, protocol.OperationStateCancelled:
+		if record.Error != nil && strings.TrimSpace(record.Error.Message) != "" {
+			return errors.New(record.Error.Message)
+		}
+		return fmt.Errorf("operation %s %s", record.OperationID, record.State)
+	default:
+		return nil
+	}
+}
+
+func operationRecordMessage(record protocol.OperationRecord) string {
+	if record.Error == nil {
+		return ""
+	}
+	return strings.TrimSpace(record.Error.Message)
+}
+
+func operationProgressSummary(record protocol.OperationRecord) string {
+	if record.Progress == nil {
+		return ""
+	}
+	if record.Progress.Percent > 0 && record.Progress.Message != "" {
+		return fmt.Sprintf("%s (%d%%)", record.Progress.Message, record.Progress.Percent)
+	}
+	if record.Progress.Message != "" {
+		return record.Progress.Message
+	}
+	if record.Progress.Total > 0 {
+		return fmt.Sprintf("%d/%d %s", record.Progress.Current, record.Progress.Total, record.Progress.Unit)
+	}
+	return ""
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 func applyResponseExitCode(resp protocol.ResponseEnvelope) int {

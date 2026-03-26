@@ -1413,6 +1413,50 @@ func TestStartSessionPlusWorkFallsBackToBaseBranch(t *testing.T) {
 	}
 }
 
+func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionStart {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionStart)
+			}
+			respBody, _ := json.Marshal(map[string]any{
+				"operation_id": "op-start",
+				"state":        string(protocol.OperationStateQueued),
+			})
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	startMsg := m.startSessionCmd("az-child", "main")()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.operationID != "op-start" || started.state != protocol.OperationStateQueued {
+		t.Fatalf("started msg = %+v", started)
+	}
+
+	updated, cmd := m.Update(startMsg)
+	if cmd == nil {
+		t.Fatal("expected refresh command after pending operation")
+	}
+	updatedModel := updated.(Model)
+	if len(updatedModel.toasts) == 0 {
+		t.Fatal("expected queued operation toast")
+	}
+	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
+	if !strings.Contains(gotToast, "Session start queued for az-child (operation op-start)") {
+		t.Fatalf("toast = %q, want queued operation message", gotToast)
+	}
+}
+
 func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T) {
 	baseBranch := "develop"
 	parentID := "az-parent"
@@ -1805,6 +1849,65 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 		transport.requests[3] != protocol.CommandWorktreeCleanupOrphaned ||
 		transport.requests[4] != daemonclient.CommandSessionStop {
 		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandGitFetch:
+				respBody, _ := json.Marshal(daemonclient.GitCommandResponse{
+					Worktree: "/tmp/az-child",
+					Remote:   "origin",
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				respBody, _ := json.Marshal(map[string]any{
+					"operation_id": "op-merge",
+					"state":        string(protocol.OperationStateRunning),
+				})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	msg := m.fetchAndMergeCmd("/tmp/az-child", "main", "az-child", false)()
+	result, ok := msg.(fetchAndMergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want fetchAndMergeResultMsg", msg)
+	}
+	if result.operationID != "op-merge" || result.state != protocol.OperationStateRunning || result.stage != "merge" {
+		t.Fatalf("result = %+v", result)
+	}
+
+	updated, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected refresh command after pending merge")
+	}
+	updatedModel := updated.(Model)
+	if len(updatedModel.toasts) == 0 {
+		t.Fatal("expected pending merge toast")
+	}
+	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
+	if !strings.Contains(gotToast, "Merge running for az-child (operation op-merge)") {
+		t.Fatalf("toast = %q, want merge running message", gotToast)
 	}
 }
 

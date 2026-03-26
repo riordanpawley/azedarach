@@ -3,6 +3,7 @@ package daemonclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -302,5 +303,40 @@ func TestGitCommandsDecodeNestedOperationResult(t *testing.T) {
 	}
 	if resp.Worktree != worktree || resp.Branch != "main" || !resp.Result.Success {
 		t.Fatalf("response = %+v", resp)
+	}
+}
+
+func TestGitCommandsReturnPendingOperationError(t *testing.T) {
+	const worktree = "/tmp/az-1"
+	transport := &gitRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-merge",
+				"state":        string(protocol.OperationStateRunning),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-git")
+	_, err := client.GitMerge(context.Background(), worktree, "main")
+	var pending *OperationPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("GitMerge error = %v, want OperationPendingError", err)
+	}
+	if pending.OperationID != "op-merge" {
+		t.Fatalf("operation id = %q, want op-merge", pending.OperationID)
+	}
+	if pending.State != protocol.OperationStateRunning {
+		t.Fatalf("state = %q, want running", pending.State)
 	}
 }

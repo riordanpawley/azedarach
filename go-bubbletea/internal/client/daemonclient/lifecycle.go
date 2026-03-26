@@ -65,6 +65,22 @@ type longRunningResultEnvelope struct {
 	Result      json.RawMessage `json:"result,omitempty"`
 }
 
+type OperationPendingError struct {
+	Command     string
+	OperationID string
+	State       protocol.OperationState
+}
+
+func (e *OperationPendingError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.OperationID != "" {
+		return fmt.Sprintf("%s pending: operation %s is %s", e.Command, e.OperationID, e.State)
+	}
+	return fmt.Sprintf("%s pending: operation is %s", e.Command, e.State)
+}
+
 func (c *Client) commandOutput(ctx context.Context, command string, body any) (string, error) {
 	resp, err := c.commandJSONResponse(ctx, command, body)
 	if err != nil {
@@ -228,6 +244,9 @@ func decodeCommandOutput(body []byte) (string, error) {
 			}
 			return out.Output, nil
 		}
+		if pending := pendingOperationError("", envelope); pending != nil {
+			return "", pending
+		}
 	}
 
 	var out commandOutputBody
@@ -249,9 +268,53 @@ func decodeLongRunningJSON(command string, body []byte, out any) error {
 		}
 		return nil
 	}
+	if pending := pendingOperationError(command, envelope); pending != nil {
+		return pending
+	}
 
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode %s response: %w", command, err)
 	}
 	return nil
+}
+
+func pendingOperationError(command string, envelope longRunningResultEnvelope) error {
+	state := operationStateFromEnvelope(envelope)
+	if state == "" || isTerminalOperationState(state) {
+		return nil
+	}
+	return &OperationPendingError{
+		Command:     command,
+		OperationID: stringValue(envelope.OperationID),
+		State:       state,
+	}
+}
+
+func operationStateFromEnvelope(envelope longRunningResultEnvelope) protocol.OperationState {
+	if envelope.State == nil {
+		return ""
+	}
+	state := protocol.OperationState(*envelope.State)
+	if !state.Valid() {
+		return ""
+	}
+	return state
+}
+
+func isTerminalOperationState(state protocol.OperationState) bool {
+	switch state {
+	case protocol.OperationStateDone,
+		protocol.OperationStateFailed,
+		protocol.OperationStateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }

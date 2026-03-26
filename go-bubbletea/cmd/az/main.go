@@ -78,6 +78,59 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "operation":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az operation <get|list|cancel> [arguments]\n")
+			os.Exit(1)
+		}
+		opCommand := commandArgs[0]
+		opArgs := commandArgs[1:]
+		switch opCommand {
+		case "get":
+			opts, err := cli.ParseOperationGetArgs(opArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az operation get --id <operation-id> [--wait]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OperationGetCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "list":
+			opts, err := cli.ParseOperationListArgs(opArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az operation list [--issue-id <issue-id>] [--state <state>] [--kind <kind>] [--limit N]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OperationListCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "cancel":
+			opts, err := cli.ParseOperationCancelArgs(opArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az operation cancel --id <operation-id> [--reason <reason>]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OperationCancelCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown operation command: %s\n", opCommand)
+			fmt.Fprintf(os.Stderr, "Usage: az operation <get|list|cancel> [arguments]\n")
+			os.Exit(1)
+		}
+
 	case "export":
 		exportOpts, err := cli.ParseExportArgs(commandArgs)
 		if err != nil {
@@ -383,14 +436,24 @@ func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 func runSessionCommand(cfg *config.Config, command string, args []string, namespaced bool) error {
 	switch command {
 	case "start":
-		if len(args) != 1 {
+		if len(args) < 1 || len(args) > 2 {
 			if namespaced {
-				return fmt.Errorf("usage: az session start <issue-id>")
+				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
 			}
-			return fmt.Errorf("usage: az start <issue-id>")
+			return fmt.Errorf("usage: az start <issue-id> [--wait]")
+		}
+		opts := cli.SessionCommandOptions{}
+		if len(args) == 2 {
+			if args[1] != "--wait" {
+				if namespaced {
+					return fmt.Errorf("usage: az session start <issue-id> [--wait]")
+				}
+				return fmt.Errorf("usage: az start <issue-id> [--wait]")
+			}
+			opts.Wait = true
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StartCommand(deps, args[0])
+			return cli.StartCommandWithOptions(deps, args[0], opts)
 		})
 	case "attach":
 		if len(args) != 1 {
@@ -403,14 +466,24 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 			return cli.AttachCommand(deps, args[0])
 		})
 	case "kill":
-		if len(args) != 1 {
+		if len(args) < 1 || len(args) > 2 {
 			if namespaced {
-				return fmt.Errorf("usage: az session kill <issue-id>")
+				return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
 			}
-			return fmt.Errorf("usage: az kill <issue-id>")
+			return fmt.Errorf("usage: az kill <issue-id> [--wait]")
+		}
+		opts := cli.SessionCommandOptions{}
+		if len(args) == 2 {
+			if args[1] != "--wait" {
+				if namespaced {
+					return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
+				}
+				return fmt.Errorf("usage: az kill <issue-id> [--wait]")
+			}
+			opts.Wait = true
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.KillCommand(deps, args[0])
+			return cli.KillCommandWithOptions(deps, args[0], opts)
 		})
 	case "status":
 		issueID := ""

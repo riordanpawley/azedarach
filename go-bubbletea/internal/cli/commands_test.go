@@ -178,6 +178,198 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 	}
 }
 
+func TestStartCommandPrintsPendingOperationState(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(map[string]any{
+					"operation_id": "op-start",
+					"state":        string(protocol.OperationStateQueued),
+				})
+				if err != nil {
+					t.Fatalf("marshal wrapped response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommand(deps, "issue-1")
+	})
+
+	if output != "Operation queued: op-start\n" {
+		t.Fatalf("output = %q, want queued operation line", output)
+	}
+}
+
+func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
+	var calls int
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				calls++
+				switch req.Command {
+				case commandSessionStart:
+					body, err := json.Marshal(map[string]any{
+						"operation_id": "op-start",
+						"state":        string(protocol.OperationStateQueued),
+					})
+					if err != nil {
+						t.Fatalf("marshal pending response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            body,
+					}, nil
+				case protocol.CommandOperationGet:
+					body, err := json.Marshal(protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-start",
+							ProjectID:   "proj",
+							Kind:        commandSessionStart,
+							State:       protocol.OperationStateDone,
+							Result:      mustJSON(t, commandOutputBody{Output: "started\n"}),
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal get response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            body,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommandWithOptions(deps, "issue-1", SessionCommandOptions{
+			Wait:         true,
+			PollInterval: time.Millisecond,
+		})
+	})
+
+	if output != "started\n" {
+		t.Fatalf("output = %q, want terminal operation output", output)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestOperationCommandsParseAndRender(t *testing.T) {
+	getOpts, err := ParseOperationGetArgs([]string{"--wait", "--poll-interval", "500ms", "op-1"})
+	if err != nil {
+		t.Fatalf("ParseOperationGetArgs error: %v", err)
+	}
+	if getOpts.OperationID != "op-1" || !getOpts.Wait || getOpts.PollInterval != 500*time.Millisecond {
+		t.Fatalf("get opts = %+v", getOpts)
+	}
+
+	listOpts, err := ParseOperationListArgs([]string{"--issue", "az-1", "--kind", "session.start", "--state", "queued", "--states", "running", "--limit", "3"})
+	if err != nil {
+		t.Fatalf("ParseOperationListArgs error: %v", err)
+	}
+	if listOpts.IssueID != "az-1" || listOpts.Kind != "session.start" || listOpts.Limit != 3 || len(listOpts.States) != 2 {
+		t.Fatalf("list opts = %+v", listOpts)
+	}
+
+	cancelOpts, err := ParseOperationCancelArgs([]string{"--reason", "user request", "op-1"})
+	if err != nil {
+		t.Fatalf("ParseOperationCancelArgs error: %v", err)
+	}
+	if cancelOpts.OperationID != "op-1" || cancelOpts.Reason != "user request" {
+		t.Fatalf("cancel opts = %+v", cancelOpts)
+	}
+}
+
+func TestOperationCommandsUseDaemonClient(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case protocol.CommandOperationGet:
+					return responseWithJSON(req, protocol.OperationGetResponseBody{
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   "proj",
+							Kind:        "session.start",
+							State:       protocol.OperationStateRunning,
+						},
+					}), nil
+				case protocol.CommandOperationList:
+					return responseWithJSON(req, protocol.OperationListResponseBody{
+						ProjectID: "proj",
+						Operations: []protocol.OperationRecord{
+							{
+								OperationID: "op-1",
+								ProjectID:   "proj",
+								Kind:        "session.start",
+								State:       protocol.OperationStateQueued,
+							},
+						},
+					}), nil
+				case protocol.CommandOperationCancel:
+					return responseWithJSON(req, protocol.OperationCancelResponseBody{
+						Cancelled: true,
+						Operation: protocol.OperationRecord{
+							OperationID: "op-1",
+							ProjectID:   "proj",
+							Kind:        "session.start",
+							State:       protocol.OperationStateCancelled,
+						},
+					}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		if err := OperationGetCommand(deps, OperationGetOptions{OperationID: "op-1"}); err != nil {
+			return err
+		}
+		if err := OperationListCommand(deps, OperationListOptions{IssueID: "az-1", Limit: 5}); err != nil {
+			return err
+		}
+		return OperationCancelCommand(deps, OperationCancelOptions{OperationID: "op-1"})
+	})
+
+	for _, needle := range []string{"ID", "STATE", "KIND", "op-1", "running", "queued", "cancelled"} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("output = %q, want %q", output, needle)
+		}
+	}
+}
+
 func TestCommandErrorUsesTransportMessage(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -2582,6 +2774,32 @@ func responseWithOutput(req protocol.RequestEnvelope, output string) protocol.Re
 		OK:              true,
 		Body:            payload,
 	}
+}
+
+func responseWithJSON(req protocol.RequestEnvelope, body any) protocol.ResponseEnvelope {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		Meta:            req.Meta,
+		CompletedAt:     req.SentAt,
+		OK:              true,
+		Body:            payload,
+	}
+}
+
+func mustJSON(t *testing.T, body any) json.RawMessage {
+	t.Helper()
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal json body: %v", err)
+	}
+	return payload
 }
 
 func mustSnapshotPayloadJSON(t *testing.T, payload protocol.SnapshotPayload) []byte {
