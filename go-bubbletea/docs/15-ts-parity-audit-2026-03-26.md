@@ -23,6 +23,8 @@ This audit compares:
   - Go uses `Space` to open a Task Workspace overlay with detail/actions panes.
 - Keybinding parity is **mixed**:
   - Core navigation keys match (`h/j/k/l`, arrows, `g` prefixed goto, `v`, `?`, `,`, `f`, `/`, `Tab`).
+  - Go now treats `r` as the authoritative refresh key in board modes, while `Ctrl+L` is just a hidden redraw shortcut and should not be documented as refresh.
+  - Go select mode now matches the intended select/bulk split more closely: `a/5` toggle selection, `Space/Enter` open bulk actions, `A` selects the column, `%` selects all visible.
   - Several documented TS actions have no Go equivalent yet (`Space+!`, `Space+H`, `Space+M`, `Space+O`, `Space+T`, etc.).
   - Go has some different semantics (`w/W` cleanup in action menu vs TS `d/D` family).
 
@@ -51,7 +53,7 @@ Present in both (evidence: TS keybindings doc + Go `handleNormalMode`/`handleGot
 - `Tab` board/compact toggle
 
 Differences:
-- TS docs advertise `Ctrl-l` redraw; Go help text advertises it but `handleNormalMode` currently has no `ctrl+l` case.
+- TS docs advertise `Ctrl-l` redraw; Go now keeps `r` as the visible refresh key and does not advertise `Ctrl+L` as refresh.
 - TS README describes `Enter` as detail-or-epic-drill; Go `Enter` in normal mode is epic drill-only, with non-epic feedback toast directing to `Space` task workspace.
 
 ## 3) Task Action Model
@@ -92,12 +94,12 @@ Go current state (from `ActionMenu` + `handleSelection`):
 TS docs describe select mode with `a/5` toggle, `A` column select-all, `%` all, then `Space` for bulk action flow.
 
 Go select mode (`handleSelectMode`) supports:
-- `a` or `Space` toggle current
+- `a` or `5` toggle current
 - `A` select current column
 - `%` select all visible
 - `*` invert selection (extra vs TS docs)
 - `x` clear selection
-- `Enter` opens bulk action menu
+- `Space` / `Enter` open bulk action menu
 
 Bulk action menu in Go includes:
 - move left/right
@@ -128,8 +130,8 @@ Net gap:
 ## 8) Help Overlay Accuracy / Drift
 
 Go help overlay (`help.go`) has drift vs actual behavior:
-- It claims selection `A` = clear selection, while implementation uses `x` for clear and `A` for column select-all.
-- It lists `Ctrl+L` refresh, but board key handler currently has no explicit `ctrl+l` case.
+- It now needs to reflect the real split between `a/5` selection toggles and `Space/Enter` bulk actions.
+- It should keep `w/W` as the canonical cleanup path and avoid advertising `Ctrl+L` as refresh.
 
 This is a documentation/UX inconsistency within Go implementation.
 

@@ -161,15 +161,16 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 			},
 		},
 		{
-			Name: "Actions",
+			Name: "Workspace",
 			Bindings: []KeyBinding{
-				{Key: "Space", Description: "Open task panel (details+actions)"},
-				{Key: "Enter", Description: "Drill into children"},
+				{Key: "Space", Description: "Open task workspace (details + actions)"},
+				{Key: "Enter", Description: "Drill into epic children"},
 			},
 		},
 		{
 			Name: "Modes",
 			Bindings: []KeyBinding{
+				{Key: "g", Description: "Goto mode"},
 				{Key: "/", Description: "Search"},
 				{Key: "f", Description: "Filter menu"},
 				{Key: ",", Description: "Sort menu"},
@@ -180,9 +181,20 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 		{
 			Name: "Selection",
 			Bindings: []KeyBinding{
-				{Key: "v", Description: "Toggle selection on current task"},
-				{Key: "%", Description: "Select all"},
-				{Key: "A", Description: "Clear selection"},
+				{Key: "a/5", Description: "Toggle selection on current task"},
+				{Key: "A", Description: "Select all in current column"},
+				{Key: "%", Description: "Select all visible tasks"},
+				{Key: "*", Description: "Invert visible selection"},
+				{Key: "x", Description: "Clear selection"},
+				{Key: "Space/Enter", Description: "Open bulk actions for selected tasks"},
+				{Key: "v/Esc", Description: "Exit select mode"},
+			},
+		},
+		{
+			Name: "Task Actions",
+			Bindings: []KeyBinding{
+				{Key: "r", Description: "Refresh board data (board modes)"},
+				{Key: "w/W", Description: "Cleanup worktree / delete + cleanup"},
 			},
 		},
 		{
@@ -190,7 +202,6 @@ func (h *HelpOverlay) getCategories() []KeyCategory {
 			Bindings: []KeyBinding{
 				{Key: "Tab", Description: "Toggle compact/kanban view"},
 				{Key: "q", Description: "Quit"},
-				{Key: "Ctrl+L", Description: "Refresh screen"},
 			},
 		},
 	}

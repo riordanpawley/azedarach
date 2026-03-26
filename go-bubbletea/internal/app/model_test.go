@@ -40,6 +40,23 @@ func (m mockTmuxService) DisplayPopup(ctx context.Context, title, width, height,
 	return nil
 }
 
+type recordingGitSyncService struct {
+	fetchCalls int
+}
+
+func (s *recordingGitSyncService) FetchAndCheck() tea.Cmd {
+	s.fetchCalls++
+	return nil
+}
+
+func (s *recordingGitSyncService) Pull() tea.Cmd {
+	return nil
+}
+
+func (s *recordingGitSyncService) ShouldNotify(int) bool {
+	return false
+}
+
 // Helper to create a test model with tasks
 func newTestModel() Model {
 	cfg := &config.Config{CLITool: "claude"}
@@ -364,11 +381,11 @@ func TestView_CanonicalProfiles(t *testing.T) {
 			if !strings.Contains(view, "NORMAL") {
 				t.Fatalf("expected status bar mode badge to remain visible, got: %s", view)
 			}
-			if profile.Width < 80 && strings.Contains(view, "h/l: columns") {
+			if profile.Width < 80 && strings.Contains(view, "Space: task workspace") {
 				t.Fatalf("expected compact status bar without full hints for %s profile, got: %s", profile.Name, view)
 			}
-			if profile.Width >= 80 && !strings.Contains(view, "h/l: columns") {
-				t.Fatalf("expected full hints for %s profile, got: %s", profile.Name, view)
+			if profile.Width >= 80 && !strings.Contains(view, "Space: task workspace") {
+				t.Fatalf("expected board hints for %s profile, got: %s", profile.Name, view)
 			}
 		})
 	}
@@ -817,6 +834,63 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 		}
 		if newModel.nav.GetCursor().TaskID == initialTaskID {
 			t.Errorf("Expected selected task to change after ctrl+u in select mode, still on %s", initialTaskID)
+		}
+	})
+}
+
+func TestSelectModeSelectionAndBulkEntry(t *testing.T) {
+	t.Run("a toggles the current task selection", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsSelected("az-1") {
+			t.Fatal("expected a to select the current task")
+		}
+	})
+
+	t.Run("5 toggles the current task selection", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+		newModel := result.(Model)
+
+		if newModel.editor.IsSelected("az-1") {
+			t.Fatal("expected 5 to deselect the current task")
+		}
+	})
+
+	t.Run("space opens bulk actions when selection exists", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+		newModel := result.(Model)
+
+		if _, ok := newModel.overlayStack.Current().(*overlay.BulkActionMenu); !ok {
+			t.Fatalf("expected bulk action menu, got %T", newModel.overlayStack.Current())
+		}
+	})
+
+	t.Run("enter also opens bulk actions when selection exists", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyEnter})
+		newModel := result.(Model)
+
+		if _, ok := newModel.overlayStack.Current().(*overlay.BulkActionMenu); !ok {
+			t.Fatalf("expected bulk action menu, got %T", newModel.overlayStack.Current())
 		}
 	})
 }
@@ -1425,6 +1499,25 @@ func TestModeTransitions(t *testing.T) {
 		_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlL})
 		if cmd == nil {
 			t.Error("Expected clear screen command, got nil")
+		}
+	})
+
+	t.Run("r refreshes outside action mode", func(t *testing.T) {
+		m.editor.EnterNormal()
+		gitSync := &recordingGitSyncService{}
+		m.gitSyncService = gitSync
+
+		result, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		newModel := result.(Model)
+
+		if cmd == nil {
+			t.Fatal("expected refresh command, got nil")
+		}
+		if gitSync.fetchCalls != 1 {
+			t.Fatalf("expected one git sync refresh call, got %d", gitSync.fetchCalls)
+		}
+		if !newModel.editor.IsNormal() {
+			t.Fatalf("expected refresh to keep normal mode, got %v", newModel.editor.GetMode())
 		}
 	})
 

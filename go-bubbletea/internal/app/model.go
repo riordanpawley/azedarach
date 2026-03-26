@@ -1332,6 +1332,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	case "r":
+		if m.editor.GetMode() != ModeAction {
+			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
+		}
 	}
 
 	// Escape closes overlay or exits non-normal modes
@@ -1664,15 +1668,8 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	// Toggle current selection without moving
-	case " ":
-		if task != nil {
-			m.editor.ToggleSelection(task.ID)
-		}
-		return m, nil
-
-	// Toggle current selection
-	case "a":
+	// Toggle current selection without moving.
+	case "a", "5":
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
@@ -1716,8 +1713,8 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editor.EnterNormal()
 		return m, nil
 
-	// Bulk action menu for selected tasks
-	case "enter":
+	// Bulk action menu for selected tasks.
+	case " ", "enter":
 		if m.editor.HasSelection() {
 			selectedIDs := m.editor.GetSelectedTasksList()
 			return m, m.overlayStack.Push(overlay.NewBulkActionMenu(selectedIDs, len(selectedIDs)))

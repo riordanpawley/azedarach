@@ -10,7 +10,7 @@ func GetHints(mode types.Mode) string {
 	case types.ModeGoto:
 		return "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"
 	case types.ModeSelect:
-		return "Space/a: toggle  A: column  %: all  *: invert  x: clear  Enter: bulk  v/Esc: exit"
+		return "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"
 	case types.ModeSearch:
 		return "Type: search  Enter: confirm  Esc: cancel"
 	case types.ModeAction:

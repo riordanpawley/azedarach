@@ -51,7 +51,7 @@ func TestStatusBar_RenderSelectMode(t *testing.T) {
 	}
 
 	// Should contain select mode hints
-	if !strings.Contains(result, "Space/a: toggle") {
+	if !strings.Contains(result, "a/5: toggle") {
 		t.Errorf("Expected status bar to contain toggle hint, got: %s", result)
 	}
 	if !strings.Contains(result, "A: column") {
@@ -249,7 +249,7 @@ func TestGetHints_AllModes(t *testing.T) {
 		expected string
 	}{
 		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  c: create  s: settings  r: refresh  Tab: view  ?: help  q: quit"},
-		{types.ModeSelect, "Space/a: toggle  A: column  %: all  *: invert  x: clear  Enter: bulk  v/Esc: exit"},
+		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"},
 		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
 		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
 		{types.ModeAction, "h/l: move  s/S: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m: merge  P: PR  f: diff  w/W: cleanup  e: edit  c: child  d: delete  Esc/q: cancel"},
