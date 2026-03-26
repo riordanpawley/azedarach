@@ -282,6 +282,15 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 	if err != nil {
 		return err
 	}
+	if status == domain.StatusDone {
+		openChildCount, err := c.countOpenChildren(ctx, db, id)
+		if err != nil {
+			return c.wrapError("update", id, err)
+		}
+		if openChildCount > 0 {
+			return c.wrapError("update", id, fmt.Errorf("%w: cannot close parent issue with %d open child issue(s)", domain.ErrConflict, openChildCount))
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var closedAt *string
 	if status == domain.StatusDone {
@@ -303,6 +312,25 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 		return c.wrapError("update", id, domain.ErrNotFound)
 	}
 	return nil
+}
+
+func (c *Client) countOpenChildren(ctx context.Context, db *sql.DB, parentID string) (int, error) {
+	var count int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM issue_dependencies d
+		JOIN issues child ON child.id = d.issue_id
+		WHERE
+			d.depends_on_id = ?
+			AND d.tombstoned_at IS NULL
+			AND d.dependency_type IN ('parent-child', 'parent_child')
+			AND child.deleted_at IS NULL
+			AND child.status != 'closed'
+	`, parentID).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // CreateTaskParams contains parameters for creating a new issue.
