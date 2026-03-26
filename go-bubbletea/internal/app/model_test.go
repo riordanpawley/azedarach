@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +19,25 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
+
+type mockTmuxService struct {
+	switchFn func(ctx context.Context, name string) error
+	popupFn  func(ctx context.Context, title, width, height, command string) error
+}
+
+func (m mockTmuxService) SwitchClient(ctx context.Context, name string) error {
+	if m.switchFn != nil {
+		return m.switchFn(ctx, name)
+	}
+	return nil
+}
+
+func (m mockTmuxService) DisplayPopup(ctx context.Context, title, width, height, command string) error {
+	if m.popupFn != nil {
+		return m.popupFn(ctx, title, width, height, command)
+	}
+	return nil
+}
 
 // Helper to create a test model with tasks
 func newTestModel() Model {
@@ -1528,6 +1546,91 @@ func TestEpicDrillDownFlow(t *testing.T) {
 	}
 }
 
+func TestNestedDrillDownEscapePopsSingleLevel(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.loading = false
+
+	parentID := "az-parent"
+	childID := "az-child"
+	grandchildID := "az-grandchild"
+	m.tasks = append(m.tasks,
+		domain.Task{
+			ID:       parentID,
+			Title:    "Parent",
+			Status:   domain.StatusOpen,
+			Priority: domain.P1,
+			Type:     domain.TypeEpic,
+		},
+		domain.Task{
+			ID:       childID,
+			Title:    "Child",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+		},
+		domain.Task{
+			ID:       grandchildID,
+			Title:    "Grandchild",
+			Status:   domain.StatusOpen,
+			Priority: domain.P3,
+			Type:     domain.TypeTask,
+			ParentID: &childID,
+		},
+	)
+
+	m.nav.SelectTask(parentID, 0)
+
+	first, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	afterFirstEnter := first.(Model)
+	if got := afterFirstEnter.drillDownParentID; got != parentID {
+		t.Fatalf("after first enter drillDownParentID = %q, want %q", got, parentID)
+	}
+
+	afterFirstEnter.nav.SelectTask(childID, 0)
+	second, _ := afterFirstEnter.handleNormalMode(tea.KeyMsg{Type: tea.KeyEnter})
+	afterSecondEnter := second.(Model)
+	if got := afterSecondEnter.drillDownParentID; got != childID {
+		t.Fatalf("after second enter drillDownParentID = %q, want %q", got, childID)
+	}
+	if got := len(afterSecondEnter.drillDownTrail); got != 1 {
+		t.Fatalf("expected one drill-down context in trail, got %d", got)
+	}
+
+	oneEsc, _ := afterSecondEnter.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	afterOneEsc := oneEsc.(Model)
+	if got := afterOneEsc.drillDownParentID; got != parentID {
+		t.Fatalf("after one esc drillDownParentID = %q, want %q", got, parentID)
+	}
+	if !afterOneEsc.isDrillDownActive() {
+		t.Fatal("expected drill-down to remain active after exiting one nested level")
+	}
+	if got := len(afterOneEsc.drillDownTrail); got != 0 {
+		t.Fatalf("expected drill-down trail to be empty after one esc, got %d", got)
+	}
+
+	columns := afterOneEsc.buildColumns()
+	var renderedIDs []string
+	for _, column := range columns {
+		for _, task := range column.Tasks {
+			renderedIDs = append(renderedIDs, task.ID)
+		}
+	}
+	if !slices.Contains(renderedIDs, childID) {
+		t.Fatalf("expected parent-level drill-down board to include child task, rendered IDs=%v", renderedIDs)
+	}
+	if slices.Contains(renderedIDs, grandchildID) {
+		t.Fatalf("expected parent-level drill-down board to hide grandchild task, rendered IDs=%v", renderedIDs)
+	}
+
+	twoEsc, _ := afterOneEsc.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	afterTwoEsc := twoEsc.(Model)
+	if afterTwoEsc.isDrillDownActive() {
+		t.Fatal("expected second esc to exit final drill-down level")
+	}
+}
+
 func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
@@ -1978,19 +2081,15 @@ func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
 	}
 	m.daemonClient = daemonclient.New(transport)
 
-	originalExecCommand := execCommand
-	t.Cleanup(func() {
-		execCommand = originalExecCommand
-	})
-
 	var commands [][]string
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		commands = append(commands, append([]string{name}, args...))
-		if len(commands) == 1 {
-			// First candidate (`issueID`) fails.
-			return exec.Command("false")
-		}
-		return exec.Command("true")
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			commands = append(commands, []string{"tmux", "switch-client", "-t", target})
+			if len(commands) == 1 {
+				return fmt.Errorf("switch failed")
+			}
+			return nil
+		},
 	}
 
 	msg := m.attachSessionCmd("em")()

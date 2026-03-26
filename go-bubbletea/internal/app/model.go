@@ -65,7 +65,6 @@ var diffStatInsertionsPattern = regexp.MustCompile(`(\d+)\s+insertion`)
 var diffStatDeletionsPattern = regexp.MustCompile(`(\d+)\s+deletion`)
 var executablePath = os.Executable
 var lookupPath = exec.LookPath
-var execCommand = exec.Command
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
 
@@ -91,6 +90,11 @@ const (
 	ViewModeCompact
 )
 
+type drillDownContext struct {
+	parentID   string
+	parentName string
+}
+
 // Model is the main application state
 type Model struct {
 	// Core data
@@ -110,6 +114,7 @@ type Model struct {
 	columnViewportStart  int
 	drillDownParentID    string
 	drillDownParentName  string
+	drillDownTrail       []drillDownContext
 	runtimeSignalsByTask map[string]board.RuntimeSignals
 	runtimeSignalsBusy   bool
 	lastRuntimeRefresh   time.Time
@@ -150,6 +155,7 @@ type Model struct {
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
 	tmuxAvailable  bool
+	tmuxClient     appdeps.TmuxService
 
 	// Git services
 	gitClient      diff.DiffClient
@@ -218,6 +224,7 @@ func New(cfg *config.Config) Model {
 		logger:               logger,
 		usePlaceholder:       false, // Use real data from local issue store
 		tmuxAvailable:        deps.TmuxAvailable,
+		tmuxClient:           deps.TmuxClient,
 		repoDir:              repoDir,
 		currentProject:       resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
@@ -1200,7 +1207,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.isDrillDownActive() {
-			m.clearDrillDown()
+			exitedParentID := m.exitCurrentDrillDown()
+			columns := m.buildColumns()
+			if exitedParentID != "" {
+				m.nav.JumpToTaskByID(columns, exitedParentID)
+			}
+			m.ensureCursorVisible(columns)
 			return m, nil
 		}
 		if m.editor.IsSelect() {
@@ -1310,8 +1322,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task != nil {
 			children := m.getTaskChildren(task.ID)
 			if len(children) > 0 {
-				m.drillDownParentID = task.ID
-				m.drillDownParentName = task.Title
+				m.enterDrillDown(task.ID, task.Title)
 				columns := m.buildColumns()
 				m.nav.JumpToTaskByID(columns, children[0].ID)
 				m.ensureCursorVisible(columns)
@@ -2739,17 +2750,15 @@ func (m Model) openLogStreamCmd(logPath string) tea.Cmd {
 		}
 
 		cmd := exec.Command("less", "--intr=^C", "+F", path)
-		if strings.TrimSpace(os.Getenv("TMUX")) != "" {
+		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
 			popupCommand := fmt.Sprintf("less --intr=^C +F %s", shellSingleQuote(path))
-			cmd = exec.Command(
-				"tmux",
-				"display-popup",
-				"-E",
-				"-w", "90%",
-				"-h", "90%",
-				"-T", "az.log",
-				popupCommand,
-			)
+			if err := m.tmuxClient.DisplayPopup(context.Background(), "az.log", "90%", "90%", popupCommand); err != nil {
+				return overlay.SelectionMsg{
+					Key:   "event-log-error",
+					Value: fmt.Errorf("stream logs in tmux popup: %w", err),
+				}
+			}
+			return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
 		}
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -3189,10 +3198,13 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 					continue
 				}
 				seen[target] = struct{}{}
-				if err := execCommand("tmux", "switch-client", "-t", target).Run(); err == nil {
-					return sessionAttachedMsg{issueID: issueID, switchedTmux: true}
-				} else {
-					lastErr = err
+					if m.tmuxClient == nil {
+						break
+					}
+					if err := m.tmuxClient.SwitchClient(ctx, target); err == nil {
+						return sessionAttachedMsg{issueID: issueID, switchedTmux: true}
+					} else {
+						lastErr = err
 				}
 			}
 			if lastErr != nil {
@@ -4233,9 +4245,39 @@ func (m Model) isDrillDownActive() bool {
 	return strings.TrimSpace(m.drillDownParentID) != ""
 }
 
+func (m *Model) enterDrillDown(parentID, parentName string) {
+	id := strings.TrimSpace(parentID)
+	if id == "" {
+		return
+	}
+	if m.isDrillDownActive() {
+		m.drillDownTrail = append(m.drillDownTrail, drillDownContext{
+			parentID:   strings.TrimSpace(m.drillDownParentID),
+			parentName: strings.TrimSpace(m.drillDownParentName),
+		})
+	}
+	m.drillDownParentID = id
+	m.drillDownParentName = strings.TrimSpace(parentName)
+}
+
+func (m *Model) exitCurrentDrillDown() string {
+	exitedParentID := strings.TrimSpace(m.drillDownParentID)
+	if len(m.drillDownTrail) == 0 {
+		m.clearDrillDown()
+		return exitedParentID
+	}
+
+	prev := m.drillDownTrail[len(m.drillDownTrail)-1]
+	m.drillDownTrail = m.drillDownTrail[:len(m.drillDownTrail)-1]
+	m.drillDownParentID = prev.parentID
+	m.drillDownParentName = prev.parentName
+	return exitedParentID
+}
+
 func (m *Model) clearDrillDown() {
 	m.drillDownParentID = ""
 	m.drillDownParentName = ""
+	m.drillDownTrail = nil
 }
 
 func (m Model) renderDrillDownToolbar() string {
