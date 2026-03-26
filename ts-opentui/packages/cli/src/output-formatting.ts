@@ -347,25 +347,8 @@ ${clipPrimeIssueContext(renderedIssueContext)}
 \`\`\``
 			})()
 
-export const buildPrimeOutput = (
-	issueId: string | undefined,
-	issueContext: PrimeIssueContext | undefined,
-	implementationContext?: PrimeImplementationContext,
-	specEnabled = false,
-	primeMode: PrimeMode = "default",
-): string => {
-	const issueSection = issueId === undefined ? "" : formatPrimeIssueSection(issueId, issueContext)
-
-	const contextGuardrail =
-		issueId === undefined
-			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
-			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
-	const implementationGuardrails = formatPrimeImplementationGuardrails(
-		implementationContext,
-		specEnabled,
-	)
-	const specGuardrails = specEnabled
-		? `  - In this repo, when guidance says \`spec\`, it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
+const renderPrimeSpecGuardrails =
+	(): string => `  - In this repo, when guidance says \`spec\`, it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
   - Treat \`az spec link\` records as required traceability for behavior work: they are how planning, implementation, and review stay aligned to requirements.
   - Before coding behavior changes, confirm the issue has the right requirement links (or add/update them) so acceptance checks stay explicit.
   - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
@@ -383,14 +366,33 @@ export const buildPrimeOutput = (
   - For \`az spec req update\`, prefer \`az spec req update --req <requirement-ref> --title "..." --body "..."\` over positional refs.
   - Avoid positional-first ordering like \`az spec link add <issue-id> <requirement-ref> -t relates -f planned\`; Effect CLI parsing can reject late flags as unknown arguments.
   - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
-		: undefined
-	const questionFirstGuardrails =
-		primeMode === "question-first"
-			? `- Question-first execution rules (Space+Q mode):
+
+const renderQuestionFirstGuardrails =
+	(): string => `- Question-first execution rules (Space+Q mode):
   - MUST ask follow-up questions immediately when the issue is underspecified or ambiguous.
   - MUST improve the current issue title and description before implementation work begins.
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
-			: undefined
+
+export const buildPrimeOutput = (
+	issueId: string | undefined,
+	issueContext: PrimeIssueContext | undefined,
+	implementationContext?: PrimeImplementationContext,
+	specEnabled = false,
+	primeMode: PrimeMode = "default",
+): string => {
+	const issueSection = issueId === undefined ? "" : formatPrimeIssueSection(issueId, issueContext)
+
+	const contextGuardrail =
+		issueId === undefined
+			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
+			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
+	const implementationGuardrails = formatPrimeImplementationGuardrails(
+		implementationContext,
+		specEnabled,
+	)
+	const specGuardrails = specEnabled ? renderPrimeSpecGuardrails() : undefined
+	const questionFirstGuardrails =
+		primeMode === "question-first" ? renderQuestionFirstGuardrails() : undefined
 
 	return `Azedarach Session Primer
 

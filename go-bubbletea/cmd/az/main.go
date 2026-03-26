@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/app"
 	"github.com/riordanpawley/azedarach/internal/cli"
+	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
@@ -40,12 +41,12 @@ func main() {
 		sessionCommand := commandArgs[0]
 		sessionArgs := commandArgs[1:]
 		if sessionCommand == "help" || sessionCommand == "-h" || sessionCommand == "--help" {
-			fmt.Printf("Usage: az session <start|attach|kill|status> [arguments]\n\n")
-			fmt.Printf("Commands:\n")
-			fmt.Printf("  start <issue-id>      Start a session for an issue\n")
-			fmt.Printf("  attach <issue-id>     Attach to an existing issue session\n")
-			fmt.Printf("  kill <issue-id>       Kill an issue session\n")
-			fmt.Printf("  status [issue-id]     Show all sessions or one issue session status\n")
+			helpText, err := clitext.Render("session_help", nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Print(helpText)
 			os.Exit(0)
 		}
 		if err := runSessionCommand(cfg, sessionCommand, sessionArgs, true); err != nil {
@@ -91,6 +92,18 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "prime":
+		if len(commandArgs) > 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az prime\n")
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.PrimeCommand(deps)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "issue":
 		if len(commandArgs) == 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
@@ -99,22 +112,12 @@ func main() {
 		issueCommand := commandArgs[0]
 		issueArgs := commandArgs[1:]
 		if issueCommand == "help" || issueCommand == "-h" || issueCommand == "--help" {
-			fmt.Printf("Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n\n")
-			fmt.Printf("Commands:\n")
-			fmt.Printf("  list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store\n")
-			fmt.Printf("  get <issue-id> [--json] [--deps]  Show a single issue by ID\n")
-			fmt.Printf("  get-many --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order\n")
-			fmt.Printf("  check <issue-id> [--json] [--deps]  Alias for get\n")
-			fmt.Printf("  doctor <issue-id>  Run integrity checks for one issue\n")
-			fmt.Printf("  create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue\n")
-			fmt.Printf("  update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields\n")
-			fmt.Printf("  close <issue-id> --impl <implementation>       Close an issue (sets status=closed)\n")
-			fmt.Printf("  delete <issue-id> --impl <implementation> --confirm  Permanently delete an issue\n")
-			fmt.Printf("  dep add --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type blocks|related|parent-child|discovered-from]  Add a dependency edge\n")
-			fmt.Printf("  dep remove --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--confirm]  Remove a dependency edge\n")
-			fmt.Printf("  dep bulk apply --impl <implementation> --input <path> [--dry-run] [--json]  Apply dependency edge mutations\n")
-			fmt.Printf("  bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations\n")
-			fmt.Printf("  bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations\n")
+			helpText, err := clitext.Render("issue_help", nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Print(helpText)
 			os.Exit(0)
 		}
 		switch issueCommand {
@@ -205,7 +208,7 @@ func main() {
 		case "update":
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -219,7 +222,7 @@ func main() {
 		case "close":
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue close --impl <implementation> [--id <issue-id>] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue close [--id <issue-id>] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -233,7 +236,7 @@ func main() {
 		case "delete":
 			opts, err := cli.ParseIssueDeleteArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue delete --impl <implementation> --confirm [--id <issue-id>] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue delete --confirm [--id <issue-id>] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -255,7 +258,7 @@ func main() {
 			case "add":
 				opts, err := cli.ParseIssueDependencyAddArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep add --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep add [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -268,7 +271,7 @@ func main() {
 			case "remove":
 				opts, err := cli.ParseIssueDependencyRemoveArgs(depArgs)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep remove [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
@@ -280,12 +283,12 @@ func main() {
 				}
 			case "bulk":
 				if len(depArgs) == 0 || depArgs[0] != "apply" {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep bulk apply --impl <implementation> --input <path> [--dry-run] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep bulk apply --input <path> [--dry-run] [--json]\n")
 					os.Exit(1)
 				}
 				opts, err := cli.ParseIssueDependencyBulkApplyArgs(depArgs[1:])
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Usage: az issue dep bulk apply --impl <implementation> --input <path> [--dry-run] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Usage: az issue dep bulk apply --input <path> [--dry-run] [--json]\n")
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}

@@ -1,0 +1,58 @@
+Usage: az [command] [arguments]
+
+Commands:
+  (no command)         Start the Azedarach TUI
+  session <subcommand>  Session commands (start|attach|kill|status)
+  start <issue-id>      Alias for 'az session start <issue-id>'
+  attach <issue-id>     Alias for 'az session attach <issue-id>'
+  kill <issue-id>       Alias for 'az session kill <issue-id>'
+  status [issue-id]     Alias for 'az session status [issue-id]'
+  issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
+  issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
+  issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
+  issue check [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
+  issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
+  issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue update [--id <id>] [<id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
+  issue close [--id <id>] [<id>]      Close an issue (sets status=closed)
+  issue delete [--id <id>] [<id>] --confirm  Permanently delete an issue
+  issue dep add --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
+  issue dep remove --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
+  issue dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
+  issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
+  issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  prime                Print AI session primer with current issue context
+  export               Export a snapshot (use --format json [--out <path>])
+  daemon restart       Force-restart the daemon and verify re-attach
+  help                 Show this help message
+
+Examples:
+  az                   # Start TUI
+  az session start az-123   # Start session for issue az-123
+  az session attach az-123  # Attach to issue az-123's session
+  az session kill az-123    # Kill issue az-123's session
+  az session status         # Show all active sessions
+  az session status az-123  # Show status for az-123
+  az issue list
+  az issue list --id az-1 --id az-2
+  az issue list --deps
+  az issue get --id az-123 --json
+  az issue get-many --id az-123 --id az-456 --json
+  az issue get --id az-123 --deps
+  az issue check --id az-123 --deps
+  az issue doctor --id az-123
+  az issue create "New task" --impl go-bubbletea --type task --priority P2
+  az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1 --update-impl go-bubbletea
+  az issue close --id az-123
+  az issue delete --id az-123 --confirm
+  az issue dep add --issue-id az-456 --depends-on-id az-123 --type blocks
+  az issue dep remove --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
+  az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
+  az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
+  az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
+  az prime
+  az export --format json
+  az export --format json --out snapshot.json
+  az daemon restart
+
+For more information, see: https://github.com/riordanpawley/azedarach

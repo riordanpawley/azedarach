@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
@@ -91,17 +92,17 @@ type IssueCreateOptions struct {
 }
 
 type IssueCloseOptions struct {
-	Implementation string
-	IssueID        string
+	IssueID string
 }
 
 type IssueUpdateOptions struct {
-	Implementation string
-	IssueID        string
-	Title          string
-	Description    string
-	Type           *domain.TaskType
-	Priority       *domain.Priority
+	IssueID     string
+	Title       string
+	Description string
+	Type        *domain.TaskType
+	Priority    *domain.Priority
+	Status      *domain.Status
+	UpdateImpls []string
 }
 
 type IssueDoctorOptions struct {
@@ -109,31 +110,27 @@ type IssueDoctorOptions struct {
 }
 
 type IssueDeleteOptions struct {
-	Implementation string
-	IssueID        string
-	Confirm        bool
+	IssueID string
+	Confirm bool
 }
 
 type IssueDependencyAddOptions struct {
-	Implementation string
-	IssueID        string
-	DependsOnID    string
-	Type           string
+	IssueID     string
+	DependsOnID string
+	Type        string
 }
 
 type IssueDependencyRemoveOptions struct {
-	Implementation string
-	IssueID        string
-	DependsOnID    string
-	Type           string
-	Confirm        bool
+	IssueID     string
+	DependsOnID string
+	Type        string
+	Confirm     bool
 }
 
 type IssueDependencyBulkApplyOptions struct {
-	Implementation string
-	InputPath      string
-	DryRun         bool
-	JSON           bool
+	InputPath string
+	DryRun    bool
+	JSON      bool
 }
 
 type IssueBulkCreateOptions struct {
@@ -448,18 +445,19 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	opts := IssueCloseOptions{}
 	issueIDFlag := ""
+	implFlag := ""
 	fs := flag.NewFlagSet("issue close", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := fs.Parse(args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close --impl <implementation> [--id <issue-id>] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--id <issue-id>] [<issue-id>]")
 	}
-	if opts.Implementation == "" {
-		return IssueCloseOptions{}, fmt.Errorf("missing required flag: --impl")
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -468,7 +466,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close --impl <implementation> [--id <issue-id>] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--id <issue-id>] [<issue-id>]")
 	}
 	return opts, nil
 }
@@ -476,19 +474,20 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	opts := IssueDeleteOptions{}
 	issueIDFlag := ""
+	implFlag := ""
 	fs := flag.NewFlagSet("issue delete", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm permanent issue deletion")
 	if err := fs.Parse(args); err != nil {
 		return IssueDeleteOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete --impl <implementation> --confirm [--id <issue-id>] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete --confirm [--id <issue-id>] [<issue-id>]")
 	}
-	if opts.Implementation == "" {
-		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --impl")
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDeleteOptions{}, fmt.Errorf("--impl is not supported for issue delete; issue implementations are already assigned")
 	}
 	if !opts.Confirm {
 		return IssueDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")
@@ -500,7 +499,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete --impl <implementation> --confirm [--id <issue-id>] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete --confirm [--id <issue-id>] [<issue-id>]")
 	}
 	return opts, nil
 }
@@ -508,24 +507,36 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	opts := IssueUpdateOptions{}
 	issueIDFlag := ""
+	implFlag := ""
+	statusRaw := ""
 	var typeRaw string
 	var priorityRaw string
+	updateImpls := make([]string, 0, 2)
 	fs := flag.NewFlagSet("issue update", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&opts.Title, "title", "", "updated issue title")
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|blocked|closed)")
+	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty update-impl value")
+		}
+		updateImpls = append(updateImpls, trimmed)
+		return nil
+	})
 	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
 	fs.StringVar(&priorityRaw, "priority", "", "updated priority (P0-P4)")
 	if err := fs.Parse(args); err != nil {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
-	if opts.Implementation == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update; use --update-impl to change issue implementations")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -534,7 +545,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update --impl <implementation> [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -550,7 +561,15 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		}
 		opts.Priority = &p
 	}
-	if opts.Title == "" && opts.Description == "" && opts.Type == nil && opts.Priority == nil {
+	if strings.TrimSpace(statusRaw) != "" {
+		status, err := parseStatus(statusRaw)
+		if err != nil {
+			return IssueUpdateOptions{}, err
+		}
+		opts.Status = &status
+	}
+	opts.UpdateImpls = dedupeOrderedIDs(updateImpls)
+	if opts.Title == "" && opts.Description == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	return opts, nil
@@ -560,9 +579,10 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	opts := IssueDependencyAddOptions{Type: "blocks"}
 	issueIDFlag := ""
 	dependsOnIDFlag := ""
+	implFlag := ""
 	fs := flag.NewFlagSet("issue dep add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
@@ -570,10 +590,10 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
 	}
-	if opts.Implementation == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("missing required flag: --impl")
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDependencyAddOptions{}, fmt.Errorf("--impl is not supported for issue dep add; dependencies target existing issues")
 	}
 	if fs.NArg() >= 1 {
 		opts.IssueID = fs.Arg(0)
@@ -588,7 +608,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
 	}
 	return opts, nil
 }
@@ -597,9 +617,10 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	opts := IssueDependencyRemoveOptions{Type: "blocks"}
 	issueIDFlag := ""
 	dependsOnIDFlag := ""
+	implFlag := ""
 	fs := flag.NewFlagSet("issue dep remove", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
@@ -608,10 +629,10 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
 	}
-	if opts.Implementation == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("missing required flag: --impl")
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("--impl is not supported for issue dep remove; dependencies target existing issues")
 	}
 	if fs.NArg() >= 1 {
 		opts.IssueID = fs.Arg(0)
@@ -626,16 +647,17 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove --impl <implementation> [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
 	}
 	return opts, nil
 }
 
 func ParseIssueDependencyBulkApplyArgs(args []string) (IssueDependencyBulkApplyOptions, error) {
 	opts := IssueDependencyBulkApplyOptions{}
+	implFlag := ""
 	fs := flag.NewFlagSet("issue dep bulk apply", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&opts.InputPath, "input", "", "path to JSON payload")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "validate and preview without mutating")
 	fs.BoolVar(&opts.JSON, "json", false, "output dependency mutation results as JSON")
@@ -645,8 +667,8 @@ func ParseIssueDependencyBulkApplyArgs(args []string) (IssueDependencyBulkApplyO
 	if fs.NArg() != 0 {
 		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("missing required flag: --impl")
+	if strings.TrimSpace(implFlag) != "" {
+		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("--impl is not supported for issue dep bulk apply; dependencies target existing issues")
 	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueDependencyBulkApplyOptions{}, fmt.Errorf("missing required flag: --input")
@@ -1082,9 +1104,17 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	if opts.Priority != nil {
 		update.Priority = *opts.Priority
 	}
+	if len(opts.UpdateImpls) > 0 {
+		update.Implementations = append([]string{}, opts.UpdateImpls...)
+	}
 
 	if err := deps.DaemonClient.UpdateTaskDetails(ctx, opts.IssueID, update); err != nil {
 		return fmt.Errorf("failed to update issue %s: %w", opts.IssueID, err)
+	}
+	if opts.Status != nil {
+		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, *opts.Status); err != nil {
+			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
+		}
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
 	return nil
@@ -1950,6 +1980,21 @@ func parsePriority(raw string) (domain.Priority, error) {
 	}
 }
 
+func parseStatus(raw string) (domain.Status, error) {
+	switch raw {
+	case "open":
+		return domain.StatusOpen, nil
+	case "in_progress":
+		return domain.StatusInProgress, nil
+	case "blocked":
+		return domain.StatusBlocked, nil
+	case "closed":
+		return domain.StatusDone, nil
+	default:
+		return "", fmt.Errorf("invalid status: %s", raw)
+	}
+}
+
 // RestartDaemonCommand forces daemon replacement and verifies client re-attach.
 func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1967,65 +2012,60 @@ func RestartDaemonCommand(deps *Dependencies) error {
 	return nil
 }
 
+type primeTemplateData struct {
+	IssueSection     string
+	ContextGuardrail string
+}
+
+func PrimeCommand(deps *Dependencies) error {
+	issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	guardrail := "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
+	issueSection := ""
+
+	if issueID != "" {
+		guardrail = fmt.Sprintf("- `AZEDARACH_ISSUE_ID` is set to `%s`; use it as the default issue scope and refresh stale context with `az issue get %s`.", issueID, issueID)
+		snapshot, err := deps.DaemonClient.ListTasksSnapshot(context.Background())
+		if err != nil {
+			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
+		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
+			issueSection = renderPrimeIssueSection(issueID, task)
+		} else {
+			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
+		}
+	}
+
+	output, err := clitext.Render("prime_output", primeTemplateData{
+		IssueSection:     issueSection,
+		ContextGuardrail: guardrail,
+	})
+	if err != nil {
+		return fmt.Errorf("render prime output: %w", err)
+	}
+	fmt.Print(output)
+	return nil
+}
+
+func renderPrimeIssueSection(issueID string, task domain.Task) string {
+	return fmt.Sprintf(
+		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s]\nDependencies: %s\n```\n",
+		issueID,
+		issueID,
+		task.ID,
+		task.Title,
+		task.Status,
+		task.Priority.String(),
+		task.Type,
+		formatDependencySummary(task.Dependencies),
+	)
+}
+
 func PrintUsage() {
-	usage := `Usage: az [command] [arguments]
-
-Commands:
-  (no command)         Start the Azedarach TUI
-  session <subcommand>  Session commands (start|attach|kill|status)
-  start <issue-id>      Alias for 'az session start <issue-id>'
-  attach <issue-id>     Alias for 'az session attach <issue-id>'
-  kill <issue-id>       Alias for 'az session kill <issue-id>'
-  status [issue-id]     Alias for 'az session status [issue-id]'
-  issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
-  issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
-  issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
-  issue check [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
-  issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
-  issue update --impl <implementation> --id <id> [--title ...] [--description ...] [--type ...] [--priority ...]  Update issue fields
-  issue close --impl <implementation> --id <id>      Close an issue (sets status=closed)
-  issue delete --impl <implementation> --id <id> --confirm  Permanently delete an issue
-  issue dep add --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
-  issue dep remove --impl <implementation> --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
-  issue dep bulk apply --impl <implementation> --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
-  issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
-  export               Export a snapshot (use --format json [--out <path>])
-  daemon restart       Force-restart the daemon and verify re-attach
-  help                 Show this help message
-
-Examples:
-  az                   # Start TUI
-  az session start az-123   # Start session for issue az-123
-  az session attach az-123  # Attach to issue az-123's session
-  az session kill az-123    # Kill issue az-123's session
-  az session status         # Show all active sessions
-  az session status az-123  # Show status for az-123
-  az issue list
-  az issue list --id az-1 --id az-2
-  az issue list --deps
-  az issue get --id az-123 --json
-  az issue get-many --id az-123 --id az-456 --json
-  az issue get --id az-123 --deps
-  az issue check --id az-123 --deps
-  az issue doctor --id az-123
-  az issue create "New task" --impl go-bubbletea --type task --priority P2
-  az issue update --impl go-bubbletea --id az-123 --title "Renamed task" --priority P1
-  az issue close --impl go-bubbletea --id az-123
-  az issue delete --impl go-bubbletea --id az-123 --confirm
-  az issue dep add --impl go-bubbletea --issue-id az-456 --depends-on-id az-123 --type blocks
-  az issue dep remove --impl go-bubbletea --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
-  az issue dep bulk apply --impl go-bubbletea --input ./dep-bulk.json --dry-run --json
-  az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
-  az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
-  az export --format json
-  az export --format json --out snapshot.json
-  az daemon restart
-
-For more information, see: https://github.com/riordanpawley/azedarach
-`
 	fmt.Println("Argument ordering: place flags/options before positional arguments for deterministic parsing.")
+	usage, err := clitext.Render("root_usage", nil)
+	if err != nil {
+		fmt.Printf("Usage unavailable: %v\n", err)
+		return
+	}
 	fmt.Print(usage)
 }
 
