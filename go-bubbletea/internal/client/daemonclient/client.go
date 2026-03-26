@@ -21,6 +21,7 @@ type TransportClient interface {
 type Client struct {
 	transport TransportClient
 	policy    reconnect.Policy
+	readWait  ReadWaitPolicy
 	projectID string
 }
 
@@ -29,6 +30,7 @@ func New(transport TransportClient) *Client {
 	return &Client{
 		transport: transport,
 		policy:    reconnect.DefaultPolicy(),
+		readWait:  DefaultReadWaitPolicy(),
 	}
 }
 
@@ -41,6 +43,12 @@ func (c *Client) WithProjectID(projectID string) *Client {
 // WithReconnectPolicy overrides reconnect policy settings.
 func (c *Client) WithReconnectPolicy(policy reconnect.Policy) *Client {
 	c.policy = policy
+	return c
+}
+
+// WithReadWaitPolicy overrides the bounded read wait budgets used by snapshot reads.
+func (c *Client) WithReadWaitPolicy(policy ReadWaitPolicy) *Client {
+	c.readWait = policy.Normalize()
 	return c
 }
 

@@ -18,6 +18,15 @@ type mockWorktreeService struct {
 	cleanupOrphanedFn func(context.Context, string) (*CleanupOrphanedResult, error)
 }
 
+type recordingWorktreeLongRunningExecutor struct {
+	commands []string
+}
+
+func (r *recordingWorktreeLongRunningExecutor) Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) protocol.ResponseEnvelope) protocol.ResponseEnvelope {
+	r.commands = append(r.commands, command)
+	return exec(ctx)
+}
+
 func (m mockWorktreeService) List(ctx context.Context, projectID string) ([]git.Worktree, error) {
 	return m.listFn(ctx, projectID)
 }
@@ -399,5 +408,42 @@ func TestNormalizeCleanupOrphanedResult(t *testing.T) {
 		{Path: "/tmp/repo-d", Branch: "az/issue-d", IssueID: "issue-d"},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Skipped = %+v, want %+v", got, want)
+	}
+}
+
+func TestWorktreeHandlerUsesLongRunningExecutorForMutations(t *testing.T) {
+	executor := &recordingWorktreeLongRunningExecutor{}
+	h := NewWorktreeHandler(mockWorktreeService{
+		listFn: func(context.Context, string) ([]git.Worktree, error) { return nil, nil },
+		createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
+			return &git.Worktree{Path: "/tmp/repo-c", Branch: "az/issue-c", IssueID: "issue-c"}, nil
+		},
+		deleteFn: func(context.Context, string, string) error { return nil },
+		cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
+			return &CleanupOrphanedResult{ProjectID: "proj"}, nil
+		},
+	}, WithWorktreeLongRunningExecutor(executor))
+
+	body, err := json.Marshal(map[string]string{
+		"project_id":  "proj",
+		"issue_id":    "issue-c",
+		"base_branch": "main",
+	})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+
+	resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-create",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandWorktreeCreate,
+		Body:            body,
+	})
+	if !resp.OK {
+		t.Fatalf("response = %+v", resp)
+	}
+	if len(executor.commands) != 1 || executor.commands[0] != CommandWorktreeCreate {
+		t.Fatalf("commands = %v, want [%s]", executor.commands, CommandWorktreeCreate)
 	}
 }

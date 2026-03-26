@@ -31,7 +31,20 @@ var (
 
 // WorktreeHandler routes daemon worktree commands.
 type WorktreeHandler struct {
-	service worktreeService
+	service     worktreeService
+	longRunning WorktreeLongRunningExecutor
+}
+
+type WorktreeLongRunningExecutor interface {
+	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) protocol.ResponseEnvelope) protocol.ResponseEnvelope
+}
+
+type WorktreeHandlerOption func(*WorktreeHandler)
+
+func WithWorktreeLongRunningExecutor(executor WorktreeLongRunningExecutor) WorktreeHandlerOption {
+	return func(handler *WorktreeHandler) {
+		handler.longRunning = executor
+	}
 }
 
 type worktreeService interface {
@@ -49,8 +62,14 @@ type CleanupOrphanedResult struct {
 }
 
 // NewWorktreeHandler returns a daemon worktree command handler.
-func NewWorktreeHandler(service worktreeService) *WorktreeHandler {
-	return &WorktreeHandler{service: service}
+func NewWorktreeHandler(service worktreeService, opts ...WorktreeHandlerOption) *WorktreeHandler {
+	handler := &WorktreeHandler{service: service}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(handler)
+		}
+	}
+	return handler
 }
 
 type worktreeCommandBody struct {
@@ -82,6 +101,15 @@ type worktreeRemoveResultBody struct {
 
 // Handle executes one worktree command from a daemon request envelope.
 func (h *WorktreeHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.longRunning != nil && isWorktreeLongRunningCommand(req.Command) {
+		return h.longRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) protocol.ResponseEnvelope {
+			return h.handleDirect(execCtx, req)
+		})
+	}
+	return h.handleDirect(ctx, req)
+}
+
+func (h *WorktreeHandler) handleDirect(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
 	resp := protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		RequestID:       req.RequestID,
@@ -249,6 +277,15 @@ func (h *WorktreeHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 			Retryable: false,
 		}
 		return resp
+	}
+}
+
+func isWorktreeLongRunningCommand(command string) bool {
+	switch command {
+	case CommandWorktreeCreate, CommandWorktreeRemove, CommandWorktreeCleanupOrphaned:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
@@ -57,19 +58,19 @@ type worktreeCommandBody struct {
 	IssueID   string `json:"issue_id,omitempty"`
 }
 
+type longRunningResultEnvelope struct {
+	OperationID *string         `json:"operation_id,omitempty"`
+	State       *string         `json:"state,omitempty"`
+	Output      *string         `json:"output,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+}
+
 func (c *Client) commandOutput(ctx context.Context, command string, body any) (string, error) {
 	resp, err := c.commandJSONResponse(ctx, command, body)
 	if err != nil {
 		return "", err
 	}
-	if len(resp.Body) == 0 {
-		return "", nil
-	}
-	var out commandOutputBody
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return "", err
-	}
-	return out.Output, nil
+	return decodeCommandOutput(resp.Body)
 }
 
 func (c *Client) projectRoute() string {
@@ -197,11 +198,60 @@ func (c *Client) RemoveWorktree(ctx context.Context, issueID string) error {
 
 // CleanupOrphanedWorktrees asks the daemon to remove orphaned worktrees for the current project route.
 func (c *Client) CleanupOrphanedWorktrees(ctx context.Context) (int, error) {
-	var out protocol.CleanupOrphanedResponseBody
-	if err := c.commandJSON(ctx, protocol.CommandWorktreeCleanupOrphaned, protocol.CleanupOrphanedRequestBody{
+	resp, err := c.commandJSONResponse(ctx, protocol.CommandWorktreeCleanupOrphaned, protocol.CleanupOrphanedRequestBody{
 		ProjectID: c.projectRoute(),
-	}, &out); err != nil {
+	})
+	if err != nil {
+		return 0, err
+	}
+	var out protocol.CleanupOrphanedResponseBody
+	if err := decodeLongRunningJSON(protocol.CommandWorktreeCleanupOrphaned, resp.Body, &out); err != nil {
 		return 0, err
 	}
 	return out.WorktreesRemoved, nil
+}
+
+func decodeCommandOutput(body []byte) (string, error) {
+	if len(body) == 0 {
+		return "", nil
+	}
+
+	var envelope longRunningResultEnvelope
+	if err := json.Unmarshal(body, &envelope); err == nil {
+		if envelope.Output != nil {
+			return *envelope.Output, nil
+		}
+		if (envelope.OperationID != nil || envelope.State != nil) && len(envelope.Result) > 0 {
+			var out commandOutputBody
+			if err := json.Unmarshal(envelope.Result, &out); err != nil {
+				return "", err
+			}
+			return out.Output, nil
+		}
+	}
+
+	var out commandOutputBody
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", err
+	}
+	return out.Output, nil
+}
+
+func decodeLongRunningJSON(command string, body []byte, out any) error {
+	if out == nil || len(body) == 0 {
+		return nil
+	}
+
+	var envelope longRunningResultEnvelope
+	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.OperationID != nil || envelope.State != nil) && len(envelope.Result) > 0 {
+		if err := json.Unmarshal(envelope.Result, out); err != nil {
+			return fmt.Errorf("decode %s result: %w", command, err)
+		}
+		return nil
+	}
+
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode %s response: %w", command, err)
+	}
+	return nil
 }

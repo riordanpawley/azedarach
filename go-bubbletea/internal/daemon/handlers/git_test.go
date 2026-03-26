@@ -19,6 +19,15 @@ type fakeGitService struct {
 	statusFn     func(context.Context, string) (*git.GitStatus, error)
 }
 
+type recordingGitLongRunningExecutor struct {
+	commands []string
+}
+
+func (r *recordingGitLongRunningExecutor) Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) protocol.ResponseEnvelope) protocol.ResponseEnvelope {
+	r.commands = append(r.commands, command)
+	return exec(ctx)
+}
+
 func (f *fakeGitService) Fetch(ctx context.Context, worktree, remote string) error {
 	if f.fetchFn != nil {
 		return f.fetchFn(ctx, worktree, remote)
@@ -303,5 +312,23 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("unexpected status validation error: %+v", resp.Error)
+	}
+}
+
+func TestGitHandlerUsesLongRunningExecutorForMutatingCommands(t *testing.T) {
+	executor := &recordingGitLongRunningExecutor{}
+	handler := NewGitHandler(&fakeGitService{}, WithGitLongRunningExecutor(executor))
+
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}))
+	if !resp.OK {
+		t.Fatalf("response = %+v", resp)
+	}
+	if len(executor.commands) != 1 || executor.commands[0] != CommandGitMerge {
+		t.Fatalf("commands = %v, want [%s]", executor.commands, CommandGitMerge)
+	}
+
+	_ = handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{Worktree: "/tmp/az-1"}))
+	if len(executor.commands) != 1 {
+		t.Fatalf("status should not use long-running executor, commands = %v", executor.commands)
 	}
 }

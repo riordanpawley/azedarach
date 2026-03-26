@@ -3,6 +3,7 @@ package daemonclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -152,8 +153,19 @@ func (c *Client) ListTasks(ctx context.Context) ([]domain.Task, error) {
 
 // ListTasksSnapshot fetches the current task set and revision through the daemon client boundary.
 func (c *Client) ListTasksSnapshot(ctx context.Context) (TaskSnapshot, error) {
-	resp, err := c.commandJSONResponse(ctx, CommandTaskList, nil)
+	return c.ListTasksSnapshotWithMode(ctx, ReadWaitModeDefault)
+}
+
+// ListTasksSnapshotWithMode fetches a task snapshot with the requested bounded read budget.
+func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (TaskSnapshot, error) {
+	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
+	defer cancel()
+
+	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, nil)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+		}
 		return TaskSnapshot{}, err
 	}
 

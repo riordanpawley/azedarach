@@ -13,8 +13,16 @@ type Dispatcher struct {
 	session   *SessionHandler
 	git       *GitHandler
 	pr        *PRHandler
+	operation OperationHandler
 	worktree  *WorktreeHandler
 	devserver *DevServerHandler
+}
+
+// OperationHandler is a marker interface so operation routes can be injected
+// without colliding with existing handler Handle methods in the variadic ctor.
+type OperationHandler interface {
+	Handle(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+	HandlesOperationCommands()
 }
 
 // NewDispatcher returns a composed command router.
@@ -22,6 +30,8 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 	d := &Dispatcher{session: session}
 	for _, handler := range handlers {
 		switch h := handler.(type) {
+		case OperationHandler:
+			d.operation = h
 		case *GitHandler:
 			d.git = h
 		case *PRHandler:
@@ -36,6 +46,7 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 		session:   d.session,
 		git:       d.git,
 		pr:        d.pr,
+		operation: d.operation,
 		worktree:  d.worktree,
 		devserver: d.devserver,
 	}
@@ -46,6 +57,8 @@ func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 	switch {
 	case d.session != nil && strings.HasPrefix(req.Command, "session."):
 		return d.session.Handle(ctx, req)
+	case d.operation != nil && strings.HasPrefix(req.Command, "operation."):
+		return d.operation.Handle(ctx, req)
 	case d.pr != nil && req.Command == CommandGitBranchBehind:
 		return d.pr.Handle(ctx, req)
 	case d.pr != nil && strings.HasPrefix(req.Command, "pr."):

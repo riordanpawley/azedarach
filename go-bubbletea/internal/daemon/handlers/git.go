@@ -32,12 +32,31 @@ type GitService interface {
 
 // GitHandler routes daemon git workflow commands.
 type GitHandler struct {
-	service GitService
+	service     GitService
+	longRunning GitLongRunningExecutor
+}
+
+type GitLongRunningExecutor interface {
+	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) protocol.ResponseEnvelope) protocol.ResponseEnvelope
+}
+
+type GitHandlerOption func(*GitHandler)
+
+func WithGitLongRunningExecutor(executor GitLongRunningExecutor) GitHandlerOption {
+	return func(handler *GitHandler) {
+		handler.longRunning = executor
+	}
 }
 
 // NewGitHandler returns a git workflow handler.
-func NewGitHandler(service GitService) *GitHandler {
-	return &GitHandler{service: service}
+func NewGitHandler(service GitService, opts ...GitHandlerOption) *GitHandler {
+	handler := &GitHandler{service: service}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(handler)
+		}
+	}
+	return handler
 }
 
 type gitCommandBody struct {
@@ -70,6 +89,15 @@ type gitMergeResultBody struct {
 
 // Handle executes one git workflow command from a daemon request envelope.
 func (h *GitHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	if h.longRunning != nil && isGitLongRunningCommand(req.Command) {
+		return h.longRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) protocol.ResponseEnvelope {
+			return h.handleDirect(execCtx, req)
+		})
+	}
+	return h.handleDirect(ctx, req)
+}
+
+func (h *GitHandler) handleDirect(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
 	resp := protocol.ResponseEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
 		RequestID:       req.RequestID,
@@ -108,6 +136,15 @@ func (h *GitHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 			Retryable: false,
 		}
 		return resp
+	}
+}
+
+func isGitLongRunningCommand(command string) bool {
+	switch command {
+	case CommandGitFetch, CommandGitMerge, CommandGitCheckout, CommandGitAbortMerge:
+		return true
+	default:
+		return false
 	}
 }
 

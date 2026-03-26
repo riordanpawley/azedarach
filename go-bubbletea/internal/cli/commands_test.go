@@ -139,6 +139,45 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				nested, err := json.Marshal(commandOutputBody{Output: "wrapped output\n"})
+				if err != nil {
+					t.Fatalf("marshal nested response: %v", err)
+				}
+				body, err := json.Marshal(map[string]any{
+					"operation_id": "op-start",
+					"state":        "done",
+					"result":       json.RawMessage(nested),
+				})
+				if err != nil {
+					t.Fatalf("marshal wrapped response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return StartCommand(deps, "issue-1")
+	})
+
+	if output != "wrapped output\n" {
+		t.Fatalf("output = %q, want wrapped output", output)
+	}
+}
+
 func TestCommandErrorUsesTransportMessage(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),

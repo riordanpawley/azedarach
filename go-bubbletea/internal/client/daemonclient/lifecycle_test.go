@@ -172,6 +172,41 @@ func TestSessionAttachAndStatusCommandsRouteThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			nested, err := json.Marshal(commandOutputBody{Output: "wrapped"})
+			if err != nil {
+				t.Fatalf("marshal nested response: %v", err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-123",
+				"state":        "done",
+				"result":       json.RawMessage(nested),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	got, err := client.StartSession(context.Background(), "az-1", "main")
+	if err != nil {
+		t.Fatalf("StartSession error: %v", err)
+	}
+	if got != "wrapped" {
+		t.Fatalf("StartSession output = %q, want wrapped", got)
+	}
+}
+
 func TestDevServerLifecycleHelpers(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -313,6 +348,44 @@ func TestCleanupOrphanedWorktreesRoutesAndDecodesResponse(t *testing.T) {
 	}
 	if body.ProjectID != "proj-a" {
 		t.Fatalf("request project_id = %q, want proj-a", body.ProjectID)
+	}
+}
+
+func TestCleanupOrphanedWorktreesDecodesNestedOperationResult(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			nested, err := json.Marshal(protocol.CleanupOrphanedResponseBody{
+				ProjectID:        "proj-a",
+				WorktreesRemoved: 3,
+			})
+			if err != nil {
+				t.Fatalf("marshal nested response: %v", err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-cleanup",
+				"state":        "done",
+				"result":       json.RawMessage(nested),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	removed, err := client.CleanupOrphanedWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("CleanupOrphanedWorktrees error: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("removed = %d, want 3", removed)
 	}
 }
 

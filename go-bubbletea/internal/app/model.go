@@ -99,8 +99,9 @@ type drillDownContext struct {
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks    []domain.Task
-	sessions map[string]*domain.Session
+	tasks           []domain.Task
+	sessions        map[string]*domain.Session
+	suppressedTasks map[string]struct{}
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -309,7 +310,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasLoading := m.loading
 		if msg.stale {
 			m.loading = false
-			if msg.freshnessHint != "" {
+			if wasLoading && msg.freshnessHint != "" {
 				m.addToast(Toast{
 					Level:   ToastWarning,
 					Message: msg.freshnessHint,
@@ -326,10 +327,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 		}
-		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, msg.tasks)
-		m.sessions = m.projectSessionProjection(msg.tasks)
+		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
+		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		m.sessions = m.projectSessionProjection(tasks)
 		m.applyRuntimeSignals()
-		m.editor.ReconcileSelection(msg.tasks)
+		m.editor.ReconcileSelection(tasks)
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
@@ -627,9 +629,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Reuse the normal loaded-state reducer path.
-		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, msg.tasks)
-		m.sessions = m.projectSessionProjection(msg.tasks)
-		m.editor.ReconcileSelection(msg.tasks)
+		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
+		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		m.sessions = m.projectSessionProjection(tasks)
+		m.editor.ReconcileSelection(tasks)
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
@@ -801,14 +804,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Failed to delete task: %v", msg.err),
+				Message: fmt.Sprintf("Failed to archive task: %v", msg.err),
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
 		}
+		m.suppressTaskHydration(msg.taskID)
+		m.tasks = removeTaskByID(m.tasks, msg.taskID)
+		m.editor.ReconcileSelection(m.tasks)
+		m.applyRuntimeSignals()
+		m.reconcileCursorAfterIssuesRefresh()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Task %s deleted", msg.taskID),
+			Message: fmt.Sprintf("Task %s archived", msg.taskID),
 			Expires: time.Now().Add(2 * time.Second),
 		})
 		return m, m.loadIssuesCmd()
@@ -1876,6 +1884,56 @@ func taskIDKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func (m *Model) suppressTaskHydration(taskID string) {
+	key := taskIDKey(taskID)
+	if key == "" {
+		return
+	}
+	if m.suppressedTasks == nil {
+		m.suppressedTasks = make(map[string]struct{})
+	}
+	m.suppressedTasks[key] = struct{}{}
+}
+
+func (m Model) isTaskHydrationSuppressed(taskID string) bool {
+	if len(m.suppressedTasks) == 0 {
+		return false
+	}
+	_, ok := m.suppressedTasks[taskIDKey(taskID)]
+	return ok
+}
+
+func (m Model) filterSuppressedHydratedTasks(tasks []domain.Task) []domain.Task {
+	if len(tasks) == 0 || len(m.suppressedTasks) == 0 {
+		return tasks
+	}
+
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if m.isTaskHydrationSuppressed(task.ID) {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
+func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
+
+	target := taskIDKey(taskID)
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if taskIDKey(task.ID) == target {
+			continue
+		}
+		filtered = append(filtered, task)
+	}
+	return filtered
+}
+
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 	return func() tea.Msg {
 		if m.daemonClient == nil {
@@ -2897,7 +2955,7 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 			return taskDeletedResultMsg{taskID: taskID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		err := m.daemonClient.DeleteTask(ctx, taskID)
+		err := m.daemonClient.ArchiveTask(ctx, taskID)
 		return taskDeletedResultMsg{taskID: taskID, err: err}
 	}
 }

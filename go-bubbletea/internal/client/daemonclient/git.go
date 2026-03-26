@@ -46,11 +46,15 @@ type gitStatusBody struct {
 
 // GitFetch asks the daemon to fetch updates for a worktree from the requested remote.
 func (c *Client) GitFetch(ctx context.Context, worktree, remote string) (GitCommandResponse, error) {
-	var resp GitCommandResponse
-	if err := c.commandJSON(ctx, CommandGitFetch, GitCommandRequest{
+	raw, err := c.commandJSONResponse(ctx, CommandGitFetch, GitCommandRequest{
 		Worktree: worktree,
 		Remote:   remote,
-	}, &resp); err != nil {
+	})
+	if err != nil {
+		return GitCommandResponse{}, err
+	}
+	var resp GitCommandResponse
+	if err := decodeLongRunningJSON(CommandGitFetch, raw.Body, &resp); err != nil {
 		return GitCommandResponse{}, err
 	}
 	return resp, nil
@@ -58,11 +62,15 @@ func (c *Client) GitFetch(ctx context.Context, worktree, remote string) (GitComm
 
 // GitMerge asks the daemon to merge a branch into the requested worktree.
 func (c *Client) GitMerge(ctx context.Context, worktree, branch string) (GitMergeCommandResponse, error) {
-	var resp GitMergeCommandResponse
-	if err := c.commandJSON(ctx, CommandGitMerge, GitCommandRequest{
+	raw, err := c.commandJSONResponse(ctx, CommandGitMerge, GitCommandRequest{
 		Worktree: worktree,
 		Branch:   branch,
-	}, &resp); err != nil {
+	})
+	if err != nil {
+		return GitMergeCommandResponse{}, err
+	}
+	var resp GitMergeCommandResponse
+	if err := decodeLongRunningJSON(CommandGitMerge, raw.Body, &resp); err != nil {
 		return GitMergeCommandResponse{}, err
 	}
 	return resp, nil
@@ -70,11 +78,15 @@ func (c *Client) GitMerge(ctx context.Context, worktree, branch string) (GitMerg
 
 // GitCheckout asks the daemon to checkout a branch in the requested worktree.
 func (c *Client) GitCheckout(ctx context.Context, worktree, branch string) (GitCommandResponse, error) {
-	var resp GitCommandResponse
-	if err := c.commandJSON(ctx, CommandGitCheckout, GitCommandRequest{
+	raw, err := c.commandJSONResponse(ctx, CommandGitCheckout, GitCommandRequest{
 		Worktree: worktree,
 		Branch:   branch,
-	}, &resp); err != nil {
+	})
+	if err != nil {
+		return GitCommandResponse{}, err
+	}
+	var resp GitCommandResponse
+	if err := decodeLongRunningJSON(CommandGitCheckout, raw.Body, &resp); err != nil {
 		return GitCommandResponse{}, err
 	}
 	return resp, nil
@@ -82,10 +94,14 @@ func (c *Client) GitCheckout(ctx context.Context, worktree, branch string) (GitC
 
 // GitAbortMerge asks the daemon to abort an ongoing merge in the requested worktree.
 func (c *Client) GitAbortMerge(ctx context.Context, worktree string) (GitCommandResponse, error) {
-	var resp GitCommandResponse
-	if err := c.commandJSON(ctx, CommandGitAbortMerge, GitCommandRequest{
+	raw, err := c.commandJSONResponse(ctx, CommandGitAbortMerge, GitCommandRequest{
 		Worktree: worktree,
-	}, &resp); err != nil {
+	})
+	if err != nil {
+		return GitCommandResponse{}, err
+	}
+	var resp GitCommandResponse
+	if err := decodeLongRunningJSON(CommandGitAbortMerge, raw.Body, &resp); err != nil {
 		return GitCommandResponse{}, err
 	}
 	return resp, nil

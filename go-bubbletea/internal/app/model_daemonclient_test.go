@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
@@ -32,6 +33,21 @@ type recordingCommandRunner struct {
 	calls  [][]string
 	output string
 	err    error
+}
+
+type blockingSnapshotTransport struct{}
+
+func (blockingSnapshotTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+	return protocol.HelloAck{Accepted: true}, nil
+}
+
+func (blockingSnapshotTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	<-ctx.Done()
+	return protocol.ResponseEnvelope{}, ctx.Err()
+}
+
+func (blockingSnapshotTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (r *recordingCommandRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -183,7 +199,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 	})
 
-	t.Run("status and delete", func(t *testing.T) {
+	t.Run("status and archive", func(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
@@ -195,13 +211,13 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 					if body.TaskID != "az-1" || body.Status != domain.StatusInProgress {
 						t.Fatalf("status body = %+v", body)
 					}
-				case daemonclient.CommandTaskDelete:
+				case daemonclient.CommandTaskArchive:
 					var body daemonclient.TaskIDRequest
 					if err := json.Unmarshal(req.Body, &body); err != nil {
-						t.Fatalf("unmarshal delete request: %v", err)
+						t.Fatalf("unmarshal archive request: %v", err)
 					}
 					if body.TaskID != "az-2" {
-						t.Fatalf("delete body = %+v", body)
+						t.Fatalf("archive body = %+v", body)
 					}
 				default:
 					t.Fatalf("unexpected command: %s", req.Command)
@@ -225,10 +241,10 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		deleteMsg := m.deleteTaskCmd("az-2")()
 		deleted, ok := deleteMsg.(taskDeletedResultMsg)
 		if !ok || deleted.taskID != "az-2" || deleted.err != nil {
-			t.Fatalf("delete result = %#v", deleteMsg)
+			t.Fatalf("archive result = %#v", deleteMsg)
 		}
 
-		if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandTaskUpdateStatus || transport.requests[1] != daemonclient.CommandTaskDelete {
+		if len(transport.requests) != 2 || transport.requests[0] != daemonclient.CommandTaskUpdateStatus || transport.requests[1] != daemonclient.CommandTaskArchive {
 			t.Fatalf("requests = %v", transport.requests)
 		}
 	})
@@ -268,6 +284,44 @@ func TestDaemonCommandsReportMissingDaemonClient(t *testing.T) {
 		t.Fatalf("abortMergeCmd message type = %T, want abortMergeResultMsg", msg)
 	} else if abortMsg.err == nil || abortMsg.err.Error() != "daemon client unavailable" {
 		t.Fatalf("abortMergeCmd error = %v, want daemon client unavailable", abortMsg.err)
+	}
+}
+
+func TestLoadIssuesCmdTimeoutReturnsStaleIssuesMsg(t *testing.T) {
+	transport := blockingSnapshotTransport{}
+	m := newTestModel()
+	m.currentProject = "proj-read"
+	m.daemonClient = daemonclient.New(&transport).WithProjectID("proj-read").WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
+		Default:  1 * time.Nanosecond,
+		Explicit: 2 * time.Nanosecond,
+	})
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Existing", Status: domain.StatusOpen}}
+
+	msg := m.loadIssuesCmd()()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+	if !loaded.stale {
+		t.Fatal("expected stale issuesLoadedMsg on read timeout")
+	}
+	if loaded.freshnessHint == "" {
+		t.Fatal("expected freshness hint on read timeout")
+	}
+
+	updated, _ := m.Update(loaded)
+	newModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if len(newModel.tasks) != 1 || newModel.tasks[0].ID != "az-1" {
+		t.Fatalf("tasks = %+v, want existing board state preserved", newModel.tasks)
+	}
+	if !newModel.hasRefreshLoop {
+		t.Fatal("expected refresh loop to start after stale read timeout")
+	}
+	if len(newModel.toasts) == 0 || !strings.Contains(newModel.toasts[len(newModel.toasts)-1].Message, "local-first data") {
+		t.Fatalf("toasts = %+v, want freshness warning", newModel.toasts)
 	}
 }
 

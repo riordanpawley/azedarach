@@ -261,3 +261,46 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 		}
 	})
 }
+
+func TestGitCommandsDecodeNestedOperationResult(t *testing.T) {
+	const worktree = "/tmp/az-1"
+	transport := &gitRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			nested, err := json.Marshal(GitMergeCommandResponse{
+				Worktree: worktree,
+				Branch:   "main",
+				Result: git.MergeResult{
+					Success: true,
+					Message: "merged",
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal nested response: %v", err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"operation_id": "op-merge",
+				"state":        "done",
+				"result":       json.RawMessage(nested),
+			})
+			if err != nil {
+				t.Fatalf("marshal wrapped response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-git")
+	resp, err := client.GitMerge(context.Background(), worktree, "main")
+	if err != nil {
+		t.Fatalf("GitMerge error: %v", err)
+	}
+	if resp.Worktree != worktree || resp.Branch != "main" || !resp.Result.Success {
+		t.Fatalf("response = %+v", resp)
+	}
+}

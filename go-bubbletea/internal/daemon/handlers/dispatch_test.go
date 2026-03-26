@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -85,6 +86,50 @@ func (g *routeBranchBehindGit) RevListCount(_ context.Context, _ string, revRang
 	return 3, nil
 }
 
+type routeOperationHandler struct {
+	lastCommand string
+	lastBody    protocol.OperationSubmitRequestBody
+}
+
+func (h *routeOperationHandler) HandlesOperationCommands() {}
+
+func (h *routeOperationHandler) Handle(_ context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	h.lastCommand = req.Command
+	if err := json.Unmarshal(req.Body, &h.lastBody); err != nil {
+		return protocol.ResponseEnvelope{
+			ProtocolVersion: req.ProtocolVersion,
+			RequestID:       req.RequestID,
+			Kind:            protocol.EnvelopeKindResponse,
+			CompletedAt:     time.Now().UTC(),
+			Error: &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		}
+	}
+	body, _ := json.Marshal(protocol.OperationSubmitResponseBody{
+		Created: true,
+		Operation: protocol.OperationRecord{
+			OperationID:  "op-1",
+			ProjectID:    h.lastBody.ProjectID,
+			Kind:         h.lastBody.Kind,
+			IssueID:      h.lastBody.IssueID,
+			DedupeKey:    h.lastBody.DedupeKey,
+			ResourceKeys: append([]string(nil), h.lastBody.ResourceKeys...),
+			State:        protocol.OperationStateQueued,
+		},
+	})
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		CompletedAt:     time.Now().UTC(),
+		OK:              true,
+		Body:            body,
+	}
+}
+
 func TestDispatcherMixedRouting(t *testing.T) {
 	session := NewSessionHandler(daemonstate.NewStore())
 	gitHandler := NewGitHandler(&fakeGitService{
@@ -96,7 +141,8 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	})
 	worktree := NewWorktreeHandler(&fakeWorktreeService{})
 	devserverH := NewDevServerHandler(newRouteDevServerManager())
-	dispatch := NewDispatcher(session, gitHandler, worktree, devserverH)
+	operationH := &routeOperationHandler{}
+	dispatch := NewDispatcher(session, gitHandler, worktree, devserverH, operationH)
 
 	mkReq := func(cmd string, body any) protocol.RequestEnvelope {
 		b, _ := json.Marshal(body)
@@ -146,6 +192,23 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	if !r5.OK {
 		t.Fatalf("cleanup route failed: %+v", r5.Error)
 	}
+
+	r6 := dispatch.Handle(context.Background(), mkReq(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID:    "proj",
+		Kind:         "session.start",
+		IssueID:      "aey",
+		DedupeKey:    "proj::aey::session.start",
+		ResourceKeys: []string{"issue:aey", "session:aey"},
+	}))
+	if !r6.OK {
+		t.Fatalf("operation route failed: %+v", r6.Error)
+	}
+	if operationH.lastCommand != protocol.CommandOperationSubmit {
+		t.Fatalf("operation handler command = %q, want %q", operationH.lastCommand, protocol.CommandOperationSubmit)
+	}
+	if operationH.lastBody.DedupeKey != "proj::aey::session.start" {
+		t.Fatalf("operation handler body = %+v", operationH.lastBody)
+	}
 }
 
 func TestDispatcherSessionRoutingRequiresSessionHandler(t *testing.T) {
@@ -193,6 +256,29 @@ func TestDispatcherUnknownCommand(t *testing.T) {
 	})
 	if resp.OK {
 		t.Fatalf("expected unsupported command response")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnsupportedCommand {
+		t.Fatalf("unexpected error mapping: %+v", resp.Error)
+	}
+}
+
+func TestDispatcherOperationRoutingRequiresOperationHandler(t *testing.T) {
+	body, _ := json.Marshal(protocol.OperationGetRequestBody{
+		ProjectID:   "proj",
+		OperationID: "op-1",
+	})
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-operation",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandOperationGet,
+		Body:            body,
+	}
+
+	dispatch := NewDispatcher(nil)
+	resp := dispatch.Handle(context.Background(), req)
+	if resp.OK {
+		t.Fatal("expected operation command to be rejected when dispatcher has no operation handler")
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnsupportedCommand {
 		t.Fatalf("unexpected error mapping: %+v", resp.Error)

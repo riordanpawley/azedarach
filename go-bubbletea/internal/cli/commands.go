@@ -2170,6 +2170,11 @@ type commandOutputBody struct {
 	Output string `json:"output"`
 }
 
+type commandOutputEnvelope struct {
+	Output *string         `json:"output,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
 type applyExecutionResultBody struct {
 	Summary applyExecutionSummaryBody `json:"summary"`
 }
@@ -2216,16 +2221,38 @@ func printCommandOutput(resp protocol.ResponseEnvelope) error {
 		return nil
 	}
 
-	var out commandOutputBody
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
+	out, err := decodeCommandOutput(resp.Body)
+	if err != nil {
 		return fmt.Errorf("failed to decode daemon response: %w", err)
 	}
 
-	if out.Output != "" {
-		fmt.Print(out.Output)
+	if out != "" {
+		fmt.Print(out)
 	}
 
 	return nil
+}
+
+func decodeCommandOutput(body []byte) (string, error) {
+	var envelope commandOutputEnvelope
+	if err := json.Unmarshal(body, &envelope); err == nil {
+		if envelope.Output != nil {
+			return *envelope.Output, nil
+		}
+		if len(envelope.Result) > 0 {
+			var nested commandOutputBody
+			if err := json.Unmarshal(envelope.Result, &nested); err != nil {
+				return "", err
+			}
+			return nested.Output, nil
+		}
+	}
+
+	var out commandOutputBody
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", err
+	}
+	return out.Output, nil
 }
 
 func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
