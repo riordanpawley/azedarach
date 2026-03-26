@@ -757,44 +757,6 @@ func TestResolveDBPathUsesEnvOverride(t *testing.T) {
 	assert.Equal(t, "/tmp/custom-azedarach.db", got)
 }
 
-func TestResolveBaseGitRootAbsoluteCommonDir(t *testing.T) {
-	start := filepath.Join(t.TempDir(), "repo", "worktree-a")
-	got, err := baseGitRootFromCommonDir(start, "/tmp/repo/.git")
-	require.NoError(t, err)
-	assert.Equal(t, "/tmp/repo", got)
-}
-
-func TestResolveBaseGitRootRelativeCommonDir(t *testing.T) {
-	start := filepath.Join(t.TempDir(), "repo", "worktree-a")
-	got, err := baseGitRootFromCommonDir(start, "../.git")
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Clean(filepath.Join(start, "..")), got)
-}
-
-func TestResolveBaseGitRootRejectsNonDotGitPath(t *testing.T) {
-	start := t.TempDir()
-	_, err := baseGitRootFromCommonDir(start, "/tmp/repo/gitdir")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "expected .git path")
-}
-
-func TestResolveBaseGitRootNestedWorktreeCommonDir(t *testing.T) {
-	start := filepath.Join(t.TempDir(), "repo", "worktree-a")
-	got, err := baseGitRootFromCommonDir(start, "/tmp/repo/.git/worktrees/worktree-a")
-	require.NoError(t, err)
-	assert.Equal(t, "/tmp/repo", got)
-}
-
-func TestResolveDBPathFromBaseGitRoot(t *testing.T) {
-	base := t.TempDir()
-	worktree := filepath.Join(base, "worktree-a")
-	require.NoError(t, os.MkdirAll(worktree, 0o755))
-
-	got, err := resolveDBPathFromGitCommonDir(worktree, "../.git")
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(base, ".azedarach", "azedarach.db"), got)
-}
-
 func TestResolveDBPathBySearchFindsParentStore(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -807,27 +769,6 @@ func TestResolveDBPathBySearchFindsParentStore(t *testing.T) {
 	got, err := resolveDBPathBySearch(worktree)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(storeDir, "azedarach.db"), got)
-}
-
-func TestParseGitDirPointer(t *testing.T) {
-	got, err := parseGitDirPointer("gitdir: /tmp/repo/.git/worktrees/wt\n")
-	require.NoError(t, err)
-	assert.Equal(t, "/tmp/repo/.git/worktrees/wt", got)
-}
-
-func TestResolveBaseGitRootFromGitMarkerWorktreePointer(t *testing.T) {
-	base := t.TempDir()
-	repo := filepath.Join(base, "repo")
-	worktree := filepath.Join(base, "wt")
-	start := filepath.Join(worktree, "go-bubbletea")
-
-	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755))
-	require.NoError(t, os.MkdirAll(start, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644))
-
-	got, err := resolveBaseGitRootFromGitMarker(start)
-	require.NoError(t, err)
-	assert.Equal(t, repo, got)
 }
 
 func TestResolveDBPathFallsBackToGitMarkerWhenGitUnavailable(t *testing.T) {

@@ -33,6 +33,11 @@ type GitSyncService interface {
 	ShouldNotify(count int) bool
 }
 
+type TmuxService interface {
+	SwitchClient(ctx context.Context, name string) error
+	DisplayPopup(ctx context.Context, title, width, height, command string) error
+}
+
 type Deps struct {
 	SessionMonitor     SessionMonitorService
 	GitSyncService     GitSyncService
@@ -42,6 +47,7 @@ type Deps struct {
 	ProjectRegistry    *config.ProjectsRegistry
 	IsOnline           bool
 	TmuxAvailable      bool
+	TmuxClient         TmuxService
 }
 
 type tmuxAdapter struct {
@@ -88,5 +94,6 @@ func Build(cfg *config.Config, repoDir string, logger *slog.Logger) Deps {
 		ProjectRegistry:    registry,
 		IsOnline:           true,
 		TmuxAvailable:      os.Getenv("TMUX") != "",
+		TmuxClient:         tmuxClient,
 	}
 }

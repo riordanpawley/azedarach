@@ -338,6 +338,7 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 }
 
 func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
+	t.Setenv("TMUX", "")
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			if req.Command != daemonclient.CommandSessionAttach {
@@ -396,6 +397,7 @@ func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
 }
 
 func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
+	t.Setenv("TMUX", "")
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {

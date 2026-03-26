@@ -21,6 +21,16 @@ func (m *mockRunner) Run(ctx context.Context, args ...string) (string, error) {
 	return m.output, m.err
 }
 
+type recordingRunner struct {
+	err      error
+	commands [][]string
+}
+
+func (r *recordingRunner) Run(ctx context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, append([]string(nil), args...))
+	return "", r.err
+}
+
 func TestClient_NewSession(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -391,5 +401,66 @@ func TestClient_ErrorWrapping(t *testing.T) {
 		assert.Equal(t, "capture-pane", tmuxErr.Op)
 		assert.Equal(t, "session-123", tmuxErr.Session)
 		assert.Contains(t, err.Error(), "session-123")
+	})
+}
+
+func TestClient_SwitchClient(t *testing.T) {
+	t.Run("switches target session", func(t *testing.T) {
+		runner := &recordingRunner{}
+		client := NewClient(runner, slog.Default())
+
+		err := client.SwitchClient(context.Background(), "ch-em")
+		require.NoError(t, err)
+		require.Len(t, runner.commands, 1)
+		assert.Equal(t, []string{"switch-client", "-t", "ch-em"}, runner.commands[0])
+	})
+
+	t.Run("wraps switch error", func(t *testing.T) {
+		runner := &recordingRunner{err: errors.New("switch failed")}
+		client := NewClient(runner, slog.Default())
+
+		err := client.SwitchClient(context.Background(), "ch-em")
+		require.Error(t, err)
+		var tmuxErr *domain.TmuxError
+		require.ErrorAs(t, err, &tmuxErr)
+		assert.Equal(t, "switch-client", tmuxErr.Op)
+		assert.Equal(t, "ch-em", tmuxErr.Session)
+	})
+}
+
+func TestClient_DisplayPopup(t *testing.T) {
+	t.Run("builds popup command with title", func(t *testing.T) {
+		runner := &recordingRunner{}
+		client := NewClient(runner, slog.Default())
+
+		err := client.DisplayPopup(context.Background(), "az.log", "90%", "90%", "less +F az.log")
+		require.NoError(t, err)
+		require.Len(t, runner.commands, 1)
+		assert.Equal(t, []string{
+			"display-popup", "-E", "-w", "90%", "-h", "90%", "-T", "az.log", "less +F az.log",
+		}, runner.commands[0])
+	})
+
+	t.Run("omits title when empty", func(t *testing.T) {
+		runner := &recordingRunner{}
+		client := NewClient(runner, slog.Default())
+
+		err := client.DisplayPopup(context.Background(), "", "80%", "70%", "echo hi")
+		require.NoError(t, err)
+		require.Len(t, runner.commands, 1)
+		assert.Equal(t, []string{
+			"display-popup", "-E", "-w", "80%", "-h", "70%", "echo hi",
+		}, runner.commands[0])
+	})
+
+	t.Run("wraps popup error", func(t *testing.T) {
+		runner := &recordingRunner{err: errors.New("popup failed")}
+		client := NewClient(runner, slog.Default())
+
+		err := client.DisplayPopup(context.Background(), "az.log", "90%", "90%", "less +F az.log")
+		require.Error(t, err)
+		var tmuxErr *domain.TmuxError
+		require.ErrorAs(t, err, &tmuxErr)
+		assert.Equal(t, "display-popup", tmuxErr.Op)
 	})
 }

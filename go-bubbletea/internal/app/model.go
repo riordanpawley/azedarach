@@ -3198,13 +3198,13 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 					continue
 				}
 				seen[target] = struct{}{}
-					if m.tmuxClient == nil {
-						break
-					}
-					if err := m.tmuxClient.SwitchClient(ctx, target); err == nil {
-						return sessionAttachedMsg{issueID: issueID, switchedTmux: true}
-					} else {
-						lastErr = err
+				if m.tmuxClient == nil {
+					break
+				}
+				if err := m.tmuxClient.SwitchClient(ctx, target); err == nil {
+					return sessionAttachedMsg{issueID: issueID, switchedTmux: true}
+				} else {
+					lastErr = err
 				}
 			}
 			if lastErr != nil {

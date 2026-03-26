@@ -151,3 +151,31 @@ func (c *Client) SetEnvironment(ctx context.Context, name, key, value string) er
 	c.logger.Debug("tmux environment variable set", "name", name, "key", key)
 	return nil
 }
+
+func (c *Client) SwitchClient(ctx context.Context, name string) error {
+	c.logger.Debug("switching tmux client", "name", name)
+
+	_, err := c.runner.Run(ctx, "switch-client", "-t", name)
+	if err != nil {
+		return &domain.TmuxError{Op: "switch-client", Session: name, Err: err}
+	}
+
+	return nil
+}
+
+func (c *Client) DisplayPopup(ctx context.Context, title, width, height, command string) error {
+	c.logger.Debug("opening tmux popup", "title", title)
+
+	args := []string{"display-popup", "-E", "-w", width, "-h", height}
+	if strings.TrimSpace(title) != "" {
+		args = append(args, "-T", title)
+	}
+	args = append(args, command)
+
+	_, err := c.runner.Run(ctx, args...)
+	if err != nil {
+		return &domain.TmuxError{Op: "display-popup", Err: err}
+	}
+
+	return nil
+}
