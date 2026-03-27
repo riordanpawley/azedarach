@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+project_root="$(cd "$self_dir/.." && pwd -P)"
+
+export GOCACHE="${GOCACHE:-$project_root/go-bubbletea/.gocache}"
+export GOPATH="${GOPATH:-$project_root/go-bubbletea/.gopath}"
+mkdir -p "$GOCACHE" "$GOPATH"
+
+IFS=':' read -r -a path_parts <<< "${PATH:-}"
+for path_part in "${path_parts[@]}"; do
+  [[ -n "$path_part" ]] || continue
+  candidate="$path_part/go"
+  if [[ ! -x "$candidate" ]]; then
+    continue
+  fi
+  candidate_dir="$(cd "$(dirname "$candidate")" && pwd -P)"
+  if [[ "$candidate_dir" == "$self_dir" ]]; then
+    continue
+  fi
+  exec "$candidate" "$@"
+done
+
+echo "azedarach go wrapper: unable to locate the real go binary in PATH" >&2
+exit 127

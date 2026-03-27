@@ -54,6 +54,9 @@ Implementation-specific overlays:
 rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
+# Go in this repo (auto-local cache/module paths via ./bin/go shim)
+./bin/go test ./...               # Uses repo-local GOCACHE/GOPATH by default
+
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide
 az impl list                      # Show available implementations

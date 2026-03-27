@@ -3,28 +3,28 @@ default:
     @just --list
 
 build:
-    go build -o bin/az ./cmd/az
-    go build -o bin/azd ./cmd/azd
+    ../bin/go build -o bin/az ./cmd/az
+    ../bin/go build -o bin/azd ./cmd/azd
 
 run:
-    go build -o bin/azd ./cmd/azd
-    go run ./cmd/az
+    ../bin/go build -o bin/azd ./cmd/azd
+    ../bin/go run ./cmd/az
 
 test:
-    go test -v ./...
+    ../bin/go test -v ./...
 
 test-coverage:
-    go test -coverprofile=coverage.out ./...
-    go tool cover -html=coverage.out -o coverage.html
+    ../bin/go test -coverprofile=coverage.out ./...
+    ../bin/go tool cover -html=coverage.out -o coverage.html
 
 type-check:
-    go build ./...
+    ../bin/go build ./...
 
 clean:
     rm -rf bin/ coverage.out coverage.html
 
 install:
-    go install ./cmd/az
+    ../bin/go install ./cmd/az
 
 lint:
     golangci-lint run ./...
@@ -33,5 +33,5 @@ boundary-check:
     if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --config .golangci-boundary.yml ./internal/...; else echo "WARN: golangci-lint not installed; skipping depguard boundary lint gate" >&2; fi
     ./scripts/check-go-boundaries.sh
     ../scripts/afv-drift-sentinel.sh
-    go test ./internal/app ./internal/cli
-    go test ./internal/daemon/... ./internal/client/...
+    ../bin/go test ./internal/app ./internal/cli
+    ../bin/go test ./internal/daemon/... ./internal/client/...

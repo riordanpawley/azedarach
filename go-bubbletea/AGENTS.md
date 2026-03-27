@@ -64,6 +64,9 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
 14. **Daemon Restart Policy**:
    - For operational daemon restarts, use `az daemon restart` (from `go-bubbletea/` with the Go binary/path).
    - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
+15. **Repo-Local Go Cache Wrapper (Critical)**:
+   - Use `../bin/go` for Go commands when working in `go-bubbletea/`.
+   - The wrapper auto-sets repo-local `GOCACHE`/`GOPATH` (`go-bubbletea/.gocache`, `go-bubbletea/.gopath`) to avoid sandbox and home-cache permission failures.
 
 ## Thin-Client Boundary Contract (Critical)
 
@@ -105,13 +108,13 @@ Run this checklist whenever touching daemon/client boundaries:
 cd go-bubbletea
 
 # 1) Guard rails remain active
-go test ./internal/app ./internal/cli
+../bin/go test ./internal/app ./internal/cli
 
 # 2) Daemon boundary behavior remains correct
-go test ./internal/daemon/... ./internal/client/...
+../bin/go test ./internal/daemon/... ./internal/client/...
 
 # 3) Full boundary-facing integration safety net
-go test ./internal/app ./internal/cli ./internal/daemon/...
+../bin/go test ./internal/app ./internal/cli ./internal/daemon/...
 ```
 
 If sandbox restrictions prevent unix socket integration tests, rerun with the required approval path and record that in issue notes.
@@ -125,6 +128,7 @@ cd go-bubbletea
 make build
 make test
 make run
+../bin/go test ./...
 
 # focused search
 rg "pattern" --type go internal cmd
