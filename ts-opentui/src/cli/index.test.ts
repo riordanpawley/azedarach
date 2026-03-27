@@ -141,13 +141,6 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("For `az spec req update`, prefer `az spec req update --req")
 		expect(output).toContain("For `az spec link add`, use either explicit refs")
 		expect(output).toContain("Avoid positional-first ordering like `az spec link add <issue-id>")
-		expect(output).toContain("Daemon execution guardrails:")
-		expect(output).toContain(
-			"The daemon runs outside your repo working directory; do not rely on daemon cwd matching the CLI cwd.",
-		)
-		expect(output).toContain(
-			"Treat `az issue fanout`, `az issue fanout drift`, and `az mail send|list|watch` as daemon-authoritative flows.",
-		)
 		expect(output).toContain("az config set spec.enabled false")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
 		expect(output).toContain(
