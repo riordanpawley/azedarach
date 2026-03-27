@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -47,5 +48,51 @@ func TestTaskWorkspaceOverlay_UsesFullScreen(t *testing.T) {
 	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
 	if !overlay.UsesFullScreen() {
 		t.Fatalf("expected task workspace overlay to request full-screen rendering")
+	}
+}
+
+func TestTaskWorkspaceOverlay_DetailScrollKeybinds(t *testing.T) {
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Task",
+		Status:      domain.StatusOpen,
+		Description: strings.Repeat("line\n", 200),
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusDetail
+
+	initial := overlay.detail.scrollY
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.detail.scrollY <= initial {
+		t.Fatalf("expected j to scroll down; got %d from %d", overlay.detail.scrollY, initial)
+	}
+
+	beforeDown := overlay.detail.scrollY
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.detail.scrollY <= beforeDown {
+		t.Fatalf("expected down arrow to scroll down; got %d from %d", overlay.detail.scrollY, beforeDown)
+	}
+
+	beforeHalfDown := overlay.detail.scrollY
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.detail.scrollY <= beforeHalfDown {
+		t.Fatalf("expected ctrl+d to half-page down; got %d from %d", overlay.detail.scrollY, beforeHalfDown)
+	}
+
+	beforeUp := overlay.detail.scrollY
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyUp})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.detail.scrollY >= beforeUp {
+		t.Fatalf("expected up arrow to scroll up; got %d from %d", overlay.detail.scrollY, beforeUp)
+	}
+
+	beforeHalfUp := overlay.detail.scrollY
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.detail.scrollY >= beforeHalfUp {
+		t.Fatalf("expected ctrl+u to half-page up; got %d from %d", overlay.detail.scrollY, beforeHalfUp)
 	}
 }

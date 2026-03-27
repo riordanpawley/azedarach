@@ -92,6 +92,26 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				w.detail.scrollY--
 			}
 			return w, nil
+		case "ctrl+d":
+			if w.focus == taskWorkspaceFocusActions {
+				step := max(1, max(1, len(w.actions.actions)/6))
+				for i := 0; i < step; i++ {
+					w.actions.moveCursorDown()
+				}
+			} else {
+				w.detail.scrollY = min(w.detail.maxScroll(), w.detail.scrollY+w.halfPageStep())
+			}
+			return w, nil
+		case "ctrl+u":
+			if w.focus == taskWorkspaceFocusActions {
+				step := max(1, max(1, len(w.actions.actions)/6))
+				for i := 0; i < step; i++ {
+					w.actions.moveCursorUp()
+				}
+			} else {
+				w.detail.scrollY = max(0, w.detail.scrollY-w.halfPageStep())
+			}
+			return w, nil
 		case "g", "home":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.cursor = 0
@@ -215,4 +235,12 @@ func (w *TaskWorkspaceOverlay) toggleFocus() {
 		return
 	}
 	w.focus = taskWorkspaceFocusDetail
+}
+
+func (w *TaskWorkspaceOverlay) halfPageStep() int {
+	step := w.detail.viewHeight / 2
+	if step < 1 {
+		return 1
+	}
+	return step
 }
