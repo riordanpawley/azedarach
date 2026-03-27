@@ -3,10 +3,13 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -209,6 +212,17 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		select {
+		case err := <-errCh:
+			if isSocketPermissionError(err) {
+				t.Skipf("sandbox does not permit unix socket bind: %v", err)
+			}
+			if err != nil {
+				t.Fatalf("daemon failed to start: %v", err)
+			}
+			t.Fatalf("daemon exited before socket became ready")
+		default:
+		}
 		if _, err := os.Stat(socketPath); err == nil {
 			break
 		}
@@ -240,10 +254,21 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 func newModelTestRuntimePaths(t *testing.T) (string, string) {
 	t.Helper()
 
-	runtimeDir, err := os.MkdirTemp("/tmp", "azd-")
+	runtimeDir, err := os.MkdirTemp(".", "azd-")
 	if err != nil {
-		t.Fatalf("MkdirTemp(/tmp): %v", err)
+		t.Fatalf("MkdirTemp(.): %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
 	return filepath.Join(runtimeDir, "s.sock"), filepath.Join(runtimeDir, "l.lock")
+}
+
+func isSocketPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "operation not permitted") || strings.Contains(text, "permission denied")
 }
