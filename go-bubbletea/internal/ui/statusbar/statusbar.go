@@ -1,6 +1,7 @@
 package statusbar
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -169,6 +170,7 @@ func (sb StatusBar) inlineHints() string {
 	if len(bindings) == 0 {
 		return ""
 	}
+	bindings = truncateHintBindings(sb.mode, bindings)
 	inline := make([]keybinds.Binding, 0, len(bindings))
 	for _, binding := range bindings {
 		key := strings.TrimSpace(binding.Key)
@@ -189,4 +191,20 @@ func (sb StatusBar) inlineHints() string {
 		DescriptionStyle: sb.styles.StatusHint,
 		FooterStyle:      sb.styles.StatusHint,
 	})
+}
+
+func truncateHintBindings(mode types.Mode, bindings []keybinds.Binding) []keybinds.Binding {
+	maxHints := len(bindings)
+	if mode == types.ModeAction {
+		maxHints = 10
+	}
+	if maxHints >= len(bindings) {
+		return bindings
+	}
+	truncated := append([]keybinds.Binding{}, bindings[:maxHints]...)
+	truncated = append(truncated, keybinds.Binding{
+		Key:         "…",
+		Description: fmt.Sprintf("+%d more", len(bindings)-maxHints),
+	})
+	return truncated
 }

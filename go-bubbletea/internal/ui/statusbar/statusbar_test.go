@@ -112,6 +112,9 @@ func TestStatusBar_RenderActionMode(t *testing.T) {
 	if !strings.Contains(result, "m/b: merge") {
 		t.Errorf("Expected status bar to contain merge hint, got: %s", result)
 	}
+	if !strings.Contains(result, "…") {
+		t.Errorf("Expected action mode hints to be truncated with summary, got: %s", result)
+	}
 }
 
 func TestStatusBar_FillsWidth(t *testing.T) {
