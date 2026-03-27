@@ -80,6 +80,24 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	}
 }
 
+func TestViewWithOverlayKeepsStatusBarVisible(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&testOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	lastLine := lines[len(lines)-1]
+	if !strings.Contains(lastLine, "NORMAL") {
+		t.Fatalf("expected status bar on final line to include mode label with overlay active; last line=%q", lastLine)
+	}
+}
+
 func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	m := newTestModel()
 	m.width = 120

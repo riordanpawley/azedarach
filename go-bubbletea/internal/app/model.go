@@ -1068,7 +1068,12 @@ func (m Model) View() string {
 	}
 	statusBarView := sb.Render()
 
-	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
+	contentHeight := board.BoardContentHeight(m.height)
+	contentView := lipgloss.NewStyle().
+		MaxWidth(m.width).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Render(mainView)
 
 	if !m.overlayStack.IsEmpty() {
 		current := m.overlayStack.Current()
@@ -1077,12 +1082,10 @@ func (m Model) View() string {
 		overlayWidth, overlayHeight := current.Size()
 
 		if overlayWidth == 0 {
-			viewHeight := lipgloss.Height(view)
-			overlayHeight := lipgloss.Height(overlayView)
-			if viewHeight+overlayHeight > m.height {
-				view = lipgloss.NewStyle().MaxHeight(m.height - overlayHeight).Render(view)
-			}
-			view = lipgloss.JoinVertical(lipgloss.Left, view, overlayView)
+			contentView = lipgloss.NewStyle().
+				Height(contentHeight).
+				MaxHeight(contentHeight).
+				Render(lipgloss.JoinVertical(lipgloss.Left, contentView, overlayView))
 		} else {
 			title := current.Title()
 			if title != "" && !overlayUsesInternalTitle(current) {
@@ -1096,22 +1099,22 @@ func (m Model) View() string {
 
 			centeredOverlay := lipgloss.Place(
 				m.width,
-				m.height,
+				contentHeight,
 				lipgloss.Center,
 				lipgloss.Center,
 				overlayView,
 			)
 
-			view = lipgloss.NewStyle().
+			contentView = lipgloss.NewStyle().
 				MaxWidth(m.width).
-				MaxHeight(m.height).
-				Render(view)
-
-			return m.layer(view, centeredOverlay)
+				Height(contentHeight).
+				MaxHeight(contentHeight).
+				Render(contentView)
+			contentView = m.layerWithinHeight(contentView, centeredOverlay, contentHeight)
 		}
 	}
 
-	return view
+	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
 }
 
 func (m Model) layer(bottom, top string) string {
