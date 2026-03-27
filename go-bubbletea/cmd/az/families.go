@@ -1,11 +1,21 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/cli"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
 func runNotifyCommand(cfg *config.Config, args []string) error {
@@ -63,13 +73,58 @@ func runGateCommand(cfg *config.Config, args []string) error {
 
 func runDevCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintDevUsage()
+		printDevUsage()
 		return nil
 	}
 
 	switch args[0] {
 	case "gate":
 		return runGateCommand(cfg, args[1:])
+	case "start":
+		opts, err := parseDevIssueArgs(args[1:], "az dev start <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+		if err != nil {
+			printDevStartUsage()
+			return err
+		}
+		return runDevWithRepo(cfg, opts.ProjectDir, func(deps *cli.Dependencies) error {
+			return runDevStartCommand(deps, opts)
+		})
+	case "stop":
+		opts, err := parseDevIssueArgs(args[1:], "az dev stop <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+		if err != nil {
+			printDevStopUsage()
+			return err
+		}
+		return runDevWithRepo(cfg, opts.ProjectDir, func(deps *cli.Dependencies) error {
+			return runDevStopCommand(deps, opts)
+		})
+	case "restart":
+		opts, err := parseDevIssueArgs(args[1:], "az dev restart <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+		if err != nil {
+			printDevRestartUsage()
+			return err
+		}
+		return runDevWithRepo(cfg, opts.ProjectDir, func(deps *cli.Dependencies) error {
+			return runDevRestartCommand(deps, opts)
+		})
+	case "status":
+		opts, err := parseDevIssueArgs(args[1:], "az dev status <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+		if err != nil {
+			printDevStatusUsage()
+			return err
+		}
+		return runDevWithRepo(cfg, opts.ProjectDir, func(deps *cli.Dependencies) error {
+			return runDevStatusCommand(deps, opts)
+		})
+	case "list":
+		opts, err := parseDevListArgs(args[1:], "az dev list [--project-dir <dir>] [--json] [--verbose]")
+		if err != nil {
+			printDevListUsage()
+			return err
+		}
+		return runDevWithRepo(cfg, opts.ProjectDir, func(deps *cli.Dependencies) error {
+			return runDevListCommand(deps, opts)
+		})
 	default:
 		return fmt.Errorf("unknown dev command: %s", args[0])
 	}
@@ -130,4 +185,318 @@ func runOpenCodePluginCommand(cfg *config.Config, args []string) error {
 
 func isHelpArg(arg string) bool {
 	return strings.EqualFold(arg, "help") || arg == "-h" || arg == "--help"
+}
+
+type devIssueOptions struct {
+	IssueID    string
+	ProjectDir string
+	Verbose    bool
+	JSON       bool
+}
+
+type devListOptions struct {
+	ProjectDir string
+	Verbose    bool
+	JSON       bool
+}
+
+type devServerRow struct {
+	IssueID   string `json:"issue_id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	Port      int    `json:"port,omitempty"`
+	Uptime    string `json:"uptime,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+}
+
+func runDevWithRepo(cfg *config.Config, projectDir string, fn func(*cli.Dependencies) error) error {
+	if strings.TrimSpace(projectDir) != "" {
+		return runCommandAtRepoDir(cfg, projectDir, fn)
+	}
+	return runCommand(cfg, fn)
+}
+
+func parseDevIssueArgs(args []string, usage string) (devIssueOptions, error) {
+	opts := devIssueOptions{}
+	fs := flag.NewFlagSet("dev", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	if err := fs.Parse(args); err != nil {
+		return devIssueOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return devIssueOptions{}, fmt.Errorf("usage: %s", usage)
+	}
+	opts.IssueID = fs.Arg(0)
+	return opts, nil
+}
+
+func parseDevListArgs(args []string, usage string) (devListOptions, error) {
+	opts := devListOptions{}
+	fs := flag.NewFlagSet("dev list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+	fs.BoolVar(&opts.JSON, "json", false, "json output")
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	if err := fs.Parse(args); err != nil {
+		return devListOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return devListOptions{}, fmt.Errorf("usage: %s", usage)
+	}
+	return opts, nil
+}
+
+func runDevStartCommand(deps *cli.Dependencies, opts devIssueOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srv, err := deps.DaemonClient.StartDevServer(ctx, opts.IssueID)
+	if err != nil {
+		return formatDevServerError("start", opts.IssueID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id": opts.IssueID,
+			"server":   srv,
+		})
+	}
+
+	fmt.Printf("Started dev server for %s\n", opts.IssueID)
+	printDevServerSummary(srv, opts.Verbose)
+	return nil
+}
+
+func runDevStopCommand(deps *cli.Dependencies, opts devIssueOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srv, err := deps.DaemonClient.StopDevServer(ctx, opts.IssueID)
+	if err != nil {
+		return formatDevServerError("stop", opts.IssueID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id": opts.IssueID,
+			"server":   srv,
+		})
+	}
+
+	fmt.Printf("Stopped dev server for %s\n", opts.IssueID)
+	printDevServerSummary(srv, opts.Verbose)
+	return nil
+}
+
+func runDevRestartCommand(deps *cli.Dependencies, opts devIssueOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srv, err := deps.DaemonClient.RestartDevServer(ctx, opts.IssueID)
+	if err != nil {
+		return formatDevServerError("restart", opts.IssueID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id": opts.IssueID,
+			"server":   srv,
+		})
+	}
+
+	fmt.Printf("Restarted dev server for %s\n", opts.IssueID)
+	printDevServerSummary(srv, opts.Verbose)
+	return nil
+}
+
+func runDevStatusCommand(deps *cli.Dependencies, opts devIssueOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srv, err := deps.DaemonClient.DevServerStatus(ctx, opts.IssueID)
+	if err != nil {
+		return formatDevServerError("status", opts.IssueID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id": opts.IssueID,
+			"server":   srv,
+		})
+	}
+
+	fmt.Printf("Dev server for %s:\n", opts.IssueID)
+	printDevServerSummary(srv, opts.Verbose)
+	return nil
+}
+
+func runDevListCommand(deps *cli.Dependencies, opts devListOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("load task snapshot: %w", err)
+	}
+
+	issueIDs := make([]string, 0, len(snapshot.Tasks))
+	seen := map[string]struct{}{}
+	for _, task := range snapshot.Tasks {
+		issueID := strings.TrimSpace(task.ID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		issueIDs = append(issueIDs, issueID)
+	}
+	sort.Strings(issueIDs)
+
+	rows := make([]devServerRow, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		srv, err := deps.DaemonClient.DevServerStatus(ctx, issueID)
+		if err != nil {
+			if isMissingDevServerError(err) {
+				continue
+			}
+			return formatDevServerError("list", issueID, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(srv.Status), "running") {
+			continue
+		}
+		rows = append(rows, devServerRow{
+			IssueID:   issueID,
+			Name:      srv.Name,
+			Status:    srv.Status,
+			Port:      srv.Port,
+			Uptime:    formatDevServerUptime(srv),
+			StartedAt: formatDevServerStartedAt(srv),
+		})
+	}
+
+	if opts.JSON {
+		return printJSON(map[string]any{"servers": rows})
+	}
+
+	if len(rows) == 0 {
+		fmt.Println("No dev servers running.")
+		return nil
+	}
+
+	fmt.Println("Running dev servers:")
+	fmt.Println()
+	fmt.Println("  ISSUE         SERVER    PORT    UPTIME")
+	fmt.Println("  ─────────────────────────────────────────")
+	for _, row := range rows {
+		port := "-"
+		if row.Port > 0 {
+			port = fmt.Sprintf("%d", row.Port)
+		}
+		uptime := row.Uptime
+		if uptime == "" {
+			uptime = "-"
+		}
+		name := row.Name
+		if strings.TrimSpace(name) == "" {
+			name = row.IssueID
+		}
+		fmt.Printf("  %-12s %-9s %-7s %s\n", row.IssueID, name, port, uptime)
+		if opts.Verbose && row.StartedAt != "" {
+			fmt.Printf("      Started at: %s\n", row.StartedAt)
+		}
+	}
+	fmt.Println()
+	fmt.Printf("%d server(s) running\n", len(rows))
+	return nil
+}
+
+func printDevServerSummary(srv devserver.Server, verbose bool) {
+	if srv.Port > 0 {
+		fmt.Printf("  Port: %d\n", srv.Port)
+	}
+	if strings.TrimSpace(srv.Status) != "" {
+		fmt.Printf("  Status: %s\n", srv.Status)
+	}
+	if verbose && !srv.StartedAt.IsZero() {
+		fmt.Printf("  Started at: %s\n", srv.StartedAt.UTC().Format(time.RFC3339))
+	}
+	if verbose {
+		if uptime := formatDevServerUptime(srv); uptime != "" {
+			fmt.Printf("  Uptime: %s\n", uptime)
+		}
+	}
+}
+
+func formatDevServerUptime(srv devserver.Server) string {
+	if srv.StartedAt.IsZero() {
+		return ""
+	}
+	uptime := time.Since(srv.StartedAt).Round(time.Second)
+	if uptime < 0 {
+		return ""
+	}
+	return uptime.String()
+}
+
+func formatDevServerStartedAt(srv devserver.Server) string {
+	if srv.StartedAt.IsZero() {
+		return ""
+	}
+	return srv.StartedAt.UTC().Format(time.RFC3339)
+}
+
+func formatDevServerError(action, issueID string, err error) error {
+	if isMissingDevServerError(err) {
+		return fmt.Errorf("dev server not found for issue %s", issueID)
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) {
+		return fmt.Errorf("dev server %s failed for %s: %s", action, issueID, cmdErr.Message)
+	}
+	return fmt.Errorf("dev server %s failed for %s: %w", action, issueID, err)
+}
+
+func isMissingDevServerError(err error) bool {
+	var cmdErr *daemonclient.CommandError
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	return cmdErr.Code == protocol.ErrorCodeInvalidRequest
+}
+
+func printDevUsage() {
+	fmt.Println("Usage: az dev <gate|start|stop|restart|status|list>")
+	fmt.Println("Manage dev servers and gate shortcuts.")
+	fmt.Println("  gate <issue-id>               Run quality gates for an issue")
+	fmt.Println("  start <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+	fmt.Println("  stop <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+	fmt.Println("  restart <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+	fmt.Println("  status <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+	fmt.Println("  list [--project-dir <dir>] [--json] [--verbose]")
+}
+
+func printDevStartUsage() {
+	fmt.Println("Usage: az dev start <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+}
+func printDevStopUsage() {
+	fmt.Println("Usage: az dev stop <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+}
+func printDevRestartUsage() {
+	fmt.Println("Usage: az dev restart <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+}
+func printDevStatusUsage() {
+	fmt.Println("Usage: az dev status <issue-id> [--project-dir <dir>] [--json] [--verbose]")
+}
+func printDevListUsage() {
+	fmt.Println("Usage: az dev list [--project-dir <dir>] [--json] [--verbose]")
+}
+
+func printJSON(v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
 }

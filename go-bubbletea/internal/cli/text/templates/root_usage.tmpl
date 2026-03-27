@@ -11,6 +11,11 @@ Commands:
   hooks install <issue-id>    Install Claude Code hook configuration
   gate <issue-id>            Run quality gates for an issue
   dev gate <issue-id>        Dev-family gate alias
+  dev start <issue-id>       Start a dev server for an issue
+  dev stop <issue-id>        Stop a dev server for an issue
+  dev restart <issue-id>     Restart a dev server for an issue
+  dev status <issue-id>      Show dev server status for an issue
+  dev list                   List running dev servers across issues
   opencode <init|plugin>     Manage OpenCode integration
   issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
@@ -65,6 +70,11 @@ Examples:
   az hooks install az-123
   az gate az-123
   az dev gate az-123
+  az dev start az-123
+  az dev stop az-123
+  az dev restart az-123
+  az dev status az-123
+  az dev list
   az opencode init
   az opencode plugin install
   az prime

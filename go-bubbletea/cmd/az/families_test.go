@@ -2,13 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/riordanpawley/azedarach/internal/cli"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
 func TestRunHooksCommandHelpAndDispatch(t *testing.T) {
@@ -31,13 +40,84 @@ func TestRunHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
-func TestRunDevGateAndNotifyCommands(t *testing.T) {
+func TestRunDevHelpAndGateRegression(t *testing.T) {
+	helpOut := captureMainStdout(t, func() error {
+		return runDevCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(helpOut, "Usage: az dev <gate|start|stop|restart|status|list>") {
+		t.Fatalf("help output = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "  list [--project-dir <dir>] [--json] [--verbose]") {
+		t.Fatalf("help output missing dev list = %q", helpOut)
+	}
+
 	gateOut := captureMainStdout(t, func() error {
 		return runDevCommand(config.DefaultConfig(), []string{"gate", "--verbose", "--project-dir", "/tmp/dev", "az-123"})
 	})
 	if !strings.Contains(gateOut, "Running quality gates for: az-123") {
 		t.Fatalf("gate output = %q", gateOut)
 	}
+}
+
+func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
+	projectDir := t.TempDir()
+	transport := &devServerTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskList:
+				return jsonResponse(req, []domain.Task{
+					{ID: "az-123", Title: "Server 123"},
+					{ID: "az-999", Title: "Server 999"},
+				})
+			case daemonclient.CommandDevServerStart:
+				return devServerResponse(req, "az-123", devserver.Server{
+					ID:        "az-123",
+					Name:      "default",
+					Port:      4321,
+					Status:    "running",
+					IssueID:   "az-123",
+					StartedAt: timeNow(t),
+				})
+			case daemonclient.CommandDevServerStop:
+				return devServerResponse(req, "az-123", devserver.Server{
+					ID:        "az-123",
+					Name:      "default",
+					Port:      4321,
+					Status:    "stopped",
+					IssueID:   "az-123",
+					StartedAt: timeNow(t).Add(-30 * time.Second),
+					Uptime:    30 * time.Second,
+				})
+			case daemonclient.CommandDevServerStatus:
+				var body struct {
+					IssueID string `json:"issue_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					return protocol.ResponseEnvelope{}, err
+				}
+				if body.IssueID == "az-123" {
+					return devServerResponse(req, "az-123", devserver.Server{
+						ID:        "az-123",
+						Name:      "default",
+						Port:      4321,
+						Status:    "running",
+						IssueID:   "az-123",
+						StartedAt: timeNow(t),
+					})
+				}
+				return devServerResponse(req, "az-999", devserver.Server{
+					ID:      "az-999",
+					Name:    "default",
+					Port:    9999,
+					Status:  "stopped",
+					IssueID: "az-999",
+				})
+			default:
+				return protocol.ResponseEnvelope{}, errors.New("unexpected command: " + req.Command)
+			}
+		},
+	}
+	deps := newDevDependencies(t, projectDir, transport)
 
 	notifyOut := captureMainStdout(t, func() error {
 		return runNotifyCommand(config.DefaultConfig(), []string{"--verbose", "stop", "az-123"})
@@ -45,34 +125,52 @@ func TestRunDevGateAndNotifyCommands(t *testing.T) {
 	if !strings.Contains(notifyOut, "Hook notification: stop for az-123 -> stopped") {
 		t.Fatalf("notify output = %q", notifyOut)
 	}
-}
-
-func TestRunOpenCodeCommandDispatch(t *testing.T) {
-	projectDir := t.TempDir()
-	output := captureMainStdout(t, func() error {
-		return runOpenCodeCommand(config.DefaultConfig(), []string{"init", "--project-dir", projectDir})
+	startOut := captureMainStdout(t, func() error {
+		return runDevStartCommand(deps, devIssueOptions{IssueID: "az-123"})
 	})
-	if !strings.Contains(output, "Initialized OpenCode support in") {
-		t.Fatalf("init output = %q", output)
+	if !strings.Contains(startOut, "Started dev server for az-123") {
+		t.Fatalf("start output = %q", startOut)
 	}
-	if _, err := os.Stat(filepath.Join(projectDir, "opencode.json")); err != nil {
-		t.Fatalf("expected opencode.json: %v", err)
+	if !strings.Contains(startOut, "Port: 4321") {
+		t.Fatalf("start output missing port = %q", startOut)
 	}
-}
 
-func TestRunOpenCodeCommandInitWithoutArgs(t *testing.T) {
-	projectDir := t.TempDir()
-	withWorkingDir(t, projectDir, func() {
-		output := captureMainStdout(t, func() error {
-			return runOpenCodeCommand(config.DefaultConfig(), []string{"init"})
-		})
-		if !strings.Contains(output, "Initialized OpenCode support in") {
-			t.Fatalf("init output = %q", output)
-		}
-		if _, err := os.Stat(filepath.Join(projectDir, "opencode.json")); err != nil {
-			t.Fatalf("expected opencode.json: %v", err)
-		}
+	stopOut := captureMainStdout(t, func() error {
+		return runDevStopCommand(deps, devIssueOptions{IssueID: "az-123", Verbose: true})
 	})
+	if !strings.Contains(stopOut, "Stopped dev server for az-123") {
+		t.Fatalf("stop output = %q", stopOut)
+	}
+	if !strings.Contains(stopOut, "Status: stopped") {
+		t.Fatalf("stop output missing status = %q", stopOut)
+	}
+
+	restartOut := captureMainStdout(t, func() error {
+		return runDevRestartCommand(deps, devIssueOptions{IssueID: "az-123"})
+	})
+	if !strings.Contains(restartOut, "Restarted dev server for az-123") {
+		t.Fatalf("restart output = %q", restartOut)
+	}
+
+	statusOut := captureMainStdout(t, func() error {
+		return runDevStatusCommand(deps, devIssueOptions{IssueID: "az-123", Verbose: true})
+	})
+	if !strings.Contains(statusOut, "Dev server for az-123:") {
+		t.Fatalf("status output = %q", statusOut)
+	}
+	if !strings.Contains(statusOut, "Status: running") {
+		t.Fatalf("status output missing running state = %q", statusOut)
+	}
+
+	listOut := captureMainStdout(t, func() error {
+		return runDevListCommand(deps, devListOptions{})
+	})
+	if !strings.Contains(listOut, "Running dev servers:") {
+		t.Fatalf("list output = %q", listOut)
+	}
+	if !strings.Contains(listOut, "az-123") || strings.Contains(listOut, "az-999") {
+		t.Fatalf("list output = %q", listOut)
+	}
 }
 
 func captureMainStdout(t *testing.T, fn func() error) string {
@@ -123,4 +221,62 @@ func withWorkingDir(t *testing.T, dir string, fn func()) {
 	}()
 
 	fn()
+}
+
+type devServerTransport struct {
+	replyFn  func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	commands []string
+}
+
+func (t *devServerTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+	return protocol.HelloAck{Accepted: true}, nil
+}
+
+func (t *devServerTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	_ = ctx
+	t.commands = append(t.commands, req.Command)
+	if t.replyFn != nil {
+		return t.replyFn(req)
+	}
+	return protocol.ResponseEnvelope{OK: true, ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse}, nil
+}
+
+func (t *devServerTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+	return nil, errors.New("not implemented")
+}
+
+func newDevDependencies(t *testing.T, repoDir string, transport *devServerTransport) *cli.Dependencies {
+	t.Helper()
+	client := daemonclient.New(transport).WithProjectID("proj-dev")
+	return &cli.Dependencies{
+		DaemonClient: client,
+		ProjectID:    "proj-dev",
+		RepoDir:      repoDir,
+	}
+}
+
+func jsonResponse(req protocol.RequestEnvelope, value any) (protocol.ResponseEnvelope, error) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return protocol.ResponseEnvelope{}, err
+	}
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		OK:              true,
+		Body:            body,
+	}, nil
+}
+
+func devServerResponse(req protocol.RequestEnvelope, issueID string, srv devserver.Server) (protocol.ResponseEnvelope, error) {
+	return jsonResponse(req, map[string]any{
+		"issue_id": issueID,
+		"server":   srv,
+	})
+}
+
+func timeNow(t *testing.T) time.Time {
+	t.Helper()
+	return time.Date(2026, 3, 27, 12, 0, 0, 0, time.UTC)
 }
