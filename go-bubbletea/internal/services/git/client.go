@@ -142,19 +142,34 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 
 	baseBranch = strings.TrimSpace(baseBranch)
 	if baseBranch != "" {
-		mergeBaseOutput, err := c.runner.Run(ctx, "merge-base", baseBranch, "HEAD")
-		if err != nil {
-			return "", fmt.Errorf("failed to get merge-base for diff stat: %w", err)
+		candidates := []string{baseBranch}
+		if !strings.Contains(baseBranch, "/") {
+			candidates = append(candidates, "origin/"+baseBranch)
 		}
-		mergeBase := strings.TrimSpace(mergeBaseOutput)
-		if mergeBase == "" {
-			mergeBase = baseBranch
+
+		var lastErr error
+		for _, candidate := range candidates {
+			mergeBaseOutput, err := c.runner.Run(ctx, "merge-base", candidate, "HEAD")
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			mergeBase := strings.TrimSpace(mergeBaseOutput)
+			if mergeBase == "" {
+				mergeBase = candidate
+			}
+			output, err := c.runner.Run(ctx, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return strings.TrimSpace(output), nil
 		}
-		output, err := c.runner.Run(ctx, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
-		if err != nil {
-			return "", fmt.Errorf("failed to get base diff stat: %w", err)
-		}
-		return strings.TrimSpace(output), nil
+
+		c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
+			"baseBranch", baseBranch,
+			"error", lastErr,
+		)
 	}
 
 	unstagedOutput, err := c.runner.Run(ctx, "diff", "--shortstat")

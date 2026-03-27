@@ -407,6 +407,41 @@ func TestDiffStatAgainstBaseBranch(t *testing.T) {
 	}
 }
 
+func TestDiffStatAgainstBaseBranchFallsBackToOriginRef(t *testing.T) {
+	expectedStat := "3 files changed, 12 insertions(+), 6 deletions(-)"
+
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("unknown revision")
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
+				return "def456\n", nil
+			}
+			if len(args) >= 6 &&
+				args[0] == "diff" &&
+				args[1] == "--shortstat" &&
+				args[2] == "def456" &&
+				args[3] == "HEAD" &&
+				args[4] == "--" &&
+				args[5] == ":^.azedarach" {
+				return expectedStat, nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	stat, err := client.DiffStat(context.Background(), "/fake/worktree", "main")
+
+	if err != nil {
+		t.Fatalf("DiffStat() error = %v", err)
+	}
+	if stat != expectedStat {
+		t.Errorf("DiffStat() = %v, want %v", stat, expectedStat)
+	}
+}
+
 func TestParseConflicts(t *testing.T) {
 	tests := []struct {
 		name      string
