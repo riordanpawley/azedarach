@@ -2597,6 +2597,15 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
 		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
 	}
+	if !strings.Contains(output, "Daemon execution guardrails:") {
+		t.Fatalf("prime output missing daemon execution guardrails section: %q", output)
+	}
+	if !strings.Contains(output, "The daemon runs outside your repo working directory") {
+		t.Fatalf("prime output missing daemon cwd guardrail: %q", output)
+	}
+	if !strings.Contains(output, "Treat `az issue fanout`, `az issue fanout drift`, and `az mail send|list|watch` as daemon-authoritative flows.") {
+		t.Fatalf("prime output missing daemon-authoritative fanout/mail guardrail: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {

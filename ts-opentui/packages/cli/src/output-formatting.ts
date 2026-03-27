@@ -441,6 +441,10 @@ ${modeGuardrails === undefined ? "" : `${modeGuardrails}\n`}
   - There is no top-level \`az dep\` command; use \`az issue dep ...\`.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
   - Use \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to remove dependency relationships.
+- Daemon execution guardrails:
+  - The daemon runs outside your repo working directory; do not rely on daemon cwd matching the CLI cwd.
+  - For commands that accept repo/worktree paths (for example \`az issue fanout drift --worktree ...\`), pass explicit paths instead of assuming cwd inheritance.
+  - Treat \`az issue fanout\`, \`az issue fanout drift\`, and \`az mail send|list|watch\` as daemon-authoritative flows.
 - Issue-context guardrails:
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
