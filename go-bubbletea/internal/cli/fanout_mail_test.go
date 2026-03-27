@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -123,5 +126,274 @@ func TestMailboxRoundTrip(t *testing.T) {
 	path := mailboxPath(repoDir, parent)
 	if filepath.Ext(path) != ".jsonl" {
 		t.Fatalf("mailbox path %q missing .jsonl suffix", path)
+	}
+}
+
+func TestFlattenFanout_NestedLogicalParentTree(t *testing.T) {
+	spec := fanoutSpec{
+		ParentIssue: "az-root",
+		Nodes: []fanoutNode{
+			{
+				Key:   "lane-a",
+				Kind:  "group",
+				Title: "Lane A",
+				Children: []fanoutNode{
+					{
+						Key:   "phase-1",
+						Kind:  "group",
+						Title: "Phase 1",
+						Children: []fanoutNode{
+							{
+								Key:   "leaf-1",
+								Kind:  "work",
+								Title: "Leaf 1",
+							},
+							{
+								Key:      "leaf-2",
+								Kind:     "work",
+								Title:    "Leaf 2",
+								DependsOn: []string{"leaf-1"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	flat, warnings, err := flattenFanout(spec)
+	if err != nil {
+		t.Fatalf("flattenFanout error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want empty", warnings)
+	}
+	if len(flat) != 4 {
+		t.Fatalf("flat len = %d, want 4", len(flat))
+	}
+	byKey := map[string]fanoutFlatNode{}
+	for _, node := range flat {
+		byKey[node.Key] = node
+	}
+	if byKey["phase-1"].ParentKey != "lane-a" {
+		t.Fatalf("phase-1 parent = %q, want lane-a", byKey["phase-1"].ParentKey)
+	}
+	if byKey["leaf-1"].ParentKey != "phase-1" {
+		t.Fatalf("leaf-1 parent = %q, want phase-1", byKey["leaf-1"].ParentKey)
+	}
+	if byKey["leaf-2"].ParentKey != "phase-1" {
+		t.Fatalf("leaf-2 parent = %q, want phase-1", byKey["leaf-2"].ParentKey)
+	}
+	plan := buildFanoutPlan(spec.ParentIssue, flat, nil)
+	if len(plan.Blocks) != 1 {
+		t.Fatalf("blocks len = %d, want 1", len(plan.Blocks))
+	}
+	if plan.Blocks[0].IssueKey != "leaf-2" || plan.Blocks[0].DependsOnKey != "leaf-1" {
+		t.Fatalf("blocks[0] = %+v, want leaf-2 blocks leaf-1", plan.Blocks[0])
+	}
+}
+
+func TestFlattenFanout_WorkNodeWithChildrenWarning(t *testing.T) {
+	spec := fanoutSpec{
+		ParentIssue: "az-root",
+		Nodes: []fanoutNode{
+			{
+				Key:   "leaf-parent",
+				Kind:  "work",
+				Title: "Leaf Parent",
+				Children: []fanoutNode{
+					{
+						Key:   "leaf-child",
+						Kind:  "work",
+						Title: "Leaf Child",
+					},
+				},
+			},
+		},
+	}
+
+	flat, warnings, err := flattenFanout(spec)
+	if err != nil {
+		t.Fatalf("flattenFanout error: %v", err)
+	}
+	if len(flat) != 2 {
+		t.Fatalf("flat len = %d, want 2", len(flat))
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings len = %d, want 1", len(warnings))
+	}
+	if !strings.Contains(warnings[0], "kind=work and children") {
+		t.Fatalf("warning = %q, want work+children warning", warnings[0])
+	}
+}
+
+func TestFlattenFanout_UnknownDependencyFails(t *testing.T) {
+	spec := fanoutSpec{
+		ParentIssue: "az-root",
+		Nodes: []fanoutNode{
+			{
+				Key:       "leaf-1",
+				Kind:      "work",
+				Title:     "Leaf 1",
+				DependsOn: []string{"leaf-missing"},
+			},
+		},
+	}
+
+	_, _, err := flattenFanout(spec)
+	if err == nil || !strings.Contains(err.Error(), "depends_on unknown key") {
+		t.Fatalf("error = %v, want unknown dependency error", err)
+	}
+}
+
+func TestComputeRunnableLeaves_DependencyGatingTimeline(t *testing.T) {
+	root := "az-root"
+	a := "az-a"
+	b := "az-b"
+	aParent := root
+	bParent := root
+	done := domain.StatusDone
+
+	base := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: a, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &aParent},
+		{
+			ID:       b,
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &bParent,
+			Dependencies: []domain.Dependency{
+				{ID: a, Type: domain.DependencyBlocks},
+			},
+		},
+	}
+
+	before, err := computeRunnableLeaves(root, base)
+	if err != nil {
+		t.Fatalf("computeRunnableLeaves before error: %v", err)
+	}
+	if len(before.Runnable) != 1 || before.Runnable[0] != a {
+		t.Fatalf("before runnable = %v, want [%s]", before.Runnable, a)
+	}
+	if got := before.Blocked[b]; !strings.Contains(got, a) {
+		t.Fatalf("before blocked[%s] = %q, want blocker %s", b, got, a)
+	}
+
+	after := append([]domain.Task(nil), base...)
+	after[1].Status = done
+	gotAfter, err := computeRunnableLeaves(root, after)
+	if err != nil {
+		t.Fatalf("computeRunnableLeaves after error: %v", err)
+	}
+	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b {
+		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b)
+	}
+}
+
+func TestComputeRunnableLeaves_MissingDependencyReported(t *testing.T) {
+	root := "az-root"
+	leaf := "az-leaf"
+	parent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{
+			ID:       leaf,
+			Type:     domain.TypeTask,
+			Status:   domain.StatusOpen,
+			ParentID: &parent,
+			Dependencies: []domain.Dependency{
+				{ID: "az-missing", Type: domain.DependencyBlocks},
+			},
+		},
+	}
+
+	result, err := computeRunnableLeaves(root, tasks)
+	if err != nil {
+		t.Fatalf("computeRunnableLeaves error: %v", err)
+	}
+	if len(result.Runnable) != 0 {
+		t.Fatalf("runnable = %v, want empty", result.Runnable)
+	}
+	if got := result.Blocked[leaf]; !strings.Contains(got, "missing") {
+		t.Fatalf("blocked[%s] = %q, want missing marker", leaf, got)
+	}
+}
+
+func TestOutOfBudgetFiles_MixedPatterns(t *testing.T) {
+	changed := []string{
+		"go-bubbletea/internal/cli/fanout_mail.go",
+		"go-bubbletea/cmd/az/main.go",
+		"README.md",
+	}
+	budget := []string{
+		"go-bubbletea/internal/cli/**",
+		"go-bubbletea/cmd/az/main.go",
+	}
+	out := outOfBudgetFiles(changed, budget)
+	if len(out) != 1 || out[0] != "README.md" {
+		t.Fatalf("out = %v, want [README.md]", out)
+	}
+}
+
+func TestMailListAndWatchUseCase_SinceAndOnce(t *testing.T) {
+	repoDir := t.TempDir()
+	deps := &Dependencies{RepoDir: repoDir}
+	parent := "az-parent"
+	events := []mailEvent{
+		{
+			Seq:         1,
+			ParentIssue: parent,
+			Type:        "handoff",
+			Body:        "first",
+			CreatedAt:   time.Now().UTC(),
+		},
+		{
+			Seq:         2,
+			ParentIssue: parent,
+			Type:        "dependency-ready",
+			Body:        "second",
+			CreatedAt:   time.Now().UTC(),
+		},
+	}
+	for _, evt := range events {
+		if err := appendMailboxEvent(repoDir, evt); err != nil {
+			t.Fatalf("appendMailboxEvent: %v", err)
+		}
+	}
+
+	listOutput := captureStdout(t, func() error {
+		return MailListCommand(deps, MailListOptions{
+			ParentIssueID: parent,
+			SinceSeq:      2,
+			Limit:         200,
+			JSON:          true,
+		})
+	})
+	var listed []mailEvent
+	if err := json.Unmarshal([]byte(strings.TrimSpace(listOutput)), &listed); err != nil {
+		t.Fatalf("decode MailListCommand output: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Seq != 2 {
+		t.Fatalf("listed = %+v, want seq=2 only", listed)
+	}
+
+	watchOutput := captureStdout(t, func() error {
+		return MailWatchCommand(deps, MailWatchOptions{
+			ParentIssueID: parent,
+			SinceSeq:      2,
+			JSONL:         true,
+			Once:          true,
+		})
+	})
+	lines := strings.Split(strings.TrimSpace(watchOutput), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("watch lines = %d, want 1", len(lines))
+	}
+	var watched mailEvent
+	if err := json.Unmarshal([]byte(lines[0]), &watched); err != nil {
+		t.Fatalf("decode MailWatchCommand output: %v", err)
+	}
+	if watched.Seq != 2 || watched.Type != "dependency-ready" {
+		t.Fatalf("watched = %+v, want seq=2 type=dependency-ready", watched)
 	}
 }
