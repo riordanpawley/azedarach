@@ -159,7 +159,7 @@ func main() {
 
 	case "issue":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update|fanout> [arguments]\n")
 			os.Exit(1)
 		}
 		issueCommand := commandArgs[0]
@@ -385,9 +385,118 @@ func main() {
 				os.Exit(1)
 			}
 
+		case "fanout":
+			if len(issueArgs) == 0 {
+				opts, err := cli.ParseIssueFanoutArgs(issueArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue fanout --input <path> [--apply] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueFanoutCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				break
+			}
+			switch issueArgs[0] {
+			case "ready":
+				opts, err := cli.ParseIssueFanoutReadyArgs(issueArgs[1:])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue fanout ready --root <issue-id> [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueFanoutReadyCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			case "drift":
+				opts, err := cli.ParseIssueFanoutDriftArgs(issueArgs[1:])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue fanout drift --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueFanoutDriftCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			default:
+				opts, err := cli.ParseIssueFanoutArgs(issueArgs)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Usage: az issue fanout --input <path> [--apply] [--json]\n")
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+					return cli.IssueFanoutCommand(deps, opts)
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown issue command: %s\n", issueCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update|fanout> [arguments]\n")
+			os.Exit(1)
+		}
+
+	case "mail":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch> [arguments]\n")
+			os.Exit(1)
+		}
+		switch commandArgs[0] {
+		case "send":
+			opts, err := cli.ParseMailSendArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az mail send --parent <issue-id> --type <event-type> --body <text> [--issue <issue-id>] [--from <actor>] [--to <actor>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.MailSendCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "list":
+			opts, err := cli.ParseMailListArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az mail list --parent <issue-id> [--since <seq>] [--limit <n>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.MailListCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		case "watch":
+			opts, err := cli.ParseMailWatchArgs(commandArgs[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az mail watch --parent <issue-id> [--since <seq>] [--jsonl] [--once]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.MailWatchCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown mail command: %s\n", commandArgs[0])
+			fmt.Fprintf(os.Stderr, "Usage: az mail <send|list|watch> [arguments]\n")
 			os.Exit(1)
 		}
 
