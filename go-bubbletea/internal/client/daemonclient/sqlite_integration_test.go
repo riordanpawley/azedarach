@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +38,8 @@ func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 		},
 	})
 
-	runtimeDir, err := os.MkdirTemp(os.TempDir(), "azd-daemonclient-")
+	// Use a workspace-local temp dir so unix socket bind works in sandboxed test environments.
+	runtimeDir, err := os.MkdirTemp(".", "azd-daemonclient-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -152,6 +154,17 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		select {
+		case err := <-errCh:
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "bind: operation not permitted") {
+				t.Skipf("sandbox does not permit unix socket bind: %v", err)
+			}
+			if err != nil {
+				t.Fatalf("daemon failed to start: %v", err)
+			}
+			t.Fatalf("daemon exited before socket became ready")
+		default:
+		}
 		if _, err := os.Stat(socketPath); err == nil {
 			break
 		}
