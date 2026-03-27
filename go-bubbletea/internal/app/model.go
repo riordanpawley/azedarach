@@ -1118,7 +1118,7 @@ func (m Model) View() string {
 				Height(contentHeight).
 				MaxHeight(contentHeight).
 				Render(contentView)
-			contentView = m.layerWithinHeight(contentView, centeredOverlay, contentHeight)
+			contentView = m.layerWithinHeightTransparent(contentView, centeredOverlay, contentHeight)
 		}
 	}
 

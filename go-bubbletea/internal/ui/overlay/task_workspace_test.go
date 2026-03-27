@@ -23,3 +23,17 @@ func TestTaskWorkspaceOverlay_View_NoLocalFooterHints(t *testing.T) {
 		t.Fatalf("expected workspace overlay to omit local footer hints, got: %q", view)
 	}
 }
+
+func TestTaskWorkspaceOverlay_View_HasOuterBorder(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	view := overlay.View()
+
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected workspace overlay to render an outer rounded border, got: %q", view)
+	}
+}

@@ -117,9 +117,10 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
-	bodyHeight := max(8, w.overlayHeight-2)
-	leftWidth := max(48, (w.overlayWidth*2)/3)
-	rightWidth := max(26, w.overlayWidth-leftWidth-3)
+	innerWidth := max(32, w.overlayWidth-2)
+	bodyHeight := max(8, w.overlayHeight-4)
+	leftWidth := max(40, (innerWidth*2)/3)
+	rightWidth := max(24, innerWidth-leftWidth-1)
 
 	leftBorder := styles.Overlay0
 	rightBorder := styles.Overlay0
@@ -156,7 +157,13 @@ func (w *TaskWorkspaceOverlay) View() string {
 		Padding(0, 1).
 		Render(actionsBody)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, detailView, actionsView)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, detailView, actionsView)
+	return lipgloss.NewStyle().
+		Width(w.overlayWidth).
+		Height(w.overlayHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Surface2).
+		Render(body)
 }
 
 func (w *TaskWorkspaceOverlay) Title() string {
