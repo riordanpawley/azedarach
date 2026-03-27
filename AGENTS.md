@@ -54,8 +54,8 @@ Implementation-specific overlays:
 rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
-# Go in this repo (auto-local cache/module paths via ./bin/go shim)
-./bin/go test ./...               # Uses repo-local GOCACHE/GOPATH by default
+# Go in this repo (cache/module paths are exported via .envrc)
+go test ./...
 
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide
