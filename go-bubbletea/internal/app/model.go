@@ -1262,7 +1262,7 @@ func (m Model) layerCenteredOverlay(bottom, overlayView string, width, height, o
 			continue
 		}
 		base := res[row]
-		overlaySlice := ansi.Cut(oLines[i], 0, overlayWidth)
+		overlaySlice := lipgloss.NewStyle().Width(overlayWidth).Render(ansi.Cut(oLines[i], 0, overlayWidth))
 		res[row] = ansi.Cut(base, 0, x) + overlaySlice + ansi.Cut(base, x+overlayWidth, width)
 	}
 
