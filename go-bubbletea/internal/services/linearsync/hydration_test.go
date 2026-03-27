@@ -12,6 +12,7 @@ func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *
 			ID:                    "az-1",
 			HasTmuxSession:        true,
 			HasWorktree:           true,
+			GitAheadCount:         1,
 			GitBehindCount:        3,
 			HasUncommittedChanges: true,
 			GitAdditions:          8,
@@ -35,7 +36,7 @@ func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *
 	if got[0].ID != "az-1" || got[0].Title != "Refreshed" || got[0].Status != domain.StatusInProgress {
 		t.Fatalf("merged task = %+v", got[0])
 	}
-	if !got[0].HasTmuxSession || !got[0].HasWorktree || got[0].GitBehindCount != 3 || !got[0].HasUncommittedChanges || got[0].GitAdditions != 8 || got[0].GitDeletions != 2 {
+	if !got[0].HasTmuxSession || !got[0].HasWorktree || got[0].GitAheadCount != 1 || got[0].GitBehindCount != 3 || !got[0].HasUncommittedChanges || got[0].GitAdditions != 8 || got[0].GitDeletions != 2 {
 		t.Fatalf("overlay fields were not preserved: %+v", got[0])
 	}
 	if got[1].ID != "az-2" || got[1].HasTmuxSession || got[1].HasWorktree || got[1].GitBehindCount != 0 {

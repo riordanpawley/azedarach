@@ -26,7 +26,7 @@ type GitService interface {
 	Merge(ctx context.Context, worktree, branch string) (*git.MergeResult, error)
 	Checkout(ctx context.Context, worktree, branch string) error
 	AbortMerge(ctx context.Context, worktree string) error
-	DiffStat(ctx context.Context, worktree string) (string, error)
+	DiffStat(ctx context.Context, worktree, baseBranch string) (string, error)
 	Status(ctx context.Context, worktree string) (*git.GitStatus, error)
 }
 
@@ -60,9 +60,10 @@ func NewGitHandler(service GitService, opts ...GitHandlerOption) *GitHandler {
 }
 
 type gitCommandBody struct {
-	Worktree string `json:"worktree"`
-	Remote   string `json:"remote,omitempty"`
-	Branch   string `json:"branch,omitempty"`
+	Worktree   string `json:"worktree"`
+	Remote     string `json:"remote,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
 }
 
 type gitActionResultBody struct {
@@ -300,7 +301,7 @@ func (h *GitHandler) handleDiffStat(ctx context.Context, resp protocol.ResponseE
 		return resp
 	}
 
-	output, err := h.service.DiffStat(ctx, cmd.Worktree)
+	output, err := h.service.DiffStat(ctx, cmd.Worktree, cmd.BaseBranch)
 	if err != nil {
 		resp.Error = mapGitError(err)
 		return resp

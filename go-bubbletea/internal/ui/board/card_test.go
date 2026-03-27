@@ -493,6 +493,7 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 	signals := &RuntimeSignals{
 		HasTmuxSession:        true,
 		HasWorktree:           true,
+		GitAheadCount:         2,
 		GitBehindCount:        4,
 		HasUncommittedChanges: true,
 		GitAdditions:          8,
@@ -516,6 +517,9 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		if !strings.Contains(headerLine, token) {
 			t.Fatalf("header should contain %q, got: %s", token, headerLine)
 		}
+	}
+	if strings.Contains(headerLine, "G:↑2") {
+		t.Fatalf("header should hide ahead token when line changes exist, got: %s", headerLine)
 	}
 }
 
@@ -572,7 +576,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 
 func TestRenderRuntimeSignals(t *testing.T) {
 	t.Run("nil runtime signals", func(t *testing.T) {
-		if got := renderRuntimeSignals(nil); got != "" {
+		if got := renderRuntimeSignals(nil, styles.New()); got != "" {
 			t.Fatalf("renderRuntimeSignals(nil) = %q, want empty", got)
 		}
 	})
@@ -581,18 +585,34 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		signals := &RuntimeSignals{
 			HasTmuxSession:        true,
 			HasWorktree:           true,
+			GitAheadCount:         1,
 			GitBehindCount:        2,
 			HasUncommittedChanges: true,
 			GitAdditions:          10,
 			GitDeletions:          3,
 		}
-		got := renderRuntimeSignals(signals)
+		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
 		if !strings.Contains(got, tmuxSessionToken) ||
 			!strings.Contains(got, worktreeToken) ||
 			!strings.Contains(got, "G:↓2") ||
 			!strings.Contains(got, "G:✎") ||
 			!strings.Contains(got, "+10/-3") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing expected token(s)", got)
+		}
+		if strings.Contains(got, "G:↑1") {
+			t.Fatalf("renderRuntimeSignals(...) = %q, should hide ahead token when line changes exist", got)
+		}
+	})
+
+	t.Run("ahead shown when no line changes", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			HasTmuxSession: true,
+			HasWorktree:    true,
+			GitAheadCount:  3,
+		}
+		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
+		if !strings.Contains(got, "G:↑3") {
+			t.Fatalf("renderRuntimeSignals(...) = %q, missing ahead token", got)
 		}
 	})
 }

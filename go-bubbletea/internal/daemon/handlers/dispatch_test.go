@@ -83,6 +83,9 @@ func (g *routeBranchBehindGit) Fetch(context.Context, string, string) error {
 
 func (g *routeBranchBehindGit) RevListCount(_ context.Context, _ string, revRange string) (int, error) {
 	g.revRanges = append(g.revRanges, revRange)
+	if revRange == "origin/main..HEAD" {
+		return 1, nil
+	}
 	return 3, nil
 }
 
@@ -338,10 +341,10 @@ func TestDispatcherRoutesPRAndBranchBehindCommands(t *testing.T) {
 	if err := json.Unmarshal(behindResp.Body, &behindOut); err != nil {
 		t.Fatalf("unmarshal branch-behind response: %v", err)
 	}
-	if behindOut.CommitsBehind != 3 || behindOut.RevRange != "main..origin/main" {
+	if behindOut.CommitsBehind != 3 || behindOut.RevRange != "main..origin/main" || behindOut.CommitsAhead != 1 || behindOut.AheadRevRange != "origin/main..HEAD" {
 		t.Fatalf("branch-behind response = %+v", behindOut)
 	}
-	if !gitClient.fetched || len(gitClient.revRanges) != 1 {
+	if !gitClient.fetched || len(gitClient.revRanges) != 2 {
 		t.Fatalf("git service calls = fetched:%v revRanges:%v", gitClient.fetched, gitClient.revRanges)
 	}
 }

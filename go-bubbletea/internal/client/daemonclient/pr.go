@@ -42,6 +42,9 @@ type BranchBehindCheckResult struct {
 	BaseBranch    string `json:"base_branch"`
 	Remote        string `json:"remote"`
 	RevRange      string `json:"rev_range"`
+	AheadRevRange string `json:"ahead_rev_range"`
+	CommitsAhead  int    `json:"commits_ahead"`
+	Ahead         bool   `json:"ahead"`
 	CommitsBehind int    `json:"commits_behind"`
 	Behind        bool   `json:"behind"`
 }

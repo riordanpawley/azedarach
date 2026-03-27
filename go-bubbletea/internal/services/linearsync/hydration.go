@@ -20,6 +20,7 @@ func ReconcileHydratedTasks(current, hydrated []domain.Task) []domain.Task {
 		if local, ok := currentByID[task.ID]; ok {
 			merged.HasTmuxSession = local.HasTmuxSession
 			merged.HasWorktree = local.HasWorktree
+			merged.GitAheadCount = local.GitAheadCount
 			merged.GitBehindCount = local.GitBehindCount
 			merged.HasUncommittedChanges = local.HasUncommittedChanges
 			merged.GitAdditions = local.GitAdditions

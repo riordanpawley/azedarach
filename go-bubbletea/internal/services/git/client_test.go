@@ -14,6 +14,9 @@ type mockRunner struct {
 }
 
 func (m *mockRunner) Run(ctx context.Context, args ...string) (string, error) {
+	if len(args) >= 3 && args[0] == "-C" {
+		args = args[2:]
+	}
 	if m.runFunc != nil {
 		return m.runFunc(ctx, args...)
 	}
@@ -346,11 +349,49 @@ index 1234567..abcdefg 100644
 }
 
 func TestDiffStat(t *testing.T) {
-	expectedStat := " file.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"
+	unstagedStat := "1 file changed, 1 insertion(+)"
+	stagedStat := "1 file changed, 2 deletions(-)"
+	expectedStat := unstagedStat + "\n" + stagedStat
 
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--stat" {
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat" {
+				return unstagedStat, nil
+			}
+			if len(args) >= 3 && args[0] == "diff" && args[1] == "--cached" && args[2] == "--shortstat" {
+				return stagedStat, nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	stat, err := client.DiffStat(context.Background(), "/fake/worktree", "")
+
+	if err != nil {
+		t.Fatalf("DiffStat() error = %v", err)
+	}
+
+	if stat != expectedStat {
+		t.Errorf("DiffStat() = %v, want %v", stat, expectedStat)
+	}
+}
+
+func TestDiffStatAgainstBaseBranch(t *testing.T) {
+	expectedStat := "2 files changed, 10 insertions(+), 4 deletions(-)"
+
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "abc123\n", nil
+			}
+			if len(args) >= 6 &&
+				args[0] == "diff" &&
+				args[1] == "--shortstat" &&
+				args[2] == "abc123" &&
+				args[3] == "HEAD" &&
+				args[4] == "--" &&
+				args[5] == ":^.azedarach" {
 				return expectedStat, nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
@@ -358,12 +399,47 @@ func TestDiffStat(t *testing.T) {
 	}
 
 	client := NewClient(runner, slog.Default())
-	stat, err := client.DiffStat(context.Background(), "/fake/worktree")
+	stat, err := client.DiffStat(context.Background(), "/fake/worktree", "main")
 
 	if err != nil {
 		t.Fatalf("DiffStat() error = %v", err)
 	}
 
+	if stat != expectedStat {
+		t.Errorf("DiffStat() = %v, want %v", stat, expectedStat)
+	}
+}
+
+func TestDiffStatAgainstBaseBranchFallsBackToOriginRef(t *testing.T) {
+	expectedStat := "3 files changed, 12 insertions(+), 6 deletions(-)"
+
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("unknown revision")
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
+				return "def456\n", nil
+			}
+			if len(args) >= 6 &&
+				args[0] == "diff" &&
+				args[1] == "--shortstat" &&
+				args[2] == "def456" &&
+				args[3] == "HEAD" &&
+				args[4] == "--" &&
+				args[5] == ":^.azedarach" {
+				return expectedStat, nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	stat, err := client.DiffStat(context.Background(), "/fake/worktree", "main")
+
+	if err != nil {
+		t.Fatalf("DiffStat() error = %v", err)
+	}
 	if stat != expectedStat {
 		t.Errorf("DiffStat() = %v, want %v", stat, expectedStat)
 	}

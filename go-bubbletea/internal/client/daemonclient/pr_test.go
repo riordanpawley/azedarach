@@ -114,6 +114,9 @@ func TestCheckBranchBehindRoutesAndDecodesResponse(t *testing.T) {
 				BaseBranch:    body.BaseBranch,
 				Remote:        body.Remote,
 				RevRange:      "main..origin/main",
+				AheadRevRange: "origin/main..HEAD",
+				CommitsAhead:  1,
+				Ahead:         true,
 				CommitsBehind: 2,
 				Behind:        true,
 			})
@@ -139,7 +142,7 @@ func TestCheckBranchBehindRoutesAndDecodesResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckBranchBehind error: %v", err)
 	}
-	if !out.Behind || out.CommitsBehind != 2 || out.RevRange != "main..origin/main" {
+	if !out.Behind || out.CommitsBehind != 2 || !out.Ahead || out.CommitsAhead != 1 || out.RevRange != "main..origin/main" || out.AheadRevRange != "origin/main..HEAD" {
 		t.Fatalf("result = %+v", out)
 	}
 	if transport.lastReq.Command != CommandGitBranchBehind {
