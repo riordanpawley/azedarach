@@ -88,7 +88,7 @@ func New(cfg Config) *Daemon {
 		cfg.CLITool = "claude"
 	}
 	if strings.TrimSpace(cfg.SessionShell) == "" {
-		cfg.SessionShell = "zsh"
+		cfg.SessionShell = appconfig.DefaultSessionShell()
 	}
 	if cfg.SocketPath == "" {
 		cfg.SocketPath = appconfig.GlobalDaemonSocketPath()

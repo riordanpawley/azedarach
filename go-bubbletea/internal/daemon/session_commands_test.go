@@ -191,7 +191,12 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "axt-123", nil)
+	command := d.buildSessionLaunchCommand(
+		"axt-123",
+		"axt-123",
+		nil,
+		`work on issue axt-123 (task): Verify startup behavior`,
+	)
 	if !strings.Contains(command, "zsh -i -c") {
 		t.Fatalf("command = %q, want interactive shell launch", command)
 	}
@@ -200,6 +205,9 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123" claude`) {
 		t.Fatalf("command = %q, want AZEDARACH_ISSUE_ID env injection", command)
+	}
+	if !strings.Contains(command, `"work on issue axt-123 (task): Verify startup behavior"`) {
+		t.Fatalf("command = %q, want initial prompt argument", command)
 	}
 }
 
@@ -215,6 +223,7 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 		"axt-123",
 		"codex-axt-123",
 		[]string{"/tmp/a.png", "/tmp/with space/image.png", "   "},
+		`work on issue axt-123 (task): Verify startup behavior`,
 	)
 	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex SessionStart hook override", command)
@@ -233,5 +242,31 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	}
 	if !strings.Contains(command, `--image "/tmp/with space/image.png"`) {
 		t.Fatalf("command = %q, want codex image argument for spaced path", command)
+	}
+	if !strings.Contains(command, `-- "work on issue axt-123 (task): Verify startup behavior"`) {
+		t.Fatalf("command = %q, want codex prompt with option terminator", command)
+	}
+}
+
+func TestBuildStartWorkPromptMatchesPrimeBootFormat(t *testing.T) {
+	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell")
+	if !strings.Contains(prompt, "work on issue az-42 (task): Fix startup shell") {
+		t.Fatalf("prompt = %q, want issue summary header", prompt)
+	}
+	if !strings.Contains(prompt, "Start by running `az prime`. Then continue the task using the context it prints without waiting for further instruction.") {
+		t.Fatalf("prompt = %q, want az prime boot instructions", prompt)
+	}
+}
+
+func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T) {
+	prompt := buildStartWorkPrompt("az-42", "task\n", "Fix <shell>\tselection")
+	if strings.Contains(prompt, "<shell>") {
+		t.Fatalf("prompt = %q, want angle brackets sanitized", prompt)
+	}
+	if !strings.Contains(prompt, "Fix [shell] selection") {
+		t.Fatalf("prompt = %q, want sanitized title", prompt)
+	}
+	if strings.Contains(prompt, "\n\n\n") {
+		t.Fatalf("prompt = %q, want compact whitespace", prompt)
 	}
 }
