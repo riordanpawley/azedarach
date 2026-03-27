@@ -23,4 +23,12 @@ func TestParseDiffStatTotals(t *testing.T) {
 			t.Fatalf("parseDiffStatTotals(empty) = (%d,%d), want (0,0)", additions, deletions)
 		}
 	})
+
+	t.Run("multiple shortstat lines are aggregated", func(t *testing.T) {
+		diffStat := " 1 file changed, 3 insertions(+), 1 deletion(-)\n 2 files changed, 4 insertions(+), 2 deletions(-)"
+		additions, deletions := parseDiffStatTotals(diffStat)
+		if additions != 7 || deletions != 3 {
+			t.Fatalf("parseDiffStatTotals(multi-line) = (%d,%d), want (7,3)", additions, deletions)
+		}
+	})
 }

@@ -346,12 +346,17 @@ index 1234567..abcdefg 100644
 }
 
 func TestDiffStat(t *testing.T) {
-	expectedStat := " file.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"
+	unstagedStat := "1 file changed, 1 insertion(+)"
+	stagedStat := "1 file changed, 2 deletions(-)"
+	expectedStat := unstagedStat + "\n" + stagedStat
 
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--stat" {
-				return expectedStat, nil
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat" {
+				return unstagedStat, nil
+			}
+			if len(args) >= 3 && args[0] == "diff" && args[1] == "--cached" && args[2] == "--shortstat" {
+				return stagedStat, nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},

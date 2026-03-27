@@ -493,6 +493,7 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 	signals := &RuntimeSignals{
 		HasTmuxSession:        true,
 		HasWorktree:           true,
+		GitAheadCount:         2,
 		GitBehindCount:        4,
 		HasUncommittedChanges: true,
 		GitAdditions:          8,
@@ -512,7 +513,7 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		t.Fatalf("expected header line in card, got: %s", stripped)
 	}
 
-	for _, token := range []string{tmuxSessionToken, worktreeToken, "G:↓4", "G:✎", "+8/-2"} {
+	for _, token := range []string{tmuxSessionToken, worktreeToken, "G:↑2", "G:↓4", "G:✎", "+8/-2"} {
 		if !strings.Contains(headerLine, token) {
 			t.Fatalf("header should contain %q, got: %s", token, headerLine)
 		}
@@ -581,6 +582,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		signals := &RuntimeSignals{
 			HasTmuxSession:        true,
 			HasWorktree:           true,
+			GitAheadCount:         1,
 			GitBehindCount:        2,
 			HasUncommittedChanges: true,
 			GitAdditions:          10,
@@ -589,6 +591,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		got := renderRuntimeSignals(signals)
 		if !strings.Contains(got, tmuxSessionToken) ||
 			!strings.Contains(got, worktreeToken) ||
+			!strings.Contains(got, "G:↑1") ||
 			!strings.Contains(got, "G:↓2") ||
 			!strings.Contains(got, "G:✎") ||
 			!strings.Contains(got, "+10/-3") {

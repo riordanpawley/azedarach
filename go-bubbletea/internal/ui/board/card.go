@@ -23,6 +23,7 @@ const worktreeToken = "W:Y"
 type RuntimeSignals struct {
 	HasTmuxSession        bool
 	HasWorktree           bool
+	GitAheadCount         int
 	GitBehindCount        int
 	HasUncommittedChanges bool
 	GitAdditions          int
@@ -199,12 +200,15 @@ func renderRuntimeSignals(signals *RuntimeSignals) string {
 	if signals == nil {
 		return ""
 	}
-	parts := make([]string, 0, 5)
+	parts := make([]string, 0, 6)
 	if signals.HasTmuxSession {
 		parts = append(parts, tmuxSessionToken)
 	}
 	if signals.HasWorktree {
 		parts = append(parts, worktreeToken)
+	}
+	if signals.GitAheadCount > 0 {
+		parts = append(parts, fmt.Sprintf("G:↑%d", signals.GitAheadCount))
 	}
 	if signals.GitBehindCount > 0 {
 		parts = append(parts, fmt.Sprintf("G:↓%d", signals.GitBehindCount))

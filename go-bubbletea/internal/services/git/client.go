@@ -140,12 +140,26 @@ func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
 func (c *Client) DiffStat(ctx context.Context, worktree string) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "diff", "--stat")
+	unstagedOutput, err := c.runner.Run(ctx, "diff", "--shortstat")
 	if err != nil {
-		return "", fmt.Errorf("failed to get diff stat: %w", err)
+		return "", fmt.Errorf("failed to get unstaged diff stat: %w", err)
 	}
 
-	return output, nil
+	stagedOutput, err := c.runner.Run(ctx, "diff", "--cached", "--shortstat")
+	if err != nil {
+		return "", fmt.Errorf("failed to get staged diff stat: %w", err)
+	}
+
+	unstagedOutput = strings.TrimSpace(unstagedOutput)
+	stagedOutput = strings.TrimSpace(stagedOutput)
+	switch {
+	case unstagedOutput != "" && stagedOutput != "":
+		return unstagedOutput + "\n" + stagedOutput, nil
+	case unstagedOutput != "":
+		return unstagedOutput, nil
+	default:
+		return stagedOutput, nil
+	}
 }
 
 // Push pushes the specified branch to the remote repository.

@@ -1882,6 +1882,7 @@ func (m *Model) applyRuntimeSignals() {
 		}
 		m.tasks[i].HasTmuxSession = signals.HasTmuxSession
 		m.tasks[i].HasWorktree = signals.HasWorktree
+		m.tasks[i].GitAheadCount = signals.GitAheadCount
 		m.tasks[i].GitBehindCount = signals.GitBehindCount
 		m.tasks[i].HasUncommittedChanges = signals.HasUncommittedChanges
 		m.tasks[i].GitAdditions = signals.GitAdditions
@@ -1955,6 +1956,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 						Remote:     "origin",
 					})
 					if behindErr == nil {
+						signals.GitAheadCount = behind.CommitsAhead
 						signals.GitBehindCount = behind.CommitsBehind
 					} else {
 						partialFailures++
@@ -1975,16 +1977,22 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 
 func parseDiffStatTotals(diffStat string) (int, int) {
 	var additions, deletions int
-	insertionMatch := diffStatInsertionsPattern.FindStringSubmatch(diffStat)
-	if len(insertionMatch) == 2 {
+	insertionMatches := diffStatInsertionsPattern.FindAllStringSubmatch(diffStat, -1)
+	for _, insertionMatch := range insertionMatches {
+		if len(insertionMatch) != 2 {
+			continue
+		}
 		if parsed, err := strconv.Atoi(insertionMatch[1]); err == nil {
-			additions = parsed
+			additions += parsed
 		}
 	}
-	deletionMatch := diffStatDeletionsPattern.FindStringSubmatch(diffStat)
-	if len(deletionMatch) == 2 {
+	deletionMatches := diffStatDeletionsPattern.FindAllStringSubmatch(diffStat, -1)
+	for _, deletionMatch := range deletionMatches {
+		if len(deletionMatch) != 2 {
+			continue
+		}
 		if parsed, err := strconv.Atoi(deletionMatch[1]); err == nil {
-			deletions = parsed
+			deletions += parsed
 		}
 	}
 	return additions, deletions
