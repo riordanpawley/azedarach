@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -374,7 +378,74 @@ func TestMailSendCommandSerializesSequenceNumbers(t *testing.T) {
 	const attempts = 8
 	for attempt := 0; attempt < attempts; attempt++ {
 		repoDir := t.TempDir()
-		deps := &Dependencies{RepoDir: repoDir}
+		var mu sync.Mutex
+		events := make([]protocol.MailEvent, 0, 8)
+		deps := &Dependencies{
+			RepoDir: repoDir,
+			DaemonClient: daemonclient.New(&fakeDaemonTransport{
+				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					switch req.Command {
+					case protocol.CommandMailSend:
+						var body protocol.MailSendCommandBody
+						if err := json.Unmarshal(req.Body, &body); err != nil {
+							t.Fatalf("decode mail.send body: %v", err)
+						}
+						mu.Lock()
+						defer mu.Unlock()
+						evt := protocol.MailEvent{
+							Seq:         int64(len(events) + 1),
+							ParentIssue: body.ParentIssue,
+							IssueID:     body.IssueID,
+							Type:        body.Type,
+							Body:        body.Body,
+							CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+						}
+						events = append(events, evt)
+						respBody, err := json.Marshal(evt)
+						if err != nil {
+							t.Fatalf("encode mail.send response: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              true,
+							Body:            respBody,
+						}, nil
+					case protocol.CommandMailList:
+						var body protocol.MailListCommandBody
+						if err := json.Unmarshal(req.Body, &body); err != nil {
+							t.Fatalf("decode mail.list body: %v", err)
+						}
+						mu.Lock()
+						defer mu.Unlock()
+						filtered := make([]protocol.MailEvent, 0, len(events))
+						for _, evt := range events {
+							if evt.Seq >= body.SinceSeq {
+								filtered = append(filtered, evt)
+							}
+						}
+						if body.Limit > 0 && len(filtered) > body.Limit {
+							filtered = filtered[len(filtered)-body.Limit:]
+						}
+						respBody, err := json.Marshal(filtered)
+						if err != nil {
+							t.Fatalf("encode mail.list response: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              true,
+							Body:            respBody,
+						}, nil
+					default:
+						t.Fatalf("unexpected command: %s", req.Command)
+						return protocol.ResponseEnvelope{}, nil
+					}
+				},
+			}),
+		}
 		parent := "az-parent"
 		start := make(chan struct{})
 		errs := make(chan error, 2)
@@ -399,15 +470,20 @@ func TestMailSendCommandSerializesSequenceNumbers(t *testing.T) {
 			}
 		}
 
-		events, err := readMailboxEvents(repoDir, parent)
+		listed, err := deps.DaemonClient.MailList(context.Background(), protocol.MailListCommandBody{
+			RepoDir:     repoDir,
+			ParentIssue: parent,
+			SinceSeq:    0,
+			Limit:       200,
+		})
 		if err != nil {
-			t.Fatalf("readMailboxEvents attempt %d: %v", attempt, err)
+			t.Fatalf("MailList attempt %d: %v", attempt, err)
 		}
-		if len(events) != 2 {
-			t.Fatalf("attempt %d events len = %d, want 2", attempt, len(events))
+		if len(listed) != 2 {
+			t.Fatalf("attempt %d events len = %d, want 2", attempt, len(listed))
 		}
-		if events[0].Seq != 1 || events[1].Seq != 2 {
-			t.Fatalf("attempt %d seqs = [%d,%d], want [1,2]", attempt, events[0].Seq, events[1].Seq)
+		if listed[0].Seq != 1 || listed[1].Seq != 2 {
+			t.Fatalf("attempt %d seqs = [%d,%d], want [1,2]", attempt, listed[0].Seq, listed[1].Seq)
 		}
 	}
 }
@@ -423,27 +499,105 @@ func runGitCommand(t *testing.T, dir string, args ...string) {
 
 func TestMailListAndWatchUseCase_SinceAndOnce(t *testing.T) {
 	repoDir := t.TempDir()
-	deps := &Dependencies{RepoDir: repoDir}
-	parent := "az-parent"
-	events := []mailEvent{
-		{
-			Seq:         1,
-			ParentIssue: parent,
-			Type:        "handoff",
-			Body:        "first",
-			CreatedAt:   time.Now().UTC(),
-		},
-		{
-			Seq:         2,
-			ParentIssue: parent,
-			Type:        "dependency-ready",
-			Body:        "second",
-			CreatedAt:   time.Now().UTC(),
-		},
+	var mu sync.Mutex
+	events := make([]protocol.MailEvent, 0, 4)
+	deps := &Dependencies{
+		RepoDir: repoDir,
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case protocol.CommandMailSend:
+					var body protocol.MailSendCommandBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode mail.send body: %v", err)
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					evt := protocol.MailEvent{
+						Seq:         int64(len(events) + 1),
+						ParentIssue: body.ParentIssue,
+						Type:        body.Type,
+						Body:        body.Body,
+						CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+					}
+					events = append(events, evt)
+					respBody, err := json.Marshal(evt)
+					if err != nil {
+						t.Fatalf("encode mail.send response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case protocol.CommandMailList:
+					var body protocol.MailListCommandBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode mail.list body: %v", err)
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					filtered := make([]protocol.MailEvent, 0, len(events))
+					for _, evt := range events {
+						if evt.Seq >= body.SinceSeq {
+							filtered = append(filtered, evt)
+						}
+					}
+					if body.Limit > 0 && len(filtered) > body.Limit {
+						filtered = filtered[len(filtered)-body.Limit:]
+					}
+					respBody, err := json.Marshal(filtered)
+					if err != nil {
+						t.Fatalf("encode mail.list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case protocol.CommandMailWatch:
+					var body protocol.MailWatchCommandBody
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode mail.watch body: %v", err)
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					filtered := make([]protocol.MailEvent, 0, len(events))
+					for _, evt := range events {
+						if evt.Seq >= body.SinceSeq {
+							filtered = append(filtered, evt)
+						}
+					}
+					respBody, err := json.Marshal(filtered)
+					if err != nil {
+						t.Fatalf("encode mail.watch response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			},
+		}),
 	}
-	for _, evt := range events {
-		if err := appendMailboxEvent(repoDir, evt); err != nil {
-			t.Fatalf("appendMailboxEvent: %v", err)
+	parent := "az-parent"
+	for _, body := range []string{"first", "second"} {
+		if err := MailSendCommand(deps, MailSendOptions{
+			ParentIssueID: parent,
+			Type:          "handoff",
+			Body:          body,
+		}); err != nil {
+			t.Fatalf("MailSendCommand(%q): %v", body, err)
 		}
 	}
 
@@ -479,7 +633,7 @@ func TestMailListAndWatchUseCase_SinceAndOnce(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &watched); err != nil {
 		t.Fatalf("decode MailWatchCommand output: %v", err)
 	}
-	if watched.Seq != 2 || watched.Type != "dependency-ready" {
-		t.Fatalf("watched = %+v, want seq=2 type=dependency-ready", watched)
+	if watched.Seq != 2 || watched.Type != "handoff" {
+		t.Fatalf("watched = %+v, want seq=2 type=handoff", watched)
 	}
 }

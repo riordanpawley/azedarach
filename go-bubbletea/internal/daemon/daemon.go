@@ -228,6 +228,12 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleIssueFanout(ctx, req)
 	case protocol.CommandIssueFanoutDrift:
 		return d.handleIssueFanoutDrift(ctx, req)
+	case protocol.CommandMailSend:
+		return d.handleMailSend(ctx, req)
+	case protocol.CommandMailList:
+		return d.handleMailList(ctx, req)
+	case protocol.CommandMailWatch:
+		return d.handleMailWatch(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.create":

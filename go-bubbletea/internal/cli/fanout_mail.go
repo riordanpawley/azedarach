@@ -414,31 +414,21 @@ func ParseMailWatchArgs(args []string) (MailWatchOptions, error) {
 }
 
 func MailSendCommand(deps *Dependencies, opts MailSendOptions) error {
-	unlock, err := lockMailbox(deps.RepoDir, opts.ParentIssueID)
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	defer unlock()
-
-	events, err := readMailboxEvents(deps.RepoDir, opts.ParentIssueID)
-	if err != nil {
-		return err
-	}
-	nextSeq := int64(1)
-	if len(events) > 0 {
-		nextSeq = events[len(events)-1].Seq + 1
-	}
-	event := mailEvent{
-		Seq:         nextSeq,
+	event, err := deps.DaemonClient.MailSend(ctx, protocol.MailSendCommandBody{
+		RepoDir:     deps.RepoDir,
 		ParentIssue: opts.ParentIssueID,
 		IssueID:     strings.TrimSpace(opts.IssueID),
 		Type:        strings.TrimSpace(opts.Type),
 		From:        strings.TrimSpace(opts.From),
 		To:          strings.TrimSpace(opts.To),
 		Body:        opts.Body,
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := appendMailboxEvent(deps.RepoDir, event); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -449,18 +439,23 @@ func MailSendCommand(deps *Dependencies, opts MailSendOptions) error {
 }
 
 func MailListCommand(deps *Dependencies, opts MailListOptions) error {
-	events, err := readMailboxEvents(deps.RepoDir, opts.ParentIssueID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	events, err := deps.DaemonClient.MailList(ctx, protocol.MailListCommandBody{
+		RepoDir:     deps.RepoDir,
+		ParentIssue: opts.ParentIssueID,
+		SinceSeq:    opts.SinceSeq,
+		Limit:       opts.Limit,
+	})
 	if err != nil {
 		return err
 	}
 	filtered := make([]mailEvent, 0, len(events))
 	for _, evt := range events {
-		if evt.Seq >= opts.SinceSeq {
-			filtered = append(filtered, evt)
-		}
-	}
-	if len(filtered) > opts.Limit {
-		filtered = filtered[len(filtered)-opts.Limit:]
+		filtered = append(filtered, protocolToLocalMailEvent(evt))
 	}
 	if opts.JSON {
 		return printJSON(filtered)
@@ -472,6 +467,12 @@ func MailListCommand(deps *Dependencies, opts MailListOptions) error {
 }
 
 func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
 	lastSeq := opts.SinceSeq
 	emit := func(evt mailEvent) error {
 		lastSeq = evt.Seq
@@ -487,15 +488,17 @@ func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 		return nil
 	}
 
-	initial, err := readMailboxEvents(deps.RepoDir, opts.ParentIssueID)
+	initial, err := deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
+		RepoDir:     deps.RepoDir,
+		ParentIssue: opts.ParentIssueID,
+		SinceSeq:    opts.SinceSeq,
+	})
 	if err != nil {
 		return err
 	}
 	for _, evt := range initial {
-		if evt.Seq >= opts.SinceSeq {
-			if err := emit(evt); err != nil {
-				return err
-			}
+		if err := emit(protocolToLocalMailEvent(evt)); err != nil {
+			return err
 		}
 	}
 	if opts.Once {
@@ -505,17 +508,40 @@ func MailWatchCommand(deps *Dependencies, opts MailWatchOptions) error {
 	// Stream mode: no heartbeat frames; emit only when new events exist.
 	for {
 		time.Sleep(250 * time.Millisecond)
-		events, err := readMailboxEvents(deps.RepoDir, opts.ParentIssueID)
+		events, err := deps.DaemonClient.MailWatch(context.Background(), protocol.MailWatchCommandBody{
+			RepoDir:     deps.RepoDir,
+			ParentIssue: opts.ParentIssueID,
+			SinceSeq:    lastSeq + 1,
+		})
 		if err != nil {
 			return err
 		}
 		for _, evt := range events {
-			if evt.Seq > lastSeq {
-				if err := emit(evt); err != nil {
-					return err
-				}
+			if err := emit(protocolToLocalMailEvent(evt)); err != nil {
+				return err
 			}
 		}
+	}
+}
+
+func protocolToLocalMailEvent(evt protocol.MailEvent) mailEvent {
+	createdAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(evt.CreatedAt))
+	if err != nil {
+		createdAt, err = time.Parse(time.RFC3339, strings.TrimSpace(evt.CreatedAt))
+		if err != nil {
+			createdAt = time.Time{}
+		}
+	}
+	return mailEvent{
+		Seq:         evt.Seq,
+		ParentIssue: evt.ParentIssue,
+		IssueID:     evt.IssueID,
+		Type:        evt.Type,
+		From:        evt.From,
+		To:          evt.To,
+		Body:        evt.Body,
+		CreatedAt:   createdAt,
+		Payload:     evt.Payload,
 	}
 }
 
