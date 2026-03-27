@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -38,13 +39,13 @@ func NewTaskWorkspaceOverlay(
 	detail := NewDetailPanel(task, session).WithRelatedTasks(relatedTasks)
 	actions := NewActionMenu(task, session).WithRelatedTasks(relatedTasks)
 
-	overlayWidth := max(84, viewportWidth-6)
-	overlayHeight := max(24, viewportHeight-4)
-	if viewportWidth > 0 {
-		overlayWidth = min(overlayWidth, viewportWidth-2)
+	overlayWidth := viewportWidth
+	overlayHeight := viewportHeight - 1
+	if overlayWidth < 1 {
+		overlayWidth = 84
 	}
-	if viewportHeight > 0 {
-		overlayHeight = min(overlayHeight, viewportHeight-2)
+	if overlayHeight < 1 {
+		overlayHeight = 24
 	}
 
 	detail.viewHeight = max(8, overlayHeight-8)
@@ -65,6 +66,14 @@ func (w *TaskWorkspaceOverlay) Init() tea.Cmd {
 
 func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			w.overlayWidth = msg.Width
+		}
+		if msg.Height > 1 {
+			w.overlayHeight = msg.Height - 1
+		}
+		return w, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
@@ -79,18 +88,30 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return w, w.actions.selectCurrentAction()
 		case "j", "down":
-			if w.focus == taskWorkspaceFocusActions {
-				w.actions.moveCursorDown()
-			} else if w.detail.scrollY < w.detail.maxScroll() {
+			if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
 			return w, nil
 		case "k", "up":
-			if w.focus == taskWorkspaceFocusActions {
-				w.actions.moveCursorUp()
-			} else if w.detail.scrollY > 0 {
+			if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
+			return w, nil
+		case "n":
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorDown()
+			}
+			return w, nil
+		case "p":
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorUp()
+			}
+			return w, nil
+		case "ctrl+d":
+			w.detail.scrollY = min(w.detail.maxScroll(), w.detail.scrollY+w.halfPageStep())
+			return w, nil
+		case "ctrl+u":
+			w.detail.scrollY = max(0, w.detail.scrollY-w.halfPageStep())
 			return w, nil
 		case "g", "home":
 			if w.focus == taskWorkspaceFocusActions {
@@ -117,56 +138,122 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
-	bodyHeight := max(8, w.overlayHeight-5)
-	leftWidth := max(48, (w.overlayWidth*2)/3)
-	rightWidth := max(26, w.overlayWidth-leftWidth-3)
+	contentWidth := max(1, w.overlayWidth-2)
+	contentHeight := max(1, w.overlayHeight-2)
+	titleLine := w.styles.MenuItemActive.Render("Task Workspace")
+	separator := w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth)))
 
-	leftBorder := styles.Overlay0
-	rightBorder := styles.Overlay0
-	if w.focus == taskWorkspaceFocusDetail {
-		leftBorder = styles.Blue
-	} else {
-		rightBorder = styles.Blue
+	bodyHeight := max(6, contentHeight-2)
+	if contentWidth < 76 {
+		return w.renderStacked(contentWidth, contentHeight, bodyHeight, titleLine, separator)
 	}
 
-	detailView := lipgloss.NewStyle().
+	gap := 1
+	minLeft := 28
+	minRight := 20
+	usableWidth := max(16, contentWidth-gap)
+	leftWidth := (usableWidth * 2) / 3
+	maxLeft := max(minLeft, usableWidth-minRight)
+	if leftWidth > maxLeft {
+		leftWidth = maxLeft
+	}
+	if leftWidth < minLeft {
+		leftWidth = minLeft
+	}
+	rightWidth := usableWidth - leftWidth
+	if rightWidth < minRight {
+		rightWidth = minRight
+		leftWidth = max(minLeft, usableWidth-rightWidth)
+	}
+	w.detail.viewHeight = max(6, bodyHeight)
+	w.detail.wrapWidth = max(20, leftWidth-2)
+
+	detailStyle := lipgloss.NewStyle()
+	if w.focus == taskWorkspaceFocusDetail {
+		detailStyle = detailStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
+	}
+	detailView := detailStyle.
 		Width(leftWidth).
 		MaxWidth(leftWidth).
 		Height(bodyHeight).
 		MaxHeight(bodyHeight).
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(leftBorder).
-		Padding(0, 1).
 		Render(w.detail.View())
 
 	actionsHeader := w.styles.MenuItemActive.Render("Actions")
 	actionsBody := lipgloss.JoinVertical(
 		lipgloss.Left,
 		actionsHeader,
-		w.styles.Separator.Render(strings.Repeat("─", max(6, rightWidth-6))),
+		w.styles.Separator.Render(strings.Repeat("─", max(6, rightWidth))),
 		w.actions.viewActionsOnly(),
 	)
-	actionsView := lipgloss.NewStyle().
+	actionStyle := lipgloss.NewStyle()
+	if w.focus == taskWorkspaceFocusActions {
+		actionStyle = actionStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
+	}
+	actionsView := actionStyle.
 		Width(rightWidth).
 		MaxWidth(rightWidth).
 		Height(bodyHeight).
 		MaxHeight(bodyHeight).
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(rightBorder).
-		Padding(0, 1).
 		Render(actionsBody)
 
-	footer := keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Tab/h/l", Description: "switch pane"},
-		{Key: "j/k", Description: "scroll or navigate"},
-		{Key: "Enter/action key", Description: "run"},
-		{Key: "Esc", Description: "close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         w.styles.MenuKey,
-		DescriptionStyle: w.styles.Footer,
-		FooterStyle:      w.styles.Footer,
-	})
-	return lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Top, detailView, actionsView), footer)
+	body := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		detailView,
+		lipgloss.NewStyle().Width(gap).Render(""),
+		actionsView,
+	)
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
+	return lipgloss.NewStyle().
+		Width(contentWidth).
+		Height(contentHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Surface2).
+		Render(content)
+}
+
+func (w *TaskWorkspaceOverlay) renderStacked(contentWidth, contentHeight, bodyHeight int, titleLine, separator string) string {
+	headerHeight := 2
+	gap := 1
+	actionsHeight := max(8, bodyHeight/3)
+	detailHeight := max(4, bodyHeight-actionsHeight-gap)
+
+	w.detail.viewHeight = max(4, detailHeight)
+	w.detail.wrapWidth = max(4, contentWidth-4)
+
+	detailView := lipgloss.NewStyle().
+		Width(contentWidth).
+		MaxWidth(contentWidth).
+		Height(detailHeight).
+		MaxHeight(detailHeight).
+		Render(w.detail.View())
+
+	actionsBody := lipgloss.JoinVertical(
+		lipgloss.Left,
+		w.styles.MenuItemActive.Render("Actions"),
+		w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth))),
+		w.actions.viewActionsOnly(),
+	)
+	actionsView := lipgloss.NewStyle().
+		Width(contentWidth).
+		MaxWidth(contentWidth).
+		Height(actionsHeight).
+		MaxHeight(actionsHeight).
+		Render(actionsBody)
+
+	body := lipgloss.JoinVertical(
+		lipgloss.Left,
+		detailView,
+		lipgloss.NewStyle().Height(gap).Render(""),
+		actionsView,
+	)
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
+	return lipgloss.NewStyle().
+		Width(contentWidth).
+		Height(max(6, contentHeight-headerHeight)).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Surface2).
+		Render(content)
 }
 
 func (w *TaskWorkspaceOverlay) Title() string {
@@ -177,10 +264,46 @@ func (w *TaskWorkspaceOverlay) Size() (width, height int) {
 	return w.overlayWidth, w.overlayHeight
 }
 
+func (w *TaskWorkspaceOverlay) StatusMode() types.Mode {
+	return types.ModeAction
+}
+
+func (w *TaskWorkspaceOverlay) UsesAppFrame() bool {
+	return false
+}
+
+func (w *TaskWorkspaceOverlay) UsesFullScreen() bool {
+	return true
+}
+
+func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
+	return true
+}
+
+func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k/↑/↓", Description: "scroll"},
+		{Key: "ctrl+u/d", Description: "half-page"},
+		{Key: "g/G", Description: "top/bottom"},
+		{Key: "Tab/h/l", Description: "focus"},
+		{Key: "Enter", Description: "run action"},
+		{Key: "n/p", Description: "action up/down"},
+		{Key: "Esc/q", Description: "close"},
+	}
+}
+
 func (w *TaskWorkspaceOverlay) toggleFocus() {
 	if w.focus == taskWorkspaceFocusDetail {
 		w.focus = taskWorkspaceFocusActions
 		return
 	}
 	w.focus = taskWorkspaceFocusDetail
+}
+
+func (w *TaskWorkspaceOverlay) halfPageStep() int {
+	step := w.detail.viewHeight / 2
+	if step < 1 {
+		return 1
+	}
+	return step
 }

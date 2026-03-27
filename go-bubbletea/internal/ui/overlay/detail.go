@@ -7,18 +7,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 // DetailPanel displays full task details with scrollable description
 type DetailPanel struct {
-	task          domain.Task
-	relatedTasks  []domain.Task
-	session       *domain.Session
-	scrollY       int
-	contentHeight int
-	viewHeight    int
-	styles        *Styles
+	task           domain.Task
+	relatedTasks   []domain.Task
+	session        *domain.Session
+	scrollY        int
+	contentHeight  int
+	viewHeight     int
+	descViewHeight int
+	wrapWidth      int
+	styles         *Styles
 }
 
 // NewDetailPanel creates a new detail panel for the given task and optional session
@@ -30,12 +33,14 @@ func NewDetailPanel(task domain.Task, session *domain.Session) *DetailPanel {
 	}
 
 	return &DetailPanel{
-		task:          task,
-		session:       session,
-		scrollY:       0,
-		contentHeight: contentHeight,
-		viewHeight:    20, // Default, will be updated in Size()
-		styles:        New(),
+		task:           task,
+		session:        session,
+		scrollY:        0,
+		contentHeight:  contentHeight,
+		viewHeight:     20, // Default, will be updated in Size()
+		descViewHeight: 20,
+		wrapWidth:      80,
+		styles:         New(),
 	}
 }
 
@@ -201,12 +206,18 @@ func (d *DetailPanel) View() string {
 		b.WriteString(headerStyle.Render("Description"))
 		b.WriteString("\n")
 
-		// Split description into lines and apply scroll
-		descLines := strings.Split(d.task.Description, "\n")
+		wrapWidth := d.wrapWidth
+		if wrapWidth < 10 {
+			wrapWidth = 10
+		}
+		descLines := wrapDescriptionLines(d.task.Description, wrapWidth)
 		d.contentHeight = len(descLines)
+		reservedLines := lipgloss.Height(b.String())
+		descViewport := max(1, d.viewHeight-reservedLines-2)
+		d.descViewHeight = descViewport
 
 		start := d.scrollY
-		end := min(d.scrollY+d.viewHeight, len(descLines))
+		end := min(d.scrollY+d.descViewHeight, len(descLines))
 
 		for i := start; i < end; i++ {
 			b.WriteString(valueStyle.Render(descLines[i]))
@@ -356,5 +367,26 @@ func (d *DetailPanel) formatDuration(dur time.Duration) string {
 
 // maxScroll returns the maximum scroll position
 func (d *DetailPanel) maxScroll() int {
-	return max(0, d.contentHeight-d.viewHeight)
+	visible := d.descViewHeight
+	if visible < 1 {
+		visible = d.viewHeight
+	}
+	return max(0, d.contentHeight-visible)
+}
+
+func wrapDescriptionLines(description string, width int) []string {
+	if width < 1 {
+		return strings.Split(description, "\n")
+	}
+	wordWrapped := ansi.Wrap(description, width, "-/")
+	lines := strings.Split(wordWrapped, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+	}
+	return out
 }

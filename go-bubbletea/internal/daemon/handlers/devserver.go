@@ -15,6 +15,7 @@ const (
 	CommandDevServerStart  = "devserver.start"
 	CommandDevServerStop   = "devserver.stop"
 	CommandDevServerStatus = "devserver.status"
+	CommandDevServerList   = "devserver.list"
 )
 
 // DevServerManager captures the devserver service behavior needed by the daemon.
@@ -22,6 +23,7 @@ type DevServerManager interface {
 	Start(ctx context.Context, issueID, name, command string) (*devserver.Server, error)
 	Stop(ctx context.Context, issueID string) error
 	Get(issueID string) (*devserver.Server, bool)
+	List() []*devserver.Server
 }
 
 // DevServerHandler routes devserver lifecycle commands.
@@ -43,6 +45,10 @@ type devServerResultBody struct {
 	Server  devserver.Server `json:"server"`
 }
 
+type devServerListBody struct {
+	Servers []devserver.Server `json:"servers"`
+}
+
 // Handle executes a devserver command from a daemon request envelope.
 func (h *DevServerHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
 	resp := protocol.ResponseEnvelope{
@@ -62,22 +68,40 @@ func (h *DevServerHandler) Handle(ctx context.Context, req protocol.RequestEnvel
 		}
 		return resp
 	}
-	if cmd.IssueID == "" {
-		resp.Error = &protocol.ErrorEnvelope{
-			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   "missing required field: issue_id",
-			Retryable: false,
-		}
-		return resp
-	}
 
 	switch req.Command {
 	case CommandDevServerStart:
+		if cmd.IssueID == "" {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   "missing required field: issue_id",
+				Retryable: false,
+			}
+			return resp
+		}
 		return h.handleStart(ctx, resp, cmd)
 	case CommandDevServerStop:
+		if cmd.IssueID == "" {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   "missing required field: issue_id",
+				Retryable: false,
+			}
+			return resp
+		}
 		return h.handleStop(ctx, resp, cmd)
 	case CommandDevServerStatus:
+		if cmd.IssueID == "" {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   "missing required field: issue_id",
+				Retryable: false,
+			}
+			return resp
+		}
 		return h.handleStatus(resp, cmd)
+	case CommandDevServerList:
+		return h.handleList(resp)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,
@@ -172,6 +196,31 @@ func (h *DevServerHandler) handleStatus(resp protocol.ResponseEnvelope, cmd devS
 	}
 
 	return devServerSuccess(resp, cmd.IssueID, *srv)
+}
+
+func (h *DevServerHandler) handleList(resp protocol.ResponseEnvelope) protocol.ResponseEnvelope {
+	servers := h.manager.List()
+	out := make([]devserver.Server, 0, len(servers))
+	for _, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		out = append(out, *srv)
+	}
+
+	body, err := json.Marshal(devServerListBody{Servers: out})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+
+	resp.OK = true
+	resp.Body = body
+	return resp
 }
 
 func devServerSuccess(resp protocol.ResponseEnvelope, issueID string, srv devserver.Server) protocol.ResponseEnvelope {

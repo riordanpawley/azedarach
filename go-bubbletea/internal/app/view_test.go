@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 func TestViewHeight(t *testing.T) {
@@ -77,6 +78,113 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	}
 	if !strings.Contains(lastLine, "ui.toast") && !strings.Contains(lastLine, "test toast") {
 		t.Fatalf("expected status bar ticker to include latest event context; last line=%q", lastLine)
+	}
+}
+
+func TestViewWithOverlayKeepsStatusBarVisible(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&testOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	lastLine := lines[len(lines)-1]
+	if !strings.Contains(lastLine, "NORMAL") {
+		t.Fatalf("expected status bar on final line to include mode label with overlay active; last line=%q", lastLine)
+	}
+}
+
+func TestViewWithStatusModeOverlayUsesOverlayModeBadge(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&statusModeOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	lastLine := lines[len(lines)-1]
+	if !strings.Contains(lastLine, "ACTION") {
+		t.Fatalf("expected status bar to use overlay-provided mode; last line=%q", lastLine)
+	}
+}
+
+func TestOverlayUsesAppFrame(t *testing.T) {
+	if !overlayUsesAppFrame(&testOverlay{}) {
+		t.Fatalf("expected default overlays to use app frame")
+	}
+	if overlayUsesAppFrame(&framelessOverlay{}) {
+		t.Fatalf("expected frameless overlays to skip app frame")
+	}
+}
+
+func TestViewWithFullScreenOverlayReplacesBoardContent(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&fullScreenOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	first := lines[0]
+	if strings.Contains(first, "Open (") {
+		t.Fatalf("expected board headers to be replaced in full-screen overlay mode; first line=%q", first)
+	}
+	if !strings.Contains(view, "FULL-SCREEN CONTENT") {
+		t.Fatalf("expected full-screen overlay content to be visible, got %q", view)
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "ACTION") {
+		t.Fatalf("expected status bar to remain visible with overlay mode badge; last line=%q", last)
+	}
+}
+
+func TestViewWithOverlayStatusBindingsUsesOverlayHints(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&hintOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "j/k") || !strings.Contains(last, "scroll") {
+		t.Fatalf("expected status bar to include overlay-provided hints; last line=%q", last)
+	}
+}
+
+func TestWindowSizeMsgForwardedToActiveOverlay(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	resize := &resizeAwareOverlay{}
+	m.overlayStack.Push(resize)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 77, Height: 33})
+	model := updated.(Model)
+	got := model.overlayStack.Current().(*resizeAwareOverlay)
+	if !got.seen {
+		t.Fatalf("expected overlay to receive window size message")
+	}
+	if got.lastW != 77 || got.lastH != 33 {
+		t.Fatalf("expected forwarded size 77x33, got %dx%d", got.lastW, got.lastH)
 	}
 }
 
@@ -156,6 +264,59 @@ func TestLayerWithinHeightTransparent_IgnoresANSISpaceOnlyLines(t *testing.T) {
 	}
 }
 
+func TestMergeOverlayLine_PreservesOutsideSpan(t *testing.T) {
+	bottom := "1111111111"
+	top := "   XX     "
+	got := mergeOverlayLine(bottom, top)
+	if got != "111XX11111" {
+		t.Fatalf("mergeOverlayLine result=%q want %q", got, "111XX11111")
+	}
+}
+
+func TestNonSpaceBounds(t *testing.T) {
+	left, right, ok := nonSpaceBounds("   abc  ")
+	if !ok {
+		t.Fatalf("expected bounds for non-space line")
+	}
+	if left != 3 || right != 6 {
+		t.Fatalf("unexpected bounds: left=%d right=%d", left, right)
+	}
+}
+
+func TestLayerCenteredOverlay_ReplacesOnlyOverlayRect(t *testing.T) {
+	m := newTestModel()
+	bottom := strings.Join([]string{
+		"AAAAAAAAAA",
+		"BBBBBBBBBB",
+		"CCCCCCCCCC",
+		"DDDDDDDDDD",
+		"EEEEEEEEEE",
+	}, "\n")
+	overlay := strings.Join([]string{
+		"XX  ",
+		"X  X",
+		"XXXX",
+	}, "\n")
+
+	got := m.layerCenteredOverlay(bottom, overlay, 10, 5, 4, 3)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 lines, got %d", len(lines))
+	}
+	if lines[0] != "AAAAAAAAAA" || lines[4] != "EEEEEEEEEE" {
+		t.Fatalf("expected rows outside overlay rect to remain unchanged, got %q / %q", lines[0], lines[4])
+	}
+	if lines[1] != "BBBXX  BBB" {
+		t.Fatalf("unexpected line 1: %q", lines[1])
+	}
+	if lines[2] != "CCCX  XCCC" {
+		t.Fatalf("unexpected line 2: %q", lines[2])
+	}
+	if lines[3] != "DDDXXXXDDD" {
+		t.Fatalf("unexpected line 3: %q", lines[3])
+	}
+}
+
 type testOverlay struct{}
 
 func (o *testOverlay) View() string                            { return "test overlay" }
@@ -163,3 +324,42 @@ func (o *testOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return o, nil }
 func (o *testOverlay) Init() tea.Cmd                           { return nil }
 func (o *testOverlay) Title() string                           { return "Test" }
 func (o *testOverlay) Size() (int, int)                        { return 20, 10 }
+
+type statusModeOverlay struct{ testOverlay }
+
+func (o *statusModeOverlay) StatusMode() types.Mode { return types.ModeAction }
+
+type framelessOverlay struct{ statusModeOverlay }
+
+func (o *framelessOverlay) View() string       { return "frame-free overlay" }
+func (o *framelessOverlay) UsesAppFrame() bool { return false }
+
+type fullScreenOverlay struct{ statusModeOverlay }
+
+func (o *fullScreenOverlay) View() string         { return "FULL-SCREEN CONTENT" }
+func (o *fullScreenOverlay) UsesFullScreen() bool { return true }
+
+type hintOverlay struct{ statusModeOverlay }
+
+func (o *hintOverlay) View() string { return "HINT OVERLAY" }
+func (o *hintOverlay) StatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k", Description: "scroll"},
+		{Key: "Esc", Description: "close"},
+	}
+}
+
+type resizeAwareOverlay struct {
+	testOverlay
+	seen         bool
+	lastW, lastH int
+}
+
+func (o *resizeAwareOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if sz, ok := msg.(tea.WindowSizeMsg); ok {
+		o.seen = true
+		o.lastW = sz.Width
+		o.lastH = sz.Height
+	}
+	return o, nil
+}

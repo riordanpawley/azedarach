@@ -19,6 +19,7 @@ const (
 	CommandDevServerStart  = "devserver.start"
 	CommandDevServerStop   = "devserver.stop"
 	CommandDevServerStatus = "devserver.status"
+	CommandDevServerList   = "devserver.list"
 	CommandWorktreeList    = "worktree.list"
 	CommandWorktreeRemove  = "worktree.remove"
 )
@@ -27,7 +28,17 @@ type sessionCommandBody struct {
 	ProjectID  string   `json:"project_id"`
 	SessionID  string   `json:"session_id"`
 	BaseBranch string   `json:"base_branch,omitempty"`
+	Yolo       bool     `json:"yolo,omitempty"`
 	ImagePaths []string `json:"image_paths,omitempty"`
+}
+
+// StartSessionParams captures lifecycle start options in a single payload
+// to avoid brittle positional argument expansion at callsites.
+type StartSessionParams struct {
+	IssueID    string
+	BaseBranch string
+	Yolo       bool
+	ImagePaths []string
 }
 
 type commandOutputBody struct {
@@ -41,6 +52,10 @@ type devServerCommandBody struct {
 type devServerResultBody struct {
 	IssueID string           `json:"issue_id"`
 	Server  devserver.Server `json:"server"`
+}
+
+type devServerListBody struct {
+	Servers []devserver.Server `json:"servers"`
 }
 
 type worktreeListBody struct {
@@ -98,12 +113,13 @@ func (c *Client) projectRoute() string {
 }
 
 // StartSession asks the daemon to start one session for issue/task id.
-func (c *Client) StartSession(ctx context.Context, issueID string, baseBranch string, imagePaths []string) (string, error) {
+func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
 		ProjectID:  c.projectID,
-		SessionID:  issueID,
-		BaseBranch: baseBranch,
-		ImagePaths: imagePaths,
+		SessionID:  params.IssueID,
+		BaseBranch: params.BaseBranch,
+		Yolo:       params.Yolo,
+		ImagePaths: params.ImagePaths,
 	})
 }
 
@@ -138,6 +154,15 @@ func (c *Client) DevServerStatus(ctx context.Context, issueID string) (devserver
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
+}
+
+// ListDevServers returns the daemon-owned devserver inventory for the current project route.
+func (c *Client) ListDevServers(ctx context.Context) ([]devserver.Server, error) {
+	var out devServerListBody
+	if err := c.commandJSON(ctx, CommandDevServerList, struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return out.Servers, nil
 }
 
 // StartDevServer asks daemon to start one devserver.

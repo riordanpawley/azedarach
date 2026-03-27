@@ -1,10 +1,35 @@
 package overlay
 
 import (
+	"path/filepath"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/config"
 )
+
+type mockSettingsEditor struct {
+	showPhases  bool
+	toggleCount int
+}
+
+func (m *mockSettingsEditor) GetShowPhases() bool {
+	return m.showPhases
+}
+
+func (m *mockSettingsEditor) ToggleShowPhases() {
+	m.showPhases = !m.showPhases
+	m.toggleCount++
+}
+
+func settingIndexByKey(menu *SettingsOverlay, key string) int {
+	for i := range menu.items {
+		if menu.items[i].Key == key {
+			return i
+		}
+	}
+	return -1
+}
 
 func TestNewSettingsOverlay(t *testing.T) {
 	items := []SettingItem{
@@ -413,6 +438,127 @@ func TestSettingsOverlay_View(t *testing.T) {
 	// Should contain separator
 	if !contains(view, "---") {
 		t.Error("expected view to contain separator")
+	}
+}
+
+func TestSettingsOverlay_ConfigBackedSessionSettingsPersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.CLITool = "claude"
+	cfg.Session.DangerouslySkipPermissions = false
+
+	menu := NewSettingsOverlayWithEditorAndConfig(&mockSettingsEditor{showPhases: true}, cfg, filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName))
+
+	if got := menu.items[0].Value; got != "claude" {
+		t.Fatalf("cli tool value = %v, want claude", got)
+	}
+	if got := menu.items[1].Value; got != false {
+		t.Fatalf("skip permissions value = %v, want false", got)
+	}
+
+	menu.cursor = 0
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}
+	_, cmd := menu.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected config persistence command after CLI tool change")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	menu.cursor = 1
+	msg = tea.KeyMsg{Type: tea.KeySpace}
+	_, cmd = menu.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected config persistence command after permissions toggle")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save, got %T", result)
+	}
+
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if loaded.CLITool != "opencode" {
+		t.Fatalf("loaded cli tool = %q, want opencode", loaded.CLITool)
+	}
+	if !loaded.Session.DangerouslySkipPermissions {
+		t.Fatal("expected loaded permissions setting to be true")
+	}
+}
+
+func TestSettingsOverlay_ConfigBackedGitPrAndNetworkSettingsPersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.PushEnabled = true
+	cfg.Git.FetchEnabled = true
+	cfg.PR.DraftByDefault = true
+	cfg.PR.AutoLink = true
+	cfg.PR.NotifyAfterCreate = true
+	cfg.PR.CreateWithoutMerge = false
+	cfg.Network.AutoDetect = true
+
+	menu := NewSettingsOverlayWithEditorAndConfig(
+		&mockSettingsEditor{showPhases: true},
+		cfg,
+		filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName),
+	)
+
+	toggles := []struct {
+		key      string
+		expected bool
+	}{
+		{key: "git-push-enabled", expected: false},
+		{key: "git-fetch-enabled", expected: false},
+		{key: "pr-draft-by-default", expected: false},
+		{key: "pr-auto-link", expected: false},
+		{key: "pr-notify-after-create", expected: false},
+		{key: "pr-create-without-merge", expected: true},
+		{key: "network-auto-detect", expected: false},
+	}
+
+	for _, tt := range toggles {
+		idx := settingIndexByKey(menu, tt.key)
+		if idx < 0 {
+			t.Fatalf("setting %q not found", tt.key)
+		}
+
+		menu.cursor = idx
+		_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeySpace})
+		if cmd == nil {
+			t.Fatalf("expected config save command after toggling %q", tt.key)
+		}
+		if result := cmd(); result != nil {
+			t.Fatalf("expected nil result from successful config save for %q, got %T", tt.key, result)
+		}
+	}
+
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if loaded.Git.PushEnabled {
+		t.Fatal("expected git push to be disabled after toggle")
+	}
+	if loaded.Git.FetchEnabled {
+		t.Fatal("expected git fetch to be disabled after toggle")
+	}
+	if loaded.PR.DraftByDefault {
+		t.Fatal("expected draft-by-default to be disabled after toggle")
+	}
+	if loaded.PR.AutoLink {
+		t.Fatal("expected auto-link to be disabled after toggle")
+	}
+	if loaded.PR.NotifyAfterCreate {
+		t.Fatal("expected notify-after-create to be disabled after toggle")
+	}
+	if !loaded.PR.CreateWithoutMerge {
+		t.Fatal("expected create-without-merge to be enabled after toggle")
+	}
+	if loaded.Network.AutoDetect {
+		t.Fatal("expected network auto-detect to be disabled after toggle")
 	}
 }
 

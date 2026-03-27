@@ -60,14 +60,21 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	// Should have start session actions
 	hasStartSession := false
+	hasYoloStart := false
 	for _, action := range menu.actions {
 		if action.Key == "s" && action.Label == "Start session" {
 			hasStartSession = true
+		}
+		if action.Key == "!" && action.Label == "Start session (yolo)" {
+			hasYoloStart = true
 		}
 	}
 
 	if !hasStartSession {
 		t.Error("expected 'Start session' action when no session exists")
+	}
+	if !hasYoloStart {
+		t.Error("expected 'Start session (yolo)' action when no session exists")
 	}
 
 	hasCreateChild := false
@@ -87,11 +94,20 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 		t.Error("expected 'Image attachments' action in action menu")
 	}
 
-	// Git actions should be disabled
+	// Worktree-gated actions should be disabled
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "w" || action.Key == "W" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "w" || action.Key == "W" {
 			if action.Enabled {
-				t.Errorf("expected git action '%s' to be disabled without session", action.Key)
+				t.Errorf("expected worktree-gated action '%s' to be disabled without session", action.Key)
+			}
+		}
+	}
+
+	// Always-available task-workspace actions should remain enabled.
+	for _, action := range menu.actions {
+		if action.Key == "b" || action.Key == "i" || action.Key == "r" {
+			if !action.Enabled {
+				t.Errorf("expected action '%s' to be enabled without session", action.Key)
 			}
 		}
 	}
@@ -150,11 +166,20 @@ func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 		t.Error("expected 'Stop session' action for busy session")
 	}
 
-	// Git actions should be enabled with worktree
+	// Worktree-gated actions should be enabled with worktree.
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "f" || action.Key == "w" || action.Key == "W" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "f" || action.Key == "w" || action.Key == "W" {
 			if !action.Enabled {
-				t.Errorf("expected git action '%s' to be enabled with worktree", action.Key)
+				t.Errorf("expected worktree-gated action '%s' to be enabled with worktree", action.Key)
+			}
+		}
+	}
+
+	// Workspace actions should still be enabled with an active session.
+	for _, action := range menu.actions {
+		if action.Key == "b" || action.Key == "i" || action.Key == "r" {
+			if !action.Enabled {
+				t.Errorf("expected workspace action '%s' to be enabled with session", action.Key)
 			}
 		}
 	}

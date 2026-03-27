@@ -206,34 +206,53 @@ func TestList(t *testing.T) {
 
 func TestBuildClaudeCommand(t *testing.T) {
 	tests := []struct {
-		name     string
-		cliTool  string
-		yolo     bool
-		expected string
+		name      string
+		cliTool   string
+		yolo      bool
+		skipPerms bool
+		expected  string
 	}{
 		{
-			name:     "default command without yolo",
-			cliTool:  "claude",
-			yolo:     false,
-			expected: "claude",
+			name:      "default command without yolo",
+			cliTool:   "claude",
+			yolo:      false,
+			skipPerms: false,
+			expected:  "claude",
 		},
 		{
-			name:     "default command with yolo",
-			cliTool:  "claude",
-			yolo:     true,
-			expected: "claude --yolo",
+			name:      "default command with yolo",
+			cliTool:   "claude",
+			yolo:      true,
+			skipPerms: false,
+			expected:  "claude --yolo",
 		},
 		{
-			name:     "custom CLI tool",
-			cliTool:  "my-claude",
-			yolo:     false,
-			expected: "my-claude",
+			name:      "custom CLI tool",
+			cliTool:   "my-claude",
+			yolo:      false,
+			skipPerms: false,
+			expected:  "my-claude",
 		},
 		{
-			name:     "empty CLI tool defaults to claude",
-			cliTool:  "",
-			yolo:     false,
-			expected: "claude",
+			name:      "empty CLI tool defaults to claude",
+			cliTool:   "",
+			yolo:      false,
+			skipPerms: false,
+			expected:  "claude",
+		},
+		{
+			name:      "skip permissions flag is appended",
+			cliTool:   "claude",
+			yolo:      false,
+			skipPerms: true,
+			expected:  "claude --dangerously-skip-permissions",
+		},
+		{
+			name:      "skip permissions combines with yolo",
+			cliTool:   "claude",
+			yolo:      true,
+			skipPerms: true,
+			expected:  "claude --dangerously-skip-permissions --yolo",
 		},
 	}
 
@@ -241,6 +260,7 @@ func TestBuildClaudeCommand(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.DefaultConfig()
 			cfg.CLITool = tt.cliTool
+			cfg.Session.DangerouslySkipPermissions = tt.skipPerms
 
 			service := NewWorktreeSessionService(
 				nil, // tmux

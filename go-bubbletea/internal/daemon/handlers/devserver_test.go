@@ -15,6 +15,7 @@ type fakeDevServerManager struct {
 	getFn   func(issueID string) (*devserver.Server, bool)
 	startFn func(ctx context.Context, issueID, name, command string) (*devserver.Server, error)
 	stopFn  func(ctx context.Context, issueID string) error
+	listFn  func() []*devserver.Server
 }
 
 func (m fakeDevServerManager) Start(ctx context.Context, issueID, name, command string) (*devserver.Server, error) {
@@ -36,6 +37,13 @@ func (m fakeDevServerManager) Get(issueID string) (*devserver.Server, bool) {
 		return m.getFn(issueID)
 	}
 	return nil, false
+}
+
+func (m fakeDevServerManager) List() []*devserver.Server {
+	if m.listFn != nil {
+		return m.listFn()
+	}
+	return nil
 }
 
 func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
@@ -119,6 +127,51 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 	}
 	if stopBody.Server.Uptime != 5*time.Second {
 		t.Fatalf("stop uptime = %s, want 5s", stopBody.Server.Uptime)
+	}
+}
+
+func TestDevServerHandlerListReturnsAllServers(t *testing.T) {
+	handler := NewDevServerHandler(fakeDevServerManager{
+		listFn: func() []*devserver.Server {
+			return []*devserver.Server{
+				{
+					ID:      "issue-1",
+					Name:    "issue-1",
+					Port:    3001,
+					Status:  "running",
+					Command: "bun run dev",
+				},
+				{
+					ID:      "issue-2",
+					Name:    "issue-2",
+					Port:    3002,
+					Status:  "stopped",
+					Command: "bun run dev",
+				},
+			}
+		},
+	})
+
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         CommandDevServerList,
+		Body:            mustJSON(t, map[string]string{}),
+	})
+	if !resp.OK {
+		t.Fatalf("list response = %+v", resp)
+	}
+
+	var body devServerListBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	if len(body.Servers) != 2 {
+		t.Fatalf("servers = %+v", body.Servers)
+	}
+	if body.Servers[0].Status != "running" || body.Servers[1].Status != "stopped" {
+		t.Fatalf("servers = %+v", body.Servers)
 	}
 }
 

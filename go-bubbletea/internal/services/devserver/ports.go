@@ -12,6 +12,7 @@ type PortAllocator struct {
 	mu        sync.Mutex
 	allocated map[int]string // port -> issueID
 	basePort  int
+	available func(int) bool
 }
 
 // NewPortAllocator creates a new port allocator starting from the given base port.
@@ -19,6 +20,7 @@ func NewPortAllocator(basePort int) *PortAllocator {
 	return &PortAllocator{
 		allocated: make(map[int]string),
 		basePort:  basePort,
+		available: isPortAvailable,
 	}
 }
 
@@ -27,6 +29,11 @@ func NewPortAllocator(basePort int) *PortAllocator {
 func (p *PortAllocator) Allocate(issueID string) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	available := p.available
+	if available == nil {
+		available = isPortAvailable
+	}
 
 	// Check if issue already has a port allocated
 	for port, id := range p.allocated {
@@ -46,7 +53,7 @@ func (p *PortAllocator) Allocate(issueID string) (int, error) {
 		}
 
 		// Check if port is actually available
-		if !isPortAvailable(port) {
+		if !available(port) {
 			continue
 		}
 

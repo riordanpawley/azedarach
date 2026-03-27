@@ -193,7 +193,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 
 	command := d.buildSessionLaunchCommand(
 		"axt-123",
-		"axt-123",
+		"axt-123", false,
 		nil,
 		`work on issue axt-123 (task): Verify startup behavior`,
 	)
@@ -222,6 +222,7 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	command := d.buildSessionLaunchCommand(
 		"axt-123",
 		"codex-axt-123",
+		false,
 		[]string{"/tmp/a.png", "/tmp/with space/image.png", "   "},
 		`work on issue axt-123 (task): Verify startup behavior`,
 	)
@@ -268,5 +269,19 @@ func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T)
 	}
 	if strings.Contains(prompt, "\n\n\n") {
 		t.Fatalf("prompt = %q, want compact whitespace", prompt)
+	}
+}
+
+func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			CLITool:      "codex",
+			SessionShell: "zsh",
+		},
+	}
+
+	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true, nil)
+	if !strings.Contains(command, "--dangerously-skip-permissions") {
+		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
 	}
 }

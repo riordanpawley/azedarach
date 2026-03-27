@@ -121,59 +121,7 @@ func (h *HelpOverlay) Size() (width, height int) {
 
 // getCategories returns all keybinding categories
 func (h *HelpOverlay) getCategories() []keybinds.Category {
-	return []keybinds.Category{
-		{
-			Name: "Navigation",
-			Bindings: []keybinds.Binding{
-				{Key: "h/l", Description: "Move between columns"},
-				{Key: "j/k", Description: "Move up/down in column"},
-				{Key: "ctrl+u / ctrl+d", Description: "Half-page scroll"},
-				{Key: "g then g/e/h/l", Description: "Jump in board"},
-				{Key: "g then w/p/s", Description: "Jump / projects / spec"},
-				{Key: "Enter", Description: "Drill into children"},
-			},
-		},
-		{
-			Name: "Actions",
-			Bindings: []keybinds.Binding{
-				{Key: "Space", Description: "Open task workspace"},
-				{Key: "space then i", Description: "Image attachments"},
-				{Key: "space then s/S/a/x", Description: "Session actions"},
-				{Key: "space then u/m/P/f", Description: "Git actions"},
-				{Key: "space then c/e/d/h/l", Description: "Task status/edit actions"},
-			},
-		},
-		{
-			Name: "Modes",
-			Bindings: []keybinds.Binding{
-				{Key: "/", Description: "Search"},
-				{Key: "f", Description: "Filter menu"},
-				{Key: ",", Description: "Sort menu"},
-				{Key: "v", Description: "Select mode"},
-				{Key: "?", Description: "Help (this screen)"},
-			},
-		},
-		{
-			Name: "Selection",
-			Bindings: []keybinds.Binding{
-				{Key: "space / a", Description: "Toggle selection"},
-				{Key: "A", Description: "Select current column"},
-				{Key: "%", Description: "Select all visible"},
-				{Key: "*", Description: "Invert selection"},
-				{Key: "x", Description: "Clear selection"},
-				{Key: "Enter", Description: "Bulk action menu"},
-			},
-		},
-		{
-			Name: "Other",
-			Bindings: []keybinds.Binding{
-				{Key: "Tab", Description: "Toggle compact/kanban view"},
-				{Key: "esc", Description: "Close overlay / exit mode"},
-				{Key: "q", Description: "Quit"},
-				{Key: "ctrl+l", Description: "Refresh screen"},
-			},
-		},
-	}
+	return keybinds.HelpCategories()
 }
 
 // min returns the minimum of two integers

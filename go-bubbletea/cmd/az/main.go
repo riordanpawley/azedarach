@@ -145,6 +145,99 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "config":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
+			os.Exit(1)
+		}
+		configCommand := commandArgs[0]
+		configArgs := commandArgs[1:]
+		if configCommand == "help" || configCommand == "-h" || configCommand == "--help" {
+			fmt.Println("Usage: az config set spec.enabled <true|false> [--project-dir <dir>]")
+			os.Exit(0)
+		}
+		switch configCommand {
+		case "set":
+			opts, err := cli.ParseConfigSetArgs(configArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			run := runCommand
+			if opts.ProjectDir != "" {
+				run = func(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+					return runCommandAtRepoDir(cfg, opts.ProjectDir, fn)
+				}
+			}
+			if err := run(cfg, func(deps *cli.Dependencies) error {
+				return cli.ConfigSetCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown config command: %s\n", configCommand)
+			fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
+			os.Exit(1)
+		}
+
+	case "sync":
+		if len(commandArgs) > 0 {
+			if commandArgs[0] == "help" || commandArgs[0] == "-h" || commandArgs[0] == "--help" {
+				fmt.Println("Usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+				os.Exit(0)
+			}
+		}
+		syncOpts, err := cli.ParseSyncArgs(commandArgs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Usage: az sync [--all] [<directory>] [--project-dir <dir>]\n")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		run := runCommand
+		if syncOpts.ProjectDir != "" {
+			run = func(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+				return runCommandAtRepoDir(cfg, syncOpts.ProjectDir, fn)
+			}
+		}
+		if err := run(cfg, func(deps *cli.Dependencies) error {
+			return cli.SyncCommand(deps, syncOpts)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "notify":
+		if err := runNotifyCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "hooks":
+		if err := runHooksCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "gate":
+		if err := runGateCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "dev":
+		if err := runDevCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "opencode":
+		if err := runOpenCodeCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "prime":
 		if len(commandArgs) > 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az prime\n")
@@ -427,6 +520,14 @@ func runTUI(cfg *config.Config) {
 // runCommand executes a CLI command with dependency injection
 func runCommand(cfg *config.Config, fn func(*cli.Dependencies) error) error {
 	deps, err := cli.NewDependencies(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize dependencies: %w", err)
+	}
+	return fn(deps)
+}
+
+func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Dependencies) error) error {
+	deps, err := cli.NewDependenciesAt(cfg, repoDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize dependencies: %w", err)
 	}

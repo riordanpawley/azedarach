@@ -6,14 +6,14 @@ Comprehensive configuration system for the Go Bubbletea Azedarach rewrite.
 
 - **Hierarchical Configuration Loading**: Loads from multiple sources with priority
 - **Sensible Defaults**: All fields have reasonable default values
-- **Flexible Storage**: Supports `.azedarach.json` or `package.json` "azedarach" key
+- **Flexible Storage**: Supports `.azedarach/config.json` or `package.json` "azedarach" key
 - **Type Safety**: Strongly typed configuration with Go structs
 - **Easy Merging**: Automatically merges partial configs with defaults
 
 ## Configuration Loading Priority
 
 1. CLI flags (not implemented yet)
-2. `.azedarach.json` in project root
+2. `.azedarach/config.json` in project root
 3. `package.json` "azedarach" key
 4. Built-in defaults
 
@@ -35,7 +35,7 @@ cfg, err := config.LoadConfig("/path/to/project")
 
 ```go
 // CLI tool to use
-cliTool := cfg.CLITool  // "claude" or "opencode"
+cliTool := cfg.CLITool  // "claude", "opencode", or "codex"
 
 // Git settings
 baseBranch := cfg.Git.BaseBranch
@@ -44,6 +44,7 @@ workflowMode := cfg.Git.WorkflowMode
 // Session settings
 shell := cfg.Session.Shell
 timeout := cfg.Session.TimeoutMs
+skipPermissions := cfg.Session.DangerouslySkipPermissions
 
 // Dev server settings
 port := cfg.DevServer.BasePort
@@ -56,9 +57,20 @@ envVars := cfg.DevServer.Environments
 cfg := config.DefaultConfig()
 cfg.CLITool = "opencode"
 cfg.Git.BaseBranch = "develop"
+cfg.Session.DangerouslySkipPermissions = true
 
-err := config.SaveConfig(cfg, "/path/to/.azedarach.json")
+err := config.SaveConfig(cfg, "/path/to/.azedarach/config.json")
 ```
+
+### CLI Updates
+
+The Go CLI exposes a focused config command for feature gating:
+
+```bash
+az config set spec.enabled false
+```
+
+This writes the project config to `.azedarach/config.json`.
 
 ### Create Custom Configuration
 
@@ -78,7 +90,7 @@ cfg = config.MergeWithDefaults(cfg)
 
 ```go
 type Config struct {
-    CLITool       string          // "claude" or "opencode"
+    CLITool       string          // "claude", "opencode", or "codex"
     Git           GitConfig
     Session       SessionConfig
     PR            PRConfig
@@ -106,6 +118,7 @@ type GitConfig struct {
 
 ```go
 type SessionConfig struct {
+    DangerouslySkipPermissions bool   // default: false
     Shell        string    // default: "zsh"
     TimeoutMs    int       // default: 30000
     LogDir       string    // default: "~/.azedarach/logs"
@@ -136,9 +149,9 @@ type WorktreeConfig struct {
 
 ## Configuration Files
 
-### .azedarach.json
+### .azedarach/config.json
 
-Create a `.azedarach.json` file in your project root:
+Create a `.azedarach/config.json` file in your project root:
 
 ```json
 {
@@ -203,7 +216,7 @@ go test ./internal/config/...
 
 Tests cover:
 - Default configuration
-- Loading from `.azedarach.json`
+- Loading from `.azedarach/config.json`
 - Loading from `package.json`
 - Configuration priority
 - Saving configuration
