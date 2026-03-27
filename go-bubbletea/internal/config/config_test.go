@@ -28,7 +28,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, cfg.Git.ShowLineChanges)
 	assert.Equal(t, "merge", cfg.Git.DefaultMergeStrategy)
 
-	assert.Equal(t, "zsh", cfg.Session.Shell)
+	assert.Equal(t, DefaultSessionShell(), cfg.Session.Shell)
 	assert.Equal(t, 30000, cfg.Session.TimeoutMs)
 	assert.NotEmpty(t, cfg.Session.LogDir)
 	assert.NotNil(t, cfg.Session.InitCommands)

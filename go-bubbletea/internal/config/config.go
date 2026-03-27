@@ -116,7 +116,7 @@ func DefaultConfig() *Config {
 			JumpLabelChars: "abcdefghijklmnopqrstuvwxyz",
 		},
 		Session: SessionConfig{
-			Shell:        "zsh",
+			Shell:        DefaultSessionShell(),
 			TimeoutMs:    30000,
 			LogDir:       filepath.Join(homeDir, ".azedarach", "logs"),
 			InitCommands: []string{},
@@ -162,6 +162,13 @@ func DefaultConfig() *Config {
 			Enabled: true,
 		},
 	}
+}
+
+func DefaultSessionShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		return shell
+	}
+	return "zsh"
 }
 
 const (
