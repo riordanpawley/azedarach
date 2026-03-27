@@ -1942,7 +1942,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 					partialFailures++
 				}
 
-				diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath)
+				diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath, baseBranch)
 				if diffErr == nil {
 					signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
 				} else {
@@ -3699,7 +3699,7 @@ func (m Model) showDiffCmd(worktree string) tea.Cmd {
 			}
 		}
 
-		diff, err := m.daemonClient.GitDiffStat(ctx, worktree)
+		diff, err := m.daemonClient.GitDiffStat(ctx, worktree, "")
 		if err != nil {
 			return showDiffResultMsg{
 				err: fmt.Errorf("failed to get diff: %w", err),

@@ -137,8 +137,25 @@ func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
 }
 
 // DiffStat returns the diff stat output (summary of changes).
-func (c *Client) DiffStat(ctx context.Context, worktree string) (string, error) {
+func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
+
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch != "" {
+		mergeBaseOutput, err := c.runner.Run(ctx, "merge-base", baseBranch, "HEAD")
+		if err != nil {
+			return "", fmt.Errorf("failed to get merge-base for diff stat: %w", err)
+		}
+		mergeBase := strings.TrimSpace(mergeBaseOutput)
+		if mergeBase == "" {
+			mergeBase = baseBranch
+		}
+		output, err := c.runner.Run(ctx, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
+		if err != nil {
+			return "", fmt.Errorf("failed to get base diff stat: %w", err)
+		}
+		return strings.TrimSpace(output), nil
+	}
 
 	unstagedOutput, err := c.runner.Run(ctx, "diff", "--shortstat")
 	if err != nil {
