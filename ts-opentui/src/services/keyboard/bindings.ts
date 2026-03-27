@@ -25,7 +25,7 @@ import type { DevServerHandlersService } from "./DevServerHandlersService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
-import type { PRHandlersService } from "./PRHandlersService.js"
+import type { GitActionHandlersService } from "./GitActionHandlersService.js"
 import type { SessionHandlersService } from "./SessionHandlersService.js"
 import type { TaskHandlersService } from "./TaskHandlersService.js"
 import type { Keybinding } from "./types.js"
@@ -44,7 +44,7 @@ export interface BindingContext {
 	// Handler services
 	sessionHandlers: SessionHandlersService
 	taskHandlers: TaskHandlersService
-	prHandlers: PRHandlersService
+	gitActionHandlers: GitActionHandlersService
 	inputHandlers: InputHandlersService
 	orchestrateHandlers: OrchestrateHandlersService
 	devServerHandlers: DevServerHandlersService
@@ -631,7 +631,7 @@ done
 		mode: "action",
 		description: "Update from base",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.updateFromBase())),
 		),
 	},
 	{
@@ -639,7 +639,7 @@ done
 		mode: "action",
 		description: "Diff vs base",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.showDiff())),
 		),
 	},
 	{
@@ -647,7 +647,7 @@ done
 		mode: "action",
 		description: "Create PR",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.createPR())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.createPR())),
 		),
 	},
 	{
@@ -655,7 +655,7 @@ done
 		mode: "action",
 		description: "Open PR",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.openPR())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.openPR())),
 		),
 	},
 	{
@@ -663,7 +663,7 @@ done
 		mode: "action",
 		description: "Merge",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.merge())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.merge())),
 		),
 	},
 	{
@@ -671,7 +671,7 @@ done
 		mode: "action",
 		description: "Abort merge",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.abortMerge())),
 		),
 	},
 	{
@@ -679,7 +679,7 @@ done
 		mode: "action",
 		description: "Cleanup worktree + branch",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.cleanup())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.gitActionHandlers.cleanup())),
 		),
 	},
 	{
