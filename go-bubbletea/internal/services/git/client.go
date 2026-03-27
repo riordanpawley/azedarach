@@ -47,7 +47,7 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error) {
 	c.logger.Debug("getting git status", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "status", "--porcelain")
+	output, err := c.runInWorktree(ctx, worktree, "status", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git status: %w", err)
 	}
@@ -69,7 +69,7 @@ func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error
 func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 	c.logger.Info("fetching from remote", "worktree", worktree, "remote", remote)
 
-	_, err := c.runner.Run(ctx, "fetch", remote)
+	_, err := c.runInWorktree(ctx, worktree, "fetch", remote)
 	if err != nil {
 		return fmt.Errorf("failed to fetch from remote: %w", err)
 	}
@@ -149,7 +149,7 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 
 		var lastErr error
 		for _, candidate := range candidates {
-			mergeBaseOutput, err := c.runner.Run(ctx, "merge-base", candidate, "HEAD")
+			mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
 			if err != nil {
 				lastErr = err
 				continue
@@ -158,7 +158,7 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 			if mergeBase == "" {
 				mergeBase = candidate
 			}
-			output, err := c.runner.Run(ctx, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
+			output, err := c.runInWorktree(ctx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
 			if err != nil {
 				lastErr = err
 				continue
@@ -172,12 +172,12 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 		)
 	}
 
-	unstagedOutput, err := c.runner.Run(ctx, "diff", "--shortstat")
+	unstagedOutput, err := c.runInWorktree(ctx, worktree, "diff", "--shortstat")
 	if err != nil {
 		return "", fmt.Errorf("failed to get unstaged diff stat: %w", err)
 	}
 
-	stagedOutput, err := c.runner.Run(ctx, "diff", "--cached", "--shortstat")
+	stagedOutput, err := c.runInWorktree(ctx, worktree, "diff", "--cached", "--shortstat")
 	if err != nil {
 		return "", fmt.Errorf("failed to get staged diff stat: %w", err)
 	}
@@ -240,7 +240,7 @@ func (c *Client) Checkout(ctx context.Context, worktree, branch string) error {
 func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (int, error) {
 	c.logger.Debug("getting rev-list count", "worktree", worktree, "range", revRange)
 
-	output, err := c.runner.Run(ctx, "rev-list", "--count", revRange)
+	output, err := c.runInWorktree(ctx, worktree, "rev-list", "--count", revRange)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rev-list count: %w", err)
 	}
@@ -252,6 +252,17 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 	}
 
 	return count, nil
+}
+
+func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...string) (string, error) {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return c.runner.Run(ctx, args...)
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-C", worktree)
+	prefixed = append(prefixed, args...)
+	return c.runner.Run(ctx, prefixed...)
 }
 
 // Pull pulls updates from the remote repository.

@@ -14,6 +14,9 @@ type mockRunner struct {
 }
 
 func (m *mockRunner) Run(ctx context.Context, args ...string) (string, error) {
+	if len(args) >= 3 && args[0] == "-C" {
+		args = args[2:]
+	}
 	if m.runFunc != nil {
 		return m.runFunc(ctx, args...)
 	}
