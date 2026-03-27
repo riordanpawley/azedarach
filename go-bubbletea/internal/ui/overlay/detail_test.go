@@ -228,6 +228,19 @@ func TestDetailPanelScrollLimits(t *testing.T) {
 	assert.LessOrEqual(t, panel.scrollY, panel.maxScroll())
 }
 
+func TestDetailPanelScrollAccountsForWrappedLines(t *testing.T) {
+	task := domain.Task{
+		ID:          "wrap-test",
+		Description: strings.Repeat("verylongtokenwithoutspaces", 20),
+	}
+	panel := NewDetailPanel(task, nil)
+	panel.viewHeight = 5
+	panel.wrapWidth = 20
+	_ = panel.View()
+
+	assert.Greater(t, panel.maxScroll(), 0, "expected wrapped description to become scrollable")
+}
+
 func TestDetailPanelEscapeCloses(t *testing.T) {
 	task := domain.Task{ID: "test"}
 	panel := NewDetailPanel(task, nil)

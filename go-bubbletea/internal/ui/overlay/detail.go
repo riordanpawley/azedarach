@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -18,6 +19,7 @@ type DetailPanel struct {
 	scrollY       int
 	contentHeight int
 	viewHeight    int
+	wrapWidth     int
 	styles        *Styles
 }
 
@@ -35,6 +37,7 @@ func NewDetailPanel(task domain.Task, session *domain.Session) *DetailPanel {
 		scrollY:       0,
 		contentHeight: contentHeight,
 		viewHeight:    20, // Default, will be updated in Size()
+		wrapWidth:     80,
 		styles:        New(),
 	}
 }
@@ -201,8 +204,12 @@ func (d *DetailPanel) View() string {
 		b.WriteString(headerStyle.Render("Description"))
 		b.WriteString("\n")
 
-		// Split description into lines and apply scroll
-		descLines := strings.Split(d.task.Description, "\n")
+		wrapWidth := d.wrapWidth
+		if wrapWidth < 10 {
+			wrapWidth = 10
+		}
+		wrappedDescription := ansi.Hardwrap(d.task.Description, wrapWidth, true)
+		descLines := strings.Split(wrappedDescription, "\n")
 		d.contentHeight = len(descLines)
 
 		start := d.scrollY
