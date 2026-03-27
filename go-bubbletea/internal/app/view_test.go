@@ -98,6 +98,24 @@ func TestViewWithOverlayKeepsStatusBarVisible(t *testing.T) {
 	}
 }
 
+func TestViewWithStatusModeOverlayUsesOverlayModeBadge(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&statusModeOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	lastLine := lines[len(lines)-1]
+	if !strings.Contains(lastLine, "ACTION") {
+		t.Fatalf("expected status bar to use overlay-provided mode; last line=%q", lastLine)
+	}
+}
+
 func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
@@ -181,3 +199,7 @@ func (o *testOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return o, nil }
 func (o *testOverlay) Init() tea.Cmd                           { return nil }
 func (o *testOverlay) Title() string                           { return "Test" }
 func (o *testOverlay) Size() (int, int)                        { return 20, 10 }
+
+type statusModeOverlay struct{ testOverlay }
+
+func (o *statusModeOverlay) StatusMode() types.Mode { return types.ModeAction }

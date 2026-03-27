@@ -6,7 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -117,7 +117,7 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
-	bodyHeight := max(8, w.overlayHeight-5)
+	bodyHeight := max(8, w.overlayHeight-2)
 	leftWidth := max(48, (w.overlayWidth*2)/3)
 	rightWidth := max(26, w.overlayWidth-leftWidth-3)
 
@@ -156,17 +156,7 @@ func (w *TaskWorkspaceOverlay) View() string {
 		Padding(0, 1).
 		Render(actionsBody)
 
-	footer := keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Tab/h/l", Description: "switch pane"},
-		{Key: "j/k", Description: "scroll or navigate"},
-		{Key: "Enter/action key", Description: "run"},
-		{Key: "Esc", Description: "close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         w.styles.MenuKey,
-		DescriptionStyle: w.styles.Footer,
-		FooterStyle:      w.styles.Footer,
-	})
-	return lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Top, detailView, actionsView), footer)
+	return lipgloss.JoinHorizontal(lipgloss.Top, detailView, actionsView)
 }
 
 func (w *TaskWorkspaceOverlay) Title() string {
@@ -175,6 +165,10 @@ func (w *TaskWorkspaceOverlay) Title() string {
 
 func (w *TaskWorkspaceOverlay) Size() (width, height int) {
 	return w.overlayWidth, w.overlayHeight
+}
+
+func (w *TaskWorkspaceOverlay) StatusMode() types.Mode {
+	return types.ModeAction
 }
 
 func (w *TaskWorkspaceOverlay) toggleFocus() {

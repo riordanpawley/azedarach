@@ -1060,7 +1060,7 @@ func (m Model) View() string {
 		MaxHeight(board.BoardContentHeight(m.height)).
 		Render(mainView)
 
-	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
+	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
 	sb.SetEventTicker(m.eventTicker)
 	sb.SetCurrentProject(m.daemonProjectID())
 	sb.SetSelectionSummary(m.selectionSummary())
@@ -1116,6 +1116,20 @@ func (m Model) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+}
+
+func (m Model) statusBarMode() types.Mode {
+	mode := m.editor.GetMode()
+	current := m.overlayStack.Current()
+	if current == nil {
+		return mode
+	}
+	if modeOverlay, ok := current.(interface {
+		StatusMode() types.Mode
+	}); ok {
+		return modeOverlay.StatusMode()
+	}
+	return mode
 }
 
 func (m Model) layer(bottom, top string) string {

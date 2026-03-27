@@ -1,0 +1,25 @@
+package overlay
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
+)
+
+func TestTaskWorkspaceOverlay_View_NoLocalFooterHints(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	view := overlay.View()
+
+	if strings.Contains(view, "Tab/h/l") {
+		t.Fatalf("expected workspace overlay to omit local footer hints, got: %q", view)
+	}
+	if strings.Contains(view, "Enter/action key") {
+		t.Fatalf("expected workspace overlay to omit local footer hints, got: %q", view)
+	}
+}
