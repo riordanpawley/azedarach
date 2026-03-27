@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"golang.org/x/sys/unix"
 )
 
 type IssueFanoutOptions struct {
@@ -217,33 +219,29 @@ func IssueFanoutCommand(deps *Dependencies, opts IssueFanoutOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-
-	spec, err := readFanoutSpec(opts.InputPath)
+	specJSON, err := os.ReadFile(opts.InputPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("read fanout spec: %w", err)
 	}
-	flat, warnings, err := flattenFanout(spec)
-	if err != nil {
-		return err
+	req := protocol.FanoutCommandBody{
+		Apply:              opts.Apply,
+		RepoDir:            deps.RepoDir,
+		DefaultParentIssue: strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")),
+		Spec:               specJSON,
 	}
-	parentIssue := strings.TrimSpace(spec.ParentIssue)
-	if parentIssue == "" {
-		parentIssue = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
-	}
-	if parentIssue == "" {
-		return fmt.Errorf("fanout requires parent_issue in spec or AZEDARACH_ISSUE_ID")
-	}
-
-	plan := buildFanoutPlan(parentIssue, flat, warnings)
 	if !opts.Apply {
+		plan, err := deps.DaemonClient.FanoutPlan(ctx, req)
+		if err != nil {
+			return err
+		}
 		if opts.JSON {
 			return printJSON(plan)
 		}
-		printFanoutPlan(plan)
+		printFanoutPlan(fanoutPlanFromProtocol(plan))
 		return nil
 	}
 
-	result, err := applyFanoutPlan(ctx, deps, parentIssue, flat)
+	result, err := deps.DaemonClient.FanoutApply(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -309,52 +307,36 @@ func IssueFanoutDriftCommand(deps *Dependencies, opts IssueFanoutDriftOptions) e
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	registry, err := loadFanoutRegistry(deps.RepoDir)
+
+	worktree := strings.TrimSpace(opts.Worktree)
+	result, err := deps.DaemonClient.FanoutDrift(ctx, protocol.FanoutDriftCommandBody{
+		IssueID:  opts.IssueID,
+		RepoDir:  deps.RepoDir,
+		Worktree: worktree,
+	})
 	if err != nil {
 		return err
-	}
-	entry, ok := registry[opts.IssueID]
-	if !ok {
-		return fmt.Errorf("no fanout registry entry for issue %s", opts.IssueID)
-	}
-	worktree := strings.TrimSpace(opts.Worktree)
-	if worktree == "" {
-		worktree = deps.RepoDir
-	}
-	budget := entry.FileBudget
-	changed, err := gitChangedFiles(worktree)
-	if err != nil {
-		return fmt.Errorf("git changed files: %w", err)
-	}
-	out := outOfBudgetFiles(changed, budget)
-	result := driftResult{
-		IssueID:      opts.IssueID,
-		Worktree:     worktree,
-		FileBudget:   budget,
-		ChangedFiles: changed,
-		OutOfBudget:  out,
-		AdvisoryOnly: true,
 	}
 	if opts.JSON {
 		if err := printJSON(result); err != nil {
 			return err
 		}
 	} else {
-		fmt.Printf("Issue: %s\n", opts.IssueID)
-		fmt.Printf("Worktree: %s\n", worktree)
-		fmt.Printf("Budget patterns: %s\n", strings.Join(budget, ", "))
-		fmt.Printf("Changed files: %d\n", len(changed))
-		if len(out) == 0 {
+		fmt.Printf("Issue: %s\n", result.IssueID)
+		fmt.Printf("Worktree: %s\n", result.Worktree)
+		fmt.Printf("Budget patterns: %s\n", strings.Join(result.FileBudget, ", "))
+		fmt.Printf("Changed files: %d\n", len(result.ChangedFiles))
+		if len(result.OutOfBudget) == 0 {
 			fmt.Println("Ownership drift: none")
 		} else {
 			fmt.Println("Ownership drift (advisory):")
-			for _, p := range out {
+			for _, p := range result.OutOfBudget {
 				fmt.Printf("- %s\n", p)
 			}
 		}
 	}
-	if opts.FailOnOut && len(out) > 0 {
-		return fmt.Errorf("out-of-budget files detected (%d)", len(out))
+	if opts.FailOnOut && len(result.OutOfBudget) > 0 {
+		return fmt.Errorf("out-of-budget files detected (%d)", len(result.OutOfBudget))
 	}
 	return nil
 }
@@ -432,6 +414,12 @@ func ParseMailWatchArgs(args []string) (MailWatchOptions, error) {
 }
 
 func MailSendCommand(deps *Dependencies, opts MailSendOptions) error {
+	unlock, err := lockMailbox(deps.RepoDir, opts.ParentIssueID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	events, err := readMailboxEvents(deps.RepoDir, opts.ParentIssueID)
 	if err != nil {
 		return err
@@ -751,6 +739,36 @@ func printFanoutPlan(plan fanoutPlan) {
 	}
 }
 
+func fanoutPlanFromProtocol(plan protocol.FanoutPlan) fanoutPlan {
+	create := make([]fanoutCreatePlan, 0, len(plan.Create))
+	for _, item := range plan.Create {
+		create = append(create, fanoutCreatePlan{
+			Key:        item.Key,
+			Title:      item.Title,
+			Kind:       item.Kind,
+			Parent:     item.Parent,
+			Type:       item.Type,
+			Impl:       item.Impl,
+			FileBudget: item.FileBudget,
+		})
+	}
+	blocks := make([]fanoutBlocksPlan, 0, len(plan.Blocks))
+	for _, item := range plan.Blocks {
+		blocks = append(blocks, fanoutBlocksPlan{
+			IssueKey:     item.IssueKey,
+			DependsOnKey: item.DependsOnKey,
+			Type:         item.Type,
+		})
+	}
+	return fanoutPlan{
+		ParentIssue: plan.ParentIssue,
+		NodeCount:   plan.NodeCount,
+		Create:      create,
+		Blocks:      blocks,
+		Warnings:    plan.Warnings,
+	}
+}
+
 func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReadyResult, error) {
 	byID := make(map[string]domain.Task, len(tasks))
 	children := make(map[string][]string, len(tasks))
@@ -842,22 +860,59 @@ func fanoutDesignMetadata(node fanoutFlatNode) string {
 }
 
 func gitChangedFiles(worktree string) ([]string, error) {
-	cmd := exec.Command("git", "-C", worktree, "diff", "--name-only")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, err
+	cmds := [][]string{
+		{"git", "-C", worktree, "diff", "--name-only"},
+		{"git", "-C", worktree, "diff", "--name-only", "--cached"},
+		{"git", "-C", worktree, "ls-files", "--others", "--exclude-standard"},
 	}
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 16)
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		output, err := cmd.Output()
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, filepath.ToSlash(line))
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			line = filepath.ToSlash(line)
+			if _, ok := seen[line]; ok {
+				continue
+			}
+			seen[line] = struct{}{}
+			out = append(out, line)
+		}
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func lockMailbox(repoDir, parentIssue string) (func(), error) {
+	path := mailboxLockPath(repoDir, parentIssue)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create mailbox lock dir: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open mailbox lock file: %w", err)
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("acquire mailbox lock: %w", err)
+	}
+	released := false
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 func outOfBudgetFiles(paths, budget []string) []string {
@@ -897,6 +952,16 @@ func mailboxPath(repoDir, parentIssue string) string {
 		return '_'
 	}, strings.TrimSpace(parentIssue))
 	return filepath.Join(repoDir, ".azedarach", "mailbox", safe+".jsonl")
+}
+
+func mailboxLockPath(repoDir, parentIssue string) string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, strings.TrimSpace(parentIssue))
+	return filepath.Join(repoDir, ".azedarach", "mailbox", safe+".lock")
 }
 
 func readMailboxEvents(repoDir, parentIssue string) ([]mailEvent, error) {

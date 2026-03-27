@@ -224,6 +224,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {
+	case protocol.CommandIssueFanout:
+		return d.handleIssueFanout(ctx, req)
+	case protocol.CommandIssueFanoutDrift:
+		return d.handleIssueFanoutDrift(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.create":

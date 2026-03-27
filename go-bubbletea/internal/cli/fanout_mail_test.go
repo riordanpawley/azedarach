@@ -2,7 +2,10 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -149,9 +152,9 @@ func TestFlattenFanout_NestedLogicalParentTree(t *testing.T) {
 								Title: "Leaf 1",
 							},
 							{
-								Key:      "leaf-2",
-								Kind:     "work",
-								Title:    "Leaf 2",
+								Key:       "leaf-2",
+								Kind:      "work",
+								Title:     "Leaf 2",
 								DependsOn: []string{"leaf-1"},
 							},
 						},
@@ -332,6 +335,89 @@ func TestOutOfBudgetFiles_MixedPatterns(t *testing.T) {
 	out := outOfBudgetFiles(changed, budget)
 	if len(out) != 1 || out[0] != "README.md" {
 		t.Fatalf("out = %v, want [README.md]", out)
+	}
+}
+
+func TestGitChangedFilesIncludesStagedAndUntracked(t *testing.T) {
+	repoDir := t.TempDir()
+	runGitCommand(t, repoDir, "init")
+
+	stagedPath := filepath.Join(repoDir, "staged.txt")
+	untrackedPath := filepath.Join(repoDir, "untracked.txt")
+	if err := os.WriteFile(stagedPath, []byte("staged\n"), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	if err := os.WriteFile(untrackedPath, []byte("untracked\n"), 0o644); err != nil {
+		t.Fatalf("write untracked file: %v", err)
+	}
+	runGitCommand(t, repoDir, "add", "staged.txt")
+
+	got, err := gitChangedFiles(repoDir)
+	if err != nil {
+		t.Fatalf("gitChangedFiles error: %v", err)
+	}
+	want := []string{"staged.txt", "untracked.txt"}
+	if !sort.StringsAreSorted(got) {
+		t.Fatalf("gitChangedFiles output not sorted: %v", got)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("gitChangedFiles len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i, path := range want {
+		if got[i] != path {
+			t.Fatalf("gitChangedFiles[%d] = %q, want %q (full=%v)", i, got[i], path, got)
+		}
+	}
+}
+
+func TestMailSendCommandSerializesSequenceNumbers(t *testing.T) {
+	const attempts = 8
+	for attempt := 0; attempt < attempts; attempt++ {
+		repoDir := t.TempDir()
+		deps := &Dependencies{RepoDir: repoDir}
+		parent := "az-parent"
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+
+		send := func(issue string) {
+			<-start
+			errs <- MailSendCommand(deps, MailSendOptions{
+				ParentIssueID: parent,
+				IssueID:       issue,
+				Type:          "handoff",
+				Body:          issue,
+			})
+		}
+
+		go send("az-1")
+		go send("az-2")
+		close(start)
+
+		for i := 0; i < 2; i++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("MailSendCommand attempt %d error: %v", attempt, err)
+			}
+		}
+
+		events, err := readMailboxEvents(repoDir, parent)
+		if err != nil {
+			t.Fatalf("readMailboxEvents attempt %d: %v", attempt, err)
+		}
+		if len(events) != 2 {
+			t.Fatalf("attempt %d events len = %d, want 2", attempt, len(events))
+		}
+		if events[0].Seq != 1 || events[1].Seq != 2 {
+			t.Fatalf("attempt %d seqs = [%d,%d], want [1,2]", attempt, events[0].Seq, events[1].Seq)
+		}
+	}
+}
+
+func runGitCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
 	}
 }
 
