@@ -210,8 +210,7 @@ func (d *DetailPanel) View() string {
 		if wrapWidth < 10 {
 			wrapWidth = 10
 		}
-		wrappedDescription := ansi.Wrap(d.task.Description, wrapWidth, "-/")
-		descLines := strings.Split(wrappedDescription, "\n")
+		descLines := wrapDescriptionLines(d.task.Description, wrapWidth)
 		d.contentHeight = len(descLines)
 		reservedLines := lipgloss.Height(b.String())
 		descViewport := max(1, d.viewHeight-reservedLines-2)
@@ -373,4 +372,21 @@ func (d *DetailPanel) maxScroll() int {
 		visible = d.viewHeight
 	}
 	return max(0, d.contentHeight-visible)
+}
+
+func wrapDescriptionLines(description string, width int) []string {
+	if width < 1 {
+		return strings.Split(description, "\n")
+	}
+	wordWrapped := ansi.Wrap(description, width, "-/")
+	lines := strings.Split(wordWrapped, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+	}
+	return out
 }

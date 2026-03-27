@@ -136,6 +136,10 @@ func (w *TaskWorkspaceOverlay) View() string {
 	separator := w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth)))
 
 	bodyHeight := max(6, contentHeight-2)
+	if contentWidth < 76 {
+		return w.renderStacked(contentWidth, contentHeight, bodyHeight, titleLine, separator)
+	}
+
 	gap := 1
 	minLeft := 28
 	minRight := 20
@@ -195,6 +199,50 @@ func (w *TaskWorkspaceOverlay) View() string {
 	return lipgloss.NewStyle().
 		Width(contentWidth).
 		Height(contentHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Surface2).
+		Render(content)
+}
+
+func (w *TaskWorkspaceOverlay) renderStacked(contentWidth, contentHeight, bodyHeight int, titleLine, separator string) string {
+	headerHeight := 2
+	gap := 1
+	actionsHeight := max(8, bodyHeight/3)
+	detailHeight := max(4, bodyHeight-actionsHeight-gap)
+
+	w.detail.viewHeight = max(4, detailHeight)
+	w.detail.wrapWidth = max(16, contentWidth-4)
+
+	detailView := lipgloss.NewStyle().
+		Width(contentWidth).
+		MaxWidth(contentWidth).
+		Height(detailHeight).
+		MaxHeight(detailHeight).
+		Render(w.detail.View())
+
+	actionsBody := lipgloss.JoinVertical(
+		lipgloss.Left,
+		w.styles.MenuItemActive.Render("Actions"),
+		w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth))),
+		w.actions.viewActionsOnly(),
+	)
+	actionsView := lipgloss.NewStyle().
+		Width(contentWidth).
+		MaxWidth(contentWidth).
+		Height(actionsHeight).
+		MaxHeight(actionsHeight).
+		Render(actionsBody)
+
+	body := lipgloss.JoinVertical(
+		lipgloss.Left,
+		detailView,
+		lipgloss.NewStyle().Height(gap).Render(""),
+		actionsView,
+	)
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
+	return lipgloss.NewStyle().
+		Width(contentWidth).
+		Height(max(6, contentHeight-headerHeight)).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(styles.Surface2).
 		Render(content)
