@@ -92,7 +92,7 @@ func runOpenCodeCommand(cfg *config.Config, args []string) error {
 }
 
 func runOpenCodeInitCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
+	if len(args) > 0 && isHelpArg(args[0]) {
 		cli.PrintOpenCodeInitUsage()
 		return nil
 	}

@@ -60,6 +60,21 @@ func TestRunOpenCodeCommandDispatch(t *testing.T) {
 	}
 }
 
+func TestRunOpenCodeCommandInitWithoutArgs(t *testing.T) {
+	projectDir := t.TempDir()
+	withWorkingDir(t, projectDir, func() {
+		output := captureMainStdout(t, func() error {
+			return runOpenCodeCommand(config.DefaultConfig(), []string{"init"})
+		})
+		if !strings.Contains(output, "Initialized OpenCode support in") {
+			t.Fatalf("init output = %q", output)
+		}
+		if _, err := os.Stat(filepath.Join(projectDir, "opencode.json")); err != nil {
+			t.Fatalf("expected opencode.json: %v", err)
+		}
+	})
+}
+
 func captureMainStdout(t *testing.T, fn func() error) string {
 	t.Helper()
 
@@ -89,4 +104,23 @@ func captureMainStdout(t *testing.T, fn func() error) string {
 	}
 
 	return buf.String()
+}
+
+func withWorkingDir(t *testing.T, dir string, fn func()) {
+	t.Helper()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir to temp dir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
+	fn()
 }
