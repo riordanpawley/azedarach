@@ -121,78 +121,7 @@ func (h *HelpOverlay) Size() (width, height int) {
 
 // getCategories returns all keybinding categories
 func (h *HelpOverlay) getCategories() []keybinds.Category {
-	return []keybinds.Category{
-		{
-			Name: "Navigation",
-			Bindings: []keybinds.Binding{
-				{Key: "h/l", Description: "Move between columns"},
-				{Key: "j/k", Description: "Move up/down in column"},
-				{Key: "ctrl+u / ctrl+d", Description: "Half-page scroll"},
-				{Key: "g then g/e/h/l", Description: "Jump in board"},
-				{Key: "g then w/p/s", Description: "Jump / projects / spec"},
-				{Key: "gg/ge", Description: "Jump to top/bottom of column"},
-				{Key: "gh/gl", Description: "Jump to first/last column"},
-			},
-		},
-		{
-			Name: "Workspace",
-			Bindings: []keybinds.Binding{
-				{Key: "Space", Description: "Open task workspace (details + actions)"},
-				{Key: "Enter", Description: "Drill into epic children"},
-			},
-		},
-		{
-			Name: "Actions",
-			Bindings: []keybinds.Binding{
-				{Key: "Space", Description: "Open task workspace"},
-				{Key: "space then i", Description: "Image attachments"},
-				{Key: "space then s/S/a/x", Description: "Session actions"},
-				{Key: "space then u/m/P/f", Description: "Git actions"},
-				{Key: "space then c/e/d/h/l", Description: "Task status/edit actions"},
-			},
-		},
-		{
-			Name: "Modes",
-			Bindings: []keybinds.Binding{
-				{Key: "g", Description: "Goto mode"},
-				{Key: "/", Description: "Search"},
-				{Key: "f", Description: "Filter menu"},
-				{Key: ",", Description: "Sort menu"},
-				{Key: "v", Description: "Select mode"},
-				{Key: "?", Description: "Help (this screen)"},
-			},
-		},
-		{
-			Name: "Selection",
-			Bindings: []keybinds.Binding{
-				{Key: "a/5", Description: "Toggle selection on current task"},
-				{Key: "A", Description: "Select all in current column"},
-				{Key: "%", Description: "Select all visible tasks"},
-				{Key: "*", Description: "Invert visible selection"},
-				{Key: "x", Description: "Clear selection"},
-				{Key: "Space/Enter", Description: "Open bulk actions for selected tasks"},
-				{Key: "v/Esc", Description: "Exit select mode"},
-			},
-		},
-		{
-			Name: "Task Actions",
-			Bindings: []keybinds.Binding{
-				{Key: "r (board)", Description: "Refresh board data"},
-				{Key: "i", Description: "Open attachment manager in workspace"},
-				{Key: "b", Description: "Open merge-into selector in workspace"},
-				{Key: "r (workspace)", Description: "Open dev server menu"},
-				{Key: "w/W", Description: "Cleanup worktree / delete + cleanup"},
-			},
-		},
-		{
-			Name: "Other",
-			Bindings: []keybinds.Binding{
-				{Key: "Tab", Description: "Toggle compact/kanban view"},
-				{Key: "esc", Description: "Close overlay / exit mode"},
-				{Key: "q", Description: "Quit"},
-			},
-		},
-	}
+	return keybinds.HelpCategories()
 }
 
 // min returns the minimum of two integers

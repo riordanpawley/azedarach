@@ -41,6 +41,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/compact"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -1422,77 +1423,98 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	switch msg.String() {
-	case "q":
+	case overlay.EventLogHotkey:
+		return m, m.overlayStack.Push(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
+	case "O": // Orchestration overlay
+		return m, m.openOrchestrationOverlay()
+	case "X": // Bulk cleanup (Shift+X)
+		// Count tasks, worktrees, and sessions for estimates
+		taskCount := len(m.tasks)
+		worktreeCount := len(m.sessions) // Estimate: active sessions have worktrees
+		sessionCount := 0
+		for _, session := range m.sessions {
+			if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
+				sessionCount++
+			}
+		}
+		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
+		return m, m.overlayStack.Push(cleanupOverlay)
+	}
+
+	action, ok := keybinds.LookupAction(types.ModeNormal, msg.String())
+	if !ok {
+		return m, nil
+	}
+
+	switch action {
+	case keybinds.ActionQuit:
 		// Cleanup before quitting
 		m.sessionMonitor.StopAll()
 		return m, tea.Quit
 
 	// Vertical navigation
-	case "j", "down":
+	case keybinds.ActionMoveDown:
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "k", "up":
+	case keybinds.ActionMoveUp:
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Horizontal navigation
-	case "h", "left":
+	case keybinds.ActionMoveLeft:
 		m.nav.MoveLeft(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "l", "right":
+	case keybinds.ActionMoveRight:
 		m.nav.MoveRight(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Half-page scroll
-	case "ctrl+d":
+	case keybinds.ActionHalfPageDown:
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "ctrl+u":
+	case keybinds.ActionHalfPageUp:
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Mode switches
-	case "g":
+	case keybinds.ActionEnterGoto:
 		m.editor.EnterGoto()
 		return m, nil
 
-	case " ": // Space - open task panel (details + actions)
+	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
 			return m, m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.width, m.height))
 		}
 		return m, nil
 
-	case "/": // Search
+	case keybinds.ActionEnterSearch: // Search
 		m.editor.EnterSearch()
 		return m, m.overlayStack.Push(overlay.NewSearchOverlay())
 
-	case "f": // Filter menu
+	case keybinds.ActionOpenFilter: // Filter menu
 		return m, m.overlayStack.Push(overlay.NewFilterMenu(m.editor.GetFilter()))
 
-	case ",": // Sort menu
+	case keybinds.ActionOpenSort: // Sort menu
 		return m, m.overlayStack.Push(overlay.NewSortMenu(m.editor.GetSort()))
 
-	case "v": // Visual select
+	case keybinds.ActionEnterSelect: // Visual select
 		m.editor.EnterSelect()
 		return m, nil
 
-	case "?": // Help
+	case keybinds.ActionOpenHelp: // Help
 		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
 
-	case overlay.EventLogHotkey:
-		return m, m.overlayStack.Push(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
-
-	case "enter": // Drill into children
+	case keybinds.ActionDrillDown: // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
 			children := m.getTaskChildren(task.ID)
@@ -1511,17 +1533,17 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "c": // Create task
+	case keybinds.ActionCreateTask: // Create task
 		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
 
-	case "s": // Settings
+	case keybinds.ActionOpenSettings: // Settings
 		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
 
-	case "D": // Diagnostics (Shift+D)
+	case keybinds.ActionOpenDiagnostic: // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
 		return m, tea.Batch(m.overlayStack.Push(diagPanel), diagPanel.Init())
 
-	case "tab": // Toggle view mode
+	case keybinds.ActionToggleView: // Toggle view mode
 		if m.viewMode == ViewModeBoard {
 			m.viewMode = ViewModeCompact
 			m.addToast(Toast{
@@ -1538,22 +1560,6 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
-
-	case "O": // Orchestration overlay
-		return m, m.openOrchestrationOverlay()
-
-	case "X": // Bulk cleanup (Shift+X)
-		// Count tasks, worktrees, and sessions for estimates
-		taskCount := len(m.tasks)
-		worktreeCount := len(m.sessions) // Estimate: active sessions have worktrees
-		sessionCount := 0
-		for _, session := range m.sessions {
-			if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
-				sessionCount++
-			}
-		}
-		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
-		return m, m.overlayStack.Push(cleanupOverlay)
 	}
 
 	return m, nil
@@ -1565,24 +1571,29 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Always return to normal mode after processing
 	m.editor.EnterNormal()
 
-	switch msg.String() {
-	case "g":
+	action, ok := keybinds.LookupAction(types.ModeGoto, msg.String())
+	if !ok {
+		return m, nil
+	}
+
+	switch action {
+	case keybinds.ActionGotoTop:
 		// Go to top of column
 		m.nav.GotoTop(columns)
 		m.ensureCursorVisible(columns)
-	case "e":
+	case keybinds.ActionGotoBottom:
 		// Go to end of column
 		m.nav.GotoBottom(columns)
 		m.ensureCursorVisible(columns)
-	case "h":
+	case keybinds.ActionGotoFirstCol:
 		// Go to first column
 		m.nav.GotoFirstColumn(columns)
 		m.ensureCursorVisible(columns)
-	case "l":
+	case keybinds.ActionGotoLastCol:
 		// Go to last column
 		m.nav.GotoLastColumn(columns)
 		m.ensureCursorVisible(columns)
-	case "w":
+	case keybinds.ActionGotoJump:
 		// Jump mode - quick navigation with labels for VISIBLE tasks only
 		// Calculate visible tasks per column based on screen height/card footprint.
 		visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
@@ -1610,14 +1621,14 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			visibleCount += colVisible
 		}
 		return m, m.overlayStack.Push(overlay.NewJumpModeWithChars(visibleCount, m.config.Keyboard.JumpLabelChars))
-	case "p":
+	case keybinds.ActionGotoProjects:
 		// Project selector
 		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
 		))
-	case "s":
+	case keybinds.ActionGotoSpec:
 		// Dedicated Spec workspace
 		return m, m.overlayStack.Push(overlay.NewSpecWorkspaceOverlay(m.currentProject))
 	}
@@ -1657,9 +1668,13 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	task, _ := m.getCurrentTaskAndSession()
-	switch msg.String() {
+	action, ok := keybinds.LookupAction(types.ModeSelect, msg.String())
+	if !ok {
+		return m, nil
+	}
+	switch action {
 	// Navigation with selection toggle
-	case "j", "down":
+	case keybinds.ActionMoveDown:
 		// Toggle current task selection, then move down
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
@@ -1668,7 +1683,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "k", "up":
+	case keybinds.ActionMoveUp:
 		// Toggle current task selection, then move up
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
@@ -1678,18 +1693,18 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Horizontal movement (no selection toggle)
-	case "h", "left":
+	case keybinds.ActionMoveLeft:
 		m.nav.MoveLeft(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "l", "right":
+	case keybinds.ActionMoveRight:
 		m.nav.MoveRight(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Half-page movement with selection toggle
-	case "ctrl+d":
+	case keybinds.ActionHalfPageDown:
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
@@ -1697,7 +1712,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "ctrl+u":
+	case keybinds.ActionHalfPageUp:
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
@@ -1706,14 +1721,14 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Toggle current selection without moving.
-	case "a", "5":
+	case keybinds.ActionSelectToggle:
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
 		return m, nil
 
 	// Select all in current column
-	case "A":
+	case keybinds.ActionSelectColumnAll:
 		status := m.nav.GetCurrentStatus(columns)
 		for _, t := range m.tasks {
 			if t.Status == status {
@@ -1723,13 +1738,13 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Select all visible tasks
-	case "%":
+	case keybinds.ActionSelectAllVisible:
 		filteredTasks := m.editor.ApplyFilter(m.tasks)
 		m.editor.SelectAll(filteredTasks)
 		return m, nil
 
 	// Invert visible selection
-	case "*":
+	case keybinds.ActionSelectInvert:
 		for _, t := range m.editor.ApplyFilter(m.tasks) {
 			if m.editor.IsSelected(t.ID) {
 				m.editor.Deselect(t.ID)
@@ -1740,28 +1755,22 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Clear selection
-	case "x":
+	case keybinds.ActionSelectClear:
 		m.editor.ClearSelection()
 		return m, nil
 
 	// Exit select mode and clear selection
-	case "v":
+	case keybinds.ActionSelectExit:
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
 		return m, nil
 
 	// Bulk action menu for selected tasks.
-	case " ", "enter":
+	case keybinds.ActionSelectBulk:
 		if m.editor.HasSelection() {
 			selectedIDs := m.editor.GetSelectedTasksList()
 			return m, m.overlayStack.Push(overlay.NewBulkActionMenu(selectedIDs, len(selectedIDs)))
 		}
-		return m, nil
-
-	// Exit select mode
-	case "esc":
-		m.editor.ClearSelection()
-		m.editor.EnterNormal()
 		return m, nil
 	}
 
