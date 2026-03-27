@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 func TestViewHeight(t *testing.T) {
@@ -147,6 +148,24 @@ func TestViewWithFullScreenOverlayReplacesBoardContent(t *testing.T) {
 	last := lines[len(lines)-1]
 	if !strings.Contains(last, "ACTION") {
 		t.Fatalf("expected status bar to remain visible with overlay mode badge; last line=%q", last)
+	}
+}
+
+func TestViewWithOverlayStatusBindingsUsesOverlayHints(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&hintOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "j/k") || !strings.Contains(last, "scroll") {
+		t.Fatalf("expected status bar to include overlay-provided hints; last line=%q", last)
 	}
 }
 
@@ -300,3 +319,13 @@ type fullScreenOverlay struct{ statusModeOverlay }
 
 func (o *fullScreenOverlay) View() string         { return "FULL-SCREEN CONTENT" }
 func (o *fullScreenOverlay) UsesFullScreen() bool { return true }
+
+type hintOverlay struct{ statusModeOverlay }
+
+func (o *hintOverlay) View() string { return "HINT OVERLAY" }
+func (o *hintOverlay) StatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k", Description: "scroll"},
+		{Key: "Esc", Description: "close"},
+	}
+}
