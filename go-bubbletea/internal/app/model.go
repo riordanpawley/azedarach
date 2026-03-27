@@ -1107,20 +1107,12 @@ func (m Model) View() string {
 					Render(overlayView)
 			}
 
-			centeredOverlay := lipgloss.Place(
-				m.width,
-				contentHeight,
-				lipgloss.Center,
-				lipgloss.Center,
-				overlayView,
-			)
-
 			contentView = lipgloss.NewStyle().
 				MaxWidth(m.width).
 				Height(contentHeight).
 				MaxHeight(contentHeight).
 				Render(contentView)
-			contentView = m.layerWithinHeightTransparent(contentView, centeredOverlay, contentHeight)
+			contentView = m.layerCenteredOverlay(contentView, overlayView, m.width, contentHeight, overlayWidth, overlayHeight)
 		}
 	}
 
@@ -1237,6 +1229,44 @@ func mergeOverlayLine(bottom, top string) string {
 		return bottom
 	}
 	return ansi.Cut(bottom, 0, left) + ansi.Cut(top, left, right) + ansi.Cut(bottom, right, bottomWidth)
+}
+
+func (m Model) layerCenteredOverlay(bottom, overlayView string, width, height, overlayWidth, overlayHeight int) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	if overlayWidth < 1 || overlayHeight < 1 {
+		return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(bottom)
+	}
+	if overlayWidth > width {
+		overlayWidth = width
+	}
+	if overlayHeight > height {
+		overlayHeight = height
+	}
+
+	bLines := strings.Split(lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(bottom), "\n")
+	oLines := strings.Split(lipgloss.NewStyle().Width(overlayWidth).Height(overlayHeight).MaxHeight(overlayHeight).Render(overlayView), "\n")
+
+	x := max(0, (width-overlayWidth)/2)
+	y := max(0, (height-overlayHeight)/2)
+	res := make([]string, len(bLines))
+	copy(res, bLines)
+
+	for i := 0; i < overlayHeight && i < len(oLines); i++ {
+		row := y + i
+		if row < 0 || row >= len(res) {
+			continue
+		}
+		base := res[row]
+		overlaySlice := ansi.Cut(oLines[i], 0, overlayWidth)
+		res[row] = ansi.Cut(base, 0, x) + overlaySlice + ansi.Cut(base, x+overlayWidth, width)
+	}
+
+	return strings.Join(res, "\n")
 }
 
 func nonSpaceBounds(line string) (left int, right int, ok bool) {

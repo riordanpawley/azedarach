@@ -220,6 +220,40 @@ func TestNonSpaceBounds(t *testing.T) {
 	}
 }
 
+func TestLayerCenteredOverlay_ReplacesOnlyOverlayRect(t *testing.T) {
+	m := newTestModel()
+	bottom := strings.Join([]string{
+		"AAAAAAAAAA",
+		"BBBBBBBBBB",
+		"CCCCCCCCCC",
+		"DDDDDDDDDD",
+		"EEEEEEEEEE",
+	}, "\n")
+	overlay := strings.Join([]string{
+		"XX  ",
+		"X  X",
+		"XXXX",
+	}, "\n")
+
+	got := m.layerCenteredOverlay(bottom, overlay, 10, 5, 4, 3)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 lines, got %d", len(lines))
+	}
+	if lines[0] != "AAAAAAAAAA" || lines[4] != "EEEEEEEEEE" {
+		t.Fatalf("expected rows outside overlay rect to remain unchanged, got %q / %q", lines[0], lines[4])
+	}
+	if lines[1] != "BBBXX  BBB" {
+		t.Fatalf("unexpected line 1: %q", lines[1])
+	}
+	if lines[2] != "CCCX  XCCC" {
+		t.Fatalf("unexpected line 2: %q", lines[2])
+	}
+	if lines[3] != "DDDXXXXDDD" {
+		t.Fatalf("unexpected line 3: %q", lines[3])
+	}
+}
+
 type testOverlay struct{}
 
 func (o *testOverlay) View() string                            { return "test overlay" }
