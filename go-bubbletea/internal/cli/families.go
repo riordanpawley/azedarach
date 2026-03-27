@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,7 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
 const (
@@ -17,6 +24,7 @@ const (
 	hookEventStop              = "stop"
 	hookEventSessionEnd        = "session_end"
 	openCodePluginFilename     = "opencode-az.js"
+	commandDevServerList       = "devserver.list"
 )
 
 var hookEventStatuses = map[string]string{
@@ -43,6 +51,15 @@ type GateOptions struct {
 	ProjectDir string
 	Verbose    bool
 	Fix        bool
+}
+
+type devServerListRequestBody struct {
+	ProjectID string `json:"project_id"`
+}
+
+type devServerListResponseBody struct {
+	ProjectID string             `json:"project_id"`
+	Servers   []devserver.Server `json:"servers"`
 }
 
 type OpenCodeInitOptions struct {
@@ -268,6 +285,181 @@ func GateCommand(_ *Dependencies, opts GateOptions) error {
 	return nil
 }
 
+func ParseDevIssueArg(command string, args []string) (string, error) {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		return "", fmt.Errorf("usage: az dev %s <issue-id>", command)
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("usage: az dev %s <issue-id>", command)
+	}
+	return strings.TrimSpace(args[0]), nil
+}
+
+func DevServerStartCommand(deps *Dependencies, issueID string) error {
+	srv, err := deps.DaemonClient.StartDevServer(context.Background(), issueID)
+	if err != nil {
+		return err
+	}
+	printDevServerAction("Started", issueID, srv)
+	return nil
+}
+
+func DevServerStopCommand(deps *Dependencies, issueID string) error {
+	srv, err := deps.DaemonClient.StopDevServer(context.Background(), issueID)
+	if err != nil {
+		return err
+	}
+	printDevServerAction("Stopped", issueID, srv)
+	return nil
+}
+
+func DevServerRestartCommand(deps *Dependencies, issueID string) error {
+	srv, err := deps.DaemonClient.RestartDevServer(context.Background(), issueID)
+	if err != nil {
+		return err
+	}
+	printDevServerAction("Restarted", issueID, srv)
+	return nil
+}
+
+func DevServerStatusCommand(deps *Dependencies, issueID string) error {
+	srv, err := deps.DaemonClient.DevServerStatus(context.Background(), issueID)
+	if err != nil {
+		return err
+	}
+	printDevServerStatus(issueID, srv)
+	return nil
+}
+
+func DevServerListCommand(deps *Dependencies) error {
+	ctx := context.Background()
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       fmt.Sprintf("%s-%d", commandDevServerList, time.Now().UTC().UnixNano()),
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta: protocol.Metadata{
+			ProjectID: deps.ProjectID,
+		},
+		Command: commandDevServerList,
+		SentAt:  time.Now().UTC(),
+		Body: mustJSONBody(devServerListRequestBody{
+			ProjectID: deps.ProjectID,
+		}),
+	}
+	resp, err := deps.DaemonClient.Command(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to list dev servers: %w", err)
+	}
+	if err := responseError(resp, "failed to list dev servers"); err != nil {
+		return err
+	}
+
+	var out devServerListResponseBody
+	if len(resp.Body) > 0 {
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			return fmt.Errorf("decode dev server list: %w", err)
+		}
+	}
+	printDevServerList(out.Servers)
+	return nil
+}
+
+func mustJSONBody(v any) []byte {
+	body, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func printDevServerAction(action, issueID string, srv devserver.Server) {
+	name := strings.TrimSpace(srv.Name)
+	if name == "" {
+		name = issueID
+	}
+	fmt.Printf("%s dev server '%s' for %s\n", action, name, issueID)
+	if srv.Port > 0 {
+		fmt.Printf("  Port: %d\n", srv.Port)
+	}
+}
+
+func printDevServerStatus(issueID string, srv devserver.Server) {
+	name := strings.TrimSpace(srv.Name)
+	if name == "" {
+		name = issueID
+	}
+	fmt.Printf("Dev server '%s' for %s\n", name, issueID)
+	fmt.Printf("  Status: %s\n", srv.Status)
+	if srv.Port > 0 {
+		fmt.Printf("  Port: %d\n", srv.Port)
+	}
+	if uptime := formatDevServerUptime(srv.Uptime); uptime != "" {
+		fmt.Printf("  Uptime: %s\n", uptime)
+	}
+}
+
+func printDevServerList(servers []devserver.Server) {
+	running := make([]devserver.Server, 0, len(servers))
+	for _, srv := range servers {
+		if strings.EqualFold(strings.TrimSpace(srv.Status), "running") {
+			running = append(running, srv)
+		}
+	}
+	if len(running) == 0 {
+		fmt.Println("No dev servers running.")
+		return
+	}
+
+	sort.Slice(running, func(i, j int) bool {
+		if running[i].IssueID != running[j].IssueID {
+			return running[i].IssueID < running[j].IssueID
+		}
+		return running[i].Name < running[j].Name
+	})
+
+	fmt.Println("Running dev servers:")
+	fmt.Println("")
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ISSUE\tSERVER\tPORT\tUPTIME")
+	fmt.Fprintln(w, "-------\t------\t----\t------")
+	for _, srv := range running {
+		name := strings.TrimSpace(srv.Name)
+		if name == "" {
+			name = srv.IssueID
+		}
+		port := "-"
+		if srv.Port > 0 {
+			port = fmt.Sprintf("%d", srv.Port)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", srv.IssueID, name, port, formatDevServerUptime(srv.Uptime))
+	}
+	_ = w.Flush()
+
+	fmt.Println("")
+	fmt.Printf("%d server(s) running\n", len(running))
+}
+
+func formatDevServerUptime(d time.Duration) string {
+	if d <= 0 {
+		return "-"
+	}
+	seconds := int(d.Seconds())
+	minutes := seconds / 60
+	hours := minutes / 60
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes%60)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds%60)
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
+
+func isHelpArg(arg string) bool {
+	return strings.EqualFold(arg, "help") || arg == "-h" || arg == "--help"
+}
+
 func OpenCodeInitCommand(deps *Dependencies, opts OpenCodeInitOptions) error {
 	projectDir := strings.TrimSpace(opts.ProjectDir)
 	if projectDir == "" && deps != nil {
@@ -364,8 +556,14 @@ func PrintGateUsage() {
 }
 
 func PrintDevUsage() {
-	fmt.Println("Usage: az dev gate <issue-id> [--project-dir <dir>] [--verbose] [--fix]")
-	fmt.Println("Manage dev server-adjacent quality gates.")
+	fmt.Println("Usage: az dev <gate|start|stop|restart|status|list>")
+	fmt.Println("Manage dev servers and dev server-adjacent quality gates.")
+	fmt.Println("  az dev gate <issue-id> [--project-dir <dir>] [--verbose] [--fix]")
+	fmt.Println("  az dev start <issue-id>")
+	fmt.Println("  az dev stop <issue-id>")
+	fmt.Println("  az dev restart <issue-id>")
+	fmt.Println("  az dev status <issue-id>")
+	fmt.Println("  az dev list")
 }
 
 func PrintOpenCodeUsage() {
