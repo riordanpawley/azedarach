@@ -441,14 +441,6 @@ ${modeGuardrails === undefined ? "" : `${modeGuardrails}\n`}
   - There is no top-level \`az dep\` command; use \`az issue dep ...\`.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
   - Use \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to remove dependency relationships.
-- Fanout and mailbox quickstart:
-  - \`az issue fanout --input ./fanout.json\` (plan nested child issues from spec)
-  - \`az issue fanout --input ./fanout.json --apply\` (create issues + dependency edges)
-  - \`az issue fanout ready --root <issue-id> --json\` (show runnable leaf issues)
-  - \`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out\` (detect out-of-budget changes)
-  - \`az mail send --parent <parent-issue> --type dependency-ready --body "..."\`
-  - \`az mail list --parent <parent-issue> --since <seq> --json\`
-  - \`az mail watch --parent <parent-issue> --since <seq> --jsonl\`
 - Issue-context guardrails:
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
@@ -457,7 +449,8 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-- High-signal issue commands:
+- How to use \`az\` command map:
+  - Issue lifecycle:
   - \`az issue list --limit 20\` (lists the most recently updated issues first)
   - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
   - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
@@ -468,6 +461,22 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
   - \`az issue update <issue-id> --append-notes "..."\` (adds to existing notes without overwriting previous notes)
   - \`az issue update <issue-id> --status in_progress|blocked|open\`
   - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
+  - Issue dependency graph:
+  - \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`
+  - \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`
+  - Fanout orchestration:
+  - \`az issue fanout --input ./fanout.json\` (plan nested child issues from spec)
+  - \`az issue fanout --input ./fanout.json --apply\` (create issues + dependency edges)
+  - \`az issue fanout ready --root <issue-id> --json\` (show runnable leaf issues)
+  - \`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out\` (detect out-of-budget changes)
+  - Mailbox coordination:
+  - \`az mail send --parent <parent-issue> --type dependency-ready --body "..."\`
+  - \`az mail list --parent <parent-issue> --since <seq> --json\`
+  - \`az mail watch --parent <parent-issue> --since <seq> --jsonl\`
+  - Spec traceability:
+  - ${specEnabled ? "\`az spec req/list/link ...\` before behavior changes and after behavior edits to keep requirements/links aligned." : "Spec workflows disabled for this project (`az config set spec.enabled false`)."}
+  - Session/runtime operations:
+  - \`az session start <issue-id>\`, \`az session status [issue-id]\`, \`az daemon restart\`, \`az export --format json [--out <path>]\`
   - \`az issue --help\`
 ${specGuardrails === undefined ? "" : `- Spec workflow:\n${specGuardrails}\n`}
 - When work is complete:

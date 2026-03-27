@@ -2597,8 +2597,8 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
 		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
 	}
-	if !strings.Contains(output, "Fanout and mailbox quickstart:") {
-		t.Fatalf("prime output missing fanout/mail quickstart section: %q", output)
+	if !strings.Contains(output, "How to use `az` command map:") {
+		t.Fatalf("prime output missing az command map section: %q", output)
 	}
 	if !strings.Contains(output, "`az issue fanout --input ./fanout.json`") {
 		t.Fatalf("prime output missing fanout plan command example: %q", output)
@@ -2608,6 +2608,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
+	}
+	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`") {
+		t.Fatalf("prime output missing session/runtime command examples: %q", output)
 	}
 }
 

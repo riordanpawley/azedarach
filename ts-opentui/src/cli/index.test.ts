@@ -116,7 +116,7 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain(
 			'`az issue create "Title"` defaults to the active parent context (including `AZEDARACH_ISSUE_ID`) unless `--deferred` is set.',
 		)
-		expect(output).toContain("Fanout and mailbox quickstart:")
+		expect(output).toContain("How to use `az` command map:")
 		expect(output).toContain("`az issue fanout --input ./fanout.json`")
 		expect(output).toContain("`az issue fanout --input ./fanout.json --apply`")
 		expect(output).toContain("`az issue fanout ready --root <issue-id> --json`")
@@ -127,6 +127,9 @@ describe("buildPrimeOutput", () => {
 			"`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`",
 		)
 		expect(output).toContain("`az mail watch --parent <parent-issue> --since <seq> --jsonl`")
+		expect(output).toContain(
+			"`az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`",
+		)
 		expect(output).toContain(
 			"In this repo, when guidance says `spec`, it means `az spec` requirement/link records",
 		)
