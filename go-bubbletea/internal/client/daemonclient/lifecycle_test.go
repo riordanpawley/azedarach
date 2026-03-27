@@ -308,16 +308,44 @@ func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
 func TestDevServerLifecycleHelpers(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(devServerResultBody{
-				IssueID: "az-1",
-				Server: devserver.Server{
-					ID:      "az-1",
-					Name:    "az-1",
-					Port:    3001,
-					Status:  "running",
+			var (
+				body []byte
+				err  error
+			)
+			switch req.Command {
+			case CommandDevServerStart, CommandDevServerStop, CommandDevServerStatus:
+				body, err = json.Marshal(devServerResultBody{
 					IssueID: "az-1",
-				},
-			})
+					Server: devserver.Server{
+						ID:      "az-1",
+						Name:    "az-1",
+						Port:    3001,
+						Status:  "running",
+						IssueID: "az-1",
+					},
+				})
+			case CommandDevServerList:
+				body, err = json.Marshal(devServerListBody{
+					Servers: []devserver.Server{
+						{
+							ID:      "az-1",
+							Name:    "az-1",
+							Port:    3001,
+							Status:  "running",
+							IssueID: "az-1",
+						},
+						{
+							ID:      "az-2",
+							Name:    "az-2",
+							Port:    3002,
+							Status:  "stopped",
+							IssueID: "az-2",
+						},
+					},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
 			if err != nil {
 				t.Fatalf("marshal response: %v", err)
 			}
@@ -344,6 +372,20 @@ func TestDevServerLifecycleHelpers(t *testing.T) {
 	}
 	if transport.lastReq.Command != CommandDevServerStop {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandDevServerStop)
+	}
+
+	servers, err := client.ListDevServers(context.Background())
+	if err != nil {
+		t.Fatalf("ListDevServers error: %v", err)
+	}
+	if transport.lastReq.Command != CommandDevServerList {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandDevServerList)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("servers length = %d, want 2", len(servers))
+	}
+	if servers[0].Status != "running" || servers[1].Status != "stopped" {
+		t.Fatalf("servers = %+v", servers)
 	}
 }
 

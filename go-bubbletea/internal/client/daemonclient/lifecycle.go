@@ -19,6 +19,7 @@ const (
 	CommandDevServerStart  = "devserver.start"
 	CommandDevServerStop   = "devserver.stop"
 	CommandDevServerStatus = "devserver.status"
+	CommandDevServerList   = "devserver.list"
 	CommandWorktreeList    = "worktree.list"
 	CommandWorktreeRemove  = "worktree.remove"
 )
@@ -51,6 +52,10 @@ type devServerCommandBody struct {
 type devServerResultBody struct {
 	IssueID string           `json:"issue_id"`
 	Server  devserver.Server `json:"server"`
+}
+
+type devServerListBody struct {
+	Servers []devserver.Server `json:"servers"`
 }
 
 type worktreeListBody struct {
@@ -149,6 +154,15 @@ func (c *Client) DevServerStatus(ctx context.Context, issueID string) (devserver
 		return devserver.Server{}, err
 	}
 	return out.Server, nil
+}
+
+// ListDevServers returns the daemon-owned devserver inventory for the current project route.
+func (c *Client) ListDevServers(ctx context.Context) ([]devserver.Server, error) {
+	var out devServerListBody
+	if err := c.commandJSON(ctx, CommandDevServerList, struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return out.Servers, nil
 }
 
 // StartDevServer asks daemon to start one devserver.

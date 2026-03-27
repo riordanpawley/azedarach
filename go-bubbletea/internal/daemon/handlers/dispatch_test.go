@@ -53,6 +53,13 @@ func (m *routeDevServerManager) Get(issueID string) (*devserver.Server, bool) {
 	srv, ok := m.servers[issueID]
 	return srv, ok
 }
+func (m *routeDevServerManager) List() []*devserver.Server {
+	servers := make([]*devserver.Server, 0, len(m.servers))
+	for _, srv := range m.servers {
+		servers = append(servers, srv)
+	}
+	return servers
+}
 
 type routePRWorkflow struct {
 	lastParams pr.CreatePRParams
@@ -186,22 +193,34 @@ func TestDispatcherMixedRouting(t *testing.T) {
 		t.Fatalf("devserver route failed: %+v", r4.Error)
 	}
 
-	r5 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
-		"project_id": "proj",
-	}))
+	r5 := dispatch.Handle(context.Background(), mkReq("devserver.list", map[string]string{}))
 	if !r5.OK {
-		t.Fatalf("cleanup route failed: %+v", r5.Error)
+		t.Fatalf("devserver list route failed: %+v", r5.Error)
+	}
+	var listBody devServerListBody
+	if err := json.Unmarshal(r5.Body, &listBody); err != nil {
+		t.Fatalf("unmarshal devserver list body: %v", err)
+	}
+	if len(listBody.Servers) == 0 {
+		t.Fatalf("expected at least one devserver in list body: %+v", listBody.Servers)
 	}
 
-	r6 := dispatch.Handle(context.Background(), mkReq(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+	r6 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
+		"project_id": "proj",
+	}))
+	if !r6.OK {
+		t.Fatalf("cleanup route failed: %+v", r6.Error)
+	}
+
+	r7 := dispatch.Handle(context.Background(), mkReq(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID:    "proj",
 		Kind:         "session.start",
 		IssueID:      "aey",
 		DedupeKey:    "proj::aey::session.start",
 		ResourceKeys: []string{"issue:aey", "session:aey"},
 	}))
-	if !r6.OK {
-		t.Fatalf("operation route failed: %+v", r6.Error)
+	if !r7.OK {
+		t.Fatalf("operation route failed: %+v", r7.Error)
 	}
 	if operationH.lastCommand != protocol.CommandOperationSubmit {
 		t.Fatalf("operation handler command = %q, want %q", operationH.lastCommand, protocol.CommandOperationSubmit)
