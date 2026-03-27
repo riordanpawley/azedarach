@@ -37,3 +37,15 @@ func TestTaskWorkspaceOverlay_View_HasOuterBorder(t *testing.T) {
 		t.Fatalf("expected workspace overlay to render an outer rounded border, got: %q", view)
 	}
 }
+
+func TestTaskWorkspaceOverlay_UsesFullScreen(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	if !overlay.UsesFullScreen() {
+		t.Fatalf("expected task workspace overlay to request full-screen rendering")
+	}
+}

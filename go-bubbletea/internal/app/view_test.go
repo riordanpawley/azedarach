@@ -125,6 +125,31 @@ func TestOverlayUsesAppFrame(t *testing.T) {
 	}
 }
 
+func TestViewWithFullScreenOverlayReplacesBoardContent(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 24
+	m.loading = false
+	m.overlayStack.Push(&fullScreenOverlay{})
+
+	view := m.View()
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected non-empty rendered view")
+	}
+	first := lines[0]
+	if strings.Contains(first, "Open (") {
+		t.Fatalf("expected board headers to be replaced in full-screen overlay mode; first line=%q", first)
+	}
+	if !strings.Contains(view, "FULL-SCREEN CONTENT") {
+		t.Fatalf("expected full-screen overlay content to be visible, got %q", view)
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "ACTION") {
+		t.Fatalf("expected status bar to remain visible with overlay mode badge; last line=%q", last)
+	}
+}
+
 func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
@@ -270,3 +295,8 @@ type framelessOverlay struct{ statusModeOverlay }
 
 func (o *framelessOverlay) View() string       { return "frame-free overlay" }
 func (o *framelessOverlay) UsesAppFrame() bool { return false }
+
+type fullScreenOverlay struct{ statusModeOverlay }
+
+func (o *fullScreenOverlay) View() string         { return "FULL-SCREEN CONTENT" }
+func (o *fullScreenOverlay) UsesFullScreen() bool { return true }

@@ -38,13 +38,13 @@ func NewTaskWorkspaceOverlay(
 	detail := NewDetailPanel(task, session).WithRelatedTasks(relatedTasks)
 	actions := NewActionMenu(task, session).WithRelatedTasks(relatedTasks)
 
-	overlayWidth := max(84, viewportWidth-6)
-	overlayHeight := max(20, viewportHeight-8)
+	overlayWidth := max(84, viewportWidth)
+	overlayHeight := max(16, viewportHeight-1)
 	if viewportWidth > 0 {
-		overlayWidth = min(overlayWidth, viewportWidth-8)
+		overlayWidth = min(overlayWidth, viewportWidth)
 	}
 	if viewportHeight > 0 {
-		overlayHeight = min(overlayHeight, viewportHeight-6)
+		overlayHeight = min(overlayHeight, viewportHeight-1)
 	}
 
 	detail.viewHeight = max(8, overlayHeight-8)
@@ -194,6 +194,10 @@ func (w *TaskWorkspaceOverlay) StatusMode() types.Mode {
 
 func (w *TaskWorkspaceOverlay) UsesAppFrame() bool {
 	return false
+}
+
+func (w *TaskWorkspaceOverlay) UsesFullScreen() bool {
+	return true
 }
 
 func (w *TaskWorkspaceOverlay) toggleFocus() {

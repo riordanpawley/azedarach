@@ -1081,6 +1081,20 @@ func (m Model) View() string {
 	if !m.overlayStack.IsEmpty() {
 		current := m.overlayStack.Current()
 		overlayView := current.View()
+		if overlayUsesFullScreen(current) {
+			title := current.Title()
+			if title != "" && !overlayUsesInternalTitle(current) {
+				titleView := m.styles.OverlayTitle.Render(title)
+				overlayView = lipgloss.JoinVertical(lipgloss.Left, titleView, overlayView)
+			}
+			contentView = lipgloss.NewStyle().
+				Width(m.width).
+				MaxWidth(m.width).
+				Height(contentHeight).
+				MaxHeight(contentHeight).
+				Render(overlayView)
+			return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+		}
 
 		overlayWidth, overlayHeight := current.Size()
 
@@ -1152,6 +1166,13 @@ func overlayUsesAppFrame(current overlay.Overlay) bool {
 		return true
 	}
 	return appFrameOverlay.UsesAppFrame()
+}
+
+func overlayUsesFullScreen(current overlay.Overlay) bool {
+	fullScreenOverlay, ok := current.(interface {
+		UsesFullScreen() bool
+	})
+	return ok && fullScreenOverlay.UsesFullScreen()
 }
 
 func (m Model) layerWithinHeight(bottom, top string, height int) string {
