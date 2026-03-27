@@ -17,6 +17,14 @@ Azedarach Session Primer
   - There is no top-level `az dep` command; use `az issue dep ...`.
   - Use `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]` to record dependency relationships.
   - Use `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]` to remove dependency relationships.
+- Fanout and mailbox quickstart:
+  - `az issue fanout --input ./fanout.json` (plan nested child issues from spec)
+  - `az issue fanout --input ./fanout.json --apply` (create issues + dependency edges)
+  - `az issue fanout ready --root <issue-id> --json` (show runnable leaf issues)
+  - `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out` (detect out-of-budget changes)
+  - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`
+  - `az mail list --parent <parent-issue> --since <seq> --json`
+  - `az mail watch --parent <parent-issue> --since <seq> --jsonl`
 - Issue-context guardrails:
   {{ .ContextGuardrail }}
   - Missing fields (for example description/notes) are valid. Treat absent or empty fields as intentional and continue execution.
