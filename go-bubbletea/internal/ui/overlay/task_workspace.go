@@ -39,13 +39,13 @@ func NewTaskWorkspaceOverlay(
 	detail := NewDetailPanel(task, session).WithRelatedTasks(relatedTasks)
 	actions := NewActionMenu(task, session).WithRelatedTasks(relatedTasks)
 
-	overlayWidth := max(84, viewportWidth)
-	overlayHeight := max(16, viewportHeight-1)
-	if viewportWidth > 0 {
-		overlayWidth = min(overlayWidth, viewportWidth)
+	overlayWidth := viewportWidth
+	overlayHeight := viewportHeight - 1
+	if overlayWidth < 1 {
+		overlayWidth = 84
 	}
-	if viewportHeight > 0 {
-		overlayHeight = min(overlayHeight, viewportHeight-1)
+	if overlayHeight < 1 {
+		overlayHeight = 24
 	}
 
 	detail.viewHeight = max(8, overlayHeight-8)
@@ -66,6 +66,14 @@ func (w *TaskWorkspaceOverlay) Init() tea.Cmd {
 
 func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			w.overlayWidth = msg.Width
+		}
+		if msg.Height > 1 {
+			w.overlayHeight = msg.Height - 1
+		}
+		return w, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
@@ -130,8 +138,8 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
-	contentWidth := max(24, w.overlayWidth-2)
-	contentHeight := max(8, w.overlayHeight-2)
+	contentWidth := max(1, w.overlayWidth-2)
+	contentHeight := max(1, w.overlayHeight-2)
 	titleLine := w.styles.MenuItemActive.Render("Task Workspace")
 	separator := w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth)))
 
@@ -211,7 +219,7 @@ func (w *TaskWorkspaceOverlay) renderStacked(contentWidth, contentHeight, bodyHe
 	detailHeight := max(4, bodyHeight-actionsHeight-gap)
 
 	w.detail.viewHeight = max(4, detailHeight)
-	w.detail.wrapWidth = max(16, contentWidth-4)
+	w.detail.wrapWidth = max(4, contentWidth-4)
 
 	detailView := lipgloss.NewStyle().
 		Width(contentWidth).

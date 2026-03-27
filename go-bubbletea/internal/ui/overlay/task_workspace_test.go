@@ -117,3 +117,22 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 		t.Fatalf("expected status bindings to include ctrl+u/d hint, got %q", joined)
 	}
 }
+
+func TestTaskWorkspaceOverlay_WindowResizeUpdatesDimensions(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 64, Height: 20})
+	overlay = model.(*TaskWorkspaceOverlay)
+
+	width, height := overlay.Size()
+	if width != 64 {
+		t.Fatalf("expected overlay width to track window size, got %d", width)
+	}
+	if height != 19 {
+		t.Fatalf("expected overlay height to reserve status line, got %d", height)
+	}
+}

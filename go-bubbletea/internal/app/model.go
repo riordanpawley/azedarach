@@ -268,6 +268,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ensureCursorVisible(m.buildColumns())
+		if !m.overlayStack.IsEmpty() {
+			return m, m.overlayStack.Update(msg)
+		}
 		return m, nil
 
 	case spinner.TickMsg:

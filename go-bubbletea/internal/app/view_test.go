@@ -169,6 +169,25 @@ func TestViewWithOverlayStatusBindingsUsesOverlayHints(t *testing.T) {
 	}
 }
 
+func TestWindowSizeMsgForwardedToActiveOverlay(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	resize := &resizeAwareOverlay{}
+	m.overlayStack.Push(resize)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 77, Height: 33})
+	model := updated.(Model)
+	got := model.overlayStack.Current().(*resizeAwareOverlay)
+	if !got.seen {
+		t.Fatalf("expected overlay to receive window size message")
+	}
+	if got.lastW != 77 || got.lastH != 33 {
+		t.Fatalf("expected forwarded size 77x33, got %dx%d", got.lastW, got.lastH)
+	}
+}
+
 func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
@@ -328,4 +347,19 @@ func (o *hintOverlay) StatusBindings() []keybinds.Binding {
 		{Key: "j/k", Description: "scroll"},
 		{Key: "Esc", Description: "close"},
 	}
+}
+
+type resizeAwareOverlay struct {
+	testOverlay
+	seen         bool
+	lastW, lastH int
+}
+
+func (o *resizeAwareOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if sz, ok := msg.(tea.WindowSizeMsg); ok {
+		o.seen = true
+		o.lastW = sz.Width
+		o.lastH = sz.Height
+	}
+	return o, nil
 }
