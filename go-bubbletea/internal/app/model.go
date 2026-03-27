@@ -1069,6 +1069,13 @@ func (m Model) View() string {
 	if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
+	if current := m.overlayStack.Current(); current != nil {
+		if hintOverlay, ok := current.(interface {
+			StatusBindings() []keybinds.Binding
+		}); ok {
+			sb.SetHintBindings(hintOverlay.StatusBindings())
+		}
+	}
 	statusBarView := sb.Render()
 
 	contentHeight := board.BoardContentHeight(m.height)

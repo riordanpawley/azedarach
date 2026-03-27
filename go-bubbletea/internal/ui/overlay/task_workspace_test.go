@@ -96,3 +96,24 @@ func TestTaskWorkspaceOverlay_DetailScrollKeybinds(t *testing.T) {
 		t.Fatalf("expected ctrl+u to half-page up; got %d from %d", overlay.detail.scrollY, beforeHalfUp)
 	}
 }
+
+func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Task",
+		Status:      domain.StatusOpen,
+		Description: strings.Repeat("line\n", 50),
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	bindings := overlay.StatusBindings()
+	joined := ""
+	for _, b := range bindings {
+		joined += b.Key + " " + b.Description + " "
+	}
+	if !strings.Contains(joined, "scroll") {
+		t.Fatalf("expected status bindings to include scroll hint, got %q", joined)
+	}
+	if !strings.Contains(joined, "ctrl+u/d") {
+		t.Fatalf("expected status bindings to include ctrl+u/d hint, got %q", joined)
+	}
+}

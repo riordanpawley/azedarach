@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -79,38 +80,30 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return w, w.actions.selectCurrentAction()
 		case "j", "down":
-			if w.focus == taskWorkspaceFocusActions {
-				w.actions.moveCursorDown()
-			} else if w.detail.scrollY < w.detail.maxScroll() {
+			if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
 			return w, nil
 		case "k", "up":
-			if w.focus == taskWorkspaceFocusActions {
-				w.actions.moveCursorUp()
-			} else if w.detail.scrollY > 0 {
+			if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
 			return w, nil
-		case "ctrl+d":
+		case "n":
 			if w.focus == taskWorkspaceFocusActions {
-				step := max(1, max(1, len(w.actions.actions)/6))
-				for i := 0; i < step; i++ {
-					w.actions.moveCursorDown()
-				}
-			} else {
-				w.detail.scrollY = min(w.detail.maxScroll(), w.detail.scrollY+w.halfPageStep())
+				w.actions.moveCursorDown()
 			}
 			return w, nil
-		case "ctrl+u":
+		case "p":
 			if w.focus == taskWorkspaceFocusActions {
-				step := max(1, max(1, len(w.actions.actions)/6))
-				for i := 0; i < step; i++ {
-					w.actions.moveCursorUp()
-				}
-			} else {
-				w.detail.scrollY = max(0, w.detail.scrollY-w.halfPageStep())
+				w.actions.moveCursorUp()
 			}
+			return w, nil
+		case "ctrl+d":
+			w.detail.scrollY = min(w.detail.maxScroll(), w.detail.scrollY+w.halfPageStep())
+			return w, nil
+		case "ctrl+u":
+			w.detail.scrollY = max(0, w.detail.scrollY-w.halfPageStep())
 			return w, nil
 		case "g", "home":
 			if w.focus == taskWorkspaceFocusActions {
@@ -228,6 +221,18 @@ func (w *TaskWorkspaceOverlay) UsesFullScreen() bool {
 
 func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
 	return true
+}
+
+func (w *TaskWorkspaceOverlay) StatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k/↑/↓", Description: "scroll"},
+		{Key: "ctrl+u/d", Description: "half-page"},
+		{Key: "g/G", Description: "top/bottom"},
+		{Key: "Tab/h/l", Description: "focus"},
+		{Key: "Enter", Description: "run action"},
+		{Key: "n/p", Description: "action up/down"},
+		{Key: "Esc/q", Description: "close"},
+	}
 }
 
 func (w *TaskWorkspaceOverlay) toggleFocus() {

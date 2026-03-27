@@ -16,6 +16,7 @@ import (
 type StatusBar struct {
 	mode             types.Mode
 	width            int
+	hintBindings     []keybinds.Binding
 	currentProject   string
 	selectionSummary string
 	loadingIndicator string
@@ -50,6 +51,10 @@ func (sb *StatusBar) SetCurrentProject(project string) {
 // SetEventTicker sets the ring buffer that provides the latest event message.
 func (sb *StatusBar) SetEventTicker(ticker *eventticker.Ring) {
 	sb.eventTicker = ticker
+}
+
+func (sb *StatusBar) SetHintBindings(bindings []keybinds.Binding) {
+	sb.hintBindings = append([]keybinds.Binding(nil), bindings...)
 }
 
 // Render renders the status bar as a string
@@ -166,7 +171,10 @@ func renderWithin(style lipgloss.Style, text string, width int) (string, bool) {
 }
 
 func (sb StatusBar) inlineHints() string {
-	bindings := GetHintBindings(sb.mode)
+	bindings := sb.hintBindings
+	if len(bindings) == 0 {
+		bindings = GetHintBindings(sb.mode)
+	}
 	if len(bindings) == 0 {
 		return ""
 	}
