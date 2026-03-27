@@ -1082,11 +1082,6 @@ func (m Model) View() string {
 		current := m.overlayStack.Current()
 		overlayView := current.View()
 		if overlayUsesFullScreen(current) {
-			title := current.Title()
-			if title != "" && !overlayUsesInternalTitle(current) {
-				titleView := m.styles.OverlayTitle.Render(title)
-				overlayView = lipgloss.JoinVertical(lipgloss.Left, titleView, overlayView)
-			}
 			contentView = lipgloss.NewStyle().
 				Width(m.width).
 				MaxWidth(m.width).

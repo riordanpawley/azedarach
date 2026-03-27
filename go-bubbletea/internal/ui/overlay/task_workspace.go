@@ -117,67 +117,72 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
-	innerWidth := max(32, w.overlayWidth-2)
-	bodyHeight := max(8, w.overlayHeight-4)
+	contentWidth := max(24, w.overlayWidth-2)
+	contentHeight := max(8, w.overlayHeight-2)
+	titleLine := w.styles.MenuItemActive.Render("Task Workspace")
+	separator := w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth)))
+
+	bodyHeight := max(6, contentHeight-2)
 	gap := 1
-	minLeft := 32
-	minRight := 22
-	leftWidth := (innerWidth * 2) / 3
-	maxLeft := max(minLeft, innerWidth-gap-minRight)
+	minLeft := 28
+	minRight := 20
+	usableWidth := max(16, contentWidth-gap)
+	leftWidth := (usableWidth * 2) / 3
+	maxLeft := max(minLeft, usableWidth-minRight)
 	if leftWidth > maxLeft {
 		leftWidth = maxLeft
 	}
 	if leftWidth < minLeft {
 		leftWidth = minLeft
 	}
-	rightWidth := innerWidth - gap - leftWidth
+	rightWidth := usableWidth - leftWidth
 	if rightWidth < minRight {
 		rightWidth = minRight
-		leftWidth = max(minLeft, innerWidth-gap-rightWidth)
+		leftWidth = max(minLeft, usableWidth-rightWidth)
 	}
 
-	leftBorder := styles.Overlay0
-	rightBorder := styles.Overlay0
+	detailStyle := lipgloss.NewStyle()
 	if w.focus == taskWorkspaceFocusDetail {
-		leftBorder = styles.Blue
-	} else {
-		rightBorder = styles.Blue
+		detailStyle = detailStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
 	}
-
-	detailView := lipgloss.NewStyle().
+	detailView := detailStyle.
 		Width(leftWidth).
 		MaxWidth(leftWidth).
 		Height(bodyHeight).
 		MaxHeight(bodyHeight).
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(leftBorder).
-		Padding(0, 1).
 		Render(w.detail.View())
 
 	actionsHeader := w.styles.MenuItemActive.Render("Actions")
 	actionsBody := lipgloss.JoinVertical(
 		lipgloss.Left,
 		actionsHeader,
-		w.styles.Separator.Render(strings.Repeat("─", max(6, rightWidth-6))),
+		w.styles.Separator.Render(strings.Repeat("─", max(6, rightWidth))),
 		w.actions.viewActionsOnly(),
 	)
-	actionsView := lipgloss.NewStyle().
+	actionStyle := lipgloss.NewStyle()
+	if w.focus == taskWorkspaceFocusActions {
+		actionStyle = actionStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
+	}
+	actionsView := actionStyle.
 		Width(rightWidth).
 		MaxWidth(rightWidth).
 		Height(bodyHeight).
 		MaxHeight(bodyHeight).
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(rightBorder).
-		Padding(0, 1).
 		Render(actionsBody)
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, detailView, lipgloss.NewStyle().Width(gap).Render(""), actionsView)
+	body := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		detailView,
+		lipgloss.NewStyle().Width(gap).Render(""),
+		actionsView,
+	)
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
 	return lipgloss.NewStyle().
-		Width(w.overlayWidth).
-		Height(w.overlayHeight).
+		Width(contentWidth).
+		Height(contentHeight).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(styles.Surface2).
-		Render(body)
+		Render(content)
 }
 
 func (w *TaskWorkspaceOverlay) Title() string {
@@ -197,6 +202,10 @@ func (w *TaskWorkspaceOverlay) UsesAppFrame() bool {
 }
 
 func (w *TaskWorkspaceOverlay) UsesFullScreen() bool {
+	return true
+}
+
+func (w *TaskWorkspaceOverlay) UsesInternalTitle() bool {
 	return true
 }
 
