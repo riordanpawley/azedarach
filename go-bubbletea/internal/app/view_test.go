@@ -116,6 +116,15 @@ func TestViewWithStatusModeOverlayUsesOverlayModeBadge(t *testing.T) {
 	}
 }
 
+func TestOverlayUsesAppFrame(t *testing.T) {
+	if !overlayUsesAppFrame(&testOverlay{}) {
+		t.Fatalf("expected default overlays to use app frame")
+	}
+	if overlayUsesAppFrame(&framelessOverlay{}) {
+		t.Fatalf("expected frameless overlays to skip app frame")
+	}
+}
+
 func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
@@ -203,3 +212,8 @@ func (o *testOverlay) Size() (int, int)                        { return 20, 10 }
 type statusModeOverlay struct{ testOverlay }
 
 func (o *statusModeOverlay) StatusMode() types.Mode { return types.ModeAction }
+
+type framelessOverlay struct{ statusModeOverlay }
+
+func (o *framelessOverlay) View() string       { return "frame-free overlay" }
+func (o *framelessOverlay) UsesAppFrame() bool { return false }

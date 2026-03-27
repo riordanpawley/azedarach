@@ -1093,10 +1093,17 @@ func (m Model) View() string {
 				titleView := m.styles.OverlayTitle.Render(title)
 				overlayView = lipgloss.JoinVertical(lipgloss.Left, titleView, overlayView)
 			}
-			overlayView = m.styles.Overlay.
-				Width(overlayWidth).
-				Height(overlayHeight).
-				Render(overlayView)
+			if overlayUsesAppFrame(current) {
+				overlayView = m.styles.Overlay.
+					Width(overlayWidth).
+					Height(overlayHeight).
+					Render(overlayView)
+			} else {
+				overlayView = lipgloss.NewStyle().
+					Width(overlayWidth).
+					Height(overlayHeight).
+					Render(overlayView)
+			}
 
 			centeredOverlay := lipgloss.Place(
 				m.width,
@@ -1141,6 +1148,16 @@ func overlayUsesInternalTitle(current overlay.Overlay) bool {
 		UsesInternalTitle() bool
 	})
 	return ok && internalTitleOverlay.UsesInternalTitle()
+}
+
+func overlayUsesAppFrame(current overlay.Overlay) bool {
+	appFrameOverlay, ok := current.(interface {
+		UsesAppFrame() bool
+	})
+	if !ok {
+		return true
+	}
+	return appFrameOverlay.UsesAppFrame()
 }
 
 func (m Model) layerWithinHeight(bottom, top string, height int) string {
