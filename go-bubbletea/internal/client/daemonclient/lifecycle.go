@@ -31,6 +31,15 @@ type sessionCommandBody struct {
 	ImagePaths []string `json:"image_paths,omitempty"`
 }
 
+// StartSessionParams captures lifecycle start options in a single payload
+// to avoid brittle positional argument expansion at callsites.
+type StartSessionParams struct {
+	IssueID    string
+	BaseBranch string
+	Yolo       bool
+	ImagePaths []string
+}
+
 type commandOutputBody struct {
 	Output string `json:"output"`
 }
@@ -99,13 +108,13 @@ func (c *Client) projectRoute() string {
 }
 
 // StartSession asks the daemon to start one session for issue/task id.
-func (c *Client) StartSession(ctx context.Context, issueID string, baseBranch string, yolo bool, imagePaths []string) (string, error) {
+func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
 		ProjectID:  c.projectID,
-		SessionID:  issueID,
-		BaseBranch: baseBranch,
-		Yolo:       yolo,
-		ImagePaths: imagePaths,
+		SessionID:  params.IssueID,
+		BaseBranch: params.BaseBranch,
+		Yolo:       params.Yolo,
+		ImagePaths: params.ImagePaths,
 	})
 }
 

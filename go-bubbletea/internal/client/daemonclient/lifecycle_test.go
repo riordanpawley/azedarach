@@ -67,7 +67,12 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 
 	client := New(transport).WithProjectID("proj-a")
 	imagePaths := []string{"/tmp/a.png", "/tmp/with space/image.png"}
-	got, err := client.StartSession(context.Background(), "az-1", "main", false, imagePaths)
+	got, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+		ImagePaths: imagePaths,
+	})
 	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
@@ -126,7 +131,11 @@ func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	if _, err := client.StartSession(context.Background(), "az-1", "main", true, nil); err != nil {
+	if _, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       true,
+	}); err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
 
@@ -245,7 +254,11 @@ func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), "az-1", "main", false, nil)
+	got, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+	})
 	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
@@ -275,7 +288,11 @@ func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	_, err := client.StartSession(context.Background(), "az-1", "main", false, nil)
+	_, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+	})
 	var pending *OperationPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("StartSession error = %v, want OperationPendingError", err)

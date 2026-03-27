@@ -2544,7 +2544,12 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch, yolo, m.sessionImagePaths(ctx, issueID)); err != nil {
+		if _, err := m.daemonClient.StartSession(ctx, daemonclient.StartSessionParams{
+			IssueID:    issueID,
+			BaseBranch: baseBranch,
+			Yolo:       yolo,
+			ImagePaths: m.sessionImagePaths(ctx, issueID),
+		}); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
 			}

@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -124,7 +125,7 @@ func (sb StatusBar) Render() string {
 	if sb.selectionSummary != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: sb.selectionSummary})
 	}
-	if hints := GetHints(sb.mode); hints != "" {
+	if hints := sb.inlineHints(); hints != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusHint, text: hints})
 	}
 
@@ -161,4 +162,31 @@ func renderWithin(style lipgloss.Style, text string, width int) (string, bool) {
 	}
 
 	return ansi.Truncate(rendered, width, "…"), true
+}
+
+func (sb StatusBar) inlineHints() string {
+	bindings := GetHintBindings(sb.mode)
+	if len(bindings) == 0 {
+		return ""
+	}
+	inline := make([]keybinds.Binding, 0, len(bindings))
+	for _, binding := range bindings {
+		key := strings.TrimSpace(binding.Key)
+		desc := strings.TrimSpace(binding.Description)
+		if key == "" || desc == "" {
+			continue
+		}
+		inline = append(inline, keybinds.Binding{
+			Key:         key + ":",
+			Description: desc,
+		})
+	}
+	if len(inline) == 0 {
+		return ""
+	}
+	return keybinds.RenderInline(inline, "  ", keybinds.Theme{
+		KeyStyle:         sb.styles.StatusInfo,
+		DescriptionStyle: sb.styles.StatusHint,
+		FooterStyle:      sb.styles.StatusHint,
+	})
 }
