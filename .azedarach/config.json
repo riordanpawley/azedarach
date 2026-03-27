@@ -67,6 +67,8 @@
     "validateCommands": [
       "cd go-bubbletea && just build"
     ],
+    "fixCommand": "",
+    "maxFixAttempts": 2,
     "startAiSessionOnFailure": true
   },
   "devServer": {
