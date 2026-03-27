@@ -153,7 +153,7 @@ func (w *TaskWorkspaceOverlay) View() string {
 		rightWidth = minRight
 		leftWidth = max(minLeft, usableWidth-rightWidth)
 	}
-	w.detail.viewHeight = max(3, bodyHeight-3)
+	w.detail.viewHeight = max(6, bodyHeight)
 	w.detail.wrapWidth = max(20, leftWidth-2)
 
 	detailStyle := lipgloss.NewStyle()
