@@ -15,10 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -1209,11 +1211,56 @@ func (m Model) layerWithinHeightTransparent(bottom, top string, height int) stri
 		if lineIsVisuallyEmpty(t) {
 			res[i] = b
 		} else {
-			res[i] = t
+			res[i] = mergeOverlayLine(b, t)
 		}
 	}
 
 	return strings.Join(res, "\n")
+}
+
+func mergeOverlayLine(bottom, top string) string {
+	left, right, ok := nonSpaceBounds(top)
+	if !ok {
+		return bottom
+	}
+	bottomWidth := ansi.StringWidth(bottom)
+	if bottomWidth == 0 {
+		return top
+	}
+	if left < 0 {
+		left = 0
+	}
+	if right > bottomWidth {
+		right = bottomWidth
+	}
+	if left >= right {
+		return bottom
+	}
+	return ansi.Cut(bottom, 0, left) + ansi.Cut(top, left, right) + ansi.Cut(bottom, right, bottomWidth)
+}
+
+func nonSpaceBounds(line string) (left int, right int, ok bool) {
+	stripped := ansi.Strip(line)
+	cellPos := 0
+	left = -1
+	right = -1
+	for _, r := range stripped {
+		width := ansi.StringWidth(string(r))
+		if width < 1 {
+			continue
+		}
+		if !unicode.IsSpace(r) {
+			if left == -1 {
+				left = cellPos
+			}
+			right = cellPos + width
+		}
+		cellPos += width
+	}
+	if left == -1 || right <= left {
+		return 0, 0, false
+	}
+	return left, right, true
 }
 
 func lineIsVisuallyEmpty(line string) bool {

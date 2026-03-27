@@ -201,6 +201,25 @@ func TestLayerWithinHeightTransparent_IgnoresANSISpaceOnlyLines(t *testing.T) {
 	}
 }
 
+func TestMergeOverlayLine_PreservesOutsideSpan(t *testing.T) {
+	bottom := "1111111111"
+	top := "   XX     "
+	got := mergeOverlayLine(bottom, top)
+	if got != "111XX11111" {
+		t.Fatalf("mergeOverlayLine result=%q want %q", got, "111XX11111")
+	}
+}
+
+func TestNonSpaceBounds(t *testing.T) {
+	left, right, ok := nonSpaceBounds("   abc  ")
+	if !ok {
+		t.Fatalf("expected bounds for non-space line")
+	}
+	if left != 3 || right != 6 {
+		t.Fatalf("unexpected bounds: left=%d right=%d", left, right)
+	}
+}
+
 type testOverlay struct{}
 
 func (o *testOverlay) View() string                            { return "test overlay" }
