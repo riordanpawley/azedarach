@@ -210,7 +210,7 @@ func (d *DetailPanel) View() string {
 		if wrapWidth < 10 {
 			wrapWidth = 10
 		}
-		wrappedDescription := ansi.Hardwrap(d.task.Description, wrapWidth, true)
+		wrappedDescription := ansi.Wrap(d.task.Description, wrapWidth, "-/")
 		descLines := strings.Split(wrappedDescription, "\n")
 		d.contentHeight = len(descLines)
 		reservedLines := lipgloss.Height(b.String())
