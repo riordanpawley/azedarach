@@ -25,6 +25,7 @@ import type { DevServerHandlersService } from "./DevServerHandlersService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
+import type { PRHandlersService } from "./PRHandlersService.js"
 import type { SessionHandlersService } from "./SessionHandlersService.js"
 import type { TaskHandlersService } from "./TaskHandlersService.js"
 import type { Keybinding } from "./types.js"
@@ -43,6 +44,7 @@ export interface BindingContext {
 	// Handler services
 	sessionHandlers: SessionHandlersService
 	taskHandlers: TaskHandlersService
+	prHandlers: PRHandlersService
 	inputHandlers: InputHandlersService
 	orchestrateHandlers: OrchestrateHandlersService
 	devServerHandlers: DevServerHandlersService
@@ -622,6 +624,62 @@ done
 				"Stop session",
 				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.stopSession())),
 			),
+		),
+	},
+	{
+		key: "u",
+		mode: "action",
+		description: "Update from base",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
+		),
+	},
+	{
+		key: "f",
+		mode: "action",
+		description: "Diff vs base",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
+		),
+	},
+	{
+		key: "P",
+		mode: "action",
+		description: "Create PR",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.createPR())),
+		),
+	},
+	{
+		key: "O",
+		mode: "action",
+		description: "Open PR",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.openPR())),
+		),
+	},
+	{
+		key: "m",
+		mode: "action",
+		description: "Merge",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.merge())),
+		),
+	},
+	{
+		key: "S-m",
+		mode: "action",
+		description: "Abort merge",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
+		),
+	},
+	{
+		key: "d",
+		mode: "action",
+		description: "Cleanup worktree + branch",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.cleanup())),
 		),
 	},
 	{
