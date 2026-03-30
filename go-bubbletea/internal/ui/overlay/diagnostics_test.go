@@ -251,6 +251,22 @@ func TestDiagnosticsPanel_Update_Scrolling(t *testing.T) {
 	if newPanel.scrollY != maxScroll {
 		t.Errorf("after 'G', scrollY = %v, want %v", newPanel.scrollY, maxScroll)
 	}
+
+	newPanel.scrollY = 10
+	newPanel.viewHeight = 8
+	msg = tea.KeyMsg{Type: tea.KeyCtrlD}
+	newModel, _ = newPanel.Update(msg)
+	newPanel = newModel.(*DiagnosticsPanel)
+	if newPanel.scrollY != 14 {
+		t.Errorf("after ctrl+d, scrollY = %v, want 14", newPanel.scrollY)
+	}
+
+	msg = tea.KeyMsg{Type: tea.KeyCtrlU}
+	newModel, _ = newPanel.Update(msg)
+	newPanel = newModel.(*DiagnosticsPanel)
+	if newPanel.scrollY != 10 {
+		t.Errorf("after ctrl+u, scrollY = %v, want 10", newPanel.scrollY)
+	}
 }
 
 func TestDiagnosticsPanel_Title(t *testing.T) {

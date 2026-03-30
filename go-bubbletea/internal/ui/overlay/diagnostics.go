@@ -97,6 +97,12 @@ func (d *DiagnosticsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.scrollY--
 			}
 			return d, nil
+		case "ctrl+d":
+			d.scrollY = min(d.maxScroll(), d.scrollY+d.halfPageStep())
+			return d, nil
+		case "ctrl+u":
+			d.scrollY = max(0, d.scrollY-d.halfPageStep())
+			return d, nil
 
 		case "g":
 			// Jump to top
@@ -656,7 +662,7 @@ func (d *DiagnosticsPanel) renderActions() string {
 	footer := renderDialogActions(d.styles, []keybinds.Binding{
 		{Key: "Tab", Description: "Switch section"},
 		{Key: "1-6", Description: "Jump to section"},
-		{Key: "j/k", Description: "Scroll"},
+		{Key: "j/k/ctrl+u/d", Description: "Scroll"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "q/Esc", Description: "Close"},
 	})
@@ -705,6 +711,14 @@ func (d *DiagnosticsPanel) getHealthColor(status diagnostics.HealthStatus) lipgl
 
 func (d *DiagnosticsPanel) maxScroll() int {
 	return max(0, d.contentHeight-d.viewHeight)
+}
+
+func (d *DiagnosticsPanel) halfPageStep() int {
+	step := d.viewHeight / 2
+	if step < 1 {
+		return 1
+	}
+	return step
 }
 
 // Utility functions

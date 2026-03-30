@@ -75,6 +75,12 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.scrollY--
 			}
 			return d, nil
+		case "ctrl+d":
+			d.scrollY = min(d.maxScroll(), d.scrollY+d.halfPageStep())
+			return d, nil
+		case "ctrl+u":
+			d.scrollY = max(0, d.scrollY-d.halfPageStep())
+			return d, nil
 
 		case "g":
 			// Jump to top
@@ -227,7 +233,7 @@ func (d *DetailPanel) View() string {
 		// Scroll indicator if needed
 		if d.maxScroll() > 0 {
 			scrollInfo := d.styles.Footer.Render(
-				fmt.Sprintf("[j/k to scroll, g/G to jump] (line %d/%d)", d.scrollY+1, d.contentHeight),
+				fmt.Sprintf("[j/k or ctrl+u/d to scroll, g/G to jump] (line %d/%d)", d.scrollY+1, d.contentHeight),
 			)
 			b.WriteString("\n")
 			b.WriteString(scrollInfo)
@@ -372,6 +378,14 @@ func (d *DetailPanel) maxScroll() int {
 		visible = d.viewHeight
 	}
 	return max(0, d.contentHeight-visible)
+}
+
+func (d *DetailPanel) halfPageStep() int {
+	step := d.descViewHeight / 2
+	if step < 1 {
+		return 1
+	}
+	return step
 }
 
 func wrapDescriptionLines(description string, width int) []string {
