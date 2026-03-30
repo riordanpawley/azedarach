@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 )
 
@@ -100,6 +102,37 @@ func TestSyncBootstrapGuardBlocksDependentCommands(t *testing.T) {
 		t.Fatalf("error message = %q, want %q", got, want)
 	}
 
+	body, err := json.Marshal(protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-a",
+		Kind:      " session.start ",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	operationResp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-1b",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         protocol.CommandOperationSubmit,
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("operation command() error = %v", err)
+	}
+	if operationResp.OK {
+		t.Fatal("expected sync-dependent operation submit to be rejected before bootstrap")
+	}
+	if operationResp.Error == nil {
+		t.Fatal("expected operation error envelope")
+	}
+	if got, want := operationResp.Error.Code, protocol.ErrorCodeUnavailable; got != want {
+		t.Fatalf("operation error code = %s, want %s", got, want)
+	}
+	if got, want := operationResp.Error.Message, "sync bootstrap not ready"; got != want {
+		t.Fatalf("operation error message = %q, want %q", got, want)
+	}
+
+	d.router = daemonhandlers.NewDispatcher(nil)
 	nonSyncResp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-2",

@@ -133,6 +133,7 @@ func (d *Daemon) shouldGuardSyncDependentCommand(req protocol.RequestEnvelope) b
 }
 
 func isSyncDependentOperationKind(kind string) bool {
+	kind = strings.TrimSpace(kind)
 	switch {
 	case strings.HasPrefix(kind, "task."):
 		return true
