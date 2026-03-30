@@ -45,6 +45,8 @@ type TaskCreatedMsg struct {
 
 // CreateTaskOverlay provides a form to create a new task
 type CreateTaskOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	id          string
 	title       textinput.Model
 	description textarea.Model
@@ -153,6 +155,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		c.ApplyWindowSize(msg)
+		return c, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -278,6 +283,49 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the form
 func (c *CreateTaskOverlay) View() string {
+	width, height := c.Clamp(72, 22)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            c.styles,
+		width:             width,
+		height:            height,
+		title:             c.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        60,
+		gap:               3,
+		minLeft:           38,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return c.renderFormContent(width, height)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(c.styles, []keybinds.Binding{
+				{Key: "Tab / Shift+Tab", Description: "Switch fields"},
+				{Key: "T/B/F/E/C", Description: "Set type"},
+				{Key: "0/1/2/3/4", Description: "Set priority"},
+				{Key: "Enter", Description: "Create task"},
+				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
+				{Key: "Esc", Description: "Cancel"},
+			})
+		},
+	})
+}
+
+func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
+	stacked := width < 52
+	titleWidth := max(20, width-6)
+	if stacked {
+		titleWidth = max(20, width-4)
+	}
+	descriptionWidth := max(24, width-4)
+	descriptionHeight := max(4, height-12)
+	if stacked {
+		descriptionHeight = max(4, height-16)
+	}
+	c.title.Width = titleWidth
+	c.description.SetWidth(descriptionWidth)
+	c.description.SetHeight(descriptionHeight)
+
 	var b strings.Builder
 
 	labelStyle := lipgloss.NewStyle().
@@ -286,7 +334,6 @@ func (c *CreateTaskOverlay) View() string {
 	focusStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#89b4fa")).
 		Bold(true)
-	hintTextStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
 
 	// Title field
 	if c.focusIndex == focusTitle {
@@ -294,9 +341,15 @@ func (c *CreateTaskOverlay) View() string {
 	} else {
 		b.WriteString(labelStyle.Render("Title:"))
 	}
-	b.WriteString(" ")
-	b.WriteString(c.title.View())
-	b.WriteString("\n")
+	if stacked {
+		b.WriteString("\n")
+		b.WriteString(c.title.View())
+		b.WriteString("\n")
+	} else {
+		b.WriteString(" ")
+		b.WriteString(c.title.View())
+		b.WriteString("\n")
+	}
 
 	// Description field
 	if c.focusIndex == focusDescription {
@@ -326,11 +379,14 @@ func (c *CreateTaskOverlay) View() string {
 	}
 	b.WriteString(" ")
 	b.WriteString(c.renderPrioritySelector())
-	b.WriteString("\n\n")
-
-	// Separator
-	b.WriteString(c.styles.Separator.Render(strings.Repeat("─", 58)))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if !stacked {
+		b.WriteString("\n")
+		b.WriteString(c.styles.Separator.Render(strings.Repeat("─", max(6, width-2))))
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString("\n")
+	}
 
 	// Submit button
 	submitStyle := c.styles.MenuItem
@@ -338,25 +394,7 @@ func (c *CreateTaskOverlay) View() string {
 		submitStyle = c.styles.MenuItemActive
 	}
 	b.WriteString(submitStyle.Render("[ Create Task ]"))
-	b.WriteString("\n\n")
-
-	// Footer hints
-	hintTheme := keybinds.Theme{
-		KeyStyle:         c.styles.MenuKey,
-		DescriptionStyle: hintTextStyle,
-		FooterStyle:      hintTextStyle,
-	}
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Tab / Shift+Tab", Description: "Switch fields"},
-		{Key: "T/B/F/E/C", Description: "Set type"},
-		{Key: "0/1/2/3/4", Description: "Set priority"},
-	}, 0, hintTheme))
 	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Enter", Description: "Create task"},
-		{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, hintTheme))
 	if c.editorError != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
 		b.WriteString("\n")
@@ -773,5 +811,5 @@ func (c *CreateTaskOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (c *CreateTaskOverlay) Size() (width, height int) {
-	return 72, 22
+	return c.Clamp(72, 22)
 }

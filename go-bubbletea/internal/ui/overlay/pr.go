@@ -23,6 +23,8 @@ type PRCreatedMsg struct {
 
 // PRCreateOverlay provides a form to create a pull request
 type PRCreateOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	title      textinput.Model
 	body       textarea.Model
 	draft      bool
@@ -78,6 +80,9 @@ func (p *PRCreateOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		p.ApplyWindowSize(msg)
+		return p, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc":
@@ -140,6 +145,48 @@ func (p *PRCreateOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the form
 func (p *PRCreateOverlay) View() string {
+	width, height := p.Clamp(80, 28)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            p.styles,
+		width:             width,
+		height:            height,
+		title:             p.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        62,
+		gap:               3,
+		minLeft:           42,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return p.renderFormContent(width, height)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(p.styles, []keybinds.Binding{
+				{Key: "Tab / Shift+Tab", Description: "Switch fields"},
+				{Key: "d", Description: "Toggle draft"},
+				{Key: "Ctrl+S", Description: "Submit"},
+				{Key: "Enter", Description: "Submit focused"},
+				{Key: "Esc", Description: "Cancel"},
+			})
+		},
+	})
+}
+
+func (p *PRCreateOverlay) renderFormContent(width, height int) string {
+	stacked := width < 52
+	titleWidth := max(24, width-18)
+	if stacked {
+		titleWidth = max(24, width-4)
+	}
+	bodyWidth := max(24, width-4)
+	bodyHeight := max(4, height-10)
+	if stacked {
+		bodyHeight = max(4, height-15)
+	}
+	p.title.Width = titleWidth
+	p.body.SetWidth(bodyWidth)
+	p.body.SetHeight(bodyHeight)
+
 	var b strings.Builder
 
 	labelStyle := lipgloss.NewStyle().
@@ -167,9 +214,15 @@ func (p *PRCreateOverlay) View() string {
 	} else {
 		b.WriteString(labelStyle.Render("Title:"))
 	}
-	b.WriteString("  ")
-	b.WriteString(p.title.View())
-	b.WriteString("\n\n")
+	if stacked {
+		b.WriteString("\n")
+		b.WriteString(p.title.View())
+		b.WriteString("\n")
+	} else {
+		b.WriteString("  ")
+		b.WriteString(p.title.View())
+		b.WriteString("\n\n")
+	}
 
 	// Body field
 	if p.focusIndex == prFocusBody {
@@ -179,7 +232,7 @@ func (p *PRCreateOverlay) View() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(p.body.View())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Draft toggle
 	if p.focusIndex == prFocusDraft {
@@ -189,11 +242,16 @@ func (p *PRCreateOverlay) View() string {
 	}
 	b.WriteString("  ")
 	b.WriteString(p.renderDraftToggle())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	// Separator
-	b.WriteString(p.styles.Separator.Render(strings.Repeat("─", 70)))
-	b.WriteString("\n\n")
+	if !stacked {
+		b.WriteString("\n")
+		b.WriteString(p.styles.Separator.Render(strings.Repeat("─", max(6, width-2))))
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString("\n")
+	}
 
 	// Submit button
 	submitStyle := p.styles.MenuItem
@@ -201,19 +259,7 @@ func (p *PRCreateOverlay) View() string {
 		submitStyle = p.styles.MenuItemActive
 	}
 	b.WriteString(submitStyle.Render("[ Create Pull Request ]"))
-	b.WriteString("\n\n")
-
-	// Footer hints
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Tab", Description: "Switch fields"},
-		{Key: "d", Description: "Toggle draft"},
-		{Key: "Ctrl+S", Description: "Submit"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         p.styles.MenuKey,
-		DescriptionStyle: p.styles.Footer,
-		FooterStyle:      p.styles.Footer,
-	}))
+	b.WriteString("\n")
 
 	return b.String()
 }
@@ -264,5 +310,5 @@ func (p *PRCreateOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (p *PRCreateOverlay) Size() (width, height int) {
-	return 80, 28
+	return p.Clamp(80, 28)
 }

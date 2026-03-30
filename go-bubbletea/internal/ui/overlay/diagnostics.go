@@ -37,6 +37,8 @@ type DiagnosticsRefreshMsg struct {
 
 // DiagnosticsPanel displays system diagnostics and health information
 type DiagnosticsPanel struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	diagnosticsService DiagnosticsCollector
 	sessions           map[string]*domain.Session
 	currentDiagnostics *diagnostics.SystemDiagnostics
@@ -142,6 +144,9 @@ func (d *DiagnosticsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.scrollY = 0
 			return d, nil
 		}
+	case tea.WindowSizeMsg:
+		d.ApplyWindowSize(msg)
+		return d, nil
 
 	case DiagnosticsRefreshMsg:
 		d.currentDiagnostics = msg.Diagnostics
@@ -154,44 +159,34 @@ func (d *DiagnosticsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the diagnostics panel
 func (d *DiagnosticsPanel) View() string {
+	width, height := d.Clamp(1000, 34)
+	title := d.Title()
 	if d.currentDiagnostics == nil {
-		return d.styles.MenuItem.Render("Loading diagnostics...")
+		title = "System Diagnostics"
 	}
 
-	var content strings.Builder
-
-	// Render the active section
-	switch d.activeSection {
-	case SectionOverview:
-		d.renderOverview(&content)
-	case SectionPorts:
-		d.renderPorts(&content)
-	case SectionSessions:
-		d.renderSessions(&content)
-	case SectionWorktrees:
-		d.renderWorktrees(&content)
-	case SectionNetwork:
-		d.renderNetwork(&content)
-	case SectionSystem:
-		d.renderSystem(&content)
-	}
-
-	// Count lines for scrolling
-	lines := strings.Split(content.String(), "\n")
-	d.contentHeight = len(lines)
-
-	// Apply scrolling
-	start := d.scrollY
-	end := min(d.scrollY+d.viewHeight, len(lines))
-
-	visibleLines := lines[start:end]
-	result := strings.Join(visibleLines, "\n")
-
-	// Add footer with navigation hints and scroll info
-	footer := d.renderFooter()
-	result += "\n\n" + footer
-
-	return result
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            d.styles,
+		width:             width,
+		height:            height,
+		title:             title,
+		rightSectionTitle: "Actions",
+		breakpoint:        70,
+		gap:               3,
+		minLeft:           44,
+		minRight:          24,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			d.viewHeight = max(1, height)
+			if d.currentDiagnostics == nil {
+				return d.styles.MenuItem.Render("Loading diagnostics...")
+			}
+			return d.renderSectionContent()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return d.renderActions()
+		},
+	})
 }
 
 // Title returns the overlay title
@@ -209,8 +204,7 @@ func (d *DiagnosticsPanel) Title() string {
 
 // Size returns the overlay dimensions
 func (d *DiagnosticsPanel) Size() (width, height int) {
-	d.viewHeight = 20
-	return 80, 28
+	return d.Clamp(1000, 34)
 }
 
 // refreshCmd returns a command to refresh diagnostics
@@ -223,6 +217,33 @@ func (d *DiagnosticsPanel) refreshCmd() tea.Cmd {
 }
 
 // Rendering helpers
+
+func (d *DiagnosticsPanel) renderSectionContent() string {
+	var content strings.Builder
+
+	switch d.activeSection {
+	case SectionOverview:
+		d.renderOverview(&content)
+	case SectionPorts:
+		d.renderPorts(&content)
+	case SectionSessions:
+		d.renderSessions(&content)
+	case SectionWorktrees:
+		d.renderWorktrees(&content)
+	case SectionNetwork:
+		d.renderNetwork(&content)
+	case SectionSystem:
+		d.renderSystem(&content)
+	}
+
+	lines := strings.Split(content.String(), "\n")
+	d.contentHeight = len(lines)
+
+	start := d.scrollY
+	end := min(d.scrollY+d.viewHeight, len(lines))
+	visibleLines := lines[start:end]
+	return strings.Join(visibleLines, "\n")
+}
 
 func (d *DiagnosticsPanel) renderOverview(b *strings.Builder) {
 	diag := d.currentDiagnostics
@@ -630,25 +651,19 @@ func (d *DiagnosticsPanel) renderSystem(b *strings.Builder) {
 	b.WriteString("\n")
 }
 
-func (d *DiagnosticsPanel) renderFooter() string {
+func (d *DiagnosticsPanel) renderActions() string {
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
-	footer := keybinds.RenderKeyTable([]keybinds.Binding{
+	footer := renderDialogActions(d.styles, []keybinds.Binding{
 		{Key: "Tab", Description: "Switch section"},
 		{Key: "1-6", Description: "Jump to section"},
 		{Key: "j/k", Description: "Scroll"},
 		{Key: "r", Description: "Refresh"},
 		{Key: "q/Esc", Description: "Close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         keyStyle,
-		DescriptionStyle: hintStyle,
-		FooterStyle:      hintStyle,
 	})
 
-	// Add scroll indicator if needed
 	if d.maxScroll() > 0 {
 		scrollInfo := fmt.Sprintf("  (line %d/%d)", d.scrollY+1, d.contentHeight)
-		footer += hintStyle.Render(scrollInfo)
+		footer += "\n" + hintStyle.Render(scrollInfo)
 	}
 
 	return footer

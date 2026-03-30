@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -170,7 +171,15 @@ func (m *ActionMenu) viewActionsOnly() string {
 	return m.renderActionList(false)
 }
 
+func (m *ActionMenu) viewActionsOnlyWidth(maxWidth int) string {
+	return m.renderActionListWithWidth(false, maxWidth)
+}
+
 func (m *ActionMenu) renderActionList(includeTaskSummary bool) string {
+	return m.renderActionListWithWidth(includeTaskSummary, 0)
+}
+
+func (m *ActionMenu) renderActionListWithWidth(includeTaskSummary bool, maxWidth int) string {
 	var b strings.Builder
 
 	if includeTaskSummary {
@@ -220,11 +229,21 @@ func (m *ActionMenu) renderActionList(includeTaskSummary bool) string {
 
 		// Format: [key] label
 		line := keyStyle.Render("["+action.Key+"]") + " " + style.Render(action.Label)
-		b.WriteString(line)
+		b.WriteString(clampOverlayLineWidth(line, maxWidth))
 		b.WriteString("\n")
 	}
 
 	return b.String()
+}
+
+func clampOverlayLineWidth(line string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return line
+	}
+	if ansi.StringWidth(line) <= maxWidth {
+		return line
+	}
+	return ansi.Truncate(line, maxWidth, "…")
 }
 
 // Title returns the overlay title

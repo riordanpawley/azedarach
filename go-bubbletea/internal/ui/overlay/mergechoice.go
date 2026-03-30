@@ -9,6 +9,8 @@ import (
 )
 
 type MergeChoiceOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	issueID       string
 	commitsBehind int
 	baseBranch    string
@@ -51,35 +53,42 @@ func (m *MergeChoiceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return CloseOverlayMsg{}
 			}
 		}
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
 	}
 	return m, nil
 }
 
 func (m *MergeChoiceOverlay) View() string {
-	var b strings.Builder
-
-	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("%d commits behind %s. Merge latest?", m.commitsBehind, m.baseBranch)))
-	b.WriteString("\n\n")
-
-	mStyle := m.styles.MenuItem
-	sStyle := m.styles.MenuItem
-
-	mOption := mStyle.Render("[M] Merge & Attach")
-	sOption := sStyle.Render("[S] Skip & Attach")
-
-	b.WriteString(mOption + "\n")
-	b.WriteString(sOption + "\n")
-
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         m.styles.MenuKey,
-		DescriptionStyle: m.styles.Footer,
-		FooterStyle:      m.styles.Footer,
-	}))
-
-	return b.String()
+	width, height := m.Clamp(64, 12)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             width,
+		height:            height,
+		title:             "MERGE CHOICE",
+		rightSectionTitle: "Actions",
+		breakpoint:        72,
+		gap:               3,
+		minLeft:           30,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			var b strings.Builder
+			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("%d commits behind %s. Merge latest?", m.commitsBehind, m.baseBranch)))
+			b.WriteString("\n\n")
+			b.WriteString(m.styles.MenuItem.Render("[M] Merge & Attach"))
+			b.WriteString("\n")
+			b.WriteString(m.styles.MenuItem.Render("[S] Skip & Attach"))
+			return strings.TrimRight(b.String(), "\n")
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.styles, []keybinds.Binding{
+				{Key: "M", Description: "merge & attach"},
+				{Key: "S", Description: "skip & attach"},
+				{Key: "Esc", Description: "cancel"},
+			})
+		},
+	})
 }
 
 func (m *MergeChoiceOverlay) Title() string {

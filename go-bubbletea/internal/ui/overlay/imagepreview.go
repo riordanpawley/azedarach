@@ -15,6 +15,8 @@ import (
 
 // ImagePreviewOverlay displays and manages image attachments with navigation
 type ImagePreviewOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	issueID       string
 	service       *attachment.Service
 	images        []attachment.Attachment
@@ -54,6 +56,9 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return i.handleConfirmMode(msg)
 		}
 		return i.handleNormalMode(msg)
+	case tea.WindowSizeMsg:
+		i.ApplyWindowSize(msg)
+		return i, nil
 
 	case imagesLoadedMsg:
 		i.images = msg.images
@@ -166,13 +171,52 @@ func (i *ImagePreviewOverlay) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.
 // View renders the overlay
 func (i *ImagePreviewOverlay) View() string {
 	if i.confirmDelete {
-		return i.renderDeleteConfirmation()
+		width, height := i.Clamp(72, 22)
+		return renderDialogTwoPane(dialogLayoutConfig{
+			styles:            i.styles,
+			width:             width,
+			height:            height,
+			title:             "Confirm Delete",
+			rightSectionTitle: "Actions",
+			breakpoint:        76,
+			gap:               3,
+			minLeft:           38,
+			minRight:          20,
+			leftFocused:       true,
+			renderLeft: func(mode dialogLayoutMode, width, height int) string {
+				return i.renderDeleteConfirmationContent()
+			},
+			renderRight: func(mode dialogLayoutMode, width, height int) string {
+				return strings.Join([]string{
+					"[Y] Yes, delete",
+					"[N] No, cancel",
+					"Esc Cancel",
+				}, "\n")
+			},
+		})
 	}
-	return i.renderPreview()
+	width, height := i.Clamp(82, 28)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            i.styles,
+		width:             width,
+		height:            height,
+		title:             "Image Preview",
+		rightSectionTitle: "Actions",
+		breakpoint:        86,
+		gap:               3,
+		minLeft:           46,
+		minRight:          22,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return i.renderPreviewContent()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return i.renderPreviewActions(width)
+		},
+	})
 }
 
-// renderPreview renders the image preview screen
-func (i *ImagePreviewOverlay) renderPreview() string {
+func (i *ImagePreviewOverlay) renderPreviewContent() string {
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().
@@ -188,19 +232,7 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 
 	// Header with navigation info
 	if len(i.images) == 0 {
-		b.WriteString(headerStyle.Render("Image Preview"))
-		b.WriteString("\n\n")
 		b.WriteString(i.styles.Footer.Render("No images attached to this task."))
-		b.WriteString("\n\n")
-		b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
-		b.WriteString("\n\n")
-		b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-			{Key: "Esc", Description: "Close"},
-		}, 0, keybinds.Theme{
-			KeyStyle:         i.styles.MenuKey,
-			DescriptionStyle: i.styles.Footer,
-			FooterStyle:      i.styles.Footer,
-		}))
 		return b.String()
 	}
 
@@ -274,11 +306,10 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 		b.WriteString("\n\n")
 	}
 
-	// Separator
-	b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
-	b.WriteString("\n\n")
+	return strings.TrimRight(b.String(), "\n")
+}
 
-	// Help text
+func (i *ImagePreviewOverlay) renderPreviewActions(width int) string {
 	hints := make([]keybinds.Binding, 0, 6)
 	if len(i.images) > 1 {
 		hints = append(hints,
@@ -292,17 +323,10 @@ func (i *ImagePreviewOverlay) renderPreview() string {
 		keybinds.Binding{Key: "r", Description: "Refresh"},
 		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
-	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	}))
-
-	return b.String()
+	return renderDialogActions(i.styles, hints, width)
 }
 
-// renderDeleteConfirmation renders the delete confirmation dialog
-func (i *ImagePreviewOverlay) renderDeleteConfirmation() string {
+func (i *ImagePreviewOverlay) renderDeleteConfirmationContent() string {
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().
@@ -310,41 +334,22 @@ func (i *ImagePreviewOverlay) renderDeleteConfirmation() string {
 		Bold(true)
 
 	b.WriteString(headerStyle.Render("⚠ Confirm Delete"))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	if i.currentIndex >= 0 && i.currentIndex < len(i.images) {
 		img := i.images[i.currentIndex]
 		b.WriteString(i.styles.MenuItem.Render(fmt.Sprintf("Delete image: %s?", img.Filename)))
 		b.WriteString("\n\n")
 		b.WriteString(i.styles.Footer.Render(fmt.Sprintf("Size: %s", formatFileSize(img.Size))))
-		b.WriteString("\n\n")
+		b.WriteString("\n")
 	}
 
 	b.WriteString(i.styles.MenuItem.Render("This action cannot be undone."))
-	b.WriteString("\n\n")
-
-	// Buttons
-	yesStyle := i.styles.MenuItemActive
-	noStyle := i.styles.MenuItem
-
-	yes := yesStyle.Render("[Y] Yes, delete")
-	no := noStyle.Render("[N] No, cancel")
-
-	buttons := yes + "    " + no
-	b.WriteString(buttons)
-	b.WriteString("\n\n")
-
-	// Footer hint
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Y", Description: "Delete"},
-		{Key: "N/Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	}))
-
-	return b.String()
+	b.WriteString("\n")
+	b.WriteString(i.styles.MenuItemActive.Render("[Y] Yes, delete"))
+	b.WriteString("\n")
+	b.WriteString(i.styles.MenuItem.Render("[N] No, cancel"))
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // Title returns the overlay title
@@ -355,9 +360,9 @@ func (i *ImagePreviewOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImagePreviewOverlay) Size() (width, height int) {
 	if i.confirmDelete {
-		return 60, 15
+		return i.Clamp(72, 22)
 	}
-	return 75, 25
+	return i.Clamp(82, 28)
 }
 
 // Commands
