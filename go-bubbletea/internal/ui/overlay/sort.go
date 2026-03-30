@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // SortOption represents a sort option with metadata
@@ -17,6 +18,8 @@ type SortOption struct {
 
 // SortMenu is a menu overlay for sorting configuration
 type SortMenu struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	sort    *domain.Sort
 	options []SortOption
 	styles  *Styles
@@ -58,6 +61,9 @@ func (m *SortMenu) Init() tea.Cmd {
 // Update handles messages
 func (m *SortMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
@@ -85,6 +91,28 @@ func (m *SortMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the menu
 func (m *SortMenu) View() string {
+	width, height := m.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             width,
+		height:            height,
+		title:             m.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        80,
+		gap:               3,
+		minLeft:           44,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return m.renderContent()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.styles, m.actionBindings(), width)
+		},
+	})
+}
+
+func (m *SortMenu) renderContent() string {
 	var b strings.Builder
 
 	for _, opt := range m.options {
@@ -140,6 +168,16 @@ func (m *SortMenu) View() string {
 	return b.String()
 }
 
+func (m *SortMenu) actionBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "s", Description: "sort by session"},
+		{Key: "p", Description: "sort by priority"},
+		{Key: "u", Description: "sort by updated"},
+		{Key: "same key", Description: "toggle direction"},
+		{Key: "Esc/q", Description: "close"},
+	}
+}
+
 // Title returns the overlay title
 func (m *SortMenu) Title() string {
 	return "Sort"
@@ -149,5 +187,5 @@ func (m *SortMenu) Title() string {
 func (m *SortMenu) Size() (width, height int) {
 	// Width: enough for longest line with description + indicator + arrow
 	// Height: number of options + footer + padding
-	return 70, len(m.options) + 5
+	return m.Clamp(110, len(m.options)+10)
 }

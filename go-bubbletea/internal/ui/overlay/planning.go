@@ -34,6 +34,8 @@ const (
 
 // PlanningOverlay provides a modal for AI-powered task planning
 type PlanningOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	phase       planningPhase
 	input       textinput.Model
 	description textarea.Model
@@ -97,6 +99,9 @@ func (p *PlanningOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		p.ApplyWindowSize(msg)
+		return p, nil
 	case tea.KeyMsg:
 		switch p.phase {
 		case phaseInput:
@@ -224,17 +229,36 @@ func (p *PlanningOverlay) handleErrorPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 
 // View renders the overlay
 func (p *PlanningOverlay) View() string {
-	switch p.phase {
-	case phaseInput:
-		return p.renderInputPhase()
-	case phaseProgress:
-		return p.renderProgressPhase()
-	case phaseComplete:
-		return p.renderCompletePhase()
-	case phaseError:
-		return p.renderErrorPhase()
-	}
-	return ""
+	width, height := p.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            p.styles,
+		width:             width,
+		height:            height,
+		title:             p.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        72,
+		gap:               3,
+		minLeft:           48,
+		minRight:          22,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			switch p.phase {
+			case phaseInput:
+				return p.renderInputPhase()
+			case phaseProgress:
+				return p.renderProgressPhase()
+			case phaseComplete:
+				return p.renderCompletePhase()
+			case phaseError:
+				return p.renderErrorPhase()
+			default:
+				return ""
+			}
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(p.styles, p.actionBindings(), width)
+		},
+	})
 }
 
 // renderInputPhase renders the input phase
@@ -288,18 +312,6 @@ func (p *PlanningOverlay) renderInputPhase() string {
 	b.WriteString(p.description.View())
 	b.WriteString("\n\n")
 
-	// Footer
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Tab", Description: "Switch fields"},
-		{Key: "Enter", Description: "Generate"},
-		{Key: "Ctrl+U", Description: "Clear"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         p.styles.MenuKey,
-		DescriptionStyle: p.styles.Footer,
-		FooterStyle:      p.styles.Footer,
-	}))
-
 	return b.String()
 }
 
@@ -336,15 +348,6 @@ func (p *PlanningOverlay) renderProgressPhase() string {
 		b.WriteString(p.renderReviewFeedback(&latest))
 		b.WriteString("\n\n")
 	}
-
-	// Footer
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Esc", Description: "cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         p.styles.MenuKey,
-		DescriptionStyle: p.styles.Footer,
-		FooterStyle:      p.styles.Footer,
-	}))
 
 	return b.String()
 }
@@ -396,16 +399,6 @@ func (p *PlanningOverlay) renderCompletePhase() string {
 
 	b.WriteString("\n\n")
 
-	// Footer
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Enter/Esc", Description: "Close"},
-		{Key: "r", Description: "Plan another"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         p.styles.MenuKey,
-		DescriptionStyle: p.styles.Footer,
-		FooterStyle:      p.styles.Footer,
-	}))
-
 	return b.String()
 }
 
@@ -422,16 +415,6 @@ func (p *PlanningOverlay) renderErrorPhase() string {
 
 	b.WriteString(errorStyle.Render(p.state.Error))
 	b.WriteString("\n\n")
-
-	// Footer
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "r", Description: "Retry"},
-		{Key: "Esc", Description: "Close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         p.styles.MenuKey,
-		DescriptionStyle: p.styles.Footer,
-		FooterStyle:      p.styles.Footer,
-	}))
 
 	return b.String()
 }
@@ -619,17 +602,47 @@ func (p *PlanningOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (p *PlanningOverlay) Size() (width, height int) {
+	desiredWidth := 80
+	desiredHeight := 30
 	switch p.phase {
 	case phaseInput:
-		return 80, 28
+		desiredHeight = 28
 	case phaseProgress:
-		return 80, 35
+		desiredHeight = 35
 	case phaseComplete:
-		return 80, 25
+		desiredHeight = 25
 	case phaseError:
-		return 80, 15
+		desiredHeight = 15
 	}
-	return 80, 30
+	return p.Clamp(desiredWidth, desiredHeight)
+}
+
+func (p *PlanningOverlay) actionBindings() []keybinds.Binding {
+	switch p.phase {
+	case phaseInput:
+		return []keybinds.Binding{
+			{Key: "Tab", Description: "switch fields"},
+			{Key: "Enter/Ctrl+S", Description: "generate"},
+			{Key: "Ctrl+U", Description: "clear field"},
+			{Key: "Esc", Description: "cancel"},
+		}
+	case phaseProgress:
+		return []keybinds.Binding{
+			{Key: "Esc", Description: "cancel"},
+		}
+	case phaseComplete:
+		return []keybinds.Binding{
+			{Key: "Enter/Esc", Description: "close"},
+			{Key: "r", Description: "plan another"},
+		}
+	case phaseError:
+		return []keybinds.Binding{
+			{Key: "r", Description: "retry"},
+			{Key: "Esc", Description: "close"},
+		}
+	default:
+		return nil
+	}
 }
 
 // truncateText truncates a string to a maximum length

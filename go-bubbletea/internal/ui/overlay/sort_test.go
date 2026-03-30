@@ -44,12 +44,12 @@ func TestSortMenu_Size(t *testing.T) {
 	menu := NewSortMenu(sort)
 
 	width, height := menu.Size()
-	if width != 70 {
-		t.Errorf("expected width 70, got %d", width)
+	if width != 110 {
+		t.Errorf("expected width 110, got %d", width)
 	}
 
-	// Height should be options + footer + padding (3 + 5 = 8)
-	expectedHeight := 8
+	// Height should fit dialog chrome + options + footer
+	expectedHeight := len(menu.options) + 10
 	if height != expectedHeight {
 		t.Errorf("expected height %d, got %d", expectedHeight, height)
 	}
