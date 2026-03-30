@@ -10,10 +10,10 @@
 │                                                                      │
 │Actions                                                               │
 │──────────────────────────────────────────────────────────────────────│
-│  Enter     toggle                                                    │
-│  v         view output                                               │
-│  r         restart                                                   │
-│  Esc       close                                                     │
+│ Enter toggle                                                         │
+│ v view output                                                        │
+│ r restart                                                            │
+│ Esc close                                                            │
 │                                                                      │
 │                                                                      │
 ╰──────────────────────────────────────────────────────────────────────╯

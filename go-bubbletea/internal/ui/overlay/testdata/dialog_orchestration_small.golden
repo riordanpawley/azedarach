@@ -3,11 +3,11 @@
 │────────────────────────────────────────────────────────────────────│
 ││  Active Sessions: 1                         Actions               │
 ││                                             ──────────────────────│
-││  ▶ az-123   ● busy                            j/k       navigate  │
-││    Implement feature X with caref...          Enter/a   attach    │
-││    ⏱ not started  📁                          x         kill      │
-││ /Users/riordan/prog/azedarach                 r         refresh   │
-││    💬 renderDialogTwoPane ok                  Esc       close     │
+││  ▶ az-123   ● busy                           j/k navigate         │
+││    Implement feature X with caref...         Enter/a attach       │
+││    ⏱ not started  📁                         x kill               │
+││ /Users/riordan/prog/azedarach                r refresh            │
+││    💬 renderDialogTwoPane ok                 Esc close            │
 ││                                                                   │
 ││                                                                   │
 ││                                                                   │

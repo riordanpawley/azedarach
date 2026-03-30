@@ -11,10 +11,10 @@
 │                                                                    │
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
-│  j/k       navigate                                                │
-│  Space     toggle                                                  │
-│  a         select all                                              │
-│  A         deselect all                                            │
-│  Enter     execute                                                 │
-│  Esc       cancel                                                  │
+│ j/k navigate                                                       │
+│ Space toggle                                                       │
+│ a select all                                                       │
+│ A deselect all                                                     │
+│ Enter execute                                                      │
+│ Esc cancel                                                         │
 ╰────────────────────────────────────────────────────────────────────╯

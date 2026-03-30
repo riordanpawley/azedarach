@@ -3,12 +3,12 @@
 │────────────────────────────────────────────────────────────────────────────────────│
 ││ Bulk Cleanup Operations                                Actions                    │
 ││                                                        ───────────────────────────│
-││   [✓] Delete completed tasks (>30 days) (~10 tasks)      j/k       navigate       │
-││   [ ] Archive all done tasks (~25 tasks)                 Space     toggle         │
-││ ▶ [✓] Remove orphaned worktrees (~5 worktrees)           a         select all     │
-││    Delete worktrees with no active sessions              A         deselect all   │
-││   [ ] Clean stale sessions (~2 sessions)                 Enter     execute        │
-││                                                          Esc       cancel         │
+││   [✓] Delete completed tasks (>30 days) (~10 tasks)     j/k navigate              │
+││   [ ] Archive all done tasks (~25 tasks)                Space toggle              │
+││ ▶ [✓] Remove orphaned worktrees (~5 worktrees)          a select all              │
+││    Delete worktrees with no active sessions             A deselect all            │
+││   [ ] Clean stale sessions (~2 sessions)                Enter execute             │
+││                                                         Esc cancel                │
 ││                                                                                   │
 ││                                                                                   │
 ││                                                                                   │

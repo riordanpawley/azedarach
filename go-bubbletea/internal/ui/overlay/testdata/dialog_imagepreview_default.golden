@@ -19,10 +19,10 @@
 │                                                                                │
 │Actions                                                                         │
 │────────────────────────────────────────────────────────────────────────────────│
-│  h/l       Navigate                                                            │
-│  g/G       First/Last                                                          │
-│  o         Open                                                                │
-│  d         Delete                                                              │
-│  r         Refresh                                                             │
-│  Esc       Close                                                               │
+│ h/l Navigate                                                                   │
+│ g/G First/Last                                                                 │
+│ o Open                                                                         │
+│ d Delete                                                                       │
+│ r Refresh                                                                      │
+│ Esc Close                                                                      │
 ╰────────────────────────────────────────────────────────────────────────────────╯

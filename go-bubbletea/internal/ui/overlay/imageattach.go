@@ -219,7 +219,7 @@ func (i *ImageAttachOverlay) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // View renders the overlay
 func (i *ImageAttachOverlay) View() string {
 	if i.inputActive {
-		width, height := i.Clamp(84, 18)
+		width, height := i.Clamp(92, 18)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -228,8 +228,8 @@ func (i *ImageAttachOverlay) View() string {
 			rightSectionTitle: "Actions",
 			breakpoint:        80,
 			gap:               3,
-			minLeft:           44,
-			minRight:          20,
+			minLeft:           36,
+			minRight:          30,
 			leftFocused:       true,
 			renderLeft: func(mode dialogLayoutMode, width, height int) string {
 				return i.renderFileInputContent()
@@ -245,7 +245,7 @@ func (i *ImageAttachOverlay) View() string {
 
 	switch i.mode {
 	case imageAttachModeList:
-		width, height := i.Clamp(84, i.listModeHeight())
+		width, height := i.Clamp(92, i.listModeHeight())
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -254,8 +254,8 @@ func (i *ImageAttachOverlay) View() string {
 			rightSectionTitle: "Actions",
 			breakpoint:        80,
 			gap:               3,
-			minLeft:           44,
-			minRight:          22,
+			minLeft:           36,
+			minRight:          32,
 			leftFocused:       true,
 			renderLeft: func(mode dialogLayoutMode, width, height int) string {
 				return i.renderListContent()
@@ -265,7 +265,7 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	case imageAttachModePreview:
-		width, height := i.Clamp(84, 24)
+		width, height := i.Clamp(92, 24)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -274,8 +274,8 @@ func (i *ImageAttachOverlay) View() string {
 			rightSectionTitle: "Actions",
 			breakpoint:        80,
 			gap:               3,
-			minLeft:           44,
-			minRight:          22,
+			minLeft:           36,
+			minRight:          32,
 			leftFocused:       true,
 			renderLeft: func(mode dialogLayoutMode, width, height int) string {
 				return i.renderPreviewContent()
@@ -326,12 +326,12 @@ func (i *ImageAttachOverlay) renderListContent() string {
 
 func (i *ImageAttachOverlay) renderListActions(width int) string {
 	hints := []keybinds.Binding{
-		{Key: "p", Description: "paste from clipboard"},
-		{Key: "f", Description: "attach from file"},
+		{Key: "p", Description: "paste clipboard"},
+		{Key: "f", Description: "attach file"},
 	}
 	if len(i.files) > 0 {
 		hints = append(hints,
-			keybinds.Binding{Key: "o", Description: "open"},
+			keybinds.Binding{Key: "o", Description: "open viewer"},
 			keybinds.Binding{Key: "d/x", Description: "delete"},
 			keybinds.Binding{Key: "Enter/v", Description: "preview"},
 		)
@@ -410,13 +410,13 @@ func (i *ImageAttachOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImageAttachOverlay) Size() (width, height int) {
 	if i.inputActive {
-		return i.Clamp(84, 18)
+		return i.Clamp(92, 18)
 	}
 	switch i.mode {
 	case imageAttachModePreview:
-		return i.Clamp(84, 24)
+		return i.Clamp(92, 24)
 	default:
-		return i.Clamp(84, i.listModeHeight())
+		return i.Clamp(92, i.listModeHeight())
 	}
 }
 

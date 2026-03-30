@@ -10,9 +10,9 @@
 │                                                              │
 │Actions                                                       │
 │──────────────────────────────────────────────────────────────│
-│  M         merge & attach                                    │
-│  S         skip & attach                                     │
-│  Esc       cancel                                            │
+│ M merge & attach                                             │
+│ S skip & attach                                              │
+│ Esc cancel                                                   │
 │                                                              │
 │                                                              │
 │                                                              │

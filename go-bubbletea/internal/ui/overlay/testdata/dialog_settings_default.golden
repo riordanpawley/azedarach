@@ -3,13 +3,13 @@
 │──────────────────────────────────────────────────────────────────────│
 ││ General                                           Actions           │
 ││ ▶   Auto-refresh issues...............yes         ──────────────────│
-││ [refresh]                                           j/k             │
-││     Compact card view.................no          move              │
-││ [compact]                                           h/l             │
-││     Theme.............................macchiato   cycle             │
-││ [theme]                                             Enter/Space     │
-││                                                   toggle/activate   │
-││ Actions                                             e               │
-││ ───────────────────                               edit config       │
-││     Open config in $EDITOR............open          Esc             │
+││ [refresh]                                          j/k move         │
+││     Compact card view.................no           h/l cycle        │
+││ [compact]                                          Enter/Space      │
+││     Theme.............................macchiato   toggle/activate   │
+││ [theme]                                            e edit config    │
+││                                                    Esc close        │
+││ Actions                                                             │
+││ ───────────────────                                                 │
+││     Open config in $EDITOR............open                          │
 ╰──────────────────────────────────────────────────────────────────────╯

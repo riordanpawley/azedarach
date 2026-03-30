@@ -3,8 +3,8 @@
 │──────────────────────────────────────────────────────────│
 ││ Merge into az-123 from:              Actions            │
 ││                                      ───────────────────│
-││                                        j/k              │
-││ ▸  az-456 [open] Related task 1      navigate           │
-││                                        Enter     select │
-││                                        Esc       cancel │
+││                                       j/k navigate      │
+││ ▸  az-456 [open] Related task 1       Enter select      │
+││                                       Esc cancel        │
+││                                                         │
 ╰──────────────────────────────────────────────────────────╯

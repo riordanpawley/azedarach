@@ -11,10 +11,10 @@
 │                                                                    │
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
-│  Tab       Switch section                                          │
-│  1-6       Jump to section                                         │
-│  j/k       Scroll                                                  │
-│  r         Refresh                                                 │
-│  q/Esc     Close                                                   │
+│ Tab Switch section                                                 │
+│ 1-6 Jump to section                                                │
+│ j/k Scroll                                                         │
+│ r Refresh                                                          │
+│ q/Esc Close                                                        │
 │  (line 1/14)                                                       │
 ╰────────────────────────────────────────────────────────────────────╯

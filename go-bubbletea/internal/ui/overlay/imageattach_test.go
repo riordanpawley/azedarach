@@ -88,8 +88,8 @@ func TestImageAttachOverlay_Size(t *testing.T) {
 	overlay := NewImageAttachOverlay("az-123", service)
 
 	width, height := overlay.Size()
-	if width != 84 {
-		t.Errorf("expected width to be 84, got %d", width)
+	if width != 92 {
+		t.Errorf("expected width to be 92, got %d", width)
 	}
 
 	if height != 14 {
