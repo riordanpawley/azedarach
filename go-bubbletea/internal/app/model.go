@@ -4340,34 +4340,12 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 		})
 		return nil
 	}
-	if session == nil {
-		session = m.sessionForIssue(task.ID)
-	}
-	targetWorktree := ""
-	targetState := domain.SessionIdle
-	if session != nil {
-		targetWorktree = session.Worktree
-		targetState = session.State
-	}
-	if targetWorktree == "" {
-		worktree, err := m.resolveIssueWorktreePath(context.Background(), task.ID)
-		if err == nil {
-			targetWorktree = worktree
-		}
-	}
-	if targetWorktree == "" {
-		m.addToast(Toast{
-			Level:   ToastWarning,
-			Message: "No active session/worktree - start session first",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return nil
-	}
+	targetState, targetStateKnown := projectedSessionState(session, m.sessionForIssue(task.ID))
 
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
 		if task.ParentID == nil {
-			return m.mergeToMainCmd(targetWorktree, task.ID)
+			return m.resolveMergeToMainCmd(task.ID)
 		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -4378,22 +4356,12 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 
 	if len(candidates) == 1 {
-		sourceWorktree, err := m.resolveIssueWorktreePath(context.Background(), candidates[0].target.ID)
-		if err != nil || sourceWorktree == "" {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "Selected upstream source has no active worktree",
-				Expires: time.Now().Add(5 * time.Second),
-			})
-			return nil
-		}
-
 		m.logger.Info("follow-on merge selected",
 			"sourceID", candidates[0].target.ID,
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
-		return m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, candidates[0].target.ID, task.ID, targetState)
+		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID, targetState, targetStateKnown)
 	}
 
 	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
@@ -4402,6 +4370,80 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
 	return m.openOverlay(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+}
+
+func projectedSessionState(primary, fallback *domain.Session) (domain.SessionState, bool) {
+	if primary != nil {
+		return primary.State, true
+	}
+	if fallback != nil {
+		return fallback.State, true
+	}
+	return domain.SessionIdle, false
+}
+
+func (m Model) resolveMergeToMainCmd(sourceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return mergeResultMsg{
+				sourceID: sourceID,
+				targetID: "main",
+				err:      fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+		return m.mergeToMainCmd(sourceWorktree, sourceID)()
+	}
+}
+
+func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState domain.SessionState, targetStateKnown bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return mergeResultMsg{
+				sourceID: sourceID,
+				targetID: targetID,
+				err:      fmt.Errorf("selected upstream source has no active worktree"),
+			}
+		}
+
+		targetWorktree, err := m.resolveIssueWorktreePath(ctx, targetID)
+		if err != nil || targetWorktree == "" {
+			return mergeResultMsg{
+				sourceID: sourceID,
+				targetID: targetID,
+				err:      fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+
+		resolvedTargetState := targetState
+		if !targetStateKnown {
+			state, ok, err := m.resolveIssueSessionStateFromSnapshot(ctx, targetID)
+			if err != nil {
+				return mergeResultMsg{
+					sourceID: sourceID,
+					targetID: targetID,
+					err:      fmt.Errorf("resolve target session state for %s: %w", targetID, err),
+				}
+			}
+			if !ok {
+				return mergeResultMsg{
+					sourceID: sourceID,
+					targetID: targetID,
+					err:      fmt.Errorf("target session state unavailable for %s; refresh and retry", targetID),
+				}
+			}
+			resolvedTargetState = state
+		}
+
+		return m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID, resolvedTargetState)()
+	}
 }
 
 func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
@@ -5085,6 +5127,30 @@ func (m Model) resolveIssueWorktreePath(ctx context.Context, issueID string) (st
 		return wt.Path, nil
 	}
 	return "", fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID string) (domain.SessionState, bool, error) {
+	if issueID == "" {
+		return domain.SessionIdle, false, fmt.Errorf("issue ID is required")
+	}
+	if m.daemonClient == nil {
+		return domain.SessionIdle, false, fmt.Errorf("daemon client unavailable")
+	}
+
+	snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return domain.SessionIdle, false, err
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ID != issueID {
+			continue
+		}
+		if task.Session == nil {
+			return domain.SessionIdle, false, nil
+		}
+		return task.Session.State, true, nil
+	}
+	return domain.SessionIdle, false, nil
 }
 
 func summarizeStatusChangeCounts(status git.GitStatus) string {

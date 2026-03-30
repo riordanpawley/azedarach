@@ -1009,7 +1009,7 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 	}
 }
 
-func TestFollowOnMergeSelectionUsesTaskSessionFallbackWhenProjectionMissing(t *testing.T) {
+func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
 
@@ -1032,10 +1032,63 @@ func TestFollowOnMergeSelectionUsesTaskSessionFallbackWhenProjectionMissing(t *t
 						IssueID string `json:"issue_id"`
 					}{
 						{Path: "/tmp/parent", Branch: "az/az-parent", IssueID: parentID},
+						{Path: "/tmp/child", Branch: "az/az-child", IssueID: childID},
 					},
 				})
 				if err != nil {
 					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandTaskList:
+				tasks := []domain.Task{
+					{
+						ID:      childID,
+						Title:   "Child task",
+						Status:  domain.StatusInProgress,
+						Type:    domain.TypeTask,
+						Session: &domain.Session{IssueID: childID, State: domain.SessionBusy, Worktree: "/tmp/child"},
+					},
+					{
+						ID:      parentID,
+						Title:   "Parent epic",
+						Status:  domain.StatusInProgress,
+						Type:    domain.TypeEpic,
+						Session: &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"},
+					},
+				}
+				respBody, err := json.Marshal(tasks)
+				if err != nil {
+					t.Fatalf("marshal task list response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandSessionStop:
+				var body struct {
+					ProjectID string `json:"project_id"`
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session stop request: %v", err)
+				}
+				if body.SessionID != childID {
+					t.Fatalf("session stop body = %+v, want session_id=%s", body, childID)
+				}
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "stopped"})
+				if err != nil {
+					t.Fatalf("marshal session stop response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -1097,14 +1150,12 @@ func TestFollowOnMergeSelectionUsesTaskSessionFallbackWhenProjectionMissing(t *t
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
 			ParentID: &parentID,
-			Session:  &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"},
 		},
 		{
-			ID:      parentID,
-			Title:   "Parent epic",
-			Status:  domain.StatusInProgress,
-			Type:    domain.TypeEpic,
-			Session: &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"},
+			ID:     parentID,
+			Title:  "Parent epic",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeEpic,
 		},
 	}
 	// Simulate stale projection: m.sessions map does not yet contain hydrated sessions.
@@ -1130,7 +1181,7 @@ func TestFollowOnMergeSelectionUsesTaskSessionFallbackWhenProjectionMissing(t *t
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 4 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandGitStatus || got[2] != daemonclient.CommandGitStatus || got[3] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 8 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandTaskList || got[3] != daemonclient.CommandSessionStop || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandGitStatus || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
