@@ -35,6 +35,10 @@ type dialogLayoutConfig struct {
 	renderRight       func(mode dialogLayoutMode, width, height int) string
 }
 
+func (cfg dialogLayoutConfig) hasRightPane() bool {
+	return cfg.renderRight != nil && strings.TrimSpace(cfg.rightSectionTitle) != ""
+}
+
 func clampDialogSize(desiredWidth, desiredHeight, viewportWidth, viewportHeight int) (int, int) {
 	if viewportWidth > 0 && viewportHeight > 0 &&
 		(viewportWidth <= dialogFullscreenWidthThreshold || viewportHeight <= dialogFullscreenHeightThreshold) {
@@ -65,10 +69,44 @@ func renderDialogTwoPane(cfg dialogLayoutConfig) string {
 	separator := cfg.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth)))
 	bodyHeight := max(6, contentHeight-2)
 
+	if !cfg.hasRightPane() {
+		mode := dialogLayoutSplit
+		if contentWidth < cfg.breakpoint {
+			mode = dialogLayoutStacked
+		}
+		return renderDialogSingle(cfg, mode, contentWidth, contentHeight, bodyHeight, titleLine, separator)
+	}
+
 	if contentWidth < cfg.breakpoint {
 		return renderDialogStacked(cfg, contentWidth, contentHeight, bodyHeight, titleLine, separator)
 	}
 	return renderDialogSplit(cfg, contentWidth, contentHeight, bodyHeight, titleLine, separator)
+}
+
+func renderDialogSingle(
+	cfg dialogLayoutConfig,
+	mode dialogLayoutMode,
+	contentWidth, contentHeight, bodyHeight int,
+	titleLine, separator string,
+) string {
+	leftStyle := lipgloss.NewStyle()
+	if cfg.leftFocused {
+		leftStyle = leftStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
+	}
+	body := leftStyle.
+		Width(contentWidth).
+		MaxWidth(contentWidth).
+		Height(bodyHeight).
+		MaxHeight(bodyHeight).
+		Render(cfg.renderLeft(mode, contentWidth, bodyHeight))
+
+	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
+	return lipgloss.NewStyle().
+		Width(contentWidth).
+		Height(contentHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Surface2).
+		Render(content)
 }
 
 func renderDialogSplit(
