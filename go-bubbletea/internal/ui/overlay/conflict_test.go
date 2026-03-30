@@ -163,10 +163,10 @@ func TestConflictDialog_View(t *testing.T) {
 	// Check that view contains expected elements
 	assert.Contains(t, view, "MERGE CONFLICTS")
 	assert.Contains(t, view, "Actions")
-	assert.Contains(t, view, "Conflicted files:")
+	assert.Contains(t, view, "AI resolve now? Press c.")
 	assert.Contains(t, view, files[0])
 	assert.Contains(t, view, files[1])
-	assert.Contains(t, view, "resolve")
+	assert.Contains(t, view, "ai resolve")
 	assert.Contains(t, view, "open")
 	assert.Contains(t, view, "abort")
 	assert.Contains(t, view, "j/k")
