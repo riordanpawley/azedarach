@@ -23,6 +23,8 @@ const (
 	taskTemplateAnchorDesign      = "DESIGN"
 	taskTemplateAnchorNotes       = "NOTES"
 	taskTemplateAnchorAcceptance  = "ACCEPTANCE"
+	createTaskOverlayWidth        = 100
+	createTaskOverlayHeight       = 30
 )
 
 // TaskCreatedMsg is emitted when a new task is created
@@ -316,7 +318,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the form
 func (c *CreateTaskOverlay) View() string {
-	width, height := c.Clamp(72, 22)
+	width, height := c.Clamp(createTaskOverlayWidth, createTaskOverlayHeight)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            c.styles,
 		width:             width,
@@ -864,5 +866,5 @@ func (c *CreateTaskOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (c *CreateTaskOverlay) Size() (width, height int) {
-	return c.Clamp(72, 22)
+	return c.Clamp(createTaskOverlayWidth, createTaskOverlayHeight)
 }

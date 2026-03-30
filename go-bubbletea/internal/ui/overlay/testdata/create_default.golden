@@ -1,22 +1,30 @@
-╭──────────────────────────────────────────────────────────────────────╮
-│Create New Task                                                       │
-│──────────────────────────────────────────────────────────────────────│
-││ Title:                                       Actions                │
-││ > Add grom renderer for detail view maybe?   ───────────────────────│
-││ Description:                                  Tab / Shift+Tab Switch│
-││ ┃   1 review panel structure and             fields                 │
-││ ┃     preserve layout                         T/B/F/E/C Set type    │
-││ ┃                                             0/1/2/3/4 Set priority│
-││ ┃                                             Enter Create task     │
-││ Type: [●T] [ B] [ F] [ E] [ C]                Ctrl+E Edit in $EDITOR│
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]            Ctrl+K Clear form     │
-││                                               Esc Cancel            │
-││ [ Create Task ]                                                     │
-││                                                                     │
-││                                                                     │
-││                                                                     │
-││                                                                     │
-││                                                                     │
-││                                                                     │
-││                                                                     │
-╰──────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Create New Task                                                                                   │
+│──────────────────────────────────────────────────────────────────────────────────────────────────│
+││ Title: > Add grom renderer for detail view maybe?               Actions                         │
+││ Description:                                                    ────────────────────────────────│
+││ ┃   1 review panel structure and preserve layout                 Tab / Shift+Tab Switch fields  │
+││ ┃                                                                T/B/F/E/C Set type             │
+││ ┃                                                                0/1/2/3/4 Set priority         │
+││ ┃                                                                Enter Create task              │
+││ ┃                                                                Ctrl+E Edit in $EDITOR         │
+││ ┃                                                                Ctrl+K Clear form              │
+││ ┃                                                                Esc Cancel                     │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ Type: [●T] [ B] [ F] [ E] [ C]                                                                  │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                                              │
+││                                                                                                 │
+││ ─────────────────────────────────────────────────────────────                                   │
+││                                                                                                 │
+││ [ Create Task ]                                                                                 │
+││                                                                                                 │
+││                                                                                                 │
+││                                                                                                 │
+││                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

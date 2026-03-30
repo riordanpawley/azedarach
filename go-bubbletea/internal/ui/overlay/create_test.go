@@ -27,8 +27,8 @@ func TestCreateTaskOverlayTitle(t *testing.T) {
 func TestCreateTaskOverlaySize(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	width, height := overlay.Size()
-	assert.Equal(t, 72, width)
-	assert.Equal(t, 22, height)
+	assert.Equal(t, 100, width)
+	assert.Equal(t, 30, height)
 }
 
 func TestCreateTaskOverlayView(t *testing.T) {
