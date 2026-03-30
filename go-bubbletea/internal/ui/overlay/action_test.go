@@ -313,6 +313,77 @@ func TestActionMenu_FollowOnMergeAvailability_TaskWorktreeFallback(t *testing.T)
 	}
 }
 
+func TestActionMenu_MergeLabelTopLevelWithoutContextDefaultsToFollowOn(t *testing.T) {
+	topLevelTask := domain.Task{
+		ID:          "az-top",
+		Title:       "Top level",
+		Status:      domain.StatusInProgress,
+		HasWorktree: true,
+	}
+	menu := NewActionMenu(topLevelTask, nil)
+	for _, action := range menu.actions {
+		if action.Key == "m" {
+			if action.Label != "Follow-on merge" {
+				t.Fatalf("merge label = %q, want %q", action.Label, "Follow-on merge")
+			}
+			return
+		}
+	}
+	t.Fatal("expected merge action")
+}
+
+func TestActionMenu_MergeLabelTopLevelUsesMainWhenNoEligibleUpstream(t *testing.T) {
+	topLevelTask := domain.Task{
+		ID:          "az-top",
+		Title:       "Top level",
+		Status:      domain.StatusInProgress,
+		HasWorktree: true,
+		Dependencies: []domain.Dependency{
+			{ID: "az-blocker", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		{ID: "az-top", Status: domain.StatusInProgress},
+		{ID: "az-blocker", Status: domain.StatusOpen},
+	}
+	menu := NewActionMenu(topLevelTask, nil).WithRelatedTasks(related)
+	for _, action := range menu.actions {
+		if action.Key == "m" {
+			if action.Label != "Merge into main" {
+				t.Fatalf("merge label = %q, want %q", action.Label, "Merge into main")
+			}
+			return
+		}
+	}
+	t.Fatal("expected merge action")
+}
+
+func TestActionMenu_MergeLabelTopLevelUsesFollowOnWhenUpstreamEligible(t *testing.T) {
+	topLevelTask := domain.Task{
+		ID:          "az-top",
+		Title:       "Top level",
+		Status:      domain.StatusInProgress,
+		HasWorktree: true,
+		Dependencies: []domain.Dependency{
+			{ID: "az-blocker", Type: domain.DependencyBlocks},
+		},
+	}
+	related := []domain.Task{
+		{ID: "az-top", Status: domain.StatusInProgress},
+		{ID: "az-blocker", Status: domain.StatusDone},
+	}
+	menu := NewActionMenu(topLevelTask, nil).WithRelatedTasks(related)
+	for _, action := range menu.actions {
+		if action.Key == "m" {
+			if action.Label != "Follow-on merge" {
+				t.Fatalf("merge label = %q, want %q", action.Label, "Follow-on merge")
+			}
+			return
+		}
+	}
+	t.Fatal("expected merge action")
+}
+
 func TestActionMenu_MoveActions(t *testing.T) {
 	tests := []struct {
 		name            string

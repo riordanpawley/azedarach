@@ -75,6 +75,7 @@ var executablePath = os.Executable
 var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
+var runGitCommandFunc = runGitCommand
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -538,6 +539,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case mergeResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			action := "Merge"
+			if msg.stage == "stop_session" {
+				action = "Stop session"
+			}
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage(action, msg.sourceID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -562,6 +575,69 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, m.loadIssuesCmd()
+
+	case mergePreflightFailureMsg:
+		return m, m.overlayStack.Push(overlay.NewMergePreflightOverlay(
+			msg.sourceID,
+			msg.targetID,
+			msg.sourceWorktree,
+			msg.targetWorktree,
+			msg.reasons,
+			msg.sourceFiles,
+			msg.targetFiles,
+			strings.TrimSpace(msg.targetWorktree) != "",
+		))
+
+	case mergePreflightActionResultMsg:
+		sideTitle := strings.Title(msg.side)
+		switch msg.action {
+		case "discard":
+			if msg.err != nil {
+				m.addToast(Toast{
+					Level:   ToastError,
+					Message: fmt.Sprintf("Discard %s changes failed: %v", sideTitle, msg.err),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, nil
+			}
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Discarded %s changes", strings.ToLower(sideTitle)),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		case "commit":
+			if msg.err != nil {
+				m.addToast(Toast{
+					Level:   ToastError,
+					Message: fmt.Sprintf("Commit %s changes failed: %v", strings.ToLower(sideTitle), msg.err),
+					Expires: time.Now().Add(6 * time.Second),
+				})
+				return m, nil
+			}
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Committed %s changes", strings.ToLower(sideTitle)),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		default:
+			return m, nil
+		}
+
+	case mergeTargetSelectionResolvedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: msg.err.Error(),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.targetID == "main" {
+			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID)
+		}
+		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState)
 
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
@@ -1796,8 +1872,13 @@ func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleActionMode processes keyboard input in action mode
 func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	task, session := m.getCurrentTaskAndSession()
 	switch msg.String() {
-	case "u", "m", "P":
+	case "b":
+		return m, m.openMergeTargetSelection(task)
+	case "m":
+		return m, m.followOnMergeSelectionCmd(task, session)
+	case "u", "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: "Action unavailable in go-bubbletea action mode; no git operation was started. " +
@@ -3008,6 +3089,44 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "m":
 		task, session := m.getCurrentTaskAndSession()
 		return m, m.followOnMergeSelectionCmd(task, session)
+	case "merge_preflight_abort":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.abortMergeCmd(worktree)
+	case "merge_preflight_discard_source":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.discardChangesCmd("source", worktree)
+	case "merge_preflight_discard_target":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.discardChangesCmd("target", worktree)
+	case "merge_preflight_commit_source":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.commitChangesCmd("source", worktree)
+	case "merge_preflight_commit_target":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.commitChangesCmd("target", worktree)
+	case "merge_preflight_refresh":
+		m.overlayStack.Pop()
+		return m, m.loadIssuesCmd()
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
@@ -3274,25 +3393,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(devOverlay)
 
 	case "b":
-		// Merge issue into... (merge select mode)
-		candidates := m.getMergeCandidates(task)
-		mergeOverlay := overlay.NewMergeSelectOverlay(
-			task,
-			candidates,
-			func(targetID string) tea.Cmd {
-				return func() tea.Msg {
-					return overlay.SelectionMsg{
-						Key: "merge",
-						Value: overlay.MergeTargetSelectedMsg{
-							SourceID: task.ID,
-							TargetID: targetID,
-						},
-					}
-				}
-			},
-			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-		)
-		return m, m.openOverlay(mergeOverlay)
+		return m, m.openMergeTargetSelection(task)
 
 	// Task actions
 	case "h":
@@ -4136,45 +4237,102 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 // handleMergeTargetSelection handles merge target selection
 func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
-
-	sourceSession := m.sessionForIssue(msg.SourceID)
-	if sourceSession == nil || sourceSession.Worktree == "" {
-		m.addToast(Toast{
-			Level:   ToastError,
-			Message: "Source session worktree not found",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return m, nil
+	targetState := domain.SessionIdle
+	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
+		targetState = targetSession.State
 	}
+	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState)
+}
 
-	if msg.TargetID == "main" {
-		return m, m.mergeToMainCmd(sourceSession.Worktree, msg.SourceID)
+func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetState domain.SessionState) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return mergeTargetSelectionResolvedMsg{
+				sourceID:    sourceID,
+				targetID:    targetID,
+				targetState: targetState,
+				err:         fmt.Errorf("source session worktree not found"),
+			}
+		}
+
+		if targetID == "main" {
+			return mergeTargetSelectionResolvedMsg{
+				sourceID:       sourceID,
+				targetID:       targetID,
+				sourceWorktree: sourceWorktree,
+				targetWorktree: m.activeProjectPath(),
+				targetState:    targetState,
+			}
+		}
+
+		targetWorktree, err := m.resolveIssueWorktreePath(ctx, targetID)
+		if err != nil || targetWorktree == "" {
+			return mergeTargetSelectionResolvedMsg{
+				sourceID:       sourceID,
+				targetID:       targetID,
+				sourceWorktree: sourceWorktree,
+				targetState:    targetState,
+				err:            fmt.Errorf("target session worktree not found"),
+			}
+		}
+		return mergeTargetSelectionResolvedMsg{
+			sourceID:       sourceID,
+			targetID:       targetID,
+			sourceWorktree: sourceWorktree,
+			targetWorktree: targetWorktree,
+			targetState:    targetState,
+		}
 	}
-
-	targetSession := m.sessionForIssue(msg.TargetID)
-	if targetSession == nil || targetSession.Worktree == "" {
-		m.addToast(Toast{
-			Level:   ToastError,
-			Message: "Target session worktree not found",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return m, nil
-	}
-
-	return m, m.followOnMergeIntoTargetCmd(sourceSession.Worktree, targetSession.Worktree, msg.SourceID, msg.TargetID, targetSession.State)
 }
 
 type mergeResultMsg struct {
-	sourceID string
-	targetID string
-	result   *git.MergeResult
+	sourceID    string
+	targetID    string
+	result      *git.MergeResult
+	stage       string
+	state       protocol.OperationState
+	operationID string
+	err         error
+}
+
+type mergePreflightFailureMsg struct {
+	sourceID       string
+	sourceWorktree string
+	targetID       string
+	targetWorktree string
+	reasons        []string
+	sourceFiles    []string
+	targetFiles    []string
+}
+
+type mergePreflightActionResultMsg struct {
+	action   string
+	side     string
+	worktree string
 	err      error
+}
+
+type mergeTargetSelectionResolvedMsg struct {
+	sourceID       string
+	targetID       string
+	sourceWorktree string
+	targetWorktree string
+	targetState    domain.SessionState
+	err            error
 }
 
 func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		baseBranch := m.config.Git.BaseBranch
+		baseBranch := m.resolveBaseBranch()
+		mainWorktree := m.activeProjectPath()
+		if strings.TrimSpace(mainWorktree) == "" {
+			mainWorktree = "."
+		}
 
 		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
@@ -4191,15 +4349,46 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
 		}
 
+		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree); preflight != nil {
+			return *preflight
+		}
+
 		if _, err := m.daemonClient.GitFetch(ctx, ".", "origin"); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return mergeResultMsg{
+					sourceID:    sourceID,
+					targetID:    "main",
+					stage:       "fetch",
+					state:       pending.State,
+					operationID: pending.OperationID,
+				}
+			}
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
 		if _, err := m.daemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return mergeResultMsg{
+					sourceID:    sourceID,
+					targetID:    "main",
+					stage:       "checkout",
+					state:       pending.State,
+					operationID: pending.OperationID,
+				}
+			}
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
 		result, err := m.daemonClient.GitMerge(ctx, ".", branch)
+		if pending, ok := pendingOperationDetails(err); ok {
+			return mergeResultMsg{
+				sourceID:    sourceID,
+				targetID:    "main",
+				stage:       "merge",
+				state:       pending.State,
+				operationID: pending.OperationID,
+			}
+		}
 		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: &result.Result, err: err}
 	}
 }
@@ -4224,7 +4413,20 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
+		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree); preflight != nil {
+			return *preflight
+		}
+
 		result, err := m.daemonClient.GitMerge(ctx, targetWorktree, sourceBranch)
+		if pending, ok := pendingOperationDetails(err); ok {
+			return mergeResultMsg{
+				sourceID:    sourceID,
+				targetID:    targetID,
+				stage:       "merge",
+				state:       pending.State,
+				operationID: pending.OperationID,
+			}
+		}
 		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: &result.Result, err: err}
 	}
 }
@@ -4243,6 +4445,15 @@ func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, source
 			}
 			m.sessionMonitor.Stop(targetID)
 			if _, err := m.daemonClient.StopSession(ctx, targetID); err != nil {
+				if pending, ok := pendingOperationDetails(err); ok {
+					return mergeResultMsg{
+						sourceID:    sourceID,
+						targetID:    targetID,
+						stage:       "stop_session",
+						state:       pending.State,
+						operationID: pending.OperationID,
+					}
+				}
 				return mergeResultMsg{
 					sourceID: sourceID,
 					targetID: targetID,
@@ -4263,20 +4474,13 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 		})
 		return nil
 	}
-	if session == nil {
-		session = m.sessionForIssue(task.ID)
-	}
-	if session == nil || session.Worktree == "" {
-		m.addToast(Toast{
-			Level:   ToastWarning,
-			Message: "No active session - start session first",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return nil
-	}
+	targetState, targetStateKnown := projectedSessionState(session, m.sessionForIssue(task.ID))
 
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
+		if task.ParentID == nil {
+			return m.resolveMergeToMainCmd(task.ID)
+		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
 			Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
@@ -4286,22 +4490,12 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 
 	if len(candidates) == 1 {
-		sourceSession := m.sessionForIssue(candidates[0].target.ID)
-		if sourceSession == nil || sourceSession.Worktree == "" {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "Selected upstream source has no active worktree",
-				Expires: time.Now().Add(5 * time.Second),
-			})
-			return nil
-		}
-
 		m.logger.Info("follow-on merge selected",
 			"sourceID", candidates[0].target.ID,
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
-		return m.followOnMergeIntoTargetCmd(sourceSession.Worktree, session.Worktree, candidates[0].target.ID, task.ID, session.State)
+		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID, targetState, targetStateKnown)
 	}
 
 	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
@@ -4310,6 +4504,110 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
 	return m.openOverlay(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+}
+
+func projectedSessionState(primary, fallback *domain.Session) (domain.SessionState, bool) {
+	if primary != nil {
+		return primary.State, true
+	}
+	if fallback != nil {
+		return fallback.State, true
+	}
+	return domain.SessionIdle, false
+}
+
+func (m Model) resolveMergeToMainCmd(sourceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return mergeResultMsg{
+				sourceID: sourceID,
+				targetID: "main",
+				err:      fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+		return m.mergeToMainCmd(sourceWorktree, sourceID)()
+	}
+}
+
+func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState domain.SessionState, targetStateKnown bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return mergeResultMsg{
+				sourceID: sourceID,
+				targetID: targetID,
+				err:      fmt.Errorf("selected upstream source has no active worktree"),
+			}
+		}
+
+		targetWorktree, err := m.resolveIssueWorktreePath(ctx, targetID)
+		if err != nil || targetWorktree == "" {
+			return mergeResultMsg{
+				sourceID: sourceID,
+				targetID: targetID,
+				err:      fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+
+		resolvedTargetState := targetState
+		if !targetStateKnown {
+			state, ok, err := m.resolveIssueSessionStateFromSnapshot(ctx, targetID)
+			if err != nil {
+				return mergeResultMsg{
+					sourceID: sourceID,
+					targetID: targetID,
+					err:      fmt.Errorf("resolve target session state for %s: %w", targetID, err),
+				}
+			}
+			if !ok {
+				return mergeResultMsg{
+					sourceID: sourceID,
+					targetID: targetID,
+					err:      fmt.Errorf("target session state unavailable for %s; refresh and retry", targetID),
+				}
+			}
+			resolvedTargetState = state
+		}
+
+		return m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID, resolvedTargetState)()
+	}
+}
+
+func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
+	if task == nil {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "No focused issue to merge",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return nil
+	}
+
+	candidates := m.getMergeCandidates(task)
+	mergeOverlay := overlay.NewMergeSelectOverlay(
+		task,
+		candidates,
+		func(targetID string) tea.Cmd {
+			return func() tea.Msg {
+				return overlay.SelectionMsg{
+					Key: "merge",
+					Value: overlay.MergeTargetSelectedMsg{
+						SourceID: task.ID,
+						TargetID: targetID,
+					},
+				}
+			}
+		},
+		func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+	)
+	return m.openOverlay(mergeOverlay)
 }
 
 func (m Model) sessionForIssue(issueID string) *domain.Session {
@@ -4359,6 +4657,8 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			if session, ok := m.sessions[task.ID]; ok && session != nil && session.Worktree != "" {
 				hasWorktree = true
 			} else if task.Session != nil && task.Session.Worktree != "" {
+				hasWorktree = true
+			} else if task.HasWorktree {
 				hasWorktree = true
 			}
 			candidates = append(candidates, followOnMergeCandidate{
@@ -4944,6 +5244,211 @@ func (m Model) listDaemonWorktrees(ctx context.Context) ([]git.Worktree, error) 
 		return nil, err
 	}
 	return worktrees, nil
+}
+
+func (m Model) resolveIssueWorktreePath(ctx context.Context, issueID string) (string, error) {
+	if issueID == "" {
+		return "", fmt.Errorf("issue ID is required")
+	}
+	if session := m.sessionForIssue(issueID); session != nil && session.Worktree != "" {
+		return session.Worktree, nil
+	}
+	worktrees, err := m.listDaemonWorktrees(ctx)
+	if err != nil {
+		return "", err
+	}
+	if wt, ok := findDaemonWorktree(worktrees, "", issueID); ok && wt.Path != "" {
+		return wt.Path, nil
+	}
+	return "", fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID string) (domain.SessionState, bool, error) {
+	if issueID == "" {
+		return domain.SessionIdle, false, fmt.Errorf("issue ID is required")
+	}
+	if m.daemonClient == nil {
+		return domain.SessionIdle, false, fmt.Errorf("daemon client unavailable")
+	}
+
+	snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return domain.SessionIdle, false, err
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ID != issueID {
+			continue
+		}
+		if task.Session == nil {
+			return domain.SessionIdle, false, nil
+		}
+		return task.Session.State, true, nil
+	}
+	return domain.SessionIdle, false, nil
+}
+
+func summarizeStatusChangeCounts(status git.GitStatus) string {
+	parts := make([]string, 0, 5)
+	if n := len(status.Staged); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d staged", n))
+	}
+	if n := len(status.Modified); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d modified", n))
+	}
+	if n := len(status.Added); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", n))
+	}
+	if n := len(status.Deleted); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", n))
+	}
+	if n := len(status.Untracked); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d untracked", n))
+	}
+	if len(parts) == 0 {
+		return "working tree has changes"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func dirtyFilesFromStatus(status git.GitStatus) []string {
+	seen := make(map[string]struct{}, 16)
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	appendUnique := func(files []string) {
+		for _, file := range files {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			out = append(out, file)
+		}
+	}
+	appendUnique(status.Staged)
+	appendUnique(status.Modified)
+	appendUnique(status.Added)
+	appendUnique(status.Deleted)
+	appendUnique(status.Untracked)
+	sort.Strings(out)
+	return out
+}
+
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree string) *mergePreflightFailureMsg {
+	if m.daemonClient == nil {
+		return nil
+	}
+
+	reasons := make([]string, 0, 2)
+	sourceFiles := make([]string, 0, 8)
+	targetFiles := make([]string, 0, 8)
+	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
+	if sourceErr != nil {
+		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
+	} else if sourceStatus.HasChanges {
+		reasons = append(reasons, fmt.Sprintf("Source %s is not clean: %s", sourceID, summarizeStatusChangeCounts(sourceStatus)))
+		sourceFiles = dirtyFilesFromStatus(sourceStatus)
+	}
+
+	targetStatus, targetErr := m.daemonClient.GitStatus(ctx, targetWorktree)
+	if targetErr != nil {
+		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
+	} else if targetStatus.HasChanges {
+		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
+		targetFiles = dirtyFilesFromStatus(targetStatus)
+	}
+
+	if len(reasons) == 0 {
+		return nil
+	}
+	return &mergePreflightFailureMsg{
+		sourceID:       sourceID,
+		sourceWorktree: sourceWorktree,
+		targetID:       targetID,
+		targetWorktree: targetWorktree,
+		reasons:        reasons,
+		sourceFiles:    sourceFiles,
+		targetFiles:    targetFiles,
+	}
+}
+
+func runGitCommand(ctx context.Context, worktree string, args ...string) (string, error) {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return "", fmt.Errorf("worktree is required")
+	}
+	fullArgs := make([]string, 0, len(args)+2)
+	fullArgs = append(fullArgs, "-C", worktree)
+	fullArgs = append(fullArgs, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed == "" {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", err, trimmed)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		_, err := runGitCommandFunc(ctx, worktree, "restore", "--staged", "--worktree", ".")
+		if err == nil {
+			_, err = runGitCommandFunc(ctx, worktree, "clean", "-fd")
+		}
+		return mergePreflightActionResultMsg{
+			action:   "discard",
+			side:     side,
+			worktree: worktree,
+			err:      err,
+		}
+	}
+}
+
+func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+
+		if m.daemonClient != nil {
+			if status, err := m.daemonClient.GitStatus(ctx, worktree); err == nil && !status.HasChanges {
+				return mergePreflightActionResultMsg{
+					action:   "commit",
+					side:     side,
+					worktree: worktree,
+					err:      fmt.Errorf("no changes to commit"),
+				}
+			}
+		}
+
+		if _, err := runGitCommandFunc(ctx, worktree, "add", "-A"); err != nil {
+			return mergePreflightActionResultMsg{
+				action:   "commit",
+				side:     side,
+				worktree: worktree,
+				err:      err,
+			}
+		}
+		if _, err := runGitCommandFunc(ctx, worktree, "commit", "-m", "chore: pre-merge checkpoint"); err != nil {
+			return mergePreflightActionResultMsg{
+				action:   "commit",
+				side:     side,
+				worktree: worktree,
+				err:      err,
+			}
+		}
+		return mergePreflightActionResultMsg{
+			action:   "commit",
+			side:     side,
+			worktree: worktree,
+		}
+	}
 }
 
 func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {

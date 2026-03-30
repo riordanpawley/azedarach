@@ -42,6 +42,7 @@ func NewActionMenu(task domain.Task, session *domain.Session) *ActionMenu {
 // child summary information for the selected task.
 func (m *ActionMenu) WithRelatedTasks(tasks []domain.Task) *ActionMenu {
 	m.relatedTasks = append([]domain.Task(nil), tasks...)
+	m.actions = m.buildActions()
 	return m
 }
 
@@ -90,9 +91,13 @@ func (m *ActionMenu) buildActions() []Action {
 	} else if m.task.HasWorktree {
 		hasWorktree = true
 	}
+	mergeLabel := "Follow-on merge"
+	if m.task.ParentID == nil && len(m.relatedTasks) > 0 && !m.hasEligibleUpstreamSource() {
+		mergeLabel = "Merge into main"
+	}
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
-		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
+		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree},
 		Action{Key: "b", Label: "Merge into...", Enabled: true},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
 		Action{Key: "O", Label: "Open PR", Enabled: hasWorktree},
@@ -121,6 +126,36 @@ func (m *ActionMenu) buildActions() []Action {
 	)
 
 	return actions
+}
+
+func (m *ActionMenu) hasEligibleUpstreamSource() bool {
+	isReady := func(status domain.Status) bool {
+		return status == domain.StatusInProgress || status == domain.StatusDone
+	}
+
+	findRelated := func(id string) (domain.Task, bool) {
+		for _, task := range m.relatedTasks {
+			if task.ID == id {
+				return task, true
+			}
+		}
+		return domain.Task{}, false
+	}
+
+	if m.task.ParentID != nil {
+		if parent, ok := findRelated(*m.task.ParentID); ok && isReady(parent.Status) {
+			return true
+		}
+	}
+	for _, dep := range m.task.Dependencies {
+		if dep.Type != domain.DependencyBlocks && dep.Type != domain.DependencyBlockedBy {
+			continue
+		}
+		if upstream, ok := findRelated(dep.ID); ok && isReady(upstream.Status) {
+			return true
+		}
+	}
+	return false
 }
 
 // Init initializes the menu
