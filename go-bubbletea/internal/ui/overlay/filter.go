@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // filterMode represents the current selection mode
@@ -21,6 +22,8 @@ const (
 
 // FilterMenu is a menu overlay for task filtering
 type FilterMenu struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	filter *domain.Filter
 	styles *Styles
 	mode   filterMode
@@ -43,6 +46,9 @@ func (m *FilterMenu) Init() tea.Cmd {
 // Update handles messages
 func (m *FilterMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
+		return m, nil
 	case tea.KeyMsg:
 		switch m.mode {
 		case filterModeNormal:
@@ -260,6 +266,28 @@ func (m *FilterMenu) handleSessionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // View renders the menu
 func (m *FilterMenu) View() string {
+	width, height := m.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             width,
+		height:            height,
+		title:             m.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        76,
+		gap:               3,
+		minLeft:           42,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return m.renderContent()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.styles, m.actionBindings(), width)
+		},
+	})
+}
+
+func (m *FilterMenu) renderContent() string {
 	var b strings.Builder
 
 	// Status filter line
@@ -337,6 +365,41 @@ func (m *FilterMenu) View() string {
 	}
 
 	return b.String()
+}
+
+func (m *FilterMenu) actionBindings() []keybinds.Binding {
+	base := []keybinds.Binding{
+		{Key: "s/p/t/S", Description: "select category"},
+		{Key: "e", Description: "toggle hide children"},
+		{Key: "1/7/3/0", Description: "set age filter"},
+		{Key: "c", Description: "clear all"},
+		{Key: "Esc", Description: "close/back"},
+	}
+
+	switch m.mode {
+	case filterModeStatus:
+		return []keybinds.Binding{
+			{Key: "o/i/b/d", Description: "toggle status"},
+			{Key: "Esc", Description: "back"},
+		}
+	case filterModePriority:
+		return []keybinds.Binding{
+			{Key: "0/1/2/3/4", Description: "toggle priority"},
+			{Key: "Esc", Description: "back"},
+		}
+	case filterModeType:
+		return []keybinds.Binding{
+			{Key: "T/B/F/E/C", Description: "toggle type"},
+			{Key: "Esc", Description: "back"},
+		}
+	case filterModeSession:
+		return []keybinds.Binding{
+			{Key: "I/U/W/D/X/P", Description: "toggle session"},
+			{Key: "Esc", Description: "back"},
+		}
+	default:
+		return base
+	}
 }
 
 // filterOption represents a single filter option
@@ -435,7 +498,7 @@ func (m *FilterMenu) Title() string {
 func (m *FilterMenu) Size() (width, height int) {
 	// Width: enough for filter options
 	// Height: 4 filter lines + 1 checkbox + 1 age + 1 clear + separators + padding
-	return 56, 14
+	return m.Clamp(104, 20)
 }
 
 // intPtr returns a pointer to an int
