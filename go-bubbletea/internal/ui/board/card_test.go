@@ -599,6 +599,49 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	}
 }
 
+func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-90 * time.Minute)
+	task := domain.Task{
+		ID:       "CHE-3010",
+		Title:    "narrow header compaction",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P2,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "CHE-3010",
+			State:     domain.SessionWaiting,
+			StartedAt: &startedAt,
+		},
+	}
+	signals := &RuntimeSignals{
+		HasTmuxSession:        true,
+		HasWorktree:           true,
+		HasUncommittedChanges: true,
+		GitAdditions:          12,
+		GitDeletions:          3,
+	}
+
+	result := stripANSI(renderCard(task, signals, false, false, 40, &ChildProgress{Total: 7, Done: 1}, nil, false, s))
+	lines := strings.Split(result, "\n")
+	first := ""
+	for _, line := range lines {
+		if strings.Contains(line, "CHE-3010") {
+			first = line
+			break
+		}
+	}
+	if first == "" {
+		t.Fatalf("expected metadata line containing issue id, got: %s", result)
+	}
+	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, " T ") {
+		t.Fatalf("first line must preserve core tokens, got: %s", first)
+	}
+	if strings.Contains(first, "WAIT") || strings.Contains(first, "+12/-3") {
+		t.Fatalf("first line should compact verbose metadata at narrow width, got: %s", first)
+	}
+}
+
 func TestRenderRuntimeSignals(t *testing.T) {
 	t.Run("nil runtime signals", func(t *testing.T) {
 		if got := renderRuntimeSignals(nil, styles.New()); got != "" {
@@ -638,6 +681,31 @@ func TestRenderRuntimeSignals(t *testing.T) {
 		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
 		if !strings.Contains(got, "G:↑3") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing ahead token", got)
+		}
+	})
+}
+
+func TestRenderRuntimeSignalsCompact(t *testing.T) {
+	t.Run("nil runtime signals", func(t *testing.T) {
+		if got := renderRuntimeSignalsCompact(nil, styles.New()); got != "" {
+			t.Fatalf("renderRuntimeSignalsCompact(nil) = %q, want empty", got)
+		}
+	})
+
+	t.Run("compacts to narrow token set", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			HasTmuxSession:        true,
+			HasWorktree:           true,
+			HasUncommittedChanges: true,
+			GitAdditions:          10,
+			GitDeletions:          3,
+		}
+		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
+		if !strings.Contains(got, "T") || !strings.Contains(got, "W") || !strings.Contains(got, "G*") {
+			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
+		}
+		if strings.Contains(got, "+10/-3") {
+			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, should omit verbose line-change token", got)
 		}
 	})
 }

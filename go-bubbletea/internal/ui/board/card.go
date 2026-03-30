@@ -104,21 +104,21 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if task.Session != nil {
 		sessionRow = renderSessionStatus(task.Session, s)
 	}
+	sessionCompact := renderSessionStatusCompact(task.Session)
 	runtimeRow := renderRuntimeSignals(runtimeSignals, s)
+	runtimeCompact := renderRuntimeSignalsCompact(runtimeSignals, s)
 
-	auxParts := make([]string, 0, 3)
-	if sessionRow != "" {
-		auxParts = append(auxParts, sessionRow)
-	}
-	if runtimeRow != "" {
-		auxParts = append(auxParts, runtimeRow)
-	}
-	if childProgress != nil && childProgress.Total > 0 {
-		auxParts = append(auxParts, renderChildProgress(*childProgress, s))
-	}
 	headerLine := strings.Join(headerParts, " ")
-	if len(auxParts) > 0 {
-		headerLine = headerLine + " " + strings.Join(auxParts, " ")
+	preferCompact := maxLineLen < 44
+	for _, token := range []struct {
+		full    string
+		compact string
+	}{
+		{full: sessionRow, compact: sessionCompact},
+		{full: runtimeRow, compact: runtimeCompact},
+		{full: renderChildProgressValue(childProgress, s), compact: renderChildProgressValue(childProgress, s)},
+	} {
+		headerLine = appendHeaderToken(headerLine, maxLineLen, token.full, token.compact, preferCompact)
 	}
 
 	titleLines := renderTitleBodyLines(task.Title, maxLineLen, CardContentHeight-1)
@@ -132,6 +132,41 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Render(content)
+}
+
+func appendHeaderToken(headerLine string, maxLineLen int, full string, compact string, preferCompact bool) string {
+	if full == "" && compact == "" {
+		return headerLine
+	}
+
+	try := func(token string) (string, bool) {
+		if token == "" {
+			return "", false
+		}
+		candidate := headerLine + " " + token
+		if ansi.StringWidth(candidate) <= maxLineLen {
+			return candidate, true
+		}
+		return "", false
+	}
+
+	if preferCompact {
+		if candidate, ok := try(compact); ok {
+			return candidate
+		}
+		if candidate, ok := try(full); ok {
+			return candidate
+		}
+		return headerLine
+	}
+
+	if candidate, ok := try(full); ok {
+		return candidate
+	}
+	if candidate, ok := try(compact); ok {
+		return candidate
+	}
+	return headerLine
 }
 
 func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {
@@ -229,46 +264,95 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	return stateStyle.Render(value)
 }
 
+func renderSessionStatusCompact(session *domain.Session) string {
+	if session == nil {
+		return ""
+	}
+
+	icon := session.State.Icon()
+	if session.StartedAt != nil && (session.State == domain.SessionBusy || session.State == domain.SessionWaiting) {
+		return fmt.Sprintf("%s%s", icon, formatCompactDuration(time.Since(*session.StartedAt)))
+	}
+
+	stateCode := map[domain.SessionState]string{
+		domain.SessionBusy:    "B",
+		domain.SessionWaiting: "W",
+		domain.SessionDone:    "D",
+		domain.SessionError:   "E",
+		domain.SessionPaused:  "P",
+		domain.SessionIdle:    "I",
+	}
+	code, ok := stateCode[session.State]
+	if !ok {
+		code = "?"
+	}
+	return icon + code
+}
+
 func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if signals == nil {
 		return ""
-	}
-	styleToken := func(token string, color lipgloss.Color) string {
-		if s == nil {
-			return token
-		}
-		return lipgloss.NewStyle().Foreground(color).Bold(true).Render(token)
 	}
 
 	hasLineChanges := signals.GitAdditions > 0 || signals.GitDeletions > 0
 	parts := make([]string, 0, 6)
 	if signals.HasTmuxSession {
-		parts = append(parts, styleToken(tmuxSessionToken, styles.Sky))
+		parts = append(parts, renderRuntimeSignalToken(tmuxSessionToken, styles.Sky, s))
 	}
 	if signals.HasWorktree {
-		parts = append(parts, styleToken(worktreeToken, styles.Teal))
+		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
 	if signals.GitAheadCount > 0 && !hasLineChanges {
-		parts = append(parts, styleToken(fmt.Sprintf("G:↑%d", signals.GitAheadCount), styles.Green))
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G:↑%d", signals.GitAheadCount), styles.Green, s))
 	}
 	if signals.GitBehindCount > 0 {
-		parts = append(parts, styleToken(fmt.Sprintf("G:↓%d", signals.GitBehindCount), styles.Yellow))
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G:↓%d", signals.GitBehindCount), styles.Yellow, s))
 	}
 	if signals.HasUncommittedChanges {
-		parts = append(parts, styleToken("G:✎", styles.Peach))
+		parts = append(parts, renderRuntimeSignalToken("G:✎", styles.Peach, s))
 	}
 	if hasLineChanges {
 		if s == nil {
 			parts = append(parts, fmt.Sprintf("+%d/-%d", signals.GitAdditions, signals.GitDeletions))
 		} else {
-			add := styleToken(fmt.Sprintf("+%d", signals.GitAdditions), styles.Green)
-			del := styleToken(fmt.Sprintf("-%d", signals.GitDeletions), styles.Red)
+			add := renderRuntimeSignalToken(fmt.Sprintf("+%d", signals.GitAdditions), styles.Green, s)
+			del := renderRuntimeSignalToken(fmt.Sprintf("-%d", signals.GitDeletions), styles.Red, s)
 			sep := lipgloss.NewStyle().Foreground(styles.Overlay0).Render("/")
 			parts = append(parts, add+sep+del)
 		}
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) string {
+	if signals == nil {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if signals.HasTmuxSession {
+		parts = append(parts, renderRuntimeSignalToken("T", styles.Sky, s))
+	}
+	if signals.HasWorktree {
+		parts = append(parts, renderRuntimeSignalToken("W", styles.Teal, s))
+	}
+
+	hasChanges := signals.HasUncommittedChanges || signals.GitAdditions > 0 || signals.GitDeletions > 0
+	if hasChanges {
+		parts = append(parts, renderRuntimeSignalToken("G*", styles.Peach, s))
+	} else if signals.GitAheadCount > 0 || signals.GitBehindCount > 0 {
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G%d/%d", signals.GitAheadCount, signals.GitBehindCount), styles.Yellow, s))
+	}
+
+	return strings.Join(parts, "")
+}
+
+func renderRuntimeSignalToken(token string, color lipgloss.Color, s *styles.Styles) string {
+	if s == nil {
+		return token
+	}
+	return lipgloss.NewStyle().Foreground(color).Bold(true).Render(token)
 }
 
 // formatDuration formats a duration as "2d 2h", "2h 34m", or "45m".
@@ -290,12 +374,36 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm", m)
 }
 
+func formatCompactDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalHours := int(d.Hours())
+	days := totalHours / 24
+	h := totalHours % 24
+	m := int(d.Minutes()) % 60
+	if days > 0 {
+		return fmt.Sprintf("%dd", days)
+	}
+	if h > 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
 // renderChildProgress renders child completion progress with completion ratio.
 func renderChildProgress(progress ChildProgress, s *styles.Styles) string {
 	if progress.Total <= 0 {
 		return ""
 	}
 	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d]", progress.Done, progress.Total))
+}
+
+func renderChildProgressValue(progress *ChildProgress, s *styles.Styles) string {
+	if progress == nil {
+		return ""
+	}
+	return renderChildProgress(*progress, s)
 }
 
 // RenderCard is the exported version for testing
