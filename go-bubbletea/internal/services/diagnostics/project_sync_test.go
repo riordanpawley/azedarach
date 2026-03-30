@@ -199,6 +199,38 @@ func TestCollectDiagnosticsIncludesProjectSyncDiagnostics(t *testing.T) {
 	}
 }
 
+func TestSetProjectSyncDiagnosticsNormalizesProjectIDKey(t *testing.T) {
+	tmux := &mockTmuxClient{sessions: []string{}}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
+	service := NewService(tmux, ports, network)
+
+	service.SetProjectSyncDiagnostics(ProjectSyncDiagnostics{
+		ProjectID: " proj-a ",
+		State:     linearsync.WorkerStateHealthy,
+		Transport: projectSyncTransportPrimary,
+	})
+	service.SetProjectSyncDiagnostics(ProjectSyncDiagnostics{
+		ProjectID: "proj-a",
+		State:     linearsync.WorkerStateDegraded,
+		Transport: projectSyncTransportFallback,
+	})
+
+	diag := service.CollectDiagnostics(context.Background(), map[string]*domain.Session{}, nil)
+	if diag == nil {
+		t.Fatal("CollectDiagnostics() returned nil")
+	}
+	if got, want := len(diag.ProjectSync), 1; got != want {
+		t.Fatalf("len(ProjectSync) = %d, want %d", got, want)
+	}
+	if got, want := diag.ProjectSync[0].ProjectID, "proj-a"; got != want {
+		t.Fatalf("ProjectID = %q, want %q", got, want)
+	}
+	if got, want := diag.ProjectSync[0].State, linearsync.WorkerStateDegraded; got != want {
+		t.Fatalf("State = %q, want %q", got, want)
+	}
+}
+
 func TestFormatDiagnosticsPreservesLegacySectionsWhenProjectSyncPresent(t *testing.T) {
 	now := time.Date(2026, 3, 30, 10, 15, 0, 0, time.UTC)
 	diag := &SystemDiagnostics{

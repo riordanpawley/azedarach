@@ -159,7 +159,8 @@ func (s *Service) SetWebhookFallback(status *linearsync.WebhookFallbackStatus) {
 
 // SetProjectSyncDiagnostics stores a project-level sync diagnostics record.
 func (s *Service) SetProjectSyncDiagnostics(diag ProjectSyncDiagnostics) {
-	if strings.TrimSpace(diag.ProjectID) == "" {
+	projectID := strings.TrimSpace(diag.ProjectID)
+	if projectID == "" {
 		return
 	}
 
@@ -169,7 +170,8 @@ func (s *Service) SetProjectSyncDiagnostics(diag ProjectSyncDiagnostics) {
 	if s.projectSync == nil {
 		s.projectSync = map[string]ProjectSyncDiagnostics{}
 	}
-	s.projectSync[diag.ProjectID] = normalizeProjectSyncDiagnostics(diag)
+	diag.ProjectID = projectID
+	s.projectSync[projectID] = normalizeProjectSyncDiagnostics(diag)
 }
 
 // SetProjectSyncProjection projects worker lifecycle state into diagnostics and stores it.
