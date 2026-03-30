@@ -1,10 +1,10 @@
-# Overview: Go/Bubbletea Rewrite
+# Overview: Go/Bubbletea Implementation
 
-> Alternative rewrite exploring Go + Bubbletea as TUI framework
+> Go + Bubbletea as the active TUI framework for Azedarach
 
 ## Executive Summary
 
-This document outlines a potential rewrite of Azedarach in Go using the [Bubbletea](https://github.com/charmbracelet/bubbletea) TUI framework. Like the existing Gleam rewrite, Bubbletea uses The Elm Architecture (TEA), making the conceptual port straightforward.
+This document outlines the Go implementation of Azedarach using the [Bubbletea](https://github.com/charmbracelet/bubbletea) TUI framework. Bubbletea uses The Elm Architecture (TEA), which keeps model/update/view boundaries explicit.
 
 ## Why Go/Bubbletea?
 
@@ -38,19 +38,14 @@ This document outlines a potential rewrite of Azedarach in Go using the [Bubblet
 3. **Windows users** - Erlang setup on Windows is painful
 4. **Binary size** - Go binaries smaller than BEAM releases
 
-## Comparison: All Three Implementations
+## Current Implementation Snapshot
 
-| Aspect | TypeScript | Gleam | Go |
-|--------|------------|-------|-----|
-| **Lines of Code** | ~33,000 | ~16,500 | ~8,000 (est.) |
-| **Architecture** | Effect services | OTP actors | Goroutines |
-| **UI Framework** | React + OpenTUI | Shore (TEA) | Bubbletea (TEA) |
-| **State** | SubscriptionRef + Atoms | TEA Model | TEA Model |
-| **Concurrency** | Effect fibers | OTP processes | Goroutines |
-| **Binary Size** | N/A (Node.js) | ~30MB (BEAM) | ~10MB |
-| **Startup Time** | ~500ms | ~200ms | ~50ms |
-| **Windows** | Yes (Node) | Difficult | Yes (native) |
-| **Distribution** | npm | escript/release | go install |
+| Aspect | Go |
+|--------|-----|
+| **Architecture** | Goroutines + daemon/client boundaries |
+| **UI Framework** | Bubbletea (TEA) |
+| **State** | TEA Model |
+| **Distribution** | `go install` / Homebrew |
 
 ## Performance Targets
 
@@ -65,10 +60,9 @@ This document outlines a potential rewrite of Azedarach in Go using the [Bubblet
 
 ## Next Steps
 
-1. Review this plan and decide if Go rewrite should proceed
-2. If yes, create initial project skeleton
-3. Begin Phase 1 implementation
-4. Maintain both Gleam and Go rewrites in parallel for comparison
+1. Continue phase delivery against tracked issues
+2. Keep boundary checks and regression guards green
+3. Update docs as runtime behavior changes
 
 ## Resources
 

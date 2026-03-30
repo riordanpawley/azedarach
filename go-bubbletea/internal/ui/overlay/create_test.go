@@ -499,7 +499,7 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 			"Status:   blocked        (open | in_progress | blocked | closed)",
 			"Assignee: jane",
 			"Labels:   ui, editor",
-			"Impl:     ts-opentui, go-bubbletea",
+			"Impl:     go-bubbletea",
 			"Estimate: 13",
 			"",
 			"## Description",
@@ -539,7 +539,7 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	assert.Equal(t, domain.StatusBlocked, created.Status)
 	assert.Equal(t, "jane", created.Assignee)
 	assert.Equal(t, []string{"ui", "editor"}, created.Labels)
-	assert.Equal(t, []string{"ts-opentui", "go-bubbletea"}, created.Implementations)
+	assert.Equal(t, []string{"go-bubbletea"}, created.Implementations)
 	assert.Equal(t, "Update parser", created.Design)
 	assert.Equal(t, "Be careful with defaults", created.Notes)
 	assert.Equal(t, "All fields parse and persist", created.Acceptance)
@@ -557,7 +557,7 @@ func TestParseTaskTemplateFullMetadata(t *testing.T) {
 		"Status:   in_progress        (open | in_progress | blocked | closed)",
 		"Assignee: sam",
 		"Labels:   alpha, beta",
-		"Impl:     ts-opentui, go-bubbletea",
+		"Impl:     go-bubbletea",
 		"Estimate: 5",
 		"",
 		"## Description",
@@ -586,7 +586,7 @@ func TestParseTaskTemplateFullMetadata(t *testing.T) {
 	assert.Equal(t, domain.StatusInProgress, msg.Status)
 	assert.Equal(t, "sam", msg.Assignee)
 	assert.Equal(t, []string{"alpha", "beta"}, msg.Labels)
-	assert.Equal(t, []string{"ts-opentui", "go-bubbletea"}, msg.Implementations)
+	assert.Equal(t, []string{"go-bubbletea"}, msg.Implementations)
 	assert.Equal(t, "Ship this", msg.Description)
 	assert.Equal(t, "Design section", msg.Design)
 	assert.Equal(t, "Notes section", msg.Notes)

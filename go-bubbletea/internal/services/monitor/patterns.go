@@ -33,7 +33,7 @@ const (
 )
 
 // State patterns ordered by priority (highest to lowest)
-// Based on TypeScript StateDetector patterns with comprehensive Claude Code output coverage
+// Based on historical state detector patterns with comprehensive Claude Code output coverage
 var statePatterns = []StatePattern{
 	// ============================================================================
 	// WAITING PATTERNS (Priority: 90)

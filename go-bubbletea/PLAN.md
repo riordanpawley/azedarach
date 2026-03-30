@@ -1,6 +1,6 @@
-# Azedarach Go/Bubbletea Rewrite Plan
+# Azedarach Go/Bubbletea Plan
 
-> Alternative rewrite exploring Go + Bubbletea as TUI framework
+> Go + Bubbletea implementation plan for Azedarach
 
 ## Quick Links
 
@@ -12,7 +12,7 @@
 | [Go Best Practices](docs/04-go-best-practices.md) | DI, context, errors, concurrency, testing |
 | [Bubbletea Patterns](docs/05-bubbletea-patterns.md) | Nested models, commands, navigation, performance |
 | [Implementation Phases](docs/06-implementation-phases.md) | Phase index with progress tracking |
-| [Feature Matrix](docs/07-feature-matrix.md) | TypeScript→Go parity tracking (~100 features) |
+| [Feature Matrix](docs/07-feature-matrix.md) | Feature coverage tracking (~100 features) |
 | [Technical Deep Dive](docs/08-technical-deep-dive.md) | Challenges, solutions, testing, migration |
 
 ## Implementation Phases
@@ -38,7 +38,7 @@ Phase 4 (Sessions)  ←───────────────────
 
 ## Executive Summary
 
-This rewrite explores Go + [Bubbletea](https://github.com/charmbracelet/bubbletea) as an alternative to the Gleam/Shore rewrite. Both use The Elm Architecture (TEA), making the conceptual port straightforward.
+This plan tracks the Go + [Bubbletea](https://github.com/charmbracelet/bubbletea) implementation. It uses The Elm Architecture (TEA) and focuses on operationalizing the current production path.
 
 ### Why Go?
 
@@ -59,7 +59,7 @@ This rewrite explores Go + [Bubbletea](https://github.com/charmbracelet/bubblete
 | Type System | Strong, functional | Strong, structural |
 | Pattern Matching | Native | Type switches |
 
-## Feature Parity Status
+## Feature Status
 
 **Total Features: ~100**
 - ✅ Planned: ~35 (35%)
@@ -163,6 +163,6 @@ go-bubbletea/
 
 ## Next Steps
 
-1. Review this plan and decide if Go rewrite should proceed
-2. If yes, begin Phase 1 implementation
-3. Maintain both Gleam and Go rewrites in parallel for comparison
+1. Continue landing phase deliverables
+2. Keep feature matrix updated as behavior ships
+3. Use issue tracker evidence bundles to close implementation gaps

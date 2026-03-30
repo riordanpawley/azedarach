@@ -42,7 +42,7 @@ Phase 4 (Sessions) ──────────► Phase 5 (Git)
 |-----------|--------|-------------|
 | **Alpha** | 1-3 | Basic navigation, viewing, filtering |
 | **Beta** | 1-5 | Full session + git workflow |
-| **RC** | 1-6 | Feature parity with TypeScript |
+| **RC** | 1-6 | Feature-complete for tracked requirements |
 | **GA** | 1-6 | Production ready, Go becomes default |
 
 ## Quick Reference

@@ -44,14 +44,14 @@ func readClipboardMacOS(ctx context.Context) ([]byte, error) {
 		attempts = append(attempts, "pngpaste not installed")
 	}
 
-	// Mirror ts-opentui environment assumptions: pbpaste can expose clipboard payload bytes.
+	// Preserve compatibility with prior clipboard flows where pbpaste exposes raw payload bytes.
 	if data, err := readClipboardMacOSPBPasteRaw(ctx); err == nil && len(data) > 0 {
 		return data, nil
 	} else if err != nil {
 		attempts = append(attempts, "pbpaste raw failed: "+compactWhitespace(err.Error()))
 	}
 
-	// Try the same direct PNG AppleScript flow used in ts-opentui.
+	// Try the direct PNG AppleScript flow used in earlier implementations.
 	if data, err := readClipboardMacOSPNGScript(ctx); err == nil && len(data) > 0 {
 		return data, nil
 	} else if err != nil {

@@ -670,7 +670,7 @@ func TestClient_EnsuresDependencyForeignKeysAndIndexes(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestClient_MigratesTsOpentuiSchemaShape(t *testing.T) {
+func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 
@@ -720,7 +720,7 @@ func TestClient_MigratesTsOpentuiSchemaShape(t *testing.T) {
 	})
 
 	_, err = client.Create(ctx, CreateTaskParams{
-		Title:    "ts schema compatibility",
+		Title:    "legacy schema compatibility",
 		Type:     domain.TypeTask,
 		Priority: domain.P3,
 	})

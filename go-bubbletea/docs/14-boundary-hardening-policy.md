@@ -22,21 +22,6 @@ Hard import direction:
 - `internal/app`, `internal/cli` X> `internal/daemon/*`.
 - `internal/daemon/*` X> Bubble Tea/UI packages.
 
-### TypeScript (future monorepo package split)
-
-Recommended package boundaries:
-- `@azedarach/protocol` (contracts only)
-- `@azedarach/daemon` (authority runtime)
-- `@azedarach/client` (rpc client boundary)
-- `@azedarach/cli` (commands/presentation)
-- `@azedarach/tui` (ui/presentation)
-
-Hard dependency direction:
-- `cli|tui` -> `client|protocol`
-- `client` -> `protocol`
-- `daemon` -> `protocol`
-- forbidden: `cli|tui -> daemon`
-
 ## Enforcement Levels
 
 ### Level 0 (current baseline)

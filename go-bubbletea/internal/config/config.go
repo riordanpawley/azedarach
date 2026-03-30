@@ -219,7 +219,7 @@ func LoadConfig(projectPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse %s: %w", configPath, err)
 	}
 
-	// ts-opentui stores init commands under worktree.initCommands; map for Go runtime.
+	// Older configs may store init commands under worktree.initCommands; map for runtime use.
 	if len(cfg.Worktree.InitCommands) > 0 {
 		cfg.Session.InitCommands = append([]string(nil), cfg.Worktree.InitCommands...)
 	}

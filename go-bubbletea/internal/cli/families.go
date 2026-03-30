@@ -281,7 +281,7 @@ func GateCommand(_ *Dependencies, opts GateOptions) error {
 	if opts.Fix {
 		fmt.Println("  Fix mode requested; no automated gates are wired in go-bubbletea yet.")
 	}
-	fmt.Println("  go-bubbletea exposes the family and help surface; ts-opentui remains the execution path for full gates.")
+	fmt.Println("  go-bubbletea exposes the family and help surface; full gate automation is still being wired.")
 	return nil
 }
 

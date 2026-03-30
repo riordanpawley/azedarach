@@ -1,6 +1,6 @@
 # Phase 6: Advanced Features
 
-**Goal**: Full feature parity with TypeScript implementation
+**Goal**: Full feature coverage for tracked product requirements
 
 **Status**: 🔲 Not Started
 
@@ -275,5 +275,5 @@ internal/config/projects.go
 - [ ] Unit tests for image detection
 - [ ] Golden tests for overlays
 - [ ] Manual testing across terminals
-- [ ] Full feature parity verified
+- [ ] Full feature coverage verified
 - [ ] Code reviewed and merged

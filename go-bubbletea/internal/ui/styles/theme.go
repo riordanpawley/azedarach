@@ -2,7 +2,7 @@ package styles
 
 import "github.com/charmbracelet/lipgloss"
 
-// Catppuccin Mocha palette (matching TypeScript version)
+// Catppuccin Mocha palette for the Go Bubbletea UI.
 var (
 	// Base colors
 	Base   = lipgloss.Color("#1e1e2e")

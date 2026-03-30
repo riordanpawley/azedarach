@@ -1,6 +1,6 @@
-# Complete Feature Matrix (TypeScript → Go)
+# Complete Feature Matrix
 
-This matrix ensures no features are lost in the rewrite. Checked items are covered in implementation phases.
+This matrix tracks feature coverage for the Go implementation. Checked items are covered in implementation phases.
 
 ## Gap Summary
 

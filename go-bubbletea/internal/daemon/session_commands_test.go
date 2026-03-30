@@ -186,7 +186,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 			SessionShell: "zsh",
 			SessionInitCommands: []string{
 				"direnv allow",
-				"cd ts-opentui && bun install",
+				"go test ./...",
 			},
 		},
 	}
@@ -200,7 +200,7 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	if !strings.Contains(command, "zsh -i -c") {
 		t.Fatalf("command = %q, want interactive shell launch", command)
 	}
-	if !strings.Contains(command, "direnv allow; cd ts-opentui && bun install;") {
+	if !strings.Contains(command, "direnv allow; go test ./...;") {
 		t.Fatalf("command = %q, want init command sequence", command)
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="axt-123" claude`) {

@@ -295,48 +295,28 @@ func formatError(err error) string {
 
 ---
 
-## Migration Strategy
+## Runtime Strategy
 
-### Running Both Versions
+### Single Runtime
 
-During development, both TypeScript and Go versions can coexist:
+The Go implementation is the active runtime:
 
 ```bash
-# TypeScript version (current)
-bun run dev          # or: az (if installed globally)
-
-# Go version (new)
-go run ./cmd/az      # or: az-go (different binary name)
+go run ./cmd/az
 ```
 
 ### Shared Configuration
 
-Both versions read the same config files:
+The runtime reads:
 - `.azedarach.json` - Project config
 - `~/.config/azedarach/projects.json` - Global projects
 
 ### Shared State
 
-Both versions interact with:
+The runtime interacts with:
 - `.linear/` directory - Bead tracker data
 - tmux sessions - Named consistently (`az-{beadId}`)
 - Git worktrees - Same naming convention
-
-### Feature Flag for Transition
-
-```bash
-# Set preferred version globally
-export AZ_RUNTIME=go  # or: ts
-
-# az wrapper script detects and launches correct version
-```
-
-### Gradual Rollout Plan
-
-1. **Alpha**: Go version usable for basic workflows (Phase 1-3)
-2. **Beta**: Session management works (Phase 4-5)
-3. **RC**: Full feature parity (Phase 6)
-4. **GA**: Go becomes default, TS deprecated
 
 ---
 
