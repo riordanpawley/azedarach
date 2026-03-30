@@ -1,5 +1,0 @@
-{
-	"extends": "./tsconfig.base.json",
-	"include": ["src/**/*", "bin/**/*", "packages/tui/src/**/*", "packages/cli/src/**/*"],
-	"exclude": ["node_modules"]
-}
