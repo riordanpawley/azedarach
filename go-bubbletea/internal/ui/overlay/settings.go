@@ -41,6 +41,8 @@ type SettingItem struct {
 
 // SettingsOverlay is a settings menu overlay
 type SettingsOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	items        []SettingItem
 	cursor       int
 	configSource string
@@ -194,6 +196,8 @@ func (m *SettingsOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
 	}
 
 	return m, nil
@@ -278,21 +282,31 @@ func (m *SettingsOverlay) View() string {
 		b.WriteString("\n")
 	}
 
-	// Add footer hint
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "j/k", Description: "move"},
-		{Key: "h/l", Description: "cycle"},
-		{Key: "Enter/Space", Description: "toggle/activate"},
-		{Key: "e", Description: "edit config"},
-		{Key: "Esc", Description: "close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         m.styles.MenuKey,
-		DescriptionStyle: m.styles.Footer,
-		FooterStyle:      m.styles.Footer,
-	}))
-
-	return b.String()
+	width, height := m.Clamp(72, len(m.items)+9)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             width,
+		height:            height,
+		title:             "Settings",
+		rightSectionTitle: "Actions",
+		breakpoint:        68,
+		gap:               2,
+		minLeft:           50,
+		minRight:          15,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return b.String()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.styles, []keybinds.Binding{
+				{Key: "j/k", Description: "move"},
+				{Key: "h/l", Description: "cycle"},
+				{Key: "Enter/Space", Description: "toggle/activate"},
+				{Key: "e", Description: "edit config"},
+				{Key: "Esc", Description: "close"},
+			})
+		},
+	})
 }
 
 // Title returns the overlay title
@@ -304,7 +318,7 @@ func (m *SettingsOverlay) Title() string {
 func (m *SettingsOverlay) Size() (width, height int) {
 	// Width: enough for longest setting line
 	// Height: number of items + footer + padding
-	return 72, len(m.items) + 9
+	return m.Clamp(72, len(m.items)+9)
 }
 
 // moveCursorDown moves the cursor to the next selectable item

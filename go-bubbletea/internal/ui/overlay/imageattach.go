@@ -24,6 +24,8 @@ const (
 
 // ImageAttachOverlay manages image attachments for a task
 type ImageAttachOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	issueID     string
 	service     ImageAttachmentService
 	mode        imageAttachMode
@@ -147,6 +149,8 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return i, nil
 
 		}
+	case tea.WindowSizeMsg:
+		i.ApplyWindowSize(msg)
 
 	case attachmentsLoadedMsg:
 		i.files = msg.attachments
@@ -215,29 +219,85 @@ func (i *ImageAttachOverlay) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // View renders the overlay
 func (i *ImageAttachOverlay) View() string {
 	if i.inputActive {
-		return i.renderFileInput()
+		width, height := i.Clamp(84, 18)
+		return renderDialogTwoPane(dialogLayoutConfig{
+			styles:            i.styles,
+			width:             width,
+			height:            height,
+			title:             "ATTACH FROM FILE",
+			rightSectionTitle: "Actions",
+			breakpoint:        80,
+			gap:               3,
+			minLeft:           36,
+			minRight:          30,
+			leftFocused:       true,
+			renderLeft: func(mode dialogLayoutMode, width, height int) string {
+				return i.renderFileInputContent()
+			},
+			renderRight: func(mode dialogLayoutMode, width, height int) string {
+				return renderDialogActions(i.styles, []keybinds.Binding{
+					{Key: "Enter", Description: "attach"},
+					{Key: "Esc", Description: "cancel"},
+				}, width)
+			},
+		})
 	}
 
 	switch i.mode {
 	case imageAttachModeList:
-		return i.renderList()
+		width, height := i.Clamp(84, i.listModeHeight())
+		return renderDialogTwoPane(dialogLayoutConfig{
+			styles:            i.styles,
+			width:             width,
+			height:            height,
+			title:             fmt.Sprintf("ATTACHMENTS FOR %s", i.issueID),
+			rightSectionTitle: "Actions",
+			breakpoint:        80,
+			gap:               3,
+			minLeft:           36,
+			minRight:          32,
+			leftFocused:       true,
+			renderLeft: func(mode dialogLayoutMode, width, height int) string {
+				return i.renderListContent()
+			},
+			renderRight: func(mode dialogLayoutMode, width, height int) string {
+				return i.renderListActions(width)
+			},
+		})
 	case imageAttachModePreview:
-		return i.renderPreview()
+		width, height := i.Clamp(84, 24)
+		return renderDialogTwoPane(dialogLayoutConfig{
+			styles:            i.styles,
+			width:             width,
+			height:            height,
+			title:             "ATTACHMENT DETAILS",
+			rightSectionTitle: "Actions",
+			breakpoint:        80,
+			gap:               3,
+			minLeft:           36,
+			minRight:          32,
+			leftFocused:       true,
+			renderLeft: func(mode dialogLayoutMode, width, height int) string {
+				return i.renderPreviewContent()
+			},
+			renderRight: func(mode dialogLayoutMode, width, height int) string {
+				return renderDialogActions(i.styles, []keybinds.Binding{
+					{Key: "o", Description: "open in viewer"},
+					{Key: "Esc", Description: "back to list"},
+				}, width)
+			},
+		})
 	default:
-		return i.renderList()
+		return i.renderListContent()
 	}
 }
 
-// renderList renders the attachment list
-func (i *ImageAttachOverlay) renderList() string {
+func (i *ImageAttachOverlay) renderListContent() string {
 	var content strings.Builder
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Bold(true)
-	content.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.issueID)))
-	content.WriteString("\n\n")
 
 	if len(i.files) == 0 {
 		content.WriteString(i.styles.Footer.Render("No attachments yet."))
-		content.WriteString("\n\n")
+		content.WriteString("\n")
 	} else {
 		for idx, file := range i.files {
 			style := i.styles.MenuItem
@@ -252,46 +312,35 @@ func (i *ImageAttachOverlay) renderList() string {
 			content.WriteString(style.Render(line))
 			content.WriteString("\n")
 		}
-		content.WriteString("\n")
 	}
 
 	if i.error != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Bold(true)
+		if content.Len() > 0 {
+			content.WriteString("\n")
+		}
 		content.WriteString(errorStyle.Render("Error: " + i.error))
-		content.WriteString("\n\n")
 	}
+	return strings.TrimRight(content.String(), "\n")
+}
 
-	// Help text
+func (i *ImageAttachOverlay) renderListActions(width int) string {
 	hints := []keybinds.Binding{
-		{Key: "p", Description: "Paste from clipboard"},
-		{Key: "f", Description: "Attach from file"},
+		{Key: "p", Description: "paste clipboard"},
+		{Key: "f", Description: "attach file"},
 	}
 	if len(i.files) > 0 {
 		hints = append(hints,
-			keybinds.Binding{Key: "o", Description: "Open"},
-			keybinds.Binding{Key: "d/x", Description: "Delete"},
-			keybinds.Binding{Key: "Enter/v", Description: "Preview"},
+			keybinds.Binding{Key: "o", Description: "open viewer"},
+			keybinds.Binding{Key: "d/x", Description: "delete"},
+			keybinds.Binding{Key: "Enter/v", Description: "preview"},
 		)
 	}
-	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "Close"})
-	footer := i.styles.Separator.Render(strings.Repeat("─", 70)) + "\n\n" + keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	})
-
-	overlayBodyHeight := 24
-	contentHeight := lipgloss.Height(content.String())
-	footerHeight := lipgloss.Height(footer)
-	spacerLines := overlayBodyHeight - contentHeight - footerHeight
-	if spacerLines < 1 {
-		spacerLines = 1
-	}
-	return content.String() + strings.Repeat("\n", spacerLines) + footer
+	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "close"})
+	return renderDialogActions(i.styles, hints, width)
 }
 
-// renderPreview renders attachment details
-func (i *ImageAttachOverlay) renderPreview() string {
+func (i *ImageAttachOverlay) renderPreviewContent() string {
 	var b strings.Builder
 
 	if i.cursor >= len(i.files) {
@@ -342,52 +391,15 @@ func (i *ImageAttachOverlay) renderPreview() string {
 	b.WriteString(labelStyle.Render("Path:"))
 	b.WriteString("  ")
 	b.WriteString(valueStyle.Render(file.Path))
-	b.WriteString("\n\n")
 
-	// Separator
-	b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
-	b.WriteString("\n\n")
-
-	// Help
-	hints := []keybinds.Binding{
-		{Key: "o", Description: "Open in viewer"},
-		{Key: "Esc", Description: "Back to list"},
-	}
-	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	}))
-
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderFileInput renders the file path input screen
-func (i *ImageAttachOverlay) renderFileInput() string {
+func (i *ImageAttachOverlay) renderFileInputContent() string {
 	var b strings.Builder
 
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#89b4fa")).
-		Bold(true)
-
-	b.WriteString(headerStyle.Render("Attach from File"))
-	b.WriteString("\n\n")
-
 	b.WriteString(i.pathInput.View())
-	b.WriteString("\n\n")
-
-	// Help
-	hints := []keybinds.Binding{
-		{Key: "Enter", Description: "Attach"},
-		{Key: "Esc", Description: "Cancel"},
-	}
-	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	}))
-
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // Title returns the overlay title
@@ -397,7 +409,23 @@ func (i *ImageAttachOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (i *ImageAttachOverlay) Size() (width, height int) {
-	return 80, 30
+	if i.inputActive {
+		return i.Clamp(84, 18)
+	}
+	switch i.mode {
+	case imageAttachModePreview:
+		return i.Clamp(84, 24)
+	default:
+		return i.Clamp(84, i.listModeHeight())
+	}
+}
+
+func (i *ImageAttachOverlay) listModeHeight() int {
+	if len(i.files) == 0 && strings.TrimSpace(i.error) == "" {
+		return 14
+	}
+	rows := len(i.files) + 10
+	return max(14, min(26, rows))
 }
 
 // Commands

@@ -9,6 +9,8 @@ import (
 )
 
 type GitPullOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	commitsBehind int
 	selected      bool
 	styles        *Styles
@@ -49,44 +51,50 @@ func (g *GitPullOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			g.selected = !g.selected
 			return g, nil
 		}
+	case tea.WindowSizeMsg:
+		g.ApplyWindowSize(msg)
 	}
 	return g, nil
 }
 
 func (g *GitPullOverlay) View() string {
-	var b strings.Builder
-
-	message := fmt.Sprintf("Your local main branch is behind by %d commits.", g.commitsBehind)
-	b.WriteString(g.styles.MenuItem.Render(message))
-	b.WriteString("\n\n")
-
-	pullStyle := g.styles.MenuItem
-	noStyle := g.styles.MenuItem
-
-	if g.selected {
-		pullStyle = g.styles.MenuItemActive
-	} else {
-		noStyle = g.styles.MenuItemActive
-	}
-
-	pull := pullStyle.Render("[P] Pull Now")
-	no := noStyle.Render("[N] Not Now")
-
-	b.WriteString(pull + "    " + no)
-	b.WriteString("\n")
-
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "←/→/Tab", Description: "Switch"},
-		{Key: "Enter", Description: "Confirm"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         g.styles.MenuKey,
-		DescriptionStyle: g.styles.Footer,
-		FooterStyle:      g.styles.Footer,
-	}))
-
-	return b.String()
+	width, height := g.Clamp(64, 12)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            g.styles,
+		width:             width,
+		height:            height,
+		title:             "GIT SYNC",
+		rightSectionTitle: "Actions",
+		breakpoint:        72,
+		gap:               3,
+		minLeft:           30,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			var b strings.Builder
+			message := fmt.Sprintf("Your local main branch is behind by %d commits.", g.commitsBehind)
+			b.WriteString(g.styles.MenuItem.Render(message))
+			b.WriteString("\n\n")
+			pullStyle := g.styles.MenuItem
+			noStyle := g.styles.MenuItem
+			if g.selected {
+				pullStyle = g.styles.MenuItemActive
+			} else {
+				noStyle = g.styles.MenuItemActive
+			}
+			b.WriteString(pullStyle.Render("[P] Pull Now"))
+			b.WriteString("\n")
+			b.WriteString(noStyle.Render("[N] Not Now"))
+			return strings.TrimRight(b.String(), "\n")
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(g.styles, []keybinds.Binding{
+				{Key: "←/→/Tab", Description: "switch"},
+				{Key: "Enter", Description: "confirm"},
+				{Key: "Esc", Description: "cancel"},
+			})
+		},
+	})
 }
 
 func (g *GitPullOverlay) Title() string {

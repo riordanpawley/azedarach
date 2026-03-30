@@ -95,3 +95,5 @@ ts-opentui/.codanna/
 /.azedarach.schema.json
 /reference-effect
 /go-bubbletea/.azedarach/mailbox
+/go-bubbletea/.azedarach
+/ts-opentui/.azedarach

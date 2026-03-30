@@ -52,9 +52,7 @@ func TestHelpOverlay_Size(t *testing.T) {
 
 func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 	help := NewHelpOverlay()
-	help.viewHeight = 100 // Set large enough to show all content
-
-	view := help.View()
+	view := collectScrolledViews(help)
 
 	// Check that view contains expected category names
 	expectedCategories := []string{"Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
@@ -246,8 +244,7 @@ func TestHelpOverlay_GetCategories(t *testing.T) {
 
 func TestHelpOverlay_ParityDriftGuards(t *testing.T) {
 	help := NewHelpOverlay()
-	help.viewHeight = 100
-	view := help.View()
+	view := collectScrolledViews(help)
 
 	if strings.Contains(view, "Ctrl+L") {
 		t.Fatalf("help drift: Ctrl+L refresh should not be advertised, got %q", view)
@@ -261,6 +258,18 @@ func TestHelpOverlay_ParityDriftGuards(t *testing.T) {
 	if !strings.Contains(view, "r (workspace)") {
 		t.Fatalf("help drift: workspace dev-server key r missing, got %q", view)
 	}
+}
+
+func collectScrolledViews(help *HelpOverlay) string {
+	var out strings.Builder
+	out.WriteString(help.View())
+	max := help.maxScroll
+	for i := 1; i <= max; i++ {
+		help.scroll = i
+		out.WriteString("\n")
+		out.WriteString(help.View())
+	}
+	return out.String()
 }
 
 func TestHelpOverlay_ScrollIndicator(t *testing.T) {

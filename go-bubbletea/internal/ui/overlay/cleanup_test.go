@@ -201,11 +201,15 @@ func TestBulkCleanupOverlay_View(t *testing.T) {
 	}
 
 	// Check for key UI elements
-	if !strings.Contains(view, "Bulk Cleanup") {
+	if !strings.Contains(view, "BULK CLEANUP") {
 		t.Error("View should contain title")
 	}
 
-	if !strings.Contains(view, "j/k") {
+	if !strings.Contains(view, "Actions") {
+		t.Error("View should contain actions section")
+	}
+
+	if !strings.Contains(view, "navigate") {
 		t.Error("View should contain navigation hints")
 	}
 
@@ -214,16 +218,16 @@ func TestBulkCleanupOverlay_View(t *testing.T) {
 	overlay.confirmMode = true
 	confirmView := overlay.View()
 
-	if !strings.Contains(confirmView, "Confirm") {
-		t.Error("Confirm view should contain 'Confirm'")
+	if !strings.Contains(confirmView, "CONFIRM DESTRUCTIVE OPERATION") {
+		t.Error("Confirm view should contain title")
 	}
 
-	if !strings.Contains(confirmView, "[Y] Yes") {
-		t.Error("Confirm view should contain yes button")
+	if !strings.Contains(confirmView, "Default action") {
+		t.Error("Confirm view should show default action")
 	}
 
-	if !strings.Contains(confirmView, "[N] No") {
-		t.Error("Confirm view should contain no button")
+	if !strings.Contains(confirmView, "toggle") {
+		t.Error("Confirm view should contain toggle action hint")
 	}
 }
 

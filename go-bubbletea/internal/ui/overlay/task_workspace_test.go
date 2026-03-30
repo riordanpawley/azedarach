@@ -118,6 +118,30 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay.focus = taskWorkspaceFocusActions
+
+	initial := overlay.actions.cursor
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.actions.cursor == initial {
+		t.Fatalf("expected down arrow to move actions cursor when actions focused")
+	}
+
+	beforeUp := overlay.actions.cursor
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyUp})
+	overlay = model.(*TaskWorkspaceOverlay)
+	if overlay.actions.cursor == beforeUp {
+		t.Fatalf("expected up arrow to move actions cursor when actions focused")
+	}
+}
+
 func TestTaskWorkspaceOverlay_WindowResizeUpdatesDimensions(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-1",

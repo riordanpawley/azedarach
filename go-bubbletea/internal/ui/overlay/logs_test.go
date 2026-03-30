@@ -72,7 +72,7 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	if !strings.Contains(view, "Event Log") {
 		t.Fatalf("View() missing title: %s", view)
 	}
-	if !strings.Contains(view, "s: stream (Ctrl+C then q)") {
+	if !strings.Contains(view, "stream") {
 		t.Fatalf("View() missing stream hint: %s", view)
 	}
 	if strings.Contains(view, "Newest runtime events first") {
@@ -101,7 +101,7 @@ func TestEventLogOverlay_View_EmptyState(t *testing.T) {
 	if !strings.Contains(view, "No runtime events yet.") {
 		t.Fatalf("View() missing empty state: %s", view)
 	}
-	if !strings.Contains(view, "Esc/q/backspace: close") {
+	if !strings.Contains(view, "Esc/q/backspace") || !strings.Contains(view, "close") {
 		t.Fatalf("View() missing close hint: %s", view)
 	}
 }
@@ -112,8 +112,17 @@ func TestEventLogOverlay_Update_NavigationAndClose(t *testing.T) {
 		testEvent(2, "daemon.event.two"),
 		testEvent(3, "daemon.event.three"),
 		testEvent(4, "daemon.event.four"),
+		testEvent(5, "daemon.event.five"),
+		testEvent(6, "daemon.event.six"),
+		testEvent(7, "daemon.event.seven"),
+		testEvent(8, "daemon.event.eight"),
+		testEvent(9, "daemon.event.nine"),
+		testEvent(10, "daemon.event.ten"),
+		testEvent(11, "daemon.event.eleven"),
+		testEvent(12, "daemon.event.twelve"),
 	})
-	overlay.viewHeight = 4
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 78, Height: 14})
+	overlay = model.(*EventLogOverlay)
 
 	// Prime maxScroll from the rendered content.
 	_ = overlay.View()
@@ -121,7 +130,7 @@ func TestEventLogOverlay_Update_NavigationAndClose(t *testing.T) {
 		t.Fatal("expected scrollable content")
 	}
 
-	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	overlay = model.(*EventLogOverlay)
 	if overlay.scroll != 1 {
 		t.Fatalf("scroll after j = %d, want 1", overlay.scroll)

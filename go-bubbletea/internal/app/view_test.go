@@ -99,6 +99,22 @@ func TestViewWithOverlayKeepsStatusBarVisible(t *testing.T) {
 	}
 }
 
+func TestRenderedBlockSize_WithFramedOverlayExpandsDimensions(t *testing.T) {
+	m := newTestModel()
+
+	content := "test overlay"
+	contentW, contentH := renderedBlockSize(content)
+	framed := m.styles.Overlay.Width(contentW).Height(contentH).Render(content)
+	framedW, framedH := renderedBlockSize(framed)
+
+	if framedW <= contentW {
+		t.Fatalf("expected framed overlay width to expand beyond content width (%d), got %d", contentW, framedW)
+	}
+	if framedH <= contentH {
+		t.Fatalf("expected framed overlay height to expand beyond content height (%d), got %d", contentH, framedH)
+	}
+}
+
 func TestViewWithStatusModeOverlayUsesOverlayModeBadge(t *testing.T) {
 	m := newTestModel()
 	m.width = 100

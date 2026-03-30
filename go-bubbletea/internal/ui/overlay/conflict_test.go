@@ -31,17 +31,17 @@ func TestConflictDialog_Size(t *testing.T) {
 		{
 			name:           "no files",
 			files:          []string{},
-			expectedHeight: 8, // header(2) + separator(1) + options(3) + footer(2)
+			expectedHeight: 12,
 		},
 		{
 			name:           "few files",
 			files:          []string{"file1.go", "file2.go", "file3.go"},
-			expectedHeight: 11, // 8 + 3 files
+			expectedHeight: 15,
 		},
 		{
 			name:           "many files capped at 10",
 			files:          make([]string, 20),
-			expectedHeight: 18, // 8 + 10 files (capped)
+			expectedHeight: 22,
 		},
 	}
 
@@ -50,7 +50,7 @@ func TestConflictDialog_Size(t *testing.T) {
 			dialog := NewConflictDialog(tt.files)
 			width, height := dialog.Size()
 
-			assert.Equal(t, 70, width)
+			assert.Equal(t, 84, width)
 			assert.Equal(t, tt.expectedHeight, height)
 		})
 	}
@@ -161,17 +161,15 @@ func TestConflictDialog_View(t *testing.T) {
 	view := dialog.View()
 
 	// Check that view contains expected elements
-	assert.Contains(t, view, "Merge conflicts detected!")
+	assert.Contains(t, view, "MERGE CONFLICTS")
+	assert.Contains(t, view, "Actions")
 	assert.Contains(t, view, "Conflicted files:")
 	assert.Contains(t, view, files[0])
 	assert.Contains(t, view, files[1])
-	assert.Contains(t, view, "[c]")
-	assert.Contains(t, view, "Resolve with Claude")
-	assert.Contains(t, view, "[o]")
-	assert.Contains(t, view, "Open manually")
-	assert.Contains(t, view, "[a]")
-	assert.Contains(t, view, "Abort merge")
-	assert.Contains(t, view, "j/k: navigate")
+	assert.Contains(t, view, "resolve")
+	assert.Contains(t, view, "open")
+	assert.Contains(t, view, "abort")
+	assert.Contains(t, view, "j/k")
 }
 
 func TestConflictDialog_Init(t *testing.T) {
