@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -206,5 +207,32 @@ func TestSQLiteStoreListSupportsStateAndDedupeFilters(t *testing.T) {
 	}
 	if listed[0].OperationID != "op-b" {
 		t.Fatalf("filtered operation id = %q, want op-b", listed[0].OperationID)
+	}
+}
+
+func TestResolveDBPathUsesBaseRepoForWorktree(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	start := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatalf("MkdirAll(start): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	got, err := resolveDBPath(start)
+	if err != nil {
+		t.Fatalf("resolveDBPath() error = %v", err)
+	}
+	want := filepath.Join(repo, ".azedarach", "azedarach.db")
+	if got != want {
+		t.Fatalf("resolveDBPath() = %q, want %q", got, want)
 	}
 }
