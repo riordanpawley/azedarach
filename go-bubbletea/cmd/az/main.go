@@ -31,6 +31,10 @@ func main() {
 	// Handle subcommands
 	command := args[0]
 	commandArgs := args[1:]
+	if aliasedArgs, ok := projectAliasArgs(command, commandArgs); ok {
+		command = "project"
+		commandArgs = aliasedArgs
+	}
 
 	switch command {
 	case "session":
@@ -509,6 +513,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
 		cli.PrintUsage()
 		os.Exit(1)
+	}
+}
+
+func projectAliasArgs(command string, args []string) ([]string, bool) {
+	switch command {
+	case "add":
+		return append([]string{"add"}, args...), true
+	case "list":
+		return append([]string{"list"}, args...), true
+	case "remove":
+		return append([]string{"remove"}, args...), true
+	case "switch":
+		return append([]string{"switch"}, args...), true
+	default:
+		return nil, false
 	}
 }
 
