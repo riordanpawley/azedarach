@@ -693,7 +693,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
-		m.createTaskOverlay = nil
 		return m, m.saveTaskCmd(msg)
 
 	case taskCreatedResultMsg:
@@ -704,6 +703,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
+		}
+		// Clear persisted create-draft state only after successful new-task creation.
+		// Updates from edit overlays must not clear the "new task" draft cache.
+		if !msg.isUpdate {
+			m.createTaskOverlay = nil
 		}
 
 		m.addToast(Toast{
