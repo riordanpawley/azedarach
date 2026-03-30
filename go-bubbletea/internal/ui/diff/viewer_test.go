@@ -125,6 +125,92 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 	}
 }
 
+func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
+	client := &fakeDiffClient{
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+			{Path: "internal/services/git/client.go", Status: gitservice.DiffFileModified},
+		},
+		mergeBase: "base789",
+	}
+
+	var gotTitle string
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, func(_ context.Context, title, _ string) error {
+		gotTitle = title
+		return nil
+	})
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	viewer = updated.(*DiffViewer)
+
+	if !viewer.searchMode {
+		t.Fatal("expected viewer in search mode")
+	}
+	if viewer.filterText != "git" {
+		t.Fatalf("filter=%q, want git", viewer.filterText)
+	}
+	if len(viewer.filteredFiles()) != 1 {
+		t.Fatalf("filtered len=%d, want 1", len(viewer.filteredFiles()))
+	}
+
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	viewer = updated.(*DiffViewer)
+	if viewer.searchMode {
+		t.Fatal("expected Enter to exit search mode")
+	}
+
+	updated, cmd := viewer.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	viewer = updated.(*DiffViewer)
+	if cmd == nil {
+		t.Fatal("expected popup command after search filter")
+	}
+	_ = cmd()
+	if gotTitle != " internal/services/git/client.go " {
+		t.Fatalf("title=%q, want filtered file popup title", gotTitle)
+	}
+}
+
+func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
+	client := &fakeDiffClient{
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+		},
+	}
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	viewer = updated.(*DiffViewer)
+	if !viewer.searchMode || viewer.filterText != "m" {
+		t.Fatalf("unexpected search state: search=%v filter=%q", viewer.searchMode, viewer.filterText)
+	}
+
+	updated, cmd := viewer.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	viewer = updated.(*DiffViewer)
+	if cmd != nil {
+		t.Fatal("expected esc in search mode to not close overlay")
+	}
+	if viewer.searchMode {
+		t.Fatal("expected esc to exit search mode")
+	}
+	if viewer.filterText != "" {
+		t.Fatalf("filter=%q, want empty", viewer.filterText)
+	}
+}
+
 func TestDiffViewerClose(t *testing.T) {
 	viewer := NewDiffViewer("/tmp/az-1", "main", &fakeDiffClient{}, nil)
 	updated, cmd := viewer.Update(tea.KeyMsg{Type: tea.KeyEsc})

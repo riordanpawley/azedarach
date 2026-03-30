@@ -40,6 +40,8 @@ type DiffViewer struct {
 	styles      *Styles
 	viewHeight  int
 	loading     bool
+	searchMode  bool
+	filterText  string
 	err         error
 	popupStatus string
 }
@@ -70,10 +72,11 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 }
 
 func (d *DiffViewer) openSelectedDiffCmd() tea.Cmd {
-	if d.cursor < 0 || d.cursor >= len(d.files) {
+	filtered := d.filteredFiles()
+	if d.cursor < 0 || d.cursor >= len(filtered) {
 		return nil
 	}
-	filePath := strings.TrimSpace(d.files[d.cursor].Path)
+	filePath := strings.TrimSpace(filtered[d.cursor].Path)
 	if filePath == "" {
 		return nil
 	}
@@ -139,6 +142,8 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.cursor = 0
 		d.scrollY = 0
 		d.files = nil
+		d.searchMode = false
+		d.filterText = ""
 		d.popupStatus = ""
 		if msg.Err != nil || msg.Files == nil {
 			if msg.Err != nil {
@@ -164,13 +169,63 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if d.loading {
 			return d, nil
 		}
+		filtered := d.filteredFiles()
+		clampCursor := func() {
+			if len(filtered) == 0 {
+				d.cursor = 0
+				d.scrollY = 0
+				return
+			}
+			if d.cursor >= len(filtered) {
+				d.cursor = len(filtered) - 1
+			}
+		}
+		if d.searchMode {
+			switch msg.String() {
+			case "esc":
+				d.searchMode = false
+				d.filterText = ""
+				clampCursor()
+				return d, nil
+			case "enter":
+				d.searchMode = false
+				clampCursor()
+				return d, nil
+			case "backspace":
+				if len(d.filterText) > 0 {
+					d.filterText = d.filterText[:len(d.filterText)-1]
+				}
+				clampCursor()
+				d.ensureCursorVisible()
+				return d, nil
+			case "j", "down":
+				if d.cursor < len(filtered)-1 {
+					d.cursor++
+					d.ensureCursorVisible()
+				}
+				return d, nil
+			case "k", "up":
+				if d.cursor > 0 {
+					d.cursor--
+					d.ensureCursorVisible()
+				}
+				return d, nil
+			default:
+				if len(msg.Runes) == 1 && !msg.Alt {
+					d.filterText += string(msg.Runes)
+					clampCursor()
+					d.ensureCursorVisible()
+				}
+				return d, nil
+			}
+		}
 
 		switch msg.String() {
 		case "esc", "q":
 			return d, func() tea.Msg { return overlay.CloseOverlayMsg{} }
 
 		case "j", "down":
-			if d.cursor < len(d.files)-1 {
+			if d.cursor < len(filtered)-1 {
 				d.cursor++
 				d.ensureCursorVisible()
 			}
@@ -189,8 +244,8 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 
 		case "G":
-			if len(d.files) > 0 {
-				d.cursor = len(d.files) - 1
+			if len(filtered) > 0 {
+				d.cursor = len(filtered) - 1
 				d.ensureCursorVisible()
 			}
 			return d, nil
@@ -206,6 +261,10 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "a":
 			return d, d.openPopupCmd("", true)
+
+		case "/":
+			d.searchMode = true
+			return d, nil
 		}
 	}
 
@@ -224,10 +283,14 @@ func (d *DiffViewer) View() string {
 	if len(d.files) == 0 {
 		return d.styles.Dimmed.Render(fmt.Sprintf("No changes vs %s", d.effectiveBaseBranch()))
 	}
+	filtered := d.filteredFiles()
+	if len(filtered) == 0 {
+		return d.styles.Dimmed.Render(fmt.Sprintf("No matches for %q", d.filterText))
+	}
 
 	var content strings.Builder
 
-	lines := d.renderFiles()
+	lines := d.renderFiles(filtered)
 
 	start := d.scrollY
 	end := min(d.scrollY+d.viewHeight, len(lines))
@@ -252,7 +315,11 @@ func (d *DiffViewer) Title() string {
 	if len(d.files) == 0 {
 		return fmt.Sprintf("Diff vs %s", d.effectiveBaseBranch())
 	}
-	return fmt.Sprintf("Diff vs %s (%d file%s)", d.effectiveBaseBranch(), len(d.files), plural(len(d.files)))
+	filterSuffix := ""
+	if strings.TrimSpace(d.filterText) != "" {
+		filterSuffix = fmt.Sprintf(" | %d/%d match", len(d.filteredFiles()), len(d.files))
+	}
+	return fmt.Sprintf("Diff vs %s (%d file%s%s)", d.effectiveBaseBranch(), len(d.files), plural(len(d.files)), filterSuffix)
 }
 
 func (d *DiffViewer) Size() (width, height int) {
@@ -260,9 +327,9 @@ func (d *DiffViewer) Size() (width, height int) {
 	return 100, 30
 }
 
-func (d *DiffViewer) renderFiles() []string {
-	lines := make([]string, 0, len(d.files))
-	for i, file := range d.files {
+func (d *DiffViewer) renderFiles(files []gitservice.ChangedFile) []string {
+	lines := make([]string, 0, len(files))
+	for i, file := range files {
 		isSelected := i == d.cursor
 
 		var headerStyle lipgloss.Style
@@ -307,8 +374,12 @@ func (d *DiffViewer) renderFooter() string {
 	}
 
 	status := ""
-	if len(d.files) > 0 {
-		status = d.styles.Footer.Render(fmt.Sprintf("  [File %d/%d]", d.cursor+1, len(d.files)))
+	filteredCount := len(d.filteredFiles())
+	if filteredCount > 0 {
+		status = d.styles.Footer.Render(fmt.Sprintf("  [File %d/%d]", d.cursor+1, filteredCount))
+	}
+	if d.searchMode {
+		status += d.styles.Footer.Render(fmt.Sprintf("  /%s", d.filterText))
 	}
 
 	return lipgloss.JoinHorizontal(
@@ -328,6 +399,22 @@ func (d *DiffViewer) ensureCursorVisible() {
 	} else if d.cursor >= d.scrollY+d.viewHeight {
 		d.scrollY = d.cursor - d.viewHeight + 1
 	}
+}
+
+func (d *DiffViewer) filteredFiles() []gitservice.ChangedFile {
+	query := strings.ToLower(strings.TrimSpace(d.filterText))
+	if query == "" {
+		return d.files
+	}
+	filtered := make([]gitservice.ChangedFile, 0, len(d.files))
+	for _, file := range d.files {
+		path := strings.ToLower(file.Path)
+		oldPath := strings.ToLower(file.OldPath)
+		if strings.Contains(path, query) || strings.Contains(oldPath, query) {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
 }
 
 func min(a, b int) int {
