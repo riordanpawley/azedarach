@@ -18,6 +18,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 type fakeDaemonTransport struct {
@@ -522,6 +523,101 @@ func TestParseExportArgs(t *testing.T) {
 	}
 }
 
+func TestParseConfigSetArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        ConfigSetOptions
+		errContains string
+	}{
+		{
+			name: "defaults",
+			args: []string{"spec.enabled", "false"},
+			want: ConfigSetOptions{Key: "spec.enabled", Value: "false", ProjectDir: ""},
+		},
+		{
+			name: "project dir option",
+			args: []string{"--project-dir", "workspace", "spec.enabled", "yes"},
+			want: ConfigSetOptions{Key: "spec.enabled", Value: "yes", ProjectDir: "workspace"},
+		},
+		{
+			name:        "rejects missing args",
+			args:        []string{"spec.enabled"},
+			errContains: "usage: az config set spec.enabled <true|false> [--project-dir <dir>]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseConfigSetArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseConfigSetArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseConfigSetArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseSyncArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        SyncOptions
+		errContains string
+	}{
+		{
+			name: "defaults",
+			want: SyncOptions{},
+		},
+		{
+			name: "all flag",
+			args: []string{"--all"},
+			want: SyncOptions{All: true},
+		},
+		{
+			name: "positional project dir",
+			args: []string{"workspace"},
+			want: SyncOptions{ProjectDir: "workspace"},
+		},
+		{
+			name: "project dir option",
+			args: []string{"--project-dir", "workspace"},
+			want: SyncOptions{ProjectDir: "workspace"},
+		},
+		{
+			name:        "rejects conflicting project dir inputs",
+			args:        []string{"--project-dir", "workspace", "other"},
+			errContains: "usage: az sync [--all] [<directory>] [--project-dir <dir>]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseSyncArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseSyncArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseSyncArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExportCommandWritesStdoutByDefault(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
@@ -643,6 +739,147 @@ func TestExportCommandSurfacesFileWriteErrors(t *testing.T) {
 	err := ExportCommand(deps, ExportOptions{Format: "json", Out: outPath})
 	if err == nil || !strings.Contains(err.Error(), "write export output to") {
 		t.Fatalf("error = %v, want write failure", err)
+	}
+}
+
+func TestConfigSetCommandWritesSpecEnabledConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	output := captureStdout(t, func() error {
+		return ConfigSetCommand(deps, ConfigSetOptions{Key: "spec.enabled", Value: "off"})
+	})
+
+	if !strings.Contains(output, "Updated ") || !strings.Contains(output, "spec.enabled=false") {
+		t.Fatalf("config output missing update line: %q", output)
+	}
+	if !strings.Contains(output, "Spec workflows are disabled.") {
+		t.Fatalf("config output missing spec-disabled note: %q", output)
+	}
+
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.Spec.Enabled {
+		t.Fatalf("Spec.Enabled = true, want false")
+	}
+}
+
+func TestConfigSetCommandRejectsInvalidBoolean(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	err := ConfigSetCommand(deps, ConfigSetOptions{Key: "spec.enabled", Value: "maybe"})
+	if err == nil || !strings.Contains(err.Error(), "Invalid boolean value 'maybe' for spec.enabled") {
+		t.Fatalf("error = %v, want invalid boolean failure", err)
+	}
+}
+
+func TestConfigSetCommandRejectsUnsupportedKey(t *testing.T) {
+	projectDir := t.TempDir()
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      projectDir,
+	}
+
+	err := ConfigSetCommand(deps, ConfigSetOptions{Key: "git.baseBranch", Value: "main"})
+	if err == nil || !strings.Contains(err.Error(), "Unsupported config key 'git.baseBranch'") {
+		t.Fatalf("error = %v, want unsupported key failure", err)
+	}
+}
+
+type fakeWorktreeLister struct {
+	worktrees []gitservice.Worktree
+	err       error
+}
+
+func (f fakeWorktreeLister) List(context.Context) ([]gitservice.Worktree, error) {
+	return f.worktrees, f.err
+}
+
+func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
+	oldLister := newSyncWorktreeLister
+	t.Cleanup(func() {
+		newSyncWorktreeLister = oldLister
+	})
+	newSyncWorktreeLister = func(repoDir string, logger *slog.Logger) syncWorktreeLister {
+		return fakeWorktreeLister{
+			worktrees: []gitservice.Worktree{
+				{Path: filepath.Join(repoDir, "worktree-a")},
+				{Path: filepath.Join(repoDir, "worktree-b")},
+			},
+		}
+	}
+
+	var gotReq protocol.RequestEnvelope
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "Sync task one", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Sync task two", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
+	}
+	payload, err := json.Marshal(tasks)
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotReq = req
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        42,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	output := captureStdout(t, func() error {
+		return SyncCommand(deps, SyncOptions{All: true})
+	})
+
+	if gotReq.Command != "task.list" {
+		t.Fatalf("command = %q, want %q", gotReq.Command, "task.list")
+	}
+	if !strings.Contains(output, "Syncing issue tracker state...") {
+		t.Fatalf("sync output missing heading: %q", output)
+	}
+	if !strings.Contains(output, "Targets: 2 worktree(s)") {
+		t.Fatalf("sync output missing target count: %q", output)
+	}
+	if !strings.Contains(output, "worktree-a") || !strings.Contains(output, "worktree-b") {
+		t.Fatalf("sync output missing worktree paths: %q", output)
+	}
+	if !strings.Contains(output, "Snapshot: tasks=2 revision=42") {
+		t.Fatalf("sync output missing snapshot summary: %q", output)
 	}
 }
 
@@ -2567,6 +2804,18 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue bulk-update --impl <implementation> --input <path>") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
+	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
+		t.Fatalf("usage missing config command: %q", output)
+	}
+	if !strings.Contains(output, "az config set spec.enabled false") {
+		t.Fatalf("usage missing config example: %q", output)
+	}
+	if !strings.Contains(output, "sync [--all] [<directory>] [--project-dir <dir>]") {
+		t.Fatalf("usage missing sync command: %q", output)
+	}
+	if !strings.Contains(output, "az sync --all") {
+		t.Fatalf("usage missing sync example: %q", output)
+	}
 	if !strings.Contains(output, "prime") {
 		t.Fatalf("usage missing prime command: %q", output)
 	}
@@ -2673,6 +2922,62 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+}
+
+func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-closed")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := json.Marshal([]domain.Task{{
+					ID:              "az-closed",
+					Title:           "Closed issue",
+					Status:          domain.StatusDone,
+					Priority:        domain.P2,
+					Type:            domain.TypeTask,
+					Implementations: []string{"go-bubbletea"},
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
+		t.Fatalf("prime output missing closed-issue warning: %q", output)
+	}
+	if !strings.Contains(output, "`az issue child \"Next task\"`") {
+		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
 	}
 }
 

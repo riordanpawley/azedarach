@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,10 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
@@ -28,6 +31,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
@@ -39,6 +43,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/compact"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -59,6 +64,7 @@ const (
 	diffPreviewMaxCharacters = 200
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
+	eventSummaryMaxRunes     = 140
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -133,6 +139,7 @@ type Model struct {
 	currentProject string
 	projects       []domain.Project
 	repoDir        string
+	logFilePath    string
 
 	// Toasts
 	toasts []Toast
@@ -195,14 +202,15 @@ func New(cfg *config.Config) Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(styles.Blue)
 
-	// Initialize logger
-	logger := slog.Default()
-
 	// Resolve repository directory for local services and daemon routing.
 	repoDir, err := os.Getwd()
 	if err != nil {
-		logger.Error("failed to get current directory", "error", err)
 		repoDir = "."
+	}
+	logFilePath := resolveTUILogFilePath(cfg)
+	logger := newTUILogger(logFilePath)
+	if err != nil {
+		logger.Error("failed to get current directory", "error", err)
 	}
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonClient := daemonclient.New(transport.NewClient(socketPath))
@@ -237,6 +245,7 @@ func New(cfg *config.Config) Model {
 		tmuxAvailable:        deps.TmuxAvailable,
 		tmuxClient:           deps.TmuxClient,
 		repoDir:              repoDir,
+		logFilePath:          logFilePath,
 		currentProject:       resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
@@ -259,6 +268,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ensureCursorVisible(m.buildColumns())
+		if !m.overlayStack.IsEmpty() {
+			return m, m.overlayStack.Update(msg)
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -742,16 +754,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Image attachment messages
+		// Image attachment messages
 	case overlay.AttachmentActionMsg:
 		if msg.Action == "attached" {
+			filename := "image"
+			if msg.Attachment != nil && strings.TrimSpace(msg.Attachment.Filename) != "" {
+				filename = msg.Attachment.Filename
+			}
 			m.addToast(Toast{
 				Level:   ToastSuccess,
-				Message: fmt.Sprintf("Image attached: %s", msg.Attachment.Filename),
+				Message: fmt.Sprintf("Image attached: %s", filename),
 				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.appendAttachmentNoteCmd(msg.Attachment)
+		} else if msg.Action == "error" && msg.Error != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Image attachment failed: %s", compactErrorMessage(msg.Error)),
+				Expires: time.Now().Add(5 * time.Second),
 			})
 		}
 		return m, nil
+
+	case overlay.OpenImagePreviewMsg:
+		imageService, ok := m.attachmentService.(*attachment.Service)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Image preview unavailable: unsupported attachment service",
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		preview := overlay.NewImagePreviewOverlay(msg.IssueID, imageService, msg.InitialIndex)
+		return m, m.overlayStack.Push(preview)
 
 	// Cleanup executed result
 	case overlay.CleanupExecutedMsg:
@@ -833,6 +869,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.overlayStack.Push(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
+
+	case openPRResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to open PR: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.addToast(Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Opened PR for %s", msg.issueID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case helixOpenResultMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to open Helix: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.opened {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Opened Helix for %s", msg.issueID),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: msg.commandHint,
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
 
 	case taskDeletedResultMsg:
 		if msg.err != nil {
@@ -944,6 +1020,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 	}
 
+	if !m.overlayStack.IsEmpty() {
+		return m, m.overlayStack.Update(msg)
+	}
+
 	return m, nil
 }
 
@@ -985,59 +1065,91 @@ func (m Model) View() string {
 		MaxHeight(board.BoardContentHeight(m.height)).
 		Render(mainView)
 
-	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
+	sb := statusbar.New(m.statusBarMode(), m.width, m.styles)
 	sb.SetEventTicker(m.eventTicker)
 	sb.SetCurrentProject(m.daemonProjectID())
 	sb.SetSelectionSummary(m.selectionSummary())
 	if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
+	if current := m.overlayStack.Current(); current != nil {
+		if hintOverlay, ok := current.(interface {
+			StatusBindings() []keybinds.Binding
+		}); ok {
+			sb.SetHintBindings(hintOverlay.StatusBindings())
+		}
+	}
 	statusBarView := sb.Render()
 
-	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
+	contentHeight := board.BoardContentHeight(m.height)
+	contentView := lipgloss.NewStyle().
+		MaxWidth(m.width).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Render(mainView)
 
 	if !m.overlayStack.IsEmpty() {
 		current := m.overlayStack.Current()
 		overlayView := current.View()
+		if overlayUsesFullScreen(current) {
+			contentView = lipgloss.NewStyle().
+				Width(m.width).
+				MaxWidth(m.width).
+				Height(contentHeight).
+				MaxHeight(contentHeight).
+				Render(overlayView)
+			return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+		}
 
 		overlayWidth, overlayHeight := current.Size()
 
 		if overlayWidth == 0 {
-			viewHeight := lipgloss.Height(view)
-			overlayHeight := lipgloss.Height(overlayView)
-			if viewHeight+overlayHeight > m.height {
-				view = lipgloss.NewStyle().MaxHeight(m.height - overlayHeight).Render(view)
-			}
-			view = lipgloss.JoinVertical(lipgloss.Left, view, overlayView)
+			contentView = lipgloss.NewStyle().
+				Height(contentHeight).
+				MaxHeight(contentHeight).
+				Render(lipgloss.JoinVertical(lipgloss.Left, contentView, overlayView))
 		} else {
 			title := current.Title()
 			if title != "" && !overlayUsesInternalTitle(current) {
 				titleView := m.styles.OverlayTitle.Render(title)
 				overlayView = lipgloss.JoinVertical(lipgloss.Left, titleView, overlayView)
 			}
-			overlayView = m.styles.Overlay.
-				Width(overlayWidth).
-				Height(overlayHeight).
-				Render(overlayView)
+			if overlayUsesAppFrame(current) {
+				overlayView = m.styles.Overlay.
+					Width(overlayWidth).
+					Height(overlayHeight).
+					Render(overlayView)
+			} else {
+				overlayView = lipgloss.NewStyle().
+					Width(overlayWidth).
+					Height(overlayHeight).
+					Render(overlayView)
+			}
 
-			centeredOverlay := lipgloss.Place(
-				m.width,
-				m.height,
-				lipgloss.Center,
-				lipgloss.Center,
-				overlayView,
-			)
-
-			view = lipgloss.NewStyle().
+			contentView = lipgloss.NewStyle().
 				MaxWidth(m.width).
-				MaxHeight(m.height).
-				Render(view)
-
-			return m.layer(view, centeredOverlay)
+				Height(contentHeight).
+				MaxHeight(contentHeight).
+				Render(contentView)
+			contentView = m.layerCenteredOverlay(contentView, overlayView, m.width, contentHeight, overlayWidth, overlayHeight)
 		}
 	}
 
-	return view
+	return lipgloss.JoinVertical(lipgloss.Left, contentView, statusBarView)
+}
+
+func (m Model) statusBarMode() types.Mode {
+	mode := m.editor.GetMode()
+	current := m.overlayStack.Current()
+	if current == nil {
+		return mode
+	}
+	if modeOverlay, ok := current.(interface {
+		StatusMode() types.Mode
+	}); ok {
+		return modeOverlay.StatusMode()
+	}
+	return mode
 }
 
 func (m Model) layer(bottom, top string) string {
@@ -1049,6 +1161,23 @@ func overlayUsesInternalTitle(current overlay.Overlay) bool {
 		UsesInternalTitle() bool
 	})
 	return ok && internalTitleOverlay.UsesInternalTitle()
+}
+
+func overlayUsesAppFrame(current overlay.Overlay) bool {
+	appFrameOverlay, ok := current.(interface {
+		UsesAppFrame() bool
+	})
+	if !ok {
+		return true
+	}
+	return appFrameOverlay.UsesAppFrame()
+}
+
+func overlayUsesFullScreen(current overlay.Overlay) bool {
+	fullScreenOverlay, ok := current.(interface {
+		UsesFullScreen() bool
+	})
+	return ok && fullScreenOverlay.UsesFullScreen()
 }
 
 func (m Model) layerWithinHeight(bottom, top string, height int) string {
@@ -1100,11 +1229,94 @@ func (m Model) layerWithinHeightTransparent(bottom, top string, height int) stri
 		if lineIsVisuallyEmpty(t) {
 			res[i] = b
 		} else {
-			res[i] = t
+			res[i] = mergeOverlayLine(b, t)
 		}
 	}
 
 	return strings.Join(res, "\n")
+}
+
+func mergeOverlayLine(bottom, top string) string {
+	left, right, ok := nonSpaceBounds(top)
+	if !ok {
+		return bottom
+	}
+	bottomWidth := ansi.StringWidth(bottom)
+	if bottomWidth == 0 {
+		return top
+	}
+	if left < 0 {
+		left = 0
+	}
+	if right > bottomWidth {
+		right = bottomWidth
+	}
+	if left >= right {
+		return bottom
+	}
+	return ansi.Cut(bottom, 0, left) + ansi.Cut(top, left, right) + ansi.Cut(bottom, right, bottomWidth)
+}
+
+func (m Model) layerCenteredOverlay(bottom, overlayView string, width, height, overlayWidth, overlayHeight int) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	if overlayWidth < 1 || overlayHeight < 1 {
+		return lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(bottom)
+	}
+	if overlayWidth > width {
+		overlayWidth = width
+	}
+	if overlayHeight > height {
+		overlayHeight = height
+	}
+
+	bLines := strings.Split(lipgloss.NewStyle().Width(width).Height(height).MaxHeight(height).Render(bottom), "\n")
+	oLines := strings.Split(lipgloss.NewStyle().Width(overlayWidth).Height(overlayHeight).MaxHeight(overlayHeight).Render(overlayView), "\n")
+
+	x := max(0, (width-overlayWidth)/2)
+	y := max(0, (height-overlayHeight)/2)
+	res := make([]string, len(bLines))
+	copy(res, bLines)
+
+	for i := 0; i < overlayHeight && i < len(oLines); i++ {
+		row := y + i
+		if row < 0 || row >= len(res) {
+			continue
+		}
+		base := res[row]
+		overlaySlice := lipgloss.NewStyle().Width(overlayWidth).Render(ansi.Cut(oLines[i], 0, overlayWidth))
+		res[row] = ansi.Cut(base, 0, x) + overlaySlice + ansi.Cut(base, x+overlayWidth, width)
+	}
+
+	return strings.Join(res, "\n")
+}
+
+func nonSpaceBounds(line string) (left int, right int, ok bool) {
+	stripped := ansi.Strip(line)
+	cellPos := 0
+	left = -1
+	right = -1
+	for _, r := range stripped {
+		width := ansi.StringWidth(string(r))
+		if width < 1 {
+			continue
+		}
+		if !unicode.IsSpace(r) {
+			if left == -1 {
+				left = cellPos
+			}
+			right = cellPos + width
+		}
+		cellPos += width
+	}
+	if left == -1 || right <= left {
+		return 0, 0, false
+	}
+	return left, right, true
 }
 
 func lineIsVisuallyEmpty(line string) bool {
@@ -1292,6 +1504,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	case "r":
+		if m.editor.GetMode() != ModeAction {
+			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
+		}
 	}
 
 	// Escape closes overlay or exits non-normal modes
@@ -1341,77 +1557,98 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	switch msg.String() {
-	case "q":
+	case overlay.EventLogHotkey:
+		return m, m.overlayStack.Push(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
+	case "O": // Orchestration overlay
+		return m, m.openOrchestrationOverlay()
+	case "X": // Bulk cleanup (Shift+X)
+		// Count tasks, worktrees, and sessions for estimates
+		taskCount := len(m.tasks)
+		worktreeCount := len(m.sessions) // Estimate: active sessions have worktrees
+		sessionCount := 0
+		for _, session := range m.sessions {
+			if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
+				sessionCount++
+			}
+		}
+		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
+		return m, m.overlayStack.Push(cleanupOverlay)
+	}
+
+	action, ok := keybinds.LookupAction(types.ModeNormal, msg.String())
+	if !ok {
+		return m, nil
+	}
+
+	switch action {
+	case keybinds.ActionQuit:
 		// Cleanup before quitting
 		m.sessionMonitor.StopAll()
 		return m, tea.Quit
 
 	// Vertical navigation
-	case "j", "down":
+	case keybinds.ActionMoveDown:
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "k", "up":
+	case keybinds.ActionMoveUp:
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Horizontal navigation
-	case "h", "left":
+	case keybinds.ActionMoveLeft:
 		m.nav.MoveLeft(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "l", "right":
+	case keybinds.ActionMoveRight:
 		m.nav.MoveRight(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Half-page scroll
-	case "ctrl+d":
+	case keybinds.ActionHalfPageDown:
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "ctrl+u":
+	case keybinds.ActionHalfPageUp:
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Mode switches
-	case "g":
+	case keybinds.ActionEnterGoto:
 		m.editor.EnterGoto()
 		return m, nil
 
-	case " ": // Space - open task panel (details + actions)
+	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
 			return m, m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.width, m.height))
 		}
 		return m, nil
 
-	case "/": // Search
+	case keybinds.ActionEnterSearch: // Search
 		m.editor.EnterSearch()
 		return m, m.overlayStack.Push(overlay.NewSearchOverlay())
 
-	case "f": // Filter menu
+	case keybinds.ActionOpenFilter: // Filter menu
 		return m, m.overlayStack.Push(overlay.NewFilterMenu(m.editor.GetFilter()))
 
-	case ",": // Sort menu
+	case keybinds.ActionOpenSort: // Sort menu
 		return m, m.overlayStack.Push(overlay.NewSortMenu(m.editor.GetSort()))
 
-	case "v": // Visual select
+	case keybinds.ActionEnterSelect: // Visual select
 		m.editor.EnterSelect()
 		return m, nil
 
-	case "?": // Help
+	case keybinds.ActionOpenHelp: // Help
 		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
 
-	case overlay.EventLogHotkey:
-		return m, m.overlayStack.Push(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
-
-	case "enter": // Drill into children
+	case keybinds.ActionDrillDown: // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
 			children := m.getTaskChildren(task.ID)
@@ -1430,17 +1667,17 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "c": // Create task
+	case keybinds.ActionCreateTask: // Create task
 		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
 
-	case "s": // Settings
-		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndSource(m.editor, m.configSourcePath()))
+	case keybinds.ActionOpenSettings: // Settings
+		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
 
-	case "D": // Diagnostics (Shift+D)
+	case keybinds.ActionOpenDiagnostic: // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
 		return m, tea.Batch(m.overlayStack.Push(diagPanel), diagPanel.Init())
 
-	case "tab": // Toggle view mode
+	case keybinds.ActionToggleView: // Toggle view mode
 		if m.viewMode == ViewModeBoard {
 			m.viewMode = ViewModeCompact
 			m.addToast(Toast{
@@ -1457,22 +1694,6 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
-
-	case "O": // Orchestration overlay
-		return m, m.openOrchestrationOverlay()
-
-	case "X": // Bulk cleanup (Shift+X)
-		// Count tasks, worktrees, and sessions for estimates
-		taskCount := len(m.tasks)
-		worktreeCount := len(m.sessions) // Estimate: active sessions have worktrees
-		sessionCount := 0
-		for _, session := range m.sessions {
-			if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
-				sessionCount++
-			}
-		}
-		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
-		return m, m.overlayStack.Push(cleanupOverlay)
 	}
 
 	return m, nil
@@ -1484,24 +1705,29 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Always return to normal mode after processing
 	m.editor.EnterNormal()
 
-	switch msg.String() {
-	case "g":
+	action, ok := keybinds.LookupAction(types.ModeGoto, msg.String())
+	if !ok {
+		return m, nil
+	}
+
+	switch action {
+	case keybinds.ActionGotoTop:
 		// Go to top of column
 		m.nav.GotoTop(columns)
 		m.ensureCursorVisible(columns)
-	case "e":
+	case keybinds.ActionGotoBottom:
 		// Go to end of column
 		m.nav.GotoBottom(columns)
 		m.ensureCursorVisible(columns)
-	case "h":
+	case keybinds.ActionGotoFirstCol:
 		// Go to first column
 		m.nav.GotoFirstColumn(columns)
 		m.ensureCursorVisible(columns)
-	case "l":
+	case keybinds.ActionGotoLastCol:
 		// Go to last column
 		m.nav.GotoLastColumn(columns)
 		m.ensureCursorVisible(columns)
-	case "w":
+	case keybinds.ActionGotoJump:
 		// Jump mode - quick navigation with labels for VISIBLE tasks only
 		// Calculate visible tasks per column based on screen height/card footprint.
 		visibleStart, visibleEnd := m.boardVisibleColumnRange(columns)
@@ -1529,14 +1755,14 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			visibleCount += colVisible
 		}
 		return m, m.overlayStack.Push(overlay.NewJumpModeWithChars(visibleCount, m.config.Keyboard.JumpLabelChars))
-	case "p":
+	case keybinds.ActionGotoProjects:
 		// Project selector
 		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
 		))
-	case "s":
+	case keybinds.ActionGotoSpec:
 		// Dedicated Spec workspace
 		return m, m.overlayStack.Push(overlay.NewSpecWorkspaceOverlay(m.currentProject))
 	}
@@ -1576,9 +1802,13 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	task, _ := m.getCurrentTaskAndSession()
-	switch msg.String() {
+	action, ok := keybinds.LookupAction(types.ModeSelect, msg.String())
+	if !ok {
+		return m, nil
+	}
+	switch action {
 	// Navigation with selection toggle
-	case "j", "down":
+	case keybinds.ActionMoveDown:
 		// Toggle current task selection, then move down
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
@@ -1587,7 +1817,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "k", "up":
+	case keybinds.ActionMoveUp:
 		// Toggle current task selection, then move up
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
@@ -1597,18 +1827,18 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Horizontal movement (no selection toggle)
-	case "h", "left":
+	case keybinds.ActionMoveLeft:
 		m.nav.MoveLeft(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "l", "right":
+	case keybinds.ActionMoveRight:
 		m.nav.MoveRight(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	// Half-page movement with selection toggle
-	case "ctrl+d":
+	case keybinds.ActionHalfPageDown:
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
@@ -1616,7 +1846,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	case "ctrl+u":
+	case keybinds.ActionHalfPageUp:
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
@@ -1624,22 +1854,15 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible(columns)
 		return m, nil
 
-	// Toggle current selection without moving
-	case " ":
-		if task != nil {
-			m.editor.ToggleSelection(task.ID)
-		}
-		return m, nil
-
-	// Toggle current selection
-	case "a":
+	// Toggle current selection without moving.
+	case keybinds.ActionSelectToggle:
 		if task != nil {
 			m.editor.ToggleSelection(task.ID)
 		}
 		return m, nil
 
 	// Select all in current column
-	case "A":
+	case keybinds.ActionSelectColumnAll:
 		status := m.nav.GetCurrentStatus(columns)
 		for _, t := range m.tasks {
 			if t.Status == status {
@@ -1649,13 +1872,13 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Select all visible tasks
-	case "%":
+	case keybinds.ActionSelectAllVisible:
 		filteredTasks := m.editor.ApplyFilter(m.tasks)
 		m.editor.SelectAll(filteredTasks)
 		return m, nil
 
 	// Invert visible selection
-	case "*":
+	case keybinds.ActionSelectInvert:
 		for _, t := range m.editor.ApplyFilter(m.tasks) {
 			if m.editor.IsSelected(t.ID) {
 				m.editor.Deselect(t.ID)
@@ -1666,28 +1889,22 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	// Clear selection
-	case "x":
+	case keybinds.ActionSelectClear:
 		m.editor.ClearSelection()
 		return m, nil
 
 	// Exit select mode and clear selection
-	case "v":
+	case keybinds.ActionSelectExit:
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
 		return m, nil
 
-	// Bulk action menu for selected tasks
-	case "enter":
+	// Bulk action menu for selected tasks.
+	case keybinds.ActionSelectBulk:
 		if m.editor.HasSelection() {
 			selectedIDs := m.editor.GetSelectedTasksList()
 			return m, m.overlayStack.Push(overlay.NewBulkActionMenu(selectedIDs, len(selectedIDs)))
 		}
-		return m, nil
-
-	// Exit select mode
-	case "esc":
-		m.editor.ClearSelection()
-		m.editor.EnterNormal()
 		return m, nil
 	}
 
@@ -1848,6 +2065,7 @@ func (m *Model) applyRuntimeSignals() {
 		}
 		m.tasks[i].HasTmuxSession = signals.HasTmuxSession
 		m.tasks[i].HasWorktree = signals.HasWorktree
+		m.tasks[i].GitAheadCount = signals.GitAheadCount
 		m.tasks[i].GitBehindCount = signals.GitBehindCount
 		m.tasks[i].HasUncommittedChanges = signals.HasUncommittedChanges
 		m.tasks[i].GitAdditions = signals.GitAdditions
@@ -1907,7 +2125,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 					partialFailures++
 				}
 
-				diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath)
+				diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath, baseBranch)
 				if diffErr == nil {
 					signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
 				} else {
@@ -1921,6 +2139,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 						Remote:     "origin",
 					})
 					if behindErr == nil {
+						signals.GitAheadCount = behind.CommitsAhead
 						signals.GitBehindCount = behind.CommitsBehind
 					} else {
 						partialFailures++
@@ -1941,16 +2160,22 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 
 func parseDiffStatTotals(diffStat string) (int, int) {
 	var additions, deletions int
-	insertionMatch := diffStatInsertionsPattern.FindStringSubmatch(diffStat)
-	if len(insertionMatch) == 2 {
+	insertionMatches := diffStatInsertionsPattern.FindAllStringSubmatch(diffStat, -1)
+	for _, insertionMatch := range insertionMatches {
+		if len(insertionMatch) != 2 {
+			continue
+		}
 		if parsed, err := strconv.Atoi(insertionMatch[1]); err == nil {
-			additions = parsed
+			additions += parsed
 		}
 	}
-	deletionMatch := diffStatDeletionsPattern.FindStringSubmatch(diffStat)
-	if len(deletionMatch) == 2 {
+	deletionMatches := diffStatDeletionsPattern.FindAllStringSubmatch(diffStat, -1)
+	for _, deletionMatch := range deletionMatches {
+		if len(deletionMatch) != 2 {
+			continue
+		}
 		if parsed, err := strconv.Atoi(deletionMatch[1]); err == nil {
-			deletions = parsed
+			deletions += parsed
 		}
 	}
 	return additions, deletions
@@ -2462,7 +2687,7 @@ func (m Model) daemonCommandTimeout() time.Duration {
 }
 
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
-func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
+func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -2473,7 +2698,12 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 		if m.daemonClient == nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		if _, err := m.daemonClient.StartSession(ctx, issueID, baseBranch); err != nil {
+		if _, err := m.daemonClient.StartSession(ctx, daemonclient.StartSessionParams{
+			IssueID:    issueID,
+			BaseBranch: baseBranch,
+			Yolo:       yolo,
+			ImagePaths: m.sessionImagePaths(ctx, issueID),
+		}); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return sessionStartedMsg{issueID: issueID, operationID: pending.OperationID, state: pending.State}
 			}
@@ -2482,6 +2712,29 @@ func (m Model) startSessionCmd(issueID string, baseBranch string) tea.Cmd {
 
 		return sessionStartedMsg{issueID: issueID}
 	}
+}
+
+func (m Model) sessionImagePaths(ctx context.Context, issueID string) []string {
+	if m.attachmentService == nil {
+		return nil
+	}
+	attachments, err := m.attachmentService.List(ctx, issueID)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("failed to list issue image attachments for session start", "issue_id", issueID, "error", err)
+		}
+		return nil
+	}
+
+	paths := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		path := strings.TrimSpace(attachment.Path)
+		if path == "" {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 // stopSessionCmd requests daemon-owned lifecycle stop and lets daemon snapshots rebuild the local projection.
@@ -2726,6 +2979,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+	case "settings-save-error":
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to save settings: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
 	case "set-default-error", "remove-error", "add-error", "save-error", "detect-error":
 		// Project registry actions failed
 		if err, ok := msg.Value.(error); ok {
@@ -2751,13 +3013,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start session
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch())
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+	case "!":
+		// Start session with dangerous skip-permissions mode.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
-			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID))
+			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false)
 		}
 		return m, nil
 	case "a":
@@ -2831,6 +3096,39 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		// Get current branch name and open PR creation overlay
 		return m, m.openPROverlayCmd(session.Worktree, task.ID)
+	case "O":
+		// Open PR in browser for current branch
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openPRCmd(session.Worktree, task.ID)
+	case "M":
+		// Abort in-progress merge in worktree
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.abortMergeCmd(session.Worktree)
+	case "H":
+		// Open Helix in the task worktree.
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openHelixCmd(session.Worktree, task.ID)
 
 	case "f":
 		// Show diff viewer
@@ -2938,6 +3236,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
 		return m, m.overlayStack.Push(overlay.NewEditTaskOverlay(*task))
+	case "T":
+		return m, m.deleteTaskCmd(task.ID)
 	case "d":
 		return m, m.deleteTaskCmd(task.ID)
 	case "c":
@@ -2949,11 +3249,36 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) eventLogFilePath() string {
-	base := m.repoDir
-	if strings.TrimSpace(base) == "" {
-		base = "."
+	if strings.TrimSpace(m.logFilePath) != "" {
+		return m.logFilePath
 	}
-	return filepath.Join(base, "az.log")
+	return resolveTUILogFilePath(m.config)
+}
+
+func resolveTUILogFilePath(cfg *config.Config) string {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	baseDir := strings.TrimSpace(cfg.Session.LogDir)
+	if baseDir == "" {
+		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+			baseDir = filepath.Join(homeDir, ".azedarach", "logs")
+		} else {
+			baseDir = filepath.Join(".", ".azedarach", "logs")
+		}
+	}
+	return filepath.Join(baseDir, "az.log")
+}
+
+func newTUILogger(logPath string) *slog.Logger {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
 func (m Model) configSourcePath() string {
@@ -3009,6 +3334,57 @@ func shellSingleQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func compactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
+}
+
+func (m Model) appendAttachmentNoteCmd(att *attachment.Attachment) tea.Cmd {
+	if att == nil || m.daemonClient == nil {
+		return nil
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return nil
+	}
+	line := formatAttachmentNoteLine(att)
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.daemonClient.AppendTaskNotes(ctx, issueID, line); err != nil {
+			return Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Image attached but failed to append notes: %s", compactErrorMessage(err)),
+				Expires: time.Now().Add(6 * time.Second),
+			}
+		}
+		return nil
+	}
+}
+
+func formatAttachmentNoteLine(att *attachment.Attachment) string {
+	if att == nil {
+		return ""
+	}
+	issueID := strings.TrimSpace(att.IssueID)
+	filename := strings.TrimSpace(att.Filename)
+	if issueID == "" || filename == "" {
+		return ""
+	}
+	relativePath := filepath.ToSlash(filepath.Join(".azedarach", "images", issueID, filename))
+	source := "file"
+	if strings.HasPrefix(strings.ToLower(filename), "clipboard-") {
+		source = "clipboard"
+	}
+	timestamp := att.Created.Local().Format("2006-01-02 15:04:05")
+	return fmt.Sprintf("📎 [%s](%s) (%s, %s)", filename, relativePath, source, timestamp)
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
@@ -3344,17 +3720,29 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 
 func runtimeEventSummary(evt protocol.EventEnvelope) string {
 	eventName := strings.TrimSpace(evt.Event)
-	body := strings.TrimSpace(string(evt.Body))
+	body := compactSummaryText(string(evt.Body))
 	switch {
 	case eventName != "" && body != "":
-		return eventName + ": " + body
+		return truncateSummary(eventName + ": " + body)
 	case eventName != "":
-		return eventName
+		return truncateSummary(eventName)
 	case body != "":
-		return body
+		return truncateSummary(body)
 	default:
-		return strings.TrimSpace(string(evt.Kind))
+		return truncateSummary(strings.TrimSpace(string(evt.Kind)))
 	}
+}
+
+func compactSummaryText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func truncateSummary(value string) string {
+	runes := []rune(value)
+	if len(runes) <= eventSummaryMaxRunes {
+		return value
+	}
+	return string(runes[:eventSummaryMaxRunes-1]) + "…"
 }
 
 // expireToasts removes expired toasts from the list
@@ -3388,6 +3776,18 @@ type createPRResultMsg struct {
 	issueID string
 	cmd     string
 	err     error
+}
+
+type openPRResultMsg struct {
+	issueID string
+	err     error
+}
+
+type helixOpenResultMsg struct {
+	issueID     string
+	opened      bool
+	commandHint string
+	err         error
 }
 
 type showDiffResultMsg struct {
@@ -3535,6 +3935,43 @@ func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 	}
 }
 
+func (m Model) openPRCmd(worktree, issueID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
+		if err != nil {
+			return openPRResultMsg{issueID: issueID, err: fmt.Errorf("resolve branch: %w", err)}
+		}
+		cmd := exec.CommandContext(ctx, "gh", "pr", "view", "--head", branch, "--web")
+		cmd.Dir = worktree
+		if err := cmd.Run(); err != nil {
+			return openPRResultMsg{issueID: issueID, err: err}
+		}
+		return openPRResultMsg{issueID: issueID}
+	}
+}
+
+func (m Model) openHelixCmd(worktree, issueID string) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(worktree) == "" {
+			return helixOpenResultMsg{issueID: issueID, err: fmt.Errorf("worktree path is empty")}
+		}
+		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
+			popupCommand := fmt.Sprintf("cd %s && hx", shellSingleQuote(worktree))
+			if err := m.tmuxClient.DisplayPopup(context.Background(), "hx-"+issueID, "90%", "90%", popupCommand); err != nil {
+				return helixOpenResultMsg{issueID: issueID, err: err}
+			}
+			return helixOpenResultMsg{issueID: issueID, opened: true}
+		}
+		return helixOpenResultMsg{
+			issueID:     issueID,
+			commandHint: fmt.Sprintf("Run: cd %s && hx", worktree),
+		}
+	}
+}
+
 // showDiffCmd gets the diff stat for the worktree
 func (m Model) showDiffCmd(worktree string) tea.Cmd {
 	return func() tea.Msg {
@@ -3546,7 +3983,7 @@ func (m Model) showDiffCmd(worktree string) tea.Cmd {
 			}
 		}
 
-		diff, err := m.daemonClient.GitDiffStat(ctx, worktree)
+		diff, err := m.daemonClient.GitDiffStat(ctx, worktree, "")
 		if err != nil {
 			return showDiffResultMsg{
 				err: fmt.Errorf("failed to get diff: %w", err),

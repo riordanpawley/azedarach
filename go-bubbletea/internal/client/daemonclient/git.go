@@ -17,9 +17,10 @@ const (
 
 // GitCommandRequest captures the daemon request body for git workflow commands.
 type GitCommandRequest struct {
-	Worktree string `json:"worktree"`
-	Remote   string `json:"remote,omitempty"`
-	Branch   string `json:"branch,omitempty"`
+	Worktree   string `json:"worktree"`
+	Remote     string `json:"remote,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
 }
 
 // GitCommandResponse captures the daemon response body for git workflow commands.
@@ -108,10 +109,11 @@ func (c *Client) GitAbortMerge(ctx context.Context, worktree string) (GitCommand
 }
 
 // GitDiffStat asks the daemon to get the diff stat output for the requested worktree.
-func (c *Client) GitDiffStat(ctx context.Context, worktree string) (string, error) {
+func (c *Client) GitDiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
 	var resp gitOutputBody
 	if err := c.commandJSON(ctx, CommandGitDiffStat, GitCommandRequest{
-		Worktree: worktree,
+		Worktree:   worktree,
+		BaseBranch: baseBranch,
 	}, &resp); err != nil {
 		return "", err
 	}

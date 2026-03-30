@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -160,7 +161,15 @@ func (m *ProjectSelector) viewList() string {
 	if len(m.registry.Projects) == 0 {
 		b.WriteString(m.styles.MenuItem.Render("No projects registered"))
 		b.WriteString("\n\n")
-		b.WriteString(m.styles.Footer.Render("Press Escape to close • a: add • D: detect"))
+		b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+			{Key: "Esc", Description: "close"},
+			{Key: "a", Description: "add"},
+			{Key: "D", Description: "detect"},
+		}, 0, keybinds.Theme{
+			KeyStyle:         m.styles.MenuKey,
+			DescriptionStyle: m.styles.Footer,
+			FooterStyle:      m.styles.Footer,
+		}))
 		return b.String()
 	}
 
@@ -194,7 +203,19 @@ func (m *ProjectSelector) viewList() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(m.styles.Footer.Render("Press 1-9 to switch • Enter: switch • d: default • x: remove • a: add • D: detect • Esc: close"))
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "1-9", Description: "switch"},
+		{Key: "Enter", Description: "switch"},
+		{Key: "d", Description: "default"},
+		{Key: "x", Description: "remove"},
+		{Key: "a", Description: "add"},
+		{Key: "D", Description: "detect"},
+		{Key: "Esc", Description: "close"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -224,7 +245,14 @@ func (m *ProjectSelector) viewActions() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(m.styles.Footer.Render("enter: select • esc: back"))
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "Enter", Description: "select"},
+		{Key: "Esc", Description: "back"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }

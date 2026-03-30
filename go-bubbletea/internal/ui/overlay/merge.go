@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -141,8 +142,15 @@ func (m *MergeSelectOverlay) View() string {
 
 	// Footer with help text
 	b.WriteString("\n")
-	footer := "j/k: navigate • Enter: select • Esc: cancel"
-	b.WriteString(m.overlayStyles.Footer.Render(footer))
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "j/k", Description: "navigate"},
+		{Key: "Enter", Description: "select"},
+		{Key: "Esc", Description: "cancel"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         m.overlayStyles.MenuKey,
+		DescriptionStyle: m.overlayStyles.Footer,
+		FooterStyle:      m.overlayStyles.Footer,
+	}))
 
 	return b.String()
 }

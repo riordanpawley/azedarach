@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // imageAttachMode represents the current mode of the overlay
@@ -45,6 +46,7 @@ type ImageAttachmentService interface {
 type AttachmentActionMsg struct {
 	Action     string // "attached", "deleted"
 	Attachment *attachment.Attachment
+	Error      error
 }
 
 // OpenImagePreviewMsg is sent to open the image preview overlay
@@ -107,7 +109,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "v":
+		case "p":
 			// Paste from clipboard
 			return i, i.pasteFromClipboard()
 
@@ -132,7 +134,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "enter", "p":
+		case "enter", "v":
 			// Open full image preview overlay
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				return i, func() tea.Msg {
@@ -144,9 +146,6 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "r":
-			// Refresh list
-			return i, i.loadAttachments()
 		}
 
 	case attachmentsLoadedMsg:
@@ -176,8 +175,13 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return i, i.loadAttachments()
 
 	case errorMsg:
-		i.error = msg.err.Error()
-		return i, nil
+		i.error = compactOverlayError(msg.err)
+		return i, func() tea.Msg {
+			return AttachmentActionMsg{
+				Action: "error",
+				Error:  msg.err,
+			}
+		}
 	}
 
 	return i, nil
@@ -226,20 +230,15 @@ func (i *ImageAttachOverlay) View() string {
 
 // renderList renders the attachment list
 func (i *ImageAttachOverlay) renderList() string {
-	var b strings.Builder
-
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#89b4fa")).
-		Bold(true)
-
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.issueID)))
-	b.WriteString("\n\n")
+	var content strings.Builder
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#89b4fa")).Bold(true)
+	content.WriteString(headerStyle.Render(fmt.Sprintf("Attachments for %s", i.issueID)))
+	content.WriteString("\n\n")
 
 	if len(i.files) == 0 {
-		b.WriteString(i.styles.Footer.Render("No attachments yet."))
-		b.WriteString("\n\n")
+		content.WriteString(i.styles.Footer.Render("No attachments yet."))
+		content.WriteString("\n\n")
 	} else {
-		// Render file list
 		for idx, file := range i.files {
 			style := i.styles.MenuItem
 			indicator := "  "
@@ -247,51 +246,48 @@ func (i *ImageAttachOverlay) renderList() string {
 				style = i.styles.MenuItemActive
 				indicator = "▶ "
 			}
-
-			// Format size
 			sizeStr := formatFileSize(file.Size)
 			typeStr := strings.TrimPrefix(file.MimeType, "image/")
-
 			line := fmt.Sprintf("%s%-40s %8s  %s", indicator, truncate(file.Filename, 40), sizeStr, typeStr)
-			b.WriteString(style.Render(line))
-			b.WriteString("\n")
+			content.WriteString(style.Render(line))
+			content.WriteString("\n")
 		}
-		b.WriteString("\n")
+		content.WriteString("\n")
 	}
 
-	// Error display
 	if i.error != "" {
-		errorStyle := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#f38ba8")).
-			Bold(true)
-		b.WriteString(errorStyle.Render("Error: " + i.error))
-		b.WriteString("\n\n")
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Bold(true)
+		content.WriteString(errorStyle.Render("Error: " + i.error))
+		content.WriteString("\n\n")
 	}
-
-	// Separator
-	b.WriteString(i.styles.Separator.Render(strings.Repeat("─", 70)))
-	b.WriteString("\n\n")
 
 	// Help text
-	hints := []string{
-		i.styles.MenuKey.Render("p/v") + " " + i.styles.Footer.Render("Paste from clipboard"),
-		i.styles.MenuKey.Render("f") + " " + i.styles.Footer.Render("Attach from file"),
+	hints := []keybinds.Binding{
+		{Key: "p", Description: "Paste from clipboard"},
+		{Key: "f", Description: "Attach from file"},
 	}
 	if len(i.files) > 0 {
 		hints = append(hints,
-			i.styles.MenuKey.Render("o")+" "+i.styles.Footer.Render("Open"),
-			i.styles.MenuKey.Render("d/x")+" "+i.styles.Footer.Render("Delete"),
-			i.styles.MenuKey.Render("Enter")+" "+i.styles.Footer.Render("Preview"),
+			keybinds.Binding{Key: "o", Description: "Open"},
+			keybinds.Binding{Key: "d/x", Description: "Delete"},
+			keybinds.Binding{Key: "Enter/v", Description: "Preview"},
 		)
 	}
-	hints = append(hints,
-		i.styles.MenuKey.Render("r")+" "+i.styles.Footer.Render("Refresh"),
-		i.styles.MenuKey.Render("Esc")+" "+i.styles.Footer.Render("Close"),
-	)
+	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "Close"})
+	footer := i.styles.Separator.Render(strings.Repeat("─", 70)) + "\n\n" + keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	})
 
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
-
-	return b.String()
+	overlayBodyHeight := 24
+	contentHeight := lipgloss.Height(content.String())
+	footerHeight := lipgloss.Height(footer)
+	spacerLines := overlayBodyHeight - contentHeight - footerHeight
+	if spacerLines < 1 {
+		spacerLines = 1
+	}
+	return content.String() + strings.Repeat("\n", spacerLines) + footer
 }
 
 // renderPreview renders attachment details
@@ -353,11 +349,15 @@ func (i *ImageAttachOverlay) renderPreview() string {
 	b.WriteString("\n\n")
 
 	// Help
-	hints := []string{
-		i.styles.MenuKey.Render("o") + " " + i.styles.Footer.Render("Open in viewer"),
-		i.styles.MenuKey.Render("Esc") + " " + i.styles.Footer.Render("Back to list"),
+	hints := []keybinds.Binding{
+		{Key: "o", Description: "Open in viewer"},
+		{Key: "Esc", Description: "Back to list"},
 	}
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -377,11 +377,15 @@ func (i *ImageAttachOverlay) renderFileInput() string {
 	b.WriteString("\n\n")
 
 	// Help
-	hints := []string{
-		i.styles.MenuKey.Render("Enter") + " " + i.styles.Footer.Render("Attach"),
-		i.styles.MenuKey.Render("Esc") + " " + i.styles.Footer.Render("Cancel"),
+	hints := []keybinds.Binding{
+		{Key: "Enter", Description: "Attach"},
+		{Key: "Esc", Description: "Cancel"},
 	}
-	b.WriteString(i.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
+		KeyStyle:         i.styles.MenuKey,
+		DescriptionStyle: i.styles.Footer,
+		FooterStyle:      i.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -485,6 +489,13 @@ func (i *ImageAttachOverlay) openInViewer() tea.Cmd {
 		}
 		return nil
 	}
+}
+
+func compactOverlayError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
 }
 
 // Helper functions

@@ -137,7 +137,7 @@ lint:
 ```go
 // internal/config/config.go
 type Config struct {
-    CLITool  string        `json:"cliTool"`  // "claude" | "opencode"
+    CLITool  string        `json:"cliTool"`  // "claude" | "opencode" | "codex"
     Session  SessionConfig `json:"session"`
     Git      GitConfig     `json:"git"`
     PR       PRConfig      `json:"pr"`

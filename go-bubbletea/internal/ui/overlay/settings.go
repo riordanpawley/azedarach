@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // SettingType represents the type of a setting
@@ -43,6 +44,8 @@ type SettingsOverlay struct {
 	items        []SettingItem
 	cursor       int
 	configSource string
+	config       *config.Config
+	configPath   string
 	styles       *Styles
 }
 
@@ -62,6 +65,13 @@ func NewSettingsOverlayWithSource(items []SettingItem, configSource string) *Set
 	}
 	// Position cursor on first selectable item
 	menu.moveCursorToNextSelectable()
+	return menu
+}
+
+func NewSettingsOverlayWithConfig(items []SettingItem, cfg *config.Config, configSource string) *SettingsOverlay {
+	menu := NewSettingsOverlayWithSource(items, configSource)
+	menu.config = cfg
+	menu.configPath = configSource
 	return menu
 }
 
@@ -270,7 +280,17 @@ func (m *SettingsOverlay) View() string {
 
 	// Add footer hint
 	b.WriteString("\n")
-	b.WriteString(m.styles.Footer.Render("j/k: move • h/l: cycle • Enter/Space: toggle/activate • e: edit config • Esc: close"))
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "j/k", Description: "move"},
+		{Key: "h/l", Description: "cycle"},
+		{Key: "Enter/Space", Description: "toggle/activate"},
+		{Key: "e", Description: "edit config"},
+		{Key: "Esc", Description: "close"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         m.styles.MenuKey,
+		DescriptionStyle: m.styles.Footer,
+		FooterStyle:      m.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -335,6 +355,7 @@ func (m *SettingsOverlay) toggleOrActivate() tea.Cmd {
 			if item.OnChange != nil {
 				item.OnChange(item.Value)
 			}
+			return m.persistConfig()
 		}
 		return nil
 
@@ -421,7 +442,7 @@ func (m *SettingsOverlay) incrementChoice() tea.Cmd {
 		item.OnChange(item.Value)
 	}
 
-	return nil
+	return m.persistConfig()
 }
 
 // decrementChoice decrements the choice value (wrapping around)
@@ -459,7 +480,25 @@ func (m *SettingsOverlay) decrementChoice() tea.Cmd {
 		item.OnChange(item.Value)
 	}
 
-	return nil
+	return m.persistConfig()
+}
+
+func (m *SettingsOverlay) persistConfig() tea.Cmd {
+	if m.config == nil || strings.TrimSpace(m.configPath) == "" {
+		return nil
+	}
+
+	cfg := m.config
+	path := m.configPath
+	return func() tea.Msg {
+		if err := config.SaveConfig(cfg, path); err != nil {
+			return SelectionMsg{
+				Key:   "settings-save-error",
+				Value: err,
+			}
+		}
+		return nil
+	}
 }
 
 // openConfigInEditor opens the config file in $EDITOR
@@ -521,7 +560,74 @@ func NewSettingsOverlayWithEditorAndSource(editor interface {
 	GetShowPhases() bool
 	ToggleShowPhases()
 }, configSource string) *SettingsOverlay {
+	return NewSettingsOverlayWithEditorAndConfig(editor, nil, configSource)
+}
+
+// NewSettingsOverlayWithEditorAndConfig creates a config-backed settings overlay with editor service integration.
+func NewSettingsOverlayWithEditorAndConfig(editor interface {
+	GetShowPhases() bool
+	ToggleShowPhases()
+}, cfg *config.Config, configSource string) *SettingsOverlay {
+	cliTool := "claude"
+	if cfg != nil && strings.TrimSpace(cfg.CLITool) != "" {
+		cliTool = cfg.CLITool
+	}
+	skipPermissions := false
+	if cfg != nil {
+		skipPermissions = cfg.Session.DangerouslySkipPermissions
+	}
+	gitPushEnabled := true
+	gitFetchEnabled := true
+	prDraftByDefault := true
+	prAutoLink := true
+	prNotifyAfterCreate := true
+	prCreateWithoutMerge := false
+	networkAutoDetect := true
+	if cfg != nil {
+		gitPushEnabled = cfg.Git.PushEnabled
+		gitFetchEnabled = cfg.Git.FetchEnabled
+		prDraftByDefault = cfg.PR.DraftByDefault
+		prAutoLink = cfg.PR.AutoLink
+		prNotifyAfterCreate = cfg.PR.NotifyAfterCreate
+		prCreateWithoutMerge = cfg.PR.CreateWithoutMerge
+		networkAutoDetect = cfg.Network.AutoDetect
+	}
 	items := []SettingItem{
+		{
+			Key:   "cli-tool",
+			Group: "Session",
+			Label: "CLI Tool",
+			Type:  SettingChoice,
+			Value: cliTool,
+			Choices: []string{
+				"claude",
+				"opencode",
+				"codex",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(string); ok {
+					cfg.CLITool = v
+				}
+			},
+		},
+		{
+			Key:   "skip-permissions",
+			Group: "Session",
+			Label: "Skip permissions",
+			Type:  SettingToggle,
+			Value: skipPermissions,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Session.DangerouslySkipPermissions = v
+				}
+			},
+		},
 		{
 			Key:   "phases",
 			Group: "General",
@@ -569,6 +675,111 @@ func NewSettingsOverlayWithEditorAndSource(editor interface {
 			},
 		},
 		{
+			Key:   "git-push-enabled",
+			Group: "Git",
+			Label: "Git Push",
+			Type:  SettingToggle,
+			Value: gitPushEnabled,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Git.PushEnabled = v
+				}
+			},
+		},
+		{
+			Key:   "git-fetch-enabled",
+			Group: "Git",
+			Label: "Git Fetch",
+			Type:  SettingToggle,
+			Value: gitFetchEnabled,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Git.FetchEnabled = v
+				}
+			},
+		},
+		{
+			Key:   "pr-draft-by-default",
+			Group: "Pull Requests",
+			Label: "Draft by default",
+			Type:  SettingToggle,
+			Value: prDraftByDefault,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.PR.DraftByDefault = v
+				}
+			},
+		},
+		{
+			Key:   "pr-auto-link",
+			Group: "Pull Requests",
+			Label: "Auto-link PR",
+			Type:  SettingToggle,
+			Value: prAutoLink,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.PR.AutoLink = v
+				}
+			},
+		},
+		{
+			Key:   "pr-notify-after-create",
+			Group: "Pull Requests",
+			Label: "Notify after create",
+			Type:  SettingToggle,
+			Value: prNotifyAfterCreate,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.PR.NotifyAfterCreate = v
+				}
+			},
+		},
+		{
+			Key:   "pr-create-without-merge",
+			Group: "Pull Requests",
+			Label: "Create without merge",
+			Type:  SettingToggle,
+			Value: prCreateWithoutMerge,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.PR.CreateWithoutMerge = v
+				}
+			},
+		},
+		{
+			Key:   "network-auto-detect",
+			Group: "Network",
+			Label: "Auto-detect network",
+			Type:  SettingToggle,
+			Value: networkAutoDetect,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Network.AutoDetect = v
+				}
+			},
+		},
+		{
 			Key:      "",
 			Group:    "Actions",
 			Label:    "───────────────────",
@@ -606,5 +817,5 @@ func NewSettingsOverlayWithEditorAndSource(editor interface {
 		},
 	}
 
-	return NewSettingsOverlayWithSource(items, configSource)
+	return NewSettingsOverlayWithConfig(items, cfg, configSource)
 }

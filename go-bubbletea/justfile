@@ -7,7 +7,9 @@ build:
     go build -o bin/azd ./cmd/azd
 
 run:
+    go build -o bin/az ./cmd/az
     go build -o bin/azd ./cmd/azd
+    ./bin/az daemon restart
     go run ./cmd/az
 
 test:

@@ -1313,6 +1313,127 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 	})
 }
 
+func TestAbortMergeCmdUsesDaemonClient(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitAbortMerge {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandGitAbortMerge)
+			}
+			var body daemonclient.GitCommandRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal abort request: %v", err)
+			}
+			if body.Worktree != "/tmp/az-1" {
+				t.Fatalf("abort body = %+v", body)
+			}
+			respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree})
+			if err != nil {
+				t.Fatalf("marshal abort response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	msg := m.abortMergeCmd("/tmp/az-1")()
+	result, ok := msg.(abortMergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want abortMergeResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("abort err = %v", result.err)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandGitAbortMerge {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
+	t.Run("open PR without session warns", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, Type: domain.TypeTask}}
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "O"})
+		if cmd != nil {
+			t.Fatal("expected nil command when session is missing")
+		}
+		updatedModel, ok := updated.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+		if len(updatedModel.toasts) == 0 {
+			t.Fatal("expected warning toast")
+		}
+		got := updatedModel.toasts[len(updatedModel.toasts)-1].Message
+		if !strings.Contains(got, "No active session - start session first") {
+			t.Fatalf("warning toast = %q", got)
+		}
+	})
+
+	t.Run("open helix without tmux returns hint", func(t *testing.T) {
+		t.Setenv("TMUX", "")
+
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		msg := m.openHelixCmd("/tmp/az-1", "az-1")()
+		result, ok := msg.(helixOpenResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want helixOpenResultMsg", msg)
+		}
+		if result.opened {
+			t.Fatalf("opened = true, want false when tmux missing")
+		}
+		if !strings.Contains(result.commandHint, "cd /tmp/az-1 && hx") {
+			t.Fatalf("command hint = %q", result.commandHint)
+		}
+	})
+}
+
+func TestHandleSelectionTombstoneActionDeletesTask(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskArchive {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskArchive)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, Type: domain.TypeTask}}
+	m.nav.SelectTask("az-1", 1)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "T"})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected delete command")
+	}
+	msg := cmd()
+	deleted, ok := msg.(taskDeletedResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want taskDeletedMsg", msg)
+	}
+	if deleted.taskID != "az-1" || deleted.err != nil {
+		t.Fatalf("deleted msg = %+v", deleted)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandTaskArchive {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
 func TestOpenPROverlayUsesDaemonWorktreeBranch(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1540,6 +1661,7 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 					ProjectID  string `json:"project_id"`
 					SessionID  string `json:"session_id"`
 					BaseBranch string `json:"base_branch,omitempty"`
+					Yolo       bool   `json:"yolo,omitempty"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session start request: %v", err)
@@ -1549,6 +1671,9 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 				}
 				if body.BaseBranch != baseBranch {
 					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				if body.Yolo {
+					t.Fatal("expected yolo=false for Shift+S start")
 				}
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
@@ -1617,7 +1742,7 @@ func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
 	}
 
 	m := newDaemonTestModel(transport)
-	startMsg := m.startSessionCmd("az-child", "main")()
+	startMsg := m.startSessionCmd("az-child", "main", false)()
 	started, ok := startMsg.(sessionStartedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want sessionStartedMsg", startMsg)
@@ -1706,6 +1831,7 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 					ProjectID  string `json:"project_id"`
 					SessionID  string `json:"session_id"`
 					BaseBranch string `json:"base_branch,omitempty"`
+					Yolo       bool   `json:"yolo,omitempty"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session start request: %v", err)
@@ -1715,6 +1841,9 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 				}
 				if body.BaseBranch != baseBranch {
 					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				if body.Yolo {
+					t.Fatal("expected yolo=false for Shift+S start")
 				}
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
@@ -1778,6 +1907,78 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 	}
 
 	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "S"})
+	if startCmd == nil {
+		t.Fatal("expected session start command")
+	}
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
+func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
+	baseBranch := "develop"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStart:
+				var body struct {
+					ProjectID  string `json:"project_id"`
+					SessionID  string `json:"session_id"`
+					BaseBranch string `json:"base_branch,omitempty"`
+					Yolo       bool   `json:"yolo,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session start request: %v", err)
+				}
+				if body.SessionID != childID {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != baseBranch {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				if !body.Yolo {
+					t.Fatal("expected yolo=true for ! start")
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "started"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	m.tasks = []domain.Task{
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.nav.SelectTask(childID, 0)
+
+	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "!"})
 	if startCmd == nil {
 		t.Fatal("expected session start command")
 	}

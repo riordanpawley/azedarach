@@ -26,6 +26,25 @@ type mockTmuxService struct {
 	popupFn  func(ctx context.Context, title, width, height, command string) error
 }
 
+type probeOverlay struct {
+	updated bool
+	lastMsg tea.Msg
+}
+
+func (p *probeOverlay) Init() tea.Cmd { return nil }
+
+func (p *probeOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	p.updated = true
+	p.lastMsg = msg
+	return p, nil
+}
+
+func (p *probeOverlay) View() string { return "probe" }
+
+func (p *probeOverlay) Title() string { return "probe" }
+
+func (p *probeOverlay) Size() (width, height int) { return 10, 5 }
+
 func (m mockTmuxService) SwitchClient(ctx context.Context, name string) error {
 	if m.switchFn != nil {
 		return m.switchFn(ctx, name)
@@ -38,6 +57,23 @@ func (m mockTmuxService) DisplayPopup(ctx context.Context, title, width, height,
 		return m.popupFn(ctx, title, width, height, command)
 	}
 	return nil
+}
+
+type recordingGitSyncService struct {
+	fetchCalls int
+}
+
+func (s *recordingGitSyncService) FetchAndCheck() tea.Cmd {
+	s.fetchCalls++
+	return nil
+}
+
+func (s *recordingGitSyncService) Pull() tea.Cmd {
+	return nil
+}
+
+func (s *recordingGitSyncService) ShouldNotify(int) bool {
+	return false
 }
 
 // Helper to create a test model with tasks
@@ -153,6 +189,89 @@ func TestHelperMethods(t *testing.T) {
 			t.Errorf("Expected minimum of 1, got %d", half)
 		}
 	})
+}
+
+func TestRuntimeEventSummary_CompactsAndTruncates(t *testing.T) {
+	evt := protocol.EventEnvelope{
+		Event: "clipboard.error",
+		Body:  []byte("line one\nline   two\r\nline three"),
+	}
+
+	summary := runtimeEventSummary(evt)
+	if strings.Contains(summary, "\n") || strings.Contains(summary, "\r") {
+		t.Fatalf("summary contains line breaks: %q", summary)
+	}
+	if !strings.Contains(summary, "line one line two line three") {
+		t.Fatalf("summary was not compacted as expected: %q", summary)
+	}
+
+	longBody := strings.Repeat("x", eventSummaryMaxRunes+50)
+	longSummary := runtimeEventSummary(protocol.EventEnvelope{
+		Event: "ui.toast",
+		Body:  []byte(longBody),
+	})
+	if len([]rune(longSummary)) > eventSummaryMaxRunes {
+		t.Fatalf("long summary was not truncated: len=%d summary=%q", len([]rune(longSummary)), longSummary)
+	}
+	if !strings.HasSuffix(longSummary, "…") {
+		t.Fatalf("truncated summary must end with ellipsis: %q", longSummary)
+	}
+}
+
+func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
+	cfg := &config.Config{
+		Session: config.SessionConfig{
+			LogDir: "/tmp/azedarach-user-logs",
+		},
+	}
+
+	got := resolveTUILogFilePath(cfg)
+	want := filepath.Join("/tmp/azedarach-user-logs", "az.log")
+	if got != want {
+		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
+	m := newTestModel()
+	probe := &probeOverlay{}
+	m.overlayStack.Push(probe)
+
+	customMsg := struct{ name string }{name: "async-result"}
+	updatedModel, _ := m.Update(customMsg)
+	next, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updatedModel)
+	}
+
+	current, ok := next.overlayStack.Current().(*probeOverlay)
+	if !ok {
+		t.Fatalf("expected probe overlay on stack, got %T", next.overlayStack.Current())
+	}
+	if !current.updated {
+		t.Fatal("expected non-key message to be forwarded to active overlay")
+	}
+	if got, ok := current.lastMsg.(struct{ name string }); !ok || got.name != customMsg.name {
+		t.Fatalf("overlay received wrong message: %#v", current.lastMsg)
+	}
+}
+
+func TestUpdate_OpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewImageAttachOverlay("axu", m.attachmentService))
+
+	updated, _ := m.Update(overlay.OpenImagePreviewMsg{
+		IssueID:      "axu",
+		InitialIndex: 0,
+	})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if _, ok := next.overlayStack.Current().(*overlay.ImagePreviewOverlay); !ok {
+		t.Fatalf("expected image preview overlay on stack, got %T", next.overlayStack.Current())
+	}
 }
 
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
@@ -364,11 +483,11 @@ func TestView_CanonicalProfiles(t *testing.T) {
 			if !strings.Contains(view, "NORMAL") {
 				t.Fatalf("expected status bar mode badge to remain visible, got: %s", view)
 			}
-			if profile.Width < 80 && strings.Contains(view, "h/l: columns") {
+			if profile.Width < 80 && strings.Contains(view, "Space: task workspace") {
 				t.Fatalf("expected compact status bar without full hints for %s profile, got: %s", profile.Name, view)
 			}
-			if profile.Width >= 80 && !strings.Contains(view, "h/l: columns") {
-				t.Fatalf("expected full hints for %s profile, got: %s", profile.Name, view)
+			if profile.Width >= 80 && !strings.Contains(view, "Space: task workspace") {
+				t.Fatalf("expected board hints for %s profile, got: %s", profile.Name, view)
 			}
 		})
 	}
@@ -646,6 +765,25 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
+	m := newTestModel()
+	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "settings-save-error",
+		Value: fmt.Errorf("boom"),
+	})
+	newModel := updated.(Model)
+
+	if newModel.overlayStack.IsEmpty() {
+		t.Fatal("expected settings overlay to remain open after save error")
+	}
+
+	if got := len(newModel.toasts); got == 0 {
+		t.Fatal("expected a toast to be recorded for settings save error")
+	}
+}
+
 func TestHalfPageScroll(t *testing.T) {
 	m := newTestModel()
 
@@ -798,6 +936,63 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 		}
 		if newModel.nav.GetCursor().TaskID == initialTaskID {
 			t.Errorf("Expected selected task to change after ctrl+u in select mode, still on %s", initialTaskID)
+		}
+	})
+}
+
+func TestSelectModeSelectionAndBulkEntry(t *testing.T) {
+	t.Run("a toggles the current task selection", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsSelected("az-1") {
+			t.Fatal("expected a to select the current task")
+		}
+	})
+
+	t.Run("5 toggles the current task selection", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+		newModel := result.(Model)
+
+		if newModel.editor.IsSelected("az-1") {
+			t.Fatal("expected 5 to deselect the current task")
+		}
+	})
+
+	t.Run("space opens bulk actions when selection exists", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+		newModel := result.(Model)
+
+		if _, ok := newModel.overlayStack.Current().(*overlay.BulkActionMenu); !ok {
+			t.Fatalf("expected bulk action menu, got %T", newModel.overlayStack.Current())
+		}
+	})
+
+	t.Run("enter also opens bulk actions when selection exists", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyEnter})
+		newModel := result.(Model)
+
+		if _, ok := newModel.overlayStack.Current().(*overlay.BulkActionMenu); !ok {
+			t.Fatalf("expected bulk action menu, got %T", newModel.overlayStack.Current())
 		}
 	})
 }
@@ -1409,6 +1604,25 @@ func TestModeTransitions(t *testing.T) {
 		}
 	})
 
+	t.Run("r refreshes outside action mode", func(t *testing.T) {
+		m.editor.EnterNormal()
+		gitSync := &recordingGitSyncService{}
+		m.gitSyncService = gitSync
+
+		result, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		newModel := result.(Model)
+
+		if cmd == nil {
+			t.Fatal("expected refresh command, got nil")
+		}
+		if gitSync.fetchCalls != 1 {
+			t.Fatalf("expected one git sync refresh call, got %d", gitSync.fetchCalls)
+		}
+		if !newModel.editor.IsNormal() {
+			t.Fatalf("expected refresh to keep normal mode, got %v", newModel.editor.GetMode())
+		}
+	})
+
 	t.Run("tab still toggles board view in normal mode", func(t *testing.T) {
 		m.editor.EnterNormal()
 		m.viewMode = ViewModeBoard
@@ -1970,6 +2184,7 @@ func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	m := newTestModel()
 	m.tasks[0].HasTmuxSession = true
 	m.tasks[0].HasWorktree = true
+	m.tasks[0].GitAheadCount = 2
 	m.tasks[0].GitBehindCount = 7
 	m.tasks[0].HasUncommittedChanges = true
 	m.tasks[0].GitAdditions = 11
@@ -1988,7 +2203,7 @@ func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	if task.ID != "az-1" || task.Title != "Task 1 refreshed" || task.Status != domain.StatusBlocked {
 		t.Fatalf("refreshed task = %+v", task)
 	}
-	if !task.HasTmuxSession || !task.HasWorktree || task.GitBehindCount != 7 || !task.HasUncommittedChanges || task.GitAdditions != 11 || task.GitDeletions != 4 {
+	if !task.HasTmuxSession || !task.HasWorktree || task.GitAheadCount != 2 || task.GitBehindCount != 7 || !task.HasUncommittedChanges || task.GitAdditions != 11 || task.GitDeletions != 4 {
 		t.Fatalf("local overlay fields were not preserved: %+v", task)
 	}
 	if len(newModel.tasks) != 2 {

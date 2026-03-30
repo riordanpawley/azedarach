@@ -208,12 +208,19 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		output, err := client.GitDiffStat(context.Background(), worktree)
+		output, err := client.GitDiffStat(context.Background(), worktree, "main")
 		if err != nil {
 			t.Fatalf("GitDiffStat error: %v", err)
 		}
 		if output == "" {
 			t.Fatal("expected diff stat output")
+		}
+		var reqBody GitCommandRequest
+		if err := json.Unmarshal(transport.lastReq.Body, &reqBody); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+		if reqBody.BaseBranch != "main" {
+			t.Fatalf("base branch = %q, want main", reqBody.BaseBranch)
 		}
 		if transport.lastReq.Meta.ProjectID != wantProjectID {
 			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)

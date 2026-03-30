@@ -7,6 +7,16 @@ Commands:
   attach <issue-id>     Alias for 'az session attach <issue-id>'
   kill <issue-id>       Alias for 'az session kill <issue-id>'
   status [issue-id]     Alias for 'az session status [issue-id]'
+  notify <event> <issue-id>  Handle Claude Code hook notifications
+  hooks install <issue-id>    Install Claude Code hook configuration
+  gate <issue-id>            Run quality gates for an issue
+  dev gate <issue-id>        Dev-family gate alias
+  dev start <issue-id>       Start a dev server for an issue
+  dev stop <issue-id>        Stop a dev server for an issue
+  dev restart <issue-id>     Restart a dev server for an issue
+  dev status <issue-id>      Show dev server status for an issue
+  dev list                   List running dev servers across issues
+  opencode <init|plugin>     Manage OpenCode integration
   issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
   issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
@@ -25,6 +35,8 @@ Commands:
   issue fanout ready --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
+  config set spec.enabled <true|false> [--project-dir <dir>]  Update project config
+  sync [--all] [<directory>] [--project-dir <dir>]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
   export               Export a snapshot (use --format json [--out <path>])
   daemon restart       Force-restart the daemon and verify re-attach
@@ -61,6 +73,21 @@ Examples:
   az mail send --parent az-123 --type dependency-ready --body "contract merged"
   az mail list --parent az-123 --since 40 --json
   az mail watch --parent az-123 --since 41 --jsonl
+  az config set spec.enabled false
+  az config set spec.enabled true --project-dir .
+  az sync
+  az sync --all
+  az notify idle_prompt az-123
+  az hooks install az-123
+  az gate az-123
+  az dev gate az-123
+  az dev start az-123
+  az dev stop az-123
+  az dev restart az-123
+  az dev status az-123
+  az dev list
+  az opencode init
+  az opencode plugin install
   az prime
   az export --format json
   az export --format json --out snapshot.json

@@ -57,7 +57,7 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 	view := help.View()
 
 	// Check that view contains expected category names
-	expectedCategories := []string{"Navigation", "Actions", "Modes", "Selection", "Other"}
+	expectedCategories := []string{"Navigation", "Workspace", "Modes", "Selection", "Task Actions", "Other"}
 	for _, category := range expectedCategories {
 		if !strings.Contains(view, category) {
 			t.Errorf("view should contain category '%s'", category)
@@ -66,14 +66,20 @@ func TestHelpOverlay_View_ContainsKeyBindings(t *testing.T) {
 
 	// Check that view contains some key bindings from different categories
 	expectedBindings := []string{
-		"h/l",   // Navigation
-		"j/k",   // Navigation
-		"Space", // Actions
-		"Enter", // Actions
-		"/",     // Modes
-		"?",     // Modes
-		"Tab",   // Other
-		"Quit",  // Other
+		"h/l",                      // Navigation
+		"j/k",                      // Navigation
+		"Open task workspace",      // Workspace
+		"Drill into epic children", // Workspace
+		"a/5",                      // Selection
+		"Space/Enter",              // Selection
+		"Toggle selection",         // Selection
+		"Refresh board data",       // Task actions
+		"Open attachment manager",  // Task actions
+		"Open merge-into selector", // Task actions
+		"Open dev server menu",     // Task actions
+		"Cleanup worktree",         // Task actions
+		"Tab",                      // Other
+		"Quit",                     // Other
 	}
 
 	for _, binding := range expectedBindings {
@@ -235,6 +241,25 @@ func TestHelpOverlay_GetCategories(t *testing.T) {
 				t.Errorf("binding %d in category '%s' has empty description", j, cat.Name)
 			}
 		}
+	}
+}
+
+func TestHelpOverlay_ParityDriftGuards(t *testing.T) {
+	help := NewHelpOverlay()
+	help.viewHeight = 100
+	view := help.View()
+
+	if strings.Contains(view, "Ctrl+L") {
+		t.Fatalf("help drift: Ctrl+L refresh should not be advertised, got %q", view)
+	}
+	if !strings.Contains(view, "w/W") {
+		t.Fatalf("help drift: canonical cleanup keys w/W missing, got %q", view)
+	}
+	if !strings.Contains(view, "r (board)") {
+		t.Fatalf("help drift: board refresh key r missing, got %q", view)
+	}
+	if !strings.Contains(view, "r (workspace)") {
+		t.Fatalf("help drift: workspace dev-server key r missing, got %q", view)
 	}
 }
 

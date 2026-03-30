@@ -56,6 +56,9 @@ type branchBehindResultBody struct {
 	BaseBranch    string `json:"base_branch"`
 	Remote        string `json:"remote"`
 	RevRange      string `json:"rev_range"`
+	AheadRevRange string `json:"ahead_rev_range"`
+	CommitsAhead  int    `json:"commits_ahead"`
+	Ahead         bool   `json:"ahead"`
 	CommitsBehind int    `json:"commits_behind"`
 	Behind        bool   `json:"behind"`
 }
@@ -201,12 +204,21 @@ func (h *PRHandler) handleBranchBehind(ctx context.Context, resp protocol.Respon
 		resp.Error = mapPRGitError(err)
 		return resp
 	}
+	aheadRevRange := fmt.Sprintf("%s/%s..HEAD", cmd.Remote, cmd.BaseBranch)
+	commitsAhead, err := h.gitClient.RevListCount(ctx, cmd.Worktree, aheadRevRange)
+	if err != nil {
+		resp.Error = mapPRGitError(err)
+		return resp
+	}
 
 	body, err := json.Marshal(branchBehindResultBody{
 		Worktree:      cmd.Worktree,
 		BaseBranch:    cmd.BaseBranch,
 		Remote:        cmd.Remote,
 		RevRange:      revRange,
+		AheadRevRange: aheadRevRange,
+		CommitsAhead:  commitsAhead,
+		Ahead:         commitsAhead > 0,
 		CommitsBehind: commitsBehind,
 		Behind:        commitsBehind > 0,
 	})

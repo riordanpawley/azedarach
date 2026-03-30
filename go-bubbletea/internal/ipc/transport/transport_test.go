@@ -2,8 +2,11 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,10 +44,11 @@ func TestClientServerHandshakeAndCommand(t *testing.T) {
 			return ch, func() {}, nil
 		},
 	})
+	errCh := make(chan error, 1)
 	go func() {
-		_ = srv.Serve(ctx)
+		errCh <- srv.Serve(ctx)
 	}()
-	waitForSocket(t, socket)
+	waitForSocket(t, socket, errCh)
 
 	client := NewClient(socket)
 	ack, err := client.Handshake(ctx, protocol.Hello{
@@ -102,8 +106,9 @@ func TestSubscribeStreamsEvents(t *testing.T) {
 			return ch, func() {}, nil
 		},
 	})
-	go func() { _ = srv.Serve(ctx) }()
-	waitForSocket(t, socket)
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
 
 	client := NewClient(socket)
 	ch, err := client.Subscribe(ctx, "proj", 1)
@@ -123,16 +128,38 @@ func TestSubscribeStreamsEvents(t *testing.T) {
 	}
 }
 
-func waitForSocket(t *testing.T, socket string) {
+func waitForSocket(t *testing.T, socket string, errCh <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			if isSocketPermissionError(err) {
+				t.Skipf("sandbox does not permit socket bind/listen: %v", err)
+			}
+			if err != nil {
+				t.Fatalf("server exited before socket became ready: %v", err)
+			}
+			t.Fatalf("server exited before socket became ready")
+		default:
+		}
 		if _, err := os.Stat(socket); err == nil {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("socket did not become ready: %s", socket)
+}
+
+func isSocketPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "operation not permitted") || strings.Contains(text, "permission denied")
 }
 
 func tempSocketPath(t *testing.T) string {

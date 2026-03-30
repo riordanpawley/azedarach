@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
 // CleanupCategory represents a type of cleanup operation
@@ -328,16 +329,18 @@ func (c *BulkCleanupOverlay) renderCategoryList() string {
 	b.WriteString("\n\n")
 
 	// Help text
-	hints := []string{
-		c.styles.MenuKey.Render("j/k") + " " + c.styles.Footer.Render("Navigate"),
-		c.styles.MenuKey.Render("Space") + " " + c.styles.Footer.Render("Toggle"),
-		c.styles.MenuKey.Render("a") + " " + c.styles.Footer.Render("Select all"),
-		c.styles.MenuKey.Render("A") + " " + c.styles.Footer.Render("Deselect all"),
-		c.styles.MenuKey.Render("Enter") + " " + c.styles.Footer.Render("Execute"),
-		c.styles.MenuKey.Render("Esc") + " " + c.styles.Footer.Render("Cancel"),
-	}
-
-	b.WriteString(c.styles.Footer.Render(strings.Join(hints, " • ")))
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "j/k", Description: "Navigate"},
+		{Key: "Space", Description: "Toggle"},
+		{Key: "a", Description: "Select all"},
+		{Key: "A", Description: "Deselect all"},
+		{Key: "Enter", Description: "Execute"},
+		{Key: "Esc", Description: "Cancel"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         c.styles.MenuKey,
+		DescriptionStyle: c.styles.Footer,
+		FooterStyle:      c.styles.Footer,
+	}))
 
 	return b.String()
 }
@@ -388,8 +391,15 @@ func (c *BulkCleanupOverlay) renderConfirmDialog() string {
 	b.WriteString("\n\n")
 
 	// Footer hint
-	footer := c.styles.Footer.Render("← → / Tab: Switch • Enter: Confirm • Esc: Cancel")
-	b.WriteString(footer)
+	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		{Key: "←/→/Tab", Description: "Switch"},
+		{Key: "Enter", Description: "Confirm"},
+		{Key: "Esc", Description: "Cancel"},
+	}, 0, keybinds.Theme{
+		KeyStyle:         c.styles.MenuKey,
+		DescriptionStyle: c.styles.Footer,
+		FooterStyle:      c.styles.Footer,
+	}))
 
 	return b.String()
 }

@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -101,8 +102,13 @@ func (e *EpicDrillDown) View() string {
 
 	// Footer
 	b.WriteString("\n")
-	footer := e.styles.Footer.Render("Enter: select • j/k: navigate • q/Esc: close")
-	b.WriteString(footer)
+	b.WriteString(e.styles.Footer.Render(
+		keybinds.RenderPlain([]keybinds.Binding{
+			{Key: "Enter", Description: "select"},
+			{Key: "j/k", Description: "navigate"},
+			{Key: "q/Esc", Description: "close"},
+		}, " • "),
+	))
 
 	return b.String()
 }

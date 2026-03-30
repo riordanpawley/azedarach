@@ -2,8 +2,11 @@ package network
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
-	"net/http/httptest"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,16 +22,16 @@ func TestNewStatusChecker(t *testing.T) {
 
 func TestCheck_Success(t *testing.T) {
 	// Create test server that returns 200 OK
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	baseURL, shutdown := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodHead, r.Method)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
+	defer shutdown()
 
 	checker := NewStatusChecker()
 	// Override the check to use test server
 	ctx := context.Background()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, server.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, baseURL, nil)
 	require.NoError(t, err)
 
 	resp, err := checker.client.Do(req)
@@ -43,14 +46,14 @@ func TestCheck_Success(t *testing.T) {
 
 func TestCheck_Failure(t *testing.T) {
 	// Create test server that returns 500 error
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	baseURL, shutdown := newTCP4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer server.Close()
+	defer shutdown()
 
 	checker := NewStatusChecker()
 	ctx := context.Background()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, server.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, baseURL, nil)
 	require.NoError(t, err)
 
 	resp, err := checker.client.Do(req)
@@ -158,4 +161,24 @@ func TestCheckCmd(t *testing.T) {
 	// The actual value depends on network availability
 	// Just verify the message type is correct
 	_ = statusMsg.Online
+}
+
+func newTCP4TestServer(t *testing.T, handler http.Handler) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("sandbox does not permit local tcp listener: %v", err)
+		}
+		t.Fatalf("listen tcp4: %v", err)
+	}
+	server := &http.Server{Handler: handler}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	baseURL := fmt.Sprintf("http://%s", listener.Addr().String())
+	return baseURL, func() {
+		_ = server.Close()
+	}
 }

@@ -1,12 +1,14 @@
 package statusbar
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/eventticker"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -14,6 +16,7 @@ import (
 type StatusBar struct {
 	mode             types.Mode
 	width            int
+	hintBindings     []keybinds.Binding
 	currentProject   string
 	selectionSummary string
 	loadingIndicator string
@@ -48,6 +51,10 @@ func (sb *StatusBar) SetCurrentProject(project string) {
 // SetEventTicker sets the ring buffer that provides the latest event message.
 func (sb *StatusBar) SetEventTicker(ticker *eventticker.Ring) {
 	sb.eventTicker = ticker
+}
+
+func (sb *StatusBar) SetHintBindings(bindings []keybinds.Binding) {
+	sb.hintBindings = append([]keybinds.Binding(nil), bindings...)
 }
 
 // Render renders the status bar as a string
@@ -124,7 +131,7 @@ func (sb StatusBar) Render() string {
 	if sb.selectionSummary != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: sb.selectionSummary})
 	}
-	if hints := GetHints(sb.mode); hints != "" {
+	if hints := sb.inlineHints(); hints != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusHint, text: hints})
 	}
 
@@ -161,4 +168,51 @@ func renderWithin(style lipgloss.Style, text string, width int) (string, bool) {
 	}
 
 	return ansi.Truncate(rendered, width, "…"), true
+}
+
+func (sb StatusBar) inlineHints() string {
+	bindings := sb.hintBindings
+	if len(bindings) == 0 {
+		bindings = GetHintBindings(sb.mode)
+	}
+	if len(bindings) == 0 {
+		return ""
+	}
+	bindings = truncateHintBindings(sb.mode, bindings)
+	inline := make([]keybinds.Binding, 0, len(bindings))
+	for _, binding := range bindings {
+		key := strings.TrimSpace(binding.Key)
+		desc := strings.TrimSpace(binding.Description)
+		if key == "" || desc == "" {
+			continue
+		}
+		inline = append(inline, keybinds.Binding{
+			Key:         key + ":",
+			Description: desc,
+		})
+	}
+	if len(inline) == 0 {
+		return ""
+	}
+	return keybinds.RenderInline(inline, "  ", keybinds.Theme{
+		KeyStyle:         sb.styles.StatusInfo,
+		DescriptionStyle: sb.styles.StatusHint,
+		FooterStyle:      sb.styles.StatusHint,
+	})
+}
+
+func truncateHintBindings(mode types.Mode, bindings []keybinds.Binding) []keybinds.Binding {
+	maxHints := len(bindings)
+	if mode == types.ModeAction {
+		maxHints = 10
+	}
+	if maxHints >= len(bindings) {
+		return bindings
+	}
+	truncated := append([]keybinds.Binding{}, bindings[:maxHints]...)
+	truncated = append(truncated, keybinds.Binding{
+		Key:         "…",
+		Description: fmt.Sprintf("+%d more", len(bindings)-maxHints),
+	})
+	return truncated
 }

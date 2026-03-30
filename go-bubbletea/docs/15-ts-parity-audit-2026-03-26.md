@@ -1,0 +1,191 @@
+# TS vs Go Parity Audit (2026-03-26)
+
+## Scope
+
+Issue: `aya` ("compare every feature in ts impl to go impl")
+
+This audit compares:
+- TypeScript implementation (`ts-opentui`) behavior documented in:
+  - `ts-opentui/docs/keybindings.md`
+  - `ts-opentui/docs/README.md`
+  - `az --help` (PATH `az`, the TS-linked CLI)
+- Go implementation (`go-bubbletea`) behavior evidenced in:
+  - `go-bubbletea/internal/app/model.go`
+  - `go-bubbletea/internal/ui/overlay/*.go` (action/help/settings/task workspace)
+  - `go run ./cmd/az --help`
+
+## Executive Summary
+
+- CLI parity is **not close**: TS CLI exposes broad issue/spec/project/dev/hook workflows; Go CLI currently exposes a narrower command surface.
+- TUI board navigation parity is **partial**: core movement/modes exist in Go, but many TS action workflows are missing or changed.
+- Task workspace model differs materially:
+  - TS uses `Space` + action key from board.
+  - Go uses `Space` to open a Task Workspace overlay with detail/actions panes.
+- Keybinding parity is **mixed**:
+  - Core navigation keys match (`h/j/k/l`, arrows, `g` prefixed goto, `v`, `?`, `,`, `f`, `/`, `Tab`).
+  - Go now treats `r` as the authoritative refresh key in board modes, while `Ctrl+L` is just a hidden redraw shortcut and should not be documented as refresh.
+  - Go select mode now matches the intended select/bulk split more closely: `a/5` toggle selection, `Space/Enter` open bulk actions, `A` selects the column, `%` selects all visible.
+  - Several documented TS actions have no Go equivalent yet (`Space+!`, `Space+H`, `Space+M`, `Space+O`, `Space+T`, etc.).
+  - Go has some different semantics (`w/W` cleanup in action menu vs TS `d/D` family).
+
+## Detailed Differences
+
+## 1) CLI Feature Surface
+
+TS `az --help` includes broad command groups beyond session + issues:
+- `config`, `prime`, `sync`, `gate`, `dev`, `notify`, `hooks`, `project`, `opencode`, extensive `spec` workflow.
+
+Go `go run ./cmd/az --help` currently includes:
+- TUI entrypoint, `session`, `issue` CRUD/deps/bulk, `prime`, `export`, `daemon restart`, `help`.
+
+Net gap:
+- Missing Go equivalents for major TS command families (especially `spec`, `hooks`, `opencode`, broader project/dev operations).
+
+## 2) Board-Level Modes and Navigation
+
+Present in both (evidence: TS keybindings doc + Go `handleNormalMode`/`handleGotoMode`):
+- `h/j/k/l` + arrow navigation
+- `g` mode with `gg/ge/gh/gl`
+- `gw` jump labels
+- `gp` project selector
+- `gs` spec workspace
+- `/` search, `f` filter, `,` sort, `v` select, `?` help
+- `Tab` board/compact toggle
+
+Differences:
+- TS docs advertise `Ctrl-l` redraw; Go now keeps `r` as the visible refresh key and does not advertise `Ctrl+L` as refresh.
+- TS README describes `Enter` as detail-or-epic-drill; Go `Enter` in normal mode is epic drill-only, with non-epic feedback toast directing to `Space` task workspace.
+
+## 3) Task Action Model
+
+TS (from keybindings doc):
+- Action mode is a board prefix (`Space`, then action key).
+
+Go (from `handleNormalMode` + `TaskWorkspaceOverlay` + `ActionMenu`):
+- `Space` opens a Task Workspace overlay.
+- Actions are executed from overlay (shortcut keys still work while overlay is open).
+
+Meaning:
+- User interaction flow is intentionally different even when actions have similar names.
+
+## 4) Session Actions
+
+TS documented set includes `Space+s/S/!/a/p/r/Ctrl+r/R/x`.
+
+Go current state (from `handleSelection`):
+- Implemented/available: `s`, `S`, `a`, `x`, `r`
+- Placeholder/TODO: `p` (pause), `R` (resume)
+- Missing from TS set: yolo start (`!`) path
+
+## 5) Git/PR Actions
+
+TS documented set includes `u,f,P,O,m,M,b,d,T,D` (and specific semantics).
+
+Go current state (from `ActionMenu` + `handleSelection`):
+- Implemented/available: `u`, `m`, `P`, `f`, `b`, `w` (cleanup worktree), `W` (delete+cleanup)
+- Not matched to TS key/behavior set:
+  - `O` (open PR) not present
+  - `M` (abort merge) not present
+  - `T` tombstone not present
+  - TS cleanup keys `d`/`D` map differently in Go (`d` is delete task in task actions; cleanup is `w/W`)
+
+## 6) Select/Bulk Operations
+
+TS docs describe select mode with `a/5` toggle, `A` column select-all, `%` all, then `Space` for bulk action flow.
+
+Go select mode (`handleSelectMode`) supports:
+- `a` or `5` toggle current
+- `A` select current column
+- `%` select all visible
+- `*` invert selection (extra vs TS docs)
+- `x` clear selection
+- `Space` / `Enter` open bulk action menu
+
+Bulk action menu in Go includes:
+- move left/right
+- set explicit status open/in_progress/blocked/done
+- delete selected
+- clear selection
+
+Net:
+- Core bulk workflows exist; initiation and some key choices differ from TS documentation.
+
+## 7) Settings Surface
+
+TS settings (docs) include many runtime config toggles (CLI tool, permissions, git, PR, notifications, network, linear sync, pattern matching).
+
+Go settings overlay (`settings.go`) currently exposes mainly:
+- show dependency phases
+- auto-refresh
+- compact card view
+- theme choice
+- Git push/fetch toggles
+- PR defaults: draft-by-default, auto-link, notify-after-create, create-without-merge
+- network autodetect
+- actions: open config in editor, manage projects
+
+Net gap:
+- Go now exposes the TS-aligned Git push/fetch controls, PR defaults (`draft-by-default`, `auto-link`, `notify-after-create`, `create-without-merge`), and network autodetect. Remaining gaps are the broader TS settings surface beyond this lane.
+
+## 8) Help Overlay Accuracy / Drift
+
+Go help/status hints now align with runtime behavior for:
+- Select-mode split: `a/5` toggle and `Space/Enter` bulk actions.
+- Refresh: `r` is canonical; `Ctrl+L` is not advertised as refresh.
+- Cleanup: `w/W` is explicitly documented as the canonical cleanup path.
+
+## Keybinding Delta (High-Signal)
+
+## Matches
+- Movement: `h/j/k/l`, arrows
+- Modes: `g`, `v`, `/`, `f`, `,`, `?`
+- Goto: `gg/ge/gh/gl/gw`
+- View toggle: `Tab`
+
+## TS-documented keys now covered in Go workspace flow
+- `Space+!` (start yolo)
+- `Space+H` (open Helix)
+- `Space+M` (abort merge)
+- `Space+O` (open PR)
+- `Space+T` (tombstone)
+- Attachment management keypaths are exposed in workspace via `Space+i` with navigate/open/remove in attachment overlays.
+
+## Different semantics / remaps in Go
+- `Space` opens task workspace overlay instead of pure prefix mode.
+- Cleanup uses `w/W` in Go action menu rather than TS `d/D` patterns.
+- Bulk actions are entered with `Enter` in select mode (Go) vs TS-documented `Space` flow.
+
+## Recommended Follow-Up Work
+
+1. Decide parity target for interaction model:
+- Preserve Go Task Workspace UX and document it as intentional divergence, or
+- Align Go with TS prefix action model for strict key-level parity.
+
+2. Close high-impact keybind gaps first:
+- Completed in Go workspace flow (`!`, `H`, `M`, `O`, `T`).
+
+3. Resolve Go internal help drift:
+- Completed for select/help/status hints (`A`/`x`, `Space/Enter`, `r` refresh).
+
+4. Expand Go settings overlay toward TS configuration coverage.
+- Expanded for session/git/pr/network tranche.
+
+5. If strict command parity is required, add missing Go CLI command groups or document a phased CLI parity contract.
+- Added parity families for hooks/notify, dev/gate, and opencode lanes.
+
+## Evidence Pointers
+
+- TS keybindings and feature docs:
+  - `ts-opentui/docs/keybindings.md`
+  - `ts-opentui/docs/README.md`
+- TS CLI surface:
+  - `az --help`
+- Go board/action handlers:
+  - `go-bubbletea/internal/app/model.go` (normal/goto/select/action + selection handling)
+- Go overlays:
+  - `go-bubbletea/internal/ui/overlay/action.go`
+  - `go-bubbletea/internal/ui/overlay/task_workspace.go`
+  - `go-bubbletea/internal/ui/overlay/settings.go`
+  - `go-bubbletea/internal/ui/overlay/help.go`
+- Go CLI surface:
+  - `go run ./cmd/az --help`

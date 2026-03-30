@@ -3,10 +3,13 @@ package daemonclient
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -37,7 +40,8 @@ func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 		},
 	})
 
-	runtimeDir, err := os.MkdirTemp(os.TempDir(), "azd-daemonclient-")
+	// Use a workspace-local temp dir so unix socket bind works in sandboxed test environments.
+	runtimeDir, err := os.MkdirTemp(".", "azd-daemonclient-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -152,6 +156,17 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		select {
+		case err := <-errCh:
+			if isSocketPermissionError(err) {
+				t.Skipf("sandbox does not permit unix socket bind: %v", err)
+			}
+			if err != nil {
+				t.Fatalf("daemon failed to start: %v", err)
+			}
+			t.Fatalf("daemon exited before socket became ready")
+		default:
+		}
 		if _, err := os.Stat(socketPath); err == nil {
 			break
 		}
@@ -178,4 +193,15 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}
+}
+
+func isSocketPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "operation not permitted") || strings.Contains(text, "permission denied")
 }

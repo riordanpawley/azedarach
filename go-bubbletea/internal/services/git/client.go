@@ -47,7 +47,7 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error) {
 	c.logger.Debug("getting git status", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "status", "--porcelain")
+	output, err := c.runInWorktree(ctx, worktree, "status", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git status: %w", err)
 	}
@@ -69,7 +69,7 @@ func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error
 func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 	c.logger.Info("fetching from remote", "worktree", worktree, "remote", remote)
 
-	_, err := c.runner.Run(ctx, "fetch", remote)
+	_, err := c.runInWorktree(ctx, worktree, "fetch", remote)
 	if err != nil {
 		return fmt.Errorf("failed to fetch from remote: %w", err)
 	}
@@ -137,15 +137,61 @@ func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
 }
 
 // DiffStat returns the diff stat output (summary of changes).
-func (c *Client) DiffStat(ctx context.Context, worktree string) (string, error) {
+func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "diff", "--stat")
-	if err != nil {
-		return "", fmt.Errorf("failed to get diff stat: %w", err)
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch != "" {
+		candidates := []string{baseBranch}
+		if !strings.Contains(baseBranch, "/") {
+			candidates = append(candidates, "origin/"+baseBranch)
+		}
+
+		var lastErr error
+		for _, candidate := range candidates {
+			mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			mergeBase := strings.TrimSpace(mergeBaseOutput)
+			if mergeBase == "" {
+				mergeBase = candidate
+			}
+			output, err := c.runInWorktree(ctx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return strings.TrimSpace(output), nil
+		}
+
+		c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
+			"baseBranch", baseBranch,
+			"error", lastErr,
+		)
 	}
 
-	return output, nil
+	unstagedOutput, err := c.runInWorktree(ctx, worktree, "diff", "--shortstat")
+	if err != nil {
+		return "", fmt.Errorf("failed to get unstaged diff stat: %w", err)
+	}
+
+	stagedOutput, err := c.runInWorktree(ctx, worktree, "diff", "--cached", "--shortstat")
+	if err != nil {
+		return "", fmt.Errorf("failed to get staged diff stat: %w", err)
+	}
+
+	unstagedOutput = strings.TrimSpace(unstagedOutput)
+	stagedOutput = strings.TrimSpace(stagedOutput)
+	switch {
+	case unstagedOutput != "" && stagedOutput != "":
+		return unstagedOutput + "\n" + stagedOutput, nil
+	case unstagedOutput != "":
+		return unstagedOutput, nil
+	default:
+		return stagedOutput, nil
+	}
 }
 
 // Push pushes the specified branch to the remote repository.
@@ -194,7 +240,7 @@ func (c *Client) Checkout(ctx context.Context, worktree, branch string) error {
 func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (int, error) {
 	c.logger.Debug("getting rev-list count", "worktree", worktree, "range", revRange)
 
-	output, err := c.runner.Run(ctx, "rev-list", "--count", revRange)
+	output, err := c.runInWorktree(ctx, worktree, "rev-list", "--count", revRange)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get rev-list count: %w", err)
 	}
@@ -206,6 +252,17 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 	}
 
 	return count, nil
+}
+
+func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...string) (string, error) {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return c.runner.Run(ctx, args...)
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-C", worktree)
+	prefixed = append(prefixed, args...)
+	return c.runner.Run(ctx, prefixed...)
 }
 
 // Pull pulls updates from the remote repository.

@@ -16,6 +16,7 @@ const (
 	CommandTaskCreate           = "task.create"
 	CommandTaskUpdateStatus     = "task.update_status"
 	CommandTaskUpdate           = "task.update_details"
+	CommandTaskAppendNotes      = "task.append_notes"
 	CommandTaskDelete           = "task.delete"
 	CommandTaskArchive          = "task.archive"
 	CommandTaskDependencyAdd    = "task.dependency.add"
@@ -52,6 +53,12 @@ type TaskUpdateParams struct {
 type TaskStatusRequest struct {
 	TaskID string        `json:"task_id"`
 	Status domain.Status `json:"status"`
+}
+
+// TaskAppendNotesRequest appends a single line to task notes.
+type TaskAppendNotesRequest struct {
+	TaskID string `json:"task_id"`
+	Line   string `json:"line"`
 }
 
 // TaskIDRequest contains the payload used for delete/archive task operations.
@@ -231,6 +238,14 @@ func (c *Client) UpdateTaskDetails(ctx context.Context, taskID string, params Ta
 		TaskUpdateParams: params,
 	}
 	return c.commandJSON(ctx, CommandTaskUpdate, body, nil)
+}
+
+// AppendTaskNotes appends a note line to task notes through the daemon boundary.
+func (c *Client) AppendTaskNotes(ctx context.Context, taskID, line string) error {
+	return c.commandJSON(ctx, CommandTaskAppendNotes, TaskAppendNotesRequest{
+		TaskID: taskID,
+		Line:   line,
+	}, nil)
 }
 
 // DeleteTask deletes a task through the daemon client boundary.

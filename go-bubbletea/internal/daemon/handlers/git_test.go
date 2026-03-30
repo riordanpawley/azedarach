@@ -15,7 +15,7 @@ type fakeGitService struct {
 	mergeFn      func(context.Context, string, string) (*git.MergeResult, error)
 	checkoutFn   func(context.Context, string, string) error
 	abortMergeFn func(context.Context, string) error
-	diffStatFn   func(context.Context, string) (string, error)
+	diffStatFn   func(context.Context, string, string) (string, error)
 	statusFn     func(context.Context, string) (*git.GitStatus, error)
 }
 
@@ -56,9 +56,9 @@ func (f *fakeGitService) AbortMerge(ctx context.Context, worktree string) error 
 	return nil
 }
 
-func (f *fakeGitService) DiffStat(ctx context.Context, worktree string) (string, error) {
+func (f *fakeGitService) DiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
 	if f.diffStatFn != nil {
-		return f.diffStatFn(ctx, worktree)
+		return f.diffStatFn(ctx, worktree, baseBranch)
 	}
 	return "", nil
 }
@@ -116,9 +116,12 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			}
 			return nil
 		},
-		diffStatFn: func(_ context.Context, worktree string) (string, error) {
+		diffStatFn: func(_ context.Context, worktree, baseBranch string) (string, error) {
 			if worktree != "/tmp/az-1" {
 				t.Fatalf("diff stat args = %q", worktree)
+			}
+			if baseBranch != "" {
+				t.Fatalf("diff stat base branch = %q, want empty", baseBranch)
 			}
 			return " README.md | 2 ++\n 1 file changed, 2 insertions(+)", nil
 		},
@@ -242,7 +245,7 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 		abortMergeFn: func(context.Context, string) error {
 			return context.DeadlineExceeded
 		},
-		diffStatFn: func(context.Context, string) (string, error) {
+		diffStatFn: func(context.Context, string, string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
 		statusFn: func(context.Context, string) (*git.GitStatus, error) {

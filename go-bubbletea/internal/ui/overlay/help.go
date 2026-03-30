@@ -5,19 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
-
-// KeyBinding represents a single keybinding entry
-type KeyBinding struct {
-	Key         string
-	Description string
-}
-
-// KeyCategory represents a category of keybindings
-type KeyCategory struct {
-	Name     string
-	Bindings []KeyBinding
-}
 
 // HelpOverlay displays keybinding reference
 type HelpOverlay struct {
@@ -79,34 +68,18 @@ func (h *HelpOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the help overlay
 func (h *HelpOverlay) View() string {
 	categories := h.getCategories()
-
-	// Build full content
-	var content strings.Builder
-	for i, cat := range categories {
-		if i > 0 {
-			content.WriteString("\n")
-		}
-
-		// Category header
-		categoryStyle := lipgloss.NewStyle().
+	keyWidth := keybinds.KeyColumnWidth(categories, 8)
+	content := keybinds.RenderCategories(categories, keyWidth, keybinds.Theme{
+		HeaderStyle: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#89b4fa")).
-			Bold(true)
-		content.WriteString(categoryStyle.Render(cat.Name + ":"))
-		content.WriteString("\n")
-
-		// Bindings in this category
-		for _, binding := range cat.Bindings {
-			keyStyle := h.styles.MenuKey
-			descStyle := h.styles.MenuItem
-
-			line := "  " + keyStyle.Render(binding.Key) + "  " + descStyle.Render(binding.Description)
-			content.WriteString(line)
-			content.WriteString("\n")
-		}
-	}
+			Bold(true),
+		SeparatorStyle:   h.styles.Separator,
+		KeyStyle:         h.styles.MenuKey,
+		DescriptionStyle: h.styles.MenuItem,
+	})
 
 	// Calculate scroll limits
-	lines := strings.Split(content.String(), "\n")
+	lines := strings.Split(content, "\n")
 	totalLines := len(lines)
 	h.maxScroll = max(0, totalLines-h.viewHeight)
 
@@ -143,57 +116,12 @@ func (h *HelpOverlay) Title() string {
 // Size returns the overlay dimensions
 func (h *HelpOverlay) Size() (width, height int) {
 	h.viewHeight = 20 // Content viewing area
-	return 50, 24     // Total overlay size including padding and borders
+	return 72, 24     // Total overlay size including padding and borders
 }
 
 // getCategories returns all keybinding categories
-func (h *HelpOverlay) getCategories() []KeyCategory {
-	return []KeyCategory{
-		{
-			Name: "Navigation",
-			Bindings: []KeyBinding{
-				{Key: "h/l", Description: "Move between columns"},
-				{Key: "j/k", Description: "Move up/down in column"},
-				{Key: "gg", Description: "Jump to top of column"},
-				{Key: "ge", Description: "Jump to bottom of column"},
-				{Key: "gh", Description: "Jump to first column"},
-				{Key: "gl", Description: "Jump to last column"},
-			},
-		},
-		{
-			Name: "Actions",
-			Bindings: []KeyBinding{
-				{Key: "Space", Description: "Open task panel (details+actions)"},
-				{Key: "Enter", Description: "Drill into children"},
-			},
-		},
-		{
-			Name: "Modes",
-			Bindings: []KeyBinding{
-				{Key: "/", Description: "Search"},
-				{Key: "f", Description: "Filter menu"},
-				{Key: ",", Description: "Sort menu"},
-				{Key: "v", Description: "Select mode"},
-				{Key: "?", Description: "Help (this screen)"},
-			},
-		},
-		{
-			Name: "Selection",
-			Bindings: []KeyBinding{
-				{Key: "v", Description: "Toggle selection on current task"},
-				{Key: "%", Description: "Select all"},
-				{Key: "A", Description: "Clear selection"},
-			},
-		},
-		{
-			Name: "Other",
-			Bindings: []KeyBinding{
-				{Key: "Tab", Description: "Toggle compact/kanban view"},
-				{Key: "q", Description: "Quit"},
-				{Key: "Ctrl+L", Description: "Refresh screen"},
-			},
-		},
-	}
+func (h *HelpOverlay) getCategories() []keybinds.Category {
+	return keybinds.HelpCategories()
 }
 
 // min returns the minimum of two integers

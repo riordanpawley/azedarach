@@ -301,6 +301,11 @@ func (s *WorktreeSessionService) buildClaudeCommand(yolo bool) string {
 
 	cmd := cliTool
 
+	// Honor the persisted permissions mode when launching Claude.
+	if s.config != nil && s.config.Session.DangerouslySkipPermissions {
+		cmd += " --dangerously-skip-permissions"
+	}
+
 	// Add yolo flag if enabled
 	if yolo {
 		cmd += " --yolo"

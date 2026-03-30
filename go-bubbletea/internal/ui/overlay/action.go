@@ -53,6 +53,7 @@ func (m *ActionMenu) buildActions() []Action {
 	if !hasTmuxSession {
 		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
 		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
+		actions = append(actions, Action{Key: "!", Label: "Start session (yolo)", Enabled: true})
 	} else {
 		// Attach action when a tmux session is known to exist.
 		actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
@@ -91,11 +92,19 @@ func (m *ActionMenu) buildActions() []Action {
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
 		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
+		Action{Key: "b", Label: "Merge into...", Enabled: true},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
+		Action{Key: "O", Label: "Open PR", Enabled: hasWorktree},
+		Action{Key: "M", Label: "Abort merge", Enabled: hasWorktree},
+		Action{Key: "H", Label: "Open Helix", Enabled: hasWorktree},
+		Action{Key: "i", Label: "Attachments", Enabled: true},
+		Action{Key: "r", Label: "Dev servers", Enabled: true},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
 		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasWorktree},
 		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasWorktree},
 	)
+
+	actions = append(actions, Action{Key: "i", Label: "Image attachments", Enabled: true})
 
 	// Task actions separator
 	actions = append(actions, Action{Key: "", Label: "───────────────────", Enabled: false})
@@ -106,6 +115,7 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
 		Action{Key: "c", Label: "Create child task", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
+		Action{Key: "T", Label: "Tombstone task", Enabled: true},
 		Action{Key: "d", Label: "Delete task", Enabled: true},
 	)
 

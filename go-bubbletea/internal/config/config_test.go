@@ -27,8 +27,11 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "worktree", cfg.Git.WorkflowMode)
 	assert.True(t, cfg.Git.ShowLineChanges)
 	assert.Equal(t, "merge", cfg.Git.DefaultMergeStrategy)
+	assert.True(t, cfg.Git.PushEnabled)
+	assert.True(t, cfg.Git.FetchEnabled)
 
-	assert.Equal(t, "zsh", cfg.Session.Shell)
+	assert.Equal(t, DefaultSessionShell(), cfg.Session.Shell)
+	assert.False(t, cfg.Session.DangerouslySkipPermissions)
 	assert.Equal(t, 30000, cfg.Session.TimeoutMs)
 	assert.NotEmpty(t, cfg.Session.LogDir)
 	assert.NotNil(t, cfg.Session.InitCommands)
@@ -36,6 +39,16 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, 3000, cfg.DevServer.BasePort)
 	assert.Equal(t, 3100, cfg.DevServer.MaxPort)
 	assert.NotNil(t, cfg.DevServer.Environments)
+
+	assert.True(t, cfg.Network.AutoDetect)
+	assert.Equal(t, 60, cfg.Network.CheckInterval)
+	assert.Equal(t, 300, cfg.Network.OfflineTimeout)
+	assert.Equal(t, 3, cfg.Network.RetryAttempts)
+
+	assert.True(t, cfg.PR.DraftByDefault)
+	assert.True(t, cfg.PR.AutoLink)
+	assert.True(t, cfg.PR.NotifyAfterCreate)
+	assert.False(t, cfg.PR.CreateWithoutMerge)
 
 	assert.Equal(t, "../", cfg.Worktree.BasePath)
 	assert.Equal(t, "{project}-{issueID}", cfg.Worktree.NameFormat)
@@ -66,9 +79,22 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
   "cliTool": "opencode",
   "git": {
     "baseBranch": "develop",
-    "workflowMode": "branch"
+    "workflowMode": "branch",
+    "pushEnabled": false,
+    "fetchEnabled": false
+  },
+  "pr": {
+    "draftByDefault": false,
+    "autoLink": false,
+    "notifyAfterCreate": false,
+    "createWithoutMerge": true
+  },
+  "network": {
+    "autoDetect": false,
+    "checkInterval": 120
   },
   "session": {
+    "dangerouslySkipPermissions": true,
     "shell": "bash",
     "timeoutMs": 60000
   },
@@ -91,12 +117,21 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "opencode", cfg.CLITool)
+	assert.True(t, cfg.Session.DangerouslySkipPermissions)
 	assert.Equal(t, "develop", cfg.Git.BaseBranch)
 	assert.Equal(t, "branch", cfg.Git.WorkflowMode)
+	assert.False(t, cfg.Git.PushEnabled)
+	assert.False(t, cfg.Git.FetchEnabled)
 	assert.Equal(t, "bash", cfg.Session.Shell)
 	assert.Equal(t, 60000, cfg.Session.TimeoutMs)
 	assert.Equal(t, []string{"direnv allow", "bun install"}, cfg.Session.InitCommands)
 	assert.False(t, cfg.Spec.Enabled)
+	assert.False(t, cfg.PR.DraftByDefault)
+	assert.False(t, cfg.PR.AutoLink)
+	assert.False(t, cfg.PR.NotifyAfterCreate)
+	assert.True(t, cfg.PR.CreateWithoutMerge)
+	assert.False(t, cfg.Network.AutoDetect)
+	assert.Equal(t, 120, cfg.Network.CheckInterval)
 	assert.Equal(t, 4000, cfg.DevServer.BasePort)
 	assert.Equal(t, 4100, cfg.DevServer.MaxPort)
 	assert.Equal(t, "development", cfg.DevServer.Environments["NODE_ENV"])
@@ -148,10 +183,18 @@ func TestLoadConfigRejectsFutureVersion(t *testing.T) {
 
 func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	tmp := t.TempDir()
-	path := filepath.Join(tmp, ConfigFileName)
+	path := filepath.Join(tmp, ConfigDirName, ConfigFileName)
 
 	cfg := DefaultConfig()
 	cfg.CLITool = "codex"
+	cfg.Session.DangerouslySkipPermissions = true
+	cfg.Git.PushEnabled = false
+	cfg.Git.FetchEnabled = false
+	cfg.PR.DraftByDefault = false
+	cfg.PR.AutoLink = false
+	cfg.PR.NotifyAfterCreate = false
+	cfg.PR.CreateWithoutMerge = true
+	cfg.Network.AutoDetect = false
 	cfg.Spec.Enabled = false
 	cfg.Session.InitCommands = []string{"direnv allow", "bun install"}
 
@@ -166,6 +209,26 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	assert.Equal(t, "./config.schema.json", raw["$schema"])
 	assert.Equal(t, float64(CurrentConfigVersion), raw["$version"])
 
+	sessionRaw, ok := raw["session"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, sessionRaw["dangerouslySkipPermissions"])
+
+	gitRaw, ok := raw["git"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, gitRaw["pushEnabled"])
+	assert.Equal(t, false, gitRaw["fetchEnabled"])
+
+	prRaw, ok := raw["pr"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, prRaw["draftByDefault"])
+	assert.Equal(t, false, prRaw["autoLink"])
+	assert.Equal(t, false, prRaw["notifyAfterCreate"])
+	assert.Equal(t, true, prRaw["createWithoutMerge"])
+
+	networkRaw, ok := raw["network"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, networkRaw["autoDetect"])
+
 	worktreeRaw, ok := raw["worktree"].(map[string]any)
 	require.True(t, ok)
 	initRaw, ok := worktreeRaw["initCommands"].([]any)
@@ -177,19 +240,35 @@ func TestMergeWithDefaultsPreservesExplicitValues(t *testing.T) {
 	partial := &Config{
 		CLITool: "opencode",
 		Git: GitConfig{
-			BaseBranch: "develop",
+			BaseBranch:   "develop",
+			PushEnabled:  true,
+			FetchEnabled: true,
 		},
 		Session:   SessionConfig{Shell: "bash"},
 		DevServer: DevServerConfig{BasePort: 4000},
-		Spec:      SpecConfig{Enabled: false},
+		Network:   NetworkConfig{AutoDetect: true},
+		PR: PRConfig{
+			DraftByDefault:     true,
+			AutoLink:           true,
+			NotifyAfterCreate:  true,
+			CreateWithoutMerge: true,
+		},
+		Spec: SpecConfig{Enabled: false},
 	}
 
 	merged := MergeWithDefaults(partial)
 
 	assert.Equal(t, "opencode", merged.CLITool)
 	assert.Equal(t, "develop", merged.Git.BaseBranch)
+	assert.True(t, merged.Git.PushEnabled)
+	assert.True(t, merged.Git.FetchEnabled)
 	assert.Equal(t, "bash", merged.Session.Shell)
 	assert.Equal(t, 4000, merged.DevServer.BasePort)
+	assert.True(t, merged.Network.AutoDetect)
+	assert.True(t, merged.PR.DraftByDefault)
+	assert.True(t, merged.PR.AutoLink)
+	assert.True(t, merged.PR.NotifyAfterCreate)
+	assert.True(t, merged.PR.CreateWithoutMerge)
 	assert.False(t, merged.Spec.Enabled)
 	assert.Equal(t, "worktree", merged.Git.WorkflowMode)
 	assert.Equal(t, 30000, merged.Session.TimeoutMs)

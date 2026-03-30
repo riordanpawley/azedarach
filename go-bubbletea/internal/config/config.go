@@ -30,6 +30,8 @@ type GitConfig struct {
 	WorkflowMode         string `json:"workflowMode"`
 	ShowLineChanges      bool   `json:"showLineChanges"`
 	DefaultMergeStrategy string `json:"defaultMergeStrategy"`
+	PushEnabled          bool   `json:"pushEnabled"`
+	FetchEnabled         bool   `json:"fetchEnabled"`
 }
 
 // KeyboardConfig contains keyboard-related settings
@@ -39,10 +41,11 @@ type KeyboardConfig struct {
 
 // SessionConfig contains session management settings
 type SessionConfig struct {
-	Shell        string   `json:"shell"`
-	TimeoutMs    int      `json:"timeoutMs"`
-	LogDir       string   `json:"logDir"`
-	InitCommands []string `json:"initCommands"`
+	DangerouslySkipPermissions bool     `json:"dangerouslySkipPermissions"`
+	Shell                      string   `json:"shell"`
+	TimeoutMs                  int      `json:"timeoutMs"`
+	LogDir                     string   `json:"logDir"`
+	InitCommands               []string `json:"initCommands"`
 }
 
 // PRConfig contains pull request settings
@@ -75,9 +78,10 @@ type IssuesConfig struct {
 
 // NetworkConfig contains network-related settings
 type NetworkConfig struct {
-	CheckInterval  int `json:"checkInterval"`
-	OfflineTimeout int `json:"offlineTimeout"`
-	RetryAttempts  int `json:"retryAttempts"`
+	AutoDetect     bool `json:"autoDetect"`
+	CheckInterval  int  `json:"checkInterval"`
+	OfflineTimeout int  `json:"offlineTimeout"`
+	RetryAttempts  int  `json:"retryAttempts"`
 }
 
 // DevServerConfig contains development server settings
@@ -111,12 +115,14 @@ func DefaultConfig() *Config {
 			WorkflowMode:         "worktree",
 			ShowLineChanges:      true,
 			DefaultMergeStrategy: "merge",
+			PushEnabled:          true,
+			FetchEnabled:         true,
 		},
 		Keyboard: KeyboardConfig{
 			JumpLabelChars: "abcdefghijklmnopqrstuvwxyz",
 		},
 		Session: SessionConfig{
-			Shell:        "zsh",
+			Shell:        DefaultSessionShell(),
 			TimeoutMs:    30000,
 			LogDir:       filepath.Join(homeDir, ".azedarach", "logs"),
 			InitCommands: []string{},
@@ -142,6 +148,7 @@ func DefaultConfig() *Config {
 			SyncInterval: 300, // 5 minutes
 		},
 		Network: NetworkConfig{
+			AutoDetect:     true,
 			CheckInterval:  60,  // 1 minute
 			OfflineTimeout: 300, // 5 minutes
 			RetryAttempts:  3,
@@ -162,6 +169,13 @@ func DefaultConfig() *Config {
 			Enabled: true,
 		},
 	}
+}
+
+func DefaultSessionShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		return shell
+	}
+	return "zsh"
 }
 
 const (
@@ -222,6 +236,10 @@ func SaveConfig(cfg *Config, path string) error {
 	data, err := marshalConfigFile(&cfgCopy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {

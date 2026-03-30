@@ -1,5 +1,5 @@
 {
-  "$schema": "./.azedarach.schema.json",
+  "$schema": "./config.schema.json",
   "$version": 7,
   "cliTool": "codex",
   "issueTracker": {
@@ -22,14 +22,13 @@
   "worktree": {
     "initCommands": [
       "direnv allow",
-      "cd ts-opentui && bun install"
+      "cd go-bubbletea"
     ],
     "env": {},
     "continueOnFailure": true,
     "parallel": false,
     "copyPaths": [
       ".direnv",
-      "./ts-opentui/node_modules",
       ".env.local"
     ]
   },
@@ -66,9 +65,9 @@
   },
   "merge": {
     "validateCommands": [
-      "cd ts-opentui && bun run type-check"
+      "cd go-bubbletea && just build"
     ],
-    "fixCommand": "cd ts-opentui && bun run fix",
+    "fixCommand": "",
     "maxFixAttempts": 2,
     "startAiSessionOnFailure": true
   },
@@ -95,6 +94,7 @@
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
   },
+  "issueEditor": {},
   "sessionRecovery": {
     "mode": "auto",
     "autoRecoveryDelayMs": 2000,

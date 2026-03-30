@@ -12,7 +12,7 @@ import (
 
 func TestStatusBar_RenderNormalMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeNormal, 80, style)
+	sb := New(types.ModeNormal, 160, style)
 
 	result := sb.Render()
 
@@ -22,23 +22,26 @@ func TestStatusBar_RenderNormalMode(t *testing.T) {
 	}
 
 	// Should contain normal mode hints
-	if !strings.Contains(result, "h/l: columns") {
-		t.Errorf("Expected status bar to contain navigation hints, got: %s", result)
+	if !strings.Contains(result, "Space: task workspace") {
+		t.Errorf("Expected status bar to contain workspace hint, got: %s", result)
 	}
-	if !strings.Contains(result, "j/k: tasks") {
-		t.Errorf("Expected status bar to contain task navigation hints, got: %s", result)
+	if !strings.Contains(result, "g: goto") {
+		t.Errorf("Expected status bar to contain goto hint, got: %s", result)
+	}
+	if !strings.Contains(result, "r: refresh") {
+		t.Errorf("Expected status bar to contain refresh hint, got: %s", result)
 	}
 	if !strings.Contains(result, "Enter: drill") {
 		t.Errorf("Expected status bar to contain drill hint, got: %s", result)
 	}
-	if !strings.Contains(result, "Space: details+actions") {
-		t.Errorf("Expected status bar to contain details+actions hint, got: %s", result)
+	if !strings.Contains(result, "Tab: view") {
+		t.Errorf("Expected status bar to contain view hint, got: %s", result)
 	}
 }
 
 func TestStatusBar_RenderSelectMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeSelect, 80, style)
+	sb := New(types.ModeSelect, 160, style)
 
 	result := sb.Render()
 
@@ -48,17 +51,17 @@ func TestStatusBar_RenderSelectMode(t *testing.T) {
 	}
 
 	// Should contain select mode hints
-	if !strings.Contains(result, "Space: toggle") {
+	if !strings.Contains(result, "a/5: toggle") {
 		t.Errorf("Expected status bar to contain toggle hint, got: %s", result)
 	}
-	if !strings.Contains(result, "a: all") {
-		t.Errorf("Expected status bar to contain select all hint, got: %s", result)
+	if !strings.Contains(result, "A: column") {
+		t.Errorf("Expected status bar to contain column select hint, got: %s", result)
 	}
 }
 
 func TestStatusBar_RenderSearchMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeSearch, 80, style)
+	sb := New(types.ModeSearch, 120, style)
 
 	result := sb.Render()
 
@@ -68,14 +71,14 @@ func TestStatusBar_RenderSearchMode(t *testing.T) {
 	}
 
 	// Should contain search mode hints
-	if !strings.Contains(result, "Type to search") {
+	if !strings.Contains(result, "Type: search") {
 		t.Errorf("Expected status bar to contain search hint, got: %s", result)
 	}
 }
 
 func TestStatusBar_RenderGotoMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeGoto, 80, style)
+	sb := New(types.ModeGoto, 160, style)
 
 	result := sb.Render()
 
@@ -85,23 +88,32 @@ func TestStatusBar_RenderGotoMode(t *testing.T) {
 	}
 
 	// Should contain goto mode hints
-	if !strings.Contains(result, "g: top") {
+	if !strings.Contains(result, "g g: top") {
 		t.Errorf("Expected status bar to contain goto top hint, got: %s", result)
 	}
-	if !strings.Contains(result, "e: end") {
-		t.Errorf("Expected status bar to contain goto end hint, got: %s", result)
+	if !strings.Contains(result, "g e: bottom") {
+		t.Errorf("Expected status bar to contain goto bottom hint, got: %s", result)
 	}
 }
 
 func TestStatusBar_RenderActionMode(t *testing.T) {
 	style := styles.New()
-	sb := New(types.ModeAction, 80, style)
+	sb := New(types.ModeAction, 160, style)
 
 	result := sb.Render()
 
 	// Should contain mode badge
 	if !strings.Contains(result, "ACTION") {
 		t.Errorf("Expected status bar to contain 'ACTION', got: %s", result)
+	}
+	if !strings.Contains(result, "h/l: move") {
+		t.Errorf("Expected status bar to contain move hint, got: %s", result)
+	}
+	if !strings.Contains(result, "m/b: merge") {
+		t.Errorf("Expected status bar to contain merge hint, got: %s", result)
+	}
+	if !strings.Contains(result, "…") {
+		t.Errorf("Expected action mode hints to be truncated with summary, got: %s", result)
 	}
 }
 
@@ -211,16 +223,39 @@ func TestStatusBar_RenderFallsBackAndTruncatesEventTicker(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderTruncatesRichHints(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeAction, 54, style)
+
+	result := sb.Render()
+
+	if strings.Contains(result, "\n") {
+		t.Fatalf("Expected single-line status bar, got newline in: %q", result)
+	}
+	if !strings.Contains(result, "ACTION") {
+		t.Fatalf("Expected action mode badge, got: %s", result)
+	}
+	if !strings.Contains(result, "h/l: move") {
+		t.Fatalf("Expected rich action hints to start with move shortcut, got: %s", result)
+	}
+	if !strings.Contains(result, "…") {
+		t.Fatalf("Expected narrow status bar to truncate rich hints, got: %q", result)
+	}
+	if got := lipgloss.Height(result); got != 1 {
+		t.Fatalf("Expected single-line status bar, got height %d: %q", got, result)
+	}
+}
+
 func TestGetHints_AllModes(t *testing.T) {
 	tests := []struct {
 		mode     types.Mode
 		expected string
 	}{
-		{types.ModeNormal, "h/l: columns  j/k: tasks  Enter: drill  Space: details+actions  ?: help  q: quit"},
-		{types.ModeSelect, "Space: toggle  a: all  n: none  Esc: cancel"},
-		{types.ModeSearch, "Type to search  Enter: confirm  Esc: cancel"},
-		{types.ModeGoto, "g: top  e: end  h: first col  l: last col  Esc: cancel"},
-		{types.ModeAction, ""},
+		{types.ModeNormal, "Space: task workspace  g: goto  /: search  f: filter  ,: sort  v: select  Enter: drill  c: create  s: settings  r: refresh  Tab: view  ?: help  q: quit"},
+		{types.ModeSelect, "a/5: toggle  A: column  %: all  *: invert  x: clear  Space/Enter: bulk  v/Esc: exit"},
+		{types.ModeSearch, "Type: search  Enter: confirm  Esc: cancel"},
+		{types.ModeGoto, "g g: top  g e: bottom  g h: first col  g l: last col  g w: labels  g p: projects  g s: spec  Esc: cancel"},
+		{types.ModeAction, "h/l: move  s/S/!: start  a: attach  p: pause  R: resume  r: dev  x: stop  u: update  m/b: merge  P/O: PR  M: abort  H: helix  i: attachments  f: diff  w/W: cleanup  e: edit  c: child  T/d: tombstone/delete  Esc/q: cancel"},
 	}
 
 	for _, tt := range tests {

@@ -4,19 +4,32 @@ Azedarach Session Primer
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
   - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}
   - `az issue child "Title"` (when you need follow-up scope under the active parent)
+- How to use `az` command map:
+  - Issue lifecycle:
+  - `az issue list --limit 20`, `az issue get <issue-id>`, `az issue child "Child task"`, `az issue update <issue-id> --status in_progress|blocked|open`, `az issue close <issue-id> --reason "..."`
+  - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
+  - Issue dependency graph:
+  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]`
+  - Fanout orchestration:
+  - `az issue fanout --input ./fanout.json`, `az issue fanout --input ./fanout.json --apply`, `az issue fanout ready --root <issue-id> --json`, `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`
+  - Mailbox coordination:
+  - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`, `az mail list --parent <parent-issue> --since <seq> --json`, `az mail watch --parent <parent-issue> --since <seq> --jsonl`
+  - Spec traceability:
+  - {{ if .SpecEnabled }}`az spec req/list/link ...` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
+  - Session/runtime operations:
+  - `az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`
 - Use `az issue` commands as the task-tracker interface for this repo.
 - Prefer `az issue` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
+{{ if .ActiveIssueClosedWarning }}{{ .ActiveIssueClosedWarning }}
+{{ end }}
 {{ if .IssueSection }}{{ .IssueSection }}
 {{ end }}{{ if .QuestionFirstGuardrails }}{{ .QuestionFirstGuardrails }}
 {{ end }}- Follow-up and dependency rules:
+  - Create follow-up scope under the active parent with `az issue child "Title"`.
   - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
   - Then assign one subagent per child issue, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent, and reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.
   - Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.
-  - `az issue create "Title"` defaults to the active parent context.
-  - There is no top-level `az dep` command; use `az issue dep ...`.
-  - Use `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]` to record dependency relationships.
-  - Use `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]` to remove dependency relationships.
 - Issue-context guardrails:
   {{ .ContextGuardrail }}
   - Missing fields (for example description/notes) are valid. Treat absent or empty fields as intentional and continue execution.
@@ -24,32 +37,7 @@ Azedarach Session Primer
 {{ end }}- Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-- How to use `az` command map:
-  - Issue lifecycle:
-  - `az issue list --limit 20` (lists the most recently updated issues first)
-  - `az issue get <issue-id>` (use `--json` when you need full structured output)
-  - `az issue create "Child task"` (manually add parent-child deps when needed)
-  - `az issue update <issue-id> --append-notes "..."` (adds to existing notes without overwriting previous notes)
-  - `az issue update <issue-id> --notes "..."`
-  - `az issue update <issue-id> --status in_progress|blocked|open`
-  - `az issue close <issue-id>`
-  - Issue dependency graph:
-  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]`
-  - `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]`
-  - Fanout orchestration:
-  - `az issue fanout --input ./fanout.json` (plan nested child issues from spec)
-  - `az issue fanout --input ./fanout.json --apply` (create issues + dependency edges)
-  - `az issue fanout ready --root <issue-id> --json` (show runnable leaf issues)
-  - `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out` (detect out-of-budget changes)
-  - Mailbox coordination:
-  - `az mail send --parent <parent-issue> --type dependency-ready --body "..."`
-  - `az mail list --parent <parent-issue> --since <seq> --json`
-  - `az mail watch --parent <parent-issue> --since <seq> --jsonl`
-  - Spec traceability:
-  - {{ if .SpecEnabled }}`az spec req/list/link ...` before behavior changes and after behavior edits to keep requirements/links aligned.{{ else }}Spec workflows disabled for this project (`az config set spec.enabled false`).{{ end }}
-  - Session/runtime operations:
-  - `az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`
-  - `az issue --help`
+- `az issue --help`
 {{ if .SpecGuardrails }}- Spec workflow:
 {{ .SpecGuardrails }}
 

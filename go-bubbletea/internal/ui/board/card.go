@@ -23,6 +23,7 @@ const worktreeToken = "W:Y"
 type RuntimeSignals struct {
 	HasTmuxSession        bool
 	HasWorktree           bool
+	GitAheadCount         int
 	GitBehindCount        int
 	HasUncommittedChanges bool
 	GitAdditions          int
@@ -103,7 +104,7 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	if task.Session != nil {
 		sessionRow = renderSessionStatus(task.Session, s)
 	}
-	runtimeRow := renderRuntimeSignals(runtimeSignals)
+	runtimeRow := renderRuntimeSignals(runtimeSignals, s)
 
 	auxParts := make([]string, 0, 3)
 	if sessionRow != "" {
@@ -195,25 +196,43 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	return stateStyle.Render(value)
 }
 
-func renderRuntimeSignals(signals *RuntimeSignals) string {
+func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if signals == nil {
 		return ""
 	}
-	parts := make([]string, 0, 5)
+	styleToken := func(token string, color lipgloss.Color) string {
+		if s == nil {
+			return token
+		}
+		return lipgloss.NewStyle().Foreground(color).Bold(true).Render(token)
+	}
+
+	hasLineChanges := signals.GitAdditions > 0 || signals.GitDeletions > 0
+	parts := make([]string, 0, 6)
 	if signals.HasTmuxSession {
-		parts = append(parts, tmuxSessionToken)
+		parts = append(parts, styleToken(tmuxSessionToken, styles.Sky))
 	}
 	if signals.HasWorktree {
-		parts = append(parts, worktreeToken)
+		parts = append(parts, styleToken(worktreeToken, styles.Teal))
+	}
+	if signals.GitAheadCount > 0 && !hasLineChanges {
+		parts = append(parts, styleToken(fmt.Sprintf("G:↑%d", signals.GitAheadCount), styles.Green))
 	}
 	if signals.GitBehindCount > 0 {
-		parts = append(parts, fmt.Sprintf("G:↓%d", signals.GitBehindCount))
+		parts = append(parts, styleToken(fmt.Sprintf("G:↓%d", signals.GitBehindCount), styles.Yellow))
 	}
 	if signals.HasUncommittedChanges {
-		parts = append(parts, "G:✎")
+		parts = append(parts, styleToken("G:✎", styles.Peach))
 	}
-	if signals.GitAdditions > 0 || signals.GitDeletions > 0 {
-		parts = append(parts, fmt.Sprintf("+%d/-%d", signals.GitAdditions, signals.GitDeletions))
+	if hasLineChanges {
+		if s == nil {
+			parts = append(parts, fmt.Sprintf("+%d/-%d", signals.GitAdditions, signals.GitDeletions))
+		} else {
+			add := styleToken(fmt.Sprintf("+%d", signals.GitAdditions), styles.Green)
+			del := styleToken(fmt.Sprintf("-%d", signals.GitDeletions), styles.Red)
+			sep := lipgloss.NewStyle().Foreground(styles.Overlay0).Render("/")
+			parts = append(parts, add+sep+del)
+		}
 	}
 
 	return strings.Join(parts, " ")

@@ -1,8 +1,8 @@
 /**
- * PRHandlersService
+ * GitActionHandlersService
  *
- * PR/worktree authority was removed from TUI runtime during the daemon hard-cut.
- * PR actions must be implemented via daemon RPC before being re-enabled.
+ * Git/PR/worktree authority was removed from TUI runtime during the daemon hard-cut.
+ * These actions must be implemented via daemon RPC before being fully re-enabled.
  */
 
 import type { CommandExecutor } from "@effect/platform"
@@ -12,7 +12,9 @@ import { ToastService } from "../ToastService.js"
 const prUnavailable = (action: string) =>
 	`PR action '${action}' is unavailable in daemon-rpc runtime; use daemon-backed PR RPC commands.`
 
-export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHandlersService", {
+export class GitActionHandlersService extends Effect.Service<GitActionHandlersService>()(
+	"GitActionHandlersService",
+	{
 	dependencies: [ToastService.Default],
 	effect: Effect.gen(function* () {
 		const toast = yield* ToastService
@@ -35,5 +37,5 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			confirmMergeSelect: () => unavailable("confirm-merge-select"),
 			cancelMergeSelect: () => unavailable("cancel-merge-select"),
 		}
-	}),
-}) {}
+	},
+) {}

@@ -66,7 +66,13 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), "az-1", "main")
+	imagePaths := []string{"/tmp/a.png", "/tmp/with space/image.png"}
+	got, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+		ImagePaths: imagePaths,
+	})
 	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
@@ -79,6 +85,21 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	if transport.lastReq.Meta.ProjectID != "proj-a" {
 		t.Fatalf("project_id = %q, want proj-a", transport.lastReq.Meta.ProjectID)
 	}
+	var body sessionCommandBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.BaseBranch != "main" {
+		t.Fatalf("base branch = %q, want main", body.BaseBranch)
+	}
+	if len(body.ImagePaths) != len(imagePaths) {
+		t.Fatalf("image path count = %d, want %d", len(body.ImagePaths), len(imagePaths))
+	}
+	for i := range imagePaths {
+		if body.ImagePaths[i] != imagePaths[i] {
+			t.Fatalf("image path[%d] = %q, want %q", i, body.ImagePaths[i], imagePaths[i])
+		}
+	}
 
 	got, err = client.StopSession(context.Background(), "az-1")
 	if err != nil {
@@ -89,6 +110,41 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 	if transport.lastReq.Command != CommandSessionStop {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandSessionStop)
+	}
+}
+
+func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(commandOutputBody{Output: "ok"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	if _, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       true,
+	}); err != nil {
+		t.Fatalf("StartSession error: %v", err)
+	}
+
+	var body sessionCommandBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if !body.Yolo {
+		t.Fatal("expected yolo=true in session.start request body")
 	}
 }
 
@@ -198,7 +254,11 @@ func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	got, err := client.StartSession(context.Background(), "az-1", "main")
+	got, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+	})
 	if err != nil {
 		t.Fatalf("StartSession error: %v", err)
 	}
@@ -228,7 +288,11 @@ func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
 	}
 
 	client := New(transport).WithProjectID("proj-a")
-	_, err := client.StartSession(context.Background(), "az-1", "main")
+	_, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+	})
 	var pending *OperationPendingError
 	if !errors.As(err, &pending) {
 		t.Fatalf("StartSession error = %v, want OperationPendingError", err)
@@ -244,16 +308,44 @@ func TestSessionLifecycleCommandsReturnPendingOperationError(t *testing.T) {
 func TestDevServerLifecycleHelpers(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			body, err := json.Marshal(devServerResultBody{
-				IssueID: "az-1",
-				Server: devserver.Server{
-					ID:      "az-1",
-					Name:    "az-1",
-					Port:    3001,
-					Status:  "running",
+			var (
+				body []byte
+				err  error
+			)
+			switch req.Command {
+			case CommandDevServerStart, CommandDevServerStop, CommandDevServerStatus:
+				body, err = json.Marshal(devServerResultBody{
 					IssueID: "az-1",
-				},
-			})
+					Server: devserver.Server{
+						ID:      "az-1",
+						Name:    "az-1",
+						Port:    3001,
+						Status:  "running",
+						IssueID: "az-1",
+					},
+				})
+			case CommandDevServerList:
+				body, err = json.Marshal(devServerListBody{
+					Servers: []devserver.Server{
+						{
+							ID:      "az-1",
+							Name:    "az-1",
+							Port:    3001,
+							Status:  "running",
+							IssueID: "az-1",
+						},
+						{
+							ID:      "az-2",
+							Name:    "az-2",
+							Port:    3002,
+							Status:  "stopped",
+							IssueID: "az-2",
+						},
+					},
+				})
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
 			if err != nil {
 				t.Fatalf("marshal response: %v", err)
 			}
@@ -280,6 +372,20 @@ func TestDevServerLifecycleHelpers(t *testing.T) {
 	}
 	if transport.lastReq.Command != CommandDevServerStop {
 		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandDevServerStop)
+	}
+
+	servers, err := client.ListDevServers(context.Background())
+	if err != nil {
+		t.Fatalf("ListDevServers error: %v", err)
+	}
+	if transport.lastReq.Command != CommandDevServerList {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandDevServerList)
+	}
+	if len(servers) != 2 {
+		t.Fatalf("servers length = %d, want 2", len(servers))
+	}
+	if servers[0].Status != "running" || servers[1].Status != "stopped" {
+		t.Fatalf("servers = %+v", servers)
 	}
 }
 

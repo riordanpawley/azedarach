@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -38,6 +39,7 @@ func (f *fakePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*p
 type fakeBranchBehindGit struct {
 	fetchCalls    []string
 	revRangeCalls []string
+	aheadCount    int
 	behindCount   int
 	err           error
 }
@@ -51,6 +53,9 @@ func (g *fakeBranchBehindGit) RevListCount(_ context.Context, _ string, revRange
 	g.revRangeCalls = append(g.revRangeCalls, revRange)
 	if g.err != nil {
 		return 0, g.err
+	}
+	if strings.HasSuffix(revRange, "..HEAD") {
+		return g.aheadCount, nil
 	}
 	return g.behindCount, nil
 }
@@ -91,7 +96,7 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 	})
 
 	t.Run("branch behind", func(t *testing.T) {
-		gitClient := &fakeBranchBehindGit{behindCount: 4}
+		gitClient := &fakeBranchBehindGit{behindCount: 4, aheadCount: 2}
 		handler := NewPRHandler(nil, gitClient)
 
 		body, _ := json.Marshal(map[string]string{
@@ -113,13 +118,13 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 		if err := json.Unmarshal(resp.Body, &out); err != nil {
 			t.Fatalf("unmarshal response: %v", err)
 		}
-		if out.RevRange != "main..origin/main" || out.CommitsBehind != 4 || !out.Behind {
+		if out.RevRange != "main..origin/main" || out.AheadRevRange != "origin/main..HEAD" || out.CommitsAhead != 2 || !out.Ahead || out.CommitsBehind != 4 || !out.Behind {
 			t.Fatalf("response = %+v", out)
 		}
 		if len(gitClient.fetchCalls) != 1 || gitClient.fetchCalls[0] != "origin" {
 			t.Fatalf("fetch calls = %+v", gitClient.fetchCalls)
 		}
-		if len(gitClient.revRangeCalls) != 1 || gitClient.revRangeCalls[0] != "main..origin/main" {
+		if len(gitClient.revRangeCalls) != 2 || gitClient.revRangeCalls[0] != "main..origin/main" || gitClient.revRangeCalls[1] != "origin/main..HEAD" {
 			t.Fatalf("rev range calls = %+v", gitClient.revRangeCalls)
 		}
 	})

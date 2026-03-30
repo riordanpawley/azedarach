@@ -33,6 +33,7 @@ type Task struct {
 	Session               *Session     `json:"session,omitempty"`
 	HasTmuxSession        bool         `json:"has_tmux_session,omitempty"`
 	HasWorktree           bool         `json:"has_worktree,omitempty"`
+	GitAheadCount         int          `json:"git_ahead_count,omitempty"`
 	GitBehindCount        int          `json:"git_behind_count,omitempty"`
 	HasUncommittedChanges bool         `json:"has_uncommitted_changes,omitempty"`
 	GitAdditions          int          `json:"git_additions,omitempty"`

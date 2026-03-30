@@ -70,15 +70,19 @@ func (s *Service) Attach(ctx context.Context, issueID string, sourcePath string)
 
 // AttachFromClipboard reads an image from the clipboard and attaches it
 func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Attachment, error) {
-	s.logger.Debug("attaching from clipboard", "issue_id", issueID)
+	s.logger.Info("attaching image from clipboard", "issue_id", issueID)
+	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 
 	// Read image from clipboard
-	data, err := ReadImageFromClipboard(ctx)
+	data, err := ReadImageFromClipboard(readCtx)
 	if err != nil {
+		s.logger.Warn("clipboard image read failed", "issue_id", issueID, "error", err)
 		return nil, fmt.Errorf("failed to read clipboard: %w", err)
 	}
 
 	if len(data) == 0 {
+		s.logger.Warn("clipboard image read returned empty payload", "issue_id", issueID)
 		return nil, fmt.Errorf("clipboard is empty or does not contain an image")
 	}
 
@@ -88,8 +92,14 @@ func (s *Service) AttachFromClipboard(ctx context.Context, issueID string) (*Att
 
 	// Generate filename with timestamp
 	filename := fmt.Sprintf("clipboard-%s%s", time.Now().Format("20060102-150405"), ext)
-
-	return s.createAttachment(ctx, issueID, filename, data, int64(len(data)))
+	s.logger.Info("clipboard image read succeeded", "issue_id", issueID, "bytes", len(data), "mime_type", mimeType, "filename", filename)
+	attachment, err := s.createAttachment(ctx, issueID, filename, data, int64(len(data)))
+	if err != nil {
+		s.logger.Warn("clipboard attachment write failed", "issue_id", issueID, "filename", filename, "error", err)
+		return nil, err
+	}
+	s.logger.Info("clipboard image attached", "issue_id", issueID, "attachment_id", attachment.ID, "path", attachment.Path)
+	return attachment, nil
 }
 
 // List returns all attachments for a given issue
@@ -254,6 +264,19 @@ func detectMimeType(data []byte) string {
 		return "image/webp"
 	}
 
+	// TIFF signature (4 bytes): little-endian II*\x00 or big-endian MM\x00*
+	if len(data) >= 4 {
+		if (data[0] == 0x49 && data[1] == 0x49 && data[2] == 0x2A && data[3] == 0x00) ||
+			(data[0] == 0x4D && data[1] == 0x4D && data[2] == 0x00 && data[3] == 0x2A) {
+			return "image/tiff"
+		}
+	}
+
+	// BMP signature (2 bytes)
+	if len(data) >= 2 && data[0] == 0x42 && data[1] == 0x4D {
+		return "image/bmp"
+	}
+
 	return "application/octet-stream"
 }
 
@@ -290,6 +313,10 @@ func mimeTypeToExt(mimeType string) string {
 		return ".gif"
 	case "image/webp":
 		return ".webp"
+	case "image/tiff":
+		return ".tiff"
+	case "image/bmp":
+		return ".bmp"
 	default:
 		return ".bin"
 	}

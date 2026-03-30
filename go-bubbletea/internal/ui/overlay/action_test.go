@@ -60,31 +60,54 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	// Should have start session actions
 	hasStartSession := false
+	hasYoloStart := false
 	for _, action := range menu.actions {
 		if action.Key == "s" && action.Label == "Start session" {
 			hasStartSession = true
+		}
+		if action.Key == "!" && action.Label == "Start session (yolo)" {
+			hasYoloStart = true
 		}
 	}
 
 	if !hasStartSession {
 		t.Error("expected 'Start session' action when no session exists")
 	}
+	if !hasYoloStart {
+		t.Error("expected 'Start session (yolo)' action when no session exists")
+	}
 
 	hasCreateChild := false
+	hasImageAttachments := false
 	for _, action := range menu.actions {
 		if action.Key == "c" && action.Label == "Create child task" && action.Enabled {
 			hasCreateChild = true
+		}
+		if action.Key == "i" && action.Label == "Image attachments" && action.Enabled {
+			hasImageAttachments = true
 		}
 	}
 	if !hasCreateChild {
 		t.Error("expected 'Create child task' action in action menu")
 	}
+	if !hasImageAttachments {
+		t.Error("expected 'Image attachments' action in action menu")
+	}
 
-	// Git actions should be disabled
+	// Worktree-gated actions should be disabled
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "w" || action.Key == "W" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "w" || action.Key == "W" {
 			if action.Enabled {
-				t.Errorf("expected git action '%s' to be disabled without session", action.Key)
+				t.Errorf("expected worktree-gated action '%s' to be disabled without session", action.Key)
+			}
+		}
+	}
+
+	// Always-available task-workspace actions should remain enabled.
+	for _, action := range menu.actions {
+		if action.Key == "b" || action.Key == "i" || action.Key == "r" {
+			if !action.Enabled {
+				t.Errorf("expected action '%s' to be enabled without session", action.Key)
 			}
 		}
 	}
@@ -143,11 +166,20 @@ func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 		t.Error("expected 'Stop session' action for busy session")
 	}
 
-	// Git actions should be enabled with worktree
+	// Worktree-gated actions should be enabled with worktree.
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "f" || action.Key == "w" || action.Key == "W" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "f" || action.Key == "w" || action.Key == "W" {
 			if !action.Enabled {
-				t.Errorf("expected git action '%s' to be enabled with worktree", action.Key)
+				t.Errorf("expected worktree-gated action '%s' to be enabled with worktree", action.Key)
+			}
+		}
+	}
+
+	// Workspace actions should still be enabled with an active session.
+	for _, action := range menu.actions {
+		if action.Key == "b" || action.Key == "i" || action.Key == "r" {
+			if !action.Enabled {
+				t.Errorf("expected workspace action '%s' to be enabled with session", action.Key)
 			}
 		}
 	}
@@ -411,8 +443,8 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
 	menu := NewActionMenu(task, nil)
 
-	// Try selecting start session with 's'
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	// Try selecting image attachments with 'i'
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}
 	_, cmd := menu.Update(msg)
 
 	if cmd == nil {
@@ -425,8 +457,8 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 		t.Fatalf("expected SelectionMsg, got %T", result)
 	}
 
-	if selectionMsg.Key != "s" {
-		t.Errorf("expected key 's', got %s", selectionMsg.Key)
+	if selectionMsg.Key != "i" {
+		t.Errorf("expected key 'i', got %s", selectionMsg.Key)
 	}
 }
 

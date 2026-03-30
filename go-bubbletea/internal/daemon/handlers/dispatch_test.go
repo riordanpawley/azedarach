@@ -53,6 +53,13 @@ func (m *routeDevServerManager) Get(issueID string) (*devserver.Server, bool) {
 	srv, ok := m.servers[issueID]
 	return srv, ok
 }
+func (m *routeDevServerManager) List() []*devserver.Server {
+	servers := make([]*devserver.Server, 0, len(m.servers))
+	for _, srv := range m.servers {
+		servers = append(servers, srv)
+	}
+	return servers
+}
 
 type routePRWorkflow struct {
 	lastParams pr.CreatePRParams
@@ -83,6 +90,9 @@ func (g *routeBranchBehindGit) Fetch(context.Context, string, string) error {
 
 func (g *routeBranchBehindGit) RevListCount(_ context.Context, _ string, revRange string) (int, error) {
 	g.revRanges = append(g.revRanges, revRange)
+	if revRange == "origin/main..HEAD" {
+		return 1, nil
+	}
 	return 3, nil
 }
 
@@ -186,22 +196,34 @@ func TestDispatcherMixedRouting(t *testing.T) {
 		t.Fatalf("devserver route failed: %+v", r4.Error)
 	}
 
-	r5 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
-		"project_id": "proj",
-	}))
+	r5 := dispatch.Handle(context.Background(), mkReq("devserver.list", map[string]string{}))
 	if !r5.OK {
-		t.Fatalf("cleanup route failed: %+v", r5.Error)
+		t.Fatalf("devserver list route failed: %+v", r5.Error)
+	}
+	var listBody devServerListBody
+	if err := json.Unmarshal(r5.Body, &listBody); err != nil {
+		t.Fatalf("unmarshal devserver list body: %v", err)
+	}
+	if len(listBody.Servers) == 0 {
+		t.Fatalf("expected at least one devserver in list body: %+v", listBody.Servers)
 	}
 
-	r6 := dispatch.Handle(context.Background(), mkReq(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+	r6 := dispatch.Handle(context.Background(), mkReq("worktree.cleanup_orphaned", map[string]string{
+		"project_id": "proj",
+	}))
+	if !r6.OK {
+		t.Fatalf("cleanup route failed: %+v", r6.Error)
+	}
+
+	r7 := dispatch.Handle(context.Background(), mkReq(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID:    "proj",
 		Kind:         "session.start",
 		IssueID:      "aey",
 		DedupeKey:    "proj::aey::session.start",
 		ResourceKeys: []string{"issue:aey", "session:aey"},
 	}))
-	if !r6.OK {
-		t.Fatalf("operation route failed: %+v", r6.Error)
+	if !r7.OK {
+		t.Fatalf("operation route failed: %+v", r7.Error)
 	}
 	if operationH.lastCommand != protocol.CommandOperationSubmit {
 		t.Fatalf("operation handler command = %q, want %q", operationH.lastCommand, protocol.CommandOperationSubmit)
@@ -338,10 +360,10 @@ func TestDispatcherRoutesPRAndBranchBehindCommands(t *testing.T) {
 	if err := json.Unmarshal(behindResp.Body, &behindOut); err != nil {
 		t.Fatalf("unmarshal branch-behind response: %v", err)
 	}
-	if behindOut.CommitsBehind != 3 || behindOut.RevRange != "main..origin/main" {
+	if behindOut.CommitsBehind != 3 || behindOut.RevRange != "main..origin/main" || behindOut.CommitsAhead != 1 || behindOut.AheadRevRange != "origin/main..HEAD" {
 		t.Fatalf("branch-behind response = %+v", behindOut)
 	}
-	if !gitClient.fetched || len(gitClient.revRanges) != 1 {
+	if !gitClient.fetched || len(gitClient.revRanges) != 2 {
 		t.Fatalf("git service calls = fetched:%v revRanges:%v", gitClient.fetched, gitClient.revRanges)
 	}
 }
