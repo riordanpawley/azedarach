@@ -1,0 +1,32 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Help                                                                                                                │
+│────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+││ Navigation:                                                                                                       │
+││ ───────────────────────────────────────────                                                                       │
+││   h/l              Move between columns                                                                           │
+││   j/k              Move up/down in column                                                                         │
+││   ctrl+u / ctrl+d  Half-page scroll                                                                               │
+││   g then g/e/h/l   Jump in board                                                                                  │
+││   g then w/p/s     Jump / projects / spec                                                                         │
+││   gg/ge            Jump to top/bottom of column                                                                   │
+││   gh/gl            Jump to first/last column                                                                      │
+││                                                                                                                   │
+││ Workspace:                                                                                                        │
+││ ───────────────────────────────────────────                                                                       │
+││   Space            Open task workspace (details + actions)                                                        │
+││   Enter            Drill into epic children                                                                       │
+││                                                                                                                   │
+││ Modes:                                                                                                            │
+││ ───────────────────────────────────────────                                                                       │
+││   g                Goto mode                                                                                      │
+││   /                Search                                                                                         │
+││   f                Filter menu                                                                                    │
+││   ,                Sort menu                                                                                      │
+││   v                Select mode                                                                                    │
+││   ?                Help (this screen)                                                                             │
+││                                                                                                                   │
+││ Selection:                                                                                                        │
+││ ───────────────────────────────────────────                                                                       │
+││   a/5              Toggle selection on current task                                                               │
+││   A                Select all in current column                                                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -10,6 +10,8 @@ import (
 
 // HelpOverlay displays keybinding reference
 type HelpOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	styles     *Styles
 	scroll     int
 	maxScroll  int
@@ -60,6 +62,8 @@ func (h *HelpOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.scroll = h.maxScroll
 			return h, nil
 		}
+	case tea.WindowSizeMsg:
+		h.ApplyWindowSize(msg)
 	}
 
 	return h, nil
@@ -67,6 +71,23 @@ func (h *HelpOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the help overlay
 func (h *HelpOverlay) View() string {
+	width, height := h.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:      h.styles,
+		width:       width,
+		height:      height,
+		title:       "Help",
+		breakpoint:  84,
+		gap:         2,
+		minLeft:     40,
+		leftFocused: true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return h.renderScrollableContent(max(3, height))
+		},
+	})
+}
+
+func (h *HelpOverlay) renderScrollableContent(contentHeight int) string {
 	categories := h.getCategories()
 	keyWidth := keybinds.KeyColumnWidth(categories, 8)
 	content := keybinds.RenderCategories(categories, keyWidth, keybinds.Theme{
@@ -81,6 +102,7 @@ func (h *HelpOverlay) View() string {
 	// Calculate scroll limits
 	lines := strings.Split(content, "\n")
 	totalLines := len(lines)
+	h.viewHeight = max(1, contentHeight)
 	h.maxScroll = max(0, totalLines-h.viewHeight)
 
 	// Apply scroll offset
@@ -116,7 +138,7 @@ func (h *HelpOverlay) Title() string {
 // Size returns the overlay dimensions
 func (h *HelpOverlay) Size() (width, height int) {
 	h.viewHeight = 20 // Content viewing area
-	return 72, 24     // Total overlay size including padding and borders
+	return h.Clamp(72, 24)
 }
 
 // getCategories returns all keybinding categories

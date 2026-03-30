@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
@@ -33,6 +34,9 @@ func TestDialogs_View_Golden(t *testing.T) {
 		{name: "project_selector", view: goldenProjectSelectorView},
 		{name: "settings_default", view: goldenSettingsDefaultView},
 		{name: "diagnostics_overview", view: goldenDiagnosticsOverviewView},
+		{name: "event_log_default", view: goldenEventLogView},
+		{name: "help_default", view: goldenHelpView},
+		{name: "spec_workspace_default", view: goldenSpecWorkspaceView},
 		{name: "imageattach_list", view: goldenImageAttachListView},
 		{name: "imageattach_preview", view: goldenImageAttachPreviewView},
 		{name: "imagepreview_default", view: goldenImagePreviewView},
@@ -66,6 +70,9 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		{name: "project_selector_small", view: goldenProjectSelectorSmallView},
 		{name: "settings_default_small", view: goldenSettingsDefaultSmallView},
 		{name: "diagnostics_overview_small", view: goldenDiagnosticsOverviewSmallView},
+		{name: "event_log_small", view: goldenEventLogSmallView},
+		{name: "help_small", view: goldenHelpSmallView},
+		{name: "spec_workspace_small", view: goldenSpecWorkspaceSmallView},
 		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 	}
 
@@ -255,6 +262,85 @@ func goldenDiagnosticsOverviewSmallView(t *testing.T) string {
 	panel := newGoldenDiagnosticsPanel()
 	model, _ := panel.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*DiagnosticsPanel).View()
+}
+
+func goldenEventLogView(t *testing.T) string {
+	t.Helper()
+	overlay := NewEventLogOverlayWithLogFile([]protocol.EventEnvelope{
+		{
+			ProtocolVersion: protocol.CurrentVersion,
+			ProjectID:       "azedarach",
+			Revision:        41,
+			Event:           "daemon.event.old",
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       time.Date(2026, time.March, 30, 8, 20, 0, 0, time.UTC),
+			Meta: protocol.Metadata{
+				SessionID:     "sess-1",
+				CorrelationID: "corr-old",
+			},
+			Body: []byte("old payload line"),
+		},
+		{
+			ProtocolVersion: protocol.CurrentVersion,
+			ProjectID:       "azedarach",
+			Revision:        42,
+			Event:           "daemon.event.new",
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       time.Date(2026, time.March, 30, 8, 21, 0, 0, time.UTC),
+			Meta: protocol.Metadata{
+				SessionID:     "sess-1",
+				CorrelationID: "corr-new",
+			},
+			Body: []byte("new payload line"),
+		},
+	}, "/tmp/az.log")
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*EventLogOverlay).View()
+}
+
+func goldenEventLogSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewEventLogOverlay([]protocol.EventEnvelope{
+		{
+			ProtocolVersion: protocol.CurrentVersion,
+			ProjectID:       "azedarach",
+			Revision:        42,
+			Event:           "daemon.event.new",
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       time.Date(2026, time.March, 30, 8, 21, 0, 0, time.UTC),
+			Body:            []byte("new payload line"),
+		},
+	})
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*EventLogOverlay).View()
+}
+
+func goldenHelpView(t *testing.T) string {
+	t.Helper()
+	overlay := NewHelpOverlay()
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*HelpOverlay).View()
+}
+
+func goldenHelpSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewHelpOverlay()
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*HelpOverlay).View()
+}
+
+func goldenSpecWorkspaceView(t *testing.T) string {
+	t.Helper()
+	overlay := NewSpecWorkspaceOverlay("azedarach")
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*SpecWorkspaceOverlay).View()
+}
+
+func goldenSpecWorkspaceSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewSpecWorkspaceOverlay("azedarach")
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*SpecWorkspaceOverlay).View()
 }
 
 func goldenImageAttachListView(t *testing.T) string {
