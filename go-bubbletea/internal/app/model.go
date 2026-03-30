@@ -3225,10 +3225,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "f":
 		// Show diff viewer
-		if session == nil {
+		diffWorktree := strings.TrimSpace(m.repoDir)
+		if session != nil && strings.TrimSpace(session.Worktree) != "" {
+			diffWorktree = strings.TrimSpace(session.Worktree)
+		}
+		if diffWorktree == "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: "No active session - start session first",
+				Message: "No worktree available for diff",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
@@ -3238,10 +3242,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
 				return fmt.Errorf("diff popup unavailable outside tmux; run inside tmux and retry")
 			}
-			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(session.Worktree), command)
+			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
 			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
 		}
-		viewer := diff.NewDiffViewer(session.Worktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
+		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
 		cmd := m.openOverlay(viewer)
 		return m, cmd
 	case "w":

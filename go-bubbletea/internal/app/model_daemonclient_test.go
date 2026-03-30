@@ -16,6 +16,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
+	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
@@ -1315,6 +1316,40 @@ func TestAbortMergeCmdUsesDaemonClient(t *testing.T) {
 }
 
 func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
+	t.Run("open diff without session uses repo root", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, Type: domain.TypeTask}}
+		m.repoDir = "/tmp/repo-root"
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel, ok := updated.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updated)
+		}
+		current := updatedModel.overlayStack.Current()
+		diffOverlay, ok := current.(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", current)
+		}
+		if diffOverlay == nil {
+			t.Fatal("expected diff overlay instance")
+		}
+		worktreeField := reflect.ValueOf(diffOverlay).Elem().FieldByName("worktree")
+		if !worktreeField.IsValid() || worktreeField.Kind() != reflect.String {
+			t.Fatal("diff overlay missing worktree field")
+		}
+		if got := worktreeField.String(); got != "/tmp/repo-root" {
+			t.Fatalf("diff worktree = %q, want %q", got, "/tmp/repo-root")
+		}
+		if len(updatedModel.toasts) != 0 {
+			t.Fatalf("unexpected toasts: %+v", updatedModel.toasts)
+		}
+	})
+
 	t.Run("open PR without session warns", func(t *testing.T) {
 		m := newDaemonTestModel(&recordingDaemonTransport{})
 		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, Type: domain.TypeTask}}
