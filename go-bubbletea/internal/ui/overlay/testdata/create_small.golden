@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────╮
+│Create New Task                                                     │
+│────────────────────────────────────────────────────────────────────│
+││ Title:                                      Actions               │
+││ > Add grom renderer for detail view maybe   ──────────────────────│
+││ Description:                                 Tab / Shift+Tab      │
+││ ┃   1 review panel structure and            Switch fields         │
+││ ┃     preserve layout                        T/B/F/E/C Set type   │
+││ ┃                                            0/1/2/3/4 Set        │
+││ ┃                                           priority              │
+││ Type: [●T] [ B] [ F] [ E] [ C]               Enter Create task    │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]           Ctrl+E Edit in       │
+││                                             $EDITOR               │
+││ [ Create Task ]                              Esc Cancel           │
+││                                                                   │
+││                                                                   │
+││                                                                   │
+││                                                                   │
+││                                                                   │
+╰────────────────────────────────────────────────────────────────────╯

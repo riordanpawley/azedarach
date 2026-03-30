@@ -20,6 +20,8 @@ func EventLogHotkeyHint() string {
 
 // EventLogOverlay renders daemon/client runtime events with newest entries first.
 type EventLogOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	logFilePath string
 	events      []protocol.EventEnvelope
 	scroll      int
@@ -106,6 +108,8 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return o, nil
 		}
+	case tea.WindowSizeMsg:
+		o.ApplyWindowSize(msg)
 	}
 
 	return o, nil
@@ -113,31 +117,25 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the event log overlay content.
 func (o *EventLogOverlay) View() string {
-	contentLines := o.renderContentLines()
-	contentHeight := max(1, o.viewHeight-1)
-	o.maxScroll = max(0, len(contentLines)-contentHeight)
-	if o.scroll > o.maxScroll {
-		o.scroll = o.maxScroll
-	}
-	if o.scroll < 0 {
-		o.scroll = 0
-	}
-
-	start := o.scroll
-	end := min(o.scroll+contentHeight, len(contentLines))
-	if start > len(contentLines) {
-		start = len(contentLines)
-	}
-	if end < start {
-		end = start
-	}
-
-	visibleContent := append([]string{}, contentLines[start:end]...)
-	for len(visibleContent) < contentHeight {
-		visibleContent = append(visibleContent, "")
-	}
-	visibleContent = append(visibleContent, o.footerLine(o.maxScroll > 0))
-	return strings.Join(visibleContent, "\n")
+	width, height := o.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            o.styles,
+		width:             width,
+		height:            height,
+		title:             "Event Log",
+		rightSectionTitle: "Actions",
+		breakpoint:        88,
+		gap:               3,
+		minLeft:           52,
+		minRight:          22,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return o.renderScrollableContent(height)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(o.styles, o.actionBindings(o.maxScroll > 0), width)
+		},
+	})
 }
 
 // Title returns the overlay title.
@@ -161,13 +159,11 @@ func (o *EventLogOverlay) Size() (width, height int) {
 	// Keep footer pinned to bottom while avoiding oversized empty interiors.
 	neededViewHeight := len(o.renderContentLines()) + 1 // + footer row
 	o.viewHeight = min(maxViewHeight, max(minViewHeight, neededViewHeight))
-	return 92, o.viewHeight + chromeHeight
+	return o.Clamp(92, o.viewHeight+chromeHeight)
 }
 
 func (o *EventLogOverlay) renderContentLines() []string {
 	lines := make([]string, 0, len(o.events)*4+6)
-
-	lines = append(lines, o.styles.Title.Render("Event Log"))
 	if strings.TrimSpace(o.logFilePath) != "" {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("Log file: "+o.logFilePath))
 	}
@@ -185,19 +181,7 @@ func (o *EventLogOverlay) renderContentLines() []string {
 }
 
 func (o *EventLogOverlay) footerLine(scrollable bool) string {
-	bindings := make([]keybinds.Binding, 0, 5)
-	if scrollable {
-		bindings = append(bindings,
-			keybinds.Binding{Key: "j/k", Description: "scroll"},
-			keybinds.Binding{Key: "g/G", Description: "top/bottom"},
-		)
-	}
-	bindings = append(bindings,
-		keybinds.Binding{Key: "s", Description: "stream (Ctrl+C then q)"},
-		keybinds.Binding{Key: "e", Description: "edit"},
-		keybinds.Binding{Key: "Esc/q/backspace", Description: "close"},
-	)
-	return o.styles.Footer.Render(keybinds.RenderPlain(bindings, " • "))
+	return o.styles.Footer.Render(keybinds.RenderPlain(o.actionBindings(scrollable), " • "))
 }
 
 func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope) []string {
@@ -278,6 +262,50 @@ func reverseEvents(events []protocol.EventEnvelope) []protocol.EventEnvelope {
 		out[len(events)-1-i] = events[i]
 	}
 	return out
+}
+
+func (o *EventLogOverlay) renderScrollableContent(contentHeight int) string {
+	contentLines := o.renderContentLines()
+	contentHeight = max(1, contentHeight-1)
+	o.maxScroll = max(0, len(contentLines)-contentHeight)
+	if o.scroll > o.maxScroll {
+		o.scroll = o.maxScroll
+	}
+	if o.scroll < 0 {
+		o.scroll = 0
+	}
+
+	start := o.scroll
+	end := min(o.scroll+contentHeight, len(contentLines))
+	if start > len(contentLines) {
+		start = len(contentLines)
+	}
+	if end < start {
+		end = start
+	}
+
+	visibleContent := append([]string{}, contentLines[start:end]...)
+	for len(visibleContent) < contentHeight {
+		visibleContent = append(visibleContent, "")
+	}
+	visibleContent = append(visibleContent, o.footerLine(o.maxScroll > 0))
+	return strings.Join(visibleContent, "\n")
+}
+
+func (o *EventLogOverlay) actionBindings(scrollable bool) []keybinds.Binding {
+	bindings := make([]keybinds.Binding, 0, 5)
+	if scrollable {
+		bindings = append(bindings,
+			keybinds.Binding{Key: "j/k", Description: "scroll"},
+			keybinds.Binding{Key: "g/G", Description: "top/bottom"},
+		)
+	}
+	bindings = append(bindings,
+		keybinds.Binding{Key: "s", Description: "stream (Ctrl+C then q)"},
+		keybinds.Binding{Key: "e", Description: "edit"},
+	)
+	bindings = append(bindings, keybinds.Binding{Key: "Esc/q/backspace", Description: "close"})
+	return bindings
 }
 
 func truncateRunes(s string, maxLen int) string {

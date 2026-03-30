@@ -9,6 +9,8 @@ import (
 
 // ConfirmDialog is a confirmation dialog overlay with Yes/No options
 type ConfirmDialog struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	title    string
 	message  string
 	styles   *Styles
@@ -77,6 +79,8 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.selected = true
 			return c, nil
 		}
+	case tea.WindowSizeMsg:
+		c.ApplyWindowSize(msg)
 	}
 
 	return c, nil
@@ -84,45 +88,44 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the dialog
 func (c *ConfirmDialog) View() string {
-	var b strings.Builder
-
-	// Message
-	if c.message != "" {
-		b.WriteString(c.styles.MenuItem.Render(c.message))
-		b.WriteString("\n\n")
-	}
-
-	// Buttons
-	yesStyle := c.styles.MenuItem
-	noStyle := c.styles.MenuItem
-
-	if c.selected {
-		yesStyle = c.styles.MenuItemActive
-	} else {
-		noStyle = c.styles.MenuItemActive
-	}
-
-	yes := yesStyle.Render("[Y] Yes")
-	no := noStyle.Render("[N] No")
-
-	// Render buttons side by side with spacing
-	buttons := yes + "    " + no
-	b.WriteString(buttons)
-	b.WriteString("\n")
-
-	// Footer hint
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "←/→/Tab", Description: "Switch"},
-		{Key: "Enter", Description: "Confirm"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         c.styles.MenuKey,
-		DescriptionStyle: c.styles.Footer,
-		FooterStyle:      c.styles.Footer,
-	}))
-
-	return b.String()
+	width, height := c.Clamp(60, 12)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            c.styles,
+		width:             width,
+		height:            height,
+		title:             strings.ToUpper(c.title),
+		rightSectionTitle: "Actions",
+		breakpoint:        70,
+		gap:               3,
+		minLeft:           28,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			var b strings.Builder
+			if c.message != "" {
+				b.WriteString(c.styles.MenuItem.Render(c.message))
+				b.WriteString("\n\n")
+			}
+			yesStyle := c.styles.MenuItem
+			noStyle := c.styles.MenuItem
+			if c.selected {
+				yesStyle = c.styles.MenuItemActive
+			} else {
+				noStyle = c.styles.MenuItemActive
+			}
+			b.WriteString(yesStyle.Render("[Y] Yes"))
+			b.WriteString("\n")
+			b.WriteString(noStyle.Render("[N] No"))
+			return strings.TrimRight(b.String(), "\n")
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(c.styles, []keybinds.Binding{
+				{Key: "←/→/Tab", Description: "switch"},
+				{Key: "Enter", Description: "confirm"},
+				{Key: "Esc", Description: "cancel"},
+			})
+		},
+	})
 }
 
 // Title returns the dialog title

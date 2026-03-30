@@ -19,6 +19,8 @@ const (
 
 // SpecWorkspaceOverlay provides a bounded Spec workspace shell.
 type SpecWorkspaceOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	projectName string
 	section     SpecWorkspaceSection
 	styles      *Styles
@@ -58,6 +60,8 @@ func (m *SpecWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nextSection()
 			return m, nil
 		}
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
 	}
 
 	return m, nil
@@ -65,29 +69,30 @@ func (m *SpecWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the Spec workspace.
 func (m *SpecWorkspaceOverlay) View() string {
-	var b strings.Builder
-
-	b.WriteString(m.styles.Title.Render("Spec Workspace"))
-	if m.projectName != "" {
-		b.WriteString("\n")
-		b.WriteString(m.styles.Footer.Render(fmt.Sprintf("Project: %s", m.projectName)))
-	}
-	b.WriteString("\n\n")
-	b.WriteString(m.renderSectionTabs())
-	b.WriteString("\n\n")
-	b.WriteString(m.renderSectionBody())
-	b.WriteString("\n\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Tab", Description: "next section"},
-		{Key: "Shift+Tab", Description: "previous"},
-		{Key: "Esc", Description: "close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         m.styles.MenuKey,
-		DescriptionStyle: m.styles.Footer,
-		FooterStyle:      m.styles.Footer,
-	}))
-
-	return b.String()
+	width, height := m.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             width,
+		height:            height,
+		title:             "Spec Workspace",
+		rightSectionTitle: "Actions",
+		breakpoint:        84,
+		gap:               3,
+		minLeft:           42,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return m.renderMainContent()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.styles, []keybinds.Binding{
+				{Key: "Tab", Description: "next section"},
+				{Key: "Shift+Tab", Description: "previous"},
+				{Key: "h/l", Description: "section left/right"},
+				{Key: "Esc", Description: "close"},
+			})
+		},
+	})
 }
 
 // Title returns the overlay title.
@@ -97,7 +102,19 @@ func (m *SpecWorkspaceOverlay) Title() string {
 
 // Size returns the overlay dimensions.
 func (m *SpecWorkspaceOverlay) Size() (width, height int) {
-	return 82, 18
+	return m.Clamp(82, 18)
+}
+
+func (m *SpecWorkspaceOverlay) renderMainContent() string {
+	var b strings.Builder
+	if m.projectName != "" {
+		b.WriteString(m.styles.Footer.Render(fmt.Sprintf("Project: %s", m.projectName)))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(m.renderSectionTabs())
+	b.WriteString("\n\n")
+	b.WriteString(m.renderSectionBody())
+	return b.String()
 }
 
 func (m *SpecWorkspaceOverlay) renderSectionTabs() string {

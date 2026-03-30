@@ -430,6 +430,10 @@ func TestProjectSelector_View_WithProjects(t *testing.T) {
 	if !strings.Contains(view, "[default]") {
 		t.Error("expected view to contain '[default]' marker")
 	}
+
+	if !strings.Contains(view, "Actions") {
+		t.Error("expected view to contain 'Actions' section")
+	}
 }
 
 func TestProjectSelector_View_ActionsMode(t *testing.T) {

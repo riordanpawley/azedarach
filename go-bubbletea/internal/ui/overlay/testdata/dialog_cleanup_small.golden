@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────╮
+│BULK CLEANUP                                                        │
+│────────────────────────────────────────────────────────────────────│
+│Bulk Cleanup Operations                                             │
+│                                                                    │
+│▶ [✓] Delete completed tasks (>30 days) (~10 tasks)                 │
+│   Permanently remove done tasks older than 30 days                 │
+│  [ ] Archive all done tasks (~25 tasks)                            │
+│                                                                    │
+│                                                                    │
+│                                                                    │
+│Actions                                                             │
+│────────────────────────────────────────────────────────────────────│
+│ j/k navigate                                                       │
+│ Space toggle                                                       │
+│ a select all                                                       │
+│ A deselect all                                                     │
+│ Enter execute                                                      │
+│ Esc cancel                                                         │
+╰────────────────────────────────────────────────────────────────────╯

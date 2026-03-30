@@ -23,6 +23,8 @@ type CleanupCategory struct {
 
 // BulkCleanupOverlay provides bulk cleanup operations
 type BulkCleanupOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	categories      []CleanupCategory
 	cursor          int
 	confirmMode     bool
@@ -110,6 +112,9 @@ func (c *BulkCleanupOverlay) Init() tea.Cmd {
 // Update handles messages
 func (c *BulkCleanupOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		c.ApplyWindowSize(msg)
+		return c, nil
 	case tea.KeyMsg:
 		if c.confirmMode {
 			return c.handleConfirmMode(msg)
@@ -258,14 +263,62 @@ func (c *BulkCleanupOverlay) executeCleanup() tea.Cmd {
 
 // View renders the overlay
 func (c *BulkCleanupOverlay) View() string {
+	width, height := c.Size()
 	if c.confirmMode {
-		return c.renderConfirmDialog()
+		return renderDialogTwoPane(dialogLayoutConfig{
+			styles:            c.styles,
+			width:             width,
+			height:            height,
+			title:             "CONFIRM DESTRUCTIVE OPERATION",
+			rightSectionTitle: "Actions",
+			breakpoint:        76,
+			gap:               3,
+			minLeft:           42,
+			minRight:          20,
+			leftFocused:       true,
+			renderLeft: func(mode dialogLayoutMode, width, height int) string {
+				return c.renderConfirmContent(width)
+			},
+			renderRight: func(mode dialogLayoutMode, width, height int) string {
+				return renderDialogActions(c.styles, []keybinds.Binding{
+					{Key: "Y", Description: "confirm"},
+					{Key: "N", Description: "cancel"},
+					{Key: "Enter", Description: "confirm"},
+					{Key: "Esc", Description: "cancel"},
+					{Key: "←/→/Tab", Description: "toggle"},
+				})
+			},
+		})
 	}
-	return c.renderCategoryList()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            c.styles,
+		width:             width,
+		height:            height,
+		title:             "BULK CLEANUP",
+		rightSectionTitle: "Actions",
+		breakpoint:        80,
+		gap:               3,
+		minLeft:           48,
+		minRight:          22,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return c.renderCategoryList(width)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(c.styles, []keybinds.Binding{
+				{Key: "j/k", Description: "navigate"},
+				{Key: "Space", Description: "toggle"},
+				{Key: "a", Description: "select all"},
+				{Key: "A", Description: "deselect all"},
+				{Key: "Enter", Description: "execute"},
+				{Key: "Esc", Description: "cancel"},
+			})
+		},
+	})
 }
 
 // renderCategoryList renders the category selection screen
-func (c *BulkCleanupOverlay) renderCategoryList() string {
+func (c *BulkCleanupOverlay) renderCategoryList(width int) string {
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().
@@ -276,6 +329,7 @@ func (c *BulkCleanupOverlay) renderCategoryList() string {
 	b.WriteString("\n\n")
 
 	// Category list
+	maxWidth := max(26, width-2)
 	for i, cat := range c.categories {
 		var style lipgloss.Style
 		indicator := "  "
@@ -300,7 +354,7 @@ func (c *BulkCleanupOverlay) renderCategoryList() string {
 			cat.SizeEstimate,
 		)
 
-		b.WriteString(style.Render(line))
+		b.WriteString(clampOverlayLineWidth(style.Render(line), maxWidth))
 		b.WriteString("\n")
 
 		// Show description in smaller text
@@ -309,7 +363,7 @@ func (c *BulkCleanupOverlay) renderCategoryList() string {
 				Foreground(lipgloss.Color("#94e2d5")).
 				Italic(true)
 			b.WriteString("   ")
-			b.WriteString(descStyle.Render(cat.Description))
+			b.WriteString(clampOverlayLineWidth(descStyle.Render(cat.Description), maxWidth-3))
 			b.WriteString("\n")
 		}
 	}
@@ -323,30 +377,11 @@ func (c *BulkCleanupOverlay) renderCategoryList() string {
 		b.WriteString(errorStyle.Render("Error: " + c.error))
 	}
 
-	// Separator
-	b.WriteString("\n")
-	b.WriteString(c.styles.Separator.Render(strings.Repeat("─", 70)))
-	b.WriteString("\n\n")
-
-	// Help text
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "j/k", Description: "Navigate"},
-		{Key: "Space", Description: "Toggle"},
-		{Key: "a", Description: "Select all"},
-		{Key: "A", Description: "Deselect all"},
-		{Key: "Enter", Description: "Execute"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         c.styles.MenuKey,
-		DescriptionStyle: c.styles.Footer,
-		FooterStyle:      c.styles.Footer,
-	}))
-
 	return b.String()
 }
 
 // renderConfirmDialog renders the confirmation dialog
-func (c *BulkCleanupOverlay) renderConfirmDialog() string {
+func (c *BulkCleanupOverlay) renderConfirmContent(width int) string {
 	var b strings.Builder
 
 	headerStyle := lipgloss.NewStyle().
@@ -360,11 +395,12 @@ func (c *BulkCleanupOverlay) renderConfirmDialog() string {
 	b.WriteString(c.styles.MenuItem.Render("This will perform the following operations:"))
 	b.WriteString("\n\n")
 
+	maxWidth := max(26, width-2)
 	for _, cat := range c.categories {
 		if cat.Selected && cat.Destructive {
 			b.WriteString(c.styles.MenuKey.Render("  • "))
-			b.WriteString(c.styles.MenuItem.Render(cat.Label))
-			b.WriteString(c.styles.Footer.Render(fmt.Sprintf(" (%s)", cat.SizeEstimate)))
+			line := c.styles.MenuItem.Render(cat.Label) + c.styles.Footer.Render(fmt.Sprintf(" (%s)", cat.SizeEstimate))
+			b.WriteString(clampOverlayLineWidth(line, maxWidth-3))
 			b.WriteString("\n")
 		}
 	}
@@ -373,33 +409,11 @@ func (c *BulkCleanupOverlay) renderConfirmDialog() string {
 	b.WriteString(c.styles.MenuItem.Render("Are you sure you want to continue?"))
 	b.WriteString("\n\n")
 
-	// Buttons
-	yesStyle := c.styles.MenuItem
-	noStyle := c.styles.MenuItem
-
-	if c.confirmSelected {
-		yesStyle = c.styles.MenuItemActive
-	} else {
-		noStyle = c.styles.MenuItemActive
+	defaultAction := "Yes"
+	if !c.confirmSelected {
+		defaultAction = "No"
 	}
-
-	yes := yesStyle.Render("[Y] Yes")
-	no := noStyle.Render("[N] No")
-
-	buttons := yes + "    " + no
-	b.WriteString(buttons)
-	b.WriteString("\n\n")
-
-	// Footer hint
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "←/→/Tab", Description: "Switch"},
-		{Key: "Enter", Description: "Confirm"},
-		{Key: "Esc", Description: "Cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         c.styles.MenuKey,
-		DescriptionStyle: c.styles.Footer,
-		FooterStyle:      c.styles.Footer,
-	}))
+	b.WriteString(c.styles.Footer.Render("Default action: " + defaultAction))
 
 	return b.String()
 }
@@ -412,8 +426,8 @@ func (c *BulkCleanupOverlay) Title() string {
 // Size returns the overlay dimensions
 func (c *BulkCleanupOverlay) Size() (width, height int) {
 	if c.confirmMode {
-		return 70, 20
+		return c.Clamp(78, 18)
 	}
-	// Height: categories * 2 (label + description) + header + help + padding
-	return 75, (len(c.categories) * 2) + 10
+	// Height: categories * 2 (label + description) + header + padding
+	return c.Clamp(86, (len(c.categories)*2)+12)
 }

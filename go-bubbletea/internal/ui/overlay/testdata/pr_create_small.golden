@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────────╮
+│Create Pull Request                                                     │
+│────────────────────────────────────────────────────────────────────────│
+││ Creating PR: feature/auth → main (Issue: az-   Actions                │
+││ 42)                                            ───────────────────────│
+││                                                 Tab / Shift+Tab Switch│
+││ Title:                                         fields                 │
+││ > Pull request title...                         d Toggle draft        │
+││   Description:                                  Ctrl+S Submit         │
+││ ┃   1 Describe your changes (supports           Enter Submit focused  │
+││ ┃     markdown)...                              Esc Cancel            │
+││ ┃                                                                     │
+││ ┃                                                                     │
+││         Draft:  [✓] Draft PR (ready for                               │
+││ review later)                                                         │
+││                                                                       │
+││ [ Create Pull Request ]                                               │
+││                                                                       │
+││                                                                       │
+╰────────────────────────────────────────────────────────────────────────╯

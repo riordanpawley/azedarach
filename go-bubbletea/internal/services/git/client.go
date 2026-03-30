@@ -31,6 +31,23 @@ type MergeResult struct {
 	Message       string
 }
 
+// DiffFileStatus represents a changed file status from git diff --name-status.
+type DiffFileStatus string
+
+const (
+	DiffFileModified DiffFileStatus = "modified"
+	DiffFileAdded    DiffFileStatus = "added"
+	DiffFileDeleted  DiffFileStatus = "deleted"
+	DiffFileRenamed  DiffFileStatus = "renamed"
+)
+
+// ChangedFile represents a changed file from git diff --name-status.
+type ChangedFile struct {
+	Path    string
+	OldPath string
+	Status  DiffFileStatus
+}
+
 // NewClient creates a new git client.
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	if logger == nil {
@@ -140,35 +157,20 @@ func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
 func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
 
-	baseBranch = strings.TrimSpace(baseBranch)
-	if baseBranch != "" {
-		candidates := []string{baseBranch}
-		if !strings.Contains(baseBranch, "/") {
-			candidates = append(candidates, "origin/"+baseBranch)
-		}
-
-		var lastErr error
-		for _, candidate := range candidates {
-			mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			mergeBase := strings.TrimSpace(mergeBaseOutput)
-			if mergeBase == "" {
-				mergeBase = candidate
-			}
-			output, err := c.runInWorktree(ctx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
-			if err != nil {
-				lastErr = err
-				continue
-			}
+	mergeBase, err := c.MergeBase(ctx, worktree, baseBranch)
+	if err == nil {
+		output, diffErr := c.runInWorktree(ctx, worktree, "diff", "--shortstat", mergeBase, "HEAD", "--", ":^.azedarach")
+		if diffErr == nil {
 			return strings.TrimSpace(output), nil
 		}
-
 		c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
-			"baseBranch", baseBranch,
-			"error", lastErr,
+			"baseBranch", strings.TrimSpace(baseBranch),
+			"error", diffErr,
+		)
+	} else if strings.TrimSpace(baseBranch) != "" {
+		c.logger.Warn("base diff stat failed; falling back to local staged/unstaged aggregation",
+			"baseBranch", strings.TrimSpace(baseBranch),
+			"error", err,
 		)
 	}
 
@@ -192,6 +194,52 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 	default:
 		return stagedOutput, nil
 	}
+}
+
+// MergeBase resolves the merge base between base branch and HEAD.
+func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (string, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return "", fmt.Errorf("base branch is empty")
+	}
+
+	candidates := []string{baseBranch}
+	if !strings.Contains(baseBranch, "/") {
+		candidates = append(candidates, "origin/"+baseBranch)
+	}
+
+	var lastErr error
+	for _, candidate := range candidates {
+		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		mergeBase := strings.TrimSpace(mergeBaseOutput)
+		if mergeBase == "" {
+			mergeBase = candidate
+		}
+		return mergeBase, nil
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("failed to resolve merge-base for %s: %w", baseBranch, lastErr)
+	}
+	return "", fmt.Errorf("failed to resolve merge-base for %s", baseBranch)
+}
+
+// ChangedFiles returns changed files from merge-base..HEAD excluding .azedarach metadata.
+func (c *Client) ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]ChangedFile, error) {
+	mergeBase, err := c.MergeBase(ctx, worktree, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-status", mergeBase, "HEAD", "--", ":^.azedarach")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get changed files: %w", err)
+	}
+	return parseChangedFilesOutput(output), nil
 }
 
 // Push pushes the specified branch to the remote repository.
@@ -397,4 +445,51 @@ func parseConflicts(output string) []string {
 	}
 
 	return conflicts
+}
+
+func parseChangedFilesOutput(output string) []ChangedFile {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return []ChangedFile{}
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	changed := make([]ChangedFile, 0, len(lines))
+	for _, line := range lines {
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+
+		statusCode := strings.TrimSpace(parts[0])
+		if statusCode == "" {
+			continue
+		}
+
+		if strings.HasPrefix(statusCode, "R") && len(parts) >= 3 {
+			changed = append(changed, ChangedFile{
+				OldPath: parts[1],
+				Path:    parts[2],
+				Status:  DiffFileRenamed,
+			})
+			continue
+		}
+
+		path := parts[1]
+		status := DiffFileModified
+		switch statusCode {
+		case "A":
+			status = DiffFileAdded
+		case "D":
+			status = DiffFileDeleted
+		case "M":
+			status = DiffFileModified
+		}
+		changed = append(changed, ChangedFile{
+			Path:   path,
+			Status: status,
+		})
+	}
+
+	return changed
 }

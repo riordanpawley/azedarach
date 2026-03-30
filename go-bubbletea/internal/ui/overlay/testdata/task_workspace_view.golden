@@ -1,0 +1,29 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Task Workspace                                                                                                        │
+│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+││ [bal] add grom renderer for detail view maybe?                               Actions                                │
+││                                                                              ───────────────────────────────────────│
+││      Status:  Open                                                           [s] Start session                      │
+││    Priority:  P2                                                             [S] Start session + work               │
+││        Type:  task                                                           [!] Start session (yolo)               │
+││     Created:  0001-01-01 00:00:00                                            ───────────────────                    │
+││     Updated:  0001-01-01 00:00:00                                            [u] Update from main                   │
+││                                                                              [m] Follow-on merge                    │
+││ Description                                                                  [b] Merge into...                      │
+││ review panel structure and preserve layout                                   [P] Create PR                          │
+││                                                                              [O] Open PR                            │
+││                                                                              [M] Abort merge                        │
+││                                                                              [H] Open Helix                         │
+││                                                                              [i] Attachments                        │
+││                                                                              [r] Dev servers                        │
+││                                                                              [f] Show diff                          │
+││                                                                              [w] Cleanup worktree                   │
+││                                                                              [W] Delete task + cleanup worktree     │
+││                                                                              [i] Image attachments                  │
+││                                                                              ───────────────────                    │
+││                                                                              [h] Move left                          │
+││                                                                              [l] Move right                         │
+││                                                                              [c] Create child task                  │
+││                                                                              [e] Edit task                          │
+││                                                                              [T] Tombstone task                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

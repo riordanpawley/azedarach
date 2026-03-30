@@ -21,9 +21,9 @@ func (runtimeGitService) Fetch(context.Context, string, string) error { return n
 func (runtimeGitService) Merge(context.Context, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: true}, nil
 }
-func (runtimeGitService) Checkout(context.Context, string, string) error   { return nil }
-func (runtimeGitService) AbortMerge(context.Context, string) error         { return nil }
-func (runtimeGitService) DiffStat(context.Context, string) (string, error) { return "", nil }
+func (runtimeGitService) Checkout(context.Context, string, string) error           { return nil }
+func (runtimeGitService) AbortMerge(context.Context, string) error                 { return nil }
+func (runtimeGitService) DiffStat(context.Context, string, string) (string, error) { return "", nil }
 func (runtimeGitService) Status(context.Context, string) (*git.GitStatus, error) {
 	return &git.GitStatus{}, nil
 }
