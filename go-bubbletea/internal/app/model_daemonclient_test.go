@@ -1608,6 +1608,9 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 	if preflight.sourceID != sourceID || preflight.targetID != "main" {
 		t.Fatalf("preflight msg = %+v", preflight)
 	}
+	if preflight.targetWorktree != m.activeProjectPath() {
+		t.Fatalf("target worktree = %q, want %q", preflight.targetWorktree, m.activeProjectPath())
+	}
 	if len(preflight.reasons) == 0 || !strings.Contains(preflight.reasons[0], "not clean") {
 		t.Fatalf("preflight reasons = %+v, want dirty-worktree reason", preflight.reasons)
 	}

@@ -4196,6 +4196,10 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		baseBranch := m.resolveBaseBranch()
+		mainWorktree := m.activeProjectPath()
+		if strings.TrimSpace(mainWorktree) == "" {
+			mainWorktree = "."
+		}
 
 		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
@@ -4212,7 +4216,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, "."); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree); preflight != nil {
 			return *preflight
 		}
 
