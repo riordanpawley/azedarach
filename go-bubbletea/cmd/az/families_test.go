@@ -173,6 +173,47 @@ func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
 	}
 }
 
+func TestRunProjectCommands(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	projectDir := filepath.Join(t.TempDir(), "azedarach")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+		t.Fatalf("create project git dir: %v", err)
+	}
+
+	addOut := captureMainStdout(t, func() error {
+		return runProjectCommand(config.DefaultConfig(), []string{"add", "--name", "azedarach", projectDir})
+	})
+	if !strings.Contains(addOut, "Added project azedarach") {
+		t.Fatalf("add output = %q", addOut)
+	}
+
+	listOut := captureMainStdout(t, func() error {
+		return runProjectCommand(config.DefaultConfig(), []string{"list"})
+	})
+	if !strings.Contains(listOut, "Registered projects:") || !strings.Contains(listOut, "azedarach") {
+		t.Fatalf("list output = %q", listOut)
+	}
+	if !strings.Contains(listOut, "[default]") {
+		t.Fatalf("list output missing default marker = %q", listOut)
+	}
+
+	switchOut := captureMainStdout(t, func() error {
+		return runProjectCommand(config.DefaultConfig(), []string{"switch", "azedarach"})
+	})
+	if !strings.Contains(switchOut, "Switched default project to azedarach") {
+		t.Fatalf("switch output = %q", switchOut)
+	}
+
+	removeOut := captureMainStdout(t, func() error {
+		return runProjectCommand(config.DefaultConfig(), []string{"remove", "azedarach"})
+	})
+	if !strings.Contains(removeOut, "Removed project azedarach") {
+		t.Fatalf("remove output = %q", removeOut)
+	}
+}
+
 func captureMainStdout(t *testing.T, fn func() error) string {
 	t.Helper()
 
