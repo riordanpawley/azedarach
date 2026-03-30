@@ -44,7 +44,7 @@ Implementation-specific overlays:
 7. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 8. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
 9. **Implementation-Specific Rules Live in Nested Overlays**: Keep implementation runtime, language, and architecture policy in `ts-opentui/AGENTS.md` or `go-bubbletea/AGENTS.md`, not in root.
-10. **Currently az is linked to the ts-opentui impl as go-bubbletea impl is still under construction**: When it reaches feature parity we will switch to linking go-bubbletea version and move to 1 impl in the repo.
+10. **Currently az is linked to the go-bubbletea impl**: `go-bubbletea` is the active default implementation for `az`; keep `ts-opentui` guidance only where explicitly needed during transition/cleanup work.
 11. **The word spec means az spec 99% of the time**: it usually is not used in the sense of file based spec
 
 ## Quick Commands
@@ -53,6 +53,9 @@ Implementation-specific overlays:
 # Search (modern tools)
 rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
+
+# Go in this repo (cache/module paths are exported via .envrc)
+go test ./...
 
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide

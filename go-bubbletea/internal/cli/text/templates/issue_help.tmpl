@@ -1,4 +1,4 @@
-Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update> [arguments]
+Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|bulk-create|bulk-update|fanout> [arguments]
 
 Commands:
   list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
@@ -15,5 +15,8 @@ Commands:
   dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
   bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  fanout --input <path> [--apply] [--json]  Plan/apply nested issue fanout
+  fanout ready --root <issue-id> [--json]  List runnable leaf issues under a fanout root
+  fanout drift --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
 
 Argument ordering: place flags/options before positional arguments for deterministic parsing.

@@ -2852,6 +2852,27 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "No active issue is preselected") {
 		t.Fatalf("prime output missing no-issue guardrail: %q", output)
 	}
+	if !strings.Contains(output, "single-window fanout") {
+		t.Fatalf("prime output missing orchestration shorthand: %q", output)
+	}
+	if !strings.Contains(output, "split work until each child issue is independently actionable and fits within a single subagent context window") {
+		t.Fatalf("prime output missing subagent sizing guardrail: %q", output)
+	}
+	if !strings.Contains(output, "How to use `az` command map:") {
+		t.Fatalf("prime output missing az command map section: %q", output)
+	}
+	if !strings.Contains(output, "`az issue fanout --input ./fanout.json`") {
+		t.Fatalf("prime output missing fanout plan command example: %q", output)
+	}
+	if !strings.Contains(output, "`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`") {
+		t.Fatalf("prime output missing fanout drift command example: %q", output)
+	}
+	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
+		t.Fatalf("prime output missing mail send command example: %q", output)
+	}
+	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`") {
+		t.Fatalf("prime output missing session/runtime command examples: %q", output)
+	}
 }
 
 func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
@@ -2913,6 +2934,62 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Dependencies:\n- blocks: az-2") {
 		t.Fatalf("prime output missing dependency summary: %q", output)
+	}
+}
+
+func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-closed")
+	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+				body, err := json.Marshal([]domain.Task{{
+					ID:              "az-closed",
+					Title:           "Closed issue",
+					Status:          domain.StatusDone,
+					Priority:        domain.P2,
+					Type:            domain.TypeTask,
+					Implementations: []string{"go-bubbletea"},
+					CreatedAt:       now,
+					UpdatedAt:       now,
+				}})
+				if err != nil {
+					t.Fatalf("marshal task list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return PrimeCommand(deps)
+	})
+
+	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
+		t.Fatalf("prime output missing closed-issue warning: %q", output)
+	}
+	if !strings.Contains(output, "`az issue child \"Next task\"`") {
+		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
 	}
 }
 
