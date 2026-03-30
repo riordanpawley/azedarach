@@ -15,8 +15,8 @@ const (
 )
 
 const (
-	dialogFullscreenWidthThreshold  = 120
-	dialogFullscreenHeightThreshold = 30
+	dialogFullscreenWidthThreshold  = 100
+	dialogFullscreenHeightThreshold = 24
 )
 
 type dialogLayoutConfig struct {

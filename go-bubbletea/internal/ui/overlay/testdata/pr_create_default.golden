@@ -1,32 +1,28 @@
-╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Create Pull Request                                                                                                 │
-│────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
-││ Creating PR: feature/auth → main (Issue: az-42)                             Actions                               │
-││                                                                             ──────────────────────────────────────│
-││ Title:  > Pull request title...                                               Tab / Shift+Tab  Switch fields      │
-││                                                                               d                Toggle draft       │
-││   Description:                                                                Ctrl+S           Submit             │
-││ ┃   1 Describe your changes (supports markdown)...                            Enter            Submit focused     │
-││ ┃                                                                             Esc              Cancel             │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││ ┃                                                                                                                 │
-││         Draft:  [✓] Draft PR (ready for review later)                                                             │
-││                                                                                                                   │
-││ ─────────────────────────────────────────────────────────────────────────                                         │
-││                                                                                                                   │
-││ [ Create Pull Request ]                                                                                           │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│Create Pull Request                                                           │
+│──────────────────────────────────────────────────────────────────────────────│
+││ Creating PR: feature/auth → main (Issue: az-42)    Actions                  │
+││                                                    ─────────────────────────│
+││ Title:                                               Tab / Shift+Tab  Switch│
+││ > Pull request title...                            fields                   │
+││   Description:                                       d                Toggle│
+││ ┃   1 Describe your changes (supports              draft                    │
+││ ┃     markdown)...                                   Ctrl+S           Submit│
+││ ┃                                                    Enter            Submit│
+││ ┃                                                  focused                  │
+││ ┃                                                    Esc              Cancel│
+││ ┃                                                                           │
+││ ┃                                                                           │
+││ ┃                                                                           │
+││ ┃                                                                           │
+││         Draft:  [✓] Draft PR (ready for review                              │
+││ later)                                                                      │
+││                                                                             │
+││ [ Create Pull Request ]                                                     │
+││                                                                             │
+││                                                                             │
+││                                                                             │
+││                                                                             │
+││                                                                             │
+││                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯

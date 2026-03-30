@@ -245,16 +245,16 @@ func (i *ImageAttachOverlay) View() string {
 
 	switch i.mode {
 	case imageAttachModeList:
-		width, height := i.Clamp(88, 30)
+		width, height := i.Clamp(84, i.listModeHeight())
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
 			height:            height,
 			title:             fmt.Sprintf("ATTACHMENTS FOR %s", i.issueID),
 			rightSectionTitle: "Actions",
-			breakpoint:        90,
+			breakpoint:        80,
 			gap:               3,
-			minLeft:           50,
+			minLeft:           44,
 			minRight:          22,
 			leftFocused:       true,
 			renderLeft: func(mode dialogLayoutMode, width, height int) string {
@@ -265,16 +265,16 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	case imageAttachModePreview:
-		width, height := i.Clamp(88, 30)
+		width, height := i.Clamp(84, 24)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
 			height:            height,
 			title:             "ATTACHMENT DETAILS",
 			rightSectionTitle: "Actions",
-			breakpoint:        90,
+			breakpoint:        80,
 			gap:               3,
-			minLeft:           50,
+			minLeft:           44,
 			minRight:          22,
 			leftFocused:       true,
 			renderLeft: func(mode dialogLayoutMode, width, height int) string {
@@ -414,10 +414,18 @@ func (i *ImageAttachOverlay) Size() (width, height int) {
 	}
 	switch i.mode {
 	case imageAttachModePreview:
-		return i.Clamp(88, 30)
+		return i.Clamp(84, 24)
 	default:
-		return i.Clamp(80, 30)
+		return i.Clamp(84, i.listModeHeight())
 	}
+}
+
+func (i *ImageAttachOverlay) listModeHeight() int {
+	if len(i.files) == 0 && strings.TrimSpace(i.error) == "" {
+		return 14
+	}
+	rows := len(i.files) + 10
+	return max(14, min(26, rows))
 }
 
 // Commands
