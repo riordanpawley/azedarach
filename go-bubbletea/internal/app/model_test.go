@@ -1658,7 +1658,7 @@ func TestModeTransitions(t *testing.T) {
 }
 
 func TestActionModeOperationalKeysFailFastWithGuidance(t *testing.T) {
-	keys := []string{"u", "m", "P"}
+	keys := []string{"u", "P"}
 
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {

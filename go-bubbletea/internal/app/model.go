@@ -552,6 +552,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, m.loadIssuesCmd()
 
+	case mergePreflightFailureMsg:
+		return m, m.overlayStack.Push(overlay.NewMergePreflightOverlay(
+			msg.sourceID,
+			msg.targetID,
+			msg.targetWorktree,
+			msg.reasons,
+			strings.TrimSpace(msg.targetWorktree) != "",
+		))
+
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			action := "Merge"
@@ -1797,8 +1806,13 @@ func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleActionMode processes keyboard input in action mode
 func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	task, session := m.getCurrentTaskAndSession()
 	switch msg.String() {
-	case "u", "m", "P":
+	case "b":
+		return m, m.openMergeTargetSelection(task)
+	case "m":
+		return m, m.followOnMergeSelectionCmd(task, session)
+	case "u", "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: "Action unavailable in go-bubbletea action mode; no git operation was started. " +
@@ -2927,6 +2941,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "m":
 		task, session := m.getCurrentTaskAndSession()
 		return m, m.followOnMergeSelectionCmd(task, session)
+	case "merge_preflight_abort":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.abortMergeCmd(worktree)
+	case "merge_preflight_refresh":
+		m.overlayStack.Pop()
+		return m, m.loadIssuesCmd()
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
@@ -3182,25 +3206,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(devOverlay)
 
 	case "b":
-		// Merge issue into... (merge select mode)
-		candidates := m.getMergeCandidates(task)
-		mergeOverlay := overlay.NewMergeSelectOverlay(
-			task,
-			candidates,
-			func(targetID string) tea.Cmd {
-				return func() tea.Msg {
-					return overlay.SelectionMsg{
-						Key: "merge",
-						Value: overlay.MergeTargetSelectedMsg{
-							SourceID: task.ID,
-							TargetID: targetID,
-						},
-					}
-				}
-			},
-			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-		)
-		return m, m.overlayStack.Push(mergeOverlay)
+		return m, m.openMergeTargetSelection(task)
 
 	// Task actions
 	case "h":
@@ -4101,6 +4107,13 @@ type mergeResultMsg struct {
 	err         error
 }
 
+type mergePreflightFailureMsg struct {
+	sourceID       string
+	targetID       string
+	targetWorktree string
+	reasons        []string
+}
+
 func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -4119,6 +4132,10 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 
 		if m.daemonClient == nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, "."); preflight != nil {
+			return *preflight
 		}
 
 		if _, err := m.daemonClient.GitFetch(ctx, ".", "origin"); err != nil {
@@ -4179,6 +4196,10 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 
 		if m.daemonClient == nil {
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
+		}
+
+		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree); preflight != nil {
+			return *preflight
 		}
 
 		result, err := m.daemonClient.GitMerge(ctx, targetWorktree, sourceBranch)
@@ -4297,6 +4318,36 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
 	return m.overlayStack.Push(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+}
+
+func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
+	if task == nil {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "No focused issue to merge",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return nil
+	}
+
+	candidates := m.getMergeCandidates(task)
+	mergeOverlay := overlay.NewMergeSelectOverlay(
+		task,
+		candidates,
+		func(targetID string) tea.Cmd {
+			return func() tea.Msg {
+				return overlay.SelectionMsg{
+					Key: "merge",
+					Value: overlay.MergeTargetSelectedMsg{
+						SourceID: task.ID,
+						TargetID: targetID,
+					},
+				}
+			}
+		},
+		func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+	)
+	return m.overlayStack.Push(mergeOverlay)
 }
 
 func (m Model) sessionForIssue(issueID string) *domain.Session {
@@ -4950,6 +5001,60 @@ func (m Model) resolveIssueWorktreePath(ctx context.Context, issueID string) (st
 		return wt.Path, nil
 	}
 	return "", fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func summarizeStatusChangeCounts(status git.GitStatus) string {
+	parts := make([]string, 0, 5)
+	if n := len(status.Staged); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d staged", n))
+	}
+	if n := len(status.Modified); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d modified", n))
+	}
+	if n := len(status.Added); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", n))
+	}
+	if n := len(status.Deleted); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", n))
+	}
+	if n := len(status.Untracked); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d untracked", n))
+	}
+	if len(parts) == 0 {
+		return "working tree has changes"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree string) *mergePreflightFailureMsg {
+	if m.daemonClient == nil {
+		return nil
+	}
+
+	reasons := make([]string, 0, 2)
+	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
+	if sourceErr != nil {
+		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
+	} else if sourceStatus.HasChanges {
+		reasons = append(reasons, fmt.Sprintf("Source %s is not clean: %s", sourceID, summarizeStatusChangeCounts(sourceStatus)))
+	}
+
+	targetStatus, targetErr := m.daemonClient.GitStatus(ctx, targetWorktree)
+	if targetErr != nil {
+		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
+	} else if targetStatus.HasChanges {
+		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
+	}
+
+	if len(reasons) == 0 {
+		return nil
+	}
+	return &mergePreflightFailureMsg{
+		sourceID:       sourceID,
+		targetID:       targetID,
+		targetWorktree: targetWorktree,
+		reasons:        reasons,
+	}
 }
 
 func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {
