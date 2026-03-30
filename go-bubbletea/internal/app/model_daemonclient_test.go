@@ -1289,13 +1289,24 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 		t.Fatalf("updated model type = %T, want Model", updated)
 	}
 	if cmd == nil {
-		t.Fatal("expected merge command")
+		t.Fatal("expected resolve command")
 	}
 
 	msg := cmd()
-	mergeMsg, ok := msg.(mergeResultMsg)
+	resolvedMsg, ok := msg.(mergeTargetSelectionResolvedMsg)
 	if !ok {
-		t.Fatalf("message type = %T, want mergeResultMsg", msg)
+		t.Fatalf("message type = %T, want mergeTargetSelectionResolvedMsg", msg)
+	}
+	next, nextCmd := updated.(Model).Update(resolvedMsg)
+	if _, ok := next.(Model); !ok {
+		t.Fatalf("next model type = %T, want Model", next)
+	}
+	if nextCmd == nil {
+		t.Fatal("expected merge command after resolution")
+	}
+	mergeMsg, ok := nextCmd().(mergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergeResultMsg", nextCmd())
 	}
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)

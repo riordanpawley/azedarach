@@ -601,6 +601,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case mergeTargetSelectionResolvedMsg:
+		if msg.err != nil {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: msg.err.Error(),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.targetID == "main" {
+			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID)
+		}
+		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState)
+
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			action := "Merge"
@@ -4089,37 +4103,56 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 // handleMergeTargetSelection handles merge target selection
 func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
-
-	sourceWorktree, err := m.resolveIssueWorktreePath(context.Background(), msg.SourceID)
-	if err != nil || sourceWorktree == "" {
-		m.addToast(Toast{
-			Level:   ToastError,
-			Message: "Source session worktree not found",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return m, nil
-	}
-
-	if msg.TargetID == "main" {
-		return m, m.mergeToMainCmd(sourceWorktree, msg.SourceID)
-	}
-
-	targetWorktree, err := m.resolveIssueWorktreePath(context.Background(), msg.TargetID)
-	if err != nil || targetWorktree == "" {
-		m.addToast(Toast{
-			Level:   ToastError,
-			Message: "Target session worktree not found",
-			Expires: time.Now().Add(3 * time.Second),
-		})
-		return m, nil
-	}
-
 	targetState := domain.SessionIdle
 	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
 		targetState = targetSession.State
 	}
+	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState)
+}
 
-	return m, m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, msg.SourceID, msg.TargetID, targetState)
+func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetState domain.SessionState) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
+		if err != nil || sourceWorktree == "" {
+			return mergeTargetSelectionResolvedMsg{
+				sourceID:    sourceID,
+				targetID:    targetID,
+				targetState: targetState,
+				err:         fmt.Errorf("source session worktree not found"),
+			}
+		}
+
+		if targetID == "main" {
+			return mergeTargetSelectionResolvedMsg{
+				sourceID:       sourceID,
+				targetID:       targetID,
+				sourceWorktree: sourceWorktree,
+				targetWorktree: m.activeProjectPath(),
+				targetState:    targetState,
+			}
+		}
+
+		targetWorktree, err := m.resolveIssueWorktreePath(ctx, targetID)
+		if err != nil || targetWorktree == "" {
+			return mergeTargetSelectionResolvedMsg{
+				sourceID:       sourceID,
+				targetID:       targetID,
+				sourceWorktree: sourceWorktree,
+				targetState:    targetState,
+				err:            fmt.Errorf("target session worktree not found"),
+			}
+		}
+		return mergeTargetSelectionResolvedMsg{
+			sourceID:       sourceID,
+			targetID:       targetID,
+			sourceWorktree: sourceWorktree,
+			targetWorktree: targetWorktree,
+			targetState:    targetState,
+		}
+	}
 }
 
 type mergeResultMsg struct {
@@ -4147,6 +4180,15 @@ type mergePreflightActionResultMsg struct {
 	side     string
 	worktree string
 	err      error
+}
+
+type mergeTargetSelectionResolvedMsg struct {
+	sourceID       string
+	targetID       string
+	sourceWorktree string
+	targetWorktree string
+	targetState    domain.SessionState
+	err            error
 }
 
 func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
