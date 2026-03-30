@@ -11,7 +11,7 @@
 ││ Type: [●T] [ B] [ F] [ E] [ C]               Enter Create task    │
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]           Ctrl+E Edit in       │
 ││                                             $EDITOR               │
-││ [ Create Task ]                              Ctrl+U Clear form    │
+││ [ Create Task ]                              Ctrl+K Clear form    │
 ││                                              Esc Cancel           │
 ││                                                                   │
 ││                                                                   │

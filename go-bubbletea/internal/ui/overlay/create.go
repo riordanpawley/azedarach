@@ -199,7 +199,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+e":
 			return c, c.editInEditorCmd()
 
-		case "ctrl+u":
+		case "ctrl+k":
 			c.clearToDefaults()
 			return c, nil
 
@@ -338,7 +338,7 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
-				{Key: "Ctrl+U", Description: "Clear form"},
+				{Key: "Ctrl+K", Description: "Clear form"},
 				{Key: "Esc", Description: "Cancel"},
 			})
 		},

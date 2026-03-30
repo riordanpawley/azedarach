@@ -43,7 +43,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Create Task")
 	assert.Contains(t, view, "Enter")
 	assert.Contains(t, view, "Ctrl+E")
-	assert.Contains(t, view, "Ctrl+U")
+	assert.Contains(t, view, "Ctrl+K")
 }
 
 func TestCreateTaskOverlayEscapeCloses(t *testing.T) {
@@ -409,7 +409,7 @@ func TestCreateTaskOverlayDescriptionTrimming(t *testing.T) {
 	assert.Equal(t, "Description", taskMsg.Description)
 }
 
-func TestCreateTaskOverlayCtrlUClearsDraft(t *testing.T) {
+func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	overlay.title.SetValue("Keep me")
 	overlay.description.SetValue("Draft description")
@@ -417,7 +417,7 @@ func TestCreateTaskOverlayCtrlUClearsDraft(t *testing.T) {
 	overlay.priority = domain.P0
 	overlay.focusIndex = focusPriority
 
-	m, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	m, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
 	require.Nil(t, cmd)
 
 	overlay = m.(*CreateTaskOverlay)
