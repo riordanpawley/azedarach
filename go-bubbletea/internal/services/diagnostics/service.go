@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,7 @@ type SystemDiagnostics struct {
 	Worktrees       []WorktreeInfo
 	Network         NetworkInfo
 	System          SystemInfo
+	ProjectSync     []ProjectSyncDiagnostics
 	WebhookFallback *linearsync.WebhookFallbackStatus
 	Warnings        []string
 	Errors          []string
@@ -128,6 +130,7 @@ type Service struct {
 	// Cached diagnostics
 	lastDiagnostics *SystemDiagnostics
 	lastUpdate      time.Time
+	projectSync     map[string]ProjectSyncDiagnostics
 	webhookFallback *linearsync.WebhookFallbackStatus
 }
 
@@ -137,6 +140,7 @@ func NewService(tmux TmuxClient, ports PortAllocator, network NetworkChecker) *S
 		tmuxClient:     tmux,
 		portAllocator:  ports,
 		networkChecker: network,
+		projectSync:    map[string]ProjectSyncDiagnostics{},
 	}
 }
 
@@ -151,6 +155,28 @@ func (s *Service) SetWebhookFallback(status *linearsync.WebhookFallbackStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.webhookFallback = status
+}
+
+// SetProjectSyncDiagnostics stores a project-level sync diagnostics record.
+func (s *Service) SetProjectSyncDiagnostics(diag ProjectSyncDiagnostics) {
+	if strings.TrimSpace(diag.ProjectID) == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.projectSync == nil {
+		s.projectSync = map[string]ProjectSyncDiagnostics{}
+	}
+	s.projectSync[diag.ProjectID] = normalizeProjectSyncDiagnostics(diag)
+}
+
+// SetProjectSyncProjection projects worker lifecycle state into diagnostics and stores it.
+func (s *Service) SetProjectSyncProjection(projection ProjectSyncProjection) ProjectSyncDiagnostics {
+	diag := ProjectSyncDiagnosticsFromLifecycle(projection)
+	s.SetProjectSyncDiagnostics(diag)
+	return diag
 }
 
 // GetPortConflicts returns a list of ports that are allocated but not available
@@ -350,6 +376,7 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 		Worktrees:       worktreeInfos,
 		Network:         network,
 		System:          system,
+		ProjectSync:     s.projectSyncSnapshotLocked(),
 		WebhookFallback: s.webhookFallback,
 		Warnings:        warnings,
 		Errors:          errors,
@@ -463,6 +490,31 @@ func (s *Service) FormatDiagnostics(diag *SystemDiagnostics) string {
 	b.WriteString(fmt.Sprintf("  Goroutines: %d\n", diag.System.NumGoroutine))
 	b.WriteString(fmt.Sprintf("  Memory: %s\n", formatBytes(diag.System.MemoryUsage)))
 
+	if len(diag.ProjectSync) > 0 {
+		b.WriteString("\n")
+		b.WriteString("PROJECT SYNC:\n")
+		for _, project := range diag.ProjectSync {
+			b.WriteString(fmt.Sprintf("  %s: state=%s transport=%s fallback=%t retry=%d backoff=%s\n",
+				project.ProjectID,
+				project.State,
+				project.Transport,
+				project.FallbackActive,
+				project.RetryAttempts,
+				project.RetryBackoff,
+			))
+			if project.FallbackReason != "" {
+				b.WriteString(fmt.Sprintf("    fallback reason: %s\n", project.FallbackReason))
+			}
+			b.WriteString(fmt.Sprintf("    last success: %s\n", formatProjectSyncTime(project.LastSuccessAt)))
+			if project.LastError != "" {
+				b.WriteString(fmt.Sprintf("    last error: %s\n", project.LastError))
+			} else {
+				b.WriteString("    last error: none\n")
+			}
+			b.WriteString(fmt.Sprintf("    last error at: %s\n", formatProjectSyncTime(project.LastErrorAt)))
+		}
+	}
+
 	return b.String()
 }
 
@@ -516,4 +568,27 @@ func formatBytes(bytes uint64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+func (s *Service) projectSyncSnapshotLocked() []ProjectSyncDiagnostics {
+	if len(s.projectSync) == 0 {
+		return nil
+	}
+
+	projects := make([]ProjectSyncDiagnostics, 0, len(s.projectSync))
+	for _, diag := range s.projectSync {
+		projects = append(projects, cloneProjectSyncDiagnostics(diag))
+	}
+
+	sort.SliceStable(projects, func(i, j int) bool {
+		if projects[i].ProjectID != projects[j].ProjectID {
+			return projects[i].ProjectID < projects[j].ProjectID
+		}
+		if projects[i].State != projects[j].State {
+			return projects[i].State < projects[j].State
+		}
+		return projects[i].Transport < projects[j].Transport
+	})
+
+	return projects
 }
