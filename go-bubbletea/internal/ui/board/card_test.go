@@ -658,10 +658,12 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			HasUncommittedChanges: true,
 			GitAdditions:          10,
 			GitDeletions:          3,
+			PendingOperationState: "queued",
 		}
 		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
 		if !strings.Contains(got, tmuxSessionToken) ||
 			!strings.Contains(got, worktreeToken) ||
+			!strings.Contains(got, "M:queued") ||
 			!strings.Contains(got, "G:↓2") ||
 			!strings.Contains(got, "G:✎") ||
 			!strings.Contains(got, "+10/-3") {
@@ -699,9 +701,10 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			HasUncommittedChanges: true,
 			GitAdditions:          10,
 			GitDeletions:          3,
+			PendingOperationState: "running",
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "T") || !strings.Contains(got, "W") || !strings.Contains(got, "G*") {
+		if !strings.Contains(got, "T") || !strings.Contains(got, "W") || !strings.Contains(got, "M:R") || !strings.Contains(got, "G*") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
 		}
 		if strings.Contains(got, "+10/-3") {

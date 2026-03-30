@@ -29,10 +29,11 @@ func NewTaskWorkspaceOverlay(
 	task domain.Task,
 	session *domain.Session,
 	relatedTasks []domain.Task,
+	mutation *TaskMutationProgress,
 	viewportWidth int,
 	viewportHeight int,
 ) *TaskWorkspaceOverlay {
-	detail := NewDetailPanel(task, session).WithRelatedTasks(relatedTasks)
+	detail := NewDetailPanel(task, session).WithRelatedTasks(relatedTasks).WithMutationProgress(mutation)
 	actions := NewActionMenu(task, session).WithRelatedTasks(relatedTasks)
 
 	overlayWidth := viewportWidth
@@ -218,4 +219,34 @@ func (w *TaskWorkspaceOverlay) halfPageStep() int {
 		return 1
 	}
 	return step
+}
+
+// TaskID returns the selected task ID shown in the workspace.
+func (w *TaskWorkspaceOverlay) TaskID() string {
+	return w.detail.task.ID
+}
+
+// SyncTask updates workspace detail/actions from refreshed task projection data.
+func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, session *domain.Session, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
+	w.detail.task = task
+	w.detail.session = session
+	w.detail.relatedTasks = append([]domain.Task(nil), relatedTasks...)
+	w.detail.mutation = cloneTaskMutationProgress(mutation)
+
+	w.actions.task = task
+	w.actions.session = session
+	w.actions.relatedTasks = append([]domain.Task(nil), relatedTasks...)
+	w.actions.actions = w.actions.buildActions()
+	if len(w.actions.actions) == 0 {
+		w.actions.cursor = 0
+		w.actions.scrollOffset = 0
+		return
+	}
+	if w.actions.cursor < 0 {
+		w.actions.cursor = 0
+	}
+	if w.actions.cursor >= len(w.actions.actions) {
+		w.actions.cursor = len(w.actions.actions) - 1
+	}
+	w.actions.ensureCursorVisible()
 }

@@ -17,7 +17,7 @@ func TestTaskWorkspaceOverlay_View_Golden(t *testing.T) {
 		Type:        domain.TypeTask,
 		Description: "review panel structure and preserve layout",
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	got := overlay.View()
 
 	goldenPath := filepath.Join("testdata", "task_workspace_view.golden")

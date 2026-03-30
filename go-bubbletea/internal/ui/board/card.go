@@ -28,6 +28,8 @@ type RuntimeSignals struct {
 	HasUncommittedChanges bool
 	GitAdditions          int
 	GitDeletions          int
+	PendingOperationState string
+	PendingOperationID    string
 }
 
 // ChildProgress summarizes completion progress for a parent task's children.
@@ -302,6 +304,9 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
+	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, false); pendingToken != "" {
+		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
+	}
 	if signals.GitAheadCount > 0 && !hasLineChanges {
 		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G:↑%d", signals.GitAheadCount), styles.Green, s))
 	}
@@ -337,6 +342,9 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken("W", styles.Teal, s))
 	}
+	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, true); pendingToken != "" {
+		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
+	}
 
 	hasChanges := signals.HasUncommittedChanges || signals.GitAdditions > 0 || signals.GitDeletions > 0
 	if hasChanges {
@@ -346,6 +354,17 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	}
 
 	return strings.Join(parts, "")
+}
+
+func renderPendingOperationToken(state string, compact bool) string {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		return ""
+	}
+	if compact {
+		return "M:" + strings.ToUpper(string(state[0]))
+	}
+	return "M:" + state
 }
 
 func renderRuntimeSignalToken(token string, color lipgloss.Color, s *styles.Styles) string {
