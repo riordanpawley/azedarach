@@ -367,6 +367,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
+		m.syncTaskWorkspaceOverlay()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
@@ -1030,6 +1031,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			if pending, ok := pendingOperationDetails(msg.err); ok {
 				m.markTaskStatusPending(msg.taskID, msg.previousStatus, msg.newStatus, pending.OperationID, pending.State)
+				m.syncTaskWorkspaceOverlay()
 				m.addToast(Toast{
 					Level:   ToastInfo,
 					Message: formatPendingOperationMessage("Task move", msg.taskID, pending.OperationID, pending.State),
@@ -1038,6 +1040,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.loadIssuesCmd()
 			}
 			m.rollbackTaskStatus(msg.taskID, msg.previousStatus)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
@@ -1046,6 +1049,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.clearPendingTaskStatus(msg.taskID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Task moved to %s", msg.newStatus),
@@ -1743,7 +1747,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
-			return m, m.openOverlay(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.width, m.height))
+			return m, m.openOverlay(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height))
 		}
 		return m, nil
 
@@ -5129,6 +5133,52 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 	delete(m.pendingStatuses, taskIDKey(taskID))
 }
 
+func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgress {
+	if len(m.pendingStatuses) == 0 {
+		return nil
+	}
+	pending, ok := m.pendingStatuses[taskIDKey(taskID)]
+	if !ok {
+		return nil
+	}
+	return &overlay.TaskMutationProgress{
+		OperationID:    pending.operationID,
+		State:          string(pending.state),
+		PreviousStatus: pending.previousStatus,
+		TargetStatus:   pending.targetStatus,
+	}
+}
+
+func (m *Model) syncTaskWorkspaceOverlay() {
+	current := m.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		return
+	}
+
+	taskID := strings.TrimSpace(workspace.TaskID())
+	if taskID == "" {
+		return
+	}
+
+	var task *domain.Task
+	for i := range m.tasks {
+		if m.tasks[i].ID == taskID {
+			task = &m.tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return
+	}
+
+	session := task.Session
+	if session == nil {
+		session = m.sessions[taskID]
+	}
+	workspace.SyncTask(*task, session, m.tasks, m.pendingMutationForTask(taskID))
+}
+
 func (m *Model) applyPendingStatusOverlays() {
 	if len(m.pendingStatuses) == 0 {
 		return
@@ -5646,7 +5696,7 @@ func (m Model) renderBoardView() string {
 		visibleColumns,
 		cursor,
 		m.editor.GetSelectedTasks(),
-		m.runtimeSignalsByTask,
+		m.runtimeSignalsForBoard(),
 		board.BuildChildProgress(m.tasks),
 		phaseData,
 		m.editor.GetShowPhases(),
@@ -5659,6 +5709,29 @@ func (m Model) renderBoardView() string {
 		return boardView
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, toolbar, boardView)
+}
+
+func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
+	if len(m.pendingStatuses) == 0 {
+		return m.runtimeSignalsByTask
+	}
+
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses))
+	for taskID, signals := range m.runtimeSignalsByTask {
+		signalsByTask[taskID] = signals
+	}
+	for _, task := range m.tasks {
+		pending, ok := m.pendingStatuses[taskIDKey(task.ID)]
+		if !ok {
+			continue
+		}
+		signals := signalsByTask[task.ID]
+		signals.PendingOperationState = string(pending.state)
+		signals.PendingOperationID = pending.operationID
+		signalsByTask[task.ID] = signals
+	}
+
+	return signalsByTask
 }
 
 // renderCompactView renders the compact list view

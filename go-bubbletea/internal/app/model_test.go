@@ -2759,3 +2759,59 @@ func TestSessionStartedMsg_AllowsImmediateAttachFromWorkspace(t *testing.T) {
 		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
 	}
 }
+
+func TestRuntimeSignalsForBoardIncludesPendingMutationState(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {HasWorktree: true},
+	}
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-1"): {
+			previousStatus: domain.StatusOpen,
+			targetStatus:   domain.StatusInProgress,
+			operationID:    "op-status",
+			state:          protocol.OperationStateQueued,
+		},
+	}
+
+	signals := m.runtimeSignalsForBoard()
+	got, ok := signals["az-1"]
+	if !ok {
+		t.Fatal("expected runtime signals for az-1")
+	}
+	if got.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending state = %q, want %q", got.PendingOperationState, protocol.OperationStateQueued)
+	}
+	if got.PendingOperationID != "op-status" {
+		t.Fatalf("pending operation id = %q, want %q", got.PendingOperationID, "op-status")
+	}
+}
+
+func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
+	m := newTestModel()
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-1"): {
+			previousStatus: domain.StatusOpen,
+			targetStatus:   domain.StatusInProgress,
+			operationID:    "op-status",
+			state:          protocol.OperationStateRunning,
+		},
+	}
+
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected pending mutation progress")
+	}
+	if progress.State != string(protocol.OperationStateRunning) {
+		t.Fatalf("progress state = %q, want %q", progress.State, protocol.OperationStateRunning)
+	}
+	if progress.OperationID != "op-status" {
+		t.Fatalf("progress operation id = %q, want %q", progress.OperationID, "op-status")
+	}
+	if progress.PreviousStatus != domain.StatusOpen || progress.TargetStatus != domain.StatusInProgress {
+		t.Fatalf("progress statuses = %s->%s, want %s->%s", progress.PreviousStatus, progress.TargetStatus, domain.StatusOpen, domain.StatusInProgress)
+	}
+}

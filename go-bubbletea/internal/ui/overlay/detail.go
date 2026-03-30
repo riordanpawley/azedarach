@@ -15,6 +15,7 @@ import (
 type DetailPanel struct {
 	task           domain.Task
 	relatedTasks   []domain.Task
+	mutation       *TaskMutationProgress
 	session        *domain.Session
 	scrollY        int
 	contentHeight  int
@@ -22,6 +23,14 @@ type DetailPanel struct {
 	descViewHeight int
 	wrapWidth      int
 	styles         *Styles
+}
+
+// TaskMutationProgress represents in-flight mutation metadata for a task.
+type TaskMutationProgress struct {
+	OperationID    string
+	State          string
+	PreviousStatus domain.Status
+	TargetStatus   domain.Status
 }
 
 // NewDetailPanel creates a new detail panel for the given task and optional session
@@ -42,6 +51,12 @@ func NewDetailPanel(task domain.Task, session *domain.Session) *DetailPanel {
 		wrapWidth:      80,
 		styles:         New(),
 	}
+}
+
+// WithMutationProgress attaches in-flight mutation metadata for the selected task.
+func (d *DetailPanel) WithMutationProgress(progress *TaskMutationProgress) *DetailPanel {
+	d.mutation = cloneTaskMutationProgress(progress)
+	return d
 }
 
 // WithRelatedTasks attaches the current task list so the panel can render
@@ -122,6 +137,13 @@ func (d *DetailPanel) View() string {
 	b.WriteString("  ")
 	b.WriteString(valueStyle.Render(d.formatStatus(d.task.Status)))
 	b.WriteString("\n")
+
+	if d.mutation != nil {
+		b.WriteString(labelStyle.Render("Mutation:"))
+		b.WriteString("  ")
+		b.WriteString(valueStyle.Render(d.formatMutationProgress()))
+		b.WriteString("\n")
+	}
 
 	b.WriteString(labelStyle.Render("Priority:"))
 	b.WriteString("  ")
@@ -371,6 +393,24 @@ func (d *DetailPanel) formatDuration(dur time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
+func (d *DetailPanel) formatMutationProgress() string {
+	if d.mutation == nil {
+		return ""
+	}
+	state := strings.TrimSpace(strings.ToLower(d.mutation.State))
+	if state == "" {
+		state = "pending"
+	}
+	progress := state
+	if d.mutation.TargetStatus != "" {
+		progress = fmt.Sprintf("%s (%s -> %s)", state, d.formatStatus(d.mutation.PreviousStatus), d.formatStatus(d.mutation.TargetStatus))
+	}
+	if operationID := strings.TrimSpace(d.mutation.OperationID); operationID != "" {
+		return fmt.Sprintf("%s [operation %s]", progress, operationID)
+	}
+	return progress
+}
+
 // maxScroll returns the maximum scroll position
 func (d *DetailPanel) maxScroll() int {
 	visible := d.descViewHeight
@@ -378,6 +418,14 @@ func (d *DetailPanel) maxScroll() int {
 		visible = d.viewHeight
 	}
 	return max(0, d.contentHeight-visible)
+}
+
+func cloneTaskMutationProgress(progress *TaskMutationProgress) *TaskMutationProgress {
+	if progress == nil {
+		return nil
+	}
+	cloned := *progress
+	return &cloned
 }
 
 func (d *DetailPanel) halfPageStep() int {

@@ -14,7 +14,7 @@ func TestTaskWorkspaceOverlay_View_NoLocalFooterHints(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	view := overlay.View()
 
 	if strings.Contains(view, "Tab/h/l") {
@@ -31,7 +31,7 @@ func TestTaskWorkspaceOverlay_View_HasOuterBorder(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	view := overlay.View()
 
 	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
@@ -45,7 +45,7 @@ func TestTaskWorkspaceOverlay_UsesFullScreen(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	if !overlay.UsesFullScreen() {
 		t.Fatalf("expected task workspace overlay to request full-screen rendering")
 	}
@@ -58,7 +58,7 @@ func TestTaskWorkspaceOverlay_DetailScrollKeybinds(t *testing.T) {
 		Status:      domain.StatusOpen,
 		Description: strings.Repeat("line\n", 200),
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	overlay.focus = taskWorkspaceFocusDetail
 
 	initial := overlay.detail.scrollY
@@ -104,7 +104,7 @@ func TestTaskWorkspaceOverlay_StatusBindingsIncludeScroll(t *testing.T) {
 		Status:      domain.StatusOpen,
 		Description: strings.Repeat("line\n", 50),
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	bindings := overlay.StatusBindings()
 	joined := ""
 	for _, b := range bindings {
@@ -124,7 +124,7 @@ func TestTaskWorkspaceOverlay_ActionFocusUsesArrowNavigation(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	overlay.focus = taskWorkspaceFocusActions
 
 	initial := overlay.actions.cursor
@@ -148,7 +148,7 @@ func TestTaskWorkspaceOverlay_WindowResizeUpdatesDimensions(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 120, 30)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 64, Height: 20})
 	overlay = model.(*TaskWorkspaceOverlay)
 
@@ -167,7 +167,7 @@ func TestTaskWorkspaceOverlay_ActionsScrollWithCursorInShortViewport(t *testing.
 		Title:  "Task",
 		Status: domain.StatusOpen,
 	}
-	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 76, 14)
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 76, 14)
 	overlay.focus = taskWorkspaceFocusActions
 
 	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyEnd})
@@ -189,5 +189,51 @@ func TestTaskWorkspaceOverlay_ActionsScrollWithCursorInShortViewport(t *testing.
 			overlay.actions.scrollOffset,
 			overlay.actions.scrollOffset+overlay.actions.viewportRows,
 		)
+	}
+}
+
+func TestTaskWorkspaceOverlay_View_ShowsMutationProgress(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusInProgress,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, &TaskMutationProgress{
+		OperationID:    "op-status",
+		State:          "queued",
+		PreviousStatus: domain.StatusOpen,
+		TargetStatus:   domain.StatusInProgress,
+	}, 120, 30)
+
+	view := overlay.View()
+	if !strings.Contains(view, "Mutation:") {
+		t.Fatalf("expected mutation row in detail panel, got: %q", view)
+	}
+	if !strings.Contains(view, "queued") || !strings.Contains(view, "op-status") {
+		t.Fatalf("expected mutation state and operation id in detail panel, got: %q", view)
+	}
+}
+
+func TestTaskWorkspaceOverlay_SyncTaskRefreshesMutationProgress(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30)
+	overlay.SyncTask(domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusInProgress,
+	}, nil, nil, &TaskMutationProgress{
+		OperationID:    "op-sync",
+		State:          "running",
+		PreviousStatus: domain.StatusOpen,
+		TargetStatus:   domain.StatusInProgress,
+	})
+
+	view := overlay.View()
+	if !strings.Contains(view, "running") || !strings.Contains(view, "op-sync") {
+		t.Fatalf("expected synced mutation progress in detail panel, got: %q", view)
 	}
 }
