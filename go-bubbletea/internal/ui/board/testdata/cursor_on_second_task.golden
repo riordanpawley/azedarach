@@ -1,18 +1,18 @@
  Open (3)                      In Progress (2)               Blocked (1)                   Done (2)                     
 ╭────────────────────────────╮╭────────────────────────────╮╭────────────────────────────╮╭────────────────────────────╮
-│  P2  az-1 [task]           ││  P1  az-3 [bug]            ││  P0  az-6 [task]           ││  P3  az-7 [task]           │
+│  P2  az-1  T               ││  P1  az-3  B               ││  P0  az-6  T               ││  P3  az-7  T               │
 │ Implement user authentic   ││ API endpoint refactor      ││ Deploy to production       ││ Setup CI/CD pipeline       │
 │ ation                      ││                            ││                            ││                            │
 │                            ││                            ││                            ││                            │
 ╰────────────────────────────╯╰────────────────────────────╯╰────────────────────────────╯╰────────────────────────────╯
 ╭────────────────────────────╮╭────────────────────────────╮                              ╭────────────────────────────╮
-│  P1  ▶az-2 [feature]       ││  P2  az-4 [epic]           │                              │  P4  az-8 [task]           │
+│  P1  ▶az-2  F              ││  P2  az-4  E               │                              │  P4  az-8  T               │
 │ Fix login redirect bug     ││ Database migration epic    │                              │ Configure monitoring       │
 │                            ││                            │                              │                            │
 │                            ││                            │                              │                            │
 ╰────────────────────────────╯╰────────────────────────────╯                              ╰────────────────────────────╯
 ╭────────────────────────────╮                                                                                          
-│  P3  az-5 [task]           │                                                                                          
+│  P3  az-5  T               │                                                                                          
 │ Add password reset flow    │                                                                                          
 │                            │                                                                                          
 │                            │                                                                                          

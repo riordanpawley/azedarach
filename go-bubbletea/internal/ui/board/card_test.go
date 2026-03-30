@@ -89,9 +89,34 @@ func TestRenderCard_Basic(t *testing.T) {
 		t.Errorf("Card should contain priority badge, got: %s", stripped)
 	}
 
-	// Should contain type token
-	if !strings.Contains(stripped, "[task]") {
-		t.Errorf("Card should contain type token, got: %s", stripped)
+	// Should contain compact type token
+	if !strings.Contains(stripped, " T ") {
+		t.Errorf("Card should contain compact type token, got: %s", stripped)
+	}
+}
+
+func TestRenderTaskTypeBadge_UsesSingleLetter(t *testing.T) {
+	s := styles.New()
+	tests := []struct {
+		name     string
+		taskType domain.TaskType
+		want     string
+	}{
+		{name: "task", taskType: domain.TypeTask, want: " T "},
+		{name: "bug", taskType: domain.TypeBug, want: " B "},
+		{name: "feature", taskType: domain.TypeFeature, want: " F "},
+		{name: "epic", taskType: domain.TypeEpic, want: " E "},
+		{name: "chore", taskType: domain.TypeChore, want: " C "},
+		{name: "unknown", taskType: domain.TaskType("other"), want: " ? "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripANSI(renderTaskTypeBadge(tt.taskType, s))
+			if got != tt.want {
+				t.Fatalf("renderTaskTypeBadge(%q) = %q, want %q", tt.taskType, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -308,7 +333,7 @@ func TestRenderCard_WithChildProgressAndSession(t *testing.T) {
 		},
 	}
 
-	result := renderCard(task, nil, false, false, 35, &ChildProgress{Total: 2, Done: 1}, nil, false, s)
+	result := renderCard(task, nil, false, false, 46, &ChildProgress{Total: 2, Done: 1}, nil, false, s)
 	stripped := stripANSI(result)
 
 	// Should contain both session status and child progress
@@ -562,7 +587,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", "[task]", "WAIT", "2d 2h", tmuxSessionToken, worktreeToken, "G:✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", "WAIT", "2d 2h", tmuxSessionToken, worktreeToken, "G:✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}

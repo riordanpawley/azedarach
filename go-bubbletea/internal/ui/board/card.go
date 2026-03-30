@@ -93,7 +93,7 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	headerParts := []string{
 		priorityBadge,
 		issueToken,
-		fmt.Sprintf("[%s]", task.Type.String()),
+		renderTaskTypeBadge(task.Type, s),
 	}
 	if phaseBadge != "" {
 		headerParts = append(headerParts, phaseBadge)
@@ -132,6 +132,39 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return cardStyle.Render(content)
+}
+
+func renderTaskTypeBadge(taskType domain.TaskType, s *styles.Styles) string {
+	letter := taskType.Short()
+	background := styles.Surface1
+
+	switch taskType {
+	case domain.TypeEpic:
+		background = styles.Mauve
+	case domain.TypeFeature:
+		background = styles.Green
+	case domain.TypeBug:
+		background = styles.Red
+	case domain.TypeTask:
+		background = styles.Blue
+	case domain.TypeChore:
+		background = styles.Yellow
+	}
+
+	badgeStyle := lipgloss.NewStyle().
+		Foreground(styles.Base).
+		Background(background).
+		Bold(true).
+		Padding(0, 1)
+
+	if s != nil {
+		badgeStyle = s.TypeBadge.Copy().
+			Foreground(styles.Base).
+			Background(background).
+			Bold(true)
+	}
+
+	return badgeStyle.Render(letter)
 }
 
 func renderTitleBodyLines(title string, maxLineLen int, maxLines int) []string {
