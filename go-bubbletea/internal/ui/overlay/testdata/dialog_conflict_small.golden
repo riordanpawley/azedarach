@@ -3,9 +3,9 @@
 │────────────────────────────────────────────────────────────────────│
 │⚠ Merge conflicts detected!                                         │
 │                                                                    │
-│Have AI resolve this merge in the session now? (c = yes)            │
-│                                                                    │
-│Conflicted files:                                                   │
+│AI resolve now? Press c.                                            │
+│▸ internal/ui/app.go                                                │
+│  internal/domain/task.go                                           │
 │                                                                    │
 │                                                                    │
 │                                                                    │

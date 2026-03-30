@@ -2451,6 +2451,76 @@ func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T)
 	}
 }
 
+func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToManualHint(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.tmuxAvailable = true
+	m.daemonClient = nil
+	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
+	m.nav.SelectTask("az-1", 0)
+
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	if cmd != nil {
+		t.Fatal("expected no attach command when daemon is unavailable")
+	}
+	newModel := result.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatal("expected warning toast when daemon is unavailable")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if lastToast.Level != ToastWarning {
+		t.Fatalf("toast level = %v, want warning", lastToast.Level)
+	}
+	if !strings.Contains(lastToast.Message, "Daemon unavailable") {
+		t.Fatalf("toast message = %q, want daemon unavailable guidance", lastToast.Message)
+	}
+	if !strings.Contains(lastToast.Message, "tmux attach-session -t az-1") {
+		t.Fatalf("toast message = %q, want manual attach command", lastToast.Message)
+	}
+}
+
+func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			return protocol.ResponseEnvelope{}, fmt.Errorf("daemon offline")
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	msg := m.resolveConflictWithAICmd("az-1")()
+	fallback, ok := msg.(conflictResolveFallbackMsg)
+	if !ok {
+		t.Fatalf("resolveConflictWithAICmd returned %T, want conflictResolveFallbackMsg", msg)
+	}
+	if fallback.issueID != "az-1" {
+		t.Fatalf("fallback issue id = %q, want az-1", fallback.issueID)
+	}
+	if fallback.err == nil || !strings.Contains(fallback.err.Error(), "daemon offline") {
+		t.Fatalf("fallback err = %v, want daemon offline", fallback.err)
+	}
+
+	result, _ := m.Update(fallback)
+	newModel := result.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatal("expected warning toast for fallback guidance")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if lastToast.Level != ToastWarning {
+		t.Fatalf("toast level = %v, want warning", lastToast.Level)
+	}
+	if !strings.Contains(lastToast.Message, "tmux attach-session -t az-1") {
+		t.Fatalf("toast message = %q, want manual attach command", lastToast.Message)
+	}
+}
+
 func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()

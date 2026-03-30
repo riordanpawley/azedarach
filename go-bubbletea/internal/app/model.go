@@ -472,6 +472,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case conflictResolveFallbackMsg:
+		m.addToast(Toast{
+			Level: ToastWarning,
+			Message: fmt.Sprintf(
+				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (AI can help resolve)",
+				msg.err,
+				msg.issueID,
+			),
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
+
 	case daemonStreamEventMsg:
 		if m.daemonEvents == nil {
 			return m, nil
@@ -1950,6 +1962,11 @@ type sessionStoppedMsg struct {
 }
 
 type sessionErrorMsg struct {
+	issueID string
+	err     error
+}
+
+type conflictResolveFallbackMsg struct {
 	issueID string
 	err     error
 }
@@ -3892,6 +3909,19 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 	}
 }
 
+func (m Model) resolveConflictWithAICmd(issueID string) tea.Cmd {
+	return func() tea.Msg {
+		msg := m.attachSessionCmd(issueID)()
+		if errMsg, ok := msg.(sessionErrorMsg); ok {
+			return conflictResolveFallbackMsg{
+				issueID: issueID,
+				err:     errMsg.err,
+			}
+		}
+		return msg
+	}
+}
+
 // createPRCmd generates the gh pr create command
 func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
@@ -3987,7 +4017,15 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 			})
 			return m, nil
 		}
-		return m, m.attachSessionCmd(task.ID)
+		if m.daemonClient == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (AI can help resolve)", task.ID),
+				Expires: time.Now().Add(8 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.resolveConflictWithAICmd(task.ID)
 
 	default:
 		return m, nil
