@@ -1125,6 +1125,7 @@ func (m Model) View() string {
 					Height(overlayHeight).
 					Render(overlayView)
 			}
+			overlayWidth, overlayHeight = renderedBlockSize(overlayView)
 
 			contentView = lipgloss.NewStyle().
 				MaxWidth(m.width).
@@ -1322,6 +1323,18 @@ func nonSpaceBounds(line string) (left int, right int, ok bool) {
 func lineIsVisuallyEmpty(line string) bool {
 	withoutANSI := ansiEscapeLinePattern.ReplaceAllString(line, "")
 	return strings.TrimSpace(withoutANSI) == ""
+}
+
+func renderedBlockSize(view string) (width, height int) {
+	width = lipgloss.Width(view)
+	height = lipgloss.Height(view)
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	return width, height
 }
 
 // buildColumns converts tasks into board columns, applying filter and sort
