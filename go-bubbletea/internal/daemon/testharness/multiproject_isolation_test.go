@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,9 +21,12 @@ const (
 )
 
 type multiprojectDaemon struct {
-	harness *Harness
-	store   *daemonstate.Store
-	hub     *daemonpublish.Hub
+	harness             *Harness
+	store               *daemonstate.Store
+	hub                 *daemonpublish.Hub
+	fallbackProjectID   string
+	fallbackActivatedMu sync.Mutex
+	fallbackActivated   map[string]bool
 }
 
 type multiprojectSessionRequest struct {
@@ -53,6 +57,26 @@ func (d *multiprojectDaemon) Command(ctx context.Context, req protocol.RequestEn
 
 	switch req.Command {
 	case multiprojectUpsertCommand:
+		if d.fallbackProjectID != "" && req.Meta.ProjectID == d.fallbackProjectID {
+			d.fallbackActivatedMu.Lock()
+			activated := d.fallbackActivated[req.Meta.ProjectID]
+			if d.fallbackActivated == nil {
+				d.fallbackActivated = map[string]bool{}
+			}
+			if !activated {
+				d.fallbackActivated[req.Meta.ProjectID] = true
+				d.fallbackActivatedMu.Unlock()
+				if err := d.harness.appendEvent("daemon.multiproject.fallback.activated", map[string]any{
+					"project_id": req.Meta.ProjectID,
+					"command":    req.Command,
+				}); err != nil {
+					return protocol.ResponseEnvelope{}, err
+				}
+				return protocol.ResponseEnvelope{}, fmt.Errorf("project %s switched to fallback", req.Meta.ProjectID)
+			}
+			d.fallbackActivatedMu.Unlock()
+		}
+
 		var cmd multiprojectSessionRequest
 		if err := json.Unmarshal(req.Body, &cmd); err != nil {
 			return protocol.ResponseEnvelope{}, fmt.Errorf("decode upsert request: %w", err)
@@ -421,5 +445,133 @@ func TestMultiprojectIsolationScopedSnapshots(t *testing.T) {
 	}
 	if got := snapA.Sessions[sharedSessionID]; got.IssueID != "issue-a" {
 		t.Fatalf("proj-a session issue_id after proj-b write = %q, want %q", got.IssueID, "issue-a")
+	}
+}
+
+func TestMultiprojectFallbackDoesNotBlockHealthyProject(t *testing.T) {
+	h := New(Config{
+		BaseDir:   t.TempDir(),
+		ProjectID: "proj-root",
+	})
+	if err := h.Boot(); err != nil {
+		t.Fatalf("Boot: %v", err)
+	}
+	defer func() {
+		if err := h.Shutdown(); err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	}()
+
+	daemon := newMultiprojectDaemon(h)
+	daemon.fallbackProjectID = "proj-b"
+	daemon.fallbackActivated = make(map[string]bool)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	clientA := daemonclient.New(daemon).WithProjectID("proj-a")
+	clientB := daemonclient.New(daemon).WithProjectID("proj-b")
+
+	upsert := func(client *daemonclient.Client, projectID, issueID string) (daemonstate.Snapshot, error) {
+		reqBody, err := json.Marshal(multiprojectSessionRequest{
+			SessionID: projectID + "-sess",
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateAttached,
+		})
+		if err != nil {
+			return daemonstate.Snapshot{}, fmt.Errorf("marshal request %s: %w", projectID, err)
+		}
+
+		resp, err := client.Command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       projectID + "-upsert",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         multiprojectUpsertCommand,
+			SentAt:          time.Now().UTC(),
+			Body:            reqBody,
+		})
+		if err != nil {
+			return daemonstate.Snapshot{}, err
+		}
+
+		var snapshot daemonstate.Snapshot
+		if err := json.Unmarshal(resp.Body, &snapshot); err != nil {
+			return daemonstate.Snapshot{}, fmt.Errorf("decode snapshot %s: %w", projectID, err)
+		}
+		return snapshot, nil
+	}
+
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		snap, err := upsert(clientA, "proj-a", "issue-a")
+		if err != nil {
+			errCh <- fmt.Errorf("proj-a upsert: %w", err)
+			return
+		}
+		if snap.ProjectID != "proj-a" {
+			errCh <- fmt.Errorf("proj-a snapshot project_id = %q, want %q", snap.ProjectID, "proj-a")
+			return
+		}
+		if snap.Revision != 1 {
+			errCh <- fmt.Errorf("proj-a snapshot revision = %d, want 1", snap.Revision)
+			return
+		}
+		if len(snap.Sessions) != 1 {
+			errCh <- fmt.Errorf("proj-a snapshot sessions = %d, want 1", len(snap.Sessions))
+			return
+		}
+		errCh <- nil
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, err := upsert(clientB, "proj-b", "issue-b")
+		if err == nil {
+			errCh <- fmt.Errorf("proj-b first upsert unexpectedly succeeded")
+			return
+		}
+		if got := err.Error(); !strings.Contains(got, "switched to fallback") {
+			errCh <- fmt.Errorf("proj-b first upsert error = %q, want fallback activation", got)
+			return
+		}
+
+		snap, err := upsert(clientB, "proj-b", "issue-b")
+		if err != nil {
+			errCh <- fmt.Errorf("proj-b retry upsert: %w", err)
+			return
+		}
+		if snap.ProjectID != "proj-b" {
+			errCh <- fmt.Errorf("proj-b retry snapshot project_id = %q, want %q", snap.ProjectID, "proj-b")
+			return
+		}
+		if snap.Revision != 1 {
+			errCh <- fmt.Errorf("proj-b retry snapshot revision = %d, want 1", snap.Revision)
+			return
+		}
+		if len(snap.Sessions) != 1 {
+			errCh <- fmt.Errorf("proj-b retry snapshot sessions = %d, want 1", len(snap.Sessions))
+			return
+		}
+		errCh <- nil
+	}()
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	events := readHarnessEvents(t, h.LogFilePath())
+	if countEvent(events, "daemon.multiproject.fallback.activated") != 1 {
+		t.Fatalf("fallback activated events = %d, want 1", countEvent(events, "daemon.multiproject.fallback.activated"))
+	}
+	if countEvent(events, "daemon.multiproject.command") != 2 {
+		t.Fatalf("command events = %d, want 2", countEvent(events, "daemon.multiproject.command"))
 	}
 }

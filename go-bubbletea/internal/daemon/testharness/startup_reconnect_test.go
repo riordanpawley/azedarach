@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,7 @@ type scenarioDaemon struct {
 	startCalls  atomic.Int32
 	handshakeOK atomic.Int32
 	snapshotRev atomic.Uint64
+	startErr    error
 	startedCh   chan struct{}
 	releaseCh   chan struct{}
 	once        sync.Once
@@ -60,6 +62,12 @@ func (s *scenarioDaemon) Start(ctx context.Context) error {
 	_ = ctx
 
 	s.startCalls.Add(1)
+	if s.startErr != nil {
+		_ = s.harness.appendEvent("daemon.start.failed", map[string]any{
+			"error": s.startErr.Error(),
+		})
+		return s.startErr
+	}
 	if err := s.harness.Boot(); err != nil {
 		return err
 	}
@@ -273,5 +281,60 @@ func TestStartupReconnectScenarioAC(t *testing.T) {
 	}
 	if attachRevisions[0] != 0 || attachRevisions[1] != 0 || attachRevisions[2] != 1 {
 		t.Fatalf("snapshot attach revisions = %v, want [0 0 1]", attachRevisions)
+	}
+}
+
+func TestStartupBootstrapFailureDiagnosticsMatrix(t *testing.T) {
+	base := t.TempDir()
+	h := New(Config{
+		BaseDir:      base,
+		ProjectID:    "proj-bootstrap-failure",
+		OTELExporter: "http://127.0.0.1:4318",
+	})
+
+	if err := h.Boot(); err != nil {
+		t.Fatalf("Boot: %v", err)
+	}
+	if err := h.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	scenario := &scenarioDaemon{
+		harness:   h,
+		startErr:  errors.New("bootstrap rejected"),
+		startedCh: make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+	orch := autoclient.NewAutostartOrchestrator(scenario, scenario)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := orch.EnsureAttached(ctx, protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "client-bootstrap-failure",
+		ClientVersion:   "dev",
+		Capabilities:    []string{"attach", "snapshot"},
+	})
+	if err == nil {
+		t.Fatal("EnsureAttached() error = nil, want bootstrap failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "autostart daemon: bootstrap rejected") {
+		t.Fatalf("EnsureAttached() error = %q, want autostart failure context", got)
+	}
+
+	if got := scenario.startCalls.Load(); got != 1 {
+		t.Fatalf("start calls = %d, want 1", got)
+	}
+
+	events := readHarnessEvents(t, h.LogFilePath())
+	if countEvent(events, "daemon.start.failed") != 1 {
+		t.Fatalf("start failed events = %d, want 1", countEvent(events, "daemon.start.failed"))
+	}
+	if countEvent(events, "daemon.harness.boot") != 1 {
+		t.Fatalf("boot events = %d, want 1", countEvent(events, "daemon.harness.boot"))
+	}
+	if countEvent(events, "daemon.harness.shutdown") != 1 {
+		t.Fatalf("shutdown events = %d, want 1", countEvent(events, "daemon.harness.shutdown"))
 	}
 }

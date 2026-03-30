@@ -250,3 +250,116 @@ func TestFormatDiagnosticsPreservesLegacySectionsWhenProjectSyncPresent(t *testi
 		t.Fatalf("FormatDiagnostics() missing project sync line: %s", output)
 	}
 }
+
+func TestProjectSyncDiagnosticsRegressionMatrix(t *testing.T) {
+	tmux := &mockTmuxClient{sessions: []string{}}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
+	service := NewService(tmux, ports, network)
+
+	started := time.Date(2026, 3, 30, 10, 15, 0, 0, time.UTC)
+	lastErrorAt := time.Date(2026, 3, 30, 10, 30, 0, 0, time.UTC)
+
+	healthyLifecycle, err := linearsync.NewProjectWorkerLifecycle("proj-a")
+	if err != nil {
+		t.Fatalf("NewProjectWorkerLifecycle(healthy) error = %v", err)
+	}
+	healthyLifecycle, err = healthyLifecycle.Transition(linearsync.WorkerTriggerHealthy)
+	if err != nil {
+		t.Fatalf("Transition(healthy) error = %v", err)
+	}
+
+	degradedLifecycle, err := linearsync.NewProjectWorkerLifecycle("proj-b")
+	if err != nil {
+		t.Fatalf("NewProjectWorkerLifecycle(degraded) error = %v", err)
+	}
+	degradedLifecycle, err = degradedLifecycle.Transition(linearsync.WorkerTriggerDegraded)
+	if err != nil {
+		t.Fatalf("Transition(degraded) error = %v", err)
+	}
+	degradedLifecycle, err = degradedLifecycle.Transition(linearsync.WorkerTriggerRetrying)
+	if err != nil {
+		t.Fatalf("Transition(retrying) error = %v", err)
+	}
+
+	stoppedLifecycle, err := linearsync.NewProjectWorkerLifecycle("proj-c")
+	if err != nil {
+		t.Fatalf("NewProjectWorkerLifecycle(stopped) error = %v", err)
+	}
+	stoppedLifecycle, err = stoppedLifecycle.Transition(linearsync.WorkerTriggerStopped)
+	if err != nil {
+		t.Fatalf("Transition(stopped) error = %v", err)
+	}
+
+	service.SetProjectSyncProjection(ProjectSyncProjection{
+		Lifecycle:     degradedLifecycle,
+		Fallback:      linearsync.WebhookFallbackStatus{Mode: "failed", Healthy: false, Reason: "Timed out registering Linear webhook after 4000ms"},
+		LastSuccessAt: &started,
+		LastError:     "retry queue stalled",
+		LastErrorAt:   &lastErrorAt,
+		RetryAttempts: 2,
+		RetryPolicy:   linearsync.RetryPolicy{MaxAttempts: 5, BaseDelay: 5 * time.Second, MaxExponent: 8},
+	})
+	service.SetProjectSyncProjection(ProjectSyncProjection{
+		Lifecycle:     healthyLifecycle,
+		Fallback:      linearsync.WebhookFallbackStatus{Mode: "sdk", Healthy: true},
+		LastSuccessAt: &started,
+		RetryAttempts: 0,
+		RetryPolicy:   linearsync.DefaultRetryPolicy(),
+	})
+	service.SetProjectSyncProjection(ProjectSyncProjection{
+		Lifecycle:   stoppedLifecycle,
+		Fallback:    linearsync.WebhookFallbackStatus{Mode: "manual", Healthy: false, Reason: "fallback retained during shutdown"},
+		LastError:   "worker stopped cleanly",
+		LastErrorAt: &lastErrorAt,
+		RetryPolicy: linearsync.DefaultRetryPolicy(),
+	})
+
+	diag := service.CollectDiagnostics(context.Background(), map[string]*domain.Session{}, nil)
+	if diag == nil {
+		t.Fatal("CollectDiagnostics() returned nil")
+	}
+	if got, want := len(diag.ProjectSync), 3; got != want {
+		t.Fatalf("len(ProjectSync) = %d, want %d", got, want)
+	}
+	if got, want := diag.ProjectSync[0].ProjectID, "proj-a"; got != want {
+		t.Fatalf("ProjectSync[0].ProjectID = %q, want %q", got, want)
+	}
+	if got, want := diag.ProjectSync[1].ProjectID, "proj-b"; got != want {
+		t.Fatalf("ProjectSync[1].ProjectID = %q, want %q", got, want)
+	}
+	if got, want := diag.ProjectSync[2].ProjectID, "proj-c"; got != want {
+		t.Fatalf("ProjectSync[2].ProjectID = %q, want %q", got, want)
+	}
+	if got, want := diag.ProjectSync[0].Transport, projectSyncTransportPrimary; got != want {
+		t.Fatalf("proj-a transport = %q, want %q", got, want)
+	}
+	if got, want := diag.ProjectSync[1].Transport, projectSyncTransportFallback; got != want {
+		t.Fatalf("proj-b transport = %q, want %q", got, want)
+	}
+	if got, want := diag.ProjectSync[2].State, linearsync.WorkerStateStopped; got != want {
+		t.Fatalf("proj-c state = %q, want %q", got, want)
+	}
+
+	output := service.FormatDiagnostics(diag)
+	for _, section := range []string{"NETWORK:", "SESSIONS:", "SYSTEM:", "PROJECT SYNC:"} {
+		if !strings.Contains(output, section) {
+			t.Fatalf("FormatDiagnostics() missing section %s: %s", section, output)
+		}
+	}
+	if !strings.Contains(output, "proj-a: state=healthy transport=primary fallback=false retry=0 backoff=0s") {
+		t.Fatalf("FormatDiagnostics() missing healthy projection line: %s", output)
+	}
+	if !strings.Contains(output, "proj-b: state=retrying transport=fallback fallback=true retry=2 backoff=20s") {
+		t.Fatalf("FormatDiagnostics() missing degraded projection line: %s", output)
+	}
+	if !strings.Contains(output, "proj-c: state=stopped transport=fallback fallback=true retry=0 backoff=0s") {
+		t.Fatalf("FormatDiagnostics() missing stopped projection line: %s", output)
+	}
+	if !strings.Contains(output, "fallback reason: project proj-c retains fallback while worker is stopped: fallback retained during shutdown") {
+		t.Fatalf("FormatDiagnostics() missing fallback reason detail: %s", output)
+	}
+	if !strings.Contains(output, "last error: worker stopped cleanly") {
+		t.Fatalf("FormatDiagnostics() missing stopped worker error detail: %s", output)
+	}
+}
