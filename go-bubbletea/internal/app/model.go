@@ -211,6 +211,9 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
+	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
+		repoDir = normalizedRepoDir
+	}
 	logFilePath := resolveTUILogFilePath(cfg)
 	logger := newTUILogger(logFilePath)
 	if err != nil {
@@ -478,6 +481,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Level:   ToastError,
 			Message: fmt.Sprintf("Session error: %s - %v", msg.issueID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+
+	case conflictResolveFallbackMsg:
+		m.addToast(Toast{
+			Level: ToastWarning,
+			Message: fmt.Sprintf(
+				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (AI can help resolve)",
+				msg.err,
+				msg.issueID,
+			),
+			Expires: time.Now().Add(8 * time.Second),
 		})
 		return m, nil
 
@@ -1963,6 +1978,11 @@ type sessionStoppedMsg struct {
 }
 
 type sessionErrorMsg struct {
+	issueID string
+	err     error
+}
+
+type conflictResolveFallbackMsg struct {
 	issueID string
 	err     error
 }
@@ -3982,6 +4002,19 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 	}
 }
 
+func (m Model) resolveConflictWithAICmd(issueID string) tea.Cmd {
+	return func() tea.Msg {
+		msg := m.attachSessionCmd(issueID)()
+		if errMsg, ok := msg.(sessionErrorMsg); ok {
+			return conflictResolveFallbackMsg{
+				issueID: issueID,
+				err:     errMsg.err,
+			}
+		}
+		return msg
+	}
+}
+
 // createPRCmd generates the gh pr create command
 func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
@@ -4068,7 +4101,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 		return m, nil
 
 	case resolution.ResolveWithClaude:
-		// Attach to tmux session for Claude to resolve
+		// Attach to tmux session so AI can resolve merge conflicts in-session.
 		if !m.tmuxAvailable {
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -4077,12 +4110,15 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 			})
 			return m, nil
 		}
-		m.addToast(Toast{
-			Level:   ToastInfo,
-			Message: fmt.Sprintf("Run: tmux attach-session -t %s (Claude can help resolve)", task.ID),
-			Expires: time.Now().Add(8 * time.Second),
-		})
-		return m, nil
+		if m.daemonClient == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (AI can help resolve)", task.ID),
+				Expires: time.Now().Add(8 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.resolveConflictWithAICmd(task.ID)
 
 	default:
 		return m, nil

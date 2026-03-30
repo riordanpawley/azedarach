@@ -84,6 +84,9 @@ func New(cfg Config) *Daemon {
 			cfg.RepoDir = "."
 		}
 	}
+	if normalizedRepoDir, err := appconfig.ResolveProjectRoot(cfg.RepoDir); err == nil {
+		cfg.RepoDir = normalizedRepoDir
+	}
 	if cfg.BaseBranch == "" {
 		cfg.BaseBranch = "main"
 	}

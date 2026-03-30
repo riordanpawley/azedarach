@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
@@ -80,12 +81,16 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if repoDir := strings.TrimSpace(cfg.repoDir); repoDir != "" {
+	repoDir := strings.TrimSpace(cfg.repoDir)
+	if normalizedRepoDir, err := appconfig.ResolveProjectRoot(repoDir); err == nil {
+		repoDir = normalizedRepoDir
+	}
+	if repoDir != "" {
 		if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil && logger != nil {
 			logger.Warn("failed to prepare daemon operation database directory", "repo_dir", repoDir, "error", err)
 		}
 	}
-	store := opstore.New(cfg.repoDir, logger)
+	store := opstore.New(repoDir, logger)
 	adapter := &operationStoreAdapter{
 		repo:         store,
 		hub:          cfg.hub,

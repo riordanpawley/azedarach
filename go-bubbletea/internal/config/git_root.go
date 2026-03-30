@@ -102,3 +102,29 @@ func baseGitRootFromCommonDir(startDir, commonDir string) (string, error) {
 
 	return "", fmt.Errorf("resolve git common dir: expected .git path, got %s", commonDir)
 }
+
+// ResolveProjectRoot returns an absolute directory suitable for project-scoped
+// state. For Git repositories (including worktrees), this is always the base
+// repository root. For non-Git paths, this falls back to the absolute path.
+func ResolveProjectRoot(startPath string) (string, error) {
+	if strings.TrimSpace(startPath) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		startPath = cwd
+	}
+
+	abs, err := filepath.Abs(startPath)
+	if err != nil {
+		return "", err
+	}
+	if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+
+	if baseRoot, err := ResolveBaseGitRoot(abs); err == nil {
+		return baseRoot, nil
+	}
+	return abs, nil
+}

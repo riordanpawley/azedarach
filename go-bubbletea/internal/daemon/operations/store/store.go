@@ -107,6 +107,9 @@ func New(repoDir string, logger *slog.Logger) *SQLiteStore {
 			logger.Warn("failed to resolve daemon operation database path", "repoDir", repoDir, "error", err)
 		}
 		fallbackRoot := strings.TrimSpace(repoDir)
+		if normalizedRoot, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
+			fallbackRoot = normalizedRoot
+		}
 		if fallbackRoot == "" {
 			fallbackRoot = "."
 		}
@@ -564,19 +567,9 @@ func resolveDBPath(repoDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	baseRoot, err := config.ResolveBaseGitRoot(absStart)
+	baseRoot, err := config.ResolveProjectRoot(absStart)
 	if err == nil {
 		return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
-	}
-	for dir := absStart; ; dir = filepath.Dir(dir) {
-		candidate := filepath.Join(dir, ".azedarach", "azedarach.db")
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
 	}
 	return "", fmt.Errorf("resolve operation db path from %s: %w", absStart, err)
 }

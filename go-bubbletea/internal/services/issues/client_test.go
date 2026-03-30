@@ -843,18 +843,20 @@ func TestResolveDBPathUsesEnvOverride(t *testing.T) {
 	assert.Equal(t, "/tmp/custom-azedarach.db", got)
 }
 
-func TestResolveDBPathBySearchFindsParentStore(t *testing.T) {
+func TestResolveDBPathUsesBaseRepoForWorktree(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
-	worktree := filepath.Join(repo, "worktree-a")
-	storeDir := filepath.Join(repo, ".azedarach")
-	require.NoError(t, os.MkdirAll(worktree, 0o755))
-	require.NoError(t, os.MkdirAll(storeDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(storeDir, "azedarach.db"), []byte(""), 0o644))
+	worktree := filepath.Join(base, "wt")
+	start := filepath.Join(worktree, "go-bubbletea")
 
-	got, err := resolveDBPathBySearch(worktree)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755))
+	require.NoError(t, os.MkdirAll(start, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644))
+
+	t.Setenv("PATH", "")
+	got, err := resolveDBPath(start)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(storeDir, "azedarach.db"), got)
+	assert.Equal(t, filepath.Join(repo, ".azedarach", "azedarach.db"), got)
 }
 
 func TestResolveDBPathFallsBackToGitMarkerWhenGitUnavailable(t *testing.T) {

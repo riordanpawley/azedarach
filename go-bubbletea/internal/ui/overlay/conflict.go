@@ -140,7 +140,7 @@ func (c *ConflictOverlay) View() string {
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(c.overlayStyles, []keybinds.Binding{
 				{Key: "j/k", Description: "navigate"},
-				{Key: "c", Description: "resolve"},
+				{Key: "c", Description: "ai resolve"},
 				{Key: "o", Description: "open"},
 				{Key: "a", Description: "abort"},
 				{Key: "Esc", Description: "close"},
@@ -170,19 +170,14 @@ func (c *ConflictOverlay) renderConflictList(width int) string {
 		Foreground(styles.Red).
 		Bold(true)
 	b.WriteString(headerStyle.Render("⚠ Merge conflicts detected!"))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	b.WriteString(c.overlayStyles.Footer.Render("AI resolve now? Press c."))
+	b.WriteString("\n")
 
 	if len(c.files) == 0 {
 		b.WriteString(c.overlayStyles.Footer.Render("No conflicted files."))
 		return strings.TrimRight(b.String(), "\n")
 	}
-
-	filesLabel := lipgloss.NewStyle().
-		Foreground(styles.Yellow).
-		Bold(true).
-		Render("Conflicted files:")
-	b.WriteString(filesLabel)
-	b.WriteString("\n")
 
 	maxWidth := max(24, width-2)
 	for i, file := range c.files {

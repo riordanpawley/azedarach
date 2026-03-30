@@ -26,6 +26,35 @@ type fakeDaemonTransport struct {
 	commandFn   func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 }
 
+func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	start := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatalf("MkdirAll(start): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt() error = %v", err)
+	}
+	if deps.RepoDir != repo {
+		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
+	}
+	if deps.ProjectID != filepath.Base(repo) {
+		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, filepath.Base(repo))
+	}
+}
+
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	if f.handshakeFn != nil {
 		return f.handshakeFn(ctx, hello)
