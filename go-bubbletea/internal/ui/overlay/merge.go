@@ -30,6 +30,8 @@ const (
 
 // MergeSelectOverlay allows selecting a merge target task
 type MergeSelectOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	source        *domain.Task  // The issue being merged FROM
 	candidates    []MergeTarget // Issues that can be merged INTO (including main)
 	cursor        int
@@ -110,6 +112,8 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			return m, m.selectCurrent()
 		}
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
 	}
 
 	return m, nil
@@ -117,9 +121,34 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (m *MergeSelectOverlay) View() string {
+	width, height := m.Clamp(60, m.sizeHeight())
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.overlayStyles,
+		width:             width,
+		height:            height,
+		title:             m.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        58,
+		gap:               3,
+		minLeft:           34,
+		minRight:          18,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return m.renderMergeContent()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.overlayStyles, []keybinds.Binding{
+				{Key: "j/k", Description: "navigate"},
+				{Key: "Enter", Description: "select"},
+				{Key: "Esc", Description: "cancel"},
+			})
+		},
+	})
+}
+
+func (m *MergeSelectOverlay) renderMergeContent() string {
 	var b strings.Builder
 
-	// Header showing the merge direction.
 	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID))
 	if m.mode == MergeSelectModeUpstreamSource {
 		header = fmt.Sprintf("Merge into %s from:", m.overlayStyles.MenuKey.Render(m.source.ID))
@@ -127,32 +156,19 @@ func (m *MergeSelectOverlay) View() string {
 	b.WriteString(m.overlayStyles.Title.Render(header))
 	b.WriteString("\n\n")
 
-	// List of candidates
 	if len(m.candidates) == 0 {
 		noTasks := m.overlayStyles.MenuItemDisabled.Render("No eligible merge targets found")
 		b.WriteString("  " + noTasks)
-		b.WriteString("\n")
-	} else {
-		for i, candidate := range m.candidates {
-			line := m.renderCandidate(candidate, i == m.cursor)
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
+		return strings.TrimRight(b.String(), "\n")
 	}
 
-	// Footer with help text
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "j/k", Description: "navigate"},
-		{Key: "Enter", Description: "select"},
-		{Key: "Esc", Description: "cancel"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         m.overlayStyles.MenuKey,
-		DescriptionStyle: m.overlayStyles.Footer,
-		FooterStyle:      m.overlayStyles.Footer,
-	}))
+	for i, candidate := range m.candidates {
+		line := m.renderCandidate(candidate, i == m.cursor)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // renderCandidate renders a single merge target candidate
@@ -270,14 +286,16 @@ func (m *MergeSelectOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (m *MergeSelectOverlay) Size() (width, height int) {
-	// Width: enough for the longest line
-	// Height: header + candidates + footer + padding
+	return m.Clamp(60, m.sizeHeight())
+}
+
+func (m *MergeSelectOverlay) sizeHeight() int {
 	candidateLines := len(m.candidates)
 	if candidateLines == 0 {
-		candidateLines = 1 // "No eligible merge targets" message
+		candidateLines = 1
 	}
 	if candidateLines > 15 {
-		candidateLines = 15 // Cap visible candidates
+		candidateLines = 15
 	}
-	return 60, 4 + candidateLines // header(2) + candidates + footer(2)
+	return max(10, candidateLines+8)
 }
