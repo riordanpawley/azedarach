@@ -24,15 +24,15 @@ const (
 
 // ImageAttachOverlay manages image attachments for a task
 type ImageAttachOverlay struct {
-	issueID     string
-	service     ImageAttachmentService
-	mode        imageAttachMode
-	files       []attachment.Attachment
-	cursor      int
-	pathInput   textinput.Model
-	inputActive bool
-	error       string
-	styles      *Styles
+	issueID        string
+	service        ImageAttachmentService
+	mode           imageAttachMode
+	files          []attachment.Attachment
+	cursor         int
+	pathInput      textinput.Model
+	inputActive    bool
+	error          string
+	styles         *Styles
 	viewportWidth  int
 	viewportHeight int
 }
@@ -435,6 +435,14 @@ func (i *ImageAttachOverlay) Size() (width, height int) {
 	default:
 		return clampDialogSize(80, 30, i.viewportWidth, i.viewportHeight)
 	}
+}
+
+func (i *ImageAttachOverlay) UsesAppFrame() bool {
+	return false
+}
+
+func (i *ImageAttachOverlay) UsesInternalTitle() bool {
+	return true
 }
 
 // Commands

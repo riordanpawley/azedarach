@@ -9,10 +9,10 @@ import (
 )
 
 type MergeChoiceOverlay struct {
-	issueID       string
-	commitsBehind int
-	baseBranch    string
-	styles        *Styles
+	issueID        string
+	commitsBehind  int
+	baseBranch     string
+	styles         *Styles
 	viewportWidth  int
 	viewportHeight int
 }
@@ -106,4 +106,12 @@ func (m *MergeChoiceOverlay) Title() string {
 
 func (m *MergeChoiceOverlay) Size() (width, height int) {
 	return 60, 10
+}
+
+func (m *MergeChoiceOverlay) UsesAppFrame() bool {
+	return false
+}
+
+func (m *MergeChoiceOverlay) UsesInternalTitle() bool {
+	return true
 }

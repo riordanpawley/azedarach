@@ -14,6 +14,11 @@ const (
 	dialogLayoutStacked
 )
 
+const (
+	dialogFullscreenWidthThreshold  = 120
+	dialogFullscreenHeightThreshold = 30
+)
+
 type dialogLayoutConfig struct {
 	styles            *Styles
 	width             int
@@ -31,6 +36,11 @@ type dialogLayoutConfig struct {
 }
 
 func clampDialogSize(desiredWidth, desiredHeight, viewportWidth, viewportHeight int) (int, int) {
+	if viewportWidth > 0 && viewportHeight > 0 &&
+		(viewportWidth <= dialogFullscreenWidthThreshold || viewportHeight <= dialogFullscreenHeightThreshold) {
+		return max(1, viewportWidth-2), max(1, viewportHeight-2)
+	}
+
 	width := max(1, desiredWidth)
 	height := max(1, desiredHeight)
 	if viewportWidth > 0 {

@@ -15,13 +15,13 @@ import (
 
 // ImagePreviewOverlay displays and manages image attachments with navigation
 type ImagePreviewOverlay struct {
-	issueID       string
-	service       *attachment.Service
-	images        []attachment.Attachment
-	currentIndex  int
-	confirmDelete bool
-	error         string
-	styles        *Styles
+	issueID        string
+	service        *attachment.Service
+	images         []attachment.Attachment
+	currentIndex   int
+	confirmDelete  bool
+	error          string
+	styles         *Styles
 	viewportWidth  int
 	viewportHeight int
 }
@@ -372,6 +372,14 @@ func (i *ImagePreviewOverlay) Size() (width, height int) {
 		return clampDialogSize(72, 22, i.viewportWidth, i.viewportHeight)
 	}
 	return clampDialogSize(82, 28, i.viewportWidth, i.viewportHeight)
+}
+
+func (i *ImagePreviewOverlay) UsesAppFrame() bool {
+	return false
+}
+
+func (i *ImagePreviewOverlay) UsesInternalTitle() bool {
+	return true
 }
 
 // Commands

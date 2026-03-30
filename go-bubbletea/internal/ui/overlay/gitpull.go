@@ -9,9 +9,9 @@ import (
 )
 
 type GitPullOverlay struct {
-	commitsBehind int
-	selected      bool
-	styles        *Styles
+	commitsBehind  int
+	selected       bool
+	styles         *Styles
 	viewportWidth  int
 	viewportHeight int
 }
@@ -112,4 +112,12 @@ func (g *GitPullOverlay) Title() string {
 
 func (g *GitPullOverlay) Size() (width, height int) {
 	return 60, 8
+}
+
+func (g *GitPullOverlay) UsesAppFrame() bool {
+	return false
+}
+
+func (g *GitPullOverlay) UsesInternalTitle() bool {
+	return true
 }

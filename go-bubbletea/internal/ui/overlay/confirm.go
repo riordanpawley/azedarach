@@ -9,10 +9,10 @@ import (
 
 // ConfirmDialog is a confirmation dialog overlay with Yes/No options
 type ConfirmDialog struct {
-	title    string
-	message  string
-	styles   *Styles
-	selected bool // true = Yes, false = No
+	title          string
+	message        string
+	styles         *Styles
+	selected       bool // true = Yes, false = No
 	viewportWidth  int
 	viewportHeight int
 }
@@ -148,4 +148,12 @@ func (c *ConfirmDialog) Size() (width, height int) {
 	// Height: message + buttons + footer + padding
 	messageLines := len(strings.Split(c.message, "\n"))
 	return 60, messageLines + 6
+}
+
+func (c *ConfirmDialog) UsesAppFrame() bool {
+	return false
+}
+
+func (c *ConfirmDialog) UsesInternalTitle() bool {
+	return true
 }

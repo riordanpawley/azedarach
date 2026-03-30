@@ -288,6 +288,14 @@ func (m *ProjectSelector) Size() (width, height int) {
 	return width, height
 }
 
+func (m *ProjectSelector) UsesAppFrame() bool {
+	return m.mode == projectModeActions
+}
+
+func (m *ProjectSelector) UsesInternalTitle() bool {
+	return m.mode != projectModeActions
+}
+
 // moveCursorDown moves the cursor down
 func (m *ProjectSelector) moveCursorDown() {
 	maxCursor := m.getMaxCursor()

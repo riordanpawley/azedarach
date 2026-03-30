@@ -22,14 +22,14 @@ type DevServerInfo struct {
 
 // DevServerOverlay is a menu overlay for dev server management
 type DevServerOverlay struct {
-	servers   []DevServerInfo
-	cursor    int
-	issueID   string
-	onToggle  func(serverID string) tea.Cmd
-	onView    func(serverID string) tea.Cmd
-	onRestart func(serverID string) tea.Cmd
-	onClose   func() tea.Cmd
-	styles    *Styles
+	servers        []DevServerInfo
+	cursor         int
+	issueID        string
+	onToggle       func(serverID string) tea.Cmd
+	onView         func(serverID string) tea.Cmd
+	onRestart      func(serverID string) tea.Cmd
+	onClose        func() tea.Cmd
+	styles         *Styles
 	viewportWidth  int
 	viewportHeight int
 }
@@ -153,6 +153,14 @@ func (m *DevServerOverlay) Title() string {
 func (m *DevServerOverlay) Size() (width, height int) {
 	view := m.View()
 	return lipgloss.Width(view), lipgloss.Height(view)
+}
+
+func (m *DevServerOverlay) UsesAppFrame() bool {
+	return false
+}
+
+func (m *DevServerOverlay) UsesInternalTitle() bool {
+	return true
 }
 
 // moveCursorDown moves the cursor to the next server

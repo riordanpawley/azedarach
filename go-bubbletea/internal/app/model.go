@@ -510,7 +510,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.gitSyncService.ShouldNotify(msg.CommitsBehind) {
-			return m, m.overlayStack.Push(overlay.NewGitPullOverlay(msg.CommitsBehind))
+			return m, m.openOverlay(overlay.NewGitPullOverlay(msg.CommitsBehind))
 		}
 		return m, nil
 
@@ -530,7 +530,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Merge conflicts: %s", strings.Join(msg.result.ConflictFiles, ", ")),
 				Expires: time.Now().Add(5 * time.Second),
 			})
-			return m, m.overlayStack.Push(overlay.NewConflictDialog(msg.result.ConflictFiles))
+			return m, m.openOverlay(overlay.NewConflictDialog(msg.result.ConflictFiles))
 		}
 
 		m.addToast(Toast{
@@ -569,7 +569,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Merge conflicts in %d files", len(msg.result.ConflictFiles)),
 				Expires: time.Now().Add(3 * time.Second),
 			})
-			return m, m.overlayStack.Push(overlay.NewConflictDialog(msg.result.ConflictFiles))
+			return m, m.openOverlay(overlay.NewConflictDialog(msg.result.ConflictFiles))
 		}
 
 		// Successful merge
@@ -747,7 +747,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Update the overlay in the stack
 				if newViewer, ok := newModel.(*diff.DiffViewer); ok {
 					m.overlayStack.Pop()
-					m.overlayStack.Push(newViewer)
+					m.openOverlay(newViewer)
 				}
 				return m, cmd
 			}
@@ -787,7 +787,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		preview := overlay.NewImagePreviewOverlay(msg.IssueID, imageService, msg.InitialIndex)
-		return m, m.overlayStack.Push(preview)
+		return m, m.openOverlay(preview)
 
 	// Cleanup executed result
 	case overlay.CleanupExecutedMsg:
@@ -840,7 +840,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.commitsBehind > 0 {
 			// Show merge choice overlay
-			m.overlayStack.Push(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.config.Git.BaseBranch))
+			m.openOverlay(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.config.Git.BaseBranch))
 			return m, nil
 		}
 
@@ -868,7 +868,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.overlayStack.Push(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
+		return m, m.openOverlay(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
 
 	case openPRResultMsg:
 		if msg.err != nil {
@@ -1151,6 +1151,15 @@ func (m Model) statusBarMode() types.Mode {
 		return modeOverlay.StatusMode()
 	}
 	return mode
+}
+
+func (m Model) openOverlay(o overlay.Overlay) tea.Cmd {
+	return tea.Batch(
+		m.overlayStack.Push(o),
+		func() tea.Msg {
+			return tea.WindowSizeMsg{Width: m.width, Height: m.height}
+		},
+	)
 }
 
 func (m Model) layer(bottom, top string) string {
@@ -1571,7 +1580,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	switch msg.String() {
 	case overlay.EventLogHotkey:
-		return m, m.overlayStack.Push(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
+		return m, m.openOverlay(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
 	case "O": // Orchestration overlay
 		return m, m.openOrchestrationOverlay()
 	case "X": // Bulk cleanup (Shift+X)
@@ -1585,7 +1594,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
-		return m, m.overlayStack.Push(cleanupOverlay)
+		return m, m.openOverlay(cleanupOverlay)
 	}
 
 	action, ok := keybinds.LookupAction(types.ModeNormal, msg.String())
@@ -1640,26 +1649,26 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
 		task, session := m.getCurrentTaskAndSession()
 		if task != nil {
-			return m, m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.width, m.height))
+			return m, m.openOverlay(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.width, m.height))
 		}
 		return m, nil
 
 	case keybinds.ActionEnterSearch: // Search
 		m.editor.EnterSearch()
-		return m, m.overlayStack.Push(overlay.NewSearchOverlay())
+		return m, m.openOverlay(overlay.NewSearchOverlay())
 
 	case keybinds.ActionOpenFilter: // Filter menu
-		return m, m.overlayStack.Push(overlay.NewFilterMenu(m.editor.GetFilter()))
+		return m, m.openOverlay(overlay.NewFilterMenu(m.editor.GetFilter()))
 
 	case keybinds.ActionOpenSort: // Sort menu
-		return m, m.overlayStack.Push(overlay.NewSortMenu(m.editor.GetSort()))
+		return m, m.openOverlay(overlay.NewSortMenu(m.editor.GetSort()))
 
 	case keybinds.ActionEnterSelect: // Visual select
 		m.editor.EnterSelect()
 		return m, nil
 
 	case keybinds.ActionOpenHelp: // Help
-		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
+		return m, m.openOverlay(overlay.NewHelpOverlay())
 
 	case keybinds.ActionDrillDown: // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
@@ -1681,14 +1690,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionCreateTask: // Create task
-		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
+		return m, m.openOverlay(overlay.NewCreateTaskOverlay())
 
 	case keybinds.ActionOpenSettings: // Settings
-		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
+		return m, m.openOverlay(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
 
 	case keybinds.ActionOpenDiagnostic: // Diagnostics (Shift+D)
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
-		return m, tea.Batch(m.overlayStack.Push(diagPanel), diagPanel.Init())
+		return m, m.openOverlay(diagPanel)
 
 	case keybinds.ActionToggleView: // Toggle view mode
 		if m.viewMode == ViewModeBoard {
@@ -1767,17 +1776,17 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			visibleCount += colVisible
 		}
-		return m, m.overlayStack.Push(overlay.NewJumpModeWithChars(visibleCount, m.config.Keyboard.JumpLabelChars))
+		return m, m.openOverlay(overlay.NewJumpModeWithChars(visibleCount, m.config.Keyboard.JumpLabelChars))
 	case keybinds.ActionGotoProjects:
 		// Project selector
-		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
+		return m, m.openOverlay(overlay.NewProjectSelectorWithOptions(
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
 		))
 	case keybinds.ActionGotoSpec:
 		// Dedicated Spec workspace
-		return m, m.overlayStack.Push(overlay.NewSpecWorkspaceOverlay(m.currentProject))
+		return m, m.openOverlay(overlay.NewSpecWorkspaceOverlay(m.currentProject))
 	}
 
 	return m, nil
@@ -1916,7 +1925,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionSelectBulk:
 		if m.editor.HasSelection() {
 			selectedIDs := m.editor.GetSelectedTasksList()
-			return m, m.overlayStack.Push(overlay.NewBulkActionMenu(selectedIDs, len(selectedIDs)))
+			return m, m.openOverlay(overlay.NewBulkActionMenu(selectedIDs, len(selectedIDs)))
 		}
 		return m, nil
 	}
@@ -2931,7 +2940,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "projects":
 		// Settings -> Manage projects
 		m.overlayStack.Pop() // Close settings
-		return m, m.overlayStack.Push(overlay.NewProjectSelectorWithOptions(
+		return m, m.openOverlay(overlay.NewProjectSelectorWithOptions(
 			m.projectRegistry,
 			overlay.WithInitialCursor(m.projectSelectorCursor()),
 			overlay.WithCurrentProjectName(m.currentProject),
@@ -3155,7 +3164,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		// Open diff viewer overlay
 		viewer := diff.NewDiffViewer(session.Worktree)
-		cmd := m.overlayStack.Push(viewer)
+		cmd := m.openOverlay(viewer)
 		return m, tea.Batch(cmd, viewer.LoadDiff(context.Background(), m.gitClient))
 	case "w":
 		// Cleanup worktree and keep task.
@@ -3167,7 +3176,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		// Image attachments
 		attachOverlay := overlay.NewImageAttachOverlay(task.ID, m.attachmentService)
-		return m, tea.Batch(m.overlayStack.Push(attachOverlay), attachOverlay.Init())
+		return m, m.openOverlay(attachOverlay)
 
 	case "r":
 		// Dev server menu
@@ -3180,7 +3189,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			func(serverID string) tea.Cmd { return m.restartDevServer(serverID) },
 			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
 		)
-		return m, m.overlayStack.Push(devOverlay)
+		return m, m.openOverlay(devOverlay)
 
 	case "b":
 		// Merge issue into... (merge select mode)
@@ -3201,7 +3210,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			},
 			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
 		)
-		return m, m.overlayStack.Push(mergeOverlay)
+		return m, m.openOverlay(mergeOverlay)
 
 	// Task actions
 	case "h":
@@ -3248,14 +3257,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.applyOptimisticTaskStatus(task.ID, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
-		return m, m.overlayStack.Push(overlay.NewEditTaskOverlay(*task))
+		return m, m.openOverlay(overlay.NewEditTaskOverlay(*task))
 	case "T":
 		return m, m.deleteTaskCmd(task.ID)
 	case "d":
 		return m, m.deleteTaskCmd(task.ID)
 	case "c":
 		parentID := task.ID
-		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlayWithParent(&parentID))
+		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParent(&parentID))
 	}
 
 	return m, nil
@@ -4232,7 +4241,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 		upstreamTargets = append(upstreamTargets, candidate.target)
 	}
 	m.logger.Info("follow-on merge source picker opened", "targetID", task.ID, "candidateCount", len(upstreamTargets))
-	return m.overlayStack.Push(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
+	return m.openOverlay(overlay.NewMergeSourceSelectOverlay(task, upstreamTargets, nil, nil))
 }
 
 func (m Model) sessionForIssue(issueID string) *domain.Session {
@@ -5182,7 +5191,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 		},
 	)
 
-	return m.overlayStack.Push(orchOverlay)
+	return m.openOverlay(orchOverlay)
 }
 
 // performCleanup executes cleanup operations for selected categories
