@@ -10,6 +10,8 @@ import (
 
 // MergePreflightOverlay displays merge-preflight failures and recovery actions.
 type MergePreflightOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	sourceID       string
 	targetID       string
 	sourceWorktree string
@@ -45,6 +47,9 @@ func (m *MergePreflightOverlay) Init() tea.Cmd {
 
 func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.ApplyWindowSize(msg)
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "r", "R":
@@ -107,12 +112,35 @@ func (m *MergePreflightOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *MergePreflightOverlay) View() string {
+	width, height := m.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             width,
+		height:            height,
+		title:             m.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        84,
+		gap:               3,
+		minLeft:           44,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return m.renderDetails(width)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(m.styles, m.actionBindings(), width)
+		},
+	})
+}
+
+func (m *MergePreflightOverlay) renderDetails(width int) string {
 	var b strings.Builder
 
-	title := fmt.Sprintf("Merge blocked: %s -> %s", m.sourceID, m.targetID)
-	b.WriteString(m.styles.Title.Render(title))
-	b.WriteString("\n\n")
 	b.WriteString(m.styles.MenuItem.Render("Merge preflight requires clean git status on source and target."))
+	b.WriteString("\n\n")
+
+	title := fmt.Sprintf("Merge blocked: %s -> %s", m.sourceID, m.targetID)
+	b.WriteString(m.styles.MenuKey.Render(title))
 	b.WriteString("\n")
 	if len(m.reasons) > 0 {
 		b.WriteString("\n")
@@ -145,32 +173,16 @@ func (m *MergePreflightOverlay) View() string {
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(m.styles.MenuItem.Render("[R] Refresh task/worktree state"))
-	b.WriteString("\n")
-	b.WriteString(m.styles.MenuItem.Render("[c/d] Commit/Discard source changes"))
-	b.WriteString("\n")
-	b.WriteString(m.styles.MenuItem.Render("[C/D] Commit/Discard target changes"))
-	b.WriteString("\n")
-	if m.canAbortTarget {
-		b.WriteString(m.styles.MenuItem.Render("[A] Abort merge in target worktree"))
+	if strings.TrimSpace(m.sourceWorktree) == "" {
 		b.WriteString("\n")
+		b.WriteString(m.styles.MenuItemDisabled.Render("Source actions unavailable: no source worktree path"))
 	}
-	b.WriteString(m.styles.MenuItem.Render("[Esc/q/Enter] Close"))
-	b.WriteString("\n\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "R", Description: "refresh"},
-		{Key: "c/d", Description: "commit/discard source"},
-		{Key: "C/D", Description: "commit/discard target"},
-		{Key: "A", Description: "abort target merge"},
-		{Key: "Esc/q/Enter", Description: "close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         m.styles.MenuKey,
-		DescriptionStyle: m.styles.Footer,
-		FooterStyle:      m.styles.Footer,
-	}))
+	if strings.TrimSpace(m.targetWorktree) == "" {
+		b.WriteString("\n")
+		b.WriteString(m.styles.MenuItemDisabled.Render("Target actions unavailable: no target worktree path"))
+	}
 
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *MergePreflightOverlay) Title() string {
@@ -178,9 +190,29 @@ func (m *MergePreflightOverlay) Title() string {
 }
 
 func (m *MergePreflightOverlay) Size() (width, height int) {
-	h := 16 + len(m.reasons) + len(m.sourceFiles) + len(m.targetFiles)
+	return m.Clamp(90, m.sizeHeight())
+}
+
+func (m *MergePreflightOverlay) sizeHeight() int {
+	reasonLines := min(8, len(m.reasons))
+	sourceFileLines := min(8, len(m.sourceFiles))
+	targetFileLines := min(8, len(m.targetFiles))
+	h := 15 + reasonLines + sourceFileLines + targetFileLines
 	if m.canAbortTarget {
 		h++
 	}
-	return 86, h
+	return min(28, max(14, h))
+}
+
+func (m *MergePreflightOverlay) actionBindings() []keybinds.Binding {
+	bindings := []keybinds.Binding{
+		{Key: "R", Description: "refresh"},
+		{Key: "c/d", Description: "commit/discard source"},
+		{Key: "C/D", Description: "commit/discard target"},
+	}
+	if m.canAbortTarget {
+		bindings = append(bindings, keybinds.Binding{Key: "A", Description: "abort target merge"})
+	}
+	bindings = append(bindings, keybinds.Binding{Key: "Esc/q/Enter", Description: "close"})
+	return bindings
 }
