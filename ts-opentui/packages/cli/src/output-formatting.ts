@@ -28,7 +28,7 @@ export interface PrimeIssueContext {
 	readonly showImplementations?: boolean
 }
 
-export type PrimeMode = "default" | "question-first"
+export type PrimeMode = "default" | "question-first" | "subagent"
 
 export const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
 
@@ -373,6 +373,14 @@ const renderQuestionFirstGuardrails =
   - MUST improve the current issue title and description before implementation work begins.
   - MUST record unknowns/open questions in the issue description so scope is explicit.`
 
+const renderSubagentGuardrails = (): string => `- Subagent execution rules:
+  - You are a leaf worker, not the orchestrator.
+  - Keep work scoped to the assigned child issue and keep updates concise.
+  - Do not fan out to additional subagents unless explicitly instructed.
+  - If the task still needs decomposition, stop and return the boundary to the orchestrator.
+  - If you need a fresh primer, run \`az prime subagent\` instead of \`az prime\`.
+  - If asked to split work, use the \`single-window fanout\` rule: split until each child fits in one subagent context window, then hand the plan back up.`
+
 export const buildPrimeOutput = (
 	issueId: string | undefined,
 	issueContext: PrimeIssueContext | undefined,
@@ -386,6 +394,16 @@ export const buildPrimeOutput = (
 	const specCheckStep = specEnabled
 		? "`az spec` (inspect linked requirements before behavior changes)"
 		: "Spec workflows are disabled for this project (skip spec checks)."
+	const primerTitle =
+		primeMode === "subagent" ? "Azedarach Subagent Primer" : "Azedarach Session Primer"
+	const firstCommandsHeader =
+		primeMode === "subagent"
+			? "- First 3 commands for this subagent:"
+			: "- First 3 commands for this session:"
+	const issueChildStep =
+		primeMode === "subagent"
+			? '`az issue child "Title"` (only when explicitly told to split work further)'
+			: '`az issue child "Title"` (when you need follow-up scope under the active parent)'
 
 	const contextGuardrail =
 		issueId === undefined
@@ -396,23 +414,48 @@ export const buildPrimeOutput = (
 		specEnabled,
 	)
 	const specGuardrails = specEnabled ? renderPrimeSpecGuardrails() : undefined
-	const questionFirstGuardrails =
-		primeMode === "question-first" ? renderQuestionFirstGuardrails() : undefined
+	const modeGuardrails =
+		primeMode === "question-first"
+			? renderQuestionFirstGuardrails()
+			: primeMode === "subagent"
+				? renderSubagentGuardrails()
+				: undefined
+	const activeIssueClosedWarning =
+		issueContext?.issue.status === "closed"
+			? `- Active issue \`${issueContext.issue.id}\` is currently \`closed\`; start by picking/opening actionable work (for example \`az issue child "Next task"\` or \`az issue list --limit 20\`).`
+			: ""
 
-	return `Azedarach Session Primer
+	return `${primerTitle}
 
-- First 3 commands for this session:
+- ${firstCommandsHeader}
   - ${issueFetchCommand}
   - ${specCheckStep}
-  - \`az issue child "Title"\` (when you need follow-up scope under the active parent)
+  - ${issueChildStep}
+- How to use \`az\` command map:
+  - Issue lifecycle:
+  - \`az issue list --limit 20\`, \`az issue get <issue-id>\`, \`az issue child "Child task"\`, \`az issue update <issue-id> --status in_progress|blocked|open\`, \`az issue close <issue-id> --reason "..."\`
+  - \`az issue bulk-create --input issues.json --json\`, \`az issue bulk-update --input updates.json --json\`, \`az issue update <issue-id> --design "..."\`, \`az issue update <issue-id> --notes "..."\`, \`az issue update <issue-id> --append-notes "..."\` (for example, \`[{"title":"Agent-created task"}]\`, \`[{"id":"az-123","status":"blocked"}]\`)
+  - Issue dependency graph:
+  - \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`, \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`
+  - Fanout orchestration:
+  - \`az issue fanout --input ./fanout.json\`, \`az issue fanout --input ./fanout.json --apply\`, \`az issue fanout ready --root <issue-id> --json\`, \`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out\`
+  - Mailbox coordination:
+  - \`az mail send --parent <parent-issue> --type dependency-ready --body "..."\`, \`az mail list --parent <parent-issue> --since <seq> --json\`, \`az mail watch --parent <parent-issue> --since <seq> --jsonl\`
+  - Spec traceability:
+  - ${specEnabled ? "\`az spec req/list/link ...\` before behavior changes and after behavior edits to keep requirements/links aligned." : "Spec workflows disabled for this project (`az config set spec.enabled false`)."}
+  - Session/runtime operations:
+  - \`az session start <issue-id>\`, \`az session status [issue-id]\`, \`az daemon restart\`, \`az export --format json [--out <path>]\`
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
+${activeIssueClosedWarning}
 ${issueSection}
-${questionFirstGuardrails === undefined ? "" : `${questionFirstGuardrails}\n`}
+${modeGuardrails === undefined ? "" : `${modeGuardrails}\n`}
 - Follow-up and dependency rules:
   - When working under a parent issue, create follow-up work with \`az issue child "Title"\`.
-  - When fanning out to subagents, tell each subagent to use \`az issue\` and create/maintain its own child issue under the active parent; reserve \`az prime\` for the orchestrator unless a subagent explicitly needs a fresh primer.
+  - When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.
+  - Then assign one subagent per child issue, tell each subagent to use \`az issue\` and create/maintain its own child issue under the active parent, and reserve \`az prime\` for the orchestrator unless a subagent explicitly needs a fresh primer.
+  - Shorthand: \`single-window fanout\` means split until each child is ready for one subagent, then fan out one subagent per child.
   - \`az issue create "Title"\` defaults to the active parent context (including \`AZEDARACH_ISSUE_ID\`) unless \`--deferred\` is set.
   - There is no top-level \`az dep\` command; use \`az issue dep ...\`.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
@@ -425,18 +468,7 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-- High-signal issue commands:
-  - \`az issue list --limit 20\` (lists the most recently updated issues first)
-  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
-  - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
-  - \`az issue bulk-create --input issues.json --json\` (for example, \`issues.json\` can contain \`[{"title":"Agent-created task"}]\`)
-  - \`az issue bulk-update --input updates.json --json\` (for example, \`updates.json\` can contain \`[{"id":"az-123","status":"blocked"}]\`)
-  - \`az issue update <issue-id> --design "..."\`
-  - \`az issue update <issue-id> --notes "..."\`
-  - \`az issue update <issue-id> --append-notes "..."\` (adds to existing notes without overwriting previous notes)
-  - \`az issue update <issue-id> --status in_progress|blocked|open\`
-  - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
-  - \`az issue --help\`
+- \`az issue --help\`
 ${specGuardrails === undefined ? "" : `- Spec workflow:\n${specGuardrails}\n`}
 - When work is complete:
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).

@@ -108,10 +108,27 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("Do not go on history/log hunting tangents")
 		expect(output).toContain(
-			"When fanning out to subagents, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent; reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.",
+			"When fanning out to subagents, split work until each child issue is independently actionable and fits within a single subagent context window.",
+		)
+		expect(output).toContain(
+			"Shorthand: `single-window fanout` means split until each child is ready for one subagent, then fan out one subagent per child.",
 		)
 		expect(output).toContain(
 			'`az issue create "Title"` defaults to the active parent context (including `AZEDARACH_ISSUE_ID`) unless `--deferred` is set.',
+		)
+		expect(output).toContain("How to use `az` command map:")
+		expect(output).toContain("`az issue fanout --input ./fanout.json`")
+		expect(output).toContain("`az issue fanout --input ./fanout.json --apply`")
+		expect(output).toContain("`az issue fanout ready --root <issue-id> --json`")
+		expect(output).toContain(
+			"`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`",
+		)
+		expect(output).toContain(
+			"`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`",
+		)
+		expect(output).toContain("`az mail watch --parent <parent-issue> --since <seq> --jsonl`")
+		expect(output).toContain(
+			"`az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`",
 		)
 		expect(output).toContain(
 			"In this repo, when guidance says `spec`, it means `az spec` requirement/link records",
@@ -155,6 +172,9 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("`az issue bulk-update --input updates.json --json`")
 		expect(output).toContain('`[{"id":"az-123","status":"blocked"}]`')
 		expect(output).not.toContain("Start each session with: `az prime`")
+		expect(output).not.toContain(
+			"If you need a fresh primer, run `az prime subagent` instead of `az prime`.",
+		)
 		expect(output).not.toContain("Implementation guardrails:")
 	})
 
@@ -164,6 +184,22 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("No active issue is preselected")
 		expect(output).toContain("run `az issue get <issue-id>`")
 		expect(output).not.toContain("Active issue context (AZEDARACH_ISSUE_ID=")
+	})
+
+	it("warns when the active issue is already closed", () => {
+		const output = buildPrimeOutput(
+			"az-closed",
+			{
+				issue: makePrimeIssue("az-closed", {
+					status: "closed",
+				}),
+			},
+			undefined,
+			true,
+		)
+
+		expect(output).toContain("Active issue `az-closed` is currently `closed`")
+		expect(output).toContain('`az issue child "Next task"`')
 	})
 
 	it("falls back to explicit refresh command when issue details fail to load", () => {
@@ -314,6 +350,34 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("MUST record unknowns/open questions in the issue description")
 	})
 
+	it("adds subagent guardrails when prime mode is subagent", () => {
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Prepare leaf-worker handoff",
+				}),
+			},
+			undefined,
+			true,
+			"subagent",
+		)
+
+		expect(output).toContain("Azedarach Subagent Primer")
+		expect(output).toContain("First 3 commands for this subagent:")
+		expect(output).toContain(
+			'`az issue child "Title"` (only when explicitly told to split work further)',
+		)
+		expect(output).toContain("Subagent execution rules:")
+		expect(output).toContain("You are a leaf worker, not the orchestrator.")
+		expect(output).toContain("Do not fan out to additional subagents unless explicitly instructed.")
+		expect(output).toContain(
+			"If you need a fresh primer, run `az prime subagent` instead of `az prime`.",
+		)
+		expect(output).toContain("single-window fanout")
+		expect(output).not.toContain("Azedarach Session Primer")
+	})
+
 	it("applies --config overrides to command-layer AppConfig reads", async () => {
 		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-${crypto.randomUUID()}.json`
 		await Bun.write(
@@ -332,6 +396,16 @@ describe("buildPrimeOutput", () => {
 		)
 
 		expect(specEnabled).toBe(false)
+	})
+
+	it("accepts prime subagent as a command subcommand", async () => {
+		const exit = await Effect.runPromiseExit(
+			cliRunner(["bun", "az", "prime", "subagent", "--help"]).pipe(
+				Effect.provide(BunContext.layer),
+			),
+		)
+
+		expect(Exit.isSuccess(exit)).toBe(true)
 	})
 
 	it("writes spec.enabled through az config set", async () => {

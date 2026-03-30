@@ -54,6 +54,9 @@ Implementation-specific overlays:
 rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
+# Go in this repo (cache/module paths are exported via .envrc)
+go test ./...
+
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide
 az impl list                      # Show available implementations

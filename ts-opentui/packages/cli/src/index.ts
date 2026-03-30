@@ -5262,59 +5262,70 @@ const formatCloseGuardMessage = (
 	].join("\n")
 }
 
-const primeHandler = (_args: { readonly verbose: boolean }) =>
-	Effect.gen(function* () {
-		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
-		const primeMode = resolvePrimeModeFromEnv(process.env)
-		const appConfig = yield* AppConfig
-		const specConfig = yield* appConfig.getSpecConfig()
-		const implementationContext = yield* IssueTrackerClient.pipe(
-			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
-			Effect.map((registry) => ({
-				implementations: registry.implementations.map((implementation) => ({
-					name: implementation.name,
-					description: implementation.description,
-					directory: implementation.directory,
-					is_default: implementation.is_default,
-					is_builtin: implementation.is_builtin,
+const primeHandlerForMode =
+	(primeModeOverride?: PrimeMode) => (_args: { readonly verbose: boolean }) =>
+		Effect.gen(function* () {
+			const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+			const primeMode = primeModeOverride ?? resolvePrimeModeFromEnv(process.env)
+			const appConfig = yield* AppConfig
+			const specConfig = yield* appConfig.getSpecConfig()
+			const implementationContext = yield* IssueTrackerClient.pipe(
+				Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
+				Effect.map((registry) => ({
+					implementations: registry.implementations.map((implementation) => ({
+						name: implementation.name,
+						description: implementation.description,
+						directory: implementation.directory,
+						is_default: implementation.is_default,
+						is_builtin: implementation.is_builtin,
+					})),
 				})),
-			})),
-			Effect.catchAll(() => Effect.succeed(undefined)),
-		)
-		const showImplementations =
-			implementationContext !== undefined && implementationContext.implementations.length > 1
-		const issueContext =
-			issueId === undefined
-				? undefined
-				: yield* IssueTrackerClient.pipe(
-						Effect.flatMap((issueTrackerClient) => issueTrackerClient.show(issueId)),
-						Effect.flatMap((issue) =>
-							(specConfig.enabled
-								? SpecService.pipe(
-										Effect.flatMap((specService) =>
-											specService.listIssueRequirements(issue.id, process.cwd()),
-										),
-										Effect.catchAll(() => Effect.succeed([])),
-									)
-								: Effect.succeed([])
-							).pipe(
-								Effect.map((linkedSpecRequirements) => ({
-									issue,
-									linkedSpecRequirements,
-									showImplementations,
-								})),
+				Effect.catchAll(() => Effect.succeed(undefined)),
+			)
+			const showImplementations =
+				implementationContext !== undefined && implementationContext.implementations.length > 1
+			const issueContext =
+				issueId === undefined
+					? undefined
+					: yield* IssueTrackerClient.pipe(
+							Effect.flatMap((issueTrackerClient) => issueTrackerClient.show(issueId)),
+							Effect.flatMap((issue) =>
+								(specConfig.enabled
+									? SpecService.pipe(
+											Effect.flatMap((specService) =>
+												specService.listIssueRequirements(issue.id, process.cwd()),
+											),
+											Effect.catchAll(() => Effect.succeed([])),
+										)
+									: Effect.succeed([])
+								).pipe(
+									Effect.map((linkedSpecRequirements) => ({
+										issue,
+										linkedSpecRequirements,
+										showImplementations,
+									})),
+								),
 							),
-						),
-						Effect.catchAll(() => Effect.succeed(undefined)),
-					)
+							Effect.catchAll(() => Effect.succeed(undefined)),
+						)
 
-		yield* Console.log(
-			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled, primeMode),
-		)
-	})
+			yield* Console.log(
+				buildPrimeOutput(
+					issueId,
+					issueContext,
+					implementationContext,
+					specConfig.enabled,
+					primeMode,
+				),
+			)
+		})
 
 const resolvePrimeModeFromEnv = (env: NodeJS.ProcessEnv): PrimeMode =>
-	env.AZEDARACH_PRIME_MODE === "question-first" ? "question-first" : "default"
+	env.AZEDARACH_PRIME_MODE === "question-first"
+		? "question-first"
+		: env.AZEDARACH_PRIME_MODE === "subagent"
+			? "subagent"
+			: "default"
 
 const listTmuxSessionNames = Effect.gen(function* () {
 	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
@@ -5895,8 +5906,21 @@ const primeCommand = Command.make(
 	{
 		verbose: verboseOption,
 	},
-	primeHandler,
-).pipe(Command.withDescription("Print session primer for AI agents using az issue as task tracker"))
+	primeHandlerForMode(),
+).pipe(
+	Command.withDescription(
+		"Print session primer for AI agents using az issue as task tracker (`subagent` prints a leaf-worker primer)",
+	),
+	Command.withSubcommands([
+		Command.make(
+			"subagent",
+			{
+				verbose: verboseOption,
+			},
+			primeHandlerForMode("subagent"),
+		).pipe(Command.withDescription("Print a concise primer for leaf subagents")),
+	]),
+)
 
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 

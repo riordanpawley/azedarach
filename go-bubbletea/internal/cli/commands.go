@@ -2406,6 +2406,7 @@ type primeTemplateData struct {
 	ActiveIssueID            string
 	SpecEnabled              bool
 	IssueSection             string
+	ActiveIssueClosedWarning string
 	ContextGuardrail         string
 	QuestionFirstGuardrails  string
 	ImplementationGuardrails string
@@ -2417,9 +2418,10 @@ func PrimeCommand(deps *Dependencies) error {
 	primeMode := strings.TrimSpace(os.Getenv("AZEDARACH_PRIME_MODE"))
 	guardrail := "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
 	issueSection := ""
+	activeIssueClosedWarning := ""
 	specGuardrails := ""
 	questionFirstGuardrails := ""
-	implementationGuardrails := "- Implementation context: implementation registry guidance is not yet available in go-bubbletea prime output; use `az impl list` from ts-opentui when needed."
+	implementationGuardrails := "- Implementation guardrails: in multi-implementation repos, include explicit `--impl <impl>` on new `az issue`/`az spec link` writes and use repeated `--impl` only for intentional shared work."
 
 	if primeMode == "question-first" {
 		questionFirstGuardrails = `- Question-first execution rules (Space+Q mode):
@@ -2444,6 +2446,9 @@ func PrimeCommand(deps *Dependencies) error {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nCould not load issue details automatically; run `az issue get %s`.\n", issueID, issueID)
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			issueSection = renderPrimeIssueSection(issueID, task)
+			if task.Status == domain.StatusDone {
+				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue child \"Next task\"` or `az issue list --limit 20`).", task.ID)
+			}
 		} else {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
 		}
@@ -2453,6 +2458,7 @@ func PrimeCommand(deps *Dependencies) error {
 		ActiveIssueID:            issueID,
 		SpecEnabled:              deps.Config != nil && deps.Config.Spec.Enabled,
 		IssueSection:             issueSection,
+		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
 		QuestionFirstGuardrails:  questionFirstGuardrails,
 		ImplementationGuardrails: implementationGuardrails,

@@ -33,6 +33,10 @@ Commands:
   issue dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
   issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
   issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  issue fanout --input <path> [--apply] [--json]  Plan/apply nested issue fanout
+  issue fanout ready --root <issue-id> [--json]  List runnable leaf issues under a fanout root
+  issue fanout drift --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
+  mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
   config set spec.enabled <true|false> [--project-dir <dir>]  Update project config
   sync [--all] [<directory>] [--project-dir <dir>]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
@@ -64,6 +68,13 @@ Examples:
   az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
   az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
   az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
+  az issue fanout --input ./fanout.json
+  az issue fanout --input ./fanout.json --apply
+  az issue fanout ready --root az-123 --json
+  az issue fanout drift --issue az-456 --worktree /tmp/az-456
+  az mail send --parent az-123 --type dependency-ready --body "contract merged"
+  az mail list --parent az-123 --since 40 --json
+  az mail watch --parent az-123 --since 41 --jsonl
   az config set spec.enabled false
   az config set spec.enabled true --project-dir .
   az sync

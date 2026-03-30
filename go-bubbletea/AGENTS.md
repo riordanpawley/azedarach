@@ -64,6 +64,9 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
 14. **Daemon Restart Policy**:
    - For operational daemon restarts, use `az daemon restart` (from `go-bubbletea/` with the Go binary/path).
    - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
+15. **Repo-Local Go Cache Env (Critical)**:
+   - `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`go-bubbletea/.gocache`, `go-bubbletea/.gopath`).
+   - After `direnv allow`, use normal `go ...` commands in `go-bubbletea/` without per-command env prefixes.
 
 ## Thin-Client Boundary Contract (Critical)
 
@@ -125,6 +128,7 @@ cd go-bubbletea
 make build
 make test
 make run
+go test ./...
 
 # focused search
 rg "pattern" --type go internal cmd
