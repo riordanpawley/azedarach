@@ -1,0 +1,20 @@
+╭────────────────────────────────────────────────────────────────────╮
+│Settings                                                            │
+│────────────────────────────────────────────────────────────────────│
+││ General                                           Actions         │
+││ ▶   Auto-refresh issues...............yes         ────────────────│
+││ [refresh]                                           j/k           │
+││     Compact card view.................no          move            │
+││ [compact]                                           h/l           │
+││     Theme.............................macchiato   cycle           │
+││ [theme]                                             Enter/Space   │
+││                                                   toggle/activate │
+││ Actions                                             e             │
+││ ───────────────────                               edit config     │
+││     Open config in $EDITOR............open          Esc           │
+││ [editor]                                          close           │
+││     Manage projects...................open                        │
+││ [projects]                                                        │
+││                                                                   │
+││                                                                   │
+╰────────────────────────────────────────────────────────────────────╯
