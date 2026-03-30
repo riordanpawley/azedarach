@@ -1571,6 +1571,36 @@ func TestSelectModeEntry(t *testing.T) {
 	})
 }
 
+func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+
+	opened, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = opened.(Model)
+
+	first, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || first == nil {
+		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
+	}
+
+	closed, _ := m.Update(overlay.CloseOverlayMsg{})
+	m = closed.(Model)
+	if !m.overlayStack.IsEmpty() {
+		t.Fatal("expected overlay stack to be empty after close")
+	}
+
+	reopened, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = reopened.(Model)
+
+	second, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || second == nil {
+		t.Fatalf("expected create overlay after reopen, got %T", m.overlayStack.Current())
+	}
+	if second != first {
+		t.Fatal("expected create overlay state to persist across close/reopen")
+	}
+}
+
 func TestModeTransitions(t *testing.T) {
 	m := newTestModel()
 

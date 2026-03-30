@@ -124,6 +124,7 @@ type Model struct {
 
 	// UI state
 	overlayStack         *overlay.Stack
+	createTaskOverlay    *overlay.CreateTaskOverlay
 	viewMode             ViewMode
 	viewportStarts       [board.DefaultColumnCount]int
 	columnViewportStart  int
@@ -669,6 +670,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
+		m.createTaskOverlay = nil
 		return m, m.saveTaskCmd(msg)
 
 	case taskCreatedResultMsg:
@@ -1647,7 +1649,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionCreateTask: // Create task
-		return m, m.openOverlay(overlay.NewCreateTaskOverlay())
+		if m.createTaskOverlay == nil {
+			m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+		}
+		return m, m.openOverlay(m.createTaskOverlay)
 
 	case keybinds.ActionOpenSettings: // Settings
 		return m, m.openOverlay(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))

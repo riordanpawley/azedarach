@@ -43,6 +43,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Create Task")
 	assert.Contains(t, view, "Enter")
 	assert.Contains(t, view, "Ctrl+E")
+	assert.Contains(t, view, "Ctrl+U")
 }
 
 func TestCreateTaskOverlayEscapeCloses(t *testing.T) {
@@ -406,6 +407,25 @@ func TestCreateTaskOverlayDescriptionTrimming(t *testing.T) {
 
 	// Description should be trimmed
 	assert.Equal(t, "Description", taskMsg.Description)
+}
+
+func TestCreateTaskOverlayCtrlUClearsDraft(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Keep me")
+	overlay.description.SetValue("Draft description")
+	overlay.taskType = domain.TypeBug
+	overlay.priority = domain.P0
+	overlay.focusIndex = focusPriority
+
+	m, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	require.Nil(t, cmd)
+
+	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, "", overlay.title.Value())
+	assert.Equal(t, "", overlay.description.Value())
+	assert.Equal(t, domain.TypeTask, overlay.taskType)
+	assert.Equal(t, domain.P2, overlay.priority)
+	assert.Equal(t, focusTitle, overlay.focusIndex)
 }
 
 // batchToSlice is a helper function to extract messages from a batch command
