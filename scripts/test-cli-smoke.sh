@@ -52,8 +52,10 @@ run_expect_failure_contains() {
 run_expect_success "session help" "Usage: az session <start|attach|kill|status>" ./bin/az session --help
 run_expect_success "top-level help" "Usage:" ./bin/az --help
 run_expect_success "top-level version" "dev" ./bin/az --version
+run_expect_success "prime banner" "Azedarach Session Primer" ./bin/az prime
 run_expect_success "issue help has lifecycle and bulk" "bulk-update --impl <implementation> --input <path> [--dry-run]" ./bin/az issue --help
 run_expect_success "issue help has delete guard" "delete <issue-id> --impl <implementation> --confirm" ./bin/az issue --help
+run_expect_failure_contains "daemon usage guard" "Usage: az daemon restart" ./bin/az daemon
 run_expect_failure_contains "issue get usage guard" "Usage: az issue get <issue-id> [--json] [--deps]" ./bin/az issue get
 run_expect_failure_contains "issue delete confirm guard" "Usage: az issue delete <issue-id> --impl <implementation> --confirm" ./bin/az issue delete az-1 --impl go-bubbletea
 run_expect_failure_contains "issue bulk-create usage guard" "Usage: az issue bulk-create --impl <implementation> --input <path> [--dry-run]" ./bin/az issue bulk-create

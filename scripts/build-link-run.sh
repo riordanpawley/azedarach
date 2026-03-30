@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+no_run=0
+if [[ "${1:-}" == "--no-run" ]]; then
+  no_run=1
+  shift
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
@@ -43,5 +49,9 @@ ln -sf "$repo_root/bin/azd" "$link_dir/azd"
 
 echo "Linked az -> $link_dir/az"
 echo "Linked azd -> $link_dir/azd"
+if [[ "$no_run" -eq 1 ]]; then
+  echo "Skipping run (--no-run)"
+  exit 0
+fi
 echo "Running az..."
 exec "$repo_root/bin/az"

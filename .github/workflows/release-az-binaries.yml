@@ -85,3 +85,36 @@ jobs:
         with:
           files: release-assets/*
           generate_release_notes: true
+
+  smoke-release-assets:
+    name: Smoke released assets (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: darwin-arm64
+          - os: macos-15-intel
+            label: darwin-x64
+          - os: ubuntu-24.04
+            label: linux-x64
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p smoke
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern "az-${{ matrix.label }}" --pattern "azd-${{ matrix.label }}" --dir smoke --clobber
+
+      - name: Run smoke checks
+        run: |
+          chmod +x "smoke/az-${{ matrix.label }}" "smoke/azd-${{ matrix.label }}"
+          "./smoke/az-${{ matrix.label }}" --version
+          "./smoke/az-${{ matrix.label }}" --help
+          "./smoke/azd-${{ matrix.label }}" --version
+          "./smoke/azd-${{ matrix.label }}" --help
