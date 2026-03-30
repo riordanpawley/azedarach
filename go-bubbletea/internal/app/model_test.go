@@ -1633,6 +1633,38 @@ func TestTaskCreatedResultMsgCreateDraftResetBehavior(t *testing.T) {
 	})
 }
 
+func TestTaskCreatedResultSelectsNewTaskAfterRefresh(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	createdResult, _ := m.Update(taskCreatedResultMsg{
+		taskID:   "az-new",
+		err:      nil,
+		isUpdate: false,
+	})
+	createdModel := createdResult.(Model)
+	if createdModel.pendingCreatedTaskID != "az-new" {
+		t.Fatalf("pendingCreatedTaskID = %q, want %q", createdModel.pendingCreatedTaskID, "az-new")
+	}
+
+	refreshedResult, _ := createdModel.Update(issuesLoadedMsg{
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+			{ID: "az-new", Title: "New Task", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+			{ID: "az-2", Title: "Task 2", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 42,
+	})
+	refreshedModel := refreshedResult.(Model)
+
+	if got := refreshedModel.nav.GetCursor().TaskID; got != "az-new" {
+		t.Fatalf("cursor task = %q, want %q", got, "az-new")
+	}
+	if refreshedModel.pendingCreatedTaskID != "" {
+		t.Fatalf("pendingCreatedTaskID = %q, want cleared state", refreshedModel.pendingCreatedTaskID)
+	}
+}
+
 func TestModeTransitions(t *testing.T) {
 	m := newTestModel()
 
