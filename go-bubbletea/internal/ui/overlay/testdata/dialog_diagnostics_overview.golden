@@ -5,7 +5,7 @@
 ││                                                                            ─────────────────────────────────────│
 ││        Status:  HEALTHY                                                     Tab Switch section                  │
 ││       Updated:  08:30:00                                                    1-6 Jump to section                 │
-││                                                                             j/k Scroll                          │
+││                                                                             j/k/ctrl+u/d Scroll                 │
 ││ SUMMARY                                                                     r Refresh                           │
 ││      Sessions:  1 active                                                    q/Esc Close                         │
 ││         Ports:  1 allocated                                                                                     │

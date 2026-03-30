@@ -61,9 +61,11 @@ const (
 )
 
 const (
-	eventTickerCapacity  = 64
-	eventLogCapacity     = 256
-	eventSummaryMaxRunes = 140
+	diffPreviewMaxCharacters = 200
+	eventTickerCapacity      = 64
+	eventLogCapacity         = 256
+	eventSummaryMaxRunes     = 140
+	runtimeSignalCacheTTL    = 45 * time.Second
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -124,16 +126,19 @@ type Model struct {
 	editor *editor.Service
 
 	// UI state
-	overlayStack         *overlay.Stack
-	viewMode             ViewMode
-	viewportStarts       [board.DefaultColumnCount]int
-	columnViewportStart  int
-	drillDownParentID    string
-	drillDownParentName  string
-	drillDownTrail       []drillDownContext
-	runtimeSignalsByTask map[string]board.RuntimeSignals
-	runtimeSignalsBusy   bool
-	lastRuntimeRefresh   time.Time
+	overlayStack                   *overlay.Stack
+	createTaskOverlay              *overlay.CreateTaskOverlay
+	viewMode                       ViewMode
+	viewportStarts                 [board.DefaultColumnCount]int
+	columnViewportStart            int
+	drillDownParentID              string
+	drillDownParentName            string
+	drillDownTrail                 []drillDownContext
+	runtimeSignalsByTask           map[string]board.RuntimeSignals
+	runtimeSignalRefreshedAtByTask map[string]time.Time
+	runtimeSignalWorktreeByTask    map[string]string
+	runtimeSignalsBusy             bool
+	lastRuntimeRefresh             time.Time
 
 	// Project
 	currentProject string
@@ -207,6 +212,9 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
+	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
+		repoDir = normalizedRepoDir
+	}
 	logFilePath := resolveTUILogFilePath(cfg)
 	logger := newTUILogger(logFilePath)
 	if err != nil {
@@ -217,36 +225,38 @@ func New(cfg *config.Config) Model {
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
-		tasks:                []domain.Task{},
-		sessions:             make(map[string]*domain.Session),
-		pendingStatuses:      make(map[string]pendingTaskStatus),
-		nav:                  navigation.NewService(),
-		editor:               editor.NewService(),
-		overlayStack:         overlay.NewStack(),
-		viewMode:             ViewModeBoard, // Start with board view
-		runtimeSignalsByTask: make(map[string]board.RuntimeSignals),
-		toasts:               []Toast{},
-		eventTicker:          eventticker.NewRing(eventTickerCapacity),
-		runtimeEvents:        []protocol.EventEnvelope{},
-		styles:               styles.New(),
-		config:               cfg,
-		loading:              true, // Start with loading state
-		spinner:              s,
-		daemonClient:         daemonClient,
-		sessionMonitor:       deps.SessionMonitor,
-		gitClient:            deps.GitDiffClient,
-		gitSyncService:       deps.GitSyncService,
-		projectRegistry:      deps.ProjectRegistry,
-		isOnline:             deps.IsOnline,
-		attachmentService:    deps.AttachmentService,
-		diagnosticsService:   deps.DiagnosticsService,
-		logger:               logger,
-		usePlaceholder:       false, // Use real data from local issue store
-		tmuxAvailable:        deps.TmuxAvailable,
-		tmuxClient:           deps.TmuxClient,
-		repoDir:              repoDir,
-		logFilePath:          logFilePath,
-		currentProject:       resolveInitialProjectName(deps.ProjectRegistry, repoDir),
+		tasks:                          []domain.Task{},
+		sessions:                       make(map[string]*domain.Session),
+		pendingStatuses:                make(map[string]pendingTaskStatus),
+		nav:                            navigation.NewService(),
+		editor:                         editor.NewService(),
+		overlayStack:                   overlay.NewStack(),
+		viewMode:                       ViewModeBoard, // Start with board view
+		runtimeSignalsByTask:           make(map[string]board.RuntimeSignals),
+		runtimeSignalRefreshedAtByTask: make(map[string]time.Time),
+		runtimeSignalWorktreeByTask:    make(map[string]string),
+		toasts:                         []Toast{},
+		eventTicker:                    eventticker.NewRing(eventTickerCapacity),
+		runtimeEvents:                  []protocol.EventEnvelope{},
+		styles:                         styles.New(),
+		config:                         cfg,
+		loading:                        true, // Start with loading state
+		spinner:                        s,
+		daemonClient:                   daemonClient,
+		sessionMonitor:                 deps.SessionMonitor,
+		gitClient:                      deps.GitDiffClient,
+		gitSyncService:                 deps.GitSyncService,
+		projectRegistry:                deps.ProjectRegistry,
+		isOnline:                       deps.IsOnline,
+		attachmentService:              deps.AttachmentService,
+		diagnosticsService:             deps.DiagnosticsService,
+		logger:                         logger,
+		usePlaceholder:                 false, // Use real data from local issue store
+		tmuxAvailable:                  deps.TmuxAvailable,
+		tmuxClient:                     deps.TmuxClient,
+		repoDir:                        repoDir,
+		logFilePath:                    logFilePath,
+		currentProject:                 resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
@@ -392,6 +402,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runtimeSignalsBusy = false
 		m.runtimeSignalsByTask = msg.signalsByTask
+		m.runtimeSignalRefreshedAtByTask = msg.refreshedAtByTask
+		m.runtimeSignalWorktreeByTask = msg.worktreeByTask
 		m.lastRuntimeRefresh = msg.refreshedAt
 		m.applyRuntimeSignals()
 		return m, nil
@@ -470,6 +482,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Level:   ToastError,
 			Message: fmt.Sprintf("Session error: %s - %v", msg.issueID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+
+	case conflictResolveFallbackMsg:
+		m.addToast(Toast{
+			Level: ToastWarning,
+			Message: fmt.Sprintf(
+				"Could not attach via daemon (%v). Run: tmux attach-session -t %s (AI can help resolve)",
+				msg.err,
+				msg.issueID,
+			),
+			Expires: time.Now().Add(8 * time.Second),
 		})
 		return m, nil
 
@@ -755,6 +779,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
+		}
+		// Clear persisted create-draft state only after successful new-task creation.
+		// Updates from edit overlays must not clear the "new task" draft cache.
+		if !msg.isUpdate {
+			m.createTaskOverlay = nil
 		}
 
 		m.addToast(Toast{
@@ -1723,7 +1752,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionCreateTask: // Create task
-		return m, m.openOverlay(overlay.NewCreateTaskOverlay())
+		if m.createTaskOverlay == nil {
+			m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+		}
+		return m, m.openOverlay(m.createTaskOverlay)
 
 	case keybinds.ActionOpenSettings: // Settings
 		return m, m.openOverlay(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
@@ -2035,6 +2067,11 @@ type sessionErrorMsg struct {
 	err     error
 }
 
+type conflictResolveFallbackMsg struct {
+	issueID string
+	err     error
+}
+
 func pendingOperationDetails(err error) (*daemonclient.OperationPendingError, bool) {
 	var pending *daemonclient.OperationPendingError
 	if !errors.As(err, &pending) {
@@ -2064,6 +2101,8 @@ func formatPendingOperationMessage(action, issueID, operationID string, state pr
 type runtimeSignalsLoadedMsg struct {
 	projectID           string
 	signalsByTask       map[string]board.RuntimeSignals
+	refreshedAtByTask   map[string]time.Time
+	worktreeByTask      map[string]string
 	refreshedAt         time.Time
 	partialFailureCount int
 }
@@ -2139,12 +2178,15 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 	if baseBranch == "" {
 		baseBranch = "main"
 	}
+	prioritizedTasks := prioritizeRuntimeSignalTasks(tasks)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return runtimeSignalsLoadedMsg{
-				projectID:     projectID,
-				signalsByTask: map[string]board.RuntimeSignals{},
-				refreshedAt:   time.Now(),
+				projectID:         projectID,
+				signalsByTask:     map[string]board.RuntimeSignals{},
+				refreshedAtByTask: map[string]time.Time{},
+				worktreeByTask:    map[string]string{},
+				refreshedAt:       time.Now(),
 			}
 		}
 
@@ -2154,9 +2196,11 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 		worktrees, err := m.daemonClient.ListWorktrees(ctx)
 		if err != nil {
 			return runtimeSignalsLoadedMsg{
-				projectID:     projectID,
-				signalsByTask: map[string]board.RuntimeSignals{},
-				refreshedAt:   time.Now(),
+				projectID:         projectID,
+				signalsByTask:     map[string]board.RuntimeSignals{},
+				refreshedAtByTask: map[string]time.Time{},
+				worktreeByTask:    map[string]string{},
+				refreshedAt:       time.Now(),
 			}
 		}
 
@@ -2168,54 +2212,124 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 			worktreeByIssue[taskIDKey(wt.IssueID)] = wt.Path
 		}
 
-		signalsByTask := make(map[string]board.RuntimeSignals, len(tasks))
+		signalsByTask := make(map[string]board.RuntimeSignals, len(prioritizedTasks))
+		refreshedAtByTask := make(map[string]time.Time, len(prioritizedTasks))
+		worktreeByTask := make(map[string]string, len(prioritizedTasks))
 		partialFailures := 0
-		for _, task := range tasks {
-			signals := board.RuntimeSignals{
-				HasTmuxSession: task.Session != nil,
-			}
+		now := time.Now()
+		for _, task := range prioritizedTasks {
+			cachedSignals, hasCachedSignals := m.runtimeSignalsByTask[task.ID]
+			signals := board.RuntimeSignals{HasTmuxSession: task.Session != nil}
 			worktreePath, hasWorktree := worktreeByIssue[taskIDKey(task.ID)]
-			if hasWorktree {
-				signals.HasWorktree = true
+			signals.HasWorktree = hasWorktree
+			if !hasWorktree {
+				worktreeByTask[task.ID] = ""
+				signalsByTask[task.ID] = signals
+				if refreshedAt, ok := m.runtimeSignalRefreshedAtByTask[task.ID]; ok {
+					refreshedAtByTask[task.ID] = refreshedAt
+				}
+				continue
+			}
 
-				status, statusErr := m.daemonClient.GitStatus(ctx, worktreePath)
-				if statusErr == nil {
-					signals.HasUncommittedChanges = status.HasChanges
+			if hasCachedSignals {
+				signals.HasUncommittedChanges = cachedSignals.HasUncommittedChanges
+				signals.GitAdditions = cachedSignals.GitAdditions
+				signals.GitDeletions = cachedSignals.GitDeletions
+				signals.GitAheadCount = cachedSignals.GitAheadCount
+				signals.GitBehindCount = cachedSignals.GitBehindCount
+			}
+
+			if hasCachedSignals && m.shouldUseCachedRuntimeSignals(task, worktreePath, now) {
+				worktreeByTask[task.ID] = worktreePath
+				if refreshedAt, ok := m.runtimeSignalRefreshedAtByTask[task.ID]; ok {
+					refreshedAtByTask[task.ID] = refreshedAt
+				}
+				signalsByTask[task.ID] = signals
+				continue
+			}
+
+			status, statusErr := m.daemonClient.GitStatus(ctx, worktreePath)
+			refreshSucceeded := statusErr == nil
+			if statusErr == nil {
+				signals.HasUncommittedChanges = status.HasChanges
+			} else {
+				partialFailures++
+			}
+
+			diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath, baseBranch)
+			if diffErr == nil {
+				signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
+			} else {
+				partialFailures++
+				refreshSucceeded = false
+			}
+
+			if m.isOnline {
+				behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
+					Worktree:   worktreePath,
+					BaseBranch: baseBranch,
+					Remote:     "origin",
+				})
+				if behindErr == nil {
+					signals.GitAheadCount = behind.CommitsAhead
+					signals.GitBehindCount = behind.CommitsBehind
 				} else {
 					partialFailures++
-				}
-
-				diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath, baseBranch)
-				if diffErr == nil {
-					signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
-				} else {
-					partialFailures++
-				}
-
-				if m.isOnline {
-					behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
-						Worktree:   worktreePath,
-						BaseBranch: baseBranch,
-						Remote:     "origin",
-					})
-					if behindErr == nil {
-						signals.GitAheadCount = behind.CommitsAhead
-						signals.GitBehindCount = behind.CommitsBehind
-					} else {
-						partialFailures++
-					}
+					refreshSucceeded = false
 				}
 			}
+			if refreshSucceeded {
+				refreshedAtByTask[task.ID] = now
+			}
+			worktreeByTask[task.ID] = worktreePath
 			signalsByTask[task.ID] = signals
 		}
 
 		return runtimeSignalsLoadedMsg{
 			projectID:           projectID,
 			signalsByTask:       signalsByTask,
-			refreshedAt:         time.Now(),
+			refreshedAtByTask:   refreshedAtByTask,
+			worktreeByTask:      worktreeByTask,
+			refreshedAt:         now,
 			partialFailureCount: partialFailures,
 		}
 	}
+}
+
+func prioritizeRuntimeSignalTasks(tasks []domain.Task) []domain.Task {
+	prioritized := make([]domain.Task, len(tasks))
+	copy(prioritized, tasks)
+	sort.SliceStable(prioritized, func(i, j int) bool {
+		leftActive := hasActiveTmuxSession(prioritized[i])
+		rightActive := hasActiveTmuxSession(prioritized[j])
+		if leftActive == rightActive {
+			return false
+		}
+		return leftActive
+	})
+	return prioritized
+}
+
+func hasActiveTmuxSession(task domain.Task) bool {
+	if task.Session != nil {
+		return true
+	}
+	return task.HasTmuxSession
+}
+
+func (m Model) shouldUseCachedRuntimeSignals(task domain.Task, worktreePath string, now time.Time) bool {
+	if hasActiveTmuxSession(task) {
+		return false
+	}
+	cachedWorktreePath, ok := m.runtimeSignalWorktreeByTask[task.ID]
+	if !ok || strings.TrimSpace(cachedWorktreePath) != strings.TrimSpace(worktreePath) {
+		return false
+	}
+	refreshedAt, ok := m.runtimeSignalRefreshedAtByTask[task.ID]
+	if !ok || refreshedAt.IsZero() {
+		return false
+	}
+	return now.Sub(refreshedAt) < runtimeSignalCacheTTL
 }
 
 func parseDiffStatTotals(diffStat string) (int, int) {
@@ -3230,10 +3344,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "f":
 		// Show diff viewer
-		if session == nil {
+		diffWorktree := strings.TrimSpace(m.repoDir)
+		if session != nil && strings.TrimSpace(session.Worktree) != "" {
+			diffWorktree = strings.TrimSpace(session.Worktree)
+		}
+		if diffWorktree == "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: "No active session - start session first",
+				Message: "No worktree available for diff",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
@@ -3243,10 +3361,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
 				return fmt.Errorf("diff popup unavailable outside tmux; run inside tmux and retry")
 			}
-			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(session.Worktree), command)
+			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
 			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
 		}
-		viewer := diff.NewDiffViewer(session.Worktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
+		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
 		cmd := m.openOverlay(viewer)
 		return m, cmd
 	case "w":
@@ -3993,6 +4111,19 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 	}
 }
 
+func (m Model) resolveConflictWithAICmd(issueID string) tea.Cmd {
+	return func() tea.Msg {
+		msg := m.attachSessionCmd(issueID)()
+		if errMsg, ok := msg.(sessionErrorMsg); ok {
+			return conflictResolveFallbackMsg{
+				issueID: issueID,
+				err:     errMsg.err,
+			}
+		}
+		return msg
+	}
+}
+
 // createPRCmd generates the gh pr create command
 func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
@@ -4079,7 +4210,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 		return m, nil
 
 	case resolution.ResolveWithClaude:
-		// Attach to tmux session for Claude to resolve
+		// Attach to tmux session so AI can resolve merge conflicts in-session.
 		if !m.tmuxAvailable {
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -4088,12 +4219,15 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 			})
 			return m, nil
 		}
-		m.addToast(Toast{
-			Level:   ToastInfo,
-			Message: fmt.Sprintf("Run: tmux attach-session -t %s (Claude can help resolve)", task.ID),
-			Expires: time.Now().Add(8 * time.Second),
-		})
-		return m, nil
+		if m.daemonClient == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Daemon unavailable. Run: tmux attach-session -t %s (AI can help resolve)", task.ID),
+				Expires: time.Now().Add(8 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.resolveConflictWithAICmd(task.ID)
 
 	default:
 		return m, nil

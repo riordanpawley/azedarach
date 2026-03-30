@@ -65,6 +65,22 @@ type CreateTaskOverlay struct {
 	styles      *Styles
 	editorError string
 	editorFlow  func(string) (string, error)
+	defaults    createTaskDefaults
+}
+
+type createTaskDefaults struct {
+	title       string
+	description string
+	taskType    domain.TaskType
+	priority    domain.Priority
+	status      domain.Status
+	assignee    string
+	labels      []string
+	impls       []string
+	design      string
+	notes       string
+	acceptance  string
+	estimate    *int
 }
 
 const (
@@ -106,6 +122,14 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 		focusIndex:  focusTitle,
 		styles:      New(),
 		editorFlow:  runTaskTemplateInEditor,
+		defaults: createTaskDefaults{
+			title:       task.Title,
+			description: task.Description,
+			taskType:    task.Type,
+			priority:    task.Priority,
+			status:      task.Status,
+			impls:       append([]string(nil), task.Implementations...),
+		},
 	}
 }
 
@@ -134,6 +158,11 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 		focusIndex:  focusTitle,
 		styles:      New(),
 		editorFlow:  runTaskTemplateInEditor,
+		defaults: createTaskDefaults{
+			taskType: domain.TypeTask,
+			priority: domain.P2,
+			status:   domain.StatusOpen,
+		},
 	}
 }
 
@@ -169,6 +198,10 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+e":
 			return c, c.editInEditorCmd()
+
+		case "ctrl+k":
+			c.clearToDefaults()
+			return c, nil
 
 		case "tab", "shift+tab":
 			// Tab through fields
@@ -305,10 +338,30 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
+				{Key: "Ctrl+K", Description: "Clear form"},
 				{Key: "Esc", Description: "Cancel"},
 			})
 		},
 	})
+}
+
+func (c *CreateTaskOverlay) clearToDefaults() {
+	c.title.SetValue(c.defaults.title)
+	c.description.SetValue(c.defaults.description)
+	c.taskType = c.defaults.taskType
+	c.priority = c.defaults.priority
+	c.status = c.defaults.status
+	c.assignee = c.defaults.assignee
+	c.labels = append([]string(nil), c.defaults.labels...)
+	c.impls = append([]string(nil), c.defaults.impls...)
+	c.design = c.defaults.design
+	c.notes = c.defaults.notes
+	c.acceptance = c.defaults.acceptance
+	c.estimate = c.defaults.estimate
+	c.editorError = ""
+	c.focusIndex = focusTitle
+	c.title.Focus()
+	c.description.Blur()
 }
 
 func (c *CreateTaskOverlay) renderFormContent(width, height int) string {

@@ -13,7 +13,7 @@
 │────────────────────────────────────────────────────────────────────│
 │ Tab Switch section                                                 │
 │ 1-6 Jump to section                                                │
-│ j/k Scroll                                                         │
+│ j/k/ctrl+u/d Scroll                                                │
 │ r Refresh                                                          │
 │ q/Esc Close                                                        │
 │  (line 1/14)                                                       │

@@ -52,3 +52,25 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 		t.Fatalf("expected .azedarach dir to exist: %v", err)
 	}
 }
+
+func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	launcher := NewLauncher(filepath.Join(worktree, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
+	if launcher.RepoDir != repo {
+		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, repo)
+	}
+}

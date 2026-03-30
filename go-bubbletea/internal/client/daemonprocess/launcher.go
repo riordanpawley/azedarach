@@ -26,6 +26,9 @@ type Launcher struct {
 
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
+	if normalizedRepoDir, err := config.ResolveProjectRoot(repoDir); err == nil {
+		repoDir = normalizedRepoDir
+	}
 	lockPath := config.GlobalDaemonLockPath()
 	return &Launcher{
 		RepoDir:     repoDir,

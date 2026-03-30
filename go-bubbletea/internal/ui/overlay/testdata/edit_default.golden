@@ -9,8 +9,8 @@
 ││ ┃                                             0/1/2/3/4 Set priority│
 ││ ┃                                             Enter Create task     │
 ││ Type: [●T] [ B] [ F] [ E] [ C]                Ctrl+E Edit in $EDITOR│
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]            Esc Cancel            │
-││                                                                     │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]            Ctrl+K Clear form     │
+││                                               Esc Cancel            │
 ││ [ Create Task ]                                                     │
 ││                                                                     │
 ││                                                                     │

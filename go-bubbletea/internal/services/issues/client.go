@@ -58,7 +58,14 @@ func NewClient(repoDir string, logger *slog.Logger) *Client {
 		if logger != nil {
 			logger.Warn("failed to resolve azedarach issue database path", "repoDir", repoDir, "error", err)
 		}
-		dbPath = filepath.Join(repoDir, ".azedarach", "azedarach.db")
+		fallbackRoot := strings.TrimSpace(repoDir)
+		if normalizedRoot, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
+			fallbackRoot = normalizedRoot
+		}
+		if strings.TrimSpace(fallbackRoot) == "" {
+			fallbackRoot = "."
+		}
+		dbPath = filepath.Join(fallbackRoot, ".azedarach", "azedarach.db")
 	}
 	return NewClientAtPath(dbPath, logger)
 }
@@ -1062,49 +1069,11 @@ func resolveDBPath(repoDir string) (string, error) {
 		return "", err
 	}
 
-	baseRoot, err := resolveBaseGitRoot(absStart)
+	baseRoot, err := config.ResolveProjectRoot(absStart)
 	if err == nil {
 		return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
 	}
-
-	// Fallback path search keeps existing repositories usable even when git
-	// common-dir discovery is unavailable in constrained runtime environments.
-	if fallbackPath, fallbackErr := resolveDBPathBySearch(absStart); fallbackErr == nil {
-		return fallbackPath, nil
-	}
-	return "", fmt.Errorf("resolve base git root: %w", err)
-}
-
-func resolveBaseGitRoot(startDir string) (string, error) {
-	return config.ResolveBaseGitRoot(startDir)
-}
-
-func resolveDBPathBySearch(startDir string) (string, error) {
-	absStart, err := filepath.Abs(startDir)
-	if err != nil {
-		return "", err
-	}
-
-	for dir := absStart; ; dir = filepath.Dir(dir) {
-		candidate := filepath.Join(dir, ".azedarach", "azedarach.db")
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err == nil && homeDir != "" {
-		candidate := filepath.Join(homeDir, ".azedarach", "azedarach.db")
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate, nil
-		}
-	}
-
-	return "", fmt.Errorf("unable to locate .azedarach/azedarach.db starting at %s", absStart)
+	return "", fmt.Errorf("resolve project root: %w", err)
 }
 
 func (c *Client) wrapError(op string, issueID string, err error) error {

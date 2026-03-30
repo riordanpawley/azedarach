@@ -1571,6 +1571,68 @@ func TestSelectModeEntry(t *testing.T) {
 	})
 }
 
+func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+
+	opened, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = opened.(Model)
+
+	first, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || first == nil {
+		t.Fatalf("expected create overlay, got %T", m.overlayStack.Current())
+	}
+
+	closed, _ := m.Update(overlay.CloseOverlayMsg{})
+	m = closed.(Model)
+	if !m.overlayStack.IsEmpty() {
+		t.Fatal("expected overlay stack to be empty after close")
+	}
+
+	reopened, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = reopened.(Model)
+
+	second, ok := m.overlayStack.Current().(*overlay.CreateTaskOverlay)
+	if !ok || second == nil {
+		t.Fatalf("expected create overlay after reopen, got %T", m.overlayStack.Current())
+	}
+	if second != first {
+		t.Fatal("expected create overlay state to persist across close/reopen")
+	}
+}
+
+func TestTaskCreatedResultMsgCreateDraftResetBehavior(t *testing.T) {
+	t.Run("update does not clear create draft", func(t *testing.T) {
+		m := newTestModel()
+		m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+
+		updated, _ := m.Update(taskCreatedResultMsg{
+			taskID:   "az-123",
+			err:      nil,
+			isUpdate: true,
+		})
+		next := updated.(Model)
+		if next.createTaskOverlay == nil {
+			t.Fatal("expected create draft to persist after task update")
+		}
+	})
+
+	t.Run("successful create clears create draft", func(t *testing.T) {
+		m := newTestModel()
+		m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+
+		updated, _ := m.Update(taskCreatedResultMsg{
+			taskID:   "az-new",
+			err:      nil,
+			isUpdate: false,
+		})
+		next := updated.(Model)
+		if next.createTaskOverlay != nil {
+			t.Fatal("expected create draft to clear after successful new task creation")
+		}
+	})
+}
+
 func TestModeTransitions(t *testing.T) {
 	m := newTestModel()
 
@@ -2375,6 +2437,149 @@ func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	}
 	if !strings.Contains(lastToast.Message, "unavailable outside tmux") {
 		t.Fatalf("conflict resolution toast message = %q, want tmux-unavailable guidance", lastToast.Message)
+	}
+}
+
+func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
+	m.nav.SelectTask("az-1", 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			var body struct {
+				ProjectID string `json:"project_id"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal attach request: %v", err)
+			}
+			if body.SessionID != "az-1" {
+				t.Fatalf("session id = %q, want az-1", body.SessionID)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	var switchTargets []string
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			switchTargets = append(switchTargets, target)
+			return nil
+		},
+	}
+
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	if cmd == nil {
+		t.Fatal("expected attach command from resolve with Claude")
+	}
+	_ = result.(Model)
+
+	msg := cmd()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+	}
+	if attached.issueID != "az-1" {
+		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
+	}
+	if !attached.switchedTmux {
+		t.Fatal("expected tmux switch on conflict resolution attach")
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionAttach {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
+		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	}
+}
+
+func TestHandleConflictResolution_ResolveWithClaudeDaemonUnavailableFallsBackToManualHint(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.tmuxAvailable = true
+	m.daemonClient = nil
+	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
+	m.nav.SelectTask("az-1", 0)
+
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	if cmd != nil {
+		t.Fatal("expected no attach command when daemon is unavailable")
+	}
+	newModel := result.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatal("expected warning toast when daemon is unavailable")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if lastToast.Level != ToastWarning {
+		t.Fatalf("toast level = %v, want warning", lastToast.Level)
+	}
+	if !strings.Contains(lastToast.Message, "Daemon unavailable") {
+		t.Fatalf("toast message = %q, want daemon unavailable guidance", lastToast.Message)
+	}
+	if !strings.Contains(lastToast.Message, "tmux attach-session -t az-1") {
+		t.Fatalf("toast message = %q, want manual attach command", lastToast.Message)
+	}
+}
+
+func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			return protocol.ResponseEnvelope{}, fmt.Errorf("daemon offline")
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	msg := m.resolveConflictWithAICmd("az-1")()
+	fallback, ok := msg.(conflictResolveFallbackMsg)
+	if !ok {
+		t.Fatalf("resolveConflictWithAICmd returned %T, want conflictResolveFallbackMsg", msg)
+	}
+	if fallback.issueID != "az-1" {
+		t.Fatalf("fallback issue id = %q, want az-1", fallback.issueID)
+	}
+	if fallback.err == nil || !strings.Contains(fallback.err.Error(), "daemon offline") {
+		t.Fatalf("fallback err = %v, want daemon offline", fallback.err)
+	}
+
+	result, _ := m.Update(fallback)
+	newModel := result.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatal("expected warning toast for fallback guidance")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if lastToast.Level != ToastWarning {
+		t.Fatalf("toast level = %v, want warning", lastToast.Level)
+	}
+	if !strings.Contains(lastToast.Message, "tmux attach-session -t az-1") {
+		t.Fatalf("toast message = %q, want manual attach command", lastToast.Message)
 	}
 }
 

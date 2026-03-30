@@ -204,8 +204,12 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve repo directory %q: %w", repoDir, err)
 	}
+	rootRepoDir, err := config.ResolveProjectRoot(absRepoDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve project root from %q: %w", absRepoDir, err)
+	}
 
-	projectID := filepath.Base(absRepoDir)
+	projectID := filepath.Base(rootRepoDir)
 	socketPath := config.GlobalDaemonSocketPath()
 	daemonTransport := transport.NewClient(socketPath)
 
@@ -214,7 +218,7 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 		DaemonClient: daemonclient.New(daemonTransport).WithProjectID(projectID),
 		Logger:       logger,
 		ProjectID:    projectID,
-		RepoDir:      absRepoDir,
+		RepoDir:      rootRepoDir,
 	}, nil
 }
 

@@ -3,8 +3,8 @@
 │──────────────────────────────────────────────────────────────────────────────────│
 ││ ⚠ Merge conflicts detected!                          Actions                    │
 ││                                                      ───────────────────────────│
-││ Conflicted files:                                     j/k navigate              │
-││ ▸ internal/ui/app.go                                  c resolve                 │
+││ AI resolve now? Press c.                              j/k navigate              │
+││ ▸ internal/ui/app.go                                  c ai resolve              │
 ││   internal/domain/task.go                             o open                    │
 ││   internal/services/git.go                            a abort                   │
 ││                                                       Esc close                 │
