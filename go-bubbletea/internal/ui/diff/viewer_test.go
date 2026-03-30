@@ -211,6 +211,54 @@ func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
 	}
 }
 
+func TestDiffViewerSearchClampsCursorAfterFilterEdit(t *testing.T) {
+	client := &fakeDiffClient{
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "alpha.go", Status: gitservice.DiffFileModified},
+			{Path: "beta.go", Status: gitservice.DiffFileModified},
+			{Path: "gamma.go", Status: gitservice.DiffFileModified},
+			{Path: "internal/services/git/client.go", Status: gitservice.DiffFileModified},
+		},
+		mergeBase: "base789",
+	}
+
+	var gotTitle string
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, func(_ context.Context, title, _ string) error {
+		gotTitle = title
+		return nil
+	})
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	viewer.cursor = 3
+
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	viewer = updated.(*DiffViewer)
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	viewer = updated.(*DiffViewer)
+
+	if viewer.cursor != 0 {
+		t.Fatalf("cursor=%d, want 0 after filter narrows to one result", viewer.cursor)
+	}
+
+	updated, _ = viewer.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	viewer = updated.(*DiffViewer)
+	updated, cmd := viewer.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	viewer = updated.(*DiffViewer)
+	if cmd == nil {
+		t.Fatal("expected popup command")
+	}
+	_ = cmd()
+	if gotTitle != " internal/services/git/client.go " {
+		t.Fatalf("title=%q, want filtered file popup title", gotTitle)
+	}
+}
+
 func TestDiffViewerClose(t *testing.T) {
 	viewer := NewDiffViewer("/tmp/az-1", "main", &fakeDiffClient{}, nil)
 	updated, cmd := viewer.Update(tea.KeyMsg{Type: tea.KeyEsc})

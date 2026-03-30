@@ -171,13 +171,14 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		filtered := d.filteredFiles()
 		clampCursor := func() {
-			if len(filtered) == 0 {
+			filteredNow := d.filteredFiles()
+			if len(filteredNow) == 0 {
 				d.cursor = 0
 				d.scrollY = 0
 				return
 			}
-			if d.cursor >= len(filtered) {
-				d.cursor = len(filtered) - 1
+			if d.cursor >= len(filteredNow) {
+				d.cursor = len(filteredNow) - 1
 			}
 		}
 		if d.searchMode {
