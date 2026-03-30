@@ -7,78 +7,157 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
 type DiffClient interface {
-	Diff(ctx context.Context, worktree string) (string, error)
+	ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]gitservice.ChangedFile, error)
+	MergeBase(ctx context.Context, worktree, baseBranch string) (string, error)
 }
 
-// DiffViewer displays git diff output with file navigation and syntax highlighting
+type PopupOpener func(ctx context.Context, title, command string) error
+
+type loadChangedFilesMsg struct {
+	Files []gitservice.ChangedFile
+	Err   error
+}
+
+type popupResultMsg struct {
+	Err error
+}
+
+// DiffViewer displays changed files and opens difftastic popups for selected diffs.
 type DiffViewer struct {
-	worktree   string
-	diffOutput string
-	files      []DiffFile
-	cursor     int
-	scrollY    int
-	expanded   map[int]bool // Which files are expanded to show hunks
-	styles     *Styles
-	width      int
-	height     int
-	viewHeight int // Available height for content display
-	loading    bool
-	err        error
+	worktree    string
+	baseBranch  string
+	gitClient   DiffClient
+	openPopup   PopupOpener
+	files       []gitservice.ChangedFile
+	cursor      int
+	scrollY     int
+	styles      *Styles
+	viewHeight  int
+	loading     bool
+	err         error
+	popupStatus string
 }
 
-// NewDiffViewer creates a new diff viewer for the specified worktree
-func NewDiffViewer(worktree string) *DiffViewer {
+// NewDiffViewer creates a new diff viewer for the specified worktree.
+func NewDiffViewer(worktree, baseBranch string, gitClient DiffClient, openPopup PopupOpener) *DiffViewer {
 	return &DiffViewer{
-		worktree:   worktree,
-		files:      []DiffFile{},
+		worktree:   strings.TrimSpace(worktree),
+		baseBranch: strings.TrimSpace(baseBranch),
+		gitClient:  gitClient,
+		openPopup:  openPopup,
+		files:      []gitservice.ChangedFile{},
 		cursor:     0,
 		scrollY:    0,
-		expanded:   make(map[int]bool),
 		styles:     New(),
-		width:      80,
-		height:     30,
 		viewHeight: 20,
-		loading:    false,
 	}
 }
 
-// LoadDiffMsg is sent when diff loading completes
-type LoadDiffMsg struct {
-	Output string
-	Err    error
-}
-
-// LoadDiff loads the git diff for the worktree
-func (d *DiffViewer) LoadDiff(ctx context.Context, gitClient DiffClient) tea.Cmd {
+func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 	return func() tea.Msg {
-		output, err := gitClient.Diff(ctx, d.worktree)
-		return LoadDiffMsg{Output: output, Err: err}
+		if d.gitClient == nil {
+			return loadChangedFilesMsg{Err: fmt.Errorf("git client unavailable")}
+		}
+		files, err := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
+		return loadChangedFilesMsg{Files: files, Err: err}
 	}
 }
 
-// Init initializes the diff viewer
-func (d *DiffViewer) Init() tea.Cmd {
-	d.loading = true
-	return nil
+func (d *DiffViewer) openSelectedDiffCmd() tea.Cmd {
+	if d.cursor < 0 || d.cursor >= len(d.files) {
+		return nil
+	}
+	filePath := strings.TrimSpace(d.files[d.cursor].Path)
+	if filePath == "" {
+		return nil
+	}
+	return d.openPopupCmd(filePath, false)
 }
 
-// Update handles messages
-func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case LoadDiffMsg:
-		d.loading = false
-		if msg.Err != nil {
-			d.err = msg.Err
-			return d, nil
+func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
+	return func() tea.Msg {
+		if d.gitClient == nil {
+			return popupResultMsg{Err: fmt.Errorf("git client unavailable")}
+		}
+		if d.openPopup == nil {
+			return popupResultMsg{Err: fmt.Errorf("diff popup unavailable")}
 		}
 
-		d.diffOutput = msg.Output
-		d.files = ParseUnifiedDiff(msg.Output)
+		mergeBase, err := d.gitClient.MergeBase(context.Background(), d.worktree, d.effectiveBaseBranch())
+		if err != nil {
+			return popupResultMsg{Err: err}
+		}
+
+		var title string
+		var command string
+		if all {
+			title = " All Changes "
+			command = fmt.Sprintf(
+				"git diff %s --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- ':^.azedarach' | less -RS",
+				shellSingleQuote(mergeBase),
+				shellSingleQuote(mergeBase),
+			)
+		} else {
+			title = " " + filePath + " "
+			command = fmt.Sprintf(
+				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- %s | less -RS",
+				shellSingleQuote(mergeBase),
+				shellSingleQuote(filePath),
+			)
+		}
+
+		if err := d.openPopup(context.Background(), title, command); err != nil {
+			return popupResultMsg{Err: err}
+		}
+		return popupResultMsg{}
+	}
+}
+
+func (d *DiffViewer) effectiveBaseBranch() string {
+	baseBranch := strings.TrimSpace(d.baseBranch)
+	if baseBranch == "" {
+		return "main"
+	}
+	return baseBranch
+}
+
+func (d *DiffViewer) Init() tea.Cmd {
+	d.loading = true
+	return d.loadChangedFilesCmd()
+}
+
+func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case loadChangedFilesMsg:
+		d.loading = false
+		d.cursor = 0
+		d.scrollY = 0
+		d.files = nil
+		d.popupStatus = ""
+		if msg.Err != nil || msg.Files == nil {
+			if msg.Err != nil {
+				d.err = msg.Err
+			} else {
+				d.err = fmt.Errorf("failed to load changed files")
+			}
+			return d, nil
+		}
+		d.err = nil
+		d.files = msg.Files
+		return d, nil
+
+	case popupResultMsg:
+		if msg.Err != nil {
+			d.popupStatus = "Popup error: " + msg.Err.Error()
+		} else {
+			d.popupStatus = "Opened diff popup"
+		}
 		return d, nil
 
 	case tea.KeyMsg:
@@ -105,239 +184,131 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 
 		case "g":
-			// Jump to top
 			d.cursor = 0
 			d.scrollY = 0
 			return d, nil
 
 		case "G":
-			// Jump to bottom
 			if len(d.files) > 0 {
 				d.cursor = len(d.files) - 1
 				d.ensureCursorVisible()
 			}
 			return d, nil
 
-		case "enter", " ":
-			// Toggle file expansion
-			if d.cursor >= 0 && d.cursor < len(d.files) {
-				d.expanded[d.cursor] = !d.expanded[d.cursor]
-			}
-			return d, nil
+		case "r":
+			d.loading = true
+			d.err = nil
+			d.popupStatus = ""
+			return d, d.loadChangedFilesCmd()
 
-		case "E":
-			// Expand all
-			for i := range d.files {
-				d.expanded[i] = true
-			}
-			return d, nil
+		case "enter":
+			return d, d.openSelectedDiffCmd()
 
-		case "C":
-			// Collapse all
-			d.expanded = make(map[int]bool)
-			return d, nil
+		case "a":
+			return d, d.openPopupCmd("", true)
 		}
 	}
 
 	return d, nil
 }
 
-// View renders the diff viewer
 func (d *DiffViewer) View() string {
 	if d.loading {
-		return d.styles.Dimmed.Render("Loading diff...")
+		return d.styles.Dimmed.Render("Loading changed files...")
 	}
 
 	if d.err != nil {
-		return d.styles.DeleteLine.Render(fmt.Sprintf("Error loading diff: %v", d.err))
+		return d.styles.DeleteLine.Render(fmt.Sprintf("Error loading changed files: %v", d.err))
 	}
 
 	if len(d.files) == 0 {
-		return d.styles.Dimmed.Render("No changes to display")
+		return d.styles.Dimmed.Render(fmt.Sprintf("No changes vs %s", d.effectiveBaseBranch()))
 	}
 
 	var content strings.Builder
 
-	// Render files with proper scrolling
-	visibleLines := d.renderFiles()
-	lines := strings.Split(visibleLines, "\n")
+	lines := d.renderFiles()
 
-	// Apply scroll window
 	start := d.scrollY
 	end := min(d.scrollY+d.viewHeight, len(lines))
 
 	for i := start; i < end; i++ {
-		if i < len(lines) {
-			content.WriteString(lines[i])
-			content.WriteString("\n")
-		}
+		content.WriteString(lines[i])
+		content.WriteString("\n")
 	}
 
-	// Add footer with navigation hints
+	if d.popupStatus != "" {
+		content.WriteString(d.styles.Footer.Render(d.popupStatus))
+		content.WriteString("\n\n")
+	}
+
 	footer := d.renderFooter()
-	content.WriteString("\n")
 	content.WriteString(footer)
 
 	return content.String()
 }
 
-// Title returns the overlay title
 func (d *DiffViewer) Title() string {
 	if len(d.files) == 0 {
-		return "Git Diff"
+		return fmt.Sprintf("Diff vs %s", d.effectiveBaseBranch())
 	}
-	return fmt.Sprintf("Git Diff (%d file%s)", len(d.files), plural(len(d.files)))
+	return fmt.Sprintf("Diff vs %s (%d file%s)", d.effectiveBaseBranch(), len(d.files), plural(len(d.files)))
 }
 
-// Size returns the overlay dimensions
 func (d *DiffViewer) Size() (width, height int) {
-	d.viewHeight = 20 // Content viewing area
-	return 100, 30    // Total overlay size
+	d.viewHeight = 20
+	return 100, 30
 }
 
-// renderFiles renders all files with their diffs
-func (d *DiffViewer) renderFiles() string {
-	var b strings.Builder
-
+func (d *DiffViewer) renderFiles() []string {
+	lines := make([]string, 0, len(d.files))
 	for i, file := range d.files {
 		isSelected := i == d.cursor
-		isExpanded := d.expanded[i]
 
-		// File header with status badge
 		var headerStyle lipgloss.Style
 		if isSelected {
-			if isExpanded {
-				headerStyle = d.styles.FileHeaderExpanded
-			} else {
-				headerStyle = d.styles.FileHeaderSelected
-			}
+			headerStyle = d.styles.FileHeaderSelected
 		} else {
 			headerStyle = d.styles.FileHeader
 		}
 
-		// Render file header line
-		cursor := " "
+		cursorMarker := " "
 		if isSelected {
-			cursor = "▶"
+			cursorMarker = "▶"
 		}
 
-		expandMarker := "►"
-		if isExpanded {
-			expandMarker = "▼"
-		}
-
-		badge := d.styles.FileStatusBadge(file.Status)
+		fileStatus := toViewerFileStatus(file.Status)
+		badge := d.styles.FileStatusBadge(fileStatus)
 		path := file.Path
-		if file.Status == FileRenamed && file.OldPath != file.Path {
+		if fileStatus == FileRenamed && file.OldPath != file.Path {
 			path = fmt.Sprintf("%s → %s", file.OldPath, file.Path)
 		}
 
-		statsRendered := lipgloss.JoinHorizontal(
+		line := lipgloss.JoinHorizontal(
 			lipgloss.Left,
-			d.styles.FileStatsAdd.Render(fmt.Sprintf("+%d", file.Additions)),
-			" ",
-			d.styles.FileStatsDel.Render(fmt.Sprintf("-%d", file.Deletions)),
-		)
-
-		headerLine := lipgloss.JoinHorizontal(
-			lipgloss.Left,
-			cursor,
-			" ",
-			expandMarker,
+			cursorMarker,
 			" ",
 			badge,
 			" ",
 			headerStyle.Render(path),
-			" ",
-			d.styles.FileStats.Render("("),
-			statsRendered,
-			d.styles.FileStats.Render(")"),
 		)
-
-		b.WriteString(headerLine)
-		b.WriteString("\n")
-
-		// Render hunks if expanded
-		if isExpanded {
-			for _, hunk := range file.Hunks {
-				b.WriteString(d.renderHunk(hunk))
-			}
-			b.WriteString("\n")
-		}
+		lines = append(lines, line)
 	}
-
-	return b.String()
+	return lines
 }
 
-// renderHunk renders a single diff hunk
-func (d *DiffViewer) renderHunk(hunk DiffHunk) string {
-	var b strings.Builder
-
-	// Hunk header
-	b.WriteString("  ")
-	b.WriteString(d.styles.HunkHeader.Render(hunk.Header))
-	b.WriteString("\n")
-
-	// Hunk lines
-	for _, line := range hunk.Lines {
-		b.WriteString(d.renderLine(line))
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
-// renderLine renders a single diff line
-func (d *DiffViewer) renderLine(line DiffLine) string {
-	var prefix, lineNum, content string
-	var style lipgloss.Style
-
-	switch line.Type {
-	case LineAdd:
-		prefix = "+"
-		lineNum = fmt.Sprintf("%5d", line.NewLine)
-		content = line.Content
-		style = d.styles.AddLine
-
-	case LineDelete:
-		prefix = "-"
-		lineNum = fmt.Sprintf("%5d", line.OldLine)
-		content = line.Content
-		style = d.styles.DeleteLine
-
-	case LineContext:
-		prefix = " "
-		lineNum = fmt.Sprintf("%5d", line.NewLine)
-		content = line.Content
-		style = d.styles.ContextLine
-	}
-
-	lineNumRendered := d.styles.LineNumber.Render(lineNum)
-
-	return lipgloss.JoinHorizontal(
-		lipgloss.Left,
-		"    ",
-		lineNumRendered,
-		" ",
-		style.Render(prefix),
-		" ",
-		style.Render(content),
-	)
-}
-
-// renderFooter renders navigation hints
 func (d *DiffViewer) renderFooter() string {
 	hints := []keybinds.Binding{
-		{Key: "j/k", Description: "navigate"},
-		{Key: "g/G", Description: "jump top/bottom"},
-		{Key: "Enter", Description: "expand/collapse"},
-		{Key: "E/C", Description: "expand/collapse all"},
+		{Key: "j/k", Description: "navigate files"},
+		{Key: "Enter", Description: "popup selected"},
+		{Key: "a", Description: "popup all"},
+		{Key: "r", Description: "refresh"},
 		{Key: "q/Esc", Description: "close"},
 	}
 
-	fileInfo := ""
+	status := ""
 	if len(d.files) > 0 {
-		fileInfo = d.styles.Footer.Render(fmt.Sprintf("  [File %d/%d]", d.cursor+1, len(d.files)))
+		status = d.styles.Footer.Render(fmt.Sprintf("  [File %d/%d]", d.cursor+1, len(d.files)))
 	}
 
 	return lipgloss.JoinHorizontal(
@@ -347,35 +318,17 @@ func (d *DiffViewer) renderFooter() string {
 			DescriptionStyle: d.styles.Footer,
 			FooterStyle:      d.styles.Footer,
 		}),
-		fileInfo,
+		status,
 	)
 }
 
-// ensureCursorVisible adjusts scrollY to keep cursor in view
 func (d *DiffViewer) ensureCursorVisible() {
-	// Calculate the line position of the cursor
-	linePos := 0
-	for i := 0; i < d.cursor && i < len(d.files); i++ {
-		linePos++ // File header line
-		if d.expanded[i] {
-			// Count hunk lines
-			for _, hunk := range d.files[i].Hunks {
-				linePos++ // Hunk header
-				linePos += len(hunk.Lines)
-			}
-			linePos++ // Blank line after expanded file
-		}
-	}
-
-	// Adjust scroll to keep cursor visible
-	if linePos < d.scrollY {
-		d.scrollY = linePos
-	} else if linePos >= d.scrollY+d.viewHeight {
-		d.scrollY = linePos - d.viewHeight + 1
+	if d.cursor < d.scrollY {
+		d.scrollY = d.cursor
+	} else if d.cursor >= d.scrollY+d.viewHeight {
+		d.scrollY = d.cursor - d.viewHeight + 1
 	}
 }
-
-// Helper functions
 
 func min(a, b int) int {
 	if a < b {
@@ -384,9 +337,29 @@ func min(a, b int) int {
 	return b
 }
 
+func shellSingleQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
 func plural(n int) string {
 	if n == 1 {
 		return ""
 	}
 	return "s"
+}
+
+func toViewerFileStatus(status gitservice.DiffFileStatus) FileStatus {
+	switch status {
+	case gitservice.DiffFileAdded:
+		return FileAdded
+	case gitservice.DiffFileDeleted:
+		return FileDeleted
+	case gitservice.DiffFileRenamed:
+		return FileRenamed
+	default:
+		return FileModified
+	}
 }
