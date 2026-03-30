@@ -280,7 +280,7 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 		},
 	}
 
-	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true, nil)
+	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true, nil, "")
 	if !strings.Contains(command, "--dangerously-skip-permissions") {
 		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
 	}

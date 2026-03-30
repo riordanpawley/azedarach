@@ -445,6 +445,68 @@ func TestDiffStatAgainstBaseBranchFallsBackToOriginRef(t *testing.T) {
 	}
 }
 
+func TestMergeBase(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "abc123\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.MergeBase(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("MergeBase() error = %v", err)
+	}
+	if mergeBase != "abc123" {
+		t.Fatalf("MergeBase() = %q, want abc123", mergeBase)
+	}
+}
+
+func TestChangedFiles(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "abc123\n", nil
+			}
+			if len(args) >= 6 &&
+				args[0] == "diff" &&
+				args[1] == "--name-status" &&
+				args[2] == "abc123" &&
+				args[3] == "HEAD" &&
+				args[4] == "--" &&
+				args[5] == ":^.azedarach" {
+				return "M\tinternal/app/model.go\nA\tnew.go\nD\told.go\nR100\tfrom.go\tto.go", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	files, err := client.ChangedFiles(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("ChangedFiles() error = %v", err)
+	}
+	if len(files) != 4 {
+		t.Fatalf("ChangedFiles() len = %d, want 4", len(files))
+	}
+
+	if files[0].Path != "internal/app/model.go" || files[0].Status != DiffFileModified {
+		t.Fatalf("first file = %+v", files[0])
+	}
+	if files[1].Path != "new.go" || files[1].Status != DiffFileAdded {
+		t.Fatalf("second file = %+v", files[1])
+	}
+	if files[2].Path != "old.go" || files[2].Status != DiffFileDeleted {
+		t.Fatalf("third file = %+v", files[2])
+	}
+	if files[3].OldPath != "from.go" || files[3].Path != "to.go" || files[3].Status != DiffFileRenamed {
+		t.Fatalf("fourth file = %+v", files[3])
+	}
+}
+
 func TestParseConflicts(t *testing.T) {
 	tests := []struct {
 		name      string

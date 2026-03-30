@@ -1,14 +1,10 @@
 package overlay
 
 import (
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
-	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 type taskWorkspaceFocus int
@@ -88,12 +84,16 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return w, w.actions.selectCurrentAction()
 		case "j", "down":
-			if w.detail.scrollY < w.detail.maxScroll() {
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorDown()
+			} else if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
 			return w, nil
 		case "k", "up":
-			if w.detail.scrollY > 0 {
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorUp()
+			} else if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
 			return w, nil
@@ -138,122 +138,31 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (w *TaskWorkspaceOverlay) View() string {
-	contentWidth := max(1, w.overlayWidth-2)
-	contentHeight := max(1, w.overlayHeight-2)
-	titleLine := w.styles.MenuItemActive.Render("Task Workspace")
-	separator := w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth)))
-
-	bodyHeight := max(6, contentHeight-2)
-	if contentWidth < 76 {
-		return w.renderStacked(contentWidth, contentHeight, bodyHeight, titleLine, separator)
-	}
-
-	gap := 1
-	minLeft := 28
-	minRight := 20
-	usableWidth := max(16, contentWidth-gap)
-	leftWidth := (usableWidth * 2) / 3
-	maxLeft := max(minLeft, usableWidth-minRight)
-	if leftWidth > maxLeft {
-		leftWidth = maxLeft
-	}
-	if leftWidth < minLeft {
-		leftWidth = minLeft
-	}
-	rightWidth := usableWidth - leftWidth
-	if rightWidth < minRight {
-		rightWidth = minRight
-		leftWidth = max(minLeft, usableWidth-rightWidth)
-	}
-	w.detail.viewHeight = max(6, bodyHeight)
-	w.detail.wrapWidth = max(20, leftWidth-2)
-
-	detailStyle := lipgloss.NewStyle()
-	if w.focus == taskWorkspaceFocusDetail {
-		detailStyle = detailStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
-	}
-	detailView := detailStyle.
-		Width(leftWidth).
-		MaxWidth(leftWidth).
-		Height(bodyHeight).
-		MaxHeight(bodyHeight).
-		Render(w.detail.View())
-
-	actionsHeader := w.styles.MenuItemActive.Render("Actions")
-	actionsBody := lipgloss.JoinVertical(
-		lipgloss.Left,
-		actionsHeader,
-		w.styles.Separator.Render(strings.Repeat("─", max(6, rightWidth))),
-		w.actions.viewActionsOnly(),
-	)
-	actionStyle := lipgloss.NewStyle()
-	if w.focus == taskWorkspaceFocusActions {
-		actionStyle = actionStyle.BorderLeft(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(styles.Blue).PaddingLeft(1)
-	}
-	actionsView := actionStyle.
-		Width(rightWidth).
-		MaxWidth(rightWidth).
-		Height(bodyHeight).
-		MaxHeight(bodyHeight).
-		Render(actionsBody)
-
-	body := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		detailView,
-		lipgloss.NewStyle().Width(gap).Render(""),
-		actionsView,
-	)
-	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
-	return lipgloss.NewStyle().
-		Width(contentWidth).
-		Height(contentHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(styles.Surface2).
-		Render(content)
-}
-
-func (w *TaskWorkspaceOverlay) renderStacked(contentWidth, contentHeight, bodyHeight int, titleLine, separator string) string {
-	headerHeight := 2
-	gap := 1
-	actionsHeight := max(8, bodyHeight/3)
-	detailHeight := max(4, bodyHeight-actionsHeight-gap)
-
-	w.detail.viewHeight = max(4, detailHeight)
-	w.detail.wrapWidth = max(4, contentWidth-4)
-
-	detailView := lipgloss.NewStyle().
-		Width(contentWidth).
-		MaxWidth(contentWidth).
-		Height(detailHeight).
-		MaxHeight(detailHeight).
-		Render(w.detail.View())
-
-	actionsBody := lipgloss.JoinVertical(
-		lipgloss.Left,
-		w.styles.MenuItemActive.Render("Actions"),
-		w.styles.Separator.Render(strings.Repeat("─", max(6, contentWidth))),
-		w.actions.viewActionsOnly(),
-	)
-	actionsView := lipgloss.NewStyle().
-		Width(contentWidth).
-		MaxWidth(contentWidth).
-		Height(actionsHeight).
-		MaxHeight(actionsHeight).
-		Render(actionsBody)
-
-	body := lipgloss.JoinVertical(
-		lipgloss.Left,
-		detailView,
-		lipgloss.NewStyle().Height(gap).Render(""),
-		actionsView,
-	)
-	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, separator, body)
-	return lipgloss.NewStyle().
-		Width(contentWidth).
-		Height(max(6, contentHeight-headerHeight)).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(styles.Surface2).
-		Render(content)
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            w.styles,
+		width:             w.overlayWidth,
+		height:            w.overlayHeight,
+		title:             "Task Workspace",
+		rightSectionTitle: "Actions",
+		breakpoint:        76,
+		gap:               1,
+		minLeft:           28,
+		minRight:          20,
+		leftFocused:       w.focus == taskWorkspaceFocusDetail,
+		rightFocused:      w.focus == taskWorkspaceFocusActions,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			w.detail.viewHeight = max(4, height)
+			if mode == dialogLayoutStacked {
+				w.detail.wrapWidth = max(4, width-4)
+			} else {
+				w.detail.wrapWidth = max(20, width-2)
+			}
+			return w.detail.View()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return w.actions.viewActionsOnlyWidth(max(8, width-2))
+		},
+	})
 }
 
 func (w *TaskWorkspaceOverlay) Title() string {

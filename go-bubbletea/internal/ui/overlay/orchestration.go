@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -23,10 +24,10 @@ type SessionInfo struct {
 
 // OrchestrationOverlay displays all active Claude sessions in a monitoring view
 type OrchestrationOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	sessions []SessionInfo
 	cursor   int
-	width    int
-	height   int
 	styles   *Styles
 
 	// Callbacks
@@ -45,8 +46,6 @@ func NewOrchestrationOverlay(
 	return &OrchestrationOverlay{
 		sessions:  sessions,
 		cursor:    0,
-		width:     100,
-		height:    30,
 		styles:    New(),
 		onAttach:  onAttach,
 		onKill:    onKill,
@@ -62,6 +61,9 @@ func (o *OrchestrationOverlay) Init() tea.Cmd {
 // Update handles messages
 func (o *OrchestrationOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		o.ApplyWindowSize(msg)
+		return o, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q", "O":
@@ -125,38 +127,34 @@ func (o *OrchestrationOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (o *OrchestrationOverlay) View() string {
-	if len(o.sessions) == 0 {
-		return o.renderEmptyState()
-	}
-
-	var b strings.Builder
-
-	// Header with session count
-	headerStyle := lipgloss.NewStyle().
-		Foreground(styles.Text).
-		Bold(true).
-		Padding(0, 1)
-	header := headerStyle.Render(fmt.Sprintf("Active Sessions: %d", len(o.sessions)))
-	b.WriteString(header)
-	b.WriteString("\n\n")
-
-	// Render each session
-	for i, session := range o.sessions {
-		b.WriteString(o.renderSession(i, session))
-		if i < len(o.sessions)-1 {
-			b.WriteString("\n")
-			// Separator line
-			b.WriteString(o.styles.Separator.Render(strings.Repeat("─", o.width-4)))
-			b.WriteString("\n")
-		}
-	}
-
-	// Help text at bottom
-	b.WriteString("\n")
-	helpText := o.renderHelp()
-	b.WriteString(helpText)
-
-	return b.String()
+	width, height := o.Clamp(100, o.viewHeight())
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            o.styles,
+		width:             width,
+		height:            height,
+		title:             o.Title(),
+		rightSectionTitle: "Actions",
+		breakpoint:        58,
+		gap:               3,
+		minLeft:           30,
+		minRight:          18,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			if len(o.sessions) == 0 {
+				return o.renderEmptyState(width)
+			}
+			return o.renderSessions(width)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(o.styles, []keybinds.Binding{
+				{Key: "j/k", Description: "navigate"},
+				{Key: "Enter/a", Description: "attach"},
+				{Key: "x", Description: "kill"},
+				{Key: "r", Description: "refresh"},
+				{Key: "Esc", Description: "close"},
+			})
+		},
+	})
 }
 
 // Title returns the overlay title
@@ -166,11 +164,18 @@ func (o *OrchestrationOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (o *OrchestrationOverlay) Size() (width, height int) {
-	return o.width, o.height
+	return o.Clamp(100, o.viewHeight())
+}
+
+func (o *OrchestrationOverlay) viewHeight() int {
+	if len(o.sessions) == 0 {
+		return 16
+	}
+	return max(16, len(o.sessions)*6+8)
 }
 
 // renderSession renders a single session entry
-func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) string {
+func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo, width int) string {
 	isActive := index == o.cursor
 
 	// Base style
@@ -214,8 +219,12 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) str
 	}
 
 	title := session.TaskTitle
-	if len(title) > o.width-10 {
-		title = title[:o.width-13] + "..."
+	if limit := max(0, width-10); len(title) > limit {
+		if limit > 3 {
+			title = title[:limit-3] + "..."
+		} else {
+			title = title[:limit]
+		}
 	}
 	line2 := titleStyle.Render(title)
 	b.WriteString(line2)
@@ -263,8 +272,12 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) str
 		preview := ""
 		if len(lines) > 0 {
 			preview = lines[len(lines)-1]
-			if len(preview) > o.width-10 {
-				preview = preview[:o.width-13] + "..."
+			if limit := max(0, width-10); len(preview) > limit {
+				if limit > 3 {
+					preview = preview[:limit-3] + "..."
+				} else {
+					preview = preview[:limit]
+				}
 			}
 		}
 
@@ -277,33 +290,40 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) str
 	return b.String()
 }
 
+// renderSessions renders the session list.
+func (o *OrchestrationOverlay) renderSessions(width int) string {
+	var b strings.Builder
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(styles.Text).
+		Bold(true).
+		Padding(0, 1)
+	header := headerStyle.Render(fmt.Sprintf("Active Sessions: %d", len(o.sessions)))
+	b.WriteString(header)
+	b.WriteString("\n\n")
+
+	for i, session := range o.sessions {
+		b.WriteString(o.renderSession(i, session, width))
+		if i < len(o.sessions)-1 {
+			b.WriteString("\n")
+			b.WriteString(o.styles.Separator.Render(strings.Repeat("─", max(6, width-4))))
+			b.WriteString("\n")
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // renderEmptyState renders the empty state when no sessions are active
-func (o *OrchestrationOverlay) renderEmptyState() string {
+func (o *OrchestrationOverlay) renderEmptyState(width int) string {
 	emptyStyle := lipgloss.NewStyle().
 		Foreground(styles.Overlay1).
 		Italic(true).
 		Align(lipgloss.Center).
-		Width(o.width-4).
+		Width(max(1, width-4)).
 		Padding(4, 0)
 
 	return emptyStyle.Render("No active sessions\n\nPress Space on a task to start a session")
-}
-
-// renderHelp renders the help text at the bottom
-func (o *OrchestrationOverlay) renderHelp() string {
-	helpStyle := lipgloss.NewStyle().
-		Foreground(styles.Overlay1).
-		Padding(1, 1)
-
-	help := []string{
-		"j/k: navigate",
-		"enter/a: attach",
-		"x: kill",
-		"r: refresh",
-		"esc: close",
-	}
-
-	return helpStyle.Render(strings.Join(help, " • "))
 }
 
 // getStateStyle returns the appropriate style for a session state

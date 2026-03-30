@@ -1,0 +1,22 @@
+╭──────────────────────────────────────────────────────────────────────╮
+│Create New Task                                                       │
+│──────────────────────────────────────────────────────────────────────│
+││ Title:                                       Actions                │
+││ > Replace top level functions                ───────────────────────│
+││ Description:                                  Tab / Shift+Tab Switch│
+││ ┃   1 Review docs/src code of emdash.sh      fields                 │
+││ ┃     for improvements                        T/B/F/E/C Set type    │
+││ ┃                                             0/1/2/3/4 Set priority│
+││ ┃                                             Enter Create task     │
+││ Type: [●T] [ B] [ F] [ E] [ C]                Ctrl+E Edit in $EDITOR│
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]            Esc Cancel            │
+││                                                                     │
+││ [ Create Task ]                                                     │
+││                                                                     │
+││                                                                     │
+││                                                                     │
+││                                                                     │
+││                                                                     │
+││                                                                     │
+││                                                                     │
+╰──────────────────────────────────────────────────────────────────────╯

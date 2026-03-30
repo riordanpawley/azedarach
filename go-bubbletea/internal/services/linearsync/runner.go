@@ -37,7 +37,7 @@ type FlushOptions struct {
 
 type Runner struct {
 	logger      *slog.Logger
-	maxAttempts int
+	retryPolicy RetryPolicy
 	now         func() time.Time
 }
 
@@ -47,14 +47,15 @@ func NewRunner(logger *slog.Logger) *Runner {
 	}
 	return &Runner{
 		logger:      logger,
-		maxAttempts: defaultMaxSyncAttempts,
+		retryPolicy: DefaultRetryPolicy(),
 		now:         time.Now,
 	}
 }
 
 func NewRunnerWithMaxAttempts(logger *slog.Logger, maxAttempts int) *Runner {
 	runner := NewRunner(logger)
-	runner.maxAttempts = normalizedMaxAttempts(maxAttempts)
+	runner.retryPolicy.MaxAttempts = normalizedMaxAttempts(maxAttempts)
+	runner.retryPolicy = runner.retryPolicy.Normalize()
 	return runner
 }
 
@@ -77,7 +78,7 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 		attempts := normalizedAttempt(item.Attempts)
 		if item.Work == nil {
 			err := errors.New("missing work func")
-			logDispatchTerminalFailure(r.logger, opts.RunID, opts.ProjectPath, item, r.maxAttempts, err)
+			logDispatchTerminalFailure(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts, err)
 			outcomes = append(outcomes, DispatchOutcome{
 				IssueID:       item.IssueID,
 				LinearIssueID: item.LinearIssueID,
@@ -88,10 +89,10 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 			continue
 		}
 
-		logDispatchStart(r.logger, opts.RunID, opts.ProjectPath, item, r.maxAttempts)
+		logDispatchStart(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts)
 		err := item.Work(ctx)
 		if err == nil {
-			logDispatchSuccess(r.logger, opts.RunID, opts.ProjectPath, item, r.maxAttempts)
+			logDispatchSuccess(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts)
 			outcomes = append(outcomes, DispatchOutcome{
 				IssueID:       item.IssueID,
 				LinearIssueID: item.LinearIssueID,
@@ -101,9 +102,9 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 			continue
 		}
 
-		if isRetryable(err) && attempts+1 < r.maxAttempts {
-			delaySeconds := retryDelaySeconds(attempts)
-			logDispatchRetryScheduled(r.logger, opts.RunID, opts.ProjectPath, item, r.maxAttempts, delaySeconds, err)
+		if isRetryable(err) && r.retryPolicy.CanRetry(attempts) {
+			delaySeconds := r.retryPolicy.DelaySeconds(attempts)
+			logDispatchRetryScheduled(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts, delaySeconds, err)
 			outcomes = append(outcomes, DispatchOutcome{
 				IssueID:       item.IssueID,
 				LinearIssueID: item.LinearIssueID,
@@ -115,7 +116,7 @@ func (r *Runner) Flush(ctx context.Context, opts FlushOptions, items []DispatchI
 			continue
 		}
 
-		logDispatchTerminalFailure(r.logger, opts.RunID, opts.ProjectPath, item, r.maxAttempts, err)
+		logDispatchTerminalFailure(r.logger, opts.RunID, opts.ProjectPath, item, r.retryPolicy.MaxAttempts, err)
 		outcomes = append(outcomes, DispatchOutcome{
 			IssueID:       item.IssueID,
 			LinearIssueID: item.LinearIssueID,

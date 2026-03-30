@@ -88,12 +88,12 @@ func TestImageAttachOverlay_Size(t *testing.T) {
 	overlay := NewImageAttachOverlay("az-123", service)
 
 	width, height := overlay.Size()
-	if width != 80 {
-		t.Errorf("expected width to be 80, got %d", width)
+	if width != 84 {
+		t.Errorf("expected width to be 84, got %d", width)
 	}
 
-	if height != 30 {
-		t.Errorf("expected height to be 30, got %d", height)
+	if height != 14 {
+		t.Errorf("expected height to be 14 for empty list mode, got %d", height)
 	}
 }
 
@@ -386,6 +386,24 @@ func TestImageAttachOverlay_View(t *testing.T) {
 	view = overlay.View()
 	if view == "" {
 		t.Error("expected non-empty view")
+	}
+}
+
+func TestImageAttachOverlay_WindowSizeStacksOnNarrowViewport(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := attachment.NewService(tmpDir, logger)
+	overlay := NewImageAttachOverlay("az-123", service)
+	overlay.files = []attachment.Attachment{
+		{ID: "1", IssueID: "az-123", Filename: "file1.png", Size: 1024},
+	}
+
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 60, Height: 18})
+	overlay = model.(*ImageAttachOverlay)
+
+	width, _ := overlay.Size()
+	if width > 60 {
+		t.Fatalf("expected overlay width to fit narrow viewport, got width=%d", width)
 	}
 }
 

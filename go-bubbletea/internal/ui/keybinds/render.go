@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type Binding struct {
@@ -83,6 +84,10 @@ func RenderInline(bindings []Binding, delimiter string, theme Theme) string {
 }
 
 func RenderKeyTable(bindings []Binding, keyWidth int, theme Theme) string {
+	return RenderKeyTableWithinWidth(bindings, keyWidth, 0, theme)
+}
+
+func RenderKeyTableWithinWidth(bindings []Binding, keyWidth int, maxWidth int, theme Theme) string {
 	keyStyle := normalizeInlineStyle(theme.KeyStyle)
 	descriptionStyle := normalizeInlineStyle(theme.DescriptionStyle)
 	footerStyle := normalizeInlineStyle(theme.FooterStyle)
@@ -101,11 +106,17 @@ func RenderKeyTable(bindings []Binding, keyWidth int, theme Theme) string {
 			continue
 		}
 		keyLabel := fmt.Sprintf("%-*s", keyWidth, binding.Key)
+		keyPart := "  " + keyStyle.Render(keyLabel)
 		if strings.TrimSpace(binding.Description) == "" {
-			lines = append(lines, "  "+keyStyle.Render(keyLabel))
+			lines = append(lines, keyPart)
 			continue
 		}
-		lines = append(lines, "  "+keyStyle.Render(keyLabel)+"  "+descriptionStyle.Render(binding.Description))
+		desc := binding.Description
+		if maxWidth > 0 {
+			available := max(4, maxWidth-(2+keyWidth+2))
+			desc = ansi.Truncate(desc, available, "...")
+		}
+		lines = append(lines, keyPart+"  "+descriptionStyle.Render(desc))
 	}
 	return footerStyle.Render(strings.Join(lines, "\n"))
 }
@@ -126,4 +137,11 @@ func RenderPlain(bindings []Binding, delimiter string) string {
 		parts = append(parts, binding.Key+": "+binding.Description)
 	}
 	return strings.Join(parts, delimiter)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

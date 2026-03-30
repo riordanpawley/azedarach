@@ -45,11 +45,7 @@ func normalizedAttempt(attempts int) int {
 }
 
 func retryDelaySeconds(attempts int) int {
-	attempts = normalizedAttempt(attempts)
-	if attempts > 8 {
-		attempts = 8
-	}
-	return baseRetryDelaySeconds * (1 << attempts)
+	return DefaultRetryPolicy().DelaySeconds(attempts)
 }
 
 func emitLifecycleLog(logger *slog.Logger, level slog.Level, message string, ctx lifecycleContext) {

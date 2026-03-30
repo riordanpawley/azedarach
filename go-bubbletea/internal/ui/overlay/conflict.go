@@ -11,6 +11,8 @@ import (
 
 // ConflictOverlay displays merge conflicts and resolution options
 type ConflictOverlay struct {
+	twoPaneDialogChrome
+	dialogViewportState
 	files               []string
 	cursor              int
 	onResolveWithClaude func() tea.Cmd
@@ -53,6 +55,9 @@ func (c *ConflictOverlay) Init() tea.Cmd {
 // Update handles messages
 func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		c.ApplyWindowSize(msg)
+		return c, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
@@ -117,76 +122,31 @@ func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (c *ConflictOverlay) View() string {
-	var b strings.Builder
-
-	// Header message with warning color
-	headerStyle := lipgloss.NewStyle().
-		Foreground(styles.Red).
-		Bold(true)
-	header := headerStyle.Render("⚠ Merge conflicts detected!")
-	b.WriteString(header)
-	b.WriteString("\n\n")
-
-	// Conflicted files list
-	if len(c.files) > 0 {
-		filesLabel := lipgloss.NewStyle().
-			Foreground(styles.Yellow).
-			Bold(true).
-			Render("Conflicted files:")
-		b.WriteString(filesLabel)
-		b.WriteString("\n")
-
-		for i, file := range c.files {
-			prefix := "  "
-			fileStyle := c.overlayStyles.MenuItem
-			if i == c.cursor {
-				prefix = lipgloss.NewStyle().Foreground(styles.Blue).Render("▸ ")
-				fileStyle = c.overlayStyles.MenuItemActive
-			}
-			line := prefix + fileStyle.Render(file)
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-		b.WriteString("\n")
-	}
-
-	// Resolution options
-	b.WriteString(c.overlayStyles.Separator.Render("───────────────────────────────"))
-	b.WriteString("\n")
-
-	options := []struct {
-		key   string
-		label string
-		desc  string
-		color lipgloss.Color
-	}{
-		{"c", "Resolve with Claude", "Use Claude Code to resolve conflicts", styles.Green},
-		{"o", "Open manually", "Open files in your editor", styles.Blue},
-		{"a", "Abort merge", "Cancel the merge operation", styles.Red},
-	}
-
-	for _, opt := range options {
-		keyStyle := lipgloss.NewStyle().Foreground(opt.color).Bold(true)
-		labelStyle := c.overlayStyles.MenuItem.Bold(true)
-		descStyle := c.overlayStyles.Footer
-
-		line := keyStyle.Render("["+opt.key+"]") + " " +
-			labelStyle.Render(opt.label) + " " +
-			descStyle.Render("- "+opt.desc)
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-
-	// Footer hint
-	b.WriteString("\n")
-	b.WriteString(c.overlayStyles.Footer.Render(
-		keybinds.RenderPlain([]keybinds.Binding{
-			{Key: "j/k", Description: "navigate"},
-			{Key: "Esc", Description: "close"},
-		}, " • "),
-	))
-
-	return b.String()
+	width, height := c.Size()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            c.overlayStyles,
+		width:             width,
+		height:            height,
+		title:             "MERGE CONFLICTS",
+		rightSectionTitle: "Actions",
+		breakpoint:        80,
+		gap:               3,
+		minLeft:           36,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return c.renderConflictList(width)
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return renderDialogActions(c.overlayStyles, []keybinds.Binding{
+				{Key: "j/k", Description: "navigate"},
+				{Key: "c", Description: "resolve"},
+				{Key: "o", Description: "open"},
+				{Key: "a", Description: "abort"},
+				{Key: "Esc", Description: "close"},
+			})
+		},
+	})
 }
 
 // Title returns the overlay title
@@ -196,11 +156,46 @@ func (c *ConflictOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (c *ConflictOverlay) Size() (width, height int) {
-	// Width: enough for file paths and options
-	// Height: header + files + separator + options + footer + padding
 	fileLines := len(c.files)
 	if fileLines > 10 {
-		fileLines = 10 // Cap at 10 visible files
+		fileLines = 10
 	}
-	return 70, 8 + fileLines // header(2) + files + separator(1) + options(3) + footer(2)
+	return c.Clamp(84, 12+fileLines)
+}
+
+func (c *ConflictOverlay) renderConflictList(width int) string {
+	var b strings.Builder
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(styles.Red).
+		Bold(true)
+	b.WriteString(headerStyle.Render("⚠ Merge conflicts detected!"))
+	b.WriteString("\n\n")
+
+	if len(c.files) == 0 {
+		b.WriteString(c.overlayStyles.Footer.Render("No conflicted files."))
+		return strings.TrimRight(b.String(), "\n")
+	}
+
+	filesLabel := lipgloss.NewStyle().
+		Foreground(styles.Yellow).
+		Bold(true).
+		Render("Conflicted files:")
+	b.WriteString(filesLabel)
+	b.WriteString("\n")
+
+	maxWidth := max(24, width-2)
+	for i, file := range c.files {
+		prefix := "  "
+		fileStyle := c.overlayStyles.MenuItem
+		if i == c.cursor {
+			prefix = lipgloss.NewStyle().Foreground(styles.Blue).Render("▸ ")
+			fileStyle = c.overlayStyles.MenuItemActive
+		}
+		line := prefix + fileStyle.Render(file)
+		b.WriteString(clampOverlayLineWidth(line, maxWidth))
+		b.WriteString("\n")
+	}
+
+	return strings.TrimRight(b.String(), "\n")
 }

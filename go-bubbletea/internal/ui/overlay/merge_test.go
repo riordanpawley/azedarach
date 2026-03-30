@@ -55,19 +55,19 @@ func TestMergeSelectOverlay_Size(t *testing.T) {
 		{
 			name:            "no candidates",
 			candidatesCount: 0,
-			expectedHeight:  5, // 4 + 1 (no candidates message)
+			expectedHeight:  10, // minimum dialog height with actions section
 			expectedWidth:   60,
 		},
 		{
 			name:            "few candidates",
 			candidatesCount: 5,
-			expectedHeight:  9, // 4 + 5
+			expectedHeight:  13, // enough for header + list + actions
 			expectedWidth:   60,
 		},
 		{
 			name:            "many candidates capped at 15",
 			candidatesCount: 20,
-			expectedHeight:  19, // 4 + 15
+			expectedHeight:  23, // capped list plus actions
 			expectedWidth:   60,
 		},
 	}

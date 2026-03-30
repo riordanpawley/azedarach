@@ -42,9 +42,9 @@ type Config struct {
 // Daemon is the daemon runtime root.
 type Daemon struct {
 	cfg    Config
-	lock   *lifecycle.LockManager
+	lock   daemonLockManager
 	hub    *publish.Hub
-	serve  *transport.Server
+	serve  daemonServer
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
@@ -67,6 +67,9 @@ type Daemon struct {
 	shutdownMu       sync.Mutex
 	shuttingDown     bool
 	inFlightCommands sync.WaitGroup
+
+	syncBootstrapState syncBootstrapState
+	syncBootstrapFn    func(context.Context) error
 }
 
 // New constructs a runnable daemon runtime.
@@ -120,6 +123,7 @@ func New(cfg Config) *Daemon {
 		sessionStopPending: map[string]int{},
 		revision:           map[string]uint64{},
 	}
+	d.syncBootstrapFn = d.defaultSyncBootstrap
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      cfg.RepoDir,
 		logger:       cfg.Logger,
@@ -198,6 +202,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
+	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
+		return err
+	}
 	err = d.serve.Serve(serveCtx)
 	if ctx.Err() != nil {
 		<-shutdownDone
@@ -215,12 +222,18 @@ func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uin
 }
 
 func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if resp, handled := d.guardSyncDependentCommand(req); handled {
+		return resp, nil
+	}
 	if err := d.beginCommand(); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
 	}
 	defer d.endCommand()
 
 	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") {
+		if d.router == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
+		}
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {

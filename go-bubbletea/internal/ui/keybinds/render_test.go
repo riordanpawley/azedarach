@@ -96,3 +96,20 @@ func TestRenderKeyTable(t *testing.T) {
 		t.Fatalf("rendered = %q, want multiline table", rendered)
 	}
 }
+
+func TestRenderKeyTableWithinWidth_TruncatesDescription(t *testing.T) {
+	theme := Theme{
+		KeyStyle:         lipgloss.NewStyle(),
+		DescriptionStyle: lipgloss.NewStyle(),
+		FooterStyle:      lipgloss.NewStyle(),
+	}
+	rendered := RenderKeyTableWithinWidth([]Binding{
+		{Key: "s", Description: "stream (Ctrl+C then q)"},
+	}, 8, 22, theme)
+	if !strings.Contains(rendered, "stream") {
+		t.Fatalf("rendered = %q, want truncated description content", rendered)
+	}
+	if strings.Contains(rendered, "(Ctrl+C then q)") {
+		t.Fatalf("rendered = %q, expected truncation at constrained width", rendered)
+	}
+}
