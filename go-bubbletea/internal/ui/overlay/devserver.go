@@ -22,6 +22,7 @@ type DevServerInfo struct {
 
 // DevServerOverlay is a menu overlay for dev server management
 type DevServerOverlay struct {
+	twoPaneDialogChrome
 	servers        []DevServerInfo
 	cursor         int
 	issueID        string
@@ -130,15 +131,11 @@ func (m *DevServerOverlay) View() string {
 			return m.renderServerList()
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return keybinds.RenderKeyTable([]keybinds.Binding{
+			return renderDialogActions(m.styles, []keybinds.Binding{
 				{Key: "Enter", Description: "toggle"},
 				{Key: "v", Description: "view output"},
 				{Key: "r", Description: "restart"},
 				{Key: "Esc", Description: "close"},
-			}, 0, keybinds.Theme{
-				KeyStyle:         m.styles.MenuKey,
-				DescriptionStyle: m.styles.Footer,
-				FooterStyle:      m.styles.Footer,
 			})
 		},
 	})
@@ -153,14 +150,6 @@ func (m *DevServerOverlay) Title() string {
 func (m *DevServerOverlay) Size() (width, height int) {
 	view := m.View()
 	return lipgloss.Width(view), lipgloss.Height(view)
-}
-
-func (m *DevServerOverlay) UsesAppFrame() bool {
-	return false
-}
-
-func (m *DevServerOverlay) UsesInternalTitle() bool {
-	return true
 }
 
 // moveCursorDown moves the cursor to the next server

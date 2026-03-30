@@ -15,6 +15,7 @@ import (
 
 // ImagePreviewOverlay displays and manages image attachments with navigation
 type ImagePreviewOverlay struct {
+	twoPaneDialogChrome
 	issueID        string
 	service        *attachment.Service
 	images         []attachment.Attachment
@@ -328,11 +329,7 @@ func (i *ImagePreviewOverlay) renderPreviewActions() string {
 		keybinds.Binding{Key: "r", Description: "Refresh"},
 		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
-	return keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	})
+	return renderDialogActions(i.styles, hints)
 }
 
 func (i *ImagePreviewOverlay) renderDeleteConfirmationContent() string {
@@ -372,14 +369,6 @@ func (i *ImagePreviewOverlay) Size() (width, height int) {
 		return clampDialogSize(72, 22, i.viewportWidth, i.viewportHeight)
 	}
 	return clampDialogSize(82, 28, i.viewportWidth, i.viewportHeight)
-}
-
-func (i *ImagePreviewOverlay) UsesAppFrame() bool {
-	return false
-}
-
-func (i *ImagePreviewOverlay) UsesInternalTitle() bool {
-	return true
 }
 
 // Commands

@@ -9,6 +9,7 @@ import (
 )
 
 type GitPullOverlay struct {
+	twoPaneDialogChrome
 	commitsBehind  int
 	selected       bool
 	styles         *Styles
@@ -93,14 +94,10 @@ func (g *GitPullOverlay) View() string {
 			return strings.TrimRight(b.String(), "\n")
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return keybinds.RenderKeyTable([]keybinds.Binding{
+			return renderDialogActions(g.styles, []keybinds.Binding{
 				{Key: "←/→/Tab", Description: "switch"},
 				{Key: "Enter", Description: "confirm"},
 				{Key: "Esc", Description: "cancel"},
-			}, 0, keybinds.Theme{
-				KeyStyle:         g.styles.MenuKey,
-				DescriptionStyle: g.styles.Footer,
-				FooterStyle:      g.styles.Footer,
 			})
 		},
 	})
@@ -112,12 +109,4 @@ func (g *GitPullOverlay) Title() string {
 
 func (g *GitPullOverlay) Size() (width, height int) {
 	return 60, 8
-}
-
-func (g *GitPullOverlay) UsesAppFrame() bool {
-	return false
-}
-
-func (g *GitPullOverlay) UsesInternalTitle() bool {
-	return true
 }

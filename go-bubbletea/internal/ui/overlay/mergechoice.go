@@ -9,6 +9,7 @@ import (
 )
 
 type MergeChoiceOverlay struct {
+	twoPaneDialogChrome
 	issueID        string
 	commitsBehind  int
 	baseBranch     string
@@ -87,14 +88,10 @@ func (m *MergeChoiceOverlay) View() string {
 			return strings.TrimRight(b.String(), "\n")
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return keybinds.RenderKeyTable([]keybinds.Binding{
+			return renderDialogActions(m.styles, []keybinds.Binding{
 				{Key: "M", Description: "merge & attach"},
 				{Key: "S", Description: "skip & attach"},
 				{Key: "Esc", Description: "cancel"},
-			}, 0, keybinds.Theme{
-				KeyStyle:         m.styles.MenuKey,
-				DescriptionStyle: m.styles.Footer,
-				FooterStyle:      m.styles.Footer,
 			})
 		},
 	})
@@ -106,12 +103,4 @@ func (m *MergeChoiceOverlay) Title() string {
 
 func (m *MergeChoiceOverlay) Size() (width, height int) {
 	return 60, 10
-}
-
-func (m *MergeChoiceOverlay) UsesAppFrame() bool {
-	return false
-}
-
-func (m *MergeChoiceOverlay) UsesInternalTitle() bool {
-	return true
 }

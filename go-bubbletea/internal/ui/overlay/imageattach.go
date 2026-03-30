@@ -24,6 +24,7 @@ const (
 
 // ImageAttachOverlay manages image attachments for a task
 type ImageAttachOverlay struct {
+	twoPaneDialogChrome
 	issueID        string
 	service        ImageAttachmentService
 	mode           imageAttachMode
@@ -240,13 +241,9 @@ func (i *ImageAttachOverlay) View() string {
 				return i.renderFileInputContent()
 			},
 			renderRight: func(mode dialogLayoutMode, width, height int) string {
-				return keybinds.RenderKeyTable([]keybinds.Binding{
+				return renderDialogActions(i.styles, []keybinds.Binding{
 					{Key: "Enter", Description: "attach"},
 					{Key: "Esc", Description: "cancel"},
-				}, 0, keybinds.Theme{
-					KeyStyle:         i.styles.MenuKey,
-					DescriptionStyle: i.styles.Footer,
-					FooterStyle:      i.styles.Footer,
 				})
 			},
 		})
@@ -290,13 +287,9 @@ func (i *ImageAttachOverlay) View() string {
 				return i.renderPreviewContent()
 			},
 			renderRight: func(mode dialogLayoutMode, width, height int) string {
-				return keybinds.RenderKeyTable([]keybinds.Binding{
+				return renderDialogActions(i.styles, []keybinds.Binding{
 					{Key: "o", Description: "open in viewer"},
 					{Key: "Esc", Description: "back to list"},
-				}, 0, keybinds.Theme{
-					KeyStyle:         i.styles.MenuKey,
-					DescriptionStyle: i.styles.Footer,
-					FooterStyle:      i.styles.Footer,
 				})
 			},
 		})
@@ -350,11 +343,7 @@ func (i *ImageAttachOverlay) renderListActions() string {
 		)
 	}
 	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "close"})
-	return keybinds.RenderKeyTable(hints, 0, keybinds.Theme{
-		KeyStyle:         i.styles.MenuKey,
-		DescriptionStyle: i.styles.Footer,
-		FooterStyle:      i.styles.Footer,
-	})
+	return renderDialogActions(i.styles, hints)
 }
 
 func (i *ImageAttachOverlay) renderPreviewContent() string {
@@ -435,14 +424,6 @@ func (i *ImageAttachOverlay) Size() (width, height int) {
 	default:
 		return clampDialogSize(80, 30, i.viewportWidth, i.viewportHeight)
 	}
-}
-
-func (i *ImageAttachOverlay) UsesAppFrame() bool {
-	return false
-}
-
-func (i *ImageAttachOverlay) UsesInternalTitle() bool {
-	return true
 }
 
 // Commands

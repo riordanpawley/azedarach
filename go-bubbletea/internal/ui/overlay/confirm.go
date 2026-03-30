@@ -9,6 +9,7 @@ import (
 
 // ConfirmDialog is a confirmation dialog overlay with Yes/No options
 type ConfirmDialog struct {
+	twoPaneDialogChrome
 	title          string
 	message        string
 	styles         *Styles
@@ -124,14 +125,10 @@ func (c *ConfirmDialog) View() string {
 			return strings.TrimRight(b.String(), "\n")
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return keybinds.RenderKeyTable([]keybinds.Binding{
+			return renderDialogActions(c.styles, []keybinds.Binding{
 				{Key: "←/→/Tab", Description: "switch"},
 				{Key: "Enter", Description: "confirm"},
 				{Key: "Esc", Description: "cancel"},
-			}, 0, keybinds.Theme{
-				KeyStyle:         c.styles.MenuKey,
-				DescriptionStyle: c.styles.Footer,
-				FooterStyle:      c.styles.Footer,
 			})
 		},
 	})
@@ -148,12 +145,4 @@ func (c *ConfirmDialog) Size() (width, height int) {
 	// Height: message + buttons + footer + padding
 	messageLines := len(strings.Split(c.message, "\n"))
 	return 60, messageLines + 6
-}
-
-func (c *ConfirmDialog) UsesAppFrame() bool {
-	return false
-}
-
-func (c *ConfirmDialog) UsesInternalTitle() bool {
-	return true
 }
