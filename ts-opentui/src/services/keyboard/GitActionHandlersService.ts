@@ -15,28 +15,27 @@ const prUnavailable = (action: string) =>
 export class GitActionHandlersService extends Effect.Service<GitActionHandlersService>()(
 	"GitActionHandlersService",
 	{
-		dependencies: [ToastService.Default],
-		effect: Effect.gen(function* () {
-			const toast = yield* ToastService
+	dependencies: [ToastService.Default],
+	effect: Effect.gen(function* () {
+		const toast = yield* ToastService
 
-			const unavailable = (
-				action: string,
-			): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
-				toast.show("warning", prUnavailable(action))
+		const unavailable = (
+			action: string,
+		): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+			toast.show("warning", prUnavailable(action))
 
-			return {
-				createPR: () => unavailable("create"),
-				updateFromBase: () => unavailable("update-from-base"),
-				merge: () => unavailable("merge"),
-				cleanup: () => unavailable("cleanup"),
-				abortMerge: () => unavailable("abort-merge"),
-				showDiff: () => unavailable("show-diff"),
-				openPR: () => unavailable("open-pr"),
-				doMerge: () => unavailable("merge"),
-				enterMergeSelect: () => unavailable("enter-merge-select"),
-				confirmMergeSelect: () => unavailable("confirm-merge-select"),
-				cancelMergeSelect: () => unavailable("cancel-merge-select"),
-			}
-		}),
+		return {
+			createPR: () => unavailable("create"),
+			updateFromBase: () => unavailable("update-from-base"),
+			merge: () => unavailable("merge"),
+			cleanup: () => unavailable("cleanup"),
+			abortMerge: () => unavailable("abort-merge"),
+			showDiff: () => unavailable("show-diff"),
+			openPR: () => unavailable("open-pr"),
+			doMerge: () => unavailable("merge"),
+			enterMergeSelect: () => unavailable("enter-merge-select"),
+			confirmMergeSelect: () => unavailable("confirm-merge-select"),
+			cancelMergeSelect: () => unavailable("cancel-merge-select"),
+		}
 	},
 ) {}
