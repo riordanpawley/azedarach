@@ -134,6 +134,7 @@ type Model struct {
 	drillDownParentID              string
 	drillDownParentName            string
 	drillDownTrail                 []drillDownContext
+	pendingCreatedTaskID           string
 	runtimeSignalsByTask           map[string]board.RuntimeSignals
 	runtimeSignalRefreshedAtByTask map[string]time.Time
 	runtimeSignalWorktreeByTask    map[string]string
@@ -364,6 +365,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = m.projectSessionProjection(tasks)
 		m.applyRuntimeSignals()
 		m.editor.ReconcileSelection(m.tasks)
+		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
@@ -752,6 +754,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		m.sessions = m.projectSessionProjection(tasks)
 		m.editor.ReconcileSelection(tasks)
+		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
@@ -784,6 +787,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Updates from edit overlays must not clear the "new task" draft cache.
 		if !msg.isUpdate {
 			m.createTaskOverlay = nil
+			if taskID := strings.TrimSpace(msg.taskID); taskID != "" {
+				m.pendingCreatedTaskID = taskID
+			}
 		}
 
 		m.addToast(Toast{
@@ -1100,6 +1106,26 @@ func (m *Model) reconcileCursorAfterIssuesRefresh() {
 		return
 	}
 	m.nav.SelectTask(col.Tasks[pos.Task].ID, pos.Column)
+}
+
+func (m *Model) applyPendingCreatedTaskSelection() {
+	taskID := strings.TrimSpace(m.pendingCreatedTaskID)
+	if taskID == "" {
+		return
+	}
+
+	columns := m.buildColumns()
+	if m.nav.JumpToTaskByID(columns, taskID) {
+		m.ensureCursorVisible(columns)
+		m.pendingCreatedTaskID = ""
+		return
+	}
+
+	// Clear the pending jump once the task has hydrated but is not selectable
+	// in the current board projection (for example, hidden by board semantics).
+	if m.taskExists(taskID) {
+		m.pendingCreatedTaskID = ""
+	}
 }
 
 // View renders the current state as a string
