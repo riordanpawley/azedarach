@@ -30,6 +30,8 @@ type DevServerOverlay struct {
 	onRestart func(serverID string) tea.Cmd
 	onClose   func() tea.Cmd
 	styles    *Styles
+	viewportWidth  int
+	viewportHeight int
 }
 
 // NewDevServerOverlay creates a new dev server overlay
@@ -98,6 +100,13 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			m.viewportWidth = msg.Width
+		}
+		if msg.Height > 0 {
+			m.viewportHeight = msg.Height
+		}
 	}
 
 	return m, nil
@@ -105,13 +114,14 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (m *DevServerOverlay) View() string {
+	width, height := clampDialogSize(72, m.viewHeight(), m.viewportWidth, m.viewportHeight)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
-		width:             72,
-		height:            m.viewHeight(),
+		width:             width,
+		height:            height,
 		title:             "DEV SERVERS",
 		rightSectionTitle: "Actions",
-		breakpoint:        1,
+		breakpoint:        76,
 		gap:               3,
 		minLeft:           36,
 		minRight:          20,

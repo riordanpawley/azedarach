@@ -22,6 +22,8 @@ type ImagePreviewOverlay struct {
 	confirmDelete bool
 	error         string
 	styles        *Styles
+	viewportWidth  int
+	viewportHeight int
 }
 
 // ImageDeletedMsg is sent when an image is deleted
@@ -54,6 +56,14 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return i.handleConfirmMode(msg)
 		}
 		return i.handleNormalMode(msg)
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			i.viewportWidth = msg.Width
+		}
+		if msg.Height > 0 {
+			i.viewportHeight = msg.Height
+		}
+		return i, nil
 
 	case imagesLoadedMsg:
 		i.images = msg.images
@@ -166,13 +176,14 @@ func (i *ImagePreviewOverlay) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.
 // View renders the overlay
 func (i *ImagePreviewOverlay) View() string {
 	if i.confirmDelete {
+		width, height := clampDialogSize(72, 22, i.viewportWidth, i.viewportHeight)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
-			width:             72,
-			height:            18,
+			width:             width,
+			height:            height,
 			title:             "Confirm Delete",
 			rightSectionTitle: "Actions",
-			breakpoint:        1,
+			breakpoint:        76,
 			gap:               3,
 			minLeft:           38,
 			minRight:          20,
@@ -181,24 +192,22 @@ func (i *ImagePreviewOverlay) View() string {
 				return i.renderDeleteConfirmationContent()
 			},
 			renderRight: func(mode dialogLayoutMode, width, height int) string {
-				return keybinds.RenderKeyTable([]keybinds.Binding{
-					{Key: "Y", Description: "delete"},
-					{Key: "N/Esc", Description: "cancel"},
-				}, 0, keybinds.Theme{
-					KeyStyle:         i.styles.MenuKey,
-					DescriptionStyle: i.styles.Footer,
-					FooterStyle:      i.styles.Footer,
-				})
+				return strings.Join([]string{
+					"[Y] Yes, delete",
+					"[N] No, cancel",
+					"Esc Cancel",
+				}, "\n")
 			},
 		})
 	}
+	width, height := clampDialogSize(82, 28, i.viewportWidth, i.viewportHeight)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            i.styles,
-		width:             82,
-		height:            28,
+		width:             width,
+		height:            height,
 		title:             "Image Preview",
 		rightSectionTitle: "Actions",
-		breakpoint:        1,
+		breakpoint:        86,
 		gap:               3,
 		minLeft:           46,
 		minRight:          22,
@@ -360,9 +369,9 @@ func (i *ImagePreviewOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImagePreviewOverlay) Size() (width, height int) {
 	if i.confirmDelete {
-		return 60, 15
+		return clampDialogSize(72, 22, i.viewportWidth, i.viewportHeight)
 	}
-	return 75, 25
+	return clampDialogSize(82, 28, i.viewportWidth, i.viewportHeight)
 }
 
 // Commands

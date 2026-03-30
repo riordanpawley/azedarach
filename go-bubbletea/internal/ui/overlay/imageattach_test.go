@@ -389,6 +389,24 @@ func TestImageAttachOverlay_View(t *testing.T) {
 	}
 }
 
+func TestImageAttachOverlay_WindowSizeStacksOnNarrowViewport(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := attachment.NewService(tmpDir, logger)
+	overlay := NewImageAttachOverlay("az-123", service)
+	overlay.files = []attachment.Attachment{
+		{ID: "1", IssueID: "az-123", Filename: "file1.png", Size: 1024},
+	}
+
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 60, Height: 18})
+	overlay = model.(*ImageAttachOverlay)
+
+	width, _ := overlay.Size()
+	if width > 60 {
+		t.Fatalf("expected overlay width to fit narrow viewport, got width=%d", width)
+	}
+}
+
 func TestFormatFileSize(t *testing.T) {
 	tests := []struct {
 		name     string

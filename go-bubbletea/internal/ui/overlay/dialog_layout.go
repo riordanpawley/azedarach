@@ -30,6 +30,24 @@ type dialogLayoutConfig struct {
 	renderRight       func(mode dialogLayoutMode, width, height int) string
 }
 
+func clampDialogSize(desiredWidth, desiredHeight, viewportWidth, viewportHeight int) (int, int) {
+	width := max(1, desiredWidth)
+	height := max(1, desiredHeight)
+	if viewportWidth > 0 {
+		maxWidth := max(44, viewportWidth-4)
+		if width > maxWidth {
+			width = maxWidth
+		}
+	}
+	if viewportHeight > 0 {
+		maxHeight := max(10, viewportHeight-2)
+		if height > maxHeight {
+			height = maxHeight
+		}
+	}
+	return width, height
+}
+
 func renderDialogTwoPane(cfg dialogLayoutConfig) string {
 	contentWidth := max(1, cfg.width-2)
 	contentHeight := max(1, cfg.height-2)

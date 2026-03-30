@@ -45,6 +45,19 @@ func TestImageAttachOverlay_UsesActionsSectionLayout(t *testing.T) {
 	}
 }
 
+func TestImagePreviewOverlay_UsesActionsSectionLayout(t *testing.T) {
+	service, _, cleanup := setupTestAttachmentService(t)
+	defer cleanup()
+	overlay := NewImagePreviewOverlay("az-1", service, 0)
+	view := overlay.View()
+	if !strings.Contains(view, "Image Preview") {
+		t.Fatalf("expected image preview title, got %q", view)
+	}
+	if !strings.Contains(view, "Actions") {
+		t.Fatalf("expected actions section, got %q", view)
+	}
+}
+
 type mockAttachService struct{}
 
 func (m *mockAttachService) List(_ context.Context, _ string) ([]attachment.Attachment, error) {

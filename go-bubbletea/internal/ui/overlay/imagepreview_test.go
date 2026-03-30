@@ -477,3 +477,17 @@ func TestImagePreviewOverlay_IndexClamping(t *testing.T) {
 		t.Errorf("Negative index should be clamped to 0, got %d", preview.currentIndex)
 	}
 }
+
+func TestImagePreviewOverlay_WindowSizeFitsNarrowViewport(t *testing.T) {
+	service, _, cleanup := setupTestAttachmentService(t)
+	defer cleanup()
+
+	overlay := NewImagePreviewOverlay("test-issue", service, 0)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 58, Height: 16})
+	overlay = model.(*ImagePreviewOverlay)
+
+	width, _ := overlay.Size()
+	if width > 58 {
+		t.Fatalf("expected preview width to fit narrow viewport, got width=%d", width)
+	}
+}

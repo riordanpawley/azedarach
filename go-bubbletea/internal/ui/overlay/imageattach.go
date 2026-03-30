@@ -33,6 +33,8 @@ type ImageAttachOverlay struct {
 	inputActive bool
 	error       string
 	styles      *Styles
+	viewportWidth  int
+	viewportHeight int
 }
 
 type ImageAttachmentService interface {
@@ -147,6 +149,13 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return i, nil
 
 		}
+	case tea.WindowSizeMsg:
+		if msg.Width > 0 {
+			i.viewportWidth = msg.Width
+		}
+		if msg.Height > 0 {
+			i.viewportHeight = msg.Height
+		}
 
 	case attachmentsLoadedMsg:
 		i.files = msg.attachments
@@ -215,13 +224,14 @@ func (i *ImageAttachOverlay) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // View renders the overlay
 func (i *ImageAttachOverlay) View() string {
 	if i.inputActive {
+		width, height := clampDialogSize(84, 18, i.viewportWidth, i.viewportHeight)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
-			width:             84,
-			height:            18,
+			width:             width,
+			height:            height,
 			title:             "ATTACH FROM FILE",
 			rightSectionTitle: "Actions",
-			breakpoint:        1,
+			breakpoint:        80,
 			gap:               3,
 			minLeft:           44,
 			minRight:          20,
@@ -244,13 +254,14 @@ func (i *ImageAttachOverlay) View() string {
 
 	switch i.mode {
 	case imageAttachModeList:
+		width, height := clampDialogSize(88, 30, i.viewportWidth, i.viewportHeight)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
-			width:             88,
-			height:            30,
+			width:             width,
+			height:            height,
 			title:             fmt.Sprintf("ATTACHMENTS FOR %s", i.issueID),
 			rightSectionTitle: "Actions",
-			breakpoint:        1,
+			breakpoint:        90,
 			gap:               3,
 			minLeft:           50,
 			minRight:          22,
@@ -263,13 +274,14 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	case imageAttachModePreview:
+		width, height := clampDialogSize(88, 30, i.viewportWidth, i.viewportHeight)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
-			width:             88,
-			height:            30,
+			width:             width,
+			height:            height,
 			title:             "ATTACHMENT DETAILS",
 			rightSectionTitle: "Actions",
-			breakpoint:        1,
+			breakpoint:        90,
 			gap:               3,
 			minLeft:           50,
 			minRight:          22,
@@ -414,7 +426,15 @@ func (i *ImageAttachOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (i *ImageAttachOverlay) Size() (width, height int) {
-	return 80, 30
+	if i.inputActive {
+		return clampDialogSize(84, 18, i.viewportWidth, i.viewportHeight)
+	}
+	switch i.mode {
+	case imageAttachModePreview:
+		return clampDialogSize(88, 30, i.viewportWidth, i.viewportHeight)
+	default:
+		return clampDialogSize(80, 30, i.viewportWidth, i.viewportHeight)
+	}
 }
 
 // Commands
