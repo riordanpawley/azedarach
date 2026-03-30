@@ -231,6 +231,9 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 	defer d.endCommand()
 
 	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") {
+		if d.router == nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
+		}
 		return d.router.Handle(ctx, req), nil
 	}
 	switch req.Command {

@@ -61,10 +61,9 @@ const (
 )
 
 const (
-	diffPreviewMaxCharacters = 200
-	eventTickerCapacity      = 64
-	eventLogCapacity         = 256
-	eventSummaryMaxRunes     = 140
+	eventTickerCapacity  = 64
+	eventLogCapacity     = 256
+	eventSummaryMaxRunes = 140
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -601,32 +600,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
-	case showDiffResultMsg:
-		if msg.err != nil {
-			m.addToast(Toast{
-				Level:   ToastError,
-				Message: fmt.Sprintf("Failed to get diff: %v", msg.err),
-				Expires: time.Now().Add(5 * time.Second),
-			})
-			return m, nil
-		}
-
-		// Show abbreviated diff in toast
-		diff := msg.diff
-		if len(diff) > diffPreviewMaxCharacters {
-			diff = diff[:diffPreviewMaxCharacters] + "..."
-		}
-		if diff == "" {
-			diff = "No changes"
-		}
-
-		m.addToast(Toast{
-			Level:   ToastInfo,
-			Message: diff,
-			Expires: time.Now().Add(8 * time.Second),
-		})
-		return m, nil
-
 	case abortMergeResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{
@@ -736,22 +709,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("PR created: %s", msg.url),
 			Expires: time.Now().Add(5 * time.Second),
 		})
-		return m, nil
-
-	// Diff viewer messages
-	case diff.LoadDiffMsg:
-		// Route to diff viewer overlay if open
-		if !m.overlayStack.IsEmpty() {
-			if viewer, ok := m.overlayStack.Current().(*diff.DiffViewer); ok {
-				newModel, cmd := viewer.Update(msg)
-				// Update the overlay in the stack
-				if newViewer, ok := newModel.(*diff.DiffViewer); ok {
-					m.overlayStack.Pop()
-					m.openOverlay(newViewer)
-				}
-				return m, cmd
-			}
-		}
 		return m, nil
 
 		// Image attachment messages
@@ -3163,9 +3120,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Open diff viewer overlay
-		viewer := diff.NewDiffViewer(session.Worktree)
+		openPopup := func(ctx context.Context, title, command string) error {
+			if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
+				return fmt.Errorf("diff popup unavailable outside tmux; run inside tmux and retry")
+			}
+			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(session.Worktree), command)
+			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
+		}
+		viewer := diff.NewDiffViewer(session.Worktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
 		cmd := m.openOverlay(viewer)
-		return m, tea.Batch(cmd, viewer.LoadDiff(context.Background(), m.gitClient))
+		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
 		return m, m.cleanupWorktreeCmd(task.ID, false)
@@ -3812,11 +3776,6 @@ type helixOpenResultMsg struct {
 	err         error
 }
 
-type showDiffResultMsg struct {
-	diff string
-	err  error
-}
-
 // fetchAndMergeCmd fetches and merges from the specified branch
 func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bool) tea.Cmd {
 	return func() tea.Msg {
@@ -3990,31 +3949,6 @@ func (m Model) openHelixCmd(worktree, issueID string) tea.Cmd {
 		return helixOpenResultMsg{
 			issueID:     issueID,
 			commandHint: fmt.Sprintf("Run: cd %s && hx", worktree),
-		}
-	}
-}
-
-// showDiffCmd gets the diff stat for the worktree
-func (m Model) showDiffCmd(worktree string) tea.Cmd {
-	return func() tea.Msg {
-		ctx := context.Background()
-
-		if m.daemonClient == nil {
-			return showDiffResultMsg{
-				err: fmt.Errorf("daemon client unavailable"),
-			}
-		}
-
-		diff, err := m.daemonClient.GitDiffStat(ctx, worktree, "")
-		if err != nil {
-			return showDiffResultMsg{
-				err: fmt.Errorf("failed to get diff: %w", err),
-			}
-		}
-
-		return showDiffResultMsg{
-			diff: diff,
-			err:  nil,
 		}
 	}
 }
