@@ -160,7 +160,7 @@ func (w *TaskWorkspaceOverlay) View() string {
 			return w.detail.View()
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return w.actions.viewActionsOnly()
+			return w.actions.viewActionsOnlyWidth(max(8, width-2))
 		},
 	})
 }
