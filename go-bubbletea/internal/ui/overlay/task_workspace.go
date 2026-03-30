@@ -116,6 +116,7 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "g", "home":
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.cursor = 0
+				w.actions.ensureCursorVisible()
 				return w, nil
 			}
 			w.detail.scrollY = 0
@@ -124,6 +125,7 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if w.focus == taskWorkspaceFocusActions {
 				w.actions.cursor = len(w.actions.actions) - 1
 				w.actions.moveCursorUp()
+				w.actions.ensureCursorVisible()
 				return w, nil
 			}
 			w.detail.scrollY = w.detail.maxScroll()
@@ -160,6 +162,7 @@ func (w *TaskWorkspaceOverlay) View() string {
 			return w.detail.View()
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			w.actions.setViewportRows(max(1, height-2))
 			return w.actions.viewActionsOnlyWidth(max(8, width-2))
 		},
 	})

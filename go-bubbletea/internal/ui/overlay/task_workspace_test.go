@@ -160,3 +160,34 @@ func TestTaskWorkspaceOverlay_WindowResizeUpdatesDimensions(t *testing.T) {
 		t.Fatalf("expected overlay height to reserve status line, got %d", height)
 	}
 }
+
+func TestTaskWorkspaceOverlay_ActionsScrollWithCursorInShortViewport(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-1",
+		Title:  "Task",
+		Status: domain.StatusOpen,
+	}
+	overlay := NewTaskWorkspaceOverlay(task, nil, nil, 76, 14)
+	overlay.focus = taskWorkspaceFocusActions
+
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	overlay = model.(*TaskWorkspaceOverlay)
+
+	_ = overlay.View()
+
+	if overlay.actions.viewportRows < 1 {
+		t.Fatalf("expected action viewport rows to be set, got %d", overlay.actions.viewportRows)
+	}
+	if overlay.actions.scrollOffset <= 0 {
+		t.Fatalf("expected action list to scroll for end navigation, got offset %d", overlay.actions.scrollOffset)
+	}
+	if overlay.actions.cursor < overlay.actions.scrollOffset ||
+		overlay.actions.cursor >= overlay.actions.scrollOffset+overlay.actions.viewportRows {
+		t.Fatalf(
+			"expected cursor %d to remain in visible window [%d, %d)",
+			overlay.actions.cursor,
+			overlay.actions.scrollOffset,
+			overlay.actions.scrollOffset+overlay.actions.viewportRows,
+		)
+	}
+}

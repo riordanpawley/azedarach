@@ -23,6 +23,8 @@ type ActionMenu struct {
 	session      *domain.Session
 	actions      []Action
 	cursor       int
+	scrollOffset int
+	viewportRows int
 	styles       *Styles
 }
 
@@ -210,6 +212,14 @@ func (m *ActionMenu) viewActionsOnlyWidth(maxWidth int) string {
 	return m.renderActionListWithWidth(false, maxWidth)
 }
 
+func (m *ActionMenu) setViewportRows(rows int) {
+	if rows < 0 {
+		rows = 0
+	}
+	m.viewportRows = rows
+	m.ensureCursorVisible()
+}
+
 func (m *ActionMenu) renderActionList(includeTaskSummary bool) string {
 	return m.renderActionListWithWidth(includeTaskSummary, 0)
 }
@@ -245,7 +255,13 @@ func (m *ActionMenu) renderActionListWithWidth(includeTaskSummary bool, maxWidth
 		b.WriteString("\n")
 	}
 
-	for i, action := range m.actions {
+	start, end := 0, len(m.actions)
+	if !includeTaskSummary {
+		start, end = m.visibleActionRange()
+	}
+
+	for i := start; i < end; i++ {
+		action := m.actions[i]
 		// Skip rendering logic for separators
 		if action.Key == "" {
 			b.WriteString(m.styles.Separator.Render(action.Label))
@@ -307,6 +323,7 @@ func (m *ActionMenu) moveCursorDown() {
 		next := (m.cursor + i) % len(m.actions)
 		if m.actions[next].Enabled && m.actions[next].Key != "" {
 			m.cursor = next
+			m.ensureCursorVisible()
 			return
 		}
 	}
@@ -318,8 +335,64 @@ func (m *ActionMenu) moveCursorUp() {
 		prev := (m.cursor - i + len(m.actions)) % len(m.actions)
 		if m.actions[prev].Enabled && m.actions[prev].Key != "" {
 			m.cursor = prev
+			m.ensureCursorVisible()
 			return
 		}
+	}
+}
+
+func (m *ActionMenu) visibleActionRange() (start, end int) {
+	total := len(m.actions)
+	if total == 0 {
+		return 0, 0
+	}
+	if m.viewportRows <= 0 || m.viewportRows >= total {
+		m.scrollOffset = 0
+		return 0, total
+	}
+
+	m.ensureCursorVisible()
+	start = m.scrollOffset
+	end = min(total, start+m.viewportRows)
+	return start, end
+}
+
+func (m *ActionMenu) ensureCursorVisible() {
+	total := len(m.actions)
+	if total == 0 {
+		m.cursor = 0
+		m.scrollOffset = 0
+		return
+	}
+
+	if m.cursor < 0 {
+		m.cursor = 0
+	} else if m.cursor >= total {
+		m.cursor = total - 1
+	}
+
+	if m.viewportRows <= 0 || m.viewportRows >= total {
+		m.scrollOffset = 0
+		return
+	}
+
+	maxStart := total - m.viewportRows
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	} else if m.scrollOffset > maxStart {
+		m.scrollOffset = maxStart
+	}
+
+	if m.cursor < m.scrollOffset {
+		m.scrollOffset = m.cursor
+	}
+	if m.cursor >= m.scrollOffset+m.viewportRows {
+		m.scrollOffset = m.cursor - m.viewportRows + 1
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	} else if m.scrollOffset > maxStart {
+		m.scrollOffset = maxStart
 	}
 }
 
