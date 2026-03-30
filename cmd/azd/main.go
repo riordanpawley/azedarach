@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/daemon"
 )
@@ -15,10 +16,18 @@ import (
 func main() {
 	var socketPath string
 	var repoDir string
+	var showVersion bool
 
 	flag.StringVar(&socketPath, "socket", "", "unix socket path")
 	flag.StringVar(&repoDir, "repo", "", "repository root")
+	flag.BoolVar(&showVersion, "version", false, "print version")
+	flag.BoolVar(&showVersion, "v", false, "print version")
 	flag.Parse()
+
+	if showVersion || (len(flag.Args()) == 1 && flag.Args()[0] == "version") {
+		fmt.Println(buildinfo.Version)
+		return
+	}
 
 	if repoDir == "" {
 		cwd, err := os.Getwd()

@@ -6,69 +6,48 @@ on:
       - "v*"
 
 jobs:
-  verify-version:
-    name: Verify tag matches package version
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify tag and ts-opentui/package.json version are in sync
-        run: |
-          set -euo pipefail
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PACKAGE_VERSION="$(jq -r '.version' ts-opentui/package.json)"
-
-          if [[ "$PACKAGE_VERSION" != "$TAG_VERSION" ]]; then
-            echo "::error::Release tag ${GITHUB_REF_NAME} does not match ts-opentui/package.json version ${PACKAGE_VERSION}."
-            echo "::error::Update ts-opentui/package.json or retag the release so both versions match."
-            exit 1
-          fi
-
-          echo "Release tag ${GITHUB_REF_NAME} matches ts-opentui/package.json version ${PACKAGE_VERSION}."
-
   build:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
-    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-14
             label: darwin-arm64
-            target: bun-darwin-arm64
+            goos: darwin
+            goarch: arm64
           - os: macos-15-intel
             label: darwin-x64
-            target: bun-darwin-x64
+            goos: darwin
+            goarch: amd64
           - os: ubuntu-24.04
             label: linux-x64
-            target: bun-linux-x64
+            goos: linux
+            goarch: amd64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          bun-version: latest
+          go-version-file: go.mod
 
-      - name: Install ts-opentui dependencies
-        working-directory: ts-opentui
-        run: bun install --frozen-lockfile
-
-      - name: Build standalone binary
-        working-directory: ts-opentui
+      - name: Build standalone binaries
         run: |
-          mkdir -p ../release-assets
-          bun build bin/az.ts --compile --target="${{ matrix.target }}" --outfile="../release-assets/az-${{ matrix.label }}"
+          mkdir -p release-assets
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-s -w -X github.com/riordanpawley/azedarach/internal/buildinfo.Version=${VERSION}"
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="$LDFLAGS" -o "release-assets/az-${{ matrix.label }}" ./cmd/az
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="$LDFLAGS" -o "release-assets/azd-${{ matrix.label }}" ./cmd/azd
 
-      - name: Generate SHA256 checksum
+      - name: Generate SHA256 checksums
         run: |
           cd release-assets
           shasum -a 256 "az-${{ matrix.label }}" > "az-${{ matrix.label }}.sha256"
+          shasum -a 256 "azd-${{ matrix.label }}" > "azd-${{ matrix.label }}.sha256"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -77,6 +56,8 @@ jobs:
           path: |
             release-assets/az-${{ matrix.label }}
             release-assets/az-${{ matrix.label }}.sha256
+            release-assets/azd-${{ matrix.label }}
+            release-assets/azd-${{ matrix.label }}.sha256
           if-no-files-found: error
 
   release:

@@ -9,7 +9,7 @@ Purpose: go-bubbletea overlay context synced to nested AGENTS.md
 
 # Azedarach go-bubbletea Overlay
 
-> Go/Bubbletea implementation-specific guidance for `go-bubbletea/`
+> Go/Bubbletea implementation-specific guidance for this repository root
 
 ## Shared Baseline
 
@@ -59,13 +59,13 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
    - For architecture issues, close only after notes include commands run, key outputs, files changed, and explicit AC pass/fail checklist.
 13. **Binary Boundary (Critical)**:
    - PATH `az` in this repository is the Go implementation.
-   - For validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from `go-bubbletea/`.
+   - For validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from the repository root.
 14. **Daemon Restart Policy**:
-   - For operational daemon restarts, use `az daemon restart` (from `go-bubbletea/` with the Go binary/path).
+   - For operational daemon restarts, use `az daemon restart` from the repository root with the Go binary/path.
    - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
 15. **Repo-Local Go Cache Env (Critical)**:
-   - `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`go-bubbletea/.gocache`, `go-bubbletea/.gopath`).
-   - After `direnv allow`, use normal `go ...` commands in `go-bubbletea/` without per-command env prefixes.
+   - `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`.gocache`, `.gopath`).
+   - After `direnv allow`, use normal `go ...` commands from the repository root without per-command env prefixes.
 
 ## Thin-Client Boundary Contract (Critical)
 
@@ -104,7 +104,7 @@ This section is non-optional for all `go-bubbletea` architecture work.
 Run this checklist whenever touching daemon/client boundaries:
 
 ```bash
-cd go-bubbletea
+cd .
 
 # 1) Guard rails remain active
 go test ./internal/app ./internal/cli
@@ -121,8 +121,8 @@ If sandbox restrictions prevent unix socket integration tests, rerun with the re
 ## Quick Commands
 
 ```bash
-# in go-bubbletea/
-cd go-bubbletea
+# in repo root
+cd .
 
 make build
 make test
@@ -137,7 +137,7 @@ fd "filename" -t f internal cmd
 ## Architecture Quick Reference
 
 ```text
-go-bubbletea/
+.
 ├── cmd/              # app entrypoints
 ├── internal/app/     # bubbletea app flow
 ├── internal/services/# domain integrations

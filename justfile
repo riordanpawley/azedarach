@@ -2,6 +2,9 @@
 default:
     @just --list
 
+build-link-run:
+    ./scripts/build-link-run.sh
+
 build:
     go build -o bin/az ./cmd/az
     go build -o bin/azd ./cmd/azd
@@ -37,3 +40,6 @@ boundary-check:
     ./scripts/afv-drift-sentinel.sh
     go test ./internal/app ./internal/cli
     go test ./internal/daemon/... ./internal/client/...
+
+release-homebrew *ARGS:
+    ./scripts/release-homebrew.sh {{ARGS}}

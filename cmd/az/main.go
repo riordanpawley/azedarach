@@ -6,21 +6,31 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/cli"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
 func main() {
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "version", "-v", "--version":
+			fmt.Println(buildinfo.Version)
+			return
+		case "help", "-h", "--help":
+			cli.PrintUsage()
+			return
+		}
+	}
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Parse command-line arguments
-	args := os.Args[1:]
 
 	// If no arguments, run the TUI
 	if len(args) == 0 {
@@ -610,9 +620,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-
-	case "help", "-h", "--help":
-		cli.PrintUsage()
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)

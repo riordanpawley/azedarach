@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-TUI_BIN="./go-bubbletea/bin/az"
+TUI_BIN="./bin/az"
 TMUX_WINDOW="az-test"
 CAPTURE_DIR="./test-captures"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -17,7 +17,7 @@ capture_tui() {
 }
 
 echo "🚀 Launching TUI in tmux window..."
-tmux new-window -n "$TMUX_WINDOW" -c "$(pwd)/go-bubbletea"
+tmux new-window -n "$TMUX_WINDOW" -c "$(pwd)"
 sleep 1
 tmux send-keys -t "$TMUX_WINDOW" "$TUI_BIN" C-m
 sleep 2
