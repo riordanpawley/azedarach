@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -151,13 +152,18 @@ func isGitLongRunningCommand(command string) bool {
 }
 
 func (h *GitHandler) handleFetch(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
-	if cmd.Worktree == "" || cmd.Remote == "" {
+	cmd.Worktree = strings.TrimSpace(cmd.Worktree)
+	cmd.Remote = strings.TrimSpace(cmd.Remote)
+	if cmd.Worktree == "" {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   "missing required fields: worktree/remote",
+			Message:   "missing required fields: worktree",
 			Retryable: false,
 		}
 		return resp
+	}
+	if cmd.Remote == "" {
+		cmd.Remote = "origin"
 	}
 
 	if err := h.service.Fetch(ctx, cmd.Worktree, cmd.Remote); err != nil {

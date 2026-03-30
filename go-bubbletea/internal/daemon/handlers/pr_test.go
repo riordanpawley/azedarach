@@ -128,6 +128,31 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 			t.Fatalf("rev range calls = %+v", gitClient.revRangeCalls)
 		}
 	})
+
+	t.Run("branch behind defaults base branch and remote", func(t *testing.T) {
+		gitClient := &fakeBranchBehindGit{behindCount: 1, aheadCount: 0}
+		handler := NewPRHandler(nil, gitClient)
+
+		body, _ := json.Marshal(map[string]string{
+			"worktree": "/tmp/repo",
+		})
+		resp := handler.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-behind-defaults",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandGitBranchBehind,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("branch-behind response error: %+v", resp.Error)
+		}
+		if len(gitClient.fetchCalls) != 1 || gitClient.fetchCalls[0] != "origin" {
+			t.Fatalf("fetch calls = %+v, want origin default", gitClient.fetchCalls)
+		}
+		if len(gitClient.revRangeCalls) != 2 || gitClient.revRangeCalls[0] != "main..origin/main" || gitClient.revRangeCalls[1] != "origin/main..HEAD" {
+			t.Fatalf("rev range calls = %+v, want main/origin defaults", gitClient.revRangeCalls)
+		}
+	})
 }
 
 func TestPRHandlerRejectsInvalidBodyAndUnsupportedCommand(t *testing.T) {

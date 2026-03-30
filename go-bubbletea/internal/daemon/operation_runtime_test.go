@@ -301,6 +301,33 @@ func TestDaemonDrainInFlightCommandsStopsIntakeCancelsQueuedAndDrainsRunning(t *
 	waitForRuntimeState(t, runtime, queuedResult.Record.ID, daemonops.StateCancelled)
 }
 
+func TestBuildSubmitRequestDefaultsGitFetchRemote(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      t.TempDir(),
+		nextRevision: sequentialRevision(),
+		gitHandler:   daemonhandlers.NewGitHandler(runtimeGitService{}),
+	})
+
+	req := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandGitFetch,
+		"proj-1",
+		mustJSON(t, map[string]string{
+			"worktree": "/tmp/az-1",
+		}),
+	)
+
+	if req.IssueID != "/tmp/az-1" {
+		t.Fatalf("issue id = %q, want /tmp/az-1", req.IssueID)
+	}
+	if req.DedupeKey != "git.fetch:/tmp/az-1:origin" {
+		t.Fatalf("dedupe key = %q, want default origin remote", req.DedupeKey)
+	}
+	if len(req.ResourceKeys) != 1 || req.ResourceKeys[0] != "worktree:/tmp/az-1" {
+		t.Fatalf("resource keys = %v, want worktree routing key", req.ResourceKeys)
+	}
+}
+
 func (r *operationRuntime) buildSubmitRequestForTest(t *testing.T, kind, projectID string, payload []byte) daemonops.SubmitRequest {
 	t.Helper()
 	req, err := r.buildSubmitRequest(kind, projectID, payload, operationSubmitOverrides{})
