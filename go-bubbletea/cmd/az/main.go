@@ -232,6 +232,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "project":
+		if err := runProjectCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "opencode":
 		if err := runOpenCodeCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

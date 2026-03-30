@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -80,6 +81,7 @@ func Build(cfg *config.Config, repoDir string, logger *slog.Logger) Deps {
 			DefaultProject: "",
 		}
 	}
+	ensureActiveProjectPresent(registry, repoDir)
 
 	issuesPath := filepath.Join(repoDir, ".azedarach")
 	attachmentSvc := attachment.NewService(issuesPath, logger)
@@ -96,4 +98,21 @@ func Build(cfg *config.Config, repoDir string, logger *slog.Logger) Deps {
 		TmuxAvailable:      os.Getenv("TMUX") != "",
 		TmuxClient:         tmuxClient,
 	}
+}
+
+func ensureActiveProjectPresent(registry *config.ProjectsRegistry, repoDir string) {
+	if registry == nil || strings.TrimSpace(repoDir) == "" {
+		return
+	}
+	projectRoot := strings.TrimSpace(repoDir)
+	if root, err := config.ResolveBaseGitRoot(repoDir); err == nil && strings.TrimSpace(root) != "" {
+		projectRoot = strings.TrimSpace(root)
+	}
+	if existing := registry.FindByPath(projectRoot); existing != nil {
+		return
+	}
+	registry.Projects = append(registry.Projects, config.Project{
+		Name: filepath.Base(projectRoot),
+		Path: projectRoot,
+	})
 }

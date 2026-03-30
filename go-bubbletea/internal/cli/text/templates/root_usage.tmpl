@@ -16,6 +16,7 @@ Commands:
   dev restart <issue-id>     Restart a dev server for an issue
   dev status <issue-id>      Show dev server status for an issue
   dev list                   List running dev servers across issues
+  project <subcommand>       Project registry management (list|add|remove|switch)
   opencode <init|plugin>     Manage OpenCode integration
   issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
@@ -75,6 +76,10 @@ Examples:
   az dev restart az-123
   az dev status az-123
   az dev list
+  az project list
+  az project add /path/to/project --name azedarach
+  az project switch azedarach
+  az project remove azedarach
   az opencode init
   az opencode plugin install
   az prime

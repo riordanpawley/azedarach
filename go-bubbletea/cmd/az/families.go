@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -181,6 +182,188 @@ func runOpenCodePluginCommand(cfg *config.Config, args []string) error {
 	default:
 		return fmt.Errorf("unknown opencode plugin command: %s", args[0])
 	}
+}
+
+type projectAddOptions struct {
+	Path string
+	Name string
+}
+
+func runProjectCommand(cfg *config.Config, args []string) error {
+	_ = cfg
+	if len(args) == 0 || isHelpArg(args[0]) {
+		printProjectUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "list":
+		return runProjectListCommand(args[1:])
+	case "add":
+		return runProjectAddCommand(args[1:])
+	case "remove":
+		return runProjectRemoveCommand(args[1:])
+	case "switch":
+		return runProjectSwitchCommand(args[1:])
+	default:
+		return fmt.Errorf("unknown project command: %s", args[0])
+	}
+}
+
+func runProjectListCommand(args []string) error {
+	jsonOutput := false
+	fs := flag.NewFlagSet("project list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&jsonOutput, "json", false, "json output")
+	if err := fs.Parse(args); err != nil {
+		printProjectListUsage()
+		return err
+	}
+	if fs.NArg() != 0 {
+		printProjectListUsage()
+		return fmt.Errorf("usage: az project list [--json]")
+	}
+
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load projects registry: %w", err)
+	}
+
+	if jsonOutput {
+		return printJSON(map[string]any{
+			"projects":        registry.Projects,
+			"default_project": registry.DefaultProject,
+		})
+	}
+
+	if len(registry.Projects) == 0 {
+		fmt.Println("No projects registered.")
+		return nil
+	}
+
+	fmt.Println("Registered projects:")
+	for _, project := range registry.Projects {
+		line := fmt.Sprintf("- %s\t%s", project.Name, project.Path)
+		if strings.TrimSpace(project.Name) != "" && project.Name == registry.DefaultProject {
+			line += " [default]"
+		}
+		fmt.Println(line)
+	}
+	return nil
+}
+
+func runProjectAddCommand(args []string) error {
+	opts, err := parseProjectAddArgs(args)
+	if err != nil {
+		printProjectAddUsage()
+		return err
+	}
+
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load projects registry: %w", err)
+	}
+
+	if err := registry.Add(opts.Name, opts.Path); err != nil {
+		return fmt.Errorf("add project: %w", err)
+	}
+	if err := config.SaveProjectsRegistry(registry); err != nil {
+		return fmt.Errorf("save projects registry: %w", err)
+	}
+
+	fmt.Printf("Added project %s (%s)\n", opts.Name, opts.Path)
+	return nil
+}
+
+func runProjectRemoveCommand(args []string) error {
+	fs := flag.NewFlagSet("project remove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		printProjectRemoveUsage()
+		return err
+	}
+	if fs.NArg() != 1 {
+		printProjectRemoveUsage()
+		return fmt.Errorf("usage: az project remove <name>")
+	}
+	name := strings.TrimSpace(fs.Arg(0))
+	if name == "" {
+		printProjectRemoveUsage()
+		return fmt.Errorf("usage: az project remove <name>")
+	}
+
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load projects registry: %w", err)
+	}
+	if err := registry.Remove(name); err != nil {
+		return fmt.Errorf("remove project: %w", err)
+	}
+	if err := config.SaveProjectsRegistry(registry); err != nil {
+		return fmt.Errorf("save projects registry: %w", err)
+	}
+
+	fmt.Printf("Removed project %s\n", name)
+	return nil
+}
+
+func runProjectSwitchCommand(args []string) error {
+	fs := flag.NewFlagSet("project switch", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		printProjectSwitchUsage()
+		return err
+	}
+	if fs.NArg() != 1 {
+		printProjectSwitchUsage()
+		return fmt.Errorf("usage: az project switch <name>")
+	}
+	name := strings.TrimSpace(fs.Arg(0))
+	if name == "" {
+		printProjectSwitchUsage()
+		return fmt.Errorf("usage: az project switch <name>")
+	}
+
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load projects registry: %w", err)
+	}
+	project, err := registry.Get(name)
+	if err != nil {
+		return fmt.Errorf("switch project: %w", err)
+	}
+	if err := registry.SetDefault(name); err != nil {
+		return fmt.Errorf("switch project: %w", err)
+	}
+	if err := config.SaveProjectsRegistry(registry); err != nil {
+		return fmt.Errorf("save projects registry: %w", err)
+	}
+
+	fmt.Printf("Switched default project to %s (%s)\n", project.Name, project.Path)
+	return nil
+}
+
+func parseProjectAddArgs(args []string) (projectAddOptions, error) {
+	opts := projectAddOptions{}
+	fs := flag.NewFlagSet("project add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Name, "name", "", "project name")
+	if err := fs.Parse(args); err != nil {
+		return projectAddOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return projectAddOptions{}, fmt.Errorf("usage: az project add <path> [--name <name>]")
+	}
+	absPath, err := filepath.Abs(strings.TrimSpace(fs.Arg(0)))
+	if err != nil {
+		return projectAddOptions{}, fmt.Errorf("resolve project path: %w", err)
+	}
+	opts.Path = absPath
+	opts.Name = strings.TrimSpace(opts.Name)
+	if opts.Name == "" {
+		opts.Name = filepath.Base(absPath)
+	}
+	return opts, nil
 }
 
 func isHelpArg(arg string) bool {
@@ -490,6 +673,31 @@ func printDevStatusUsage() {
 }
 func printDevListUsage() {
 	fmt.Println("Usage: az dev list [--project-dir <dir>] [--json] [--verbose]")
+}
+
+func printProjectUsage() {
+	fmt.Println("Usage: az project <list|add|remove|switch>")
+	fmt.Println("Manage registered projects.")
+	fmt.Println("  list [--json]")
+	fmt.Println("  add <path> [--name <name>]")
+	fmt.Println("  remove <name>")
+	fmt.Println("  switch <name>")
+}
+
+func printProjectListUsage() {
+	fmt.Println("Usage: az project list [--json]")
+}
+
+func printProjectAddUsage() {
+	fmt.Println("Usage: az project add <path> [--name <name>]")
+}
+
+func printProjectRemoveUsage() {
+	fmt.Println("Usage: az project remove <name>")
+}
+
+func printProjectSwitchUsage() {
+	fmt.Println("Usage: az project switch <name>")
 }
 
 func printJSON(v any) error {
