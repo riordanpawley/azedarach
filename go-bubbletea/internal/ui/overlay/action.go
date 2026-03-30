@@ -89,9 +89,13 @@ func (m *ActionMenu) buildActions() []Action {
 	} else if m.task.HasWorktree {
 		hasWorktree = true
 	}
+	mergeLabel := "Follow-on merge"
+	if m.task.ParentID == nil {
+		mergeLabel = "Merge into main"
+	}
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
-		Action{Key: "m", Label: "Follow-on merge", Enabled: hasWorktree},
+		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree},
 		Action{Key: "b", Label: "Merge into...", Enabled: true},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},
 		Action{Key: "O", Label: "Open PR", Enabled: hasWorktree},

@@ -313,6 +313,25 @@ func TestActionMenu_FollowOnMergeAvailability_TaskWorktreeFallback(t *testing.T)
 	}
 }
 
+func TestActionMenu_MergeLabelTopLevelUsesMain(t *testing.T) {
+	topLevelTask := domain.Task{
+		ID:          "az-top",
+		Title:       "Top level",
+		Status:      domain.StatusInProgress,
+		HasWorktree: true,
+	}
+	menu := NewActionMenu(topLevelTask, nil)
+	for _, action := range menu.actions {
+		if action.Key == "m" {
+			if action.Label != "Merge into main" {
+				t.Fatalf("merge label = %q, want %q", action.Label, "Merge into main")
+			}
+			return
+		}
+	}
+	t.Fatal("expected merge action")
+}
+
 func TestActionMenu_MoveActions(t *testing.T) {
 	tests := []struct {
 		name            string

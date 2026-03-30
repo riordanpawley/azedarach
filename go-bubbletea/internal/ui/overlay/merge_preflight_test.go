@@ -8,7 +8,7 @@ import (
 )
 
 func TestMergePreflightOverlayRefreshSelection(t *testing.T) {
-	o := NewMergePreflightOverlay("az-1", "main", ".", []string{"Target main is not clean"}, true)
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", []string{"Target main is not clean"}, []string{"foo.go"}, []string{"bar.go"}, true)
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	if cmd == nil {
 		t.Fatal("expected refresh command")
@@ -24,7 +24,7 @@ func TestMergePreflightOverlayRefreshSelection(t *testing.T) {
 }
 
 func TestMergePreflightOverlayAbortSelection(t *testing.T) {
-	o := NewMergePreflightOverlay("az-1", "main", ".", []string{"Target main is not clean"}, true)
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", []string{"Target main is not clean"}, nil, nil, true)
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if cmd == nil {
 		t.Fatal("expected abort command")
@@ -43,7 +43,7 @@ func TestMergePreflightOverlayAbortSelection(t *testing.T) {
 }
 
 func TestMergePreflightOverlayClose(t *testing.T) {
-	o := NewMergePreflightOverlay("az-1", "main", ".", nil, false)
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", nil, nil, nil, false)
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd == nil {
 		t.Fatal("expected close command")
@@ -54,12 +54,45 @@ func TestMergePreflightOverlayClose(t *testing.T) {
 }
 
 func TestMergePreflightOverlayViewContainsReasons(t *testing.T) {
-	o := NewMergePreflightOverlay("az-1", "main", ".", []string{"Source az-1 is not clean: 1 modified"}, true)
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", []string{"Source az-1 is not clean: 1 modified"}, []string{"source.go"}, []string{"target.go"}, true)
 	view := o.View()
 	if !strings.Contains(view, "Merge blocked: az-1 -> main") {
 		t.Fatalf("view missing title: %q", view)
 	}
 	if !strings.Contains(view, "Source az-1 is not clean") {
 		t.Fatalf("view missing reason: %q", view)
+	}
+	if !strings.Contains(view, "source.go") || !strings.Contains(view, "target.go") {
+		t.Fatalf("view missing dirty file lists: %q", view)
+	}
+}
+
+func TestMergePreflightOverlayCommitSourceSelection(t *testing.T) {
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", nil, []string{"foo.go"}, nil, true)
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if cmd == nil {
+		t.Fatal("expected commit source command")
+	}
+	selection, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want SelectionMsg", cmd())
+	}
+	if selection.Key != "merge_preflight_commit_source" {
+		t.Fatalf("selection key = %q, want merge_preflight_commit_source", selection.Key)
+	}
+}
+
+func TestMergePreflightOverlayDiscardTargetSelection(t *testing.T) {
+	o := NewMergePreflightOverlay("az-1", "main", "/tmp/az-1", ".", nil, nil, []string{"bar.go"}, true)
+	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd == nil {
+		t.Fatal("expected discard target command")
+	}
+	selection, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want SelectionMsg", cmd())
+	}
+	if selection.Key != "merge_preflight_discard_target" {
+		t.Fatalf("selection key = %q, want merge_preflight_discard_target", selection.Key)
 	}
 }

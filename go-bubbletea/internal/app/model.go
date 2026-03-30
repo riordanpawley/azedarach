@@ -556,10 +556,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewMergePreflightOverlay(
 			msg.sourceID,
 			msg.targetID,
+			msg.sourceWorktree,
 			msg.targetWorktree,
 			msg.reasons,
+			msg.sourceFiles,
+			msg.targetFiles,
 			strings.TrimSpace(msg.targetWorktree) != "",
 		))
+
+	case mergePreflightActionResultMsg:
+		sideTitle := strings.Title(msg.side)
+		switch msg.action {
+		case "discard":
+			if msg.err != nil {
+				m.addToast(Toast{
+					Level:   ToastError,
+					Message: fmt.Sprintf("Discard %s changes failed: %v", sideTitle, msg.err),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, nil
+			}
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Discarded %s changes", strings.ToLower(sideTitle)),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		case "commit":
+			if msg.err != nil {
+				m.addToast(Toast{
+					Level:   ToastError,
+					Message: fmt.Sprintf("Commit %s changes failed: %v", strings.ToLower(sideTitle), msg.err),
+					Expires: time.Now().Add(6 * time.Second),
+				})
+				return m, nil
+			}
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Committed %s changes", strings.ToLower(sideTitle)),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		default:
+			return m, nil
+		}
 
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
@@ -2948,6 +2988,34 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.abortMergeCmd(worktree)
+	case "merge_preflight_discard_source":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.discardChangesCmd("source", worktree)
+	case "merge_preflight_discard_target":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.discardChangesCmd("target", worktree)
+	case "merge_preflight_commit_source":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.commitChangesCmd("source", worktree)
+	case "merge_preflight_commit_target":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.commitChangesCmd("target", worktree)
 	case "merge_preflight_refresh":
 		m.overlayStack.Pop()
 		return m, m.loadIssuesCmd()
@@ -4109,9 +4177,19 @@ type mergeResultMsg struct {
 
 type mergePreflightFailureMsg struct {
 	sourceID       string
+	sourceWorktree string
 	targetID       string
 	targetWorktree string
 	reasons        []string
+	sourceFiles    []string
+	targetFiles    []string
+}
+
+type mergePreflightActionResultMsg struct {
+	action   string
+	side     string
+	worktree string
+	err      error
 }
 
 func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
@@ -4285,6 +4363,9 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
+		if task.ParentID == nil {
+			return m.mergeToMainCmd(targetWorktree, task.ID)
+		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
 			Message: "No eligible upstream sources for follow-on merge; upstream sources must have an active session and be in progress or done",
@@ -5026,17 +5107,45 @@ func summarizeStatusChangeCounts(status git.GitStatus) string {
 	return strings.Join(parts, ", ")
 }
 
+func dirtyFilesFromStatus(status git.GitStatus) []string {
+	seen := make(map[string]struct{}, 16)
+	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	appendUnique := func(files []string) {
+		for _, file := range files {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			out = append(out, file)
+		}
+	}
+	appendUnique(status.Staged)
+	appendUnique(status.Modified)
+	appendUnique(status.Added)
+	appendUnique(status.Deleted)
+	appendUnique(status.Untracked)
+	sort.Strings(out)
+	return out
+}
+
 func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree string) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
 
 	reasons := make([]string, 0, 2)
+	sourceFiles := make([]string, 0, 8)
+	targetFiles := make([]string, 0, 8)
 	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
 	} else if sourceStatus.HasChanges {
 		reasons = append(reasons, fmt.Sprintf("Source %s is not clean: %s", sourceID, summarizeStatusChangeCounts(sourceStatus)))
+		sourceFiles = dirtyFilesFromStatus(sourceStatus)
 	}
 
 	targetStatus, targetErr := m.daemonClient.GitStatus(ctx, targetWorktree)
@@ -5044,6 +5153,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		reasons = append(reasons, fmt.Sprintf("Could not read target status (%s): %v", targetID, targetErr))
 	} else if targetStatus.HasChanges {
 		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
+		targetFiles = dirtyFilesFromStatus(targetStatus)
 	}
 
 	if len(reasons) == 0 {
@@ -5051,9 +5161,87 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	}
 	return &mergePreflightFailureMsg{
 		sourceID:       sourceID,
+		sourceWorktree: sourceWorktree,
 		targetID:       targetID,
 		targetWorktree: targetWorktree,
 		reasons:        reasons,
+		sourceFiles:    sourceFiles,
+		targetFiles:    targetFiles,
+	}
+}
+
+func runGitCommand(ctx context.Context, worktree string, args ...string) (string, error) {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return "", fmt.Errorf("worktree is required")
+	}
+	fullArgs := make([]string, 0, len(args)+2)
+	fullArgs = append(fullArgs, "-C", worktree)
+	fullArgs = append(fullArgs, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed == "" {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", err, trimmed)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		_, err := runGitCommand(ctx, worktree, "restore", "--staged", "--worktree", ".")
+		return mergePreflightActionResultMsg{
+			action:   "discard",
+			side:     side,
+			worktree: worktree,
+			err:      err,
+		}
+	}
+}
+
+func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+
+		if m.daemonClient != nil {
+			if status, err := m.daemonClient.GitStatus(ctx, worktree); err == nil && !status.HasChanges {
+				return mergePreflightActionResultMsg{
+					action:   "commit",
+					side:     side,
+					worktree: worktree,
+					err:      fmt.Errorf("no changes to commit"),
+				}
+			}
+		}
+
+		if _, err := runGitCommand(ctx, worktree, "add", "-A"); err != nil {
+			return mergePreflightActionResultMsg{
+				action:   "commit",
+				side:     side,
+				worktree: worktree,
+				err:      err,
+			}
+		}
+		if _, err := runGitCommand(ctx, worktree, "commit", "-m", "chore: pre-merge checkpoint"); err != nil {
+			return mergePreflightActionResultMsg{
+				action:   "commit",
+				side:     side,
+				worktree: worktree,
+				err:      err,
+			}
+		}
+		return mergePreflightActionResultMsg{
+			action:   "commit",
+			side:     side,
+			worktree: worktree,
+		}
 	}
 }
 
