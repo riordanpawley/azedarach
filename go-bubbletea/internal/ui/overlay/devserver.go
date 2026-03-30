@@ -23,16 +23,15 @@ type DevServerInfo struct {
 // DevServerOverlay is a menu overlay for dev server management
 type DevServerOverlay struct {
 	twoPaneDialogChrome
-	servers        []DevServerInfo
-	cursor         int
-	issueID        string
-	onToggle       func(serverID string) tea.Cmd
-	onView         func(serverID string) tea.Cmd
-	onRestart      func(serverID string) tea.Cmd
-	onClose        func() tea.Cmd
-	styles         *Styles
-	viewportWidth  int
-	viewportHeight int
+	dialogViewportState
+	servers   []DevServerInfo
+	cursor    int
+	issueID   string
+	onToggle  func(serverID string) tea.Cmd
+	onView    func(serverID string) tea.Cmd
+	onRestart func(serverID string) tea.Cmd
+	onClose   func() tea.Cmd
+	styles    *Styles
 }
 
 // NewDevServerOverlay creates a new dev server overlay
@@ -102,12 +101,7 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			m.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			m.viewportHeight = msg.Height
-		}
+		m.ApplyWindowSize(msg)
 	}
 
 	return m, nil
@@ -115,7 +109,7 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (m *DevServerOverlay) View() string {
-	width, height := clampDialogSize(72, m.viewHeight(), m.viewportWidth, m.viewportHeight)
+	width, height := m.Clamp(72, m.viewHeight())
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,

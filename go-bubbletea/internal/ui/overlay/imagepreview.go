@@ -16,15 +16,14 @@ import (
 // ImagePreviewOverlay displays and manages image attachments with navigation
 type ImagePreviewOverlay struct {
 	twoPaneDialogChrome
-	issueID        string
-	service        *attachment.Service
-	images         []attachment.Attachment
-	currentIndex   int
-	confirmDelete  bool
-	error          string
-	styles         *Styles
-	viewportWidth  int
-	viewportHeight int
+	dialogViewportState
+	issueID       string
+	service       *attachment.Service
+	images        []attachment.Attachment
+	currentIndex  int
+	confirmDelete bool
+	error         string
+	styles        *Styles
 }
 
 // ImageDeletedMsg is sent when an image is deleted
@@ -58,12 +57,7 @@ func (i *ImagePreviewOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return i.handleNormalMode(msg)
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			i.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			i.viewportHeight = msg.Height
-		}
+		i.ApplyWindowSize(msg)
 		return i, nil
 
 	case imagesLoadedMsg:
@@ -177,7 +171,7 @@ func (i *ImagePreviewOverlay) handleConfirmMode(msg tea.KeyMsg) (tea.Model, tea.
 // View renders the overlay
 func (i *ImagePreviewOverlay) View() string {
 	if i.confirmDelete {
-		width, height := clampDialogSize(72, 22, i.viewportWidth, i.viewportHeight)
+		width, height := i.Clamp(72, 22)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -201,7 +195,7 @@ func (i *ImagePreviewOverlay) View() string {
 			},
 		})
 	}
-	width, height := clampDialogSize(82, 28, i.viewportWidth, i.viewportHeight)
+	width, height := i.Clamp(82, 28)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            i.styles,
 		width:             width,
@@ -366,9 +360,9 @@ func (i *ImagePreviewOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImagePreviewOverlay) Size() (width, height int) {
 	if i.confirmDelete {
-		return clampDialogSize(72, 22, i.viewportWidth, i.viewportHeight)
+		return i.Clamp(72, 22)
 	}
-	return clampDialogSize(82, 28, i.viewportWidth, i.viewportHeight)
+	return i.Clamp(82, 28)
 }
 
 // Commands

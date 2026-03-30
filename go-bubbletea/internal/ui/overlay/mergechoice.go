@@ -10,12 +10,11 @@ import (
 
 type MergeChoiceOverlay struct {
 	twoPaneDialogChrome
-	issueID        string
-	commitsBehind  int
-	baseBranch     string
-	styles         *Styles
-	viewportWidth  int
-	viewportHeight int
+	dialogViewportState
+	issueID       string
+	commitsBehind int
+	baseBranch    string
+	styles        *Styles
 }
 
 func NewMergeChoiceOverlay(issueID string, commitsBehind int, baseBranch string) *MergeChoiceOverlay {
@@ -55,18 +54,13 @@ func (m *MergeChoiceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			m.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			m.viewportHeight = msg.Height
-		}
+		m.ApplyWindowSize(msg)
 	}
 	return m, nil
 }
 
 func (m *MergeChoiceOverlay) View() string {
-	width, height := clampDialogSize(64, 12, m.viewportWidth, m.viewportHeight)
+	width, height := m.Clamp(64, 12)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,

@@ -10,12 +10,11 @@ import (
 // ConfirmDialog is a confirmation dialog overlay with Yes/No options
 type ConfirmDialog struct {
 	twoPaneDialogChrome
-	title          string
-	message        string
-	styles         *Styles
-	selected       bool // true = Yes, false = No
-	viewportWidth  int
-	viewportHeight int
+	dialogViewportState
+	title    string
+	message  string
+	styles   *Styles
+	selected bool // true = Yes, false = No
 }
 
 // ConfirmResult represents the result of a confirmation dialog
@@ -81,12 +80,7 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, nil
 		}
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			c.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			c.viewportHeight = msg.Height
-		}
+		c.ApplyWindowSize(msg)
 	}
 
 	return c, nil
@@ -94,7 +88,7 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the dialog
 func (c *ConfirmDialog) View() string {
-	width, height := clampDialogSize(60, 12, c.viewportWidth, c.viewportHeight)
+	width, height := c.Clamp(60, 12)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            c.styles,
 		width:             width,

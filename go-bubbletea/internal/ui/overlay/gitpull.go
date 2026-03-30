@@ -10,11 +10,10 @@ import (
 
 type GitPullOverlay struct {
 	twoPaneDialogChrome
-	commitsBehind  int
-	selected       bool
-	styles         *Styles
-	viewportWidth  int
-	viewportHeight int
+	dialogViewportState
+	commitsBehind int
+	selected      bool
+	styles        *Styles
 }
 
 func NewGitPullOverlay(count int) *GitPullOverlay {
@@ -53,18 +52,13 @@ func (g *GitPullOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return g, nil
 		}
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			g.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			g.viewportHeight = msg.Height
-		}
+		g.ApplyWindowSize(msg)
 	}
 	return g, nil
 }
 
 func (g *GitPullOverlay) View() string {
-	width, height := clampDialogSize(64, 12, g.viewportWidth, g.viewportHeight)
+	width, height := g.Clamp(64, 12)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            g.styles,
 		width:             width,

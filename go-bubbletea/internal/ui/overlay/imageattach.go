@@ -25,17 +25,16 @@ const (
 // ImageAttachOverlay manages image attachments for a task
 type ImageAttachOverlay struct {
 	twoPaneDialogChrome
-	issueID        string
-	service        ImageAttachmentService
-	mode           imageAttachMode
-	files          []attachment.Attachment
-	cursor         int
-	pathInput      textinput.Model
-	inputActive    bool
-	error          string
-	styles         *Styles
-	viewportWidth  int
-	viewportHeight int
+	dialogViewportState
+	issueID     string
+	service     ImageAttachmentService
+	mode        imageAttachMode
+	files       []attachment.Attachment
+	cursor      int
+	pathInput   textinput.Model
+	inputActive bool
+	error       string
+	styles      *Styles
 }
 
 type ImageAttachmentService interface {
@@ -151,12 +150,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		}
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			i.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			i.viewportHeight = msg.Height
-		}
+		i.ApplyWindowSize(msg)
 
 	case attachmentsLoadedMsg:
 		i.files = msg.attachments
@@ -225,7 +219,7 @@ func (i *ImageAttachOverlay) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd
 // View renders the overlay
 func (i *ImageAttachOverlay) View() string {
 	if i.inputActive {
-		width, height := clampDialogSize(84, 18, i.viewportWidth, i.viewportHeight)
+		width, height := i.Clamp(84, 18)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -251,7 +245,7 @@ func (i *ImageAttachOverlay) View() string {
 
 	switch i.mode {
 	case imageAttachModeList:
-		width, height := clampDialogSize(88, 30, i.viewportWidth, i.viewportHeight)
+		width, height := i.Clamp(88, 30)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -271,7 +265,7 @@ func (i *ImageAttachOverlay) View() string {
 			},
 		})
 	case imageAttachModePreview:
-		width, height := clampDialogSize(88, 30, i.viewportWidth, i.viewportHeight)
+		width, height := i.Clamp(88, 30)
 		return renderDialogTwoPane(dialogLayoutConfig{
 			styles:            i.styles,
 			width:             width,
@@ -416,13 +410,13 @@ func (i *ImageAttachOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImageAttachOverlay) Size() (width, height int) {
 	if i.inputActive {
-		return clampDialogSize(84, 18, i.viewportWidth, i.viewportHeight)
+		return i.Clamp(84, 18)
 	}
 	switch i.mode {
 	case imageAttachModePreview:
-		return clampDialogSize(88, 30, i.viewportWidth, i.viewportHeight)
+		return i.Clamp(88, 30)
 	default:
-		return clampDialogSize(80, 30, i.viewportWidth, i.viewportHeight)
+		return i.Clamp(80, 30)
 	}
 }
 

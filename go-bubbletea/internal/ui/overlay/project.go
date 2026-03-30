@@ -30,13 +30,12 @@ const (
 
 // ProjectSelector is an overlay for selecting and managing projects
 type ProjectSelector struct {
+	dialogViewportState
 	registry           *config.ProjectsRegistry
 	cursor             int
 	mode               projectSelectorMode
 	styles             *Styles
 	currentProjectName string
-	viewportWidth      int
-	viewportHeight     int
 }
 
 type projectSelectorMode int
@@ -129,12 +128,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.WindowSizeMsg:
-		if msg.Width > 0 {
-			m.viewportWidth = msg.Width
-		}
-		if msg.Height > 0 {
-			m.viewportHeight = msg.Height
-		}
+		m.ApplyWindowSize(msg)
 	}
 
 	return m, nil
@@ -150,7 +144,7 @@ func (m *ProjectSelector) View() string {
 
 // viewList renders the project list
 func (m *ProjectSelector) viewList() string {
-	width, height := clampDialogSize(88, m.listModeHeight(), m.viewportWidth, m.viewportHeight)
+	width, height := m.Clamp(88, m.listModeHeight())
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,
