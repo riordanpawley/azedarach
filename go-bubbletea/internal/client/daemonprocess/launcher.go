@@ -82,9 +82,18 @@ func (l *Launcher) resolveBinary() string {
 	if env := os.Getenv("AZEDARACH_DAEMON_BIN"); env != "" {
 		return env
 	}
-	local := filepath.Join(l.RepoDir, "bin", "azd")
-	if _, err := os.Stat(local); err == nil {
-		return local
+	candidates := []string{
+		filepath.Join(l.RepoDir, "bin", "azd"),
+		// Support monorepo root launcher repo dir with go-bubbletea-local binaries.
+		filepath.Join(l.RepoDir, "go-bubbletea", "bin", "azd"),
+	}
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		candidates = append(candidates, filepath.Join(cwd, "bin", "azd"))
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
 	}
 	return "azd"
 }

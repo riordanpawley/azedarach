@@ -74,3 +74,42 @@ func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, repo)
 	}
 }
+
+func TestLauncherResolveBinary_UsesMonorepoGoBubbleteaBin(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	nestedBin := filepath.Join(repoDir, "go-bubbletea", "bin")
+	if err := os.MkdirAll(nestedBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested bin): %v", err)
+	}
+	azd := filepath.Join(nestedBin, "azd")
+	if err := os.WriteFile(azd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(azd): %v", err)
+	}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	if got := launcher.resolveBinary(); got != azd {
+		t.Fatalf("resolveBinary() = %q, want %q", got, azd)
+	}
+}
+
+func TestLauncherResolveBinary_UsesWorkingDirBinFallback(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	binDir := filepath.Join(cwd, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cwd bin): %v", err)
+	}
+	azd := filepath.Join(binDir, "azd")
+	if err := os.WriteFile(azd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(cwd azd): %v", err)
+	}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	if got := launcher.resolveBinary(); got != azd {
+		t.Fatalf("resolveBinary() = %q, want %q", got, azd)
+	}
+}
