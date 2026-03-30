@@ -17,6 +17,7 @@ Commands:
   dev status <issue-id>      Show dev server status for an issue
   dev list                   List running dev servers across issues
   project <subcommand>       Project registry management (list|add|remove|switch)
+  operation <subcommand>     Inspect/cancel background operations (get|list|cancel)
   opencode <init|plugin>     Manage OpenCode integration
   issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
@@ -80,6 +81,9 @@ Examples:
   az project add /path/to/project --name azedarach
   az project switch azedarach
   az project remove azedarach
+  az operation list --limit 20
+  az operation get --id op-123 --wait
+  az operation cancel --id op-123 --reason "No longer needed"
   az opencode init
   az opencode plugin install
   az prime

@@ -2816,6 +2816,18 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
 	}
+	if !strings.Contains(output, "operation <subcommand>") {
+		t.Fatalf("usage missing operation command family: %q", output)
+	}
+	if !strings.Contains(output, "az operation list --limit 20") {
+		t.Fatalf("usage missing operation list example: %q", output)
+	}
+	if !strings.Contains(output, "az operation get --id op-123 --wait") {
+		t.Fatalf("usage missing operation get example: %q", output)
+	}
+	if !strings.Contains(output, "az operation cancel --id op-123") {
+		t.Fatalf("usage missing operation cancel example: %q", output)
+	}
 	if !strings.Contains(output, "prime") {
 		t.Fatalf("usage missing prime command: %q", output)
 	}
