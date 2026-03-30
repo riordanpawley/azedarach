@@ -16,8 +16,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
-	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -2243,6 +2243,110 @@ func TestCheckBranchBehindCmdUsesDaemonSurface(t *testing.T) {
 	}
 	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandGitBranchBehind {
 		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestCheckBranchBehindCmdUsesFallbackBaseBranch(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitBranchBehind {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandGitBranchBehind)
+			}
+			var body daemonclient.BranchBehindCheckParams
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if body.Worktree != "/tmp/az-1" || body.BaseBranch != "main" || body.Remote != "origin" {
+				t.Fatalf("request body = %+v", body)
+			}
+			respBody, err := json.Marshal(daemonclient.BranchBehindCheckResult{
+				Worktree:      body.Worktree,
+				BaseBranch:    body.BaseBranch,
+				Remote:        body.Remote,
+				RevRange:      "main..origin/main",
+				CommitsBehind: 0,
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = ""
+	msg := m.checkBranchBehindCmd("/tmp/az-1", "az-1")()
+	result, ok := msg.(branchBehindMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want branchBehindMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("result = %+v, want nil err", result)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandGitBranchBehind {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestCheckBranchBehindCmdSkipsDaemonWhenWorktreeUnavailable(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandWorktreeList {
+				t.Fatalf("unexpected daemon command: %s", req.Command)
+			}
+			respBody, err := json.Marshal(struct {
+				ProjectID string `json:"project_id"`
+				Worktrees []struct {
+					Path    string `json:"path"`
+					Branch  string `json:"branch"`
+					IssueID string `json:"issue_id"`
+				} `json:"worktrees"`
+			}{
+				ProjectID: "default",
+				Worktrees: []struct {
+					Path    string `json:"path"`
+					Branch  string `json:"branch"`
+					IssueID string `json:"issue_id"`
+				}{},
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = ""
+
+	msg := m.checkBranchBehindCmd("", "az-1")()
+	result, ok := msg.(branchBehindMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want branchBehindMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("result = %+v, want nil err", result)
+	}
+	if result.commitsBehind != 0 {
+		t.Fatalf("commitsBehind = %d, want 0", result.commitsBehind)
+	}
+	if result.worktree != "" {
+		t.Fatalf("worktree = %q, want empty", result.worktree)
+	}
+	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandWorktreeList {
+		t.Fatalf("requests = %v, want only worktree list", got)
 	}
 }
 
