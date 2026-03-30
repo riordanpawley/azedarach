@@ -1613,6 +1613,65 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 	}
 }
 
+func TestDiscardChangesCmdRunsRestoreThenClean(t *testing.T) {
+	var calls [][]string
+	original := runGitCommandFunc
+	runGitCommandFunc = func(_ context.Context, worktree string, args ...string) (string, error) {
+		call := append([]string{worktree}, args...)
+		calls = append(calls, call)
+		return "", nil
+	}
+	defer func() {
+		runGitCommandFunc = original
+	}()
+
+	m := newTestModel()
+	msg := m.discardChangesCmd("source", "/tmp/az-1")()
+
+	result, ok := msg.(mergePreflightActionResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergePreflightActionResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("discard err = %v", result.err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("git calls = %v, want 2 calls", calls)
+	}
+	wantFirst := []string{"/tmp/az-1", "restore", "--staged", "--worktree", "."}
+	if !reflect.DeepEqual(calls[0], wantFirst) {
+		t.Fatalf("first git call = %v, want %v", calls[0], wantFirst)
+	}
+	wantSecond := []string{"/tmp/az-1", "clean", "-fd"}
+	if !reflect.DeepEqual(calls[1], wantSecond) {
+		t.Fatalf("second git call = %v, want %v", calls[1], wantSecond)
+	}
+}
+
+func TestDiscardChangesCmdReturnsCleanError(t *testing.T) {
+	original := runGitCommandFunc
+	runGitCommandFunc = func(_ context.Context, _ string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "clean" && args[1] == "-fd" {
+			return "", errors.New("clean failed")
+		}
+		return "", nil
+	}
+	defer func() {
+		runGitCommandFunc = original
+	}()
+
+	m := newTestModel()
+	msg := m.discardChangesCmd("target", "/tmp/az-2")()
+
+	result, ok := msg.(mergePreflightActionResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergePreflightActionResultMsg", msg)
+	}
+	if result.err == nil || !strings.Contains(result.err.Error(), "clean failed") {
+		t.Fatalf("discard err = %v, want clean failure", result.err)
+	}
+}
+
 func TestGitWorkflowCommandsUseDaemonClient(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

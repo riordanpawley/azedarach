@@ -73,6 +73,7 @@ var executablePath = os.Executable
 var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
+var runGitCommandFunc = runGitCommand
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -4385,9 +4386,9 @@ func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
 					},
 				}
 			}
-			},
-			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-		)
+		},
+		func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+	)
 	return m.openOverlay(mergeOverlay)
 }
 
@@ -5155,7 +5156,10 @@ func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		_, err := runGitCommand(ctx, worktree, "restore", "--staged", "--worktree", ".")
+		_, err := runGitCommandFunc(ctx, worktree, "restore", "--staged", "--worktree", ".")
+		if err == nil {
+			_, err = runGitCommandFunc(ctx, worktree, "clean", "-fd")
+		}
 		return mergePreflightActionResultMsg{
 			action:   "discard",
 			side:     side,
@@ -5181,7 +5185,7 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 			}
 		}
 
-		if _, err := runGitCommand(ctx, worktree, "add", "-A"); err != nil {
+		if _, err := runGitCommandFunc(ctx, worktree, "add", "-A"); err != nil {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
@@ -5189,7 +5193,7 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 				err:      err,
 			}
 		}
-		if _, err := runGitCommand(ctx, worktree, "commit", "-m", "chore: pre-merge checkpoint"); err != nil {
+		if _, err := runGitCommandFunc(ctx, worktree, "commit", "-m", "chore: pre-merge checkpoint"); err != nil {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
