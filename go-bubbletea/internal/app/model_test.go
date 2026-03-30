@@ -2709,3 +2709,53 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
 	}
 }
+
+func TestSessionStartedMsg_AllowsImmediateAttachFromWorkspace(t *testing.T) {
+	t.Setenv("TMUX", "")
+	m := newTestModel()
+	issueID := m.tasks[0].ID
+	m.tasks[0].HasTmuxSession = false
+	m.tasks[0].Session = nil
+	m.tmuxAvailable = false
+	m.nav.SelectTask(issueID, 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	updatedAny, _ := m.Update(sessionStartedMsg{issueID: issueID})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
+	}
+	if !updated.tasks[0].HasTmuxSession {
+		t.Fatal("expected session start to mark task as tmux-attached for immediate attach action")
+	}
+
+	_, cmd := updated.handleSelection(overlay.SelectionMsg{Key: "a"})
+	if cmd == nil {
+		t.Fatal("expected attach command after session start")
+	}
+	msg := cmd()
+	if _, ok := msg.(sessionAttachedMsg); !ok {
+		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+	}
+}

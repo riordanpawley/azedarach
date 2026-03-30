@@ -456,6 +456,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, m.loadIssuesCmd()
 		}
+		for i := range m.tasks {
+			if m.tasks[i].ID == msg.issueID {
+				m.tasks[i].HasTmuxSession = true
+				break
+			}
+		}
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session started: %s", msg.issueID),
