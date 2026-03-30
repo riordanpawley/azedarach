@@ -1101,6 +1101,162 @@ func TestFollowOnMergeSelectionUsesTaskSessionFallbackWhenProjectionMissing(t *t
 	}
 }
 
+func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
+	m := newTestModel()
+
+	updated, cmd := m.Update(mergeResultMsg{
+		sourceID:    "az-1",
+		targetID:    "main",
+		stage:       "merge",
+		operationID: "op-merge",
+		state:       protocol.OperationStateQueued,
+	})
+	if cmd == nil {
+		t.Fatal("expected refresh command for pending merge")
+	}
+
+	updatedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if len(updatedModel.toasts) == 0 {
+		t.Fatal("expected pending-operation toast")
+	}
+	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
+	if !strings.Contains(gotToast, "Merge queued for az-1 (operation op-merge)") {
+		t.Fatalf("toast = %q, want queued merge message", gotToast)
+	}
+}
+
+func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T) {
+	sourceID := "az-source"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-source", Branch: "az/az-source", IssueID: sourceID},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitFetch:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal fetch request: %v", err)
+				}
+				if body.Worktree != "." || body.Remote != "origin" {
+					t.Fatalf("fetch body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Remote: body.Remote})
+				if err != nil {
+					t.Fatalf("marshal fetch response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitCheckout:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal checkout request: %v", err)
+				}
+				if body.Worktree != "." || body.Branch != "main" {
+					t.Fatalf("checkout body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Branch: body.Branch})
+				if err != nil {
+					t.Fatalf("marshal checkout response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				if body.Worktree != "." || body.Branch != "az/az-source" {
+					t.Fatalf("merge body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+					Worktree: body.Worktree,
+					Branch:   body.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+
+	updated, cmd := m.handleMergeTargetSelection(overlay.MergeTargetSelectedMsg{
+		SourceID: sourceID,
+		TargetID: "main",
+	})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected merge command")
+	}
+
+	msg := cmd()
+	mergeMsg, ok := msg.(mergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want mergeResultMsg", msg)
+	}
+	if mergeMsg.err != nil {
+		t.Fatalf("merge err = %v", mergeMsg.err)
+	}
+	if got := transport.requests; len(got) != 5 || got[0] != daemonclient.CommandWorktreeList || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandGitFetch || got[3] != daemonclient.CommandGitCheckout || got[4] != daemonclient.CommandGitMerge {
+		t.Fatalf("requests = %v", got)
+	}
+}
+
 func TestGitWorkflowCommandsUseDaemonClient(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

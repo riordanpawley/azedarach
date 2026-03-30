@@ -515,6 +515,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case mergeResultMsg:
+		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			action := "Merge"
+			if msg.stage == "stop_session" {
+				action = "Stop session"
+			}
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: formatPendingOperationMessage(action, msg.sourceID, msg.operationID, msg.state),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.loadIssuesCmd()
+		}
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -4047,8 +4059,8 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
 
-	sourceSession := m.sessionForIssue(msg.SourceID)
-	if sourceSession == nil || sourceSession.Worktree == "" {
+	sourceWorktree, err := m.resolveIssueWorktreePath(context.Background(), msg.SourceID)
+	if err != nil || sourceWorktree == "" {
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: "Source session worktree not found",
@@ -4058,11 +4070,11 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 	}
 
 	if msg.TargetID == "main" {
-		return m, m.mergeToMainCmd(sourceSession.Worktree, msg.SourceID)
+		return m, m.mergeToMainCmd(sourceWorktree, msg.SourceID)
 	}
 
-	targetSession := m.sessionForIssue(msg.TargetID)
-	if targetSession == nil || targetSession.Worktree == "" {
+	targetWorktree, err := m.resolveIssueWorktreePath(context.Background(), msg.TargetID)
+	if err != nil || targetWorktree == "" {
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: "Target session worktree not found",
@@ -4071,20 +4083,28 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 		return m, nil
 	}
 
-	return m, m.followOnMergeIntoTargetCmd(sourceSession.Worktree, targetSession.Worktree, msg.SourceID, msg.TargetID, targetSession.State)
+	targetState := domain.SessionIdle
+	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
+		targetState = targetSession.State
+	}
+
+	return m, m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, msg.SourceID, msg.TargetID, targetState)
 }
 
 type mergeResultMsg struct {
-	sourceID string
-	targetID string
-	result   *git.MergeResult
-	err      error
+	sourceID    string
+	targetID    string
+	result      *git.MergeResult
+	stage       string
+	state       protocol.OperationState
+	operationID string
+	err         error
 }
 
 func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		baseBranch := m.config.Git.BaseBranch
+		baseBranch := m.resolveBaseBranch()
 
 		branch, err := m.resolveWorktreeBranch(ctx, sourceWorktree, sourceID)
 		if err != nil {
@@ -4102,14 +4122,41 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 		}
 
 		if _, err := m.daemonClient.GitFetch(ctx, ".", "origin"); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return mergeResultMsg{
+					sourceID:    sourceID,
+					targetID:    "main",
+					stage:       "fetch",
+					state:       pending.State,
+					operationID: pending.OperationID,
+				}
+			}
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
 		if _, err := m.daemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
+			if pending, ok := pendingOperationDetails(err); ok {
+				return mergeResultMsg{
+					sourceID:    sourceID,
+					targetID:    "main",
+					stage:       "checkout",
+					state:       pending.State,
+					operationID: pending.OperationID,
+				}
+			}
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
 		result, err := m.daemonClient.GitMerge(ctx, ".", branch)
+		if pending, ok := pendingOperationDetails(err); ok {
+			return mergeResultMsg{
+				sourceID:    sourceID,
+				targetID:    "main",
+				stage:       "merge",
+				state:       pending.State,
+				operationID: pending.OperationID,
+			}
+		}
 		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: &result.Result, err: err}
 	}
 }
@@ -4135,6 +4182,15 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 		}
 
 		result, err := m.daemonClient.GitMerge(ctx, targetWorktree, sourceBranch)
+		if pending, ok := pendingOperationDetails(err); ok {
+			return mergeResultMsg{
+				sourceID:    sourceID,
+				targetID:    targetID,
+				stage:       "merge",
+				state:       pending.State,
+				operationID: pending.OperationID,
+			}
+		}
 		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: &result.Result, err: err}
 	}
 }
@@ -4153,6 +4209,15 @@ func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, source
 			}
 			m.sessionMonitor.Stop(targetID)
 			if _, err := m.daemonClient.StopSession(ctx, targetID); err != nil {
+				if pending, ok := pendingOperationDetails(err); ok {
+					return mergeResultMsg{
+						sourceID:    sourceID,
+						targetID:    targetID,
+						stage:       "stop_session",
+						state:       pending.State,
+						operationID: pending.OperationID,
+					}
+				}
 				return mergeResultMsg{
 					sourceID: sourceID,
 					targetID: targetID,
@@ -4176,10 +4241,22 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	if session == nil {
 		session = m.sessionForIssue(task.ID)
 	}
-	if session == nil || session.Worktree == "" {
+	targetWorktree := ""
+	targetState := domain.SessionIdle
+	if session != nil {
+		targetWorktree = session.Worktree
+		targetState = session.State
+	}
+	if targetWorktree == "" {
+		worktree, err := m.resolveIssueWorktreePath(context.Background(), task.ID)
+		if err == nil {
+			targetWorktree = worktree
+		}
+	}
+	if targetWorktree == "" {
 		m.addToast(Toast{
 			Level:   ToastWarning,
-			Message: "No active session - start session first",
+			Message: "No active session/worktree - start session first",
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return nil
@@ -4196,8 +4273,8 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	}
 
 	if len(candidates) == 1 {
-		sourceSession := m.sessionForIssue(candidates[0].target.ID)
-		if sourceSession == nil || sourceSession.Worktree == "" {
+		sourceWorktree, err := m.resolveIssueWorktreePath(context.Background(), candidates[0].target.ID)
+		if err != nil || sourceWorktree == "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "Selected upstream source has no active worktree",
@@ -4211,7 +4288,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
-		return m.followOnMergeIntoTargetCmd(sourceSession.Worktree, session.Worktree, candidates[0].target.ID, task.ID, session.State)
+		return m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, candidates[0].target.ID, task.ID, targetState)
 	}
 
 	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
@@ -4269,6 +4346,8 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			if session, ok := m.sessions[task.ID]; ok && session != nil && session.Worktree != "" {
 				hasWorktree = true
 			} else if task.Session != nil && task.Session.Worktree != "" {
+				hasWorktree = true
+			} else if task.HasWorktree {
 				hasWorktree = true
 			}
 			candidates = append(candidates, followOnMergeCandidate{
@@ -4854,6 +4933,23 @@ func (m Model) listDaemonWorktrees(ctx context.Context) ([]git.Worktree, error) 
 		return nil, err
 	}
 	return worktrees, nil
+}
+
+func (m Model) resolveIssueWorktreePath(ctx context.Context, issueID string) (string, error) {
+	if issueID == "" {
+		return "", fmt.Errorf("issue ID is required")
+	}
+	if session := m.sessionForIssue(issueID); session != nil && session.Worktree != "" {
+		return session.Worktree, nil
+	}
+	worktrees, err := m.listDaemonWorktrees(ctx)
+	if err != nil {
+		return "", err
+	}
+	if wt, ok := findDaemonWorktree(worktrees, "", issueID); ok && wt.Path != "" {
+		return wt.Path, nil
+	}
+	return "", fmt.Errorf("worktree not found for issue %s", issueID)
 }
 
 func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {
