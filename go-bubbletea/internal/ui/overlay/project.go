@@ -141,7 +141,7 @@ func (m *ProjectSelector) View() string {
 
 // viewList renders the project list
 func (m *ProjectSelector) viewList() string {
-	var b strings.Builder
+	var list strings.Builder
 
 	headerLine := m.styles.Separator.Copy().
 		Foreground(uistyles.Blue).
@@ -151,17 +151,17 @@ func (m *ProjectSelector) viewList() string {
 		Foreground(uistyles.Blue).
 		Render("  PROJECT SELECTOR")
 
-	b.WriteString(headerLine)
-	b.WriteString("\n")
-	b.WriteString(headerTitle)
-	b.WriteString("\n")
-	b.WriteString(headerLine)
-	b.WriteString("\n\n")
+	list.WriteString(headerLine)
+	list.WriteString("\n")
+	list.WriteString(headerTitle)
+	list.WriteString("\n")
+	list.WriteString(headerLine)
+	list.WriteString("\n\n")
 
 	if len(m.registry.Projects) == 0 {
-		b.WriteString(m.styles.MenuItem.Render("No projects registered"))
-		b.WriteString("\n\n")
-		b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+		list.WriteString(m.styles.MenuItem.Render("No projects registered"))
+		list.WriteString("\n\n")
+		list.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 			{Key: "Esc", Description: "close"},
 			{Key: "a", Description: "add"},
 			{Key: "D", Description: "detect"},
@@ -170,7 +170,7 @@ func (m *ProjectSelector) viewList() string {
 			DescriptionStyle: m.styles.Footer,
 			FooterStyle:      m.styles.Footer,
 		}))
-		return b.String()
+		return list.String()
 	}
 
 	for i, project := range m.registry.Projects {
@@ -196,14 +196,13 @@ func (m *ProjectSelector) viewList() string {
 			line += " " + m.styles.MenuKey.Render("[default]")
 		}
 
-		b.WriteString(style.Render(line))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Footer.Copy().MarginTop(0).Render(fmt.Sprintf("   %s", project.Path)))
-		b.WriteString("\n")
+		list.WriteString(style.Render(line))
+		list.WriteString("\n")
+		list.WriteString(m.styles.Footer.Copy().MarginTop(0).Render(fmt.Sprintf("   %s", project.Path)))
+		list.WriteString("\n")
 	}
 
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
+	keys := keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "1-9", Description: "switch"},
 		{Key: "Enter", Description: "switch"},
 		{Key: "d", Description: "default"},
@@ -215,9 +214,14 @@ func (m *ProjectSelector) viewList() string {
 		KeyStyle:         m.styles.MenuKey,
 		DescriptionStyle: m.styles.Footer,
 		FooterStyle:      m.styles.Footer,
-	}))
+	})
 
-	return b.String()
+	return lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		list.String(),
+		lipgloss.NewStyle().Width(4).Render(""),
+		keys,
+	)
 }
 
 // viewActions renders the actions menu for adding projects
@@ -271,12 +275,16 @@ func (m *ProjectSelector) Size() (width, height int) {
 		return 50, 10
 	}
 
-	// Dynamic height based on number of projects
-	height = len(m.registry.Projects)*2 + 6
+	view := m.viewList()
+	width = lipgloss.Width(view)
+	height = lipgloss.Height(view)
+	if width < 52 {
+		width = 52
+	}
 	if height < 10 {
 		height = 10
 	}
-	return 70, height
+	return width, height
 }
 
 // moveCursorDown moves the cursor down
