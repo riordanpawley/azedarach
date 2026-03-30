@@ -210,6 +210,9 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
+	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
+		repoDir = normalizedRepoDir
+	}
 	logFilePath := resolveTUILogFilePath(cfg)
 	logger := newTUILogger(logFilePath)
 	if err != nil {
