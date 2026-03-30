@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,7 +9,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
+	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 )
 
 func TestDialogs_View_Golden(t *testing.T) {
@@ -18,15 +21,24 @@ func TestDialogs_View_Golden(t *testing.T) {
 		name string
 		view func(t *testing.T) string
 	}{
+		{name: "conflict", view: goldenConflictView},
+		{name: "cleanup", view: goldenCleanupView},
+		{name: "cleanup_confirm", view: goldenCleanupConfirmView},
 		{name: "confirm", view: goldenConfirmView},
 		{name: "gitpull", view: goldenGitPullView},
 		{name: "mergechoice", view: goldenMergeChoiceView},
+		{name: "merge_select", view: goldenMergeSelectView},
+		{name: "merge_upstream", view: goldenMergeUpstreamView},
 		{name: "devserver", view: goldenDevServerView},
 		{name: "project_selector", view: goldenProjectSelectorView},
+		{name: "settings_default", view: goldenSettingsDefaultView},
+		{name: "diagnostics_overview", view: goldenDiagnosticsOverviewView},
 		{name: "imageattach_list", view: goldenImageAttachListView},
 		{name: "imageattach_preview", view: goldenImageAttachPreviewView},
 		{name: "imagepreview_default", view: goldenImagePreviewView},
 		{name: "imagepreview_confirm_delete", view: goldenImagePreviewConfirmDeleteView},
+		{name: "orchestration", view: goldenOrchestrationView},
+		{name: "orchestration_empty", view: goldenOrchestrationEmptyView},
 	}
 
 	for _, tc := range cases {
@@ -46,9 +58,15 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 		name string
 		view func(t *testing.T) string
 	}{
+		{name: "conflict_small", view: goldenConflictSmallView},
+		{name: "cleanup_small", view: goldenCleanupSmallView},
 		{name: "imageattach_list_small", view: goldenImageAttachListSmallView},
+		{name: "merge_select_small", view: goldenMergeSelectSmallView},
 		{name: "imagepreview_default_small", view: goldenImagePreviewSmallView},
 		{name: "project_selector_small", view: goldenProjectSelectorSmallView},
+		{name: "settings_default_small", view: goldenSettingsDefaultSmallView},
+		{name: "diagnostics_overview_small", view: goldenDiagnosticsOverviewSmallView},
+		{name: "orchestration_small", view: goldenOrchestrationSmallView},
 	}
 
 	for _, tc := range cases {
@@ -88,6 +106,64 @@ func goldenConfirmView(t *testing.T) string {
 	return model.(*ConfirmDialog).View()
 }
 
+func goldenConflictView(t *testing.T) string {
+	t.Helper()
+	dialog := NewConflictDialog([]string{
+		"internal/ui/app.go",
+		"internal/domain/task.go",
+		"internal/services/git.go",
+	})
+	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*ConflictOverlay).View()
+}
+
+func goldenConflictSmallView(t *testing.T) string {
+	t.Helper()
+	dialog := NewConflictDialog([]string{
+		"internal/ui/app.go",
+		"internal/domain/task.go",
+		"internal/services/git.go",
+	})
+	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*ConflictOverlay).View()
+}
+
+func goldenCleanupView(t *testing.T) string {
+	t.Helper()
+	overlay := NewBulkCleanupOverlay(func(context.Context, []string) (CleanupResult, error) {
+		return CleanupResult{}, nil
+	}, 100, 5, 2)
+	overlay.categories[0].Selected = true
+	overlay.categories[2].Selected = true
+	overlay.cursor = 2
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*BulkCleanupOverlay).View()
+}
+
+func goldenCleanupConfirmView(t *testing.T) string {
+	t.Helper()
+	overlay := NewBulkCleanupOverlay(func(context.Context, []string) (CleanupResult, error) {
+		return CleanupResult{}, nil
+	}, 100, 5, 2)
+	overlay.categories[0].Selected = true
+	overlay.categories[2].Selected = true
+	overlay.confirmMode = true
+	overlay.confirmSelected = true
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*BulkCleanupOverlay).View()
+}
+
+func goldenCleanupSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewBulkCleanupOverlay(func(context.Context, []string) (CleanupResult, error) {
+		return CleanupResult{}, nil
+	}, 100, 5, 2)
+	overlay.categories[0].Selected = true
+	overlay.categories[2].Selected = true
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*BulkCleanupOverlay).View()
+}
+
 func goldenGitPullView(t *testing.T) string {
 	t.Helper()
 	overlay := NewGitPullOverlay(7)
@@ -100,6 +176,27 @@ func goldenMergeChoiceView(t *testing.T) string {
 	overlay := NewMergeChoiceOverlay("az-123", 3, "main")
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*MergeChoiceOverlay).View()
+}
+
+func goldenMergeSelectView(t *testing.T) string {
+	t.Helper()
+	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
+	overlay := NewMergeSelectOverlay(source, []MergeTarget{
+		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
+		{ID: "az-789", Label: "Related task 2", Status: domain.StatusDone, HasWorktree: false},
+	}, nil, nil)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*MergeSelectOverlay).View()
+}
+
+func goldenMergeUpstreamView(t *testing.T) string {
+	t.Helper()
+	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
+	overlay := NewMergeSourceSelectOverlay(source, []MergeTarget{
+		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
+	}, nil, nil)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*MergeSelectOverlay).View()
 }
 
 func goldenDevServerView(t *testing.T) string {
@@ -130,6 +227,34 @@ func goldenProjectSelectorView(t *testing.T) string {
 	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(1))
 	model, _ := selector.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	return model.(*ProjectSelector).View()
+}
+
+func goldenSettingsDefaultView(t *testing.T) string {
+	t.Helper()
+	menu := NewDefaultSettingsOverlay()
+	model, _ := menu.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*SettingsOverlay).View()
+}
+
+func goldenSettingsDefaultSmallView(t *testing.T) string {
+	t.Helper()
+	menu := NewDefaultSettingsOverlay()
+	model, _ := menu.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*SettingsOverlay).View()
+}
+
+func goldenDiagnosticsOverviewView(t *testing.T) string {
+	t.Helper()
+	panel := newGoldenDiagnosticsPanel()
+	model, _ := panel.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*DiagnosticsPanel).View()
+}
+
+func goldenDiagnosticsOverviewSmallView(t *testing.T) string {
+	t.Helper()
+	panel := newGoldenDiagnosticsPanel()
+	model, _ := panel.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*DiagnosticsPanel).View()
 }
 
 func goldenImageAttachListView(t *testing.T) string {
@@ -209,6 +334,17 @@ func goldenImagePreviewSmallView(t *testing.T) string {
 	return model.(*ImagePreviewOverlay).View()
 }
 
+func goldenMergeSelectSmallView(t *testing.T) string {
+	t.Helper()
+	source := &domain.Task{ID: "az-123", Title: "Implement feature X"}
+	overlay := NewMergeSelectOverlay(source, []MergeTarget{
+		{ID: "az-456", Label: "Related task 1", Status: domain.StatusOpen, HasWorktree: true},
+		{ID: "az-789", Label: "Related task 2", Status: domain.StatusDone, HasWorktree: false},
+	}, nil, nil)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*MergeSelectOverlay).View()
+}
+
 func goldenProjectSelectorSmallView(t *testing.T) string {
 	t.Helper()
 	registry := &config.ProjectsRegistry{
@@ -221,4 +357,101 @@ func goldenProjectSelectorSmallView(t *testing.T) string {
 	selector := NewProjectSelectorWithOptions(registry, WithCurrentProjectName("azedarach"), WithInitialCursor(1))
 	model, _ := selector.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*ProjectSelector).View()
+}
+
+func goldenOrchestrationView(t *testing.T) string {
+	t.Helper()
+	overlay := NewOrchestrationOverlay(
+		[]SessionInfo{
+			{
+				IssueID:      "az-123",
+				TaskTitle:    "Implement feature X with careful layout handling",
+				State:        domain.SessionBusy,
+				StartedAt:    nil,
+				Worktree:     "/Users/riordan/prog/azedarach",
+				RecentOutput: "build finished\nview rendered\nrenderDialogTwoPane ok",
+			},
+			{
+				IssueID:   "az-456",
+				TaskTitle: "Fix selector overflow on mobile",
+				State:     domain.SessionWaiting,
+				Worktree:  "/Users/riordan/prog/Chefy",
+			},
+		},
+		nil, nil, nil,
+	)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*OrchestrationOverlay).View()
+}
+
+func goldenOrchestrationEmptyView(t *testing.T) string {
+	t.Helper()
+	overlay := NewOrchestrationOverlay(nil, nil, nil, nil)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*OrchestrationOverlay).View()
+}
+
+func goldenOrchestrationSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewOrchestrationOverlay(
+		[]SessionInfo{
+			{
+				IssueID:      "az-123",
+				TaskTitle:    "Implement feature X with careful layout handling",
+				State:        domain.SessionBusy,
+				StartedAt:    nil,
+				Worktree:     "/Users/riordan/prog/azedarach",
+				RecentOutput: "build finished\nview rendered\nrenderDialogTwoPane ok",
+			},
+		},
+		nil, nil, nil,
+	)
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
+	return model.(*OrchestrationOverlay).View()
+}
+
+func newGoldenDiagnosticsPanel() *DiagnosticsPanel {
+	now := time.Date(2026, time.March, 30, 8, 30, 0, 0, time.UTC)
+	mockService := &mockDiagnosticsService{
+		diagnostics: &diagnostics.SystemDiagnostics{
+			Timestamp:    now,
+			OverallState: diagnostics.HealthHealthy,
+			Sessions: []diagnostics.SessionInfo{
+				{
+					IssueID:  "az-123",
+					State:    domain.SessionBusy,
+					Uptime:   5 * time.Minute,
+					Worktree: "/Users/riordan/prog/azedarach",
+				},
+			},
+			Ports: []diagnostics.PortInfo{
+				{Port: 3000, IssueID: "az-123", InUse: true, Available: true},
+			},
+			Worktrees: []diagnostics.WorktreeInfo{
+				{IssueID: "az-123", Path: "/Users/riordan/prog/azedarach", IsHealthy: true},
+			},
+			Network: diagnostics.NetworkInfo{
+				IsOnline:  true,
+				LastCheck: now,
+				Latency:   21 * time.Millisecond,
+			},
+			System: diagnostics.SystemInfo{
+				GoVersion:    "go1.21.5",
+				OS:           "darwin",
+				Arch:         "arm64",
+				NumGoroutine: 42,
+				MemoryUsage:  64 * 1024 * 1024,
+			},
+			Operations: diagnostics.OperationInfo{
+				Total:      3,
+				Busy:       1,
+				Waiting:    1,
+				Done:       1,
+				Cancelable: 2,
+			},
+		},
+	}
+	panel := NewDiagnosticsPanel(mockService, map[string]*domain.Session{})
+	panel.currentDiagnostics = mockService.diagnostics
+	return panel
 }
