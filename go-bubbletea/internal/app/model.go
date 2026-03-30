@@ -2123,9 +2123,6 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 		for _, task := range prioritizedTasks {
 			cachedSignals, hasCachedSignals := m.runtimeSignalsByTask[task.ID]
 			signals := board.RuntimeSignals{HasTmuxSession: task.Session != nil}
-			if hasCachedSignals && cachedSignals.HasTmuxSession {
-				signals.HasTmuxSession = true
-			}
 			worktreePath, hasWorktree := worktreeByIssue[taskIDKey(task.ID)]
 			signals.HasWorktree = hasWorktree
 			if !hasWorktree {

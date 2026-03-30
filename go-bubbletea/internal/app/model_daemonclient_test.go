@@ -2804,3 +2804,56 @@ func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
 		t.Fatalf("inactive refreshedAt = %v, want cached %v", loaded.refreshedAtByTask["az-inactive"], cachedAt)
 	}
 }
+
+func TestRefreshRuntimeSignalsCmdClearsStaleTmuxSessionFlag(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				body, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "",
+					Worktrees: nil,
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {HasTmuxSession: true},
+	}
+	m.runtimeSignalRefreshedAtByTask = map[string]time.Time{
+		"az-1": time.Now().Add(-5 * time.Second),
+	}
+
+	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
+		{ID: "az-1", Title: "task", Status: domain.StatusInProgress},
+	})()
+	loaded, ok := msg.(runtimeSignalsLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
+	}
+	if loaded.signalsByTask["az-1"].HasTmuxSession {
+		t.Fatalf("HasTmuxSession = true, want false when current task has no session")
+	}
+}
