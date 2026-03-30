@@ -236,7 +236,7 @@ func (p *PlanningOverlay) View() string {
 		height:            height,
 		title:             p.Title(),
 		rightSectionTitle: "Actions",
-		breakpoint:        86,
+		breakpoint:        72,
 		gap:               3,
 		minLeft:           48,
 		minRight:          22,
