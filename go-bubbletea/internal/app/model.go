@@ -2159,6 +2159,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 			}
 
 			status, statusErr := m.daemonClient.GitStatus(ctx, worktreePath)
+			refreshSucceeded := statusErr == nil
 			if statusErr == nil {
 				signals.HasUncommittedChanges = status.HasChanges
 			} else {
@@ -2170,6 +2171,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
 			} else {
 				partialFailures++
+				refreshSucceeded = false
 			}
 
 			if m.isOnline {
@@ -2183,9 +2185,12 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 					signals.GitBehindCount = behind.CommitsBehind
 				} else {
 					partialFailures++
+					refreshSucceeded = false
 				}
 			}
-			refreshedAtByTask[task.ID] = now
+			if refreshSucceeded {
+				refreshedAtByTask[task.ID] = now
+			}
 			worktreeByTask[task.ID] = worktreePath
 			signalsByTask[task.ID] = signals
 		}
