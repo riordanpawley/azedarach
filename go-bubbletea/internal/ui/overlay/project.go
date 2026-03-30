@@ -202,7 +202,11 @@ func (m *ProjectSelector) viewList() string {
 		list.WriteString("\n")
 	}
 
-	keys := keybinds.RenderKeyTable([]keybinds.Binding{
+	list.WriteString("\n")
+	list.WriteString(m.styles.MenuHeader.Copy().Foreground(uistyles.Blue).Render("Actions"))
+	list.WriteString("\n")
+
+	list.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
 		{Key: "1-9", Description: "switch"},
 		{Key: "Enter", Description: "switch"},
 		{Key: "d", Description: "default"},
@@ -212,16 +216,11 @@ func (m *ProjectSelector) viewList() string {
 		{Key: "Esc", Description: "close"},
 	}, 0, keybinds.Theme{
 		KeyStyle:         m.styles.MenuKey,
-		DescriptionStyle: m.styles.Footer,
-		FooterStyle:      m.styles.Footer,
-	})
+		DescriptionStyle: m.styles.Footer.Copy().MarginTop(0),
+		FooterStyle:      m.styles.Footer.Copy().MarginTop(0),
+	}))
 
-	return lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		list.String(),
-		lipgloss.NewStyle().Width(4).Render(""),
-		keys,
-	)
+	return list.String()
 }
 
 // viewActions renders the actions menu for adding projects
