@@ -134,6 +134,7 @@ type Model struct {
 	drillDownTrail                 []drillDownContext
 	runtimeSignalsByTask           map[string]board.RuntimeSignals
 	runtimeSignalRefreshedAtByTask map[string]time.Time
+	runtimeSignalWorktreeByTask    map[string]string
 	runtimeSignalsBusy             bool
 	lastRuntimeRefresh             time.Time
 
@@ -228,6 +229,7 @@ func New(cfg *config.Config) Model {
 		viewMode:                       ViewModeBoard, // Start with board view
 		runtimeSignalsByTask:           make(map[string]board.RuntimeSignals),
 		runtimeSignalRefreshedAtByTask: make(map[string]time.Time),
+		runtimeSignalWorktreeByTask:    make(map[string]string),
 		toasts:                         []Toast{},
 		eventTicker:                    eventticker.NewRing(eventTickerCapacity),
 		runtimeEvents:                  []protocol.EventEnvelope{},
@@ -396,6 +398,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runtimeSignalsBusy = false
 		m.runtimeSignalsByTask = msg.signalsByTask
 		m.runtimeSignalRefreshedAtByTask = msg.refreshedAtByTask
+		m.runtimeSignalWorktreeByTask = msg.worktreeByTask
 		m.lastRuntimeRefresh = msg.refreshedAt
 		m.applyRuntimeSignals()
 		return m, nil
@@ -2009,6 +2012,7 @@ type runtimeSignalsLoadedMsg struct {
 	projectID           string
 	signalsByTask       map[string]board.RuntimeSignals
 	refreshedAtByTask   map[string]time.Time
+	worktreeByTask      map[string]string
 	refreshedAt         time.Time
 	partialFailureCount int
 }
@@ -2091,6 +2095,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				projectID:         projectID,
 				signalsByTask:     map[string]board.RuntimeSignals{},
 				refreshedAtByTask: map[string]time.Time{},
+				worktreeByTask:    map[string]string{},
 				refreshedAt:       time.Now(),
 			}
 		}
@@ -2104,6 +2109,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				projectID:         projectID,
 				signalsByTask:     map[string]board.RuntimeSignals{},
 				refreshedAtByTask: map[string]time.Time{},
+				worktreeByTask:    map[string]string{},
 				refreshedAt:       time.Now(),
 			}
 		}
@@ -2118,6 +2124,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 
 		signalsByTask := make(map[string]board.RuntimeSignals, len(prioritizedTasks))
 		refreshedAtByTask := make(map[string]time.Time, len(prioritizedTasks))
+		worktreeByTask := make(map[string]string, len(prioritizedTasks))
 		partialFailures := 0
 		now := time.Now()
 		for _, task := range prioritizedTasks {
@@ -2126,6 +2133,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 			worktreePath, hasWorktree := worktreeByIssue[taskIDKey(task.ID)]
 			signals.HasWorktree = hasWorktree
 			if !hasWorktree {
+				worktreeByTask[task.ID] = ""
 				signalsByTask[task.ID] = signals
 				if refreshedAt, ok := m.runtimeSignalRefreshedAtByTask[task.ID]; ok {
 					refreshedAtByTask[task.ID] = refreshedAt
@@ -2141,7 +2149,8 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				signals.GitBehindCount = cachedSignals.GitBehindCount
 			}
 
-			if hasCachedSignals && m.shouldUseCachedRuntimeSignals(task, now) {
+			if hasCachedSignals && m.shouldUseCachedRuntimeSignals(task, worktreePath, now) {
+				worktreeByTask[task.ID] = worktreePath
 				if refreshedAt, ok := m.runtimeSignalRefreshedAtByTask[task.ID]; ok {
 					refreshedAtByTask[task.ID] = refreshedAt
 				}
@@ -2177,6 +2186,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				}
 			}
 			refreshedAtByTask[task.ID] = now
+			worktreeByTask[task.ID] = worktreePath
 			signalsByTask[task.ID] = signals
 		}
 
@@ -2184,6 +2194,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 			projectID:           projectID,
 			signalsByTask:       signalsByTask,
 			refreshedAtByTask:   refreshedAtByTask,
+			worktreeByTask:      worktreeByTask,
 			refreshedAt:         now,
 			partialFailureCount: partialFailures,
 		}
@@ -2211,8 +2222,12 @@ func hasActiveTmuxSession(task domain.Task) bool {
 	return task.HasTmuxSession
 }
 
-func (m Model) shouldUseCachedRuntimeSignals(task domain.Task, now time.Time) bool {
+func (m Model) shouldUseCachedRuntimeSignals(task domain.Task, worktreePath string, now time.Time) bool {
 	if hasActiveTmuxSession(task) {
+		return false
+	}
+	cachedWorktreePath, ok := m.runtimeSignalWorktreeByTask[task.ID]
+	if !ok || strings.TrimSpace(cachedWorktreePath) != strings.TrimSpace(worktreePath) {
 		return false
 	}
 	refreshedAt, ok := m.runtimeSignalRefreshedAtByTask[task.ID]

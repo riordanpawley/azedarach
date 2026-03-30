@@ -2778,6 +2778,10 @@ func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
 		"az-inactive": cachedAt,
 		"az-active":   cachedAt,
 	}
+	m.runtimeSignalWorktreeByTask = map[string]string{
+		"az-inactive": "/tmp/inactive",
+		"az-active":   "/tmp/active",
+	}
 
 	tasks := []domain.Task{
 		{ID: "az-inactive", Title: "inactive", Status: domain.StatusInProgress},
@@ -2802,6 +2806,112 @@ func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
 	}
 	if !loaded.refreshedAtByTask["az-inactive"].Equal(cachedAt) {
 		t.Fatalf("inactive refreshedAt = %v, want cached %v", loaded.refreshedAtByTask["az-inactive"], cachedAt)
+	}
+}
+
+func TestRefreshRuntimeSignalsCmdBypassesCacheWhenWorktreePathChanges(t *testing.T) {
+	var diffStatWorktrees []string
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				body, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/new-inactive", Branch: "az/az-inactive", IssueID: "az-inactive"},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandGitStatus:
+				respBody, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: true}})
+				if err != nil {
+					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitDiffStat:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal diff stat body: %v", err)
+				}
+				diffStatWorktrees = append(diffStatWorktrees, body.Worktree)
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "1 file changed, 7 insertions(+), 3 deletions(-)"})
+				if err != nil {
+					t.Fatalf("marshal diff response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.isOnline = false
+	cachedAt := time.Now().Add(-10 * time.Second)
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-inactive": {
+			HasWorktree:           true,
+			HasUncommittedChanges: true,
+			GitAdditions:          9,
+			GitDeletions:          4,
+		},
+	}
+	m.runtimeSignalRefreshedAtByTask = map[string]time.Time{
+		"az-inactive": cachedAt,
+	}
+	m.runtimeSignalWorktreeByTask = map[string]string{
+		"az-inactive": "/tmp/old-inactive",
+	}
+
+	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
+		{ID: "az-inactive", Title: "inactive", Status: domain.StatusInProgress},
+	})()
+	loaded, ok := msg.(runtimeSignalsLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
+	}
+	if len(diffStatWorktrees) != 1 || diffStatWorktrees[0] != "/tmp/new-inactive" {
+		t.Fatalf("diff stat worktrees = %v, want fresh call for new worktree path", diffStatWorktrees)
+	}
+	if loaded.worktreeByTask["az-inactive"] != "/tmp/new-inactive" {
+		t.Fatalf("cached worktree = %q, want %q", loaded.worktreeByTask["az-inactive"], "/tmp/new-inactive")
 	}
 }
 
