@@ -126,6 +126,7 @@ type Model struct {
 
 	// UI state
 	overlayStack                   *overlay.Stack
+	createTaskOverlay              *overlay.CreateTaskOverlay
 	viewMode                       ViewMode
 	viewportStarts                 [board.DefaultColumnCount]int
 	columnViewportStart            int
@@ -702,6 +703,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
+		}
+		// Clear persisted create-draft state only after successful new-task creation.
+		// Updates from edit overlays must not clear the "new task" draft cache.
+		if !msg.isUpdate {
+			m.createTaskOverlay = nil
 		}
 
 		m.addToast(Toast{
@@ -1670,7 +1676,10 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionCreateTask: // Create task
-		return m, m.openOverlay(overlay.NewCreateTaskOverlay())
+		if m.createTaskOverlay == nil {
+			m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+		}
+		return m, m.openOverlay(m.createTaskOverlay)
 
 	case keybinds.ActionOpenSettings: // Settings
 		return m, m.openOverlay(overlay.NewSettingsOverlayWithEditorAndConfig(m.editor, m.config, m.configSourcePath()))
