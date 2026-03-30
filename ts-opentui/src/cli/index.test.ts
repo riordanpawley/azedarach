@@ -186,6 +186,22 @@ describe("buildPrimeOutput", () => {
 		expect(output).not.toContain("Active issue context (AZEDARACH_ISSUE_ID=")
 	})
 
+	it("warns when the active issue is already closed", () => {
+		const output = buildPrimeOutput(
+			"az-closed",
+			{
+				issue: makePrimeIssue("az-closed", {
+					status: "closed",
+				}),
+			},
+			undefined,
+			true,
+		)
+
+		expect(output).toContain("Active issue `az-closed` is currently `closed`")
+		expect(output).toContain('`az issue child "Next task"`')
+	})
+
 	it("falls back to explicit refresh command when issue details fail to load", () => {
 		const output = buildPrimeOutput("gq", undefined, undefined, true)
 

@@ -37,5 +37,6 @@ export class GitActionHandlersService extends Effect.Service<GitActionHandlersSe
 			confirmMergeSelect: () => unavailable("confirm-merge-select"),
 			cancelMergeSelect: () => unavailable("cancel-merge-select"),
 		}
+	}),
 	},
 ) {}

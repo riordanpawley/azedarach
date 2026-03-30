@@ -420,6 +420,10 @@ export const buildPrimeOutput = (
 			: primeMode === "subagent"
 				? renderSubagentGuardrails()
 				: undefined
+	const activeIssueClosedWarning =
+		issueContext?.issue.status === "closed"
+			? `- Active issue \`${issueContext.issue.id}\` is currently \`closed\`; start by picking/opening actionable work (for example \`az issue child "Next task"\` or \`az issue list --limit 20\`).`
+			: ""
 
 	return `${primerTitle}
 
@@ -427,9 +431,24 @@ export const buildPrimeOutput = (
   - ${issueFetchCommand}
   - ${specCheckStep}
   - ${issueChildStep}
+- How to use \`az\` command map:
+  - Issue lifecycle:
+  - \`az issue list --limit 20\`, \`az issue get <issue-id>\`, \`az issue child "Child task"\`, \`az issue update <issue-id> --status in_progress|blocked|open\`, \`az issue close <issue-id> --reason "..."\`
+  - \`az issue bulk-create --input issues.json --json\`, \`az issue bulk-update --input updates.json --json\`, \`az issue update <issue-id> --design "..."\`, \`az issue update <issue-id> --notes "..."\`, \`az issue update <issue-id> --append-notes "..."\` (for example, \`[{"title":"Agent-created task"}]\`, \`[{"id":"az-123","status":"blocked"}]\`)
+  - Issue dependency graph:
+  - \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`, \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`
+  - Fanout orchestration:
+  - \`az issue fanout --input ./fanout.json\`, \`az issue fanout --input ./fanout.json --apply\`, \`az issue fanout ready --root <issue-id> --json\`, \`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out\`
+  - Mailbox coordination:
+  - \`az mail send --parent <parent-issue> --type dependency-ready --body "..."\`, \`az mail list --parent <parent-issue> --since <seq> --json\`, \`az mail watch --parent <parent-issue> --since <seq> --jsonl\`
+  - Spec traceability:
+  - ${specEnabled ? "\`az spec req/list/link ...\` before behavior changes and after behavior edits to keep requirements/links aligned." : "Spec workflows disabled for this project (`az config set spec.enabled false`)."}
+  - Session/runtime operations:
+  - \`az session start <issue-id>\`, \`az session status [issue-id]\`, \`az daemon restart\`, \`az export --format json [--out <path>]\`
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - Create follow-up/child work in the tracker instead of local TODOs.
+${activeIssueClosedWarning}
 ${issueSection}
 ${modeGuardrails === undefined ? "" : `${modeGuardrails}\n`}
 - Follow-up and dependency rules:
@@ -449,35 +468,7 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-- How to use \`az\` command map:
-  - Issue lifecycle:
-  - \`az issue list --limit 20\` (lists the most recently updated issues first)
-  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
-  - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
-  - \`az issue bulk-create --input issues.json --json\` (for example, \`issues.json\` can contain \`[{"title":"Agent-created task"}]\`)
-  - \`az issue bulk-update --input updates.json --json\` (for example, \`updates.json\` can contain \`[{"id":"az-123","status":"blocked"}]\`)
-  - \`az issue update <issue-id> --design "..."\`
-  - \`az issue update <issue-id> --notes "..."\`
-  - \`az issue update <issue-id> --append-notes "..."\` (adds to existing notes without overwriting previous notes)
-  - \`az issue update <issue-id> --status in_progress|blocked|open\`
-  - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
-  - Issue dependency graph:
-  - \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`
-  - \`az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\`
-  - Fanout orchestration:
-  - \`az issue fanout --input ./fanout.json\` (plan nested child issues from spec)
-  - \`az issue fanout --input ./fanout.json --apply\` (create issues + dependency edges)
-  - \`az issue fanout ready --root <issue-id> --json\` (show runnable leaf issues)
-  - \`az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out\` (detect out-of-budget changes)
-  - Mailbox coordination:
-  - \`az mail send --parent <parent-issue> --type dependency-ready --body "..."\`
-  - \`az mail list --parent <parent-issue> --since <seq> --json\`
-  - \`az mail watch --parent <parent-issue> --since <seq> --jsonl\`
-  - Spec traceability:
-  - ${specEnabled ? "\`az spec req/list/link ...\` before behavior changes and after behavior edits to keep requirements/links aligned." : "Spec workflows disabled for this project (`az config set spec.enabled false`)."}
-  - Session/runtime operations:
-  - \`az session start <issue-id>\`, \`az session status [issue-id]\`, \`az daemon restart\`, \`az export --format json [--out <path>]\`
-  - \`az issue --help\`
+- \`az issue --help\`
 ${specGuardrails === undefined ? "" : `- Spec workflow:\n${specGuardrails}\n`}
 - When work is complete:
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
