@@ -84,12 +84,16 @@ func (w *TaskWorkspaceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return w, w.actions.selectCurrentAction()
 		case "j", "down":
-			if w.detail.scrollY < w.detail.maxScroll() {
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorDown()
+			} else if w.detail.scrollY < w.detail.maxScroll() {
 				w.detail.scrollY++
 			}
 			return w, nil
 		case "k", "up":
-			if w.detail.scrollY > 0 {
+			if w.focus == taskWorkspaceFocusActions {
+				w.actions.moveCursorUp()
+			} else if w.detail.scrollY > 0 {
 				w.detail.scrollY--
 			}
 			return w, nil

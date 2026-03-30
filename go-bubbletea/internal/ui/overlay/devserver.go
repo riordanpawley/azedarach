@@ -105,76 +105,33 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the overlay
 func (m *DevServerOverlay) View() string {
-	var b strings.Builder
-
-	if len(m.servers) == 0 {
-		b.WriteString(m.styles.MenuItemDisabled.Render("No dev servers configured"))
-		b.WriteString("\n\n")
-		b.WriteString(m.styles.Footer.Render("Press Escape to close"))
-		return b.String()
-	}
-
-	for i, server := range m.servers {
-		// Determine status style and indicator
-		var statusStyle lipgloss.Style
-		var statusText string
-		switch server.Status {
-		case "running":
-			statusStyle = lipgloss.NewStyle().Foreground(styles.Green).Bold(true)
-			statusText = "●"
-		case "stopped":
-			statusStyle = lipgloss.NewStyle().Foreground(styles.Overlay0)
-			statusText = "○"
-		case "error":
-			statusStyle = lipgloss.NewStyle().Foreground(styles.Red).Bold(true)
-			statusText = "✗"
-		default:
-			statusStyle = lipgloss.NewStyle().Foreground(styles.Overlay0)
-			statusText = "?"
-		}
-
-		// Determine item style based on cursor position
-		var nameStyle lipgloss.Style
-		if i == m.cursor {
-			nameStyle = m.styles.MenuItemActive
-		} else {
-			nameStyle = m.styles.MenuItem
-		}
-
-		// Format uptime
-		var uptimeStr string
-		if server.Status == "running" && server.Uptime > 0 {
-			uptimeStr = formatUptime(server.Uptime)
-		} else {
-			uptimeStr = "—"
-		}
-
-		// Format line: [status] name :port uptime
-		line := fmt.Sprintf("%s %s :%d  %s",
-			statusStyle.Render(statusText),
-			nameStyle.Render(server.Name),
-			server.Port,
-			m.styles.MenuItemDisabled.Render(uptimeStr),
-		)
-
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-
-	// Add footer with keybindings
-	b.WriteString("\n")
-	b.WriteString(keybinds.RenderKeyTable([]keybinds.Binding{
-		{Key: "Enter", Description: "toggle"},
-		{Key: "v", Description: "view output"},
-		{Key: "r", Description: "restart"},
-		{Key: "Esc", Description: "close"},
-	}, 0, keybinds.Theme{
-		KeyStyle:         m.styles.MenuKey,
-		DescriptionStyle: m.styles.Footer,
-		FooterStyle:      m.styles.Footer,
-	}))
-
-	return b.String()
+	return renderDialogTwoPane(dialogLayoutConfig{
+		styles:            m.styles,
+		width:             72,
+		height:            m.viewHeight(),
+		title:             "DEV SERVERS",
+		rightSectionTitle: "Actions",
+		breakpoint:        1,
+		gap:               3,
+		minLeft:           36,
+		minRight:          20,
+		leftFocused:       true,
+		renderLeft: func(mode dialogLayoutMode, width, height int) string {
+			return m.renderServerList()
+		},
+		renderRight: func(mode dialogLayoutMode, width, height int) string {
+			return keybinds.RenderKeyTable([]keybinds.Binding{
+				{Key: "Enter", Description: "toggle"},
+				{Key: "v", Description: "view output"},
+				{Key: "r", Description: "restart"},
+				{Key: "Esc", Description: "close"},
+			}, 0, keybinds.Theme{
+				KeyStyle:         m.styles.MenuKey,
+				DescriptionStyle: m.styles.Footer,
+				FooterStyle:      m.styles.Footer,
+			})
+		},
+	})
 }
 
 // Title returns the overlay title
@@ -184,23 +141,8 @@ func (m *DevServerOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (m *DevServerOverlay) Size() (width, height int) {
-	// Width: enough for server info (name + port + uptime + padding)
-	// Height: number of servers + footer + padding
-	maxWidth := 50
-	for _, server := range m.servers {
-		lineWidth := len(server.Name) + 20 // name + port + uptime + decorations
-		if lineWidth > maxWidth {
-			maxWidth = lineWidth
-		}
-	}
-
-	height = len(m.servers) + 4 // servers + footer + padding
-	if len(m.servers) == 0 {
-		height = 6
-	}
-
-	width = maxWidth
-	return
+	view := m.View()
+	return lipgloss.Width(view), lipgloss.Height(view)
 }
 
 // moveCursorDown moves the cursor to the next server
@@ -235,4 +177,58 @@ func formatUptime(d time.Duration) string {
 	days := hours / 24
 	hours = hours % 24
 	return fmt.Sprintf("%dd%dh", days, hours)
+}
+
+func (m *DevServerOverlay) renderServerList() string {
+	var b strings.Builder
+	if len(m.servers) == 0 {
+		b.WriteString(m.styles.MenuItemDisabled.Render("No dev servers configured"))
+		return b.String()
+	}
+
+	for i, server := range m.servers {
+		var statusStyle lipgloss.Style
+		var statusText string
+		switch server.Status {
+		case "running":
+			statusStyle = lipgloss.NewStyle().Foreground(styles.Green).Bold(true)
+			statusText = "●"
+		case "stopped":
+			statusStyle = lipgloss.NewStyle().Foreground(styles.Overlay0)
+			statusText = "○"
+		case "error":
+			statusStyle = lipgloss.NewStyle().Foreground(styles.Red).Bold(true)
+			statusText = "✗"
+		default:
+			statusStyle = lipgloss.NewStyle().Foreground(styles.Overlay0)
+			statusText = "?"
+		}
+
+		nameStyle := m.styles.MenuItem
+		if i == m.cursor {
+			nameStyle = m.styles.MenuItemActive
+		}
+
+		uptimeStr := "—"
+		if server.Status == "running" && server.Uptime > 0 {
+			uptimeStr = formatUptime(server.Uptime)
+		}
+
+		line := fmt.Sprintf("%s %s :%d  %s",
+			statusStyle.Render(statusText),
+			nameStyle.Render(server.Name),
+			server.Port,
+			m.styles.MenuItemDisabled.Render(uptimeStr),
+		)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *DevServerOverlay) viewHeight() int {
+	if len(m.servers) == 0 {
+		return 12
+	}
+	return max(12, len(m.servers)+8)
 }
