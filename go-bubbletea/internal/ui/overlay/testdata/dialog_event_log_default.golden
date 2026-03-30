@@ -3,10 +3,10 @@
 │──────────────────────────────────────────────────────────────────────────────────────────│
 ││ Log file: /tmp/az.log                                      Actions                      │
 ││ 2026-03-30 08:21:00  #42  daemon.event.new  [event]        ─────────────────────────────│
-││   project=azedarach  session=sess-1  correlation=corr-ne     s                stream    │
-││   new payload line                                         (Ctrl+C then q)              │
-││ 2026-03-30 08:20:00  #41  daemon.event.old  [event]          e                edit      │
-││   project=azedarach  session=sess-1  correlation=corr-ol     Esc/q/backspace  close     │
+││   project=azedarach  session=sess-1  correlation=corr-ne     s                stream ...│
+││   new payload line                                           e                edit      │
+││ 2026-03-30 08:20:00  #41  daemon.event.old  [event]          Esc/q/backspace  close     │
+││   project=azedarach  session=sess-1  correlation=corr-ol                                │
 ││   old payload line                                                                      │
 ││                                                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────╯

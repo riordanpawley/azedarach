@@ -238,7 +238,7 @@ func (i *ImageAttachOverlay) View() string {
 				return renderDialogActions(i.styles, []keybinds.Binding{
 					{Key: "Enter", Description: "attach"},
 					{Key: "Esc", Description: "cancel"},
-				})
+				}, width)
 			},
 		})
 	}
@@ -261,7 +261,7 @@ func (i *ImageAttachOverlay) View() string {
 				return i.renderListContent()
 			},
 			renderRight: func(mode dialogLayoutMode, width, height int) string {
-				return i.renderListActions()
+				return i.renderListActions(width)
 			},
 		})
 	case imageAttachModePreview:
@@ -284,7 +284,7 @@ func (i *ImageAttachOverlay) View() string {
 				return renderDialogActions(i.styles, []keybinds.Binding{
 					{Key: "o", Description: "open in viewer"},
 					{Key: "Esc", Description: "back to list"},
-				})
+				}, width)
 			},
 		})
 	default:
@@ -324,7 +324,7 @@ func (i *ImageAttachOverlay) renderListContent() string {
 	return strings.TrimRight(content.String(), "\n")
 }
 
-func (i *ImageAttachOverlay) renderListActions() string {
+func (i *ImageAttachOverlay) renderListActions(width int) string {
 	hints := []keybinds.Binding{
 		{Key: "p", Description: "paste from clipboard"},
 		{Key: "f", Description: "attach from file"},
@@ -337,7 +337,7 @@ func (i *ImageAttachOverlay) renderListActions() string {
 		)
 	}
 	hints = append(hints, keybinds.Binding{Key: "Esc", Description: "close"})
-	return renderDialogActions(i.styles, hints)
+	return renderDialogActions(i.styles, hints, width)
 }
 
 func (i *ImageAttachOverlay) renderPreviewContent() string {

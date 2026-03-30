@@ -14,8 +14,12 @@ func (twoPaneDialogChrome) UsesInternalTitle() bool {
 	return true
 }
 
-func renderDialogActions(styles *Styles, bindings []keybinds.Binding) string {
-	return keybinds.RenderKeyTable(bindings, 0, keybinds.Theme{
+func renderDialogActions(styles *Styles, bindings []keybinds.Binding, width ...int) string {
+	maxWidth := 0
+	if len(width) > 0 {
+		maxWidth = width[0]
+	}
+	return keybinds.RenderKeyTableWithinWidth(bindings, 0, maxWidth, keybinds.Theme{
 		KeyStyle:         styles.MenuKey,
 		DescriptionStyle: styles.Footer,
 		FooterStyle:      styles.Footer,

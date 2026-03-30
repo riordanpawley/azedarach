@@ -133,7 +133,7 @@ func (o *EventLogOverlay) View() string {
 			return o.renderScrollableContent(height)
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return renderDialogActions(o.styles, o.actionBindings(o.maxScroll > 0))
+			return renderDialogActions(o.styles, o.actionBindings(o.maxScroll > 0), width)
 		},
 	})
 }

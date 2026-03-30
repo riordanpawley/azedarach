@@ -72,7 +72,7 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	if !strings.Contains(view, "Event Log") {
 		t.Fatalf("View() missing title: %s", view)
 	}
-	if !strings.Contains(view, "stream") || !strings.Contains(view, "(Ctrl+C then q)") {
+	if !strings.Contains(view, "stream") {
 		t.Fatalf("View() missing stream hint: %s", view)
 	}
 	if strings.Contains(view, "Newest runtime events first") {

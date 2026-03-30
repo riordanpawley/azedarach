@@ -211,7 +211,7 @@ func (i *ImagePreviewOverlay) View() string {
 			return i.renderPreviewContent()
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return i.renderPreviewActions()
+			return i.renderPreviewActions(width)
 		},
 	})
 }
@@ -309,7 +309,7 @@ func (i *ImagePreviewOverlay) renderPreviewContent() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (i *ImagePreviewOverlay) renderPreviewActions() string {
+func (i *ImagePreviewOverlay) renderPreviewActions(width int) string {
 	hints := make([]keybinds.Binding, 0, 6)
 	if len(i.images) > 1 {
 		hints = append(hints,
@@ -323,7 +323,7 @@ func (i *ImagePreviewOverlay) renderPreviewActions() string {
 		keybinds.Binding{Key: "r", Description: "Refresh"},
 		keybinds.Binding{Key: "Esc", Description: "Close"},
 	)
-	return renderDialogActions(i.styles, hints)
+	return renderDialogActions(i.styles, hints, width)
 }
 
 func (i *ImagePreviewOverlay) renderDeleteConfirmationContent() string {
