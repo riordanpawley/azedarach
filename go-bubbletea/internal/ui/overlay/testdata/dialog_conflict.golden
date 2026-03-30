@@ -3,13 +3,13 @@
 │──────────────────────────────────────────────────────────────────────────────────│
 ││ ⚠ Merge conflicts detected!                          Actions                    │
 ││                                                      ───────────────────────────│
-││ Conflicted files:                                     j/k navigate              │
-││ ▸ internal/ui/app.go                                  c resolve                 │
-││   internal/domain/task.go                             o open                    │
-││   internal/services/git.go                            a abort                   │
-││                                                       Esc close                 │
-││                                                                                 │
-││                                                                                 │
+││ Have AI resolve this merge in the session now? (c     j/k navigate              │
+││ yes)                                                  c ai resolve              │
+││                                                       o open                    │
+││ Conflicted files:                                     a abort                   │
+││ ▸ internal/ui/app.go                                  Esc close                 │
+││   internal/domain/task.go                                                       │
+││   internal/services/git.go                                                      │
 ││                                                                                 │
 ││                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────╯

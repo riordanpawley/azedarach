@@ -3,16 +3,16 @@
 │────────────────────────────────────────────────────────────────────│
 │⚠ Merge conflicts detected!                                         │
 │                                                                    │
+│Have AI resolve this merge in the session now? (c = yes)            │
+│                                                                    │
 │Conflicted files:                                                   │
-│▸ internal/ui/app.go                                                │
-│  internal/domain/task.go                                           │
 │                                                                    │
 │                                                                    │
 │                                                                    │
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
 │ j/k navigate                                                       │
-│ c resolve                                                          │
+│ c ai resolve                                                       │
 │ o open                                                             │
 │ a abort                                                            │
 │ Esc close                                                          │

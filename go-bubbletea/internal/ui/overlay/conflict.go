@@ -140,7 +140,7 @@ func (c *ConflictOverlay) View() string {
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(c.overlayStyles, []keybinds.Binding{
 				{Key: "j/k", Description: "navigate"},
-				{Key: "c", Description: "resolve"},
+				{Key: "c", Description: "ai resolve"},
 				{Key: "o", Description: "open"},
 				{Key: "a", Description: "abort"},
 				{Key: "Esc", Description: "close"},
@@ -170,6 +170,8 @@ func (c *ConflictOverlay) renderConflictList(width int) string {
 		Foreground(styles.Red).
 		Bold(true)
 	b.WriteString(headerStyle.Render("⚠ Merge conflicts detected!"))
+	b.WriteString("\n\n")
+	b.WriteString("Have AI resolve this merge in the session now? (c = yes)")
 	b.WriteString("\n\n")
 
 	if len(c.files) == 0 {

@@ -2378,6 +2378,79 @@ func TestTmuxActionsDegradeOutsideTmux(t *testing.T) {
 	}
 }
 
+func TestHandleConflictResolution_ResolveWithClaudeAttachesSession(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+	m.tasks[0].Session = &domain.Session{IssueID: "az-1", Worktree: "/tmp/az-1"}
+	m.nav.SelectTask("az-1", 0)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			var body struct {
+				ProjectID string `json:"project_id"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("unmarshal attach request: %v", err)
+			}
+			if body.SessionID != "az-1" {
+				t.Fatalf("session id = %q, want az-1", body.SessionID)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	var switchTargets []string
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			switchTargets = append(switchTargets, target)
+			return nil
+		},
+	}
+
+	result, cmd := m.handleConflictResolution(overlay.ConflictResolutionMsg{ResolveWithClaude: true})
+	if cmd == nil {
+		t.Fatal("expected attach command from resolve with Claude")
+	}
+	_ = result.(Model)
+
+	msg := cmd()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+	}
+	if attached.issueID != "az-1" {
+		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
+	}
+	if !attached.switchedTmux {
+		t.Fatal("expected tmux switch on conflict resolution attach")
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionAttach {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
+		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	}
+}
+
 func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()

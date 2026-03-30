@@ -3978,7 +3978,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 		return m, nil
 
 	case resolution.ResolveWithClaude:
-		// Attach to tmux session for Claude to resolve
+		// Attach to tmux session so AI can resolve merge conflicts in-session.
 		if !m.tmuxAvailable {
 			m.addToast(Toast{
 				Level:   ToastWarning,
@@ -3987,12 +3987,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 			})
 			return m, nil
 		}
-		m.addToast(Toast{
-			Level:   ToastInfo,
-			Message: fmt.Sprintf("Run: tmux attach-session -t %s (Claude can help resolve)", task.ID),
-			Expires: time.Now().Add(8 * time.Second),
-		})
-		return m, nil
+		return m, m.attachSessionCmd(task.ID)
 
 	default:
 		return m, nil
