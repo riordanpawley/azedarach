@@ -141,6 +141,25 @@ func TestHelpOverlay_Update_ScrollDown(t *testing.T) {
 	}
 }
 
+func TestHelpOverlay_Update_HalfPageScrolling(t *testing.T) {
+	help := NewHelpOverlay()
+	help.viewHeight = 8
+	help.maxScroll = 40
+	help.scroll = 10
+
+	model, _ := help.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	help = model.(*HelpOverlay)
+	if help.scroll != 14 {
+		t.Fatalf("expected ctrl+d to move by half page to 14, got %d", help.scroll)
+	}
+
+	model, _ = help.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	help = model.(*HelpOverlay)
+	if help.scroll != 10 {
+		t.Fatalf("expected ctrl+u to move by half page back to 10, got %d", help.scroll)
+	}
+}
+
 func TestHelpOverlay_Update_ScrollUp(t *testing.T) {
 	help := NewHelpOverlay()
 	help.scroll = 5 // Start scrolled down

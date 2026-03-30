@@ -196,6 +196,15 @@ func TestDetailPanelScrolling(t *testing.T) {
 	panel = m.(*DetailPanel)
 	assert.Equal(t, 5, panel.scrollY)
 
+	panel.descViewHeight = 8
+	m, _ = panel.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	panel = m.(*DetailPanel)
+	assert.Equal(t, 9, panel.scrollY)
+
+	m, _ = panel.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	panel = m.(*DetailPanel)
+	assert.Equal(t, 5, panel.scrollY)
+
 	// Jump to top
 	m, _ = panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	panel = m.(*DetailPanel)

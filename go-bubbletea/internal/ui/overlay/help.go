@@ -51,6 +51,12 @@ func (h *HelpOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.scroll--
 			}
 			return h, nil
+		case "ctrl+d":
+			h.scroll = min(h.maxScroll, h.scroll+h.halfPageStep())
+			return h, nil
+		case "ctrl+u":
+			h.scroll = max(0, h.scroll-h.halfPageStep())
+			return h, nil
 
 		case "g":
 			// Jump to top
@@ -115,15 +121,17 @@ func (h *HelpOverlay) renderScrollableContent(contentHeight int) string {
 	// Add scroll indicator if needed
 	if h.maxScroll > 0 {
 		scrollInfo := h.styles.Footer.Render(
-			lipgloss.JoinHorizontal(
-				lipgloss.Left,
-				"[",
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("j/k"),
-				" to scroll, ",
-				lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("g/G"),
-				" to jump]",
-			),
-		)
+				lipgloss.JoinHorizontal(
+					lipgloss.Left,
+					"[",
+					lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("j/k"),
+					"/",
+					lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("ctrl+u/d"),
+					" to scroll, ",
+					lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Render("g/G"),
+					" to jump]",
+				),
+			)
 		result += "\n\n" + scrollInfo
 	}
 
@@ -144,6 +152,14 @@ func (h *HelpOverlay) Size() (width, height int) {
 // getCategories returns all keybinding categories
 func (h *HelpOverlay) getCategories() []keybinds.Category {
 	return keybinds.HelpCategories()
+}
+
+func (h *HelpOverlay) halfPageStep() int {
+	step := h.viewHeight / 2
+	if step < 1 {
+		return 1
+	}
+	return step
 }
 
 // min returns the minimum of two integers
