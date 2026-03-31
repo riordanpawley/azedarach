@@ -48,7 +48,7 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if scopeWatchPath := resolveScopedWorktreeWatchPath(); scopeWatchPath != "" {
+	if scopeWatchPath := resolveScopedWorktreeWatchPath(repoDir); scopeWatchPath != "" {
 		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
 	}
 
@@ -67,15 +67,14 @@ func main() {
 	}
 }
 
-func resolveScopedWorktreeWatchPath() string {
+func resolveScopedWorktreeWatchPath(repoDir string) string {
 	if !isScopedDaemonMode(os.Getenv("AZEDARACH_DAEMON_SCOPE")) {
 		return ""
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
+	if strings.TrimSpace(repoDir) == "" {
 		return ""
 	}
-	root, err := config.ResolveWorktreeRoot(cwd)
+	root, err := config.ResolveWorktreeRoot(repoDir)
 	if err != nil {
 		return ""
 	}
