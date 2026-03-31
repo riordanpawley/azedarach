@@ -535,7 +535,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
 		case daemonEventRefreshSnapshot:
-			m.daemonRevision = msg.event.Revision
+			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+			m.daemonRevision = cursor.Advance(msg.event).Revision
 			return m, tea.Batch(m.loadIssuesCmd(), m.waitForDaemonEventCmd())
 		case daemonEventRehydrate:
 			return m, m.attachDaemonCmd()
@@ -2657,10 +2658,11 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
-	switch {
-	case evt.Revision <= m.daemonRevision:
+	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+	switch cursor.Decide(evt) {
+	case protocol.StreamProjectionDecisionIgnore:
 		return daemonEventIgnore
-	case evt.Revision > m.daemonRevision+1:
+	case protocol.StreamProjectionDecisionResync:
 		return daemonEventRehydrate
 	default:
 		return daemonEventRefreshSnapshot
