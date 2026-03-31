@@ -387,6 +387,14 @@ func (d *Daemon) applySessionLifecycleTransition(
 
 	resp := d.session.Handle(ctx, sessionReq)
 	if resp.OK {
+		if d.sessionStore == nil {
+			return errors.New("session store unavailable")
+		}
+		session, err := d.sessionStore.Session(projectID, sessionID)
+		if err != nil {
+			return err
+		}
+		d.publishSessionProjectionEvent(projectID, req.Meta, session)
 		return nil
 	}
 	if resp.Error != nil {
@@ -427,6 +435,9 @@ func (d *Daemon) projectID(meta protocol.Metadata) string {
 func (d *Daemon) nextRevision(projectID string) uint64 {
 	d.revMu.Lock()
 	defer d.revMu.Unlock()
+	if d.revision == nil {
+		d.revision = map[string]uint64{}
+	}
 	d.revision[projectID]++
 	return d.revision[projectID]
 }
@@ -448,6 +459,47 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
 	})
+}
+
+func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rev := d.nextRevision(projectID)
+	if d.hub == nil {
+		return rev
+	}
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: projectID,
+		Revision:  rev,
+		Session: protocol.SessionProjection{
+			SessionID: session.ID,
+			IssueID:   session.IssueID,
+			State:     protocol.SessionLifecycleState(session.State),
+			UpdatedAt: session.UpdatedAt,
+		},
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("marshal session projection event body failed", "project_id", projectID, "session_id", session.ID, "error", err)
+		}
+		return rev
+	}
+	if meta.ProjectID == "" {
+		meta.ProjectID = projectID
+	}
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       projectID,
+		Meta:            meta,
+		Revision:        rev,
+		Event:           protocol.EventSessionUpdated,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Body:            body,
+	})
+	return rev
 }
 
 func (d *Daemon) commandOutput(req protocol.RequestEnvelope, output string) protocol.ResponseEnvelope {

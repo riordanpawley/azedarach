@@ -34,12 +34,6 @@ func TestIssuesLoadedPreservesSelectionCursorAndSessionProjection(t *testing.T) 
 	if beforeSession == nil || beforeSession.Worktree != "/tmp/az-2" {
 		t.Fatalf("pre-refresh current session = %+v, want az-2 session", beforeSession)
 	}
-	m.sessions["stale"] = &domain.Session{
-		IssueID:  "stale",
-		State:    domain.SessionPaused,
-		Worktree: "/tmp/stale",
-	}
-
 	result, cmd := m.Update(issuesLoadedMsg{
 		tasks: []domain.Task{
 			{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
@@ -75,24 +69,21 @@ func TestIssuesLoadedPreservesSelectionCursorAndSessionProjection(t *testing.T) 
 		t.Fatalf("current session = %+v, want projected %s session", session, beforeTask.ID)
 	}
 
-	projected, ok := newModel.sessions["az-2"]
-	if !ok || projected == nil {
-		t.Fatalf("projected session = %+v, want az-2 session", projected)
+	projected := newModel.tasks[1].Session
+	if projected == nil {
+		t.Fatal("expected hydrated task session")
 	}
 	if projected == sourceSession {
-		t.Fatal("projected session should be cloned, not aliased")
+		t.Fatal("hydrated task session should be cloned, not aliased")
 	}
 	if projected.StartedAt == nil || !projected.StartedAt.Equal(startedAt) {
-		t.Fatalf("projected startedAt = %+v, want %v", projected.StartedAt, startedAt)
+		t.Fatalf("hydrated startedAt = %+v, want %v", projected.StartedAt, startedAt)
 	}
 	if projected.DevServer == nil || projected.DevServer == devServer {
-		t.Fatalf("projected dev server = %+v, want cloned dev server", projected.DevServer)
+		t.Fatalf("hydrated dev server = %+v, want cloned dev server", projected.DevServer)
 	}
 	if projected.DevServer.Port != devServer.Port || projected.DevServer.Command != devServer.Command || projected.DevServer.Running != devServer.Running {
-		t.Fatalf("projected dev server = %+v, want %+v", projected.DevServer, devServer)
-	}
-	if _, ok := newModel.sessions["stale"]; ok {
-		t.Fatal("expected stale session projection entry to be removed")
+		t.Fatalf("hydrated dev server = %+v, want %+v", projected.DevServer, devServer)
 	}
 }
 

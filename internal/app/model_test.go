@@ -2390,7 +2390,7 @@ func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
 	}
 }
 
-func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
+func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 	startedAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
 	devServer := &domain.DevServer{Port: 4242, Command: "npm run dev", Running: true}
 	sourceSession := &domain.Session{
@@ -2430,15 +2430,15 @@ func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
 	})
 	newModel := result.(Model)
 
-	got, ok := newModel.sessions["az-1"]
-	if !ok || got == nil {
-		t.Fatalf("session projection = %+v, want az-1 session", got)
+	got := newModel.tasks[0].Session
+	if got == nil {
+		t.Fatal("expected hydrated task session from daemon snapshot")
 	}
 	if got == sourceSession {
-		t.Fatal("session projection should clone daemon snapshot data, not alias it")
+		t.Fatal("hydrated task session should clone daemon snapshot data, not alias it")
 	}
 	if got.IssueID != sourceSession.IssueID || got.State != sourceSession.State || got.Worktree != sourceSession.Worktree {
-		t.Fatalf("session projection = %+v, want %+v", got, sourceSession)
+		t.Fatalf("hydrated task session = %+v, want %+v", got, sourceSession)
 	}
 	if got.StartedAt == nil || !got.StartedAt.Equal(startedAt) {
 		t.Fatalf("startedAt = %+v, want %v", got.StartedAt, startedAt)
@@ -2448,9 +2448,6 @@ func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
 	}
 	if got.DevServer.Port != devServer.Port || got.DevServer.Command != devServer.Command || got.DevServer.Running != devServer.Running {
 		t.Fatalf("dev server projection = %+v, want %+v", got.DevServer, devServer)
-	}
-	if _, ok := newModel.sessions["stale"]; ok {
-		t.Fatal("expected stale projection entry to be cleared by daemon snapshot refresh")
 	}
 }
 
@@ -2890,44 +2887,49 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 	}
 }
 
-func TestSessionStartedMsg_AllowsImmediateAttachFromWorkspace(t *testing.T) {
+func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.T) {
 	t.Setenv("TMUX", "")
 	m := newTestModel()
 	issueID := m.tasks[0].ID
-	m.tasks[0].HasTmuxSession = false
 	m.tasks[0].Session = nil
 	m.tmuxAvailable = false
 	m.nav.SelectTask(issueID, 0)
 
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
-			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 0, time.UTC)
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: m.daemonProjectID(),
+		Revision:  7,
+		Session: protocol.SessionProjection{
+			SessionID: "proj-az-1",
+			IssueID:   issueID,
+			State:     protocol.SessionLifecycleStateAttached,
+			UpdatedAt: updatedAt,
 		},
+	})
+	if err != nil {
+		t.Fatalf("marshal session projection event: %v", err)
 	}
-	m.daemonClient = daemonclient.New(transport)
 
-	updatedAny, _ := m.Update(sessionStartedMsg{issueID: issueID})
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			Revision: 7,
+			Event:    protocol.EventSessionUpdated,
+			Body:     body,
+		},
+	})
 	updated, ok := updatedAny.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
 	}
-	if !updated.tasks[0].HasTmuxSession {
-		t.Fatal("expected session start to mark task as tmux-attached for immediate attach action")
+	session := updated.tasks[0].Session
+	if session == nil {
+		t.Fatal("expected authoritative session event to hydrate task session")
+	}
+	if session.State != domain.SessionBusy {
+		t.Fatalf("session state = %q, want %q", session.State, domain.SessionBusy)
+	}
+	if session.StartedAt == nil || !session.StartedAt.Equal(updatedAt) {
+		t.Fatalf("session startedAt = %+v, want %v", session.StartedAt, updatedAt)
 	}
 
 	_, cmd := updated.handleSelection(overlay.SelectionMsg{Key: "a"})
@@ -2936,7 +2938,9 @@ func TestSessionStartedMsg_AllowsImmediateAttachFromWorkspace(t *testing.T) {
 	}
 	msg := cmd()
 	if _, ok := msg.(sessionAttachedMsg); !ok {
-		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+		if _, behind := msg.(branchBehindMsg); !behind {
+			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or branchBehindMsg", msg)
+		}
 	}
 }
 
@@ -2994,4 +2998,137 @@ func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 	if progress.PreviousStatus != domain.StatusOpen || progress.TargetStatus != domain.StatusInProgress {
 		t.Fatalf("progress statuses = %s->%s, want %s->%s", progress.PreviousStatus, progress.TargetStatus, domain.StatusOpen, domain.StatusInProgress)
 	}
+}
+
+func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	updatedAny, _ := m.Update(sessionStartedMsg{
+		issueID:     "az-1",
+		operationID: "op-session",
+		state:       protocol.OperationStateQueued,
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
+	}
+
+	pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
+	if !ok {
+		t.Fatal("expected pending status entry for session start")
+	}
+	if pending.action != "session_start" {
+		t.Fatalf("pending action = %q, want %q", pending.action, "session_start")
+	}
+	if pending.operationID != "op-session" {
+		t.Fatalf("pending operation id = %q, want %q", pending.operationID, "op-session")
+	}
+	if pending.state != protocol.OperationStateQueued {
+		t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateQueued)
+	}
+
+	signals := updated.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if got.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending state = %q, want %q", got.PendingOperationState, protocol.OperationStateQueued)
+	}
+	if got.PendingOperationID != "op-session" {
+		t.Fatalf("pending operation id = %q, want %q", got.PendingOperationID, "op-session")
+	}
+
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected pending mutation progress for session start")
+	}
+	if progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("progress state = %q, want %q", progress.State, protocol.OperationStateQueued)
+	}
+	if progress.OperationID != "op-session" {
+		t.Fatalf("progress operation id = %q, want %q", progress.OperationID, "op-session")
+	}
+	if progress.TargetStatus != "" {
+		t.Fatalf("progress target status = %q, want empty", progress.TargetStatus)
+	}
+}
+
+func TestApplyPendingStatusOverlaysIgnoresNonStatusPending(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-1"): {
+			action:      "session_start",
+			operationID: "op-session",
+			state:       protocol.OperationStateQueued,
+			updatedAt:   time.Now(),
+		},
+	}
+
+	m.applyPendingStatusOverlays()
+
+	if m.tasks[0].Status != domain.StatusOpen {
+		t.Fatalf("task status = %q, want %q", m.tasks[0].Status, domain.StatusOpen)
+	}
+}
+
+func TestReconcilePendingStatusesClearsSessionMarkersFromHydratedProjection(t *testing.T) {
+	now := time.Now()
+
+	t.Run("session start", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:             "az-1",
+				Title:          "Task",
+				Status:         domain.StatusOpen,
+				Priority:       domain.P2,
+				Type:           domain.TypeTask,
+				HasTmuxSession: true,
+				Session:        &domain.Session{IssueID: "az-1", State: domain.SessionBusy},
+			},
+		}
+		m.pendingStatuses = map[string]pendingTaskStatus{
+			taskIDKey("az-1"): {
+				action:      "session_start",
+				operationID: "op-session",
+				state:       protocol.OperationStateRunning,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingStatuses()
+		if _, ok := m.pendingStatuses[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session_start pending marker to clear after session hydration")
+		}
+	})
+
+	t.Run("session stop", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:       "az-1",
+				Title:    "Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			},
+		}
+		m.pendingStatuses = map[string]pendingTaskStatus{
+			taskIDKey("az-1"): {
+				action:      "session_stop",
+				operationID: "op-stop",
+				state:       protocol.OperationStateRunning,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingStatuses()
+		if _, ok := m.pendingStatuses[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session_stop pending marker to clear when session projection is absent")
+		}
+	})
 }

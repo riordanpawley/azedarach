@@ -136,6 +136,9 @@ func containsSessionEntry(expr ast.Expr) bool {
 	case *ast.IndexExpr:
 		return isSessionsField(node.X) || containsSessionEntry(node.X) || containsSessionEntry(node.Index)
 	case *ast.SelectorExpr:
+		if node.Sel != nil && node.Sel.Name == "sessions" {
+			return true
+		}
 		return containsSessionEntry(node.X)
 	case *ast.ParenExpr:
 		return containsSessionEntry(node.X)
