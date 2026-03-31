@@ -9,6 +9,7 @@ Commands:
   status [issue-id]     Alias for 'az session status [issue-id]'
   notify <event> <issue-id>  Handle Claude Code hook notifications
   hooks install <issue-id>    Install Claude Code hook configuration
+  githooks <install|run>      Manage repo git hooks and run configured hook tasks
   gate <issue-id>            Run quality gates for an issue
   dev gate <issue-id>        Dev-family gate alias
   dev start <issue-id>       Start a dev server for an issue
@@ -82,6 +83,8 @@ Examples:
   az sync --all
   az notify idle_prompt az-123
   az hooks install az-123
+  az githooks install
+  az githooks run
   az gate az-123
   az dev gate az-123
   az dev start az-123

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,6 +38,30 @@ func TestRunHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.local.json")); err != nil {
 		t.Fatalf("expected hooks file: %v", err)
+	}
+}
+
+func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
+	output := captureMainStdout(t, func() error {
+		return runGitHooksCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(output, "Usage: az githooks <install|run>") {
+		t.Fatalf("help output = %q", output)
+	}
+
+	projectDir := t.TempDir()
+	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	output = captureMainStdout(t, func() error {
+		return runGitHooksCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir})
+	})
+	if !strings.Contains(output, "Installed git hooks in") {
+		t.Fatalf("dispatch output = %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".githooks", "pre-commit")); err != nil {
+		t.Fatalf("expected pre-commit hook: %v", err)
 	}
 }
 

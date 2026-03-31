@@ -2,112 +2,69 @@
   "$schema": "./config.schema.json",
   "$version": 7,
   "cliTool": "codex",
-  "issueTracker": {
-    "local": {
-      "syncEnabled": false,
-      "backups": {
-        "enabled": true,
-        "intervalMinutes": 60,
-        "writeCooldownSeconds": 300,
-        "maxBackups": 30,
-        "directory": ".azedarach/backups"
-      }
-    }
-  },
-  "model": {
-    "claude": {},
-    "opencode": {},
-    "codex": {}
-  },
-  "worktree": {
-    "initCommands": [
-      "direnv allow",
-      "cd go-bubbletea"
-    ],
-    "env": {},
-    "continueOnFailure": true,
-    "parallel": false,
-    "copyPaths": [
-      ".direnv",
-      ".env.local"
-    ]
+  "devServer": {
+    "basePort": 3000,
+    "environments": {},
+    "maxPort": 3100
   },
   "git": {
-    "pushBranchOnCreate": true,
-    "remote": "origin",
-    "branchPrefix": "az-",
-    "branchSlugMaxLength": 24,
     "baseBranch": "main",
-    "pushEnabled": true,
+    "defaultMergeStrategy": "merge",
     "fetchEnabled": true,
+    "pushEnabled": true,
     "showLineChanges": true,
     "workflowMode": "local"
   },
-  "session": {
-    "command": "claude",
-    "shell": "zsh",
-    "tmuxPrefix": "C-a",
-    "dangerouslySkipPermissions": false,
-    "backgroundTasks": []
-  },
-  "patterns": {
-    "waiting": [],
-    "done": [],
-    "error": []
-  },
-  "stateDetection": {
-    "patternMatching": true
-  },
-  "pr": {
-    "enabled": false,
-    "autoDraft": true,
-    "autoMerge": false
-  },
-  "merge": {
-    "validateCommands": [
-      "cd go-bubbletea && just build"
-    ],
-    "fixCommand": "",
-    "maxFixAttempts": 2,
-    "startAiSessionOnFailure": true
-  },
-  "devServer": {
-    "portPattern": "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)",
-    "servers": {
-      "default": {
-        "command": "npm run dev",
-        "ports": {
-          "PORT": 3000
-        }
-      }
-    }
-  },
-  "notifications": {
-    "bell": true,
-    "system": false
-  },
-  "network": {
-    "autoDetect": true,
-    "checkIntervalSeconds": 30,
-    "checkHost": "github.com"
+  "issues": {
+    "path": ".azedarach",
+    "syncInterval": 300
   },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
   },
-  "issueEditor": {},
-  "sessionRecovery": {
-    "mode": "auto",
-    "autoRecoveryDelayMs": 2000,
-    "retryBaseDelayMs": 1000,
-    "retryMaxDelayMs": 60000
+  "merge": {
+    "autoMerge": false,
+    "compareWithOrigin": true,
+    "strategy": "merge"
   },
-  "hooks": {
-    "preCompact": {
-      "enabled": true
-    }
+  "network": {
+    "autoDetect": true,
+    "checkInterval": 60,
+    "offlineTimeout": 300,
+    "retryAttempts": 3
+  },
+  "notifications": {
+    "completedTask": true,
+    "errorThreshold": 3,
+    "failedTask": true
+  },
+  "pr": {
+    "autoLink": true,
+    "createWithoutMerge": false,
+    "draftByDefault": true,
+    "notifyAfterCreate": true
+  },
+  "session": {
+    "dangerouslySkipPermissions": false,
+    "initCommands": [
+      "direnv allow",
+      "cd go-bubbletea"
+    ],
+    "logDir": "/Users/riordan/.azedarach/logs",
+    "shell": "zsh",
+    "timeoutMs": 30000
   },
   "spec": {
-    "enabled": true
+    "enabled": false
   },
-  "projects": []
+  "worktree": {
+    "autoCleanup": true,
+    "basePath": "../",
+    "initCommands": [
+      "direnv allow",
+      "cd go-bubbletea"
+    ],
+    "keepDays": 7,
+    "nameFormat": "{project}-{issueID}"
+  }
 }
