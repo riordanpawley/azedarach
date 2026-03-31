@@ -1263,7 +1263,7 @@ func (m Model) View() string {
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
 	if m.boardRefreshing {
-		sb.SetLoadingIndicator("!!! REFRESHING BOARD !!!")
+		sb.SetModeSuffix(m.spinner.View())
 	} else if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
@@ -6334,17 +6334,6 @@ func (m Model) renderBoardView() string {
 
 	contentHeight := board.BoardContentHeight(m.height)
 	toolbar := ""
-	refreshBanner := ""
-	if m.boardRefreshing {
-		refreshBanner = lipgloss.NewStyle().
-			Background(styles.Yellow).
-			Foreground(styles.Base).
-			Bold(true).
-			Width(m.width).
-			Align(lipgloss.Center).
-			Render("REFRESHING BOARD - please wait")
-		contentHeight -= lipgloss.Height(refreshBanner)
-	}
 	if m.isDrillDownActive() {
 		toolbar = m.renderDrillDownToolbar()
 		contentHeight -= lipgloss.Height(toolbar) + 1
@@ -6366,13 +6355,10 @@ func (m Model) renderBoardView() string {
 		m.width,
 		contentHeight,
 	)
-	if toolbar == "" && refreshBanner == "" {
+	if toolbar == "" {
 		return boardView
 	}
-	parts := make([]string, 0, 3)
-	if refreshBanner != "" {
-		parts = append(parts, refreshBanner)
-	}
+	parts := make([]string, 0, 2)
 	if toolbar != "" {
 		parts = append(parts, toolbar)
 	}

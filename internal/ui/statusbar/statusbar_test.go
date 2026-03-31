@@ -233,6 +233,18 @@ func TestStatusBar_RenderShowsLoadingIndicator(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderShowsModeSuffixInModeBadge(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 80, style)
+	sb.SetModeSuffix("...")
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "NORMAL ...") {
+		t.Fatalf("Expected mode badge to contain suffix, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderFallsBackAndTruncatesEventTicker(t *testing.T) {
 	style := styles.New()
 	ring := eventticker.NewRing(2)

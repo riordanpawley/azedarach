@@ -594,11 +594,14 @@ func TestView_ShowsBoardRefreshingIndicators(t *testing.T) {
 	m.boardRefreshing = true
 
 	view := m.View()
-	if !strings.Contains(view, "REFRESHING BOARD - please wait") {
-		t.Fatalf("view = %q, want board refresh banner", view)
+	if strings.Contains(view, "REFRESHING BOARD - please wait") {
+		t.Fatalf("view = %q, should not show full-width refresh banner", view)
 	}
-	if !strings.Contains(view, "!!! REFRESHING BOARD !!!") {
-		t.Fatalf("view = %q, want board refresh status indicator", view)
+	if strings.Contains(view, "!!! REFRESHING BOARD !!!") {
+		t.Fatalf("view = %q, should not show extra refresh status text", view)
+	}
+	if !strings.Contains(view, "NORMAL") {
+		t.Fatalf("view = %q, want mode badge while refreshing", view)
 	}
 }
 
