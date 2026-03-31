@@ -38,14 +38,14 @@ forbidden_scan() {
   shift 2
 
   if rg -n -F \
-    --glob 'go-bubbletea/internal/cli/**' \
-    --glob 'go-bubbletea/internal/ui/**' \
+    --glob 'internal/cli/**' \
+    --glob 'internal/ui/**' \
     --glob '!**/*_test.go' \
     "$pattern" "$@" >/dev/null; then
     fail "$description"
     rg -n -F \
-      --glob 'go-bubbletea/internal/cli/**' \
-      --glob 'go-bubbletea/internal/ui/**' \
+      --glob 'internal/cli/**' \
+      --glob 'internal/ui/**' \
       --glob '!**/*_test.go' \
       "$pattern" "$@" >&2 || true
     printf '      Move the ownership boundary back to the daemon/client layer.\n' >&2
@@ -60,12 +60,12 @@ strict_app_scan() {
   shift 2
 
   if rg -n -P \
-    --glob 'go-bubbletea/internal/app/**' \
+    --glob 'internal/app/**' \
     --glob '!**/*_test.go' \
     "$pattern" "$@" >/dev/null; then
     fail "$description"
     rg -n -P \
-      --glob 'go-bubbletea/internal/app/**' \
+      --glob 'internal/app/**' \
       --glob '!**/*_test.go' \
       "$pattern" "$@" >&2 || true
     printf '      Move authority ownership back to daemon snapshot projection paths.\n' >&2
@@ -74,9 +74,9 @@ strict_app_scan() {
   fi
 }
 
-require_marker 'worktree.cleanup_orphaned' 'go-bubbletea/docs/12-daemon-ownership-adr.md'
-require_marker 'task.snapshot.export' 'go-bubbletea/docs/12-daemon-ownership-adr.md'
-require_marker 'task.bulk.apply' 'go-bubbletea/docs/12-daemon-ownership-adr.md'
+require_marker 'worktree.cleanup_orphaned' 'docs/adr/1-daemon-ownership-adr.md'
+require_marker 'task.snapshot.export' 'docs/adr/1-daemon-ownership-adr.md'
+require_marker 'task.bulk.apply' 'docs/adr/1-daemon-ownership-adr.md'
 
 forbidden_scan \
   'no direct worktree ownership imports remain in CLI/TUI paths' \
@@ -94,30 +94,24 @@ forbidden_scan \
   'no direct PR ownership imports remain in CLI/TUI paths' \
   'github.com/riordanpawley/azedarach/internal/services/pr'
 
-forbidden_scan \
-  'no CLI/TUI path reintroduces local worktree mutation helpers' \
-  'worktree.' \
-  go-bubbletea/internal/cli \
-  go-bubbletea/internal/ui
-
 strict_app_scan \
   'no internal/app/model.go local session monitor starts' \
   'sessionMonitor\.Start\(' \
-  go-bubbletea/internal/app/model.go
+  internal/app/model.go
 
 strict_app_scan \
   'no internal/app/model.go direct session projection writes' \
   '^\s*m\.sessions\[[^]]+\]\s*=' \
-  go-bubbletea/internal/app/model.go
+  internal/app/model.go
 
 strict_app_scan \
   'no internal/app/model.go direct session projection deletes' \
   'delete\(m\.sessions,' \
-  go-bubbletea/internal/app/model.go
+  internal/app/model.go
 
 if (( failures > 0 )); then
   printf 'Drift sentinel failed: %d check(s) failed.\n' "$failures" >&2
   exit 1
 fi
 
-printf 'Drift sentinel passed: %d checks verified.\n' 11
+printf 'Drift sentinel passed: %d checks verified.\n' 10

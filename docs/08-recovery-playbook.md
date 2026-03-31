@@ -10,15 +10,6 @@ command surface first if you are unsure:
 go run ./cmd/az help
 ```
 
-The current user-facing CLI surface is:
-
-- `start`
-- `attach`
-- `kill`
-- `status`
-- `export`
-- `help`
-
 For snapshot refresh, the only supported export flags are:
 
 ```bash

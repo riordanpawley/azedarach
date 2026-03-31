@@ -3,7 +3,7 @@
 ## Directory Layout
 
 ```
-go-bubbletea/
+azedarach/
 ├── cmd/
 │   └── az/
 │       └── main.go           # Entry point + CLI commands

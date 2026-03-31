@@ -5,8 +5,8 @@
 Make daemon authority boundaries mechanically enforceable, not convention-based.
 
 This policy is a follow-up to:
-- `docs/11-daemon-package-boundaries.md`
-- `docs/12-daemon-ownership-adr.md`
+- [docs/07-daemon-package-boundaries.md](07-daemon-package-boundaries.md)
+- [docs/adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 
 ## Target Shape
 
@@ -31,21 +31,21 @@ Hard import direction:
 
 ### Level 1 (implemented)
 
-- Dedicated depguard lint config in `go-bubbletea/.golangci-boundary.yml`.
-- Go package graph verifier in `go-bubbletea/scripts/check-go-boundaries.sh`.
-- `just boundary-check` runs depguard + graph verifier before tests.
+- Dedicated depguard lint config in `.golangci-boundary.yml`.
+- Go package graph verifier in `scripts/check-boundaries.sh`.
+- `just check-boundaries` runs depguard + graph verifier before tests.
 
 ### Level 2 (next)
 
 - Add explicit exception allowlist entries with issue IDs and expiry dates.
-- Wire boundary-check as a required CI status gate for all Go boundary-touching PRs.
+- Wire `check-boundaries` as a required CI status gate for all Go boundary-touching PRs.
 
 ## Mandatory Guardrail Checks
 
 Run in repo root:
 
 ```bash
-cd go-bubbletea && just boundary-check
+cd . && just check-boundaries
 ```
 
 If socket tests fail in sandbox, rerun with elevated permissions and record it in issue notes.

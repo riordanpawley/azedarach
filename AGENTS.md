@@ -1,159 +1,149 @@
-<!--
-File: CONTEXT.md
-Version: 1.2.0
-Updated: 2026-03-25
-Purpose: go-bubbletea overlay context synced to nested AGENTS.md
--->
+# AGENTS.md
 
-<ai_context version="1.0" tool="shared">
+Agent instructions for this repository. This file is the canonical source of agent guidance.
 
-# Azedarach go-bubbletea Overlay
+## Project Overview
 
-> Go/Bubbletea implementation-specific guidance for this repository root
+- Project: Azedarach
+- Stack: Go + Bubble Tea + Lip Gloss
+- Purpose: TUI Kanban board for orchestrating parallel AI sessions with issue tracking
 
-## Shared Baseline
+## Working Directory
 
-Shared repository workflow and policy rules are already loaded before this overlay and apply here:
-- issue tracking (`az prime`, `az issue`)
-- git workflow and safety constraints
-- completion/commit discipline
-- cross-repo Codex context workflow
-
-This file is intentionally an overlay with go-bubbletea-specific rules only.
-
-## Critical go-bubbletea Rules
-
-1. **Project Layout**:
-   - `cmd/` for entrypoints and wiring
-   - `internal/` for private implementation
-   - `docs/` for implementation docs
-2. **Dependency Injection**:
-   - Accept interfaces, return concrete structs.
-   - Keep external command/tmux/git clients mockable.
-3. **Functional Options**:
-   - Use `Option` functions for constructors with optional settings.
-4. **Bubbletea Model Structure**:
-   - Use nested models with clear routing.
-   - Keep shared state explicit and avoid duplicated mutable state.
-5. **Initialization**:
-   - Batch sub-model init commands via `tea.Batch(...)`.
-6. **Context Propagation**:
-   - Pass `context.Context` as the first parameter for I/O or long-running operations.
-7. **Error Handling**:
-   - Return and wrap errors with context (`fmt.Errorf("...: %w", err)`).
-   - Prefer structured logging via `slog`.
-8. **Testing**:
-   - Keep tests deterministic and fast.
-   - Use table-driven tests and interface-based mocks.
-9. **Concurrency**:
-   - Prefer context cancellation for goroutine lifecycle.
-   - Use buffered channels when bounded capacity is known.
-10. **Architecture Migration Gates**:
-   - Do not mark a migration complete while active entrypoints still depend on transitional adapters or legacy execution paths.
-   - Runtime AC must prove the intended production path is wired on active entrypoints, not only in isolated packages/tests.
-   - Cross-process boundaries must use typed protocol/domain payloads rather than UI-framework message types.
-11. **Active-Path Placeholder Policy**:
-   - Placeholder implementations are allowed only when they are off active runtime paths or explicitly tracked as incomplete follow-up work.
-   - If an active-path placeholder remains, the issue must stay partial/in-progress with linked follow-up issue IDs.
-12. **Closure Evidence (Required)**:
-   - For architecture issues, close only after notes include commands run, key outputs, files changed, and explicit AC pass/fail checklist.
-13. **Binary Boundary (Critical)**:
-   - PATH `az` in this repository is the Go implementation.
-   - For validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from the repository root.
-14. **Daemon Restart Policy**:
-   - For operational daemon restarts, use `az daemon restart` from the repository root with the Go binary/path.
-   - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
-15. **Repo-Local Go Cache Env (Critical)**:
-   - `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`.gocache`, `.gopath`).
-   - After `direnv allow`, use normal `go ...` commands from the repository root without per-command env prefixes.
-16. **CLI Argument Ordering (Critical)**:
-   - For CLI command design and documentation, place flags/options before positional arguments.
-   - Usage/help/examples must match parser behavior (no positional-before-flag forms in docs).
-
-## Thin-Client Boundary Contract (Critical)
-
-This section is non-optional for all `go-bubbletea` architecture work.
-
-1. **Authority Ownership**:
-   - Daemon owns durable/project state and lifecycle authority (tasks, session lifecycle, worktree lifecycle, devserver lifecycle).
-   - CLI and TUI are clients only. They may hold presentation/runtime-ephemeral state only (cursor position, overlays, viewport, transient loading flags).
-2. **No Direct Authority Operations in TUI/CLI**:
-   - `internal/app` and `internal/cli` must not directly execute authority operations through `internal/services/git`, `internal/services/tmux`, `internal/services/issues`, `internal/services/devserver`, or `internal/services/pr` when a daemon command path exists.
-   - Boundary operations must go through `internal/client/daemonclient` and typed protocol contracts.
-3. **Daemon Routing Requirement**:
-   - New or changed boundary operations must be represented as daemon commands with typed request/response payloads.
-   - Runtime daemon command paths must be wired through active handlers on production entrypoints; test-only handlers do not satisfy this.
-4. **Session Authority Rule**:
-   - Session lifecycle transitions must be daemon-authoritative.
-   - TUI session maps are projections only; do not perform local writes that establish or mutate lifecycle authority.
-   - `internal/app` may stop or clear `SessionMonitor` state during teardown, but it must not call `SessionMonitor.Start` or recreate lifecycle monitoring locally.
-   - Any `m.sessions` mutation must come from daemon snapshot refresh (`projectSessionProjection`), not from per-session authority writes or monitor callbacks.
-5. **Singleton Scope Rule**:
-   - If daemon runtime assets are user-global (socket/lock), design changes must explicitly preserve project isolation semantics and avoid cross-repo authority bleed.
-6. **Required Drift Guards**:
-   - Boundary changes must include regression guards that fail when direct authority operations reappear in client layers.
-   - Keep migration/boundary guard tests in `internal/app` and `internal/cli` current with each boundary change.
-   - Guard coverage for session projection must fail if `model.go` regains `SessionMonitor.Start` or direct `m.sessions[...] =` / `delete(m.sessions, ...)` authority writes.
-7. **Boundary Evidence Before Close**:
-   - For any boundary issue, notes must include:
-     - commands run
-     - key outputs/assertions
-     - files changed
-     - explicit AC verdicts for runtime, integration, and regression checks
-   - If any are missing, keep the issue in `in_progress` or `blocked`.
-
-## Boundary Verification Checklist (Required)
-
-Run this checklist whenever touching daemon/client boundaries:
+Run commands from repo root:
 
 ```bash
 cd .
+```
 
-# 1) Guard rails remain active
+## Setup And Validation Commands
+
+Use these as primary checks after code changes:
+
+```bash
+# Build and test
+just build
+just test
+
+# Run app locally
+just run
+
+# Optional focused quality gates
+just check-boundaries
+
+# Full Go test sweep
+go test ./...
+
+# Focused daemon/client boundary checks
 go test ./internal/app ./internal/cli
-
-# 2) Daemon boundary behavior remains correct
 go test ./internal/daemon/... ./internal/client/...
-
-# 3) Full boundary-facing integration safety net
 go test ./internal/app ./internal/cli ./internal/daemon/...
 ```
 
-If sandbox restrictions prevent unix socket integration tests, rerun with the required approval path and record that in issue notes.
-
-## Quick Commands
+## Fast Search Commands
 
 ```bash
-# in repo root
-cd .
-
-make build
-make test
-make run
-go test ./...
-
-# focused search
 rg "pattern" --type go internal cmd
 fd "filename" -t f internal cmd
 ```
 
-## Architecture Quick Reference
+## Issue Workflow
 
-```text
-.
-├── cmd/              # app entrypoints
-├── internal/app/     # bubbletea app flow
-├── internal/services/# domain integrations
-├── internal/types/   # domain types
-└── internal/ui/      # bubbletea views/components
-```
+- Start sessions with `az prime`.
+- Use `az issue` for tracked issue operations.
+- Track any non-trivial work in issues.
 
-## Quick Help
+## Spec Documentation Workflow
 
-- go docs: `docs/`
+- Treat spec-synced Markdown under `docs/spec/` as the spec source of truth when present.
+- Keep broader docs in `docs/` aligned with those spec files.
+- Pre-commit runs `scripts/spec-sync-precommit.sh`; when spec sync is configured, it auto-stages `docs/spec/` updates.
+- Configure one explicit sync command via `AZ_SPEC_SYNC_CMD` when your environment provides spec tooling.
 
-## Todos
+## Developer Docs Map
 
-- look into incorporating good code from this git integration https://github.com/pingdotgg/t3code/blob/main/apps/server/src/git/Layers/GitCore.ts
+- [docs/README.md](docs/README.md) is the index for developer/internal docs and audience notes.
+- Core architecture references:
+  - [docs/01-overview.md](docs/01-overview.md)
+  - [docs/02-architecture.md](docs/02-architecture.md)
+  - [docs/03-project-structure.md](docs/03-project-structure.md)
+- Boundary and runtime authority references:
+  - [docs/06-daemon-battle-tested-path.md](docs/06-daemon-battle-tested-path.md)
+  - [docs/07-daemon-package-boundaries.md](docs/07-daemon-package-boundaries.md)
+  - [docs/09-boundary-hardening-policy.md](docs/09-boundary-hardening-policy.md)
+  - [docs/adr/1-daemon-ownership-adr.md](docs/adr/1-daemon-ownership-adr.md)
+- Operational references:
+  - [docs/08-recovery-playbook.md](docs/08-recovery-playbook.md)
+  - [docs/10-go-release-and-homebrew.md](docs/10-go-release-and-homebrew.md)
 
-</ai_context>
+## Go/Bubbletea Engineering Rules
+
+1. Keep entrypoint wiring in `cmd/`, private implementation in `internal/`, and docs in `docs/`.
+2. Accept interfaces at boundaries and return concrete structs from constructors.
+3. Use functional options for optional constructor configuration.
+4. Keep Bubble Tea models nested with explicit message routing and explicit shared state.
+5. Batch startup/init commands with `tea.Batch(...)`.
+6. Pass `context.Context` as first parameter for I/O or long-running work.
+7. Wrap errors with context (`fmt.Errorf("...: %w", err)`) and prefer `slog` for structured logs.
+8. Keep tests deterministic, table-driven, and mock via interfaces.
+9. Prefer context cancellation for goroutine lifecycle and buffered channels when capacity is known.
+
+## Thin-Client Boundary Contract (Critical)
+
+1. Daemon owns durable/project lifecycle authority; CLI/TUI are clients for presentation/runtime-ephemeral state.
+2. `internal/app` and `internal/cli` must not directly execute authority operations via `internal/services/{git,tmux,issues,devserver,pr}` when daemon command paths exist.
+3. Boundary operations must go through `internal/client/daemonclient` with typed request/response contracts.
+4. Session lifecycle must be daemon-authoritative. TUI session maps are projections only.
+5. `internal/app` teardown may stop/clear `SessionMonitor`, but must not call `SessionMonitor.Start` or recreate lifecycle monitoring locally.
+6. `m.sessions` mutations must come from daemon snapshot refresh (`projectSessionProjection`), not local authority writes/callbacks.
+7. If runtime assets are user-global (socket/lock), preserve project isolation and avoid cross-repo authority bleed.
+8. Include regression guards so direct client-side authority operations fail tests if reintroduced.
+
+## Architecture Migration Gates
+
+1. Do not mark migrations complete while active entrypoints still depend on transitional adapters or legacy execution paths.
+2. Runtime acceptance criteria must prove the intended production path is wired on active entrypoints, not only isolated package/tests.
+3. Cross-process boundaries must use typed protocol/domain payloads, not UI-framework message types.
+
+## Active-Path Placeholder Policy
+
+- Placeholder implementations are allowed only when off active runtime paths or explicitly tracked as incomplete follow-up work.
+- If an active-path placeholder remains, keep the issue partial/in-progress and link follow-up issue IDs.
+
+## Closure Evidence (Required)
+
+For architecture or boundary work, only close when notes include:
+
+1. Commands run
+2. Key outputs/assertions
+3. Files changed
+4. Explicit AC pass/fail checklist
+
+If any are missing, keep issue state `in_progress` or `blocked`.
+
+## CLI/Binary Rules
+
+1. In this repo, PATH `az` is the Go implementation.
+2. For validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from repo root.
+3. For daemon restarts, use `az daemon restart` from repo root (`just run` does this automatically).
+4. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
+5. Keep CLI docs/help/examples with flags before positional arguments.
+
+## Environment Rules
+
+- `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`.gocache`, `.gopath`).
+- After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
+
+## Git Safety Rules
+
+1. When already in target repo/worktree, use plain `git` commands.
+2. Use local-only git flow by default; do not run remote sync/cleanup commands unless explicitly requested.
+3. Never delete untracked files or run `git restore` without explicit permission.
+
+## Session Completion Checklist
+
+1. File follow-up issues.
+2. Run relevant quality gates.
+3. Update issue status.
+4. Confirm `git status`.
+5. Ensure intended changes are committed locally.

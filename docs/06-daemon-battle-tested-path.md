@@ -2,7 +2,7 @@
 
 ## Goal
 
-Move go-bubbletea to a production-safe split architecture:
+Move Azedarach to a production-safe split architecture:
 
 - single daemon backend per project namespace
 - thin TUI/CLI clients

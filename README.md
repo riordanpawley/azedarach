@@ -72,7 +72,9 @@ azd --help
 - Project-level spec gate toggle:
   - `az config set spec.enabled true`
   - `az config set spec.enabled false`
-- Spec and implementation planning references live under `docs/`
+- Use spec-synced Markdown under `docs/spec/` as the spec documentation source of truth.
+- Keep implementation/planning docs in `docs/` aligned to those spec-synced files.
+- Pre-commit runs spec sync (when configured) and auto-stages `docs/spec/` updates.
 
 ### Daemon + Operations
 
@@ -170,12 +172,10 @@ flowchart TD
   D --> E{Azedarach/Daemon: Gate checks pass?}
   E -->|No| F[AI Agent: Fix code/tests]
   F --> D
-  E -->|Yes| G{User: Need remote collaboration?}
-  G -->|No| H[AI Agent or User: Commit locally]
+  E -->|Yes| H[AI Agent or User: Commit locally]
   H --> I{User: Task complete?}
   I -->|No| D
   I -->|Yes| J[User: az issue close ISSUE]
-  G -->|Yes| K[User: Switch to PR-based flow]
 ```
 
 ### Agent Flow: TUI-Managed Session
@@ -223,12 +223,23 @@ flowchart TD
 
 ## Development Commands
 
+This list is intentionally non-exhaustive. Run `just --list` for all available tasks.
+
 ```bash
 just build         # build bin/az + bin/azd
 just run           # restart daemon + run az
 just test          # go test -v ./...
 just type-check    # go build ./...
-just boundary-check
+just check-boundaries
+just spec-sync     # run spec sync hook logic and auto-stage docs/spec when configured
+```
+
+Spec sync hook configuration:
+
+```bash
+# Optional: configure the exact command used by pre-commit for this shell/session.
+# Replace with your actual spec sync command.
+export AZ_SPEC_SYNC_CMD='spec sync --to-md docs/spec'
 ```
 
 Direct Go entrypoint examples:
@@ -248,12 +259,14 @@ go run ./cmd/azd
 
 ## Documentation
 
-- Overview: `docs/01-overview.md`
-- Architecture: `docs/02-architecture.md`
-- Project structure: `docs/03-project-structure.md`
-- Feature matrix: `docs/07-feature-matrix.md`
-- Recovery playbook: `docs/13-recovery-playbook.md`
-- Release + Homebrew: `docs/15-go-release-and-homebrew.md`
+Audience: these are **developer/internal docs** for contributors and maintainers.
+
+- Overview: [docs/01-overview.md](docs/01-overview.md)
+- Architecture: [docs/02-architecture.md](docs/02-architecture.md)
+- Project structure: [docs/03-project-structure.md](docs/03-project-structure.md)
+- Recovery playbook: [docs/08-recovery-playbook.md](docs/08-recovery-playbook.md)
+- Release + Homebrew: [docs/10-go-release-and-homebrew.md](docs/10-go-release-and-homebrew.md)
+- Full docs index + audience notes: [docs/README.md](docs/README.md)
 
 ## Release
 
