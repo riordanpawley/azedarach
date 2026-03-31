@@ -104,6 +104,12 @@ Examples:
   az opencode init
   az opencode plugin install
   az spec req list --json
+  az spec req get --id bfs-req-1
+  az spec req create --id bfs-req-1 --title "Restore az spec grammar" --issue bgh
+  az spec link add --issue bgh --req bfs-req-1 --role implements
+  az spec read --issue bgh
+  az spec lint --strict
+  az spec parity --fail-on-out
   az spec sync --target md --check
   az prime
   az export --format json

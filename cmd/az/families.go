@@ -177,55 +177,6 @@ func runOpenCodeCommand(cfg *config.Config, args []string) error {
 	}
 }
 
-func runSpecCommand(cfg *config.Config, args []string) error {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		cli.PrintSpecUsage()
-		return nil
-	}
-	if cfg == nil || !cfg.Spec.Enabled {
-		return fmt.Errorf("spec workflows are disabled for this project; re-enable with: az config set spec.enabled true")
-	}
-
-	switch args[0] {
-	case "req", "link", "read", "lint", "parity":
-		return fmt.Errorf("az spec %s is not implemented in Go runtime yet", args[0])
-	case "sync":
-		opts, err := parseSpecSyncArgs(args[1:])
-		if err != nil {
-			cli.PrintSpecUsage()
-			return err
-		}
-		if strings.TrimSpace(opts.Target) != "md" {
-			return fmt.Errorf("usage: az spec sync --target md [--check] [--json]")
-		}
-		return fmt.Errorf("az spec sync is not implemented in Go runtime yet")
-	default:
-		return fmt.Errorf("unknown spec command: %s", args[0])
-	}
-}
-
-type specSyncOptions struct {
-	Target string
-	Check  bool
-	JSON   bool
-}
-
-func parseSpecSyncArgs(args []string) (specSyncOptions, error) {
-	opts := specSyncOptions{}
-	fs := flag.NewFlagSet("spec sync", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.Target, "target", "", "sync target")
-	fs.BoolVar(&opts.Check, "check", false, "check mode")
-	fs.BoolVar(&opts.JSON, "json", false, "json output")
-	if err := fs.Parse(args); err != nil {
-		return specSyncOptions{}, err
-	}
-	if fs.NArg() != 0 {
-		return specSyncOptions{}, fmt.Errorf("usage: az spec sync --target md [--check] [--json]")
-	}
-	return opts, nil
-}
-
 func runOpenCodeInitCommand(cfg *config.Config, args []string) error {
 	if len(args) > 0 && isHelpArg(args[0]) {
 		cli.PrintOpenCodeInitUsage()

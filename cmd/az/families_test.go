@@ -91,6 +91,12 @@ func TestRunSpecCommandHelpAndValidation(t *testing.T) {
 	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|lint|parity|sync> [arguments]") {
 		t.Fatalf("help output = %q", helpOut)
 	}
+	if !strings.Contains(helpOut, "az spec req create --id <req-id> --title <text>") {
+		t.Fatalf("help output missing req create grammar = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "az spec link add --issue <issue-id> --req <req-id>") {
+		t.Fatalf("help output missing link add grammar = %q", helpOut)
+	}
 	if !strings.Contains(helpOut, "az spec sync --target md --check") {
 		t.Fatalf("help output missing sync example = %q", helpOut)
 	}

@@ -1,6 +1,6 @@
 # az spec v1 Contract (Phase 1)
 
-Status: Draft for implementation in epic `bfs`  
+Status: Active implementation contract for epic `bfs`  
 Scope: Go runtime restoration of `az spec` commands with daemon-authoritative execution
 
 ## Goals
@@ -8,6 +8,12 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 - Restore a deterministic `az spec` command family in Go runtime.
 - Route authority operations through daemon protocol/client contracts (no direct CLI-side store mutation).
 - Define strict parse/validation/output rules so CLI, daemon, and tests align.
+
+## Current Slice Status
+
+- CLI grammar and help text are restored for the phase-1 command surface.
+- `az spec sync --target md` is implemented in the Go CLI layer and generates deterministic `docs/spec/` Markdown.
+- `req`, `link`, `read`, `lint`, and `parity` still require daemon-backed authority contracts for real execution; until then they validate syntax and fail with a consistent not-implemented error.
 
 ## Command Surface (Phase 1)
 

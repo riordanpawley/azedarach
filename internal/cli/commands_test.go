@@ -3014,6 +3014,15 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
 	}
+	if !strings.Contains(output, "az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh") {
+		t.Fatalf("usage missing spec req create example: %q", output)
+	}
+	if !strings.Contains(output, "az spec link add --issue bgh --req bfs-req-1 --role implements") {
+		t.Fatalf("usage missing spec link add example: %q", output)
+	}
+	if !strings.Contains(output, "az spec parity --fail-on-out") {
+		t.Fatalf("usage missing spec parity example: %q", output)
+	}
 	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
 		t.Fatalf("usage missing impl delete example: %q", output)
 	}
