@@ -49,3 +49,18 @@ spec-sync:
 
 release-homebrew *ARGS:
     ./scripts/release-homebrew.sh {{ARGS}}
+
+git-config-lock:
+    git rev-parse --is-inside-work-tree >/dev/null
+    if [ "$(git config --local --get core.bare || true)" != "false" ]; then git config --local core.bare false; fi
+    chflags uchg .git/config
+    @just git-config-status
+
+git-config-unlock:
+    git rev-parse --is-inside-work-tree >/dev/null
+    chflags nouchg .git/config
+    @just git-config-status
+
+git-config-status:
+    git config --show-origin --get core.bare || true
+    if ls -lO .git/config >/dev/null 2>&1; then ls -lO .git/config; elif command -v lsattr >/dev/null 2>&1; then lsattr .git/config; else ls -l .git/config; fi

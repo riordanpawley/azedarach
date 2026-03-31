@@ -232,6 +232,9 @@ just test          # go test -v ./...
 just type-check    # go build ./...
 just check-boundaries
 just spec-sync     # run spec sync hook logic and auto-stage docs/spec when configured
+just git-config-lock
+just git-config-unlock
+just git-config-status
 ```
 
 Spec sync hook configuration:
@@ -247,6 +250,30 @@ Direct Go entrypoint examples:
 ```bash
 go run ./cmd/az
 go run ./cmd/azd
+```
+
+## Git Config Safety Guard
+
+If `git config core.bare true` is accidentally written into `.git/config`, Git treats the repository as bare and normal worktree commands fail.
+
+To prevent accidental flips, lock `.git/config` as immutable:
+
+```bash
+just git-config-lock
+```
+
+To intentionally edit local git config later:
+
+```bash
+just git-config-unlock
+# make git config changes
+just git-config-lock
+```
+
+Check current state anytime:
+
+```bash
+just git-config-status
 ```
 
 ## System Requirements
