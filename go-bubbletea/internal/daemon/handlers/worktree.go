@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -128,6 +129,9 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 		}
 		return resp
 	}
+	cmd.ProjectID = resolveProjectID(cmd.ProjectID, req.Meta)
+	cmd.IssueID = strings.TrimSpace(cmd.IssueID)
+	cmd.BaseBranch = strings.TrimSpace(cmd.BaseBranch)
 
 	switch req.Command {
 	case CommandWorktreeList:
@@ -139,7 +143,6 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 			}
 			return resp
 		}
-
 		worktrees, err := h.service.List(ctx, cmd.ProjectID)
 		if err != nil {
 			resp.Error = mapWorktreeError(err)
@@ -237,7 +240,6 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 			}
 			return resp
 		}
-
 		result, err := h.service.CleanupOrphaned(ctx, cmd.ProjectID)
 		if err != nil {
 			resp.Error = mapCleanupOrphanedError(err)

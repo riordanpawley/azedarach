@@ -255,10 +255,18 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 
 	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitFetch, gitCommandBody{Worktree: "/tmp/az-1"}))
 	if resp.OK {
-		t.Fatal("expected fetch validation failure")
+		t.Fatal("expected fetch timeout failure with default remote")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeTimeout || !resp.Error.Retryable {
+		t.Fatalf("unexpected fetch mapping with default remote: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitFetch, gitCommandBody{}))
+	if resp.OK {
+		t.Fatal("expected fetch validation failure when worktree is missing")
 	}
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
-		t.Fatalf("unexpected validation error: %+v", resp.Error)
+		t.Fatalf("unexpected fetch validation error: %+v", resp.Error)
 	}
 
 	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitFetch, gitCommandBody{Worktree: "/tmp/az-1", Remote: "origin"}))

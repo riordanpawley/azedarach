@@ -5340,25 +5340,37 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		baseBranch := m.config.Git.BaseBranch
+		resolvedWorktree := strings.TrimSpace(worktree)
+		if resolvedWorktree == "" {
+			if fallback, err := m.resolveIssueWorktreePath(ctx, issueID); err == nil {
+				resolvedWorktree = strings.TrimSpace(fallback)
+			}
+		}
+		if resolvedWorktree == "" {
+			// If no worktree can be resolved we can't compute behind/ahead; callers
+			// should continue with attach flow without warning noise.
+			return branchBehindMsg{issueID: issueID, worktree: "", commitsBehind: 0}
+		}
+
+		baseBranch := strings.TrimSpace(m.resolveBaseBranch())
 		remote := "origin"
 
 		if m.daemonClient == nil {
-			return branchBehindMsg{issueID: issueID, worktree: worktree, err: fmt.Errorf("daemon client unavailable")}
+			return branchBehindMsg{issueID: issueID, worktree: resolvedWorktree, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		result, err := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
-			Worktree:   worktree,
+			Worktree:   resolvedWorktree,
 			BaseBranch: baseBranch,
 			Remote:     remote,
 		})
 		if err != nil {
-			return branchBehindMsg{issueID: issueID, worktree: worktree, err: err}
+			return branchBehindMsg{issueID: issueID, worktree: resolvedWorktree, err: err}
 		}
 
 		return branchBehindMsg{
 			issueID:       issueID,
-			worktree:      worktree,
+			worktree:      resolvedWorktree,
 			commitsBehind: result.CommitsBehind,
 		}
 	}

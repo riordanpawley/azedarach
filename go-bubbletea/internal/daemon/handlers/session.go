@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -61,6 +62,8 @@ func (h *SessionHandler) Handle(ctx context.Context, req protocol.RequestEnvelop
 		}
 		return resp
 	}
+	cmd.ProjectID = resolveProjectID(cmd.ProjectID, req.Meta)
+	cmd.SessionID = strings.TrimSpace(cmd.SessionID)
 	if cmd.ProjectID == "" || cmd.SessionID == "" {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,

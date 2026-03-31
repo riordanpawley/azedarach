@@ -123,3 +123,52 @@ func TestSessionHandlerUnsupportedCommand(t *testing.T) {
 		t.Fatalf("error mapping = %+v", resp.Error)
 	}
 }
+
+func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
+	t.Run("uses metadata project id when body is empty", func(t *testing.T) {
+		store := daemonstate.NewStore()
+		h := NewSessionHandler(store)
+		body, _ := json.Marshal(map[string]string{
+			"session_id": "s-meta",
+			"issue_id":   "aey",
+		})
+
+		resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-meta",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandSessionStart,
+			Meta:            protocol.Metadata{ProjectID: "proj-meta"},
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("response = %+v", resp.Error)
+		}
+		if got := store.ReadSnapshot("proj-meta"); got.Sessions["s-meta"].State != daemonstate.SessionStateStarting {
+			t.Fatalf("store state = %+v, want started in proj-meta", got.Sessions["s-meta"])
+		}
+	})
+
+	t.Run("rejects when project id is missing from body and metadata", func(t *testing.T) {
+		store := daemonstate.NewStore()
+		h := NewSessionHandler(store)
+		body, _ := json.Marshal(map[string]string{
+			"session_id": "s-default",
+			"issue_id":   "aey",
+		})
+
+		resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-default",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandSessionStart,
+			Body:            body,
+		})
+		if resp.OK {
+			t.Fatalf("expected invalid request for missing project route")
+		}
+		if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+			t.Fatalf("error = %+v, want invalid_request", resp.Error)
+		}
+	})
+}

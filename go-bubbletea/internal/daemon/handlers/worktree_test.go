@@ -447,3 +447,73 @@ func TestWorktreeHandlerUsesLongRunningExecutorForMutations(t *testing.T) {
 		t.Fatalf("commands = %v, want [%s]", executor.commands, CommandWorktreeCreate)
 	}
 }
+
+func TestWorktreeHandlerProjectIDFallbacks(t *testing.T) {
+	t.Run("uses metadata project id when body project id is empty", func(t *testing.T) {
+		var gotProjectID string
+		h := NewWorktreeHandler(mockWorktreeService{
+			listFn: func(_ context.Context, projectID string) ([]git.Worktree, error) {
+				gotProjectID = projectID
+				return []git.Worktree{}, nil
+			},
+			createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
+				return nil, nil
+			},
+			deleteFn: func(context.Context, string, string) error { return nil },
+			cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
+				return &CleanupOrphanedResult{}, nil
+			},
+		})
+
+		body, _ := json.Marshal(map[string]string{})
+		resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-meta-project",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandWorktreeList,
+			Meta:            protocol.Metadata{ProjectID: "proj-meta"},
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("response = %+v", resp.Error)
+		}
+		if gotProjectID != "proj-meta" {
+			t.Fatalf("project id = %q, want proj-meta", gotProjectID)
+		}
+	})
+
+	t.Run("rejects when project id is missing from body and metadata", func(t *testing.T) {
+		var gotProjectID string
+		h := NewWorktreeHandler(mockWorktreeService{
+			listFn: func(_ context.Context, projectID string) ([]git.Worktree, error) {
+				gotProjectID = projectID
+				return []git.Worktree{}, nil
+			},
+			createFn: func(context.Context, string, string, string) (*git.Worktree, error) {
+				return nil, nil
+			},
+			deleteFn: func(context.Context, string, string) error { return nil },
+			cleanupOrphanedFn: func(context.Context, string) (*CleanupOrphanedResult, error) {
+				return &CleanupOrphanedResult{}, nil
+			},
+		})
+
+		body, _ := json.Marshal(map[string]string{})
+		resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-default-project",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandWorktreeList,
+			Body:            body,
+		})
+		if resp.OK {
+			t.Fatalf("expected invalid request for missing project route")
+		}
+		if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+			t.Fatalf("error = %+v, want invalid_request", resp.Error)
+		}
+		if gotProjectID != "" {
+			t.Fatalf("project id = %q, want service not called", gotProjectID)
+		}
+	})
+}

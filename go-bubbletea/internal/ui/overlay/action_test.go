@@ -122,13 +122,31 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 
 	menu := NewActionMenu(task, nil)
 	hasAttach := false
+	hasCleanup := false
+	hasDeleteAndCleanup := false
+	worktreeOnlyActionsEnabled := []string{}
 	for _, action := range menu.actions {
 		if action.Key == "a" && action.Enabled {
 			hasAttach = true
 		}
+		if action.Key == "w" && action.Enabled {
+			hasCleanup = true
+		}
+		if action.Key == "W" && action.Enabled {
+			hasDeleteAndCleanup = true
+		}
+		if (action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "f") && action.Enabled {
+			worktreeOnlyActionsEnabled = append(worktreeOnlyActionsEnabled, action.Key)
+		}
 	}
 	if !hasAttach {
 		t.Fatal("expected attach action when task has tmux presence")
+	}
+	if !hasCleanup || !hasDeleteAndCleanup {
+		t.Fatal("expected cleanup actions to remain enabled when tmux session is present")
+	}
+	if len(worktreeOnlyActionsEnabled) > 0 {
+		t.Fatalf("expected worktree-path actions to stay disabled without projected worktree, got enabled: %v", worktreeOnlyActionsEnabled)
 	}
 }
 

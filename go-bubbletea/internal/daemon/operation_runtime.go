@@ -424,8 +424,13 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 		if err = json.Unmarshal(payload, &body); err != nil {
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
-		if strings.TrimSpace(body.Worktree) == "" || strings.TrimSpace(body.Remote) == "" {
-			return "", nil, "", errors.New("missing required fields: worktree/remote")
+		body.Worktree = strings.TrimSpace(body.Worktree)
+		body.Remote = strings.TrimSpace(body.Remote)
+		if body.Worktree == "" {
+			return "", nil, "", errors.New("missing required fields: worktree")
+		}
+		if body.Remote == "" {
+			body.Remote = "origin"
 		}
 		issueID = body.Worktree
 		resourceKeys = []string{"worktree:" + body.Worktree}

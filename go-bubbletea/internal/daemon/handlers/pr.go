@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -184,13 +185,22 @@ func (h *PRHandler) handleBranchBehind(ctx context.Context, resp protocol.Respon
 		return resp
 	}
 
-	if cmd.Worktree == "" || cmd.BaseBranch == "" || cmd.Remote == "" {
+	cmd.Worktree = strings.TrimSpace(cmd.Worktree)
+	cmd.BaseBranch = strings.TrimSpace(cmd.BaseBranch)
+	cmd.Remote = strings.TrimSpace(cmd.Remote)
+	if cmd.Worktree == "" {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   "missing required fields: worktree/base_branch/remote",
+			Message:   "missing required fields: worktree",
 			Retryable: false,
 		}
 		return resp
+	}
+	if cmd.BaseBranch == "" {
+		cmd.BaseBranch = "main"
+	}
+	if cmd.Remote == "" {
+		cmd.Remote = "origin"
 	}
 
 	if err := h.gitClient.Fetch(ctx, cmd.Worktree, cmd.Remote); err != nil {
