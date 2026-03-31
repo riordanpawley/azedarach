@@ -543,6 +543,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case daemonStreamEventMsg:
+		if m.daemonEvents == nil {
+			return m, nil
+		}
+		if msg.stream != nil && msg.stream != m.daemonEvents {
+			return m, nil
+		}
 		m.recordRuntimeEvent(msg.event)
 		m.applyOperationProgressEvent(msg.event)
 		if msg.event.Event == protocol.EventSessionUpdated {
@@ -556,6 +562,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRevision = cursor.Advance(msg.event).Revision
 			return m, tea.Batch(m.loadIssuesCmd(), m.waitForDaemonEventCmd())
 		case daemonEventRehydrate:
+			m.daemonEvents = nil
 			return m, m.attachDaemonCmd()
 		default:
 			return m, m.waitForDaemonEventCmd()
@@ -2149,7 +2156,8 @@ type projectSwitchResultMsg struct {
 }
 
 type daemonStreamEventMsg struct {
-	event protocol.EventEnvelope
+	stream <-chan protocol.EventEnvelope
+	event  protocol.EventEnvelope
 }
 
 type daemonStreamClosedMsg struct {
@@ -2862,17 +2870,18 @@ func (m *Model) rebuildProjectScopedServices() {
 }
 
 func (m Model) waitForDaemonEventCmd() tea.Cmd {
+	stream := m.daemonEvents
 	return func() tea.Msg {
-		if m.daemonEvents == nil {
+		if stream == nil {
 			return nil
 		}
 
-		evt, ok := <-m.daemonEvents
+		evt, ok := <-stream
 		if !ok {
-			return daemonStreamClosedMsg{stream: m.daemonEvents}
+			return daemonStreamClosedMsg{stream: stream}
 		}
 
-		return daemonStreamEventMsg{event: evt}
+		return daemonStreamEventMsg{stream: stream, event: evt}
 	}
 }
 
