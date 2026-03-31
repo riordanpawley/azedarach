@@ -51,6 +51,18 @@ func (d *DetailPanel) WithRelatedTasks(tasks []domain.Task) *DetailPanel {
 	return d
 }
 
+// SetDetailSize configures the panel for use as an inline pane (not a modal
+// overlay). It updates the view dimensions and applies the external scrollY
+// offset so the caller controls scrolling.
+func (d *DetailPanel) SetDetailSize(width, height, scrollY int) {
+	d.wrapWidth = width - 2
+	if d.wrapWidth < 10 {
+		d.wrapWidth = 10
+	}
+	d.viewHeight = height
+	d.scrollY = scrollY
+}
+
 // Init initializes the detail panel
 func (d *DetailPanel) Init() tea.Cmd {
 	return nil

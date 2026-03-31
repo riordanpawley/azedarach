@@ -1685,12 +1685,13 @@ func TestModeTransitions(t *testing.T) {
 		}
 	})
 
-	t.Run("tab still toggles board view in normal mode", func(t *testing.T) {
+	t.Run("tab cycles board → compact → detail → board in normal mode", func(t *testing.T) {
 		m.editor.EnterNormal()
 		m.viewMode = ViewModeBoard
 		m.nav.SelectTask("az-2", 0)
 		before := getCursorPosition(m)
 
+		// Board → Compact
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
 		compactModel := result.(Model)
 
@@ -1704,11 +1705,26 @@ func TestModeTransitions(t *testing.T) {
 			t.Fatalf("expected compact-view toast, got %q", got)
 		}
 
+		// Compact → Detail
 		result, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+		detailModel := result.(Model)
+
+		if detailModel.viewMode != ViewModeDetail {
+			t.Fatalf("expected second tab to switch to detail view, got %v", detailModel.viewMode)
+		}
+		if got := getCursorPosition(detailModel); got != before {
+			t.Fatalf("cursor position changed after tab to detail view: before=%+v after=%+v", before, got)
+		}
+		if got := detailModel.toasts[len(detailModel.toasts)-1].Message; got != "Switched to detail view" {
+			t.Fatalf("expected detail-view toast, got %q", got)
+		}
+
+		// Detail → Board
+		result, _ = detailModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
 		boardModel := result.(Model)
 
 		if boardModel.viewMode != ViewModeBoard {
-			t.Fatalf("expected second tab to restore board view, got %v", boardModel.viewMode)
+			t.Fatalf("expected third tab to restore board view, got %v", boardModel.viewMode)
 		}
 		if got := getCursorPosition(boardModel); got != before {
 			t.Fatalf("cursor position changed after tab back to board view: before=%+v after=%+v", before, got)

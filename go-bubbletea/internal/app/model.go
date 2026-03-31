@@ -97,6 +97,37 @@ type ViewMode int
 const (
 	ViewModeBoard ViewMode = iota
 	ViewModeCompact
+	// ViewModeDetail is a lazyjira-inspired split-pane view: task list on the
+	// left/top and a scrollable detail panel on the right/bottom. The layout is
+	// adaptive: side-by-side on wide terminals (≥ detailSplitMinWidth columns)
+	// and stacked vertically on narrower ones.
+	ViewModeDetail
+)
+
+// detailSplitMinWidth is the minimum terminal width required to show the
+// side-by-side (horizontal) detail layout instead of the stacked layout.
+const detailSplitMinWidth = 120
+
+// Layout constants for ViewModeDetail.
+const (
+	// Side-by-side layout (wide terminals).
+	detailSideBySideListPercent = 40  // list pane gets 40% of width
+	detailMinListWidth          = 30  // absolute minimum list pane width
+	detailMaxListPercent        = 50  // list pane never exceeds 50% of width
+
+	// Stacked layout (narrow terminals).
+	detailStackedListFocusedPercent = 60 // list gets 60% of height when list is focused
+	detailStackedListMinHeight      = 5  // minimum list height when list is focused
+	detailStackedListCollapsedLines = 3  // list height when detail pane is focused
+	detailStackedDetailMinHeight    = 3  // minimum detail pane height
+)
+
+// detailPane identifies which pane is focused in ViewModeDetail.
+type detailPane int
+
+const (
+	detailPaneList   detailPane = iota // left / top: task list
+	detailPaneDetail                   // right / bottom: task info
 )
 
 type drillDownContext struct {
@@ -129,6 +160,8 @@ type Model struct {
 	overlayStack                   *overlay.Stack
 	createTaskOverlay              *overlay.CreateTaskOverlay
 	viewMode                       ViewMode
+	detailFocusPane                detailPane // active pane in ViewModeDetail
+	detailScrollY                  int        // scroll offset for detail panel in ViewModeDetail
 	viewportStarts                 [board.DefaultColumnCount]int
 	columnViewportStart            int
 	drillDownParentID              string
@@ -1113,9 +1146,12 @@ func (m Model) View() string {
 	}
 
 	var mainView string
-	if m.viewMode == ViewModeCompact {
+	switch m.viewMode {
+	case ViewModeCompact:
 		mainView = m.renderCompactView()
-	} else {
+	case ViewModeDetail:
+		mainView = m.renderDetailView()
+	default:
 		mainView = m.renderBoardView()
 	}
 
@@ -1465,7 +1501,7 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 }
 
 func (m Model) runtimeSignalRefreshTasks() []domain.Task {
-	if m.viewMode == ViewModeCompact {
+	if m.viewMode == ViewModeCompact || m.viewMode == ViewModeDetail {
 		return m.compactRenderedTasks()
 	}
 	return m.boardRenderedTasks()
@@ -1672,35 +1708,76 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Vertical navigation
 	case keybinds.ActionMoveDown:
-		m.nav.MoveDown(columns)
-		m.ensureCursorVisible(columns)
+		if m.viewMode == ViewModeDetail {
+			if m.detailFocusPane == detailPaneDetail {
+				m.detailScrollY++
+			} else {
+				m.nav.MoveDown(columns)
+				m.ensureCursorVisible(columns)
+				m.detailScrollY = 0 // reset detail scroll when the selected task changes
+			}
+		} else {
+			m.nav.MoveDown(columns)
+			m.ensureCursorVisible(columns)
+		}
 		return m, nil
 
 	case keybinds.ActionMoveUp:
-		m.nav.MoveUp(columns)
-		m.ensureCursorVisible(columns)
+		if m.viewMode == ViewModeDetail {
+			if m.detailFocusPane == detailPaneDetail {
+				if m.detailScrollY > 0 {
+					m.detailScrollY--
+				}
+			} else {
+				m.nav.MoveUp(columns)
+				m.ensureCursorVisible(columns)
+				m.detailScrollY = 0 // reset detail scroll when the selected task changes
+			}
+		} else {
+			m.nav.MoveUp(columns)
+			m.ensureCursorVisible(columns)
+		}
 		return m, nil
 
-	// Horizontal navigation
+	// Horizontal navigation / detail-pane switching
 	case keybinds.ActionMoveLeft:
-		m.nav.MoveLeft(columns)
-		m.ensureCursorVisible(columns)
+		if m.viewMode == ViewModeDetail {
+			m.detailFocusPane = detailPaneList
+		} else {
+			m.nav.MoveLeft(columns)
+			m.ensureCursorVisible(columns)
+		}
 		return m, nil
 
 	case keybinds.ActionMoveRight:
-		m.nav.MoveRight(columns)
-		m.ensureCursorVisible(columns)
+		if m.viewMode == ViewModeDetail {
+			m.detailFocusPane = detailPaneDetail
+		} else {
+			m.nav.MoveRight(columns)
+			m.ensureCursorVisible(columns)
+		}
 		return m, nil
 
 	// Half-page scroll
 	case keybinds.ActionHalfPageDown:
-		m.nav.HalfPageDown(columns, m.halfPage())
-		m.ensureCursorVisible(columns)
+		if m.viewMode == ViewModeDetail && m.detailFocusPane == detailPaneDetail {
+			m.detailScrollY += m.halfPage()
+		} else {
+			m.nav.HalfPageDown(columns, m.halfPage())
+			m.ensureCursorVisible(columns)
+		}
 		return m, nil
 
 	case keybinds.ActionHalfPageUp:
-		m.nav.HalfPageUp(columns, m.halfPage())
-		m.ensureCursorVisible(columns)
+		if m.viewMode == ViewModeDetail && m.detailFocusPane == detailPaneDetail {
+			m.detailScrollY -= m.halfPage()
+			if m.detailScrollY < 0 {
+				m.detailScrollY = 0
+			}
+		} else {
+			m.nav.HalfPageUp(columns, m.halfPage())
+			m.ensureCursorVisible(columns)
+		}
 		return m, nil
 
 	// Mode switches
@@ -1764,16 +1841,28 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
 		return m, m.openOverlay(diagPanel)
 
-	case keybinds.ActionToggleView: // Toggle view mode
-		if m.viewMode == ViewModeBoard {
+	case keybinds.ActionToggleView: // Cycle view mode: board → compact → detail → board
+		switch m.viewMode {
+		case ViewModeBoard:
 			m.viewMode = ViewModeCompact
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: "Switched to compact view",
 				Expires: time.Now().Add(2 * time.Second),
 			})
-		} else {
+		case ViewModeCompact:
+			m.viewMode = ViewModeDetail
+			m.detailFocusPane = detailPaneList
+			m.detailScrollY = 0
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Switched to detail view",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+		default:
 			m.viewMode = ViewModeBoard
+			m.detailFocusPane = detailPaneList
+			m.detailScrollY = 0
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: "Switched to board view",
@@ -5651,7 +5740,119 @@ func (m Model) renderCompactView() string {
 	return compactView.Render()
 }
 
-// getFlatIndexFromPosition converts a column/task position to a flat index
+// renderDetailView renders the lazyjira-inspired split-pane detail view.
+// On wide terminals (≥ detailSplitMinWidth): list on the left, detail on the right.
+// On narrow terminals: list on top, detail on the bottom (stacked layout).
+func (m Model) renderDetailView() string {
+	contentHeight := board.BoardContentHeight(m.height)
+
+	// Gather the task list (same data as compact view).
+	filteredTasks := m.boardVisibleTasks(m.tasks)
+	sortedTasks := m.editor.ApplySort(filteredTasks)
+
+	columns := m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	flatIndex := m.getFlatIndexFromPosition(pos, columns)
+
+	isWide := m.width >= detailSplitMinWidth
+
+	var listWidth, detailWidth int
+	var listHeight, detailHeight int
+
+	if isWide {
+		// Side-by-side: list gets detailSideBySideListPercent% of width, detail gets the rest.
+		listWidth = m.width * detailSideBySideListPercent / 100
+		if listWidth < detailMinListWidth {
+			listWidth = detailMinListWidth
+		}
+		if listWidth > m.width*detailMaxListPercent/100 {
+			listWidth = m.width * detailMaxListPercent / 100
+		}
+		detailWidth = m.width - listWidth
+		listHeight = contentHeight
+		detailHeight = contentHeight
+	} else {
+		// Stacked: heights are distributed based on focus using accordion sizing.
+		listWidth = m.width
+		detailWidth = m.width
+		if m.detailFocusPane == detailPaneList {
+			// List focused: list gets more space, detail collapses.
+			listHeight = contentHeight * detailStackedListFocusedPercent / 100
+			if listHeight < detailStackedListMinHeight {
+				listHeight = detailStackedListMinHeight
+			}
+		} else {
+			// Detail focused: detail gets more space, list collapses.
+			listHeight = detailStackedListCollapsedLines
+		}
+		detailHeight = contentHeight - listHeight
+		if detailHeight < detailStackedDetailMinHeight {
+			detailHeight = detailStackedDetailMinHeight
+		}
+	}
+
+	// Render the list pane (reuse compact view component).
+	listView := compact.NewCompactView(sortedTasks, listWidth, listHeight)
+	listView.SetCursor(flatIndex)
+	listView.SetSelected(m.editor.GetSelectedTasks())
+	listStr := listView.Render()
+
+	// Render the detail pane for the currently selected task.
+	detailStr := m.renderDetailPane(detailWidth, detailHeight)
+
+	// Apply focus border indicator via a header line.
+	listHeader := m.renderDetailPaneHeader("List", m.detailFocusPane == detailPaneList, listWidth)
+	detailHeader := m.renderDetailPaneHeader("Detail  h←list  l→detail", m.detailFocusPane == detailPaneDetail, detailWidth)
+
+	listBlock := lipgloss.NewStyle().Width(listWidth).Height(listHeight).MaxHeight(listHeight).Render(listStr)
+	detailBlock := lipgloss.NewStyle().Width(detailWidth).Height(detailHeight).MaxHeight(detailHeight).Render(detailStr)
+
+	listCol := lipgloss.JoinVertical(lipgloss.Left, listHeader, listBlock)
+	detailCol := lipgloss.JoinVertical(lipgloss.Left, detailHeader, detailBlock)
+
+	if isWide {
+		return lipgloss.JoinHorizontal(lipgloss.Top, listCol, detailCol)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, listCol, detailCol)
+}
+
+// renderDetailPaneHeader renders a slim header bar for a detail-view pane.
+// It uses a highlighted style when the pane is focused.
+func (m Model) renderDetailPaneHeader(label string, focused bool, width int) string {
+	style := m.styles.StatusHint
+	if focused {
+		style = m.styles.OverlayTitle
+	}
+	return style.Width(width).MaxWidth(width).Render(label)
+}
+
+// renderDetailPane renders the full task-detail content for the selected task
+// at the given dimensions, with scrolling driven by m.detailScrollY.
+func (m Model) renderDetailPane(width, height int) string {
+	columns := m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	flatIndex := m.getFlatIndexFromPosition(pos, columns)
+
+	filteredTasks := m.boardVisibleTasks(m.tasks)
+	sortedTasks := m.editor.ApplySort(filteredTasks)
+
+	if len(sortedTasks) == 0 {
+		return lipgloss.NewStyle().
+			Width(width).Height(height).
+			Align(lipgloss.Center, lipgloss.Center).
+			Render("No tasks")
+	}
+
+	if flatIndex < 0 || flatIndex >= len(sortedTasks) {
+		flatIndex = 0
+	}
+	task := sortedTasks[flatIndex]
+	session := m.sessions[task.ID]
+
+	dp := overlay.NewDetailPanel(task, session).WithRelatedTasks(m.tasks)
+	dp.SetDetailSize(width, height, m.detailScrollY)
+	return dp.View()
+}
 func (m Model) getFlatIndexFromPosition(pos navigation.Position, columns []board.Column) int {
 	index := 0
 	for i := 0; i < pos.Column && i < len(columns); i++ {
