@@ -1097,33 +1097,26 @@ func TestParseIssueCreateArgs(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			args: []string{"--impl", "go-bubbletea", "Title"},
+			args: []string{"Title"},
 			want: IssueCreateOptions{
-				Implementation: "go-bubbletea",
-				Title:          "Title",
-				Type:           domain.TypeTask,
-				Priority:       domain.P2,
+				Title:    "Title",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
 			},
 		},
 		{
 			name: "explicit options",
-			args: []string{"--impl", "go-bubbletea", "--type", "bug", "--priority", "P0", "--description", "details", "Title"},
+			args: []string{"--type", "bug", "--priority", "P0", "--description", "details", "Title"},
 			want: IssueCreateOptions{
-				Implementation: "go-bubbletea",
-				Title:          "Title",
-				Description:    "details",
-				Type:           domain.TypeBug,
-				Priority:       domain.P0,
+				Title:       "Title",
+				Description: "details",
+				Type:        domain.TypeBug,
+				Priority:    domain.P0,
 			},
 		},
 		{
-			name:        "missing impl",
-			args:        []string{"Title"},
-			errContains: "missing required flag: --impl",
-		},
-		{
 			name:        "invalid priority",
-			args:        []string{"--impl", "go-bubbletea", "--priority", "high", "Title"},
+			args:        []string{"--priority", "high", "Title"},
 			errContains: "invalid priority: high",
 		},
 		{
@@ -1163,11 +1156,6 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			name: "valid",
 			args: []string{"az-1"},
 			want: IssueCloseOptions{IssueID: "az-1"},
-		},
-		{
-			name:        "forbid impl",
-			args:        []string{"--impl", "go-bubbletea", "az-1"},
-			errContains: "--impl is not supported for issue close",
 		},
 		{
 			name:        "missing id",
@@ -1217,10 +1205,6 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "missing required flag: --confirm") {
 		t.Fatalf("expected missing confirm error, got %v", err)
 	}
-	_, err = ParseIssueDeleteArgs([]string{"--impl", "go-bubbletea", "--confirm", "az-1"})
-	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue delete") {
-		t.Fatalf("expected impl forbidden error, got %v", err)
-	}
 }
 
 func TestParseIssueUpdateArgs(t *testing.T) {
@@ -1250,11 +1234,6 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 					Priority: &p,
 				}
 			}(),
-		},
-		{
-			name:        "forbid impl",
-			args:        []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
-			errContains: "--impl is not supported for issue update",
 		},
 		{
 			name:        "no update fields",
@@ -1314,10 +1293,6 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if add.IssueID != "az-1" || add.DependsOnID != "az-2" || add.Type != "related" {
 		t.Fatalf("ParseIssueDependencyAddArgs() = %+v", add)
 	}
-	_, err = ParseIssueDependencyAddArgs([]string{"--impl", "go-bubbletea", "az-1", "az-2"})
-	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue dep add") {
-		t.Fatalf("expected impl forbidden error for add, got %v", err)
-	}
 	add, err = ParseIssueDependencyAddArgs([]string{"--issue-id", "az-1", "--depends-on-id", "az-2"})
 	if err != nil {
 		t.Fatalf("ParseIssueDependencyAddArgs() named flags error = %v", err)
@@ -1333,10 +1308,6 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || remove.Type != "blocks" || !remove.Confirm {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() = %+v", remove)
 	}
-	_, err = ParseIssueDependencyRemoveArgs([]string{"--impl", "go-bubbletea", "az-3"})
-	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue dep remove") {
-		t.Fatalf("expected impl forbidden error for remove, got %v", err)
-	}
 	remove, err = ParseIssueDependencyRemoveArgs([]string{"--issue-id", "az-3", "--depends-on-id", "az-4"})
 	if err != nil {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() named flags error = %v", err)
@@ -1347,26 +1318,26 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 }
 
 func TestParseIssueBulkArgs(t *testing.T) {
-	create, err := ParseIssueBulkCreateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-create.json", "--dry-run"})
+	create, err := ParseIssueBulkCreateArgs([]string{"--input", "bulk-create.json", "--dry-run"})
 	if err != nil {
 		t.Fatalf("ParseIssueBulkCreateArgs() error = %v", err)
 	}
-	if create.Implementation != "go-bubbletea" || create.InputPath != "bulk-create.json" || !create.DryRun {
+	if create.InputPath != "bulk-create.json" || !create.DryRun {
 		t.Fatalf("ParseIssueBulkCreateArgs() = %+v", create)
 	}
-	_, err = ParseIssueBulkCreateArgs([]string{"--input", "bulk-create.json"})
-	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
-		t.Fatalf("expected missing impl error for bulk-create, got %v", err)
+	_, err = ParseIssueBulkCreateArgs([]string{})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --input") {
+		t.Fatalf("expected missing input error for bulk-create, got %v", err)
 	}
 
-	update, err := ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-update.json"})
+	update, err := ParseIssueBulkUpdateArgs([]string{"--input", "bulk-update.json"})
 	if err != nil {
 		t.Fatalf("ParseIssueBulkUpdateArgs() error = %v", err)
 	}
-	if update.Implementation != "go-bubbletea" || update.InputPath != "bulk-update.json" || update.DryRun {
+	if update.InputPath != "bulk-update.json" || update.DryRun {
 		t.Fatalf("ParseIssueBulkUpdateArgs() = %+v", update)
 	}
-	_, err = ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea"})
+	_, err = ParseIssueBulkUpdateArgs([]string{})
 	if err == nil || !strings.Contains(err.Error(), "missing required flag: --input") {
 		t.Fatalf("expected missing input error for bulk-update, got %v", err)
 	}
@@ -1377,10 +1348,6 @@ func TestParseIssueBulkArgs(t *testing.T) {
 	}
 	if depBulk.InputPath != "dep-bulk.json" || !depBulk.DryRun || !depBulk.JSON {
 		t.Fatalf("ParseIssueDependencyBulkApplyArgs() = %+v", depBulk)
-	}
-	_, err = ParseIssueDependencyBulkApplyArgs([]string{"--impl", "go-bubbletea", "--input", "dep-bulk.json"})
-	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue dep bulk apply") {
-		t.Fatalf("expected impl forbidden error for dep bulk apply, got %v", err)
 	}
 }
 
@@ -2214,11 +2181,10 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 			name: "create",
 			run: func(deps *Dependencies) error {
 				return IssueCreateCommand(deps, IssueCreateOptions{
-					Implementation: "go-bubbletea",
-					Title:          "New issue",
-					Description:    "Context",
-					Type:           domain.TypeFeature,
-					Priority:       domain.P1,
+					Title:       "New issue",
+					Description: "Context",
+					Type:        domain.TypeFeature,
+					Priority:    domain.P1,
 				})
 			},
 			wantCommand: daemonclient.CommandTaskCreate,
@@ -2608,16 +2574,14 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 
 	_ = captureStdout(t, func() error {
 		return IssueBulkCreateCommand(deps, IssueBulkCreateOptions{
-			Implementation: "go-bubbletea",
-			InputPath:      bulkCreatePath,
-			DryRun:         false,
+			InputPath: bulkCreatePath,
+			DryRun:    false,
 		})
 	})
 	_ = captureStdout(t, func() error {
 		return IssueBulkUpdateCommand(deps, IssueBulkUpdateOptions{
-			Implementation: "go-bubbletea",
-			InputPath:      bulkUpdatePath,
-			DryRun:         true,
+			InputPath: bulkUpdatePath,
+			DryRun:    true,
 		})
 	})
 
@@ -2726,9 +2690,8 @@ func TestIssueBulkUpdateCommand_DependencyRetargetBuildsApplyOps(t *testing.T) {
 
 	_ = captureStdout(t, func() error {
 		return IssueBulkUpdateCommand(deps, IssueBulkUpdateOptions{
-			Implementation: "go-bubbletea",
-			InputPath:      bulkUpdatePath,
-			DryRun:         true,
+			InputPath: bulkUpdatePath,
+			DryRun:    true,
 		})
 	})
 
@@ -2827,10 +2790,10 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue dep bulk apply --input <path>") {
 		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-create --impl <implementation> --input <path>") {
+	if !strings.Contains(output, "issue bulk-create --input <path>") {
 		t.Fatalf("usage missing issue bulk-create command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-update --impl <implementation> --input <path>") {
+	if !strings.Contains(output, "issue bulk-update --input <path>") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
 	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
@@ -2860,7 +2823,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "prime") {
 		t.Fatalf("usage missing prime command: %q", output)
 	}
-	if strings.Contains(output, "issue close --impl") || strings.Contains(output, "issue delete --impl") || strings.Contains(output, "issue dep add --impl") {
+	if strings.Contains(output, "--impl <implementation>") || strings.Contains(output, "--update-impl <impl>") {
 		t.Fatalf("usage should not include --impl for existing-issue commands: %q", output)
 	}
 	if !strings.Contains(output, "Argument ordering: place flags/options before positional arguments for deterministic parsing.") {
