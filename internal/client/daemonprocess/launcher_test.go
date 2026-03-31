@@ -33,6 +33,9 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
+	if launcher.LockPath != filepath.Join(socketRoot, "daemon.lock") {
+		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(socketRoot, "daemon.lock"))
+	}
 	launcher.BinPath = "true"
 	launcher.openLogFile = func(path string) (io.WriteCloser, error) {
 		want := filepath.Join(repoDir, ".azedarach", "daemon.log")
@@ -72,6 +75,9 @@ func TestNewLauncherNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	launcher := NewLauncher(filepath.Join(worktree, "go-bubbletea"), filepath.Join(base, "daemon.sock"))
 	if launcher.RepoDir != repo {
 		t.Fatalf("launcher.RepoDir = %q, want %q", launcher.RepoDir, repo)
+	}
+	if launcher.LockPath != filepath.Join(base, "daemon.lock") {
+		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(base, "daemon.lock"))
 	}
 }
 

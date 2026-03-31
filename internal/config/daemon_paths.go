@@ -1,14 +1,18 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
 	globalDaemonRuntimeDirName = "azedarach"
 	globalDaemonSocketFileName = "daemon.sock"
 	globalDaemonLockFileName   = "daemon.lock"
+	scopedDaemonRuntimeDirName = "scopes"
 )
 
 // GlobalDaemonRuntimeDir returns the user-global directory used for singleton daemon runtime assets.
@@ -43,6 +47,54 @@ func GlobalDaemonSocketPath() string {
 // GlobalDaemonLockPath returns the user-global singleton lock path.
 func GlobalDaemonLockPath() string {
 	return filepath.Join(GlobalDaemonRuntimeDir(), globalDaemonLockFileName)
+}
+
+// DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
+// path depending on runtime mode.
+func DaemonSocketPathFor(startPath string) string {
+	if useScopedDaemonRuntime() {
+		return ScopedDaemonSocketPath(startPath)
+	}
+	return GlobalDaemonSocketPath()
+}
+
+// DaemonLockPathFor returns either the global or worktree-scoped daemon lock path
+// depending on runtime mode.
+func DaemonLockPathFor(startPath string) string {
+	if useScopedDaemonRuntime() {
+		return ScopedDaemonLockPath(startPath)
+	}
+	return GlobalDaemonLockPath()
+}
+
+// ScopedDaemonRuntimeDir returns a deterministic runtime directory for a worktree scope.
+func ScopedDaemonRuntimeDir(startPath string) string {
+	scopeRoot, err := ResolveWorktreeRoot(startPath)
+	if err != nil || strings.TrimSpace(scopeRoot) == "" {
+		scopeRoot = startPath
+	}
+	scopeID := daemonScopeID(scopeRoot)
+	return filepath.Join(GlobalDaemonRuntimeDir(), scopedDaemonRuntimeDirName, scopeID)
+}
+
+// ScopedDaemonSocketPath returns the daemon socket path for a worktree scope.
+func ScopedDaemonSocketPath(startPath string) string {
+	return filepath.Join(ScopedDaemonRuntimeDir(startPath), globalDaemonSocketFileName)
+}
+
+// ScopedDaemonLockPath returns the daemon lock path for a worktree scope.
+func ScopedDaemonLockPath(startPath string) string {
+	return filepath.Join(ScopedDaemonRuntimeDir(startPath), globalDaemonLockFileName)
+}
+
+func daemonScopeID(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:8])
+}
+
+func useScopedDaemonRuntime() bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	return mode == "worktree" || mode == "scoped" || mode == "local"
 }
 
 func daemonRuntimeDirWritable(dir string) bool {

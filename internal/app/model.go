@@ -174,9 +174,10 @@ type Model struct {
 	hasRefreshLoop bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient   *daemonclient.Client
-	daemonEvents   <-chan protocol.EventEnvelope
-	daemonRevision uint64
+	daemonClient     *daemonclient.Client
+	daemonSocketPath string
+	daemonEvents     <-chan protocol.EventEnvelope
+	daemonRevision   uint64
 
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
@@ -216,6 +217,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
+	daemonSocketPath := config.DaemonSocketPathFor(repoDir)
 	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
 		repoDir = normalizedRepoDir
 	}
@@ -224,8 +226,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		logger.Error("failed to get current directory", "error", err)
 	}
-	socketPath := config.GlobalDaemonSocketPath()
-	daemonClient := daemonclient.New(transport.NewClient(socketPath))
+	daemonClient := daemonclient.New(transport.NewClient(daemonSocketPath))
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
@@ -247,6 +248,7 @@ func New(cfg *config.Config) Model {
 		loading:                        true, // Start with loading state
 		spinner:                        s,
 		daemonClient:                   daemonClient,
+		daemonSocketPath:               daemonSocketPath,
 		sessionMonitor:                 deps.SessionMonitor,
 		gitClient:                      deps.GitDiffClient,
 		gitSyncService:                 deps.GitSyncService,
@@ -348,6 +350,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case issuesLoadedMsg:
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
+		}
+		if msg.daemonClient != nil {
+			m.daemonClient = msg.daemonClient
+			if strings.TrimSpace(msg.daemonSocket) != "" {
+				m.daemonSocketPath = msg.daemonSocket
+			}
 		}
 		wasLoading := m.loading
 		if msg.stale {
@@ -773,6 +781,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(6 * time.Second),
 			})
 			return m, nil
+		}
+		if msg.daemonClient != nil {
+			m.daemonClient = msg.daemonClient
+			if strings.TrimSpace(msg.daemonSocket) != "" {
+				m.daemonSocketPath = msg.daemonSocket
+			}
 		}
 
 		m.rebindProjectContext(msg.project, msg.projectConfig)
@@ -2092,6 +2106,8 @@ type issuesLoadedMsg struct {
 	tasks         []domain.Task
 	revision      uint64
 	events        <-chan protocol.EventEnvelope
+	daemonClient  *daemonclient.Client
+	daemonSocket  string
 	stale         bool
 	freshnessHint string
 }
@@ -2107,6 +2123,8 @@ type projectSwitchResultMsg struct {
 	tasks         []domain.Task
 	revision      uint64
 	events        <-chan protocol.EventEnvelope
+	daemonClient  *daemonclient.Client
+	daemonSocket  string
 	err           error
 }
 
@@ -2487,6 +2505,15 @@ func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
 	return filtered
 }
 
+func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient.Client {
+	if m.daemonClient != nil {
+		if strings.TrimSpace(m.daemonSocketPath) == "" || m.daemonSocketPath == socketPath {
+			return m.daemonClient.WithProjectID(projectID)
+		}
+	}
+	return daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+}
+
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 	return func() tea.Msg {
 		if m.daemonClient == nil {
@@ -2512,7 +2539,9 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(project.Path, config.GlobalDaemonSocketPath())
+		socketPath := config.DaemonSocketPathFor(project.Path)
+		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
+		launcher := daemonprocess.NewLauncher(project.Path, socketPath)
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2529,7 +2558,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			ClientVersion:   "dev",
 			Capabilities:    []string{"snapshot", "subscribe"},
 		}
-		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, hello)
 		if err != nil {
 			return projectSwitchResultMsg{
@@ -2544,16 +2573,14 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			}
 		}
 
-		m.daemonClient.WithProjectID(project.Name)
-
-		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return projectSwitchResultMsg{
 				project: project,
 				err:     err,
 			}
 		}
-		events, err := m.daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
+		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
 				project: project,
@@ -2567,6 +2594,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			tasks:         snapshot.Tasks,
 			revision:      snapshot.Revision,
 			events:        events,
+			daemonClient:  daemonClient,
+			daemonSocket:  socketPath,
 		}
 	}
 }
@@ -2582,7 +2611,9 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(targetRepoDir, config.GlobalDaemonSocketPath())
+		socketPath := config.DaemonSocketPathFor(targetRepoDir)
+		daemonClient := m.daemonClientForSocket(socketPath, projectID)
+		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath)
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2597,7 +2628,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			}
 		}
 
-		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "tui",
@@ -2611,21 +2642,23 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
 
-		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
-		events, err := m.daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
+		events, err := daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
 		if err != nil {
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
 		return issuesLoadedMsg{
-			projectID: projectID,
-			tasks:     snapshot.Tasks,
-			revision:  snapshot.Revision,
-			events:    events,
+			projectID:    projectID,
+			tasks:        snapshot.Tasks,
+			revision:     snapshot.Revision,
+			events:       events,
+			daemonClient: daemonClient,
+			daemonSocket: socketPath,
 		}
 	}
 }

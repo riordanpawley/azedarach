@@ -163,3 +163,52 @@ func isProcessAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
+
+// TerminateLockOwner best-effort stops the process referenced by lockPath and
+// removes the lock. Missing or stale locks are treated as no-op success.
+func TerminateLockOwner(lockPath string) error {
+	b, err := os.ReadFile(lockPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+
+	pid, parseErr := parseLockPID(strings.TrimSpace(string(b)))
+	if parseErr == nil && pid > 0 && isProcessAlive(pid) {
+		if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			return killErr
+		}
+	}
+
+	if rmErr := os.Remove(lockPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		return rmErr
+	}
+	return nil
+}
+
+func parseLockPID(content string) (int, error) {
+	if content == "" {
+		return 0, errors.New("empty lock file")
+	}
+	if strings.HasPrefix(content, "{") {
+		var rec lockRecord
+		if err := json.Unmarshal([]byte(content), &rec); err != nil {
+			return 0, err
+		}
+		if rec.PID <= 0 {
+			return 0, errors.New("invalid pid in lock record")
+		}
+		return rec.PID, nil
+	}
+
+	pid, err := strconv.Atoi(content)
+	if err != nil {
+		return 0, err
+	}
+	if pid <= 0 {
+		return 0, errors.New("invalid pid")
+	}
+	return pid, nil
+}

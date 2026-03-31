@@ -46,6 +46,7 @@ const (
 type Dependencies struct {
 	Config       *config.Config
 	DaemonClient *daemonclient.Client
+	DaemonSocket string
 	Logger       *slog.Logger
 	ProjectID    string
 	RepoDir      string
@@ -215,12 +216,13 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	}
 
 	projectID := filepath.Base(rootRepoDir)
-	socketPath := config.GlobalDaemonSocketPath()
+	socketPath := config.DaemonSocketPathFor(absRepoDir)
 	daemonTransport := transport.NewClient(socketPath)
 
 	return &Dependencies{
 		Config:       cfg,
 		DaemonClient: daemonclient.New(daemonTransport).WithProjectID(projectID),
+		DaemonSocket: socketPath,
 		Logger:       logger,
 		ProjectID:    projectID,
 		RepoDir:      rootRepoDir,
@@ -2477,7 +2479,7 @@ func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	launcher := newLauncher(deps.RepoDir, config.GlobalDaemonSocketPath())
+	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
 	if err := launcher.Replace(ctx); err != nil {
 		return fmt.Errorf("restart daemon: %w", err)
 	}
@@ -2947,7 +2949,7 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
-	launcher := newLauncher(deps.RepoDir, config.GlobalDaemonSocketPath())
+	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
