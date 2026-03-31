@@ -367,7 +367,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 	if specSyncCfg.Enabled {
 		command := strings.TrimSpace(specSyncCfg.Command)
 		if command == "" {
-			command = "az spec sync --target md"
+			return fmt.Errorf("githooks spec sync command is enabled but no command is configured")
 		}
 		if opts.Verbose {
 			fmt.Printf("githooks: spec sync command: %s\n", command)
@@ -399,7 +399,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 		if shouldRun {
 			command := strings.TrimSpace(boundaryCfg.Command)
 			if command == "" {
-				command = "just check-boundaries"
+				return fmt.Errorf("githooks boundary check is enabled but no command is configured")
 			}
 			if opts.Verbose {
 				fmt.Printf("githooks: boundary command: %s\n", command)

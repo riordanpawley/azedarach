@@ -57,6 +57,10 @@ func TestDefaultConfig(t *testing.T) {
 	assert.NotNil(t, cfg.Worktree.InitCommands)
 
 	assert.True(t, cfg.Spec.Enabled)
+	assert.False(t, cfg.GitHooks.SpecSync.Enabled)
+	assert.Empty(t, cfg.GitHooks.SpecSync.Command)
+	assert.False(t, cfg.GitHooks.BoundaryCheck.Enabled)
+	assert.Empty(t, cfg.GitHooks.BoundaryCheck.Command)
 }
 
 func TestResolveConfigBaseFindsNearestAncestorConfig(t *testing.T) {
