@@ -7,22 +7,22 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
-func TestRunBranchCommandSuggestsMTMForM2MTypo(t *testing.T) {
+func TestRunBranchCommandSuggestsMergeForM2MTypo(t *testing.T) {
 	err := runBranchCommand(config.DefaultConfig(), "m2m", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown m2m command")
 	}
-	if !strings.Contains(err.Error(), "did you mean `az branch mtm`?") {
-		t.Fatalf("err = %q, want mtm suggestion", err)
+	if !strings.Contains(err.Error(), "did you mean `az branch merge`?") {
+		t.Fatalf("err = %q, want merge suggestion", err)
 	}
 }
 
-func TestRunBranchCommandUnknownUsageListsMTMAlias(t *testing.T) {
+func TestRunBranchCommandUnknownUsageListsMerge(t *testing.T) {
 	err := runBranchCommand(config.DefaultConfig(), "wat", nil)
 	if err == nil {
 		t.Fatal("expected error for unknown command")
 	}
-	if !strings.Contains(err.Error(), "usage: az branch <merge|mtm>") {
-		t.Fatalf("err = %q, want usage with mtm alias", err)
+	if !strings.Contains(err.Error(), "usage: az branch <merge>") {
+		t.Fatalf("err = %q, want usage with merge command", err)
 	}
 }
