@@ -866,6 +866,95 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
+	m := newTestModel()
+	parentID := "az-parent"
+	childID := "az-child"
+	m.tasks = []domain.Task{
+		{
+			ID:         parentID,
+			Title:      "Parent",
+			Status:     domain.StatusDone,
+			Priority:   domain.P1,
+			Type:       domain.TypeTask,
+			HasWorktree: false,
+		},
+		{
+			ID:         childID,
+			Title:      "Child",
+			Status:     domain.StatusInProgress,
+			Priority:   domain.P1,
+			Type:       domain.TypeTask,
+			ParentID:   &parentID,
+			HasWorktree: true,
+		},
+	}
+	m.nav.SelectTask(childID, 1)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	if cmd != nil {
+		t.Fatalf("expected no merge command when no eligible upstream exists, got %T", cmd)
+	}
+
+	newModel := updated.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatalf("expected warning toast when follow-on merge has no eligible upstream")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if !strings.Contains(lastToast.Message, "No eligible upstream sources") {
+		t.Fatalf("unexpected toast message: %q", lastToast.Message)
+	}
+}
+
+func TestGetFollowOnMergeCandidatesRequiresUpstreamWorktree(t *testing.T) {
+	m := newTestModel()
+	parentID := "az-parent"
+	childID := "az-child"
+
+	makeTasks := func(parentHasWorktree bool) []domain.Task {
+		return []domain.Task{
+			{
+				ID:          parentID,
+				Title:       "Parent",
+				Status:      domain.StatusDone,
+				Priority:    domain.P1,
+				Type:        domain.TypeTask,
+				HasWorktree: parentHasWorktree,
+			},
+			{
+				ID:          childID,
+				Title:       "Child",
+				Status:      domain.StatusInProgress,
+				Priority:    domain.P1,
+				Type:        domain.TypeTask,
+				ParentID:    &parentID,
+				HasWorktree: true,
+			},
+		}
+	}
+
+	t.Run("excludes parent without worktree", func(t *testing.T) {
+		m.tasks = makeTasks(false)
+		target := m.tasks[1]
+		candidates := m.getFollowOnMergeCandidates(&target)
+		if len(candidates) != 0 {
+			t.Fatalf("expected no candidates without upstream worktree, got %+v", candidates)
+		}
+	})
+
+	t.Run("includes parent with worktree", func(t *testing.T) {
+		m.tasks = makeTasks(true)
+		target := m.tasks[1]
+		candidates := m.getFollowOnMergeCandidates(&target)
+		if len(candidates) != 1 {
+			t.Fatalf("expected one candidate with upstream worktree, got %+v", candidates)
+		}
+		if candidates[0].target.ID != parentID {
+			t.Fatalf("candidate source id = %q, want %q", candidates[0].target.ID, parentID)
+		}
+	})
+}
+
 func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 	m := newTestModel()
 	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
@@ -2219,152 +2308,6 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	}
 	if !strings.Contains(view, "Actions") {
 		t.Fatalf("expected action panel to render in task workspace, got %q", view)
-	}
-}
-
-func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayAndShowsPendingMutation(t *testing.T) {
-	t.Setenv("TMUX", "")
-	m := newTestModel()
-	m.nav.SelectTask("az-1", 0)
-	m.tasks[0].HasTmuxSession = true
-	m.tasks[0].Session = nil
-	m.tmuxAvailable = false
-
-	workspace := overlay.NewTaskWorkspaceOverlay(m.tasks[0], nil, m.tasks, nil, m.width, m.height)
-	m.overlayStack.Push(workspace)
-
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
-			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
-		},
-	}
-	m.daemonClient = daemonclient.New(transport)
-
-	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "a"})
-	updated, ok := updatedAny.(Model)
-	if !ok {
-		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
-	}
-	if cmd == nil {
-		t.Fatal("expected attach command")
-	}
-
-	if _, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
-		t.Fatalf("expected TaskWorkspaceOverlay to remain open, got %T", updated.overlayStack.Current())
-	}
-
-	pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
-	if !ok {
-		t.Fatal("expected pending attach status for task az-1")
-	}
-	if pending.state != protocol.OperationStateRunning {
-		t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateRunning)
-	}
-	if pending.operationID != "session-attach" {
-		t.Fatalf("pending operation id = %q, want %q", pending.operationID, "session-attach")
-	}
-
-	view := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View()
-	if !strings.Contains(view, "Mutation:") || !strings.Contains(strings.ToLower(view), "running") {
-		t.Fatalf("expected running mutation row in workspace detail panel, got %q", view)
-	}
-
-	msg := cmd()
-	if _, ok := msg.(sessionAttachedMsg); !ok {
-		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
-	}
-}
-
-func TestUpdate_SpaceThenAttachKeepsWorkspaceOverlayOpen(t *testing.T) {
-	t.Setenv("TMUX", "")
-	m := newTestModel()
-	m.nav.SelectTask("az-1", 0)
-	m.tasks[0].HasTmuxSession = true
-	m.tasks[0].Session = nil
-	m.tmuxAvailable = false
-
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
-			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
-		},
-	}
-	m.daemonClient = daemonclient.New(transport)
-
-	withWorkspaceAny, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-	withWorkspace, ok := withWorkspaceAny.(Model)
-	if !ok {
-		t.Fatalf("model type after Space = %T, want app.Model", withWorkspaceAny)
-	}
-	if _, ok := withWorkspace.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
-		t.Fatalf("expected TaskWorkspaceOverlay after Space, got %T", withWorkspace.overlayStack.Current())
-	}
-
-	afterAAny, cmd := withWorkspace.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	afterA, ok := afterAAny.(Model)
-	if !ok {
-		t.Fatalf("model type after a = %T, want app.Model", afterAAny)
-	}
-	if cmd == nil {
-		t.Fatal("expected selection command from a key in workspace")
-	}
-
-	msg := cmd()
-	selection, ok := msg.(overlay.SelectionMsg)
-	if !ok {
-		t.Fatalf("selection message type = %T, want overlay.SelectionMsg", msg)
-	}
-	if selection.Key != "a" {
-		t.Fatalf("selection key = %q, want a", selection.Key)
-	}
-
-	afterSelectionAny, attachCmd := afterA.Update(selection)
-	afterSelection, ok := afterSelectionAny.(Model)
-	if !ok {
-		t.Fatalf("model type after selection = %T, want app.Model", afterSelectionAny)
-	}
-	if attachCmd == nil {
-		t.Fatal("expected attach command")
-	}
-	if _, ok := afterSelection.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
-		t.Fatalf("expected TaskWorkspaceOverlay to remain open during attach, got %T", afterSelection.overlayStack.Current())
-	}
-
-	pending := afterSelection.pendingMutationForTask("az-1")
-	if pending == nil {
-		t.Fatal("expected pending attach mutation for az-1")
-	}
-	if pending.State != string(protocol.OperationStateRunning) {
-		t.Fatalf("pending state = %q, want %q", pending.State, protocol.OperationStateRunning)
 	}
 }
 

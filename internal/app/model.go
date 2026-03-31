@@ -77,6 +77,7 @@ var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
 var runGitCommandFunc = runGitCommand
+var execProcess = tea.ExecProcess
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -188,6 +189,7 @@ type Model struct {
 	daemonSocketPath string
 	daemonEvents     <-chan protocol.EventEnvelope
 	daemonRevision   uint64
+	lastDaemonReattachAttempt time.Time
 
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
@@ -214,6 +216,8 @@ type Model struct {
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
 }
+
+const daemonReattachRetryInterval = 5 * time.Second
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
@@ -404,6 +408,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
+		m.lastDaemonReattachAttempt = time.Time{}
 		m.loading = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
@@ -448,14 +453,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
+		now := time.Now()
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: msg.err.Error(),
-			Expires: time.Now().Add(8 * time.Second),
+			Expires: now.Add(8 * time.Second),
 		})
 		m.loading = false
-		// Still schedule a refresh to retry
-		return m, tickEvery(5 * time.Second)
+		cmds := []tea.Cmd{tickEvery(5 * time.Second)}
+		if shouldQueueDaemonReattach(m.lastDaemonReattachAttempt, now, msg.err) {
+			m.lastDaemonReattachAttempt = now
+			cmds = append(cmds, m.attachDaemonCmd())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
@@ -976,8 +986,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.commitsBehind > 0 {
-			m.clearPendingTaskStatus(msg.issueID)
-			m.syncTaskWorkspaceOverlay()
 			// Show merge choice overlay
 			m.openOverlay(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.config.Git.BaseBranch))
 			return m, nil
@@ -987,8 +995,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.attachSessionCmd(msg.issueID)
 
 	case sessionAttachedMsg:
-		m.clearPendingTaskStatus(msg.issueID)
-		m.syncTaskWorkspaceOverlay()
 		message := fmt.Sprintf("Attached to session: %s", msg.issueID)
 		if msg.switchedTmux {
 			message = fmt.Sprintf("Switched to session: %s", msg.issueID)
@@ -2394,6 +2400,32 @@ type runtimeSignalsLoadedMsg struct {
 	partialFailureCount int
 }
 
+func shouldAttemptDaemonReattach(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "daemon socket unavailable") {
+		return true
+	}
+	if !strings.Contains(message, "daemon command transport") {
+		return false
+	}
+	return strings.Contains(message, "dial unix") ||
+		strings.Contains(message, "connect: no such file or directory") ||
+		strings.Contains(message, "connection refused")
+}
+
+func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
+	if !shouldAttemptDaemonReattach(err) {
+		return false
+	}
+	if lastAttempt.IsZero() {
+		return true
+	}
+	return now.Sub(lastAttempt) >= daemonReattachRetryInterval
+}
+
 // Commands
 
 // loadIssuesCmd returns a command that fetches issues from the CLI
@@ -2740,12 +2772,6 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
-		if err := launcher.Replace(ctx); err != nil {
-			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
-			}
-		}
 
 		hello := protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
@@ -2813,15 +2839,9 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			launcher.BinPath = bin
 		}
 
-		// Startup should bind daemon authority to the active project context
-		// when we have an explicit daemon binary path to execute.
-		// If no explicit binary is resolved (for example in isolated tests),
-		// fall back to attach-only behavior.
-		if launcher.BinPath != "" {
-			if err := launcher.Replace(ctx); err != nil {
-				return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon restart: %w", err)}
-			}
-		}
+		// Avoid unconditional daemon replacement on every reattach attempt.
+		// EnsureAttached will start or replace only when protocol handshake
+		// indicates it is required.
 
 		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
@@ -3576,12 +3596,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	keepWorkspaceOpen := msg.Key == "a"
-
-	// Close the overlay first unless task-workspace attach wants in-panel progress.
-	if !keepWorkspaceOpen {
-		m.overlayStack.Pop()
-	}
+	// Close the overlay first
+	m.overlayStack.Pop()
 
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
@@ -3624,25 +3640,13 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		// Attach to session
 		if session != nil {
-			if keepWorkspaceOpen {
-				m.markTaskOperationPending(task.ID, "session_attach", "session-attach", protocol.OperationStateRunning)
-				m.syncTaskWorkspaceOverlay()
-			}
 			// Check if branch is behind main
 			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
 		} else if task.HasTmuxSession {
-			if keepWorkspaceOpen {
-				m.markTaskOperationPending(task.ID, "session_attach", "session-attach", protocol.OperationStateRunning)
-				m.syncTaskWorkspaceOverlay()
-			}
 			// We still have tmux presence, so attempt direct attach even when
 			// the session projection is stale or not yet hydrated.
 			return m, m.attachSessionCmd(task.ID)
 		} else {
-			if keepWorkspaceOpen {
-				m.clearPendingTaskStatus(task.ID)
-				m.syncTaskWorkspaceOverlay()
-			}
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session for this task",
@@ -4024,38 +4028,39 @@ func formatAttachmentNoteLine(att *attachment.Attachment) string {
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
-	return func() tea.Msg {
-		path := strings.TrimSpace(logPath)
-		if path == "" {
+	path := strings.TrimSpace(logPath)
+	if path == "" {
+		return func() tea.Msg {
 			return overlay.SelectionMsg{Key: "event-log-error", Value: errors.New("log file path is empty")}
 		}
-		if _, err := os.Stat(path); err != nil {
+	}
+	if _, err := os.Stat(path); err != nil {
+		return func() tea.Msg {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",
 				Value: fmt.Errorf("log file unavailable: %w", err),
 			}
 		}
+	}
 
-		editorName := strings.TrimSpace(os.Getenv("EDITOR"))
-		if editorName == "" {
-			editorName = strings.TrimSpace(os.Getenv("VISUAL"))
-		}
-		if editorName == "" {
-			editorName = "vim"
-		}
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
 
-		cmd := exec.Command(editorName, path)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+	cmd := exec.Command(editorName, path)
+	return execProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",
 				Value: fmt.Errorf("open log editor: %w", err),
 			}
 		}
 		return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
-	}
+	})
 }
 
 type taskDeletedResultMsg struct {
@@ -5041,7 +5046,7 @@ func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, source
 	}
 }
 
-func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
+func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
 	if task == nil {
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -5223,14 +5228,14 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			if task.ID != taskID {
 				continue
 			}
-			if !isEligibleUpstreamSource(task, relation) {
-				return
-			}
 			hasWorktree := false
 			if task.Session != nil && task.Session.Worktree != "" {
 				hasWorktree = true
 			} else if task.HasWorktree {
 				hasWorktree = true
+			}
+			if !isEligibleUpstreamSource(task, relation, hasWorktree) {
+				return
 			}
 			candidates = append(candidates, followOnMergeCandidate{
 				target: overlay.MergeTarget{
@@ -5274,10 +5279,10 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 	return candidates
 }
 
-func isEligibleUpstreamSource(task domain.Task, relation string) bool {
+func isEligibleUpstreamSource(task domain.Task, relation string, hasWorktree bool) bool {
 	switch relation {
 	case string(domain.DependencyParentChild), string(domain.DependencyBlocks):
-		return task.Status == domain.StatusInProgress || task.Status == domain.StatusDone
+		return hasWorktree && (task.Status == domain.StatusInProgress || task.Status == domain.StatusDone)
 	default:
 		return false
 	}
