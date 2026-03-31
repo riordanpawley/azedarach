@@ -1,312 +1,159 @@
-Please also reference the following rules as needed. The list below is provided in TOON format, and `@` stands for the project root directory.
-
-rules[2]{path,description}:
-  @go-bubbletea/AGENTS.md,go-bubbletea scoped context
-  @ts-opentui/AGENTS.md,ts-opentui scoped context
-
-# Additional Conventions Beyond the Built-in Functions
-
-As this project's AI coding tool, you must follow the additional conventions below, in addition to the built-in functions.
-
 <!--
 File: CONTEXT.md
-Version: 2.0.1
-Updated: 2026-03-07
-Purpose: Canonical root AI context source synced to AGENTS.md entrypoints
+Version: 1.2.0
+Updated: 2026-03-25
+Purpose: go-bubbletea overlay context synced to nested AGENTS.md
 -->
 
 <ai_context version="1.0" tool="shared">
 
-# Azedarach Project Context
+# Azedarach go-bubbletea Overlay
 
-> TUI Kanban board and CLI frontend clients on top of daemon backend for orchestrating parallel AI sessions with issue tracking
+> Go/Bubbletea implementation-specific guidance for this repository root
 
-## Entrypoint Generation
+## Shared Baseline
 
-This file is the canonical root context source for Codex-native configuration.
+Shared repository workflow and policy rules are already loaded before this overlay and apply here:
+- issue tracking (`az prime`, `az issue`)
+- git workflow and safety constraints
+- completion/commit discipline
+- cross-repo Codex context workflow
 
-Nested `AGENTS.md` overlays are maintained directly in-repo for path-scoped guidance.
+This file is intentionally an overlay with go-bubbletea-specific rules only.
 
-## Instructions Reference
+## Critical go-bubbletea Rules
 
-Implementation-specific overlays:
-- [ts-opentui/AGENTS.md](./ts-opentui/AGENTS.md)
-- [go-bubbletea/AGENTS.md](./go-bubbletea/AGENTS.md)
+1. **Project Layout**:
+   - `cmd/` for entrypoints and wiring
+   - `internal/` for private implementation
+   - `docs/` for implementation docs
+2. **Dependency Injection**:
+   - Accept interfaces, return concrete structs.
+   - Keep external command/tmux/git clients mockable.
+3. **Functional Options**:
+   - Use `Option` functions for constructors with optional settings.
+4. **Bubbletea Model Structure**:
+   - Use nested models with clear routing.
+   - Keep shared state explicit and avoid duplicated mutable state.
+5. **Initialization**:
+   - Batch sub-model init commands via `tea.Batch(...)`.
+6. **Context Propagation**:
+   - Pass `context.Context` as the first parameter for I/O or long-running operations.
+7. **Error Handling**:
+   - Return and wrap errors with context (`fmt.Errorf("...: %w", err)`).
+   - Prefer structured logging via `slog`.
+8. **Testing**:
+   - Keep tests deterministic and fast.
+   - Use table-driven tests and interface-based mocks.
+9. **Concurrency**:
+   - Prefer context cancellation for goroutine lifecycle.
+   - Use buffered channels when bounded capacity is known.
+10. **Architecture Migration Gates**:
+   - Do not mark a migration complete while active entrypoints still depend on transitional adapters or legacy execution paths.
+   - Runtime AC must prove the intended production path is wired on active entrypoints, not only in isolated packages/tests.
+   - Cross-process boundaries must use typed protocol/domain payloads rather than UI-framework message types.
+11. **Active-Path Placeholder Policy**:
+   - Placeholder implementations are allowed only when they are off active runtime paths or explicitly tracked as incomplete follow-up work.
+   - If an active-path placeholder remains, the issue must stay partial/in-progress with linked follow-up issue IDs.
+12. **Closure Evidence (Required)**:
+   - For architecture issues, close only after notes include commands run, key outputs, files changed, and explicit AC pass/fail checklist.
+13. **Binary Boundary (Critical)**:
+   - PATH `az` in this repository is the Go implementation.
+   - For validation, use `go run ./cmd/az ...`, `go run ./cmd/azd ...`, or `./bin/az ...` from the repository root.
+14. **Daemon Restart Policy**:
+   - For operational daemon restarts, use `az daemon restart` from the repository root with the Go binary/path.
+   - Do not bump protocol/version just to force restarts; version bumps are for contract changes.
+15. **Repo-Local Go Cache Env (Critical)**:
+   - `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`.gocache`, `.gopath`).
+   - After `direnv allow`, use normal `go ...` commands from the repository root without per-command env prefixes.
+16. **CLI Argument Ordering (Critical)**:
+   - For CLI command design and documentation, place flags/options before positional arguments.
+   - Usage/help/examples must match parser behavior (no positional-before-flag forms in docs).
 
-## Critical Rules (Quick Reference)
+## Thin-Client Boundary Contract (Critical)
 
-1. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed), and `bat` (not cat).
-2. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
-3. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
-4. **Codex Canonical Source**: Edit live instruction assets directly (`AGENTS.md`, nested `AGENTS.md`, `.codex/skills/*`, `.codex/subagents/*`).
-5. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
-6. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-7. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
-8. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
-9. **Implementation-Specific Rules Live in Nested Overlays**: Keep implementation runtime, language, and architecture policy in `ts-opentui/AGENTS.md` or `go-bubbletea/AGENTS.md`, not in root.
-10. **Currently az is linked to the go-bubbletea impl**: `go-bubbletea` is the active default implementation for `az`; keep `ts-opentui` guidance only where explicitly needed during transition/cleanup work.
-11. **The word spec means az spec 99% of the time**: it usually is not used in the sense of file based spec
+This section is non-optional for all `go-bubbletea` architecture work.
+
+1. **Authority Ownership**:
+   - Daemon owns durable/project state and lifecycle authority (tasks, session lifecycle, worktree lifecycle, devserver lifecycle).
+   - CLI and TUI are clients only. They may hold presentation/runtime-ephemeral state only (cursor position, overlays, viewport, transient loading flags).
+2. **No Direct Authority Operations in TUI/CLI**:
+   - `internal/app` and `internal/cli` must not directly execute authority operations through `internal/services/git`, `internal/services/tmux`, `internal/services/issues`, `internal/services/devserver`, or `internal/services/pr` when a daemon command path exists.
+   - Boundary operations must go through `internal/client/daemonclient` and typed protocol contracts.
+3. **Daemon Routing Requirement**:
+   - New or changed boundary operations must be represented as daemon commands with typed request/response payloads.
+   - Runtime daemon command paths must be wired through active handlers on production entrypoints; test-only handlers do not satisfy this.
+4. **Session Authority Rule**:
+   - Session lifecycle transitions must be daemon-authoritative.
+   - TUI session maps are projections only; do not perform local writes that establish or mutate lifecycle authority.
+   - `internal/app` may stop or clear `SessionMonitor` state during teardown, but it must not call `SessionMonitor.Start` or recreate lifecycle monitoring locally.
+   - Any `m.sessions` mutation must come from daemon snapshot refresh (`projectSessionProjection`), not from per-session authority writes or monitor callbacks.
+5. **Singleton Scope Rule**:
+   - If daemon runtime assets are user-global (socket/lock), design changes must explicitly preserve project isolation semantics and avoid cross-repo authority bleed.
+6. **Required Drift Guards**:
+   - Boundary changes must include regression guards that fail when direct authority operations reappear in client layers.
+   - Keep migration/boundary guard tests in `internal/app` and `internal/cli` current with each boundary change.
+   - Guard coverage for session projection must fail if `model.go` regains `SessionMonitor.Start` or direct `m.sessions[...] =` / `delete(m.sessions, ...)` authority writes.
+7. **Boundary Evidence Before Close**:
+   - For any boundary issue, notes must include:
+     - commands run
+     - key outputs/assertions
+     - files changed
+     - explicit AC verdicts for runtime, integration, and regression checks
+   - If any are missing, keep the issue in `in_progress` or `blocked`.
+
+## Boundary Verification Checklist (Required)
+
+Run this checklist whenever touching daemon/client boundaries:
+
+```bash
+cd .
+
+# 1) Guard rails remain active
+go test ./internal/app ./internal/cli
+
+# 2) Daemon boundary behavior remains correct
+go test ./internal/daemon/... ./internal/client/...
+
+# 3) Full boundary-facing integration safety net
+go test ./internal/app ./internal/cli ./internal/daemon/...
+```
+
+If sandbox restrictions prevent unix socket integration tests, rerun with the required approval path and record that in issue notes.
 
 ## Quick Commands
 
 ```bash
-# Search (modern tools)
-rg "pattern" --type ts            # Search content (NOT grep)
-fd "filename" -t f                # Find files (NOT find)
+# in repo root
+cd .
 
-# Go in this repo (cache/module paths are exported via .envrc)
+make build
+make test
+make run
 go test ./...
 
-# Issue Tracking
-az prime                          # Session primer + AI workflow guide
-az impl list                      # Show available implementations
-az issue create "Title" --impl <impl>
-
-# Codex Context
-fd . .codex/skills -td            # List installed local skills
-fd . .codex/subagents -tf         # List local subagent prompts
+# focused search
+rg "pattern" --type go internal cmd
+fd "filename" -t f internal cmd
 ```
 
-## Codex Native Context Workflow
+## Architecture Quick Reference
 
-Canonical live paths:
-- `AGENTS.md`, `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md` (directly maintained overlays)
-- `.codex/skills/*` (Codex skills)
-- `.codex/subagents/*` (Codex subagent prompts)
-- `.codex/rules/*` and `.codex/config.toml` (Codex configuration)
+```text
+.
+├── cmd/              # app entrypoints
+├── internal/app/     # bubbletea app flow
+├── internal/services/# domain integrations
+├── internal/types/   # domain types
+└── internal/ui/      # bubbletea views/components
+```
 
-Legacy migration snapshot (read-only reference):
-- `.codex/context/rules/*`
-- `.codex/context/docs/*`
-- `.codex/context/README-migrated-context.md`
+## Quick Help
 
-Sync behavior:
-- There is no generation step in the active workflow.
-- Edit Codex-native files directly and keep root + nested AGENTS aligned in the same change.
-- OpenCode plugin files remain intentionally unmanaged by Codex context files.
+- go docs: `docs/`
 
-## Implementation Selection
+## Todos
 
-- Root guidance is implementation-agnostic.
-- Use the nested overlay for whichever implementation directory you are changing.
-- Include explicit `--impl <impl>` on `az issue` and `az spec` writes when required by project configuration.
-
-## Task Management
-
-**Track all non-trivial work through issue tracking** (preserves context across sessions).
-
-- Run `az prime` at the start of each AI session.
-- Use `az issue` for all issue updates and transitions.
-- Any task expected to take more than one command MUST be tracked in the issue tracker.
-- Keep one active parent issue per session whenever possible.
-- If subagents are used, each subagent MUST create and maintain a child issue under the active parent issue, and close it when that subagent task is done.
-
-## Issue Tracking Policy
-
-**IMPORTANT**: This project uses **`az issue`** as the issue tracking interface. Do NOT use markdown TODOs, task lists, or parallel tracking systems.
-
-### Important Rules
-
-- ✅ First command in a new AI session: `az prime`
-- ✅ Use `az issue` for issue tracking commands
-- ✅ `az prime` is the source of AI workflow guidance for issue tracking
-- ✅ Track every task that takes more than one command in the issue tracker
-- ✅ Keep a session scoped to one active parent issue at a time when possible
-- ✅ Subagents must create, maintain, and close child issues linked to the active parent issue
-- ✅ Keep issue status updated as work progresses
-- ✅ Keep the issue tracker as the single source of truth for issue state
-- ❌ Do NOT create markdown TODO lists as a parallel tracker
-
-## Large Epic Orchestration (Anti-Drift Protocol)
-
-Use this protocol for any epic that spans multiple sessions, subagents, or major architecture boundaries.
-
-### 1) Mandatory Epic Structure
-
-- Create one parent epic with explicit child issues for each lane.
-- Child issues MUST be independently completable and reviewable.
-- Set dependency edges so merge order is machine-readable (`az issue dep add ... --type blocks`).
-- Mark every issue that has children as `type=epic`.
-
-### 2) Three-Layer Acceptance Criteria (Required)
-
-Each implementation issue must include all three AC layers:
-
-- **Runtime AC**: proves active entrypoint wiring (real binaries/commands, not isolated packages).
-- **Integration AC**: proves cross-boundary behavior end-to-end (IPC/reconnect/streaming/etc).
-- **Regression AC**: proves existing user-facing semantics still hold unless explicitly changed.
-
-Use optional **Drift Guard AC** for explicit anti-regression checks (forbidden imports, placeholder detectors, path guards).
-
-### 3) Evidence Bundle Required Before Close
-
-An issue cannot close without notes containing:
-
-1. commands run
-2. key outputs or summarized assertions
-3. files changed
-4. explicit pass/fail verdict for each AC line item
-
-If any item is missing, move/keep the issue in `in_progress`.
-
-### 4) Placeholder and Shim Policy
-
-- Do not close architecture migration issues while active runtime paths still use placeholders or local shims.
-- Placeholders/shims may exist only behind explicit TODO scope with non-migration issue status.
-- For migration epics, closure requires active-path replacement, not just test coverage around scaffolding.
-
-### 5) Closure Gate Issue
-
-For large epics, add one final child gate issue that:
-
-- blocks on all implementation children
-- re-runs the integrated test matrix
-- verifies no active-path placeholders/shims remain
-- performs final evidence-based checklist
-
-Only close the parent epic after that gate issue closes.
-
-### 6) Parallel Subagent Execution Rules
-
-- Assign each subagent one issue lane with a disjoint file budget.
-- Prefer git worktrees per subagent lane for isolation; merge only when that lane AC is green.
-- Do not accept “temporary red” mainline merges for incomplete lanes.
-- If cross-lane changes are unavoidable, land prerequisite lane first and rebase dependent lanes.
-
-## Landing the Plane (Session Completion)
-
-**When ending a work session**, you MUST complete ALL steps below.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Finalize locally**:
-   ```bash
-   git status
-   ```
-   Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-5. **Clean up** - Clear stashes and local temporary state
-6. **Verify** - All changes committed locally
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
-- Avoid remote git flows unless explicitly requested.
-- Never auto-run pull/rebase/push as part of completion.
-
-## Shared Skills
-
-This repository has shared skills in `.codex/skills/` that apply to all implementations:
-
-- **Skill Loading Policy**: Skills are task-scoped references, not mandatory bootstrap. Only load a skill when the current task explicitly needs it.
-- **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
-
-See `.codex/skills/` for available skill docs.
-
-## OpenCode Plugins
-
-This project uses two OpenCode plugins:
-
-1. **opencode-pty** - PTY integration
-2. **.opencode/plugin/azedarach.js** - Session status monitoring for TUI
-
-Both are configured in `opencode.json`.
-
-## RTK / Rust Token Killer Usage Guidelines (for Codex CLI)
-### Objective
-* When executing shell commands that may produce large amounts of output, prioritize using RTK (Rust Token Killer) to compress, filter, and summarize the output, reducing LLM token consumption and improving context efficiency.
-* RTK is suitable for:
-  
-  * File reading
-  * Code search
-  * git status / diff
-  * Test output
-  * build / lint output
-  * docker / kubectl logs
-  * Other high-noise, high-output commands
-
-### Codex CLI Environment Constraints
-* RTK’s automatic hook / auto-rewrite capabilities (e.g., `rtk init --global`) currently mainly support **Claude Code** and **OpenCode**.
-* In **Codex CLI**, **do not assume RTK has automatically taken over shell commands**.
-* When using RTK in Codex CLI, you must rely on:
-  
-  1. The agent explicitly invoking `rtk ...` commands
-  2. The rules defined in this document
-* Therefore, in this environment, if the display shows the original command being executed, it usually means the original command is actually executed, not automatically rewritten by RTK.
-
-### Mandatory Rules
-* For commands that produce high output, **do not use the original command directly**; you must prioritize rewriting it using the corresponding RTK command.
-* Only skip RTK when conditions for “allowed fallback to original commands” are met.
-* If you ultimately decide to fall back to the original command, you should narrow the output scope as much as possible to avoid unbounded output.
-
-### RTK Command Replacement Rules
-The following high-output commands must be rewritten to RTK form by default:
-
-* `git status` → `rtk git status`
-* `git diff` → `rtk git diff`
-* `git log` → `rtk git log`
-* `cat <file>` → `rtk read <file>`
-* `head <file>` → `rtk read <file>`
-* `tail <file>` → `rtk read <file>`
-* `grep <pattern> .` → `rtk grep <pattern> .`
-* `rg <pattern>` → `rtk grep <pattern> .`
-* `ls` → `rtk ls`
-* `pytest` → `rtk pytest`
-* `cargo test` → `rtk cargo test`
-* `go test` → `rtk go test`
-* `tsc` → `rtk tsc`
-* `docker ps` → `rtk docker ps`
-* `docker logs <container>` → `rtk docker logs <container>`
-* `kubectl logs <pod>` → `rtk kubectl logs <pod>`
-
-### RTK Usage Priority
-#### Must use RTK first
-* File reading
-* Search output
-* git status / diff / logs
-* Test output
-* build / lint output
-* docker / kubectl logs
-
-#### Recommended to use RTK
-* Package list queries
-* Dependency analysis
-* Query-type outputs from package managers
-* Other commands known to produce large outputs
-
-#### Can use original commands directly
-* `pwd`
-* `echo`
-* Very short-output commands
-* Commands with strict output format requirements where RTK may alter the format
-
-### RTK Fallback Rules
-* If RTK clearly supports a command, it must be used first.
-* If unsure whether RTK supports a command, try:
-  
-  * `rtk proxy <command>`
-
-Examples:
-
-* `rtk proxy make build`
-* `rtk proxy uv run script.py`
-
-### Allowed Cases for Falling Back to Original Commands
-Only allowed under the following conditions:
-
-1. RTK does not support the command
-2. RTK output is insufficient to diagnose the issue
-3. Full raw logs are required for deep debugging
-4. The command output is very short, with no significant benefit from RTK
-5. RTK alters necessary output format, affecting current analysis or subsequent processing
-
-### RTK Behavioral Principles
-* Prioritize reducing unnecessary output rather than blindly preserving all original output.
-* In high-output scenarios, do not use original commands directly unless there is a clear reason.
-* If RTK does not provide sufficient information on the first attempt, then fall back to the original command.
-* Even after fallback, limit the output scope (e.g., only view necessary sections, files, or error segments).
-* In Codex CLI, treat RTK as an **explicit command strategy**, not an implicit hook capability.
+- look into incorporating good code from this git integration https://github.com/pingdotgg/t3code/blob/main/apps/server/src/git/Layers/GitCore.ts
 
 </ai_context>

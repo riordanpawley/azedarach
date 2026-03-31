@@ -1,62 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ ! -d "ts-opentui" ]; then
-    echo "pre-commit: ts-opentui directory not found; skipping checks"
-    exit 0
-fi
-
-staged_ts_opentui_files="$(git diff --cached --name-only --diff-filter=ACMR -- ts-opentui)"
-if [ -z "$staged_ts_opentui_files" ]; then
-    echo "pre-commit: no staged ts-opentui files; skipping checks"
-    exit 0
-fi
-
-set --
-while IFS= read -r file_path; do
-    [ -n "$file_path" ] || continue
-    relative_path="${file_path#ts-opentui/}"
-    set -- "$@" "$relative_path"
-done <<EOF_FILES
-$staged_ts_opentui_files
-EOF_FILES
-
-echo "pre-commit: running biome check --write on staged ts-opentui files"
-(cd ts-opentui && bunx biome check --write --files-ignore-unknown=true --no-errors-on-unmatched "$@")
-
-echo "pre-commit: re-staging biome-updated files"
-while IFS= read -r file_path; do
-    [ -n "$file_path" ] || continue
-    git add -- "$file_path"
-done <<EOF_FILES
-$staged_ts_opentui_files
-EOF_FILES
-
-echo "pre-commit: running ts-opentui type-check"
-set +e
-typecheck_output="$(cd ts-opentui && bun run type-check 2>&1)"
-typecheck_status=$?
-set -e
-
-if [ "$typecheck_status" -ne 0 ]; then
-    printf "%s\n" "$typecheck_output"
-
-    block_commit=0
-    while IFS= read -r file_path; do
-        [ -n "$file_path" ] || continue
-        relative_path="${file_path#ts-opentui/}"
-        if printf "%s" "$typecheck_output" | rg -Fq "$relative_path("; then
-            block_commit=1
-            break
-        fi
-    done <<EOF_FILES
-$staged_ts_opentui_files
-EOF_FILES
-
-    if [ "$block_commit" -eq 1 ]; then
-        echo "pre-commit: type-check failed in staged ts-opentui files; aborting commit"
-        exit "$typecheck_status"
-    fi
-
-    echo "pre-commit: type-check failed only in non-staged ts-opentui files; allowing commit"
-fi
+# TS-opentui checks were removed with the Go migration.
+# Keep this hook as a passthrough placeholder for future repo-wide checks.
+exit 0

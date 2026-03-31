@@ -14,13 +14,9 @@ This repository treats RuleSync-native sources as canonical for AI tool context 
 
 Rule sources:
 - `./.rulesync/rules/root-context.md` (root workspace context)
-- `./.rulesync/rules/ts-opentui.md` (ts-opentui context, `agentsmd.subprojectPath`)
-- `./.rulesync/rules/go-bubbletea.md` (go-bubbletea context, `agentsmd.subprojectPath`)
 
 Generation runs in one RuleSync pass:
-- `agentsmd + rules` emits path-scoped `AGENTS.md` files (`AGENTS.md`,
-  `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md`) using
-  `agentsmd.subprojectPath`.
+- `agentsmd + rules` emits root `AGENTS.md`.
 - `codexcli/opencode + subagents/skills` emits tool-specific subagent/skill outputs.
 - `opencode` rules are intentionally disabled to avoid `.opencode/memories` outputs.
 
