@@ -1851,7 +1851,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionCreateTask: // Create task
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentAndImplOptions(nil, m.availableTaskImplementations())
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 
@@ -3616,14 +3616,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.applyOptimisticTaskStatus(task.ID, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
-		return m, m.openOverlay(overlay.NewEditTaskOverlay(*task))
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptions(*task, m.availableTaskImplementations()))
 	case "T":
 		return m, m.deleteTaskCmd(task.ID)
 	case "d":
 		return m, m.deleteTaskCmd(task.ID)
 	case "c":
 		parentID := task.ID
-		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParent(&parentID))
+		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParentAndImplOptions(&parentID, m.availableTaskImplementations()))
 	}
 
 	return m, nil
@@ -5247,6 +5247,29 @@ func (m Model) taskExists(taskID string) bool {
 		}
 	}
 	return false
+}
+
+func (m Model) availableTaskImplementations() []string {
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for i := range m.tasks {
+		for _, impl := range m.tasks[i].Implementations {
+			value := strings.TrimSpace(impl)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			impls = append(impls, value)
+		}
+	}
+	if len(impls) == 0 {
+		impls = append(impls, "default")
+	}
+	sort.Strings(impls)
+	return impls
 }
 
 func summarizeBulkIssues(issues []bulkTaskIssue) string {

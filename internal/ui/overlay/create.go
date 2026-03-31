@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,7 +54,9 @@ type CreateTaskOverlay struct {
 	title           textinput.Model
 	description     textarea.Model
 	acceptanceInput textarea.Model
-	implInput       textinput.Model
+	implOptions     []string
+	implCombos      [][]string
+	implComboIndex  int
 	taskType        domain.TaskType
 	priority        domain.Priority
 	status          domain.Status
@@ -105,21 +108,19 @@ type OpenTaskImageAttachMsg struct {
 
 // NewCreateTaskOverlay creates a new task creation overlay
 func NewCreateTaskOverlay() *CreateTaskOverlay {
-	return NewCreateTaskOverlayWithParent(nil)
+	return NewCreateTaskOverlayWithParentAndImplOptions(nil, nil)
 }
 
 func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
+	return NewEditTaskOverlayWithImplOptions(task, nil)
+}
+
+func NewEditTaskOverlayWithImplOptions(task domain.Task, implOptions []string) *CreateTaskOverlay {
 	ti := textinput.New()
 	ti.SetValue(task.Title)
 	ti.Focus()
 	ti.CharLimit = 200
 	ti.Width = 56
-
-	implInput := textinput.New()
-	implInput.Placeholder = "default, go-bubbletea, ts-opentui"
-	implInput.CharLimit = 400
-	implInput.Width = 56
-	implInput.SetValue(strings.Join(task.Implementations, ", "))
 
 	ta := textarea.New()
 	ta.SetValue(task.Description)
@@ -133,12 +134,12 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 	acceptance.SetWidth(56)
 	acceptance.SetHeight(3)
 
-	return &CreateTaskOverlay{
+	overlay := &CreateTaskOverlay{
 		id:              task.ID,
 		title:           ti,
 		description:     ta,
 		acceptanceInput: acceptance,
-		implInput:       implInput,
+		implOptions:     append([]string(nil), implOptions...),
 		taskType:        task.Type,
 		priority:        task.Priority,
 		status:          task.Status,
@@ -156,9 +157,15 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 			impls:       append([]string(nil), task.Implementations...),
 		},
 	}
+	overlay.syncImplementationSelection()
+	return overlay
 }
 
 func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
+	return NewCreateTaskOverlayWithParentAndImplOptions(parentID, nil)
+}
+
+func NewCreateTaskOverlayWithParentAndImplOptions(parentID *string, implOptions []string) *CreateTaskOverlay {
 	// Initialize title input
 	ti := textinput.New()
 	ti.Placeholder = "Task title..."
@@ -179,16 +186,11 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 	acceptance.SetWidth(56)
 	acceptance.SetHeight(3)
 
-	implInput := textinput.New()
-	implInput.Placeholder = "default, go-bubbletea, ts-opentui"
-	implInput.CharLimit = 400
-	implInput.Width = 56
-
-	return &CreateTaskOverlay{
+	overlay := &CreateTaskOverlay{
 		title:           ti,
 		description:     ta,
 		acceptanceInput: acceptance,
-		implInput:       implInput,
+		implOptions:     append([]string(nil), implOptions...),
 		taskType:        domain.TypeTask,
 		priority:        domain.P2,
 		status:          domain.StatusOpen,
@@ -202,6 +204,84 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 			status:   domain.StatusOpen,
 		},
 	}
+	overlay.syncImplementationSelection()
+	overlay.defaults.impls = append([]string(nil), overlay.impls...)
+	return overlay
+}
+
+func normalizeImplementationOptions(options []string) []string {
+	seen := make(map[string]struct{}, len(options)+1)
+	normalized := make([]string, 0, len(options)+1)
+	for _, option := range options {
+		value := strings.TrimSpace(option)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	if len(normalized) == 0 {
+		normalized = append(normalized, "default")
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func generateImplementationCombos(options []string) [][]string {
+	normalized := normalizeImplementationOptions(options)
+	total := 1 << len(normalized)
+	combos := make([][]string, 0, total-1)
+	for mask := 1; mask < total; mask++ {
+		combo := make([]string, 0, len(normalized))
+		for idx, option := range normalized {
+			if mask&(1<<idx) != 0 {
+				combo = append(combo, option)
+			}
+		}
+		combos = append(combos, combo)
+	}
+	sort.SliceStable(combos, func(i, j int) bool {
+		if len(combos[i]) != len(combos[j]) {
+			return len(combos[i]) < len(combos[j])
+		}
+		return strings.Join(combos[i], ",") < strings.Join(combos[j], ",")
+	})
+	return combos
+}
+
+func normalizeImplementationSet(values []string) []string {
+	normalized := normalizeImplementationOptions(values)
+	sort.Strings(normalized)
+	return normalized
+}
+
+func implementationSetKey(values []string) string {
+	normalized := normalizeImplementationSet(values)
+	return strings.Join(normalized, "\x00")
+}
+
+func (c *CreateTaskOverlay) syncImplementationSelection() {
+	c.implOptions = normalizeImplementationOptions(c.implOptions)
+	c.implCombos = generateImplementationCombos(c.implOptions)
+	if len(c.implCombos) == 0 {
+		c.implCombos = [][]string{{"default"}}
+	}
+	target := implementationSetKey(c.impls)
+	if target == "" {
+		target = implementationSetKey(c.defaults.impls)
+	}
+	for idx, combo := range c.implCombos {
+		if implementationSetKey(combo) == target {
+			c.implComboIndex = idx
+			c.impls = append([]string(nil), combo...)
+			return
+		}
+	}
+	c.implComboIndex = 0
+	c.impls = append([]string(nil), c.implCombos[0]...)
 }
 
 type taskEditorAppliedMsg struct {
@@ -264,27 +344,22 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c.title.Focus()
 				c.description.Blur()
 				c.acceptanceInput.Blur()
-				c.implInput.Blur()
 			} else if c.focusIndex == focusDescription {
 				c.title.Blur()
 				c.description.Focus()
 				c.acceptanceInput.Blur()
-				c.implInput.Blur()
 			} else if c.focusIndex == focusAcceptance {
 				c.title.Blur()
 				c.description.Blur()
 				c.acceptanceInput.Focus()
-				c.implInput.Blur()
 			} else if c.focusIndex == focusImpls {
 				c.title.Blur()
 				c.description.Blur()
 				c.acceptanceInput.Blur()
-				c.implInput.Focus()
 			} else {
 				c.title.Blur()
 				c.description.Blur()
 				c.acceptanceInput.Blur()
-				c.implInput.Blur()
 			}
 
 			return c, nil
@@ -294,8 +369,18 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			// Enter submits from non-description fields so submit does not depend on Ctrl+S.
-			if c.focusIndex == focusSubmit || c.focusIndex == focusTitle || c.focusIndex == focusType || c.focusIndex == focusPriority {
+			if c.focusIndex == focusSubmit || c.focusIndex == focusTitle || c.focusIndex == focusType || c.focusIndex == focusPriority || c.focusIndex == focusImpls {
 				return c, c.submit()
+			}
+		case "left", "h":
+			if c.focusIndex == focusImpls {
+				c.cycleImplementationCombo(-1)
+				return c, nil
+			}
+		case "right", "l":
+			if c.focusIndex == focusImpls {
+				c.cycleImplementationCombo(1)
+				return c, nil
 			}
 		}
 
@@ -352,7 +437,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.assignee = msg.msg.Assignee
 		c.labels = append([]string(nil), msg.msg.Labels...)
 		c.impls = append([]string(nil), msg.msg.Implementations...)
-		c.implInput.SetValue(strings.Join(c.impls, ", "))
+		c.syncImplementationSelection()
 		c.design = msg.msg.Design
 		c.notes = msg.msg.Notes
 		c.acceptance = msg.msg.Acceptance
@@ -377,9 +462,6 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	} else if c.focusIndex == focusAcceptance {
 		c.acceptanceInput, cmd = c.acceptanceInput.Update(msg)
-		cmds = append(cmds, cmd)
-	} else if c.focusIndex == focusImpls {
-		c.implInput, cmd = c.implInput.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -409,7 +491,7 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "Ctrl+C", Description: "Clear focused field"},
 				{Key: "T/B/F/E/C", Description: "Set type"},
 				{Key: "0/1/2/3/4", Description: "Set priority"},
-				{Key: "Impls field", Description: "Comma-separated impl keys"},
+				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
 				{Key: "Ctrl+O", Description: "Attach image (edit task)"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
@@ -430,7 +512,7 @@ func (c *CreateTaskOverlay) clearToDefaults() {
 	c.assignee = c.defaults.assignee
 	c.labels = append([]string(nil), c.defaults.labels...)
 	c.impls = append([]string(nil), c.defaults.impls...)
-	c.implInput.SetValue(strings.Join(c.defaults.impls, ", "))
+	c.syncImplementationSelection()
 	c.design = c.defaults.design
 	c.notes = c.defaults.notes
 	c.acceptance = c.defaults.acceptance
@@ -440,7 +522,6 @@ func (c *CreateTaskOverlay) clearToDefaults() {
 	c.title.Focus()
 	c.description.Blur()
 	c.acceptanceInput.Blur()
-	c.implInput.Blur()
 }
 
 func (c *CreateTaskOverlay) clearFocusedField() {
@@ -450,12 +531,27 @@ func (c *CreateTaskOverlay) clearFocusedField() {
 	case focusDescription:
 		c.description.SetValue("")
 	case focusImpls:
-		c.implInput.SetValue("")
-		c.impls = nil
+		c.impls = append([]string(nil), c.defaults.impls...)
+		c.syncImplementationSelection()
 	case focusAcceptance:
 		c.acceptanceInput.SetValue("")
 		c.acceptance = ""
 	}
+}
+
+func (c *CreateTaskOverlay) cycleImplementationCombo(direction int) {
+	if len(c.implCombos) == 0 {
+		c.syncImplementationSelection()
+	}
+	if len(c.implCombos) == 0 {
+		return
+	}
+	if direction > 0 {
+		c.implComboIndex = (c.implComboIndex + 1) % len(c.implCombos)
+	} else if direction < 0 {
+		c.implComboIndex = (c.implComboIndex - 1 + len(c.implCombos)) % len(c.implCombos)
+	}
+	c.impls = append([]string(nil), c.implCombos[c.implComboIndex]...)
 }
 
 func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
@@ -540,9 +636,7 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 		b.WriteString(labelStyle.Render("Impls:"))
 	}
 	b.WriteString(" ")
-	implWidth := max(20, width-14)
-	c.implInput.Width = implWidth
-	b.WriteString(c.implInput.View())
+	b.WriteString(c.renderImplementationSelector())
 	b.WriteString("\n")
 
 	if c.focusIndex == focusAcceptance {
@@ -634,6 +728,19 @@ func (c *CreateTaskOverlay) renderPrioritySelector() string {
 	return strings.Join(parts, " ")
 }
 
+func (c *CreateTaskOverlay) renderImplementationSelector() string {
+	c.syncImplementationSelection()
+	current := strings.Join(c.impls, " + ")
+	if strings.TrimSpace(current) == "" {
+		current = "default"
+	}
+	style := c.styles.MenuItem
+	if c.focusIndex == focusImpls {
+		style = c.styles.MenuItemActive
+	}
+	return style.Render(fmt.Sprintf("[<] %s [>]", current))
+}
+
 // submit creates a TaskCreatedMsg and closes the overlay
 func (c *CreateTaskOverlay) submit() tea.Cmd {
 	// Validate title is not empty
@@ -641,8 +748,8 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 	if title == "" {
 		return nil // Don't submit if title is empty
 	}
-	implementations := splitCSV(c.implInput.Value())
-	c.impls = append([]string(nil), implementations...)
+	c.syncImplementationSelection()
+	implementations := append([]string(nil), c.impls...)
 	acceptance := strings.TrimSpace(c.acceptanceInput.Value())
 	c.acceptance = acceptance
 
