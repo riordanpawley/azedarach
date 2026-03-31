@@ -1,2 +1,0 @@
-# Bun configuration for Azedarach
-# No preload needed for OpenTUI/React - JSX transform handled by tsconfig.json
