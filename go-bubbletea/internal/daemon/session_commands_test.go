@@ -8,9 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -284,4 +286,169 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 	if !strings.Contains(command, "--dangerously-skip-permissions") {
 		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
 	}
+}
+
+func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) {
+	const (
+		projectID = "proj"
+		sessionID = "proj-az-1"
+		issueID   = "az-1"
+	)
+
+	store := daemonstate.NewStore()
+	hub := publish.NewHub(32, 8, slog.Default())
+	daemon := &Daemon{
+		cfg: Config{
+			Logger: slog.Default(),
+		},
+		hub:          hub,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+	}
+
+	ch, cancel := hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	startReq := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-session.start",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+		Command: daemonhandlers.CommandSessionStart,
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": sessionID,
+			"issue_id":   issueID,
+		}),
+	}
+
+	if err := daemon.applySessionLifecycleTransition(context.Background(), startReq, projectID, sessionID, issueID, daemonhandlers.CommandSessionStart); err != nil {
+		t.Fatalf("apply start transition: %v", err)
+	}
+
+	stopReq := startReq
+	stopReq.RequestID = "req-session.stop"
+	stopReq.Command = daemonhandlers.CommandSessionStop
+	if err := daemon.applySessionLifecycleTransition(context.Background(), stopReq, projectID, sessionID, issueID, daemonhandlers.CommandSessionStop); err != nil {
+		t.Fatalf("apply stop transition: %v", err)
+	}
+
+	events := collectSessionProjectionEvents(t, ch, 2)
+	wantStates := []protocol.SessionLifecycleState{
+		protocol.SessionLifecycleStateStarting,
+		protocol.SessionLifecycleStateStopped,
+	}
+	for i, event := range events {
+		if event.Event != protocol.EventSessionUpdated {
+			t.Fatalf("event[%d] = %s, want %s", i, event.Event, protocol.EventSessionUpdated)
+		}
+		if event.Revision != uint64(i+1) {
+			t.Fatalf("event[%d] revision = %d, want %d", i, event.Revision, i+1)
+		}
+		var body protocol.SessionProjectionEventBody
+		if err := json.Unmarshal(event.Body, &body); err != nil {
+			t.Fatalf("unmarshal event body: %v", err)
+		}
+		if body.ProjectID != projectID {
+			t.Fatalf("body project_id = %s, want %s", body.ProjectID, projectID)
+		}
+		if body.Revision != event.Revision {
+			t.Fatalf("body revision = %d, want %d", body.Revision, event.Revision)
+		}
+		if body.Session.SessionID != sessionID {
+			t.Fatalf("body session id = %s, want %s", body.Session.SessionID, sessionID)
+		}
+		if body.Session.IssueID != issueID {
+			t.Fatalf("body issue id = %s, want %s", body.Session.IssueID, issueID)
+		}
+		if body.Session.State != wantStates[i] {
+			t.Fatalf("body session state = %s, want %s", body.Session.State, wantStates[i])
+		}
+		if body.Session.UpdatedAt.IsZero() {
+			t.Fatal("expected updated_at to be populated")
+		}
+	}
+}
+
+func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-2"
+	)
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	store := daemonstate.NewStore()
+	hub := publish.NewHub(32, 8, slog.Default())
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		hub:          hub,
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		worktree:     git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-2", branchName: "riordan/az-2/test"}, ".", slog.Default()),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+	}
+
+	ch, cancel := hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile sessions: %v", err)
+	}
+	if result.AlignedDaemonSessions != 1 {
+		t.Fatalf("aligned daemon sessions = %d, want 1", result.AlignedDaemonSessions)
+	}
+
+	events := collectSessionProjectionEvents(t, ch, 2)
+	wantStates := []protocol.SessionLifecycleState{
+		protocol.SessionLifecycleStateStarting,
+		protocol.SessionLifecycleStateAttached,
+	}
+	for i, event := range events {
+		if event.Event != protocol.EventSessionUpdated {
+			t.Fatalf("event[%d] = %s, want %s", i, event.Event, protocol.EventSessionUpdated)
+		}
+		if event.Revision != uint64(i+1) {
+			t.Fatalf("event[%d] revision = %d, want %d", i, event.Revision, i+1)
+		}
+		var body protocol.SessionProjectionEventBody
+		if err := json.Unmarshal(event.Body, &body); err != nil {
+			t.Fatalf("unmarshal event body: %v", err)
+		}
+		if body.ProjectID != projectID {
+			t.Fatalf("body project_id = %s, want %s", body.ProjectID, projectID)
+		}
+		if body.Session.SessionID != sessionID {
+			t.Fatalf("body session id = %s, want %s", body.Session.SessionID, sessionID)
+		}
+		if body.Session.IssueID != issueID {
+			t.Fatalf("body issue id = %s, want %s", body.Session.IssueID, issueID)
+		}
+		if body.Session.State != wantStates[i] {
+			t.Fatalf("body session state = %s, want %s", body.Session.State, wantStates[i])
+		}
+	}
+}
+
+func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
+	t.Helper()
+
+	events := make([]protocol.EventEnvelope, 0, count)
+	deadline := time.After(2 * time.Second)
+	for len(events) < count {
+		select {
+		case evt := <-ch:
+			events = append(events, evt)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d session events, got %d", count, len(events))
+		}
+	}
+	return events
 }

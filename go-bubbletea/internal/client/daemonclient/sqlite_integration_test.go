@@ -21,6 +21,9 @@ import (
 
 func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 	repoDir := t.TempDir()
+	tmuxDir := t.TempDir()
+	installFakeTmux(t, tmuxDir)
+	t.Setenv("PATH", tmuxDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	seedIssueStore(t, repoDir, []seedTask{
 		{
 			id:          "afk",
@@ -64,6 +67,16 @@ func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 	}
 	if snapshot.Tasks[0].ID == "" || snapshot.Tasks[1].ID == "" {
 		t.Fatalf("snapshot task ids should be populated: %+v", snapshot.Tasks)
+	}
+}
+
+func installFakeTmux(t *testing.T, dir string) {
+	t.Helper()
+
+	path := filepath.Join(dir, "tmux")
+	script := []byte("#!/bin/sh\ncase \"$1\" in\n  list-sessions) exit 1 ;;\n  has-session|new-session|kill-session|send-keys|capture-pane|attach-session|set-environment|switch-client|display-popup) exit 0 ;;\n  *) exit 1 ;;\nesac\n")
+	if err := os.WriteFile(path, script, 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
 	}
 }
 
