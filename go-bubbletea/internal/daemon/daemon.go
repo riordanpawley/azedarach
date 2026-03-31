@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -387,6 +388,23 @@ func (d *Daemon) applySessionLifecycleTransition(
 
 	resp := d.session.Handle(ctx, sessionReq)
 	if resp.OK {
+		var result struct {
+			ProjectID string              `json:"project_id"`
+			Session   daemonstate.Session `json:"session"`
+		}
+		if err := json.Unmarshal(resp.Body, &result); err != nil {
+			return fmt.Errorf("decode session transition result: %w", err)
+		}
+		if strings.TrimSpace(result.ProjectID) == "" {
+			result.ProjectID = projectID
+		}
+		if strings.TrimSpace(result.Session.ID) == "" {
+			result.Session.ID = sessionID
+		}
+		if strings.TrimSpace(result.Session.IssueID) == "" {
+			result.Session.IssueID = issueID
+		}
+		d.publishSessionProjectionEvent(result.ProjectID, req.ProtocolVersion, req.Meta, result.Session)
 		return nil
 	}
 	if resp.Error != nil {
@@ -427,6 +445,9 @@ func (d *Daemon) projectID(meta protocol.Metadata) string {
 func (d *Daemon) nextRevision(projectID string) uint64 {
 	d.revMu.Lock()
 	defer d.revMu.Unlock()
+	if d.revision == nil {
+		d.revision = map[string]uint64{}
+	}
 	d.revision[projectID]++
 	return d.revision[projectID]
 }
@@ -434,6 +455,9 @@ func (d *Daemon) nextRevision(projectID string) uint64 {
 func (d *Daemon) currentRevision(projectID string) uint64 {
 	d.revMu.Lock()
 	defer d.revMu.Unlock()
+	if d.revision == nil {
+		return 0
+	}
 	return d.revision[projectID]
 }
 
@@ -448,6 +472,49 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
 	})
+}
+
+func (d *Daemon) publishSessionProjectionEvent(projectID string, protocolVersion protocol.Version, meta protocol.Metadata, session daemonstate.Session) uint64 {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	if protocolVersion == 0 {
+		protocolVersion = protocol.CurrentVersion
+	}
+	rev := d.nextRevision(projectID)
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: projectID,
+		Revision:  rev,
+		Session: protocol.SessionProjection{
+			SessionID: session.ID,
+			IssueID:   session.IssueID,
+			State:     protocol.SessionLifecycleState(session.State),
+			UpdatedAt: session.UpdatedAt,
+		},
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to marshal session projection event", "project_id", projectID, "session_id", session.ID, "error", err)
+		}
+		return rev
+	}
+	if meta.ProjectID == "" {
+		meta.ProjectID = projectID
+	}
+	if d.hub != nil {
+		d.hub.Publish(protocol.EventEnvelope{
+			ProtocolVersion: protocolVersion,
+			ProjectID:       projectID,
+			Meta:            meta,
+			Revision:        rev,
+			Event:           protocol.EventSessionUpdated,
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       time.Now().UTC(),
+			Body:            body,
+		})
+	}
+	return rev
 }
 
 func (d *Daemon) commandOutput(req protocol.RequestEnvelope, output string) protocol.ResponseEnvelope {

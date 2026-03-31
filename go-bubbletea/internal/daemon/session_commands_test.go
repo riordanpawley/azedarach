@@ -8,9 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -177,6 +179,137 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
 		t.Fatalf("session state after stop = %s, want %s", got, daemonstate.SessionStateStopped)
 	}
+}
+
+func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
+	const (
+		projectID = "proj"
+		sessionID = "sess-1"
+		issueID   = "az-1"
+	)
+
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg:     Config{Logger: slog.Default()},
+		session: daemonhandlers.NewSessionHandler(store),
+		hub:     publish.NewHub(32, 8, slog.Default()),
+	}
+
+	ch, cancel := daemon.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+	}
+	if err := daemon.applySessionLifecycleTransition(context.Background(), req, projectID, sessionID, issueID, daemonhandlers.CommandSessionStart); err != nil {
+		t.Fatalf("apply session lifecycle transition: %v", err)
+	}
+
+	evt := collectSessionProjectionEvents(t, ch, 1)[0]
+	if evt.Event != protocol.EventSessionUpdated {
+		t.Fatalf("event = %s, want %s", evt.Event, protocol.EventSessionUpdated)
+	}
+	if evt.Revision != 1 {
+		t.Fatalf("revision = %d, want 1", evt.Revision)
+	}
+	var body protocol.SessionProjectionEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil {
+		t.Fatalf("unmarshal session event body: %v", err)
+	}
+	if body.ProjectID != projectID || body.Revision != 1 {
+		t.Fatalf("body = %+v, want project/revision %s/1", body, projectID)
+	}
+	if body.Session.SessionID != sessionID || body.Session.IssueID != issueID {
+		t.Fatalf("session body = %+v, want session/issue %s/%s", body.Session, sessionID, issueID)
+	}
+	if body.Session.State != protocol.SessionLifecycleStateStarting {
+		t.Fatalf("session state = %s, want %s", body.Session.State, protocol.SessionLifecycleStateStarting)
+	}
+}
+
+func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	store := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStopped); err != nil {
+		t.Fatalf("seed stopped session: %v", err)
+	}
+
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		worktree:     git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		hub:          publish.NewHub(32, 8, slog.Default()),
+	}
+
+	ch, cancel := daemon.hub.Subscribe(projectID, 0)
+	defer cancel()
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile with recovery: %v", err)
+	}
+	if result.AlignedDaemonSessions != 1 {
+		t.Fatalf("aligned daemon sessions = %d, want 1", result.AlignedDaemonSessions)
+	}
+
+	events := collectSessionProjectionEvents(t, ch, 2)
+	wantStates := []protocol.SessionLifecycleState{
+		protocol.SessionLifecycleStateStarting,
+		protocol.SessionLifecycleStateAttached,
+	}
+	for i, evt := range events {
+		if evt.Event != protocol.EventSessionUpdated {
+			t.Fatalf("event[%d] = %s, want %s", i, evt.Event, protocol.EventSessionUpdated)
+		}
+		var body protocol.SessionProjectionEventBody
+		if err := json.Unmarshal(evt.Body, &body); err != nil {
+			t.Fatalf("unmarshal session event body: %v", err)
+		}
+		if body.ProjectID != projectID {
+			t.Fatalf("event[%d] project = %s, want %s", i, body.ProjectID, projectID)
+		}
+		if body.Session.SessionID != sessionID {
+			t.Fatalf("event[%d] session = %s, want %s", i, body.Session.SessionID, sessionID)
+		}
+		if body.Session.State != wantStates[i] {
+			t.Fatalf("event[%d] state = %s, want %s", i, body.Session.State, wantStates[i])
+		}
+		if body.Revision != evt.Revision {
+			t.Fatalf("event[%d] body revision = %d, want envelope revision %d", i, body.Revision, evt.Revision)
+		}
+	}
+}
+
+func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
+	t.Helper()
+	events := make([]protocol.EventEnvelope, 0, count)
+	deadline := time.After(2 * time.Second)
+	for len(events) < count {
+		select {
+		case evt := <-ch:
+			events = append(events, evt)
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d session events, got %d", count, len(events))
+		}
+	}
+	return events
 }
 
 func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) {

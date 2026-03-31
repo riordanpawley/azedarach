@@ -484,8 +484,8 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			issueID = sessionIDInTmux
 		}
 		if !ok {
-			if _, err := d.sessionStore.UpsertSession(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
-				if _, err := d.sessionStore.UpsertSession(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
+			if _, err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
+				if _, err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
 				}
 			}
@@ -499,19 +499,31 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 
 		switch session.State {
 		case daemonstate.SessionStateStopped:
-			if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
-				if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
+			if _, err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
+				if _, err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
 				}
 			}
 		case daemonstate.SessionStateStarting:
-			if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
+			if _, err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 				result.AlignedDaemonSessions++
 			}
 		}
 	}
 
 	return result, nil
+}
+
+func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, state daemonstate.SessionState) (daemonstate.SessionEvent, error) {
+	if d.sessionStore == nil {
+		return daemonstate.SessionEvent{}, errors.New("session store unavailable")
+	}
+	event, err := d.sessionStore.UpsertSession(projectID, sessionID, issueID, state)
+	if err != nil {
+		return daemonstate.SessionEvent{}, err
+	}
+	d.publishSessionProjectionEvent(projectID, protocol.CurrentVersion, protocol.Metadata{ProjectID: projectID}, event.Session)
+	return event, nil
 }
 
 func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {

@@ -113,6 +113,56 @@ func TestOperationRuntimeSubmitGetListPublishesLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
+	runtime.gitHandler = daemonhandlers.NewGitHandler(runtimeGitService{})
+
+	payload := mustJSON(t, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
+	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-1",
+		Kind:      daemonhandlers.CommandGitMerge,
+		IssueID:   "/tmp/wt",
+		Payload:   payload,
+	})
+	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
+	defer cancel()
+
+	resp := runtime.Handle(context.Background(), submitReq)
+	if !resp.OK {
+		t.Fatalf("submit response = %+v", resp)
+	}
+	var submitBody protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &submitBody); err != nil {
+		t.Fatalf("unmarshal submit body: %v", err)
+	}
+	if submitBody.Operation.OperationID == "" {
+		t.Fatal("expected operation id")
+	}
+
+	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID, daemonops.StateDone)
+	if record.Kind != daemonhandlers.CommandGitMerge {
+		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMerge)
+	}
+
+	events := collectOperationEvents(t, ch, 3)
+	want := []string{protocol.EventOperationQueued, protocol.EventOperationRunning, protocol.EventOperationDone}
+	for i, event := range events {
+		if event.Event != want[i] {
+			t.Fatalf("event[%d] = %s, want %s", i, event.Event, want[i])
+		}
+		var body protocol.OperationEventBody
+		if err := json.Unmarshal(event.Body, &body); err != nil {
+			t.Fatalf("unmarshal event body: %v", err)
+		}
+		if body.Operation.OperationID != submitBody.Operation.OperationID {
+			t.Fatalf("event operation id = %s, want %s", body.Operation.OperationID, submitBody.Operation.OperationID)
+		}
+		if body.Operation.Kind != daemonhandlers.CommandGitMerge {
+			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMerge)
+		}
+	}
+}
+
 func TestOperationRuntimeCancelMarksRunningOperationCancelled(t *testing.T) {
 	blocked := make(chan struct{})
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
