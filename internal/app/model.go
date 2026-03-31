@@ -326,6 +326,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleSelection(msg)
 
+	case overlay.BulkActionMsg:
+		m.overlayStack.Pop()
+		return m.handleBulkAction(msg)
+
 	case overlay.SearchMsg:
 		m.editor.SetSearchQuery(msg.Query)
 		if current := m.overlayStack.Current(); current != nil {
@@ -1954,18 +1958,18 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch action {
 	// Navigation with selection toggle
 	case keybinds.ActionMoveDown:
-		// Toggle current task selection, then move down
+		// Keep current task selected, then move down.
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case keybinds.ActionMoveUp:
-		// Toggle current task selection, then move up
+		// Keep current task selected, then move up.
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
@@ -1985,7 +1989,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Half-page movement with selection toggle
 	case keybinds.ActionHalfPageDown:
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -1993,7 +1997,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionHalfPageUp:
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
