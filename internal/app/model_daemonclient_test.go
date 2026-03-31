@@ -537,6 +537,38 @@ func TestShouldAttemptDaemonReattach(t *testing.T) {
 	})
 }
 
+func TestShouldQueueDaemonReattach(t *testing.T) {
+	now := time.Now()
+	socketErr := errors.New("daemon command transport: dial unix /Users/riordan/.azedarach/run/daemon.sock: connect: no such file or directory")
+
+	t.Run("first transport failure", func(t *testing.T) {
+		if !shouldQueueDaemonReattach(time.Time{}, now, socketErr) {
+			t.Fatal("expected first transport error to queue reattach")
+		}
+	})
+
+	t.Run("within retry interval", func(t *testing.T) {
+		last := now.Add(-daemonReattachRetryInterval + time.Second)
+		if shouldQueueDaemonReattach(last, now, socketErr) {
+			t.Fatal("did not expect reattach within retry interval")
+		}
+	})
+
+	t.Run("after retry interval", func(t *testing.T) {
+		last := now.Add(-daemonReattachRetryInterval - time.Second)
+		if !shouldQueueDaemonReattach(last, now, socketErr) {
+			t.Fatal("expected reattach after retry interval")
+		}
+	})
+
+	t.Run("non transport error", func(t *testing.T) {
+		err := errors.New("failed to update task: invalid request")
+		if shouldQueueDaemonReattach(time.Time{}, now, err) {
+			t.Fatal("did not expect reattach for non-transport error")
+		}
+	})
+}
+
 func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
