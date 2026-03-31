@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -188,6 +189,11 @@ type OperationGetOptions struct {
 	JSON         bool
 	Wait         bool
 	PollInterval time.Duration
+}
+
+type OperationLogsOptions struct {
+	OperationID string
+	JSON        bool
 }
 
 type OperationListOptions struct {
@@ -546,6 +552,19 @@ func OperationGetCommand(deps *Dependencies, opts OperationGetOptions) error {
 	return printOperationRecord(record, opts.JSON)
 }
 
+func OperationLogsCommand(deps *Dependencies, opts OperationLogsOptions) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	record, err := deps.DaemonClient.GetOperation(ctx, opts.OperationID)
+	if err != nil {
+		return fmt.Errorf("failed to get operation: %w", err)
+	}
+	return printOperationLogs(record, opts.JSON)
+}
+
 func OperationListCommand(deps *Dependencies, opts OperationListOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -688,6 +707,30 @@ func ParseOperationGetArgs(args []string) (OperationGetOptions, error) {
 		}
 	} else if fs.NArg() != 0 {
 		return OperationGetOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	return opts, nil
+}
+
+func ParseOperationLogsArgs(args []string) (OperationLogsOptions, error) {
+	opts := OperationLogsOptions{}
+	fs := flag.NewFlagSet("operation logs", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "output operation logs as JSON")
+	fs.StringVar(&opts.OperationID, "id", "", "operation id")
+	if err := fs.Parse(args); err != nil {
+		return OperationLogsOptions{}, err
+	}
+	if opts.OperationID == "" {
+		switch fs.NArg() {
+		case 0:
+			return OperationLogsOptions{}, fmt.Errorf("operation id is required")
+		case 1:
+			opts.OperationID = fs.Arg(0)
+		default:
+			return OperationLogsOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(1))
+		}
+	} else if fs.NArg() != 0 {
+		return OperationLogsOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	return opts, nil
 }
@@ -3132,6 +3175,22 @@ func printOperationRecord(record protocol.OperationRecord, asJSON bool) error {
 	return printOperationList([]protocol.OperationRecord{record}, false)
 }
 
+func printOperationLogs(record protocol.OperationRecord, asJSON bool) error {
+	if asJSON {
+		return printJSON(record)
+	}
+	if err := printOperationRecord(record, false); err != nil {
+		return err
+	}
+	if payload := formatJSONBlock(record.Payload); payload != "" {
+		fmt.Printf("\nPayload:\n%s\n", payload)
+	}
+	if result := formatJSONBlock(record.Result); result != "" {
+		fmt.Printf("\nResult (raw JSON):\n%s\n", result)
+	}
+	return nil
+}
+
 func printOperationList(records []protocol.OperationRecord, asJSON bool) error {
 	if asJSON {
 		return printJSON(records)
@@ -3176,6 +3235,18 @@ func printJSON(v any) error {
 	}
 	fmt.Println(string(data))
 	return nil
+}
+
+func formatJSONBlock(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	var out bytes.Buffer
+	if err := json.Indent(&out, trimmed, "", "  "); err != nil {
+		return string(trimmed)
+	}
+	return out.String()
 }
 
 func parseOperationStates(values []string) ([]protocol.OperationState, error) {

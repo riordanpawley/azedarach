@@ -612,6 +612,14 @@ func TestOperationCommandsParseAndRender(t *testing.T) {
 		t.Fatalf("get opts = %+v", getOpts)
 	}
 
+	logsOpts, err := ParseOperationLogsArgs([]string{"--json", "op-1"})
+	if err != nil {
+		t.Fatalf("ParseOperationLogsArgs error: %v", err)
+	}
+	if logsOpts.OperationID != "op-1" || !logsOpts.JSON {
+		t.Fatalf("logs opts = %+v", logsOpts)
+	}
+
 	listOpts, err := ParseOperationListArgs([]string{"--issue", "az-1", "--kind", "session.start", "--state", "queued", "--states", "running", "--limit", "3"})
 	if err != nil {
 		t.Fatalf("ParseOperationListArgs error: %v", err)
@@ -641,7 +649,13 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 							OperationID: "op-1",
 							ProjectID:   "proj",
 							Kind:        "session.start",
-							State:       protocol.OperationStateRunning,
+							State:       protocol.OperationStateFailed,
+							Payload:     mustJSON(t, map[string]string{"project_id": "proj", "session_id": "az-1"}),
+							Result:      mustJSON(t, map[string]string{"output": "tmux attach failed"}),
+							Error: &protocol.OperationError{
+								Code:    protocol.ErrorCodeInternal,
+								Message: "tmux attach failed: exited 1",
+							},
 						},
 					}), nil
 				case protocol.CommandOperationList:
@@ -680,13 +694,16 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 		if err := OperationGetCommand(deps, OperationGetOptions{OperationID: "op-1"}); err != nil {
 			return err
 		}
+		if err := OperationLogsCommand(deps, OperationLogsOptions{OperationID: "op-1"}); err != nil {
+			return err
+		}
 		if err := OperationListCommand(deps, OperationListOptions{IssueID: "az-1", Limit: 5}); err != nil {
 			return err
 		}
 		return OperationCancelCommand(deps, OperationCancelOptions{OperationID: "op-1"})
 	})
 
-	for _, needle := range []string{"ID", "STATE", "KIND", "op-1", "running", "queued", "cancelled"} {
+	for _, needle := range []string{"ID", "STATE", "KIND", "op-1", "failed", "queued", "cancelled", "Payload:", "Result (raw JSON):", "tmux attach failed: exited 1"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("output = %q, want %q", output, needle)
 		}
@@ -3371,6 +3388,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "az operation cancel --id op-123") {
 		t.Fatalf("usage missing operation cancel example: %q", output)
+	}
+	if !strings.Contains(output, "az operation logs --id op-123") {
+		t.Fatalf("usage missing operation logs example: %q", output)
 	}
 	if !strings.Contains(output, "prime") {
 		t.Fatalf("usage missing prime command: %q", output)
