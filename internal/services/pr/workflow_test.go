@@ -201,8 +201,8 @@ func TestPRWorkflow_Create(t *testing.T) {
 			assert.Equal(t, tt.wantNumber, info.Number)
 			assert.Equal(t, tt.wantDraft, info.Draft)
 			assert.Equal(t, tt.params.Branch, info.Branch)
-			if tt.params.BeadID != "" && tt.params.Title != "" {
-				expectedBody := buildPRBody(tt.params.Body, tt.params.BeadID, tt.params.Title)
+			if tt.params.IssueID != "" && tt.params.Title != "" {
+				expectedBody := buildPRBody(tt.params.Body, tt.params.IssueID, tt.params.Title)
 				require.GreaterOrEqual(t, len(runner.calls), 1)
 				expectedArgs := []string{
 					"gh", "pr", "create",

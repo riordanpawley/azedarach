@@ -43,15 +43,15 @@ func NewPRWorkflow(runner CommandRunner, logger *slog.Logger) *PRWorkflow {
 	}
 }
 
-func buildPRBody(body, beadID, title string) string {
+func buildPRBody(body, issueID, title string) string {
 	body = strings.TrimSpace(body)
 	title = strings.TrimSpace(title)
 
-	if beadID == "" || title == "" {
+	if issueID == "" || title == "" {
 		return body
 	}
 
-	footer := fmt.Sprintf("Resolves %s: %s", beadID, title)
+	footer := fmt.Sprintf("Resolves %s: %s", issueID, title)
 	if body == "" {
 		return footer
 	}
@@ -73,7 +73,7 @@ func (w *PRWorkflow) Create(ctx context.Context, params CreatePRParams) (*PRInfo
 		"issue_id", params.IssueID,
 	)
 
-	body := buildPRBody(params.Body, params.BeadID, params.Title)
+	body := buildPRBody(params.Body, params.IssueID, params.Title)
 
 	args := []string{
 		"pr", "create",
