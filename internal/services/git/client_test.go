@@ -441,23 +441,26 @@ func TestDiffStatAgainstBaseBranchFallsBackToLocalChangesWhenMergeBaseFails(t *t
 	}
 }
 
-func TestMergeBaseDoesNotFallbackToOriginRef(t *testing.T) {
+func TestMergeBaseFallsBackToOriginRef(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
 				return "", fmt.Errorf("unknown revision")
 			}
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
-				t.Fatalf("unexpected origin fallback call: %v", args)
+				return "def456\n", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
 	}
 
 	client := NewClient(runner, slog.Default())
-	_, err := client.MergeBase(context.Background(), "/fake/worktree", "main")
-	if err == nil {
-		t.Fatal("MergeBase() error = nil, want merge-base failure")
+	mergeBase, err := client.MergeBase(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("MergeBase() error = %v", err)
+	}
+	if mergeBase != "def456" {
+		t.Fatalf("MergeBase() = %q, want def456", mergeBase)
 	}
 }
 

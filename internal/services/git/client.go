@@ -203,14 +203,21 @@ func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (st
 		return "", fmt.Errorf("base branch is empty")
 	}
 
+	candidates := []string{baseBranch}
+	if !strings.Contains(baseBranch, "/") {
+		candidates = append(candidates, "origin/"+baseBranch)
+	}
+
 	var lastErr error
-	mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", baseBranch, "HEAD")
-	if err != nil {
-		lastErr = err
-	} else {
+	for _, candidate := range candidates {
+		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
+		if err != nil {
+			lastErr = err
+			continue
+		}
 		mergeBase := strings.TrimSpace(mergeBaseOutput)
 		if mergeBase == "" {
-			mergeBase = baseBranch
+			mergeBase = candidate
 		}
 		return mergeBase, nil
 	}
