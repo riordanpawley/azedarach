@@ -27,7 +27,7 @@ Commands:
   issue check [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
   issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
   issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
-  issue update [--id <id>] [<id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
+  issue update [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   issue close [--id <id>] [<id>]      Close an issue (sets status=closed)
   issue delete [--id <id>] [<id>] --confirm  Permanently delete an issue
   issue dep add --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
@@ -63,6 +63,7 @@ Examples:
   az issue doctor --id az-123
   az issue create "New task" --impl go-bubbletea --type task --priority P2
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1 --update-impl go-bubbletea
+  az issue update --id az-123 --append-notes "Follow-up detail"
   az issue close --id az-123
   az issue delete --id az-123 --confirm
   az issue dep add --issue-id az-456 --depends-on-id az-123 --type blocks

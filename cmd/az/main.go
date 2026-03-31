@@ -407,7 +407,7 @@ func main() {
 		case "update":
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

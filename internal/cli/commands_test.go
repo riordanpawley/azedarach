@@ -1418,6 +1418,14 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			}(),
 		},
 		{
+			name: "append notes",
+			args: []string{"--append-notes", "Follow-up", "az-1"},
+			want: IssueUpdateOptions{
+				IssueID:     "az-1",
+				AppendNotes: "Follow-up",
+			},
+		},
+		{
 			name:        "forbid impl",
 			args:        []string{"--impl", "go-bubbletea", "--title", "Renamed", "az-1"},
 			errContains: "--impl is not supported for issue update",
@@ -1453,7 +1461,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueUpdateArgs() error = %v", err)
 			}
-			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description {
+			if got.IssueID != tt.want.IssueID || got.Title != tt.want.Title || got.Description != tt.want.Description || got.AppendNotes != tt.want.AppendNotes {
 				t.Fatalf("ParseIssueUpdateArgs() = %+v, want %+v", got, tt.want)
 			}
 			if (got.Type == nil) != (tt.want.Type == nil) {
@@ -2620,6 +2628,78 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	})
 	if gotUpdateReq.Command != daemonclient.CommandTaskUpdate {
 		t.Fatalf("update command = %q, want %q", gotUpdateReq.Command, daemonclient.CommandTaskUpdate)
+	}
+	if !strings.Contains(updateOut, "Updated issue: az-1") {
+		t.Fatalf("update output = %q", updateOut)
+	}
+}
+
+func TestIssueUpdateCommandAppendsNotesWhenRequested(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	var gotAppendReq protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{
+						{
+							ID:          "az-1",
+							Title:       "Old",
+							Description: "OldDesc",
+							Type:        domain.TypeTask,
+							Priority:    domain.P2,
+							Status:      domain.StatusOpen,
+							CreatedAt:   now,
+							UpdatedAt:   now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskAppendNotes:
+					gotAppendReq = req
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	updateOut := captureStdout(t, func() error {
+		return IssueUpdateCommand(deps, IssueUpdateOptions{
+			IssueID:     "az-1",
+			AppendNotes: "Follow-up detail",
+		})
+	})
+	if gotAppendReq.Command != daemonclient.CommandTaskAppendNotes {
+		t.Fatalf("append command = %q, want %q", gotAppendReq.Command, daemonclient.CommandTaskAppendNotes)
+	}
+	var appendBody daemonclient.TaskAppendNotesRequest
+	if err := json.Unmarshal(gotAppendReq.Body, &appendBody); err != nil {
+		t.Fatalf("unmarshal append body: %v", err)
+	}
+	if appendBody.TaskID != "az-1" || appendBody.Line != "Follow-up detail" {
+		t.Fatalf("append body = %+v", appendBody)
 	}
 	if !strings.Contains(updateOut, "Updated issue: az-1") {
 		t.Fatalf("update output = %q", updateOut)

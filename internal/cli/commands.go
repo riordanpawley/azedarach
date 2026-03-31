@@ -118,6 +118,7 @@ type IssueUpdateOptions struct {
 	IssueID     string
 	Title       string
 	Description string
+	AppendNotes string
 	Type        *domain.TaskType
 	Priority    *domain.Priority
 	Status      *domain.Status
@@ -794,6 +795,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&opts.Title, "title", "", "updated issue title")
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
+	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|blocked|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
@@ -810,7 +812,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update; use --update-impl to change issue implementations")
@@ -822,7 +824,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -845,8 +847,11 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		}
 		opts.Status = &status
 	}
+	if strings.TrimSpace(opts.AppendNotes) == "" {
+		opts.AppendNotes = ""
+	}
 	opts.UpdateImpls = dedupeOrderedIDs(updateImpls)
-	if opts.Title == "" && opts.Description == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
+	if opts.Title == "" && opts.Description == "" && opts.AppendNotes == "" && opts.Type == nil && opts.Priority == nil && opts.Status == nil && len(opts.UpdateImpls) == 0 {
 		return IssueUpdateOptions{}, fmt.Errorf("no update fields provided")
 	}
 	return opts, nil
@@ -1593,6 +1598,11 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	if opts.Status != nil {
 		if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, *opts.Status); err != nil {
 			return fmt.Errorf("failed to set status for issue %s: %w", opts.IssueID, err)
+		}
+	}
+	if opts.AppendNotes != "" {
+		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, opts.AppendNotes); err != nil {
+			return fmt.Errorf("failed to append notes for issue %s: %w", opts.IssueID, err)
 		}
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
