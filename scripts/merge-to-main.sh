@@ -40,7 +40,7 @@ if [[ -z "${main_worktree}" ]]; then
 	else
 		echo "ERROR: no worktree has branch 'main' checked out."
 		echo "NEXT:"
-		echo "1. create or switch a worktree to main"
+		echo "1. create a main worktree, for example: git worktree add ../azedarach-main main"
 		echo "2. verify with: git worktree list"
 		echo "3. rerun: just mtm ${source_branch} ${session_id}"
 		exit 2
@@ -67,8 +67,9 @@ if git -C "${main_worktree}" rev-parse -q --verify MERGE_HEAD >/dev/null; then
 	echo "NEXT:"
 	echo "1. cd '${main_worktree}'"
 	echo "2. git status --short"
-	echo "3. resolve and commit, or abort with: git merge --abort"
-	echo "4. rerun: just mtm ${source_branch} ${session_id}"
+	echo "3. resolve and commit that merge, or abort with: git merge --abort"
+	echo "4. if committed, run: az session kill ${session_id} (no need to rerun mtm)"
+	echo "5. if aborted, rerun: just mtm ${source_branch} ${session_id}"
 	exit 2
 fi
 
@@ -95,7 +96,8 @@ if [[ ${merge_code} -ne 0 ]]; then
 	echo "2. git status --short"
 	echo "3. resolve conflicts and git add resolved files"
 	echo "4. git commit to finish the merge"
-	echo "5. rerun: just mtm ${source_branch} ${session_id}"
+	echo "5. az session kill ${session_id}"
+	echo "6. verify cleanliness with: git status --short"
 	exit "${merge_code}"
 fi
 
@@ -105,7 +107,7 @@ if [[ -n "$(git -C "${main_worktree}" status --porcelain)" ]]; then
 	echo "1. cd '${main_worktree}'"
 	echo "2. git status --short"
 	echo "3. commit or stash the remaining changes until status is clean"
-	echo "4. rerun: just mtm ${source_branch} ${session_id}"
+	echo "4. run: az session kill ${session_id}"
 	exit 2
 fi
 
@@ -123,9 +125,9 @@ if [[ ${kill_code} -ne 0 ]]; then
 	echo "ERROR: failed to kill session '${session_id}'."
 	echo "NEXT:"
 	echo "1. cd '${main_worktree}'"
-	echo "2. az session kill ${session_id}"
-	echo "3. fix the reported session error"
-	echo "4. rerun: just mtm ${source_branch} ${session_id}"
+	echo "2. az session list | rg '${session_id}' || true"
+	echo "3. if it still exists, rerun: az session kill ${session_id}"
+	echo "4. if it does not exist, stop here (merge already succeeded and main is clean)"
 	exit "${kill_code}"
 fi
 
