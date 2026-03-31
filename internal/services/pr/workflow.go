@@ -43,6 +43,26 @@ func NewPRWorkflow(runner CommandRunner, logger *slog.Logger) *PRWorkflow {
 	}
 }
 
+func buildPRBody(body, beadID, title string) string {
+	body = strings.TrimSpace(body)
+	title = strings.TrimSpace(title)
+
+	if beadID == "" || title == "" {
+		return body
+	}
+
+	footer := fmt.Sprintf("Resolves %s: %s", beadID, title)
+	if body == "" {
+		return footer
+	}
+
+	if strings.HasSuffix(body, footer) {
+		return body
+	}
+
+	return body + "\n\n" + footer
+}
+
 // Create creates a new pull request via gh pr create
 func (w *PRWorkflow) Create(ctx context.Context, params CreatePRParams) (*PRInfo, error) {
 	w.logger.Debug("creating PR",
@@ -53,10 +73,12 @@ func (w *PRWorkflow) Create(ctx context.Context, params CreatePRParams) (*PRInfo
 		"issue_id", params.IssueID,
 	)
 
+	body := buildPRBody(params.Body, params.BeadID, params.Title)
+
 	args := []string{
 		"pr", "create",
 		"--title", params.Title,
-		"--body", params.Body,
+		"--body", body,
 		"--head", params.Branch,
 		"--base", params.BaseBranch,
 	}
