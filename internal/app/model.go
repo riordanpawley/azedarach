@@ -2530,7 +2530,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				refreshSucceeded = false
 			}
 
-			if m.isOnline {
+			if m.shouldCompareAgainstRemote() {
 				behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
 					Worktree:   worktreePath,
 					BaseBranch: baseBranch,
@@ -2581,6 +2581,10 @@ func hasActiveTmuxSession(task domain.Task) bool {
 		return true
 	}
 	return task.HasTmuxSession
+}
+
+func (m Model) shouldCompareAgainstRemote() bool {
+	return m.isOnline && strings.EqualFold(strings.TrimSpace(m.config.Git.WorkflowMode), "origin")
 }
 
 func (m Model) shouldUseCachedRuntimeSignals(task domain.Task, worktreePath string, now time.Time) bool {

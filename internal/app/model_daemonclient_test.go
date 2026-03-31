@@ -3973,6 +3973,86 @@ func TestRefreshRuntimeSignalsCmdDoesNotMarkFailedRefreshAsFresh(t *testing.T) {
 	}
 }
 
+func TestRefreshRuntimeSignalsCmdSkipsRemoteBehindCheckInLocalWorkflowMode(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				body, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandGitStatus:
+				body, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+				if err != nil {
+					t.Fatalf("marshal git status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandGitDiffStat:
+				body, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: ""})
+				if err != nil {
+					t.Fatalf("marshal diff stat response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			case daemonclient.CommandGitBranchBehind:
+				t.Fatal("unexpected remote branch-behind request in local workflow mode")
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.isOnline = true
+	m.config.Git.WorkflowMode = "local"
+	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+	})()
+	if _, ok := msg.(runtimeSignalsLoadedMsg); !ok {
+		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
+	}
+}
+
 func TestRefreshRuntimeSignalsCmdClearsStaleTmuxSessionFlag(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
