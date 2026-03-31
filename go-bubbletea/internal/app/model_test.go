@@ -232,6 +232,17 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
+func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
+	m := newTestModel()
+	m.repoDir = "/tmp/worktree"
+
+	got := m.daemonLogFilePath()
+	want := filepath.Join("/tmp/worktree", ".azedarach", "daemon.log")
+	if got != want {
+		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
+	}
+}
+
 func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
 	m := newTestModel()
 	probe := &probeOverlay{}
