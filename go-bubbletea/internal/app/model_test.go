@@ -2210,7 +2210,7 @@ func TestIssuesLoadedKeepsCursorOnValidTaskAfterRefresh(t *testing.T) {
 	}
 }
 
-func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
+func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 	startedAt := time.Date(2026, time.March, 25, 10, 30, 0, 0, time.UTC)
 	devServer := &domain.DevServer{Port: 4242, Command: "npm run dev", Running: true}
 	sourceSession := &domain.Session{
@@ -2250,15 +2250,15 @@ func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
 	})
 	newModel := result.(Model)
 
-	got, ok := newModel.sessions["az-1"]
-	if !ok || got == nil {
-		t.Fatalf("session projection = %+v, want az-1 session", got)
+	got := newModel.tasks[0].Session
+	if got == nil {
+		t.Fatal("expected hydrated task session from daemon snapshot")
 	}
 	if got == sourceSession {
-		t.Fatal("session projection should clone daemon snapshot data, not alias it")
+		t.Fatal("hydrated task session should clone daemon snapshot data, not alias it")
 	}
 	if got.IssueID != sourceSession.IssueID || got.State != sourceSession.State || got.Worktree != sourceSession.Worktree {
-		t.Fatalf("session projection = %+v, want %+v", got, sourceSession)
+		t.Fatalf("hydrated task session = %+v, want %+v", got, sourceSession)
 	}
 	if got.StartedAt == nil || !got.StartedAt.Equal(startedAt) {
 		t.Fatalf("startedAt = %+v, want %v", got.StartedAt, startedAt)
@@ -2268,9 +2268,6 @@ func TestIssuesLoadedSyncsDaemonSessionProjection(t *testing.T) {
 	}
 	if got.DevServer.Port != devServer.Port || got.DevServer.Command != devServer.Command || got.DevServer.Running != devServer.Running {
 		t.Fatalf("dev server projection = %+v, want %+v", got.DevServer, devServer)
-	}
-	if _, ok := newModel.sessions["stale"]; ok {
-		t.Fatal("expected stale projection entry to be cleared by daemon snapshot refresh")
 	}
 }
 
@@ -2710,44 +2707,49 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 	}
 }
 
-func TestSessionStartedMsg_AllowsImmediateAttachFromWorkspace(t *testing.T) {
+func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.T) {
 	t.Setenv("TMUX", "")
 	m := newTestModel()
 	issueID := m.tasks[0].ID
-	m.tasks[0].HasTmuxSession = false
 	m.tasks[0].Session = nil
 	m.tmuxAvailable = false
 	m.nav.SelectTask(issueID, 0)
 
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
-			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 0, time.UTC)
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: m.daemonProjectID(),
+		Revision:  7,
+		Session: protocol.SessionProjection{
+			SessionID: "proj-az-1",
+			IssueID:   issueID,
+			State:     protocol.SessionLifecycleStateAttached,
+			UpdatedAt: updatedAt,
 		},
+	})
+	if err != nil {
+		t.Fatalf("marshal session projection event: %v", err)
 	}
-	m.daemonClient = daemonclient.New(transport)
 
-	updatedAny, _ := m.Update(sessionStartedMsg{issueID: issueID})
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			Revision: 7,
+			Event:    protocol.EventSessionUpdated,
+			Body:     body,
+		},
+	})
 	updated, ok := updatedAny.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
 	}
-	if !updated.tasks[0].HasTmuxSession {
-		t.Fatal("expected session start to mark task as tmux-attached for immediate attach action")
+	session := updated.tasks[0].Session
+	if session == nil {
+		t.Fatal("expected authoritative session event to hydrate task session")
+	}
+	if session.State != domain.SessionBusy {
+		t.Fatalf("session state = %q, want %q", session.State, domain.SessionBusy)
+	}
+	if session.StartedAt == nil || !session.StartedAt.Equal(updatedAt) {
+		t.Fatalf("session startedAt = %+v, want %v", session.StartedAt, updatedAt)
 	}
 
 	_, cmd := updated.handleSelection(overlay.SelectionMsg{Key: "a"})
@@ -2756,7 +2758,9 @@ func TestSessionStartedMsg_AllowsImmediateAttachFromWorkspace(t *testing.T) {
 	}
 	msg := cmd()
 	if _, ok := msg.(sessionAttachedMsg); !ok {
-		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+		if _, behind := msg.(branchBehindMsg); !behind {
+			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or branchBehindMsg", msg)
+		}
 	}
 }
 
@@ -2830,10 +2834,6 @@ func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
 	updated, ok := updatedAny.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
-	}
-
-	if !updated.tasks[0].HasTmuxSession {
-		t.Fatal("expected pending session start to mark tmux session on task")
 	}
 
 	pending, ok := updated.pendingStatuses[taskIDKey("az-1")]

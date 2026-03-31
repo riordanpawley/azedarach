@@ -319,7 +319,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Key == "merge_attach" {
 			m.overlayStack.Pop()
 			issueID := msg.Value.(string)
-			session := m.sessions[issueID]
+			session := m.sessionForIssue(issueID)
+			if session == nil {
+				return m, nil
+			}
 			return m, m.fetchAndMergeCmd(session.Worktree, m.config.Git.BaseBranch, issueID, true)
 		}
 		if msg.Key == "skip_attach" {
@@ -364,6 +367,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		for i := range m.tasks {
+			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		}
 		m.applyPendingStatusOverlays()
 		m.applyRuntimeSignals()
 		m.reconcilePendingStatuses()
@@ -514,10 +520,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case daemonStreamEventMsg:
-		if m.daemonEvents == nil {
-			return m, nil
-		}
 		m.recordRuntimeEvent(msg.event)
+		if msg.event.Event == protocol.EventSessionUpdated {
+			m.applySessionProjectionEvent(msg.event)
+		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
@@ -770,7 +776,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
-		m.sessions = m.projectSessionProjection(tasks)
+		for i := range m.tasks {
+			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		}
 		m.editor.ReconcileSelection(tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
@@ -1068,7 +1076,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		if msg.newStatus == domain.StatusDone {
-			if session, ok := m.sessions[msg.taskID]; ok {
+			if session := m.sessionForIssue(msg.taskID); session != nil {
 				return m, tea.Batch(
 					m.loadIssuesCmd(),
 					m.openPROverlayCmd(session.Worktree, msg.taskID),
@@ -2649,6 +2657,61 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 	}
 }
 
+func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
+	if evt.Event != protocol.EventSessionUpdated {
+		return
+	}
+
+	var body protocol.SessionProjectionEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("decode session projection event failed", "event", evt.Event, "revision", evt.Revision, "error", err)
+		}
+		return
+	}
+
+	issueID := strings.TrimSpace(body.Session.IssueID)
+	if issueID == "" {
+		return
+	}
+
+	nextState, hasSession := projectSessionLifecycleState(body.Session.State)
+	updatedAt := body.Session.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	for i := range m.tasks {
+		if m.tasks[i].ID != issueID {
+			continue
+		}
+
+		if !hasSession {
+			m.tasks[i].Session = nil
+			m.tasks[i].HasTmuxSession = false
+			m.reconcilePendingStatuses()
+			m.syncTaskWorkspaceOverlay()
+			return
+		}
+
+		next := cloneSession(m.tasks[i].Session)
+		if next == nil {
+			next = &domain.Session{IssueID: issueID}
+		}
+		next.IssueID = issueID
+		next.State = nextState
+		if next.StartedAt == nil {
+			startedAt := updatedAt
+			next.StartedAt = &startedAt
+		}
+		m.tasks[i].Session = next
+		m.tasks[i].HasTmuxSession = true
+		m.reconcilePendingStatuses()
+		m.syncTaskWorkspaceOverlay()
+		return
+	}
+}
+
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
 	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 	switch cursor.Decide(evt) {
@@ -2984,17 +3047,6 @@ func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 	}
 }
 
-func (m Model) projectSessionProjection(tasks []domain.Task) map[string]*domain.Session {
-	sessions := make(map[string]*domain.Session)
-	for _, task := range tasks {
-		if task.Session == nil {
-			continue
-		}
-		sessions[task.ID] = cloneSession(task.Session)
-	}
-	return sessions
-}
-
 func cloneSession(session *domain.Session) *domain.Session {
 	if session == nil {
 		return nil
@@ -3010,6 +3062,19 @@ func cloneSession(session *domain.Session) *domain.Session {
 		cloned.DevServer = &devServer
 	}
 	return &cloned
+}
+
+func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.SessionState, bool) {
+	switch state {
+	case protocol.SessionLifecycleStateStarting, protocol.SessionLifecycleStateAttached:
+		return domain.SessionBusy, true
+	case protocol.SessionLifecycleStatePaused:
+		return domain.SessionPaused, true
+	case protocol.SessionLifecycleStateStopped:
+		return "", false
+	default:
+		return domain.SessionBusy, true
+	}
 }
 
 // Helper methods
@@ -3067,11 +3132,7 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	for i := range m.tasks {
 		if m.tasks[i].ID == cursor.TaskID {
 			task := m.tasks[i]
-			session := task.Session
-			if session == nil {
-				session = m.sessions[task.ID]
-			}
-			return &task, session
+			return &task, task.Session
 		}
 	}
 	return nil, nil
@@ -3711,7 +3772,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool) tea.Cmd {
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if session, ok := m.sessions[taskID]; ok && session != nil {
+		if session := m.sessionForIssue(taskID); session != nil {
 			m.sessionMonitor.Stop(taskID)
 			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
 				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
@@ -4664,9 +4725,6 @@ func (m Model) sessionForIssue(issueID string) *domain.Session {
 	if issueID == "" {
 		return nil
 	}
-	if session, ok := m.sessions[issueID]; ok && session != nil {
-		return session
-	}
 	for i := range m.tasks {
 		if m.tasks[i].ID == issueID && m.tasks[i].Session != nil {
 			return m.tasks[i].Session
@@ -4704,9 +4762,7 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 				return
 			}
 			hasWorktree := false
-			if session, ok := m.sessions[task.ID]; ok && session != nil && session.Worktree != "" {
-				hasWorktree = true
-			} else if task.Session != nil && task.Session.Worktree != "" {
+			if task.Session != nil && task.Session.Worktree != "" {
 				hasWorktree = true
 			} else if task.HasWorktree {
 				hasWorktree = true
@@ -5201,11 +5257,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 		return
 	}
 
-	session := task.Session
-	if session == nil {
-		session = m.sessions[taskID]
-	}
-	workspace.SyncTask(*task, session, m.tasks, m.pendingMutationForTask(taskID))
+	workspace.SyncTask(*task, task.Session, m.tasks, m.pendingMutationForTask(taskID))
 }
 
 func (m *Model) applyPendingStatusOverlays() {
@@ -5706,7 +5758,7 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 		}
 
 		// Check if task has an active session (and thus a worktree)
-		_, hasSession := m.sessions[task.ID]
+		hasSession := task.Session != nil
 
 		candidates = append(candidates, overlay.MergeTarget{
 			ID:          task.ID,

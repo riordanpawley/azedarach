@@ -95,6 +95,19 @@ func newDaemonTestModel(transport *recordingDaemonTransport) Model {
 	return m
 }
 
+func setTaskSession(t *testing.T, m *Model, issueID string, session *domain.Session) {
+	t.Helper()
+	for i := range m.tasks {
+		if m.tasks[i].ID != issueID {
+			continue
+		}
+		m.tasks[i].Session = cloneSession(session)
+		m.tasks[i].HasTmuxSession = session != nil
+		return
+	}
+	t.Fatalf("task %q not found", issueID)
+}
+
 func TestTaskCommandsUseDaemonClient(t *testing.T) {
 	t.Run("load", func(t *testing.T) {
 		transport := &recordingDaemonTransport{
@@ -802,11 +815,11 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
-	m.sessions["az-1"] = &domain.Session{
+	setTaskSession(t, &m, "az-1", &domain.Session{
 		IssueID:  "az-1",
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/az-1",
-	}
+	})
 	m.config.Git.BaseBranch = "main"
 
 	updated, cmd := m.Update(overlay.SelectionMsg{
@@ -985,8 +998,8 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 			Type:   domain.TypeEpic,
 		},
 	}
-	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"}
-	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1143,8 +1156,8 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 					Type:   domain.TypeEpic,
 				},
 			}
-			m.sessions[childID] = &domain.Session{IssueID: childID, State: tt.state, Worktree: "/tmp/child"}
-			m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+			setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: tt.state, Worktree: "/tmp/child"})
+			setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
 			m.nav.SelectTask(childID, 1)
 
 			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1322,8 +1335,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 			Type:   domain.TypeEpic,
 		},
 	}
-	// Simulate stale projection: m.sessions map does not yet contain hydrated sessions.
-	m.sessions = map[string]*domain.Session{}
+	// Simulate stale projection by leaving task sessions nil and forcing daemon snapshot fallback.
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1611,8 +1623,8 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 		{ID: childID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentID},
 		{ID: parentID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
 	}
-	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"}
-	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
@@ -1733,7 +1745,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 			Type:   domain.TypeTask,
 		},
 	}
-	m.sessions[issueID] = &domain.Session{IssueID: issueID, State: domain.SessionPaused, Worktree: "/tmp/az-top"}
+	setTaskSession(t, &m, issueID, &domain.Session{IssueID: issueID, State: domain.SessionPaused, Worktree: "/tmp/az-top"})
 	m.nav.SelectTask(issueID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1987,11 +1999,11 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		m.tasks = []domain.Task{
 			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
 		}
-		m.sessions["az-1"] = &domain.Session{
+		setTaskSession(t, &m, "az-1", &domain.Session{
 			IssueID:  "az-1",
 			State:    domain.SessionBusy,
 			Worktree: "/tmp/az-1",
-		}
+		})
 		m.nav.SelectTask("az-1", 1)
 
 		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
@@ -2042,11 +2054,11 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		m.tasks = []domain.Task{
 			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
 		}
-		m.sessions["az-1"] = &domain.Session{
+		setTaskSession(t, &m, "az-1", &domain.Session{
 			IssueID:  "az-1",
 			State:    domain.SessionBusy,
 			Worktree: "/tmp/az-1",
-		}
+		})
 		m.nav.SelectTask("az-1", 1)
 
 		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "W"})
@@ -2585,11 +2597,11 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 			Type:   domain.TypeTask,
 		},
 	}
-	m.sessions[parentID] = &domain.Session{
+	setTaskSession(t, &m, parentID, &domain.Session{
 		IssueID:  parentID,
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent",
-	}
+	})
 
 	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
 	if upstreamCount != 1 {
@@ -2684,16 +2696,16 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 			Type:   domain.TypeTask,
 		},
 	}
-	m.sessions[parentA] = &domain.Session{
+	setTaskSession(t, &m, parentA, &domain.Session{
 		IssueID:  parentA,
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent-a",
-	}
-	m.sessions[parentB] = &domain.Session{
+	})
+	setTaskSession(t, &m, parentB, &domain.Session{
 		IssueID:  parentB,
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent-b",
-	}
+	})
 	m.nav.SelectTask(childID, 0)
 
 	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
