@@ -130,6 +130,7 @@ type Model struct {
 	pendingStatuses  map[string]pendingTaskStatus
 	operationTaskID  map[string]string
 	pendingOpsByTask map[string]pendingOperationProgress
+	pendingCleanup   *pendingWorktreeCleanupConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -1068,6 +1069,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case worktreeCleanupResultMsg:
+		if msg.needsForce {
+			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
+				taskID:      msg.taskID,
+				deletedTask: msg.deletedTask,
+			}
+			action := "cleanup worktree"
+			if msg.deletedTask {
+				action = "delete task and cleanup worktree"
+			}
+			confirm := overlay.NewConfirmDialog(
+				"Force worktree cleanup?",
+				fmt.Sprintf("Worktree has local changes.\n\nAction: %s\nTask: %s\n\nDetails: %s\n\nForce removal will discard modified/untracked files.\nProceed?", action, msg.taskID, msg.reason),
+			)
+			return m, m.openOverlay(confirm)
+		}
+		m.pendingCleanup = nil
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -3554,6 +3571,22 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Close the overlay first
 	m.overlayStack.Pop()
 
+	if msg.Key == "yes" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		m.pendingCleanup = nil
+		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, true)
+	}
+	if msg.Key == "no" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		m.pendingCleanup = nil
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled forced cleanup for %s", pending.taskID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
 	task, session := m.getCurrentTaskAndSession()
 	if task == nil {
 		return m, nil
@@ -3708,10 +3741,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
-		return m, m.cleanupWorktreeCmd(task.ID, false)
+		return m, m.cleanupWorktreeCmd(task.ID, false, false)
 	case "W":
 		// Delete task and cleanup worktree.
-		return m, m.cleanupWorktreeCmd(task.ID, true)
+		return m, m.cleanupWorktreeCmd(task.ID, true, false)
 
 	case "i":
 		// Image attachments
@@ -4009,7 +4042,15 @@ type taskDeletedResultMsg struct {
 type worktreeCleanupResultMsg struct {
 	taskID      string
 	deletedTask bool
+	force       bool
+	needsForce  bool
+	reason      string
 	err         error
+}
+
+type pendingWorktreeCleanupConfirmation struct {
+	taskID      string
+	deletedTask bool
 }
 
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
@@ -4026,34 +4067,72 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 	}
 }
 
-func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool) tea.Cmd {
+func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if m.daemonClient == nil {
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: fmt.Errorf("daemon client unavailable")}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		if session := m.sessionForIssue(taskID); session != nil {
 			m.sessionMonitor.Stop(taskID)
 			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
+				if force && isSessionAlreadyStoppedError(err) {
+					// Force-retry path may re-enter before projections clear the stale session.
+					// If daemon already stopped it, continue to worktree removal.
+				} else {
+					return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+				}
 			}
 		}
 
-		if err := m.daemonClient.RemoveWorktree(ctx, taskID); err != nil {
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
+		if err := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, force); err != nil {
+			if !force && isDirtyWorktreeRemovalError(err) {
+				return worktreeCleanupResultMsg{
+					taskID:      taskID,
+					deletedTask: deleteTask,
+					force:       force,
+					needsForce:  true,
+					reason:      strings.TrimSpace(err.Error()),
+				}
+			}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
 		}
 
 		if deleteTask {
 			if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, err: err}
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
 			}
 		}
 
-		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask}
+		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force}
 	}
+}
+
+func isDirtyWorktreeRemovalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "contains modified or untracked files") ||
+		strings.Contains(message, "use --force to delete it")
+}
+
+func isSessionAlreadyStoppedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) && cmdErr.Code == protocol.ErrorCodeInvalidRequest {
+		message := strings.ToLower(strings.TrimSpace(cmdErr.Message))
+		return strings.Contains(message, "no active session found") ||
+			strings.Contains(message, "session not found")
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "no active session found") ||
+		strings.Contains(message, "session not found")
 }
 
 // NOTE: clampTaskIndex and clampTaskIndexForColumn have been removed.

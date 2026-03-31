@@ -752,6 +752,16 @@ func operationProgressForState(state daemonops.State, kind string) protocol.Oper
 		progress.Current = 50
 		progress.Total = 100
 		progress.Percent = 50
+	case daemonops.StateFailed:
+		progress.Message = "failed " + strings.TrimSpace(kind)
+		progress.Current = 100
+		progress.Total = 100
+		progress.Percent = 100
+	case daemonops.StateCancelled:
+		progress.Message = "cancelled " + strings.TrimSpace(kind)
+		progress.Current = 100
+		progress.Total = 100
+		progress.Percent = 100
 	default:
 		progress.Message = "completed " + strings.TrimSpace(kind)
 		progress.Current = 100

@@ -185,6 +185,41 @@ branch refs/heads/az/issue-123
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
+func TestWorktreeManager_DeleteWithOptions_UsesForceWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	err := manager.DeleteWithOptions(ctx, issueID, true)
+
+	require.NoError(t, err)
+	mock.AssertCommand(t, "worktree remove --force /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
 func TestWorktreeManager_Delete_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"

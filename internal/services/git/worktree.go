@@ -97,6 +97,11 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 
 // Delete removes the worktree and branch for the given issue ID.
 func (w *WorktreeManager) Delete(ctx context.Context, issueID string) error {
+	return w.DeleteWithOptions(ctx, issueID, false)
+}
+
+// DeleteWithOptions removes the worktree and branch for the given issue ID.
+func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string, force bool) error {
 	w.logger.Info("deleting worktree", "issueID", issueID)
 
 	// Get worktree info to find the path
@@ -106,8 +111,13 @@ func (w *WorktreeManager) Delete(ctx context.Context, issueID string) error {
 	}
 
 	// Remove worktree
-	// git worktree remove <path>
-	_, err = w.runner.Run(ctx, "worktree", "remove", worktree.Path)
+	// git worktree remove [--force] <path>
+	removeArgs := []string{"worktree", "remove"}
+	if force {
+		removeArgs = append(removeArgs, "--force")
+	}
+	removeArgs = append(removeArgs, worktree.Path)
+	_, err = w.runner.Run(ctx, removeArgs...)
 	if err != nil {
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
