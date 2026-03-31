@@ -7,13 +7,13 @@ usage() {
 Cut a Go release and update Homebrew formula in one command.
 
 Usage:
-  release-homebrew.sh (--patch|--minor|--major) --tap-dir <path> [options] [-- <release-script-args...>]
+  release-homebrew.sh (--patch|--minor|--major) [--tap-dir <path>] [options] [-- <release-script-args...>]
 
 Options:
   --patch                    Bump patch version (required exactly one bump flag)
   --minor                    Bump minor version
   --major                    Bump major version
-  --tap-dir <path>           Local clone of homebrew tap repo (required)
+  --tap-dir <path>           Local clone of homebrew tap repo (default: ../homebrew-azedarach)
   --repo <owner/repo>        GitHub release repo (default: riordanpawley/azedarach)
   --formula <path>           Formula path inside tap repo (default: Formula/azedarach.rb)
   --max-wait-seconds <n>     Max wait for release assets (default: 600)
@@ -23,6 +23,7 @@ Options:
   -h, --help                 Show help
 
 Examples:
+  ./scripts/release-homebrew.sh --patch
   ./scripts/release-homebrew.sh --patch --tap-dir /Users/me/prog/homebrew-azedarach
   ./scripts/release-homebrew.sh --minor --tap-dir /Users/me/prog/homebrew-azedarach -- --skip-checks
 EOF
@@ -116,14 +117,21 @@ if [[ -z "$RELEASE_TARGET" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_TAP_DIR="$REPO_ROOT/../homebrew-azedarach"
+
 if [[ -z "$TAP_DIR" ]]; then
-  echo "--tap-dir is required" >&2
-  usage
+  TAP_DIR="$DEFAULT_TAP_DIR"
+  echo "==> --tap-dir not provided; using default: $TAP_DIR"
+fi
+
+if [[ ! -d "$TAP_DIR" ]]; then
+  echo "Tap directory does not exist: $TAP_DIR" >&2
+  echo "Provide --tap-dir <path> to override default ../homebrew-azedarach" >&2
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TAP_DIR_ABS="$(cd "$TAP_DIR" && pwd)"
 FORMULA_OUTPUT="$TAP_DIR_ABS/$FORMULA_PATH"
 
