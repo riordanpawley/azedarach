@@ -364,7 +364,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesLoadedMsg:
-		if msg.refreshSeq < m.issueRefreshSeq {
+		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
 			return m, nil
 		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
@@ -454,7 +454,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesErrorMsg:
-		if msg.refreshSeq < m.issueRefreshSeq {
+		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
 			return m, nil
 		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {

@@ -643,6 +643,29 @@ func TestIssuesLoadedMsg_IgnoresStaleRefreshSequence(t *testing.T) {
 	}
 }
 
+func TestIssuesLoadedMsg_AcceptsUnsequencedDaemonReattachSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.loading = true
+	m.issueRefreshSeq = 5
+
+	next, _ := m.Update(issuesLoadedMsg{
+		refreshSeq: 0, // attachDaemonCmd/rehydrate path
+		projectID:  m.daemonProjectID(),
+		tasks: []domain.Task{
+			{ID: "rehydrated-1", Title: "Rehydrated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 42,
+	})
+
+	updated := next.(Model)
+	if len(updated.tasks) != 1 || updated.tasks[0].ID != "rehydrated-1" {
+		t.Fatalf("tasks = %+v, want unsequenced reattach snapshot applied", updated.tasks)
+	}
+	if updated.daemonRevision != 42 {
+		t.Fatalf("daemonRevision = %d, want 42", updated.daemonRevision)
+	}
+}
+
 func TestEscClearsFiltersInNormalMode(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
