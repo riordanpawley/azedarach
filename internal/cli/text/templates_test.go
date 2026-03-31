@@ -12,8 +12,8 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"get [--id <issue-id>] [--json] [--deps] [<issue-id>]",
-		"check [--id <issue-id>] [--json] [--deps] [<issue-id>]",
+		"get [--id <issue-id>] [--json] [<issue-id>]",
+		"check [--id <issue-id>] [--json] [<issue-id>]",
 		"doctor [--id <issue-id>] [<issue-id>]",
 		"Argument ordering: place flags/options before positional arguments for deterministic parsing.",
 	} {

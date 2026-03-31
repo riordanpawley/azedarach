@@ -337,7 +337,7 @@ func main() {
 		case "get":
 			opts, err := cli.ParseIssueGetArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue get [--id <issue-id>] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -365,7 +365,7 @@ func main() {
 		case "check":
 			opts, err := cli.ParseIssueCheckArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue check [--id <issue-id>] [--json] [--deps] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue check [--id <issue-id>] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
