@@ -2976,5 +2976,28 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 	if !ack.Accepted {
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
+	if strings.TrimSpace(ack.DaemonProjectID) != "" &&
+		strings.TrimSpace(deps.ProjectID) != "" &&
+		!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
+		if err := launcher.Replace(ctx); err != nil {
+			return fmt.Errorf("daemon project mismatch (%s != %s): replace failed: %w", ack.DaemonProjectID, deps.ProjectID, err)
+		}
+		ack, err = orch.EnsureAttached(ctx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      clientName,
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if err != nil {
+			return fmt.Errorf("daemon re-attach failed after project mismatch: %w", err)
+		}
+		if !ack.Accepted {
+			return fmt.Errorf("daemon handshake rejected after project mismatch: %s", ack.Reason)
+		}
+		if strings.TrimSpace(ack.DaemonProjectID) != "" &&
+			!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
+			return fmt.Errorf("daemon project mismatch after replace (%s != %s)", ack.DaemonProjectID, deps.ProjectID)
+		}
+	}
 	return nil
 }

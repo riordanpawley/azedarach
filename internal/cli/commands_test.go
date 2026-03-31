@@ -3436,6 +3436,70 @@ func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	}
 }
 
+func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	handshakes := 0
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				handshakes++
+				if handshakes == 1 {
+					return protocol.HelloAck{Accepted: true, DaemonProjectID: "other-proj"}, nil
+				}
+				return protocol.HelloAck{Accepted: true, DaemonProjectID: "proj"}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
+		t.Fatalf("ensureDaemon() error = %v", err)
+	}
+	if !fake.replaceCalled {
+		t.Fatalf("expected replace to be called on daemon project mismatch")
+	}
+	if handshakes < 2 {
+		t.Fatalf("handshakes = %d, want at least 2", handshakes)
+	}
+}
+
+func TestEnsureDaemonProjectMismatchReplaceFailure(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{replaceErr: errors.New("replace failed")}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true, DaemonProjectID: "wrong"}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	err := ensureDaemon(context.Background(), deps, "cli")
+	if err == nil || !strings.Contains(err.Error(), "replace failed") {
+		t.Fatalf("error = %v, want replace failure", err)
+	}
+}
+
 func responseWithOutput(req protocol.RequestEnvelope, output string) protocol.ResponseEnvelope {
 	payload, err := json.Marshal(commandOutputBody{Output: output})
 	if err != nil {
