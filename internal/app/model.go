@@ -189,6 +189,7 @@ type Model struct {
 	daemonSocketPath string
 	daemonEvents     <-chan protocol.EventEnvelope
 	daemonRevision   uint64
+	lastDaemonReattachAttempt time.Time
 
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
@@ -215,6 +216,8 @@ type Model struct {
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
 }
+
+const daemonReattachRetryInterval = 5 * time.Second
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
@@ -405,6 +408,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
+		m.lastDaemonReattachAttempt = time.Time{}
 		m.loading = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
@@ -449,14 +453,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
+		now := time.Now()
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: msg.err.Error(),
-			Expires: time.Now().Add(8 * time.Second),
+			Expires: now.Add(8 * time.Second),
 		})
 		m.loading = false
-		// Still schedule a refresh to retry
-		return m, tickEvery(5 * time.Second)
+		cmds := []tea.Cmd{tickEvery(5 * time.Second)}
+		if shouldQueueDaemonReattach(m.lastDaemonReattachAttempt, now, msg.err) {
+			m.lastDaemonReattachAttempt = now
+			cmds = append(cmds, m.attachDaemonCmd())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
@@ -2389,6 +2398,32 @@ type runtimeSignalsLoadedMsg struct {
 	worktreeByTask      map[string]string
 	refreshedAt         time.Time
 	partialFailureCount int
+}
+
+func shouldAttemptDaemonReattach(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "daemon socket unavailable") {
+		return true
+	}
+	if !strings.Contains(message, "daemon command transport") {
+		return false
+	}
+	return strings.Contains(message, "dial unix") ||
+		strings.Contains(message, "connect: no such file or directory") ||
+		strings.Contains(message, "connection refused")
+}
+
+func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
+	if !shouldAttemptDaemonReattach(err) {
+		return false
+	}
+	if lastAttempt.IsZero() {
+		return true
+	}
+	return now.Sub(lastAttempt) >= daemonReattachRetryInterval
 }
 
 // Commands
