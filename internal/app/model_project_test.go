@@ -227,8 +227,8 @@ func TestProjectSelectedMsgStartsVisibleRefreshWithoutDiscardingCurrentBoard(t *
 	if cmd == nil {
 		t.Fatal("expected project switch command to be scheduled")
 	}
-	if !updated.loading {
-		t.Fatal("expected loading state while switching projects")
+	if updated.loading {
+		t.Fatal("expected board to remain visible while switching projects")
 	}
 	if !updated.boardRefreshing {
 		t.Fatal("expected board refresh indicator while switching projects")
@@ -279,6 +279,15 @@ func TestProjectSwitchInFlight_BlocksBoardKeyInteractions(t *testing.T) {
 	}
 	if !updated.overlayStack.IsEmpty() {
 		t.Fatal("expected no overlay to open while project switch is in flight")
+	}
+
+	next, cmd = updated.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated = next.(Model)
+	if cmd != nil {
+		t.Fatalf("expected refresh hotkey to be blocked while project switch is in flight, got %T", cmd)
+	}
+	if updated.boardRefreshing {
+		t.Fatal("expected blocked refresh hotkey not to mutate refresh state")
 	}
 }
 

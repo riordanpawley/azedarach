@@ -804,7 +804,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.ProjectSelectedMsg:
 		// Close overlay
 		m.overlayStack.Pop()
-		m.loading = true
+		m.loading = false
 		m.boardRefreshing = true
 		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
@@ -1732,7 +1732,7 @@ func isChildOfParent(task domain.Task, parentID string) bool {
 
 // handleKey processes keyboard input based on current mode
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Global keys (work in any mode)
+	// Always-available global keys.
 	switch msg.String() {
 	case "ctrl+c":
 		// Cleanup before quitting
@@ -1741,6 +1741,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	}
+
+	// Freeze board interactions while switching project contexts.
+	if m.projectSwitchInFlight {
+		return m, nil
+	}
+
+	// Remaining global keys (work in any mode)
+	switch msg.String() {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
@@ -1785,10 +1794,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if m.projectSwitchInFlight {
-		return m, nil
-	}
-
 	// Mode-specific handling
 	switch m.editor.GetMode() {
 	case ModeNormal:
