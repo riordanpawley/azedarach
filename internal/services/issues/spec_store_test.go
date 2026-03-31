@@ -382,6 +382,55 @@ func TestClient_ListSpecAuditEntriesSupportsTimeWindow(t *testing.T) {
 	require.Len(t, filtered, 1)
 }
 
+func TestClient_ListSpecLinksRequirementSelectorRejectsAmbiguousLocalIDAndExternalCode(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	issueID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "implementation issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	// Requirement A: selector value appears as local_id.
+	_, err = client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID: "REQ-AMB",
+		Title:   "local-id requirement",
+	})
+	require.NoError(t, err)
+
+	_, err = client.AddSpecLink(ctx, AddSpecLinkParams{
+		IssueID:       issueID,
+		RequirementID: "REQ-AMB",
+		Role:          LinkRoleImplements,
+	})
+	require.NoError(t, err)
+
+	// Requirement B: same selector value appears as external_code.
+	ext := "REQ-AMB"
+	_, err = client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID:      "REQ-OTHER",
+		ExternalCode: &ext,
+		Title:        "external-code requirement",
+	})
+	require.NoError(t, err)
+
+	_, err = client.AddSpecLink(ctx, AddSpecLinkParams{
+		IssueID:       issueID,
+		RequirementID: "REQ-OTHER",
+		Role:          LinkRoleRelates,
+	})
+	require.NoError(t, err)
+
+	_, err = client.ListSpecLinks(ctx, SpecLinkFilter{
+		IssueID:       issueID,
+		RequirementID: "REQ-AMB",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, domain.ErrConflict)
+}
+
 func openSQLiteDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path)

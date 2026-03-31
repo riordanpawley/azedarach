@@ -132,15 +132,26 @@ func (s issueSpecService) RemoveLink(ctx context.Context, req protocol.SpecLinkR
 }
 
 func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequestBody) (protocol.SpecReadResponseBody, error) {
-	reqFilter := issues.RequirementFilter{IssueID: req.IssueID}
+	resolvedReqID := req.ReqID
+	requirements := make([]issues.Requirement, 0, 1)
 	if req.ReqID != "" {
-		reqFilter.LocalIDs = []string{req.ReqID}
+		requirement, err := s.client.GetRequirement(ctx, req.ReqID)
+		if err != nil {
+			return protocol.SpecReadResponseBody{}, err
+		}
+		resolvedReqID = requirement.LocalID
+		requirements = append(requirements, requirement)
 	}
-	requirements, err := s.client.ListRequirements(ctx, reqFilter)
-	if err != nil {
-		return protocol.SpecReadResponseBody{}, err
+
+	if req.ReqID == "" {
+		reqFilter := issues.RequirementFilter{IssueID: req.IssueID}
+		rows, err := s.client.ListRequirements(ctx, reqFilter)
+		if err != nil {
+			return protocol.SpecReadResponseBody{}, err
+		}
+		requirements = rows
 	}
-	linkFilter := issues.SpecLinkFilter{IssueID: req.IssueID, RequirementID: req.ReqID}
+	linkFilter := issues.SpecLinkFilter{IssueID: req.IssueID, RequirementID: resolvedReqID}
 	links, err := s.client.ListSpecLinks(ctx, linkFilter)
 	if err != nil {
 		return protocol.SpecReadResponseBody{}, err

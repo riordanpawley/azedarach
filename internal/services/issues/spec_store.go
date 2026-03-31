@@ -596,8 +596,12 @@ func (c *Client) ListSpecLinks(ctx context.Context, filter SpecLinkFilter) ([]Sp
 		args = append(args, trimmed)
 	}
 	if trimmed := strings.TrimSpace(filter.RequirementID); trimmed != "" {
-		query.WriteString(` AND (r.local_id = ? OR r.external_code = ?)`)
-		args = append(args, trimmed, trimmed)
+		requirement, err := c.lookupRequirementBySelector(ctx, db, trimmed, filter.IncludeDeleted)
+		if err != nil {
+			return nil, c.wrapError("list-spec-links", "", err)
+		}
+		query.WriteString(` AND l.requirement_id = ?`)
+		args = append(args, requirement.rowID)
 	}
 
 	query.WriteString(` ORDER BY l.updated_at DESC, l.id ASC`)
