@@ -3065,6 +3065,29 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	}
 }
 
+func TestDaemonStreamEventMsg_IgnoresDifferentProject(t *testing.T) {
+	m := newTestModel()
+	m.currentProject = "chefy"
+	beforeEvents := len(m.runtimeEvents)
+	beforeRevision := m.daemonRevision
+
+	next, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: "az",
+			Revision:  99,
+			Event:     "task.updated",
+		},
+	})
+	updated := next.(Model)
+
+	if len(updated.runtimeEvents) != beforeEvents {
+		t.Fatalf("runtimeEvents len = %d, want %d (cross-project event ignored)", len(updated.runtimeEvents), beforeEvents)
+	}
+	if updated.daemonRevision != beforeRevision {
+		t.Fatalf("daemonRevision = %d, want %d (cross-project event ignored)", updated.daemonRevision, beforeRevision)
+	}
+}
+
 func TestRuntimeSignalsForBoardIncludesPendingMutationState(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{

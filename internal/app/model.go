@@ -182,6 +182,7 @@ type Model struct {
 	boardRefreshing bool
 	issueRefreshSeq uint64
 	projectSwitchSeq uint64
+	projectSwitchInFlight bool
 	spinner         spinner.Model
 	lastRefresh     time.Time
 	hasRefreshLoop  bool
@@ -561,6 +562,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
+		if projectID := strings.TrimSpace(msg.event.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+			return m, m.waitForDaemonEventCmd()
+		}
 		m.recordRuntimeEvent(msg.event)
 		m.applyOperationProgressEvent(msg.event)
 		if msg.event.Event == protocol.EventSessionUpdated {
@@ -802,6 +806,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlayStack.Pop()
 		m.loading = true
 		m.boardRefreshing = true
+		m.projectSwitchInFlight = true
 		m.issueRefreshSeq++
 		m.projectSwitchSeq++
 
@@ -815,6 +820,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.loading = false
 			m.boardRefreshing = false
+			m.projectSwitchInFlight = false
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Project switch failed: %v", msg.err),
@@ -845,6 +851,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = false
 		m.boardRefreshing = false
+		m.projectSwitchInFlight = false
 		m.lastRefresh = time.Now()
 		m.daemonEvents = msg.events
 
@@ -1776,6 +1783,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			columns := m.buildColumns()
 			m.ensureCursorVisible(columns)
 		}
+		return m, nil
+	}
+	if m.projectSwitchInFlight {
 		return m, nil
 	}
 
@@ -2961,6 +2971,9 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 		if m.logger != nil {
 			m.logger.Warn("decode session projection event failed", "event", evt.Event, "revision", evt.Revision, "error", err)
 		}
+		return
+	}
+	if projectID := strings.TrimSpace(body.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
 		return
 	}
 

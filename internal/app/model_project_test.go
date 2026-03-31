@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -232,6 +233,9 @@ func TestProjectSelectedMsgStartsVisibleRefreshWithoutDiscardingCurrentBoard(t *
 	if !updated.boardRefreshing {
 		t.Fatal("expected board refresh indicator while switching projects")
 	}
+	if !updated.projectSwitchInFlight {
+		t.Fatal("expected project switch in-flight flag while switching projects")
+	}
 	if len(updated.tasks) != 1 || updated.tasks[0].ID != "old-1" {
 		t.Fatalf("tasks = %+v, want previous board tasks preserved until switch succeeds", updated.tasks)
 	}
@@ -254,8 +258,27 @@ func TestProjectSwitchFailureRetainsPreviousBoardState(t *testing.T) {
 	if updated.boardRefreshing {
 		t.Fatal("expected refresh indicator cleared on switch failure")
 	}
+	if updated.projectSwitchInFlight {
+		t.Fatal("expected project switch in-flight flag cleared on switch failure")
+	}
 	if len(updated.tasks) != 1 || updated.tasks[0].ID != "old-1" {
 		t.Fatalf("tasks = %+v, want previous board tasks retained after switch failure", updated.tasks)
+	}
+}
+
+func TestProjectSwitchInFlight_BlocksBoardKeyInteractions(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.projectSwitchInFlight = true
+
+	next, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeySpace})
+	updated := next.(Model)
+
+	if cmd != nil {
+		t.Fatalf("expected no command while project switch is in flight, got %T", cmd)
+	}
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatal("expected no overlay to open while project switch is in flight")
 	}
 }
 
