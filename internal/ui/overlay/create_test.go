@@ -2,6 +2,8 @@ package overlay
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,6 +19,21 @@ func TestNewCreateTaskOverlay(t *testing.T) {
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
 	assert.Equal(t, focusTitle, overlay.focusIndex)
+}
+
+func TestCreateTaskOverlayImplOptionsFallbackToDefault(t *testing.T) {
+	overlay := NewCreateTaskOverlayWithParentAndImplOptions(nil, nil)
+	require.NotNil(t, overlay)
+	assert.Equal(t, []string{"default"}, overlay.implOptions)
+	assert.Equal(t, []string{"default"}, overlay.impls)
+}
+
+func TestCreateTaskOverlayNoHardcodedImplementationTriplet(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("create.go"))
+	require.NoError(t, err)
+	text := string(source)
+	assert.NotContains(t, text, `[]string{"default", "go-bubbletea", "ts-opentui"}`)
+	assert.NotContains(t, text, "default, go-bubbletea, ts-opentui")
 }
 
 func TestCreateTaskOverlayTitle(t *testing.T) {
