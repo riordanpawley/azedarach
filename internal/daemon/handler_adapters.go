@@ -156,6 +156,27 @@ func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 	if err != nil {
 		return protocol.SpecReadResponseBody{}, err
 	}
+
+	// For issue-scoped reads without explicit requirement selector, include requirements
+	// referenced by links even when requirement.issue_id is empty.
+	if req.ReqID == "" && req.IssueID != "" {
+		present := make(map[string]struct{}, len(requirements))
+		for _, row := range requirements {
+			present[row.LocalID] = struct{}{}
+		}
+		for _, link := range links {
+			if _, ok := present[link.RequirementID]; ok {
+				continue
+			}
+			row, err := s.client.GetRequirement(ctx, link.RequirementID)
+			if err != nil {
+				return protocol.SpecReadResponseBody{}, err
+			}
+			requirements = append(requirements, row)
+			present[row.LocalID] = struct{}{}
+		}
+	}
+
 	outReqs := make([]protocol.SpecRequirement, 0, len(requirements))
 	for _, row := range requirements {
 		outReqs = append(outReqs, mapRequirementToProtocol(row))

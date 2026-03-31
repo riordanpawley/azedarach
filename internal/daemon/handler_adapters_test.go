@@ -67,6 +67,51 @@ func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 	}
 }
 
+func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(t *testing.T) {
+	ctx := context.Background()
+	client := newTestIssueClient(t)
+
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{
+		Title:    "implementation issue",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	_, err = client.CreateRequirement(ctx, issues.CreateRequirementParams{
+		LocalID: "REQ-LINKED",
+		Title:   "linked requirement without issue_id",
+	})
+	if err != nil {
+		t.Fatalf("create requirement: %v", err)
+	}
+	_, err = client.AddSpecLink(ctx, issues.AddSpecLinkParams{
+		IssueID:       issueID,
+		RequirementID: "REQ-LINKED",
+		Role:          issues.LinkRoleImplements,
+	})
+	if err != nil {
+		t.Fatalf("add spec link: %v", err)
+	}
+
+	service := issueSpecService{client: client}
+	out, err := service.Read(ctx, protocol.SpecReadRequestBody{IssueID: issueID})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(out.Links) != 1 {
+		t.Fatalf("links len = %d, want 1", len(out.Links))
+	}
+	if len(out.Requirements) != 1 {
+		t.Fatalf("requirements len = %d, want 1", len(out.Requirements))
+	}
+	if out.Requirements[0].ID != "REQ-LINKED" {
+		t.Fatalf("requirement id = %q, want REQ-LINKED", out.Requirements[0].ID)
+	}
+}
+
 func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *testing.T) {
 	ctx := context.Background()
 	client := newTestIssueClient(t)
