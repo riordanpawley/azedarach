@@ -2222,6 +2222,74 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	}
 }
 
+func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayAndShowsPendingMutation(t *testing.T) {
+	t.Setenv("TMUX", "")
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	m.tasks[0].HasTmuxSession = true
+	m.tasks[0].Session = nil
+	m.tmuxAvailable = false
+
+	workspace := overlay.NewTaskWorkspaceOverlay(m.tasks[0], nil, m.tasks, nil, m.width, m.height)
+	m.overlayStack.Push(workspace)
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "a"})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
+	}
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+
+	if _, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay to remain open, got %T", updated.overlayStack.Current())
+	}
+
+	pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
+	if !ok {
+		t.Fatal("expected pending attach status for task az-1")
+	}
+	if pending.state != protocol.OperationStateRunning {
+		t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateRunning)
+	}
+	if pending.operationID != "session-attach" {
+		t.Fatalf("pending operation id = %q, want %q", pending.operationID, "session-attach")
+	}
+
+	view := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View()
+	if !strings.Contains(view, "Mutation:") || !strings.Contains(strings.ToLower(view), "running") {
+		t.Fatalf("expected running mutation row in workspace detail panel, got %q", view)
+	}
+
+	msg := cmd()
+	if _, ok := msg.(sessionAttachedMsg); !ok {
+		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+	}
+}
+
 func TestEnterOnLeafTaskShowsDrillDownGuidanceToast(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
