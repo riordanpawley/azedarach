@@ -182,6 +182,42 @@ func TestStatusBar_RenderFallsBackToSelectionSummary(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderShowsFilterAndSortSummaries(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 96, style)
+	sb.SetFilterSummary("F:q=board,st:1")
+	sb.SetSortSummary("S:updated/desc")
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "F:q=board,st:1") {
+		t.Fatalf("Expected status bar to contain filter summary, got: %s", result)
+	}
+	if !strings.Contains(result, "S:updated/desc") {
+		t.Fatalf("Expected status bar to contain sort summary, got: %s", result)
+	}
+}
+
+func TestStatusBar_RenderKeepsFilterAndSortOnNarrowWidth(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 18, style)
+	sb.SetCurrentProject("azedarach")
+	sb.SetFilterSummary("F:st:2")
+	sb.SetSortSummary("S:priority/asc")
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "F:") {
+		t.Fatalf("Expected narrow status bar to keep filter summary marker, got: %s", result)
+	}
+	if !strings.Contains(result, "S:") {
+		t.Fatalf("Expected narrow status bar to keep sort summary marker, got: %s", result)
+	}
+	if !strings.Contains(result, "N") {
+		t.Fatalf("Expected narrow status bar to keep compact mode badge, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderShowsLoadingIndicator(t *testing.T) {
 	style := styles.New()
 	sb := New(types.ModeNormal, 80, style)

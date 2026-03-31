@@ -480,7 +480,11 @@ func TestView_CanonicalProfiles(t *testing.T) {
 			if view == "" {
 				t.Fatalf("expected %s profile view to render", profile.Name)
 			}
-			if !strings.Contains(view, "NORMAL") {
+			if profile.Width < 80 {
+				if !strings.Contains(view, "NORMAL") && !strings.Contains(view, "N F:") {
+					t.Fatalf("expected compact status bar mode/filter badge to remain visible, got: %s", view)
+				}
+			} else if !strings.Contains(view, "NORMAL") {
 				t.Fatalf("expected status bar mode badge to remain visible, got: %s", view)
 			}
 			if profile.Width < 80 && strings.Contains(view, "Space: task workspace") {
@@ -518,6 +522,40 @@ func TestView_ShowsRuntimeSignalLoadingIndicator(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "Loading runtime status...") {
 		t.Fatalf("view = %q, want runtime loading indicator in status bar", view)
+	}
+}
+
+func TestView_ShowsFilterAndSortSummaries(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.editor.SetSearchQuery("az-1")
+	m.editor.SetSortField(domain.SortByUpdated)
+	m.editor.SetSortOrder(domain.SortDesc)
+
+	view := m.View()
+	if !strings.Contains(view, "F:q=az-1") {
+		t.Fatalf("view = %q, want filter summary in status bar", view)
+	}
+	if !strings.Contains(view, "S:updated/desc") {
+		t.Fatalf("view = %q, want sort summary in status bar", view)
+	}
+}
+
+func TestEscClearsFiltersInNormalMode(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.editor.ToggleStatusFilter(domain.StatusDone)
+	m.editor.SetSearchQuery("az-2")
+	m.editor.SetSortField(domain.SortByPriority)
+	m.editor.SetSortOrder(domain.SortDesc)
+
+	result, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	next := result.(Model)
+	if next.editor.IsFilterActive() {
+		t.Fatal("expected esc in normal mode to clear active filters")
+	}
+	if got := next.editor.GetSort(); got.Field != domain.SortByPriority || got.Order != domain.SortDesc {
+		t.Fatalf("expected esc filter clear to preserve sort state, got field=%s order=%v", got.Field, got.Order)
 	}
 }
 
@@ -1673,11 +1711,17 @@ func TestModeTransitions(t *testing.T) {
 
 		for _, mode := range modes {
 			m.editor.SetMode(mode)
+			if mode == ModeSearch {
+				m.editor.SetSearchQuery("pending")
+			}
 			result, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 			newModel := result.(Model)
 
 			if !newModel.editor.IsNormal() {
 				t.Errorf("Expected ModeNormal after escape from %v, got %v", mode, newModel.editor.GetMode())
+			}
+			if mode == ModeSearch && newModel.editor.GetFilter().SearchQuery != "" {
+				t.Errorf("expected search query to clear on escape from search mode, got %q", newModel.editor.GetFilter().SearchQuery)
 			}
 		}
 	})
