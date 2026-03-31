@@ -61,7 +61,7 @@ type SpecRequirement struct {
 	LocalID      string              `json:"local_id"`
 	ExternalCode *string             `json:"external_code"`
 	Title        string              `json:"title"`
-	Body         string              `json:"body"`
+	Body         string              `json:"description"`
 	Kind         SpecRequirementKind `json:"kind"`
 	Status       string              `json:"status"`
 	Priority     int                 `json:"priority"`
@@ -71,11 +71,12 @@ type SpecRequirement struct {
 
 // SpecIssueLink mirrors the daemon-side requirement/issue link record.
 type SpecIssueLink struct {
+	ID                      string                    `json:"id,omitempty"`
 	IssueID                 string                    `json:"issue_id"`
-	RequirementID           string                    `json:"requirement_id"`
+	RequirementID           string                    `json:"req_id"`
 	RequirementLocalID      string                    `json:"requirement_local_id"`
 	RequirementExternalCode *string                   `json:"requirement_external_code"`
-	LinkType                SpecLinkType              `json:"link_type"`
+	LinkType                SpecLinkType              `json:"role"`
 	Implementations         []string                  `json:"implementations"`
 	FulfillmentStatus       SpecLinkFulfillmentStatus `json:"fulfillment_status"`
 	FulfillmentPercent      *int                      `json:"fulfillment_percent"`
@@ -122,7 +123,7 @@ type SpecRequirementWithStats struct {
 type SpecRequirementListRequest struct {
 	IssueID        string              `json:"issue_id,omitempty"`
 	Status         string              `json:"status,omitempty"`
-	RequirementIDs []string            `json:"requirement_ids,omitempty"`
+	RequirementIDs []string            `json:"ids,omitempty"`
 	Query          string              `json:"query,omitempty"`
 	Kind           SpecRequirementKind `json:"kind,omitempty"`
 	Priority       *int                `json:"priority,omitempty"`
@@ -135,7 +136,7 @@ type SpecRequirementListResult struct {
 
 // SpecRequirementGetRequest encodes the phase-1 req get command.
 type SpecRequirementGetRequest struct {
-	RequirementID string                        `json:"requirement_id,omitempty"`
+	RequirementID string                        `json:"id,omitempty"`
 	Selector      SpecRequirementLookupSelector `json:"selector,omitempty"`
 }
 
@@ -146,7 +147,7 @@ type SpecRequirementGetResult struct {
 
 // SpecRequirementCreateRequest encodes the phase-1 req create command.
 type SpecRequirementCreateRequest struct {
-	RequirementID string              `json:"requirement_id,omitempty"`
+	RequirementID string              `json:"id,omitempty"`
 	LocalID       string              `json:"local_id,omitempty"`
 	ExternalCode  string              `json:"external_code,omitempty"`
 	Title         string              `json:"title"`
@@ -164,7 +165,7 @@ type SpecRequirementCreateResult struct {
 
 // SpecRequirementUpdateRequest encodes the phase-1 req update command.
 type SpecRequirementUpdateRequest struct {
-	RequirementID string                        `json:"requirement_id,omitempty"`
+	RequirementID string                        `json:"id,omitempty"`
 	Selector      SpecRequirementLookupSelector `json:"selector,omitempty"`
 	Title         string                        `json:"title,omitempty"`
 	Description   string                        `json:"description,omitempty"`
@@ -181,7 +182,7 @@ type SpecRequirementUpdateResult struct {
 
 // SpecRequirementDeleteRequest encodes the phase-1 req delete command.
 type SpecRequirementDeleteRequest struct {
-	RequirementID string                        `json:"requirement_id,omitempty"`
+	RequirementID string                        `json:"id,omitempty"`
 	Selector      SpecRequirementLookupSelector `json:"selector,omitempty"`
 	Confirm       bool                          `json:"confirm,omitempty"`
 }
@@ -189,15 +190,15 @@ type SpecRequirementDeleteRequest struct {
 // SpecRequirementDeleteResult captures the req delete response body.
 type SpecRequirementDeleteResult struct {
 	Deleted       bool   `json:"deleted"`
-	RequirementID string `json:"requirement_id,omitempty"`
+	RequirementID string `json:"id,omitempty"`
 }
 
 // SpecLinkListRequest encodes the phase-1 link list command.
 type SpecLinkListRequest struct {
 	IssueID             string                        `json:"issue_id,omitempty"`
-	RequirementID       string                        `json:"requirement_id,omitempty"`
+	RequirementID       string                        `json:"req_id,omitempty"`
 	RequirementSelector SpecRequirementLookupSelector `json:"requirement_selector,omitempty"`
-	LinkIDs             []string                      `json:"link_ids,omitempty"`
+	LinkIDs             []string                      `json:"ids,omitempty"`
 	Implementation      string                        `json:"implementation,omitempty"`
 }
 
@@ -209,7 +210,7 @@ type SpecLinkListResult struct {
 // SpecLinkAddRequest encodes the phase-1 link add command.
 type SpecLinkAddRequest struct {
 	IssueID             string                        `json:"issue_id"`
-	RequirementID       string                        `json:"requirement_id"`
+	RequirementID       string                        `json:"req_id"`
 	RequirementSelector SpecRequirementLookupSelector `json:"requirement_selector,omitempty"`
 	Role                string                        `json:"role,omitempty"`
 	Note                string                        `json:"note,omitempty"`
@@ -227,7 +228,7 @@ type SpecLinkAddResult struct {
 // SpecLinkRemoveRequest encodes the phase-1 link remove command.
 type SpecLinkRemoveRequest struct {
 	IssueID             string                        `json:"issue_id"`
-	RequirementID       string                        `json:"requirement_id"`
+	RequirementID       string                        `json:"req_id"`
 	RequirementSelector SpecRequirementLookupSelector `json:"requirement_selector,omitempty"`
 	Role                string                        `json:"role,omitempty"`
 	Implementations     []string                      `json:"implementations,omitempty"`
@@ -235,13 +236,13 @@ type SpecLinkRemoveRequest struct {
 
 // SpecLinkRemoveResult captures the link remove response body.
 type SpecLinkRemoveResult struct {
-	Removed int `json:"removed"`
+	Removed bool `json:"removed"`
 }
 
 // SpecReadRequest encodes the phase-1 read command.
 type SpecReadRequest struct {
 	IssueID             string                        `json:"issue_id,omitempty"`
-	RequirementID       string                        `json:"requirement_id,omitempty"`
+	RequirementID       string                        `json:"req_id,omitempty"`
 	RequirementSelector SpecRequirementLookupSelector `json:"requirement_selector,omitempty"`
 }
 
