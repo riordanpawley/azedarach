@@ -976,6 +976,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.commitsBehind > 0 {
+			m.clearPendingTaskStatus(msg.issueID)
+			m.syncTaskWorkspaceOverlay()
 			// Show merge choice overlay
 			m.openOverlay(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.config.Git.BaseBranch))
 			return m, nil
@@ -985,6 +987,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.attachSessionCmd(msg.issueID)
 
 	case sessionAttachedMsg:
+		m.clearPendingTaskStatus(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		message := fmt.Sprintf("Attached to session: %s", msg.issueID)
 		if msg.switchedTmux {
 			message = fmt.Sprintf("Switched to session: %s", msg.issueID)
@@ -3572,8 +3576,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Close the overlay first
-	m.overlayStack.Pop()
+	keepWorkspaceOpen := false
+	if msg.Key == "a" {
+		_, keepWorkspaceOpen = m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	}
+
+	// Close the overlay first unless task-workspace attach wants in-panel progress.
+	if !keepWorkspaceOpen {
+		m.overlayStack.Pop()
+	}
 
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
@@ -3616,13 +3627,25 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		// Attach to session
 		if session != nil {
+			if keepWorkspaceOpen {
+				m.markTaskOperationPending(task.ID, "session_attach", "session-attach", protocol.OperationStateRunning)
+				m.syncTaskWorkspaceOverlay()
+			}
 			// Check if branch is behind main
 			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
 		} else if task.HasTmuxSession {
+			if keepWorkspaceOpen {
+				m.markTaskOperationPending(task.ID, "session_attach", "session-attach", protocol.OperationStateRunning)
+				m.syncTaskWorkspaceOverlay()
+			}
 			// We still have tmux presence, so attempt direct attach even when
 			// the session projection is stale or not yet hydrated.
 			return m, m.attachSessionCmd(task.ID)
 		} else {
+			if keepWorkspaceOpen {
+				m.clearPendingTaskStatus(task.ID)
+				m.syncTaskWorkspaceOverlay()
+			}
 			m.addToast(Toast{
 				Level:   ToastWarning,
 				Message: "No active session for this task",
