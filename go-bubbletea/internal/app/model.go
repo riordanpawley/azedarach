@@ -338,12 +338,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
-		// Start periodic refresh only if not already running
+		// Continue the refresh loop on successful loads.
 		if !m.hasRefreshLoop {
 			m.hasRefreshLoop = true
-			return m, tickEvery(2 * time.Second)
 		}
-		return m, nil
+		return m, tickEvery(refreshInterval(true))
 
 	case beadsErrorMsg:
 		m.toasts = append(m.toasts, Toast{
@@ -352,11 +351,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		m.loading = false
-		// Still schedule a refresh to retry
-		return m, tickEvery(5 * time.Second)
+		// Back off briefly after a failed poll so the last good state stays visible.
+		return m, tickEvery(refreshInterval(false))
 
 	case tickMsg:
-		// Expire old toasts and refresh beads
+		// Expire old toasts and refresh beads. The next tick is scheduled by the
+		// success/error result so the cadence can adapt to the outcome.
 		m.expireToasts()
 		return m, tea.Batch(
 			m.loadBeadsCmd(),
@@ -1227,6 +1227,11 @@ type beadsErrorMsg struct {
 
 type tickMsg time.Time
 
+const (
+	refreshSuccessInterval = 2 * time.Second
+	refreshFailureInterval = 5 * time.Second
+)
+
 type sessionStartedMsg struct {
 	beadID       string
 	worktreePath string
@@ -1257,6 +1262,13 @@ func tickEvery(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func refreshInterval(success bool) time.Duration {
+	if success {
+		return refreshSuccessInterval
+	}
+	return refreshFailureInterval
 }
 
 // startSessionCmd creates a worktree, tmux session, and starts monitoring
