@@ -34,12 +34,18 @@ install:
 lint:
     golangci-lint run ./...
 
-boundary-check:
+check-boundaries:
     if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --config .golangci-boundary.yml ./internal/...; else echo "WARN: golangci-lint not installed; skipping depguard boundary lint gate" >&2; fi
-    ./scripts/check-go-boundaries.sh
+    ./scripts/check-boundaries.sh
     ./scripts/afv-drift-sentinel.sh
     go test ./internal/app ./internal/cli
     go test ./internal/daemon/... ./internal/client/...
+
+boundary-check:
+    @just check-boundaries
+
+spec-sync:
+    ./scripts/spec-sync-precommit.sh
 
 release-homebrew *ARGS:
     ./scripts/release-homebrew.sh {{ARGS}}

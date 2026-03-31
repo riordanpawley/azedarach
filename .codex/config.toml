@@ -1,11 +1,6 @@
+[features]
+codex_hooks = true
+
 [mcp_servers.floop]
 command = "floop"
 args = ["mcp-server"]
-
-# >>> azedarach-codex-hooks
-[[hooks.SessionStart]]
-hooks = [{ command = "\"/bin/az-notify.sh\" user_prompt \"tc\" \"az-tc\"" }]
-
-[[hooks.Stop]]
-hooks = [{ command = "\"/bin/az-notify.sh\" session_end \"tc\" \"az-tc\"" }]
-# <<< azedarach-codex-hooks

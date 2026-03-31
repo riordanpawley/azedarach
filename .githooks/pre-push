@@ -1,3 +1,11 @@
 #!/usr/bin/env sh
-# Linear issue tracking has no repository JSONL state to validate before push.
+set -eu
+
+if [ "${AZEDARACH_SKIP_PUSH_GATE:-0}" = "1" ]; then
+  echo "pre-push: gate skipped (AZEDARACH_SKIP_PUSH_GATE=1)"
+  exit 0
+fi
+
+"$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
+
 exit 0

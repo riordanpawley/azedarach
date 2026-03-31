@@ -273,5 +273,5 @@ Audience: these are **developer/internal docs** for contributors and maintainers
 Homebrew release flow:
 
 ```bash
-just release-homebrew -- --patch --tap-dir ~/prog/homebrew-azedarach
+just release-homebrew -- --patch --tap-dir ../homebrew-azedarach
 ```

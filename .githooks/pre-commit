@@ -1,10 +1,35 @@
 #!/usr/bin/env sh
 set -eu
 
+# Keep spec markdown docs in sync and auto-stage generated files when configured.
+"$(git rev-parse --show-toplevel)/scripts/spec-sync-precommit.sh"
+
 # During merge/rebase continuations, block commit progress when build/tests fail.
 if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
   "$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
 fi
 
-# Keep normal commits lightweight; dedicated integration checks run in CI/release.
+if [ "${AZEDARACH_SKIP_BOUNDARY_CHECK:-0}" = "1" ]; then
+  echo "pre-commit: boundary checks skipped (AZEDARACH_SKIP_BOUNDARY_CHECK=1)"
+  exit 0
+fi
+
+run_boundary_check=0
+
+while IFS= read -r path; do
+  case "$path" in
+    internal/*|cmd/*|docs/*|justfile|AGENTS.md|.golangci-boundary.yml|scripts/check-boundaries.sh|scripts/afv-drift-sentinel.sh)
+      run_boundary_check=1
+      break
+      ;;
+  esac
+done <<EOF
+$(git diff --cached --name-only --diff-filter=ACMR)
+EOF
+
+if [ "$run_boundary_check" = "1" ]; then
+  echo "pre-commit: running boundary validation checks"
+  just check-boundaries
+fi
+
 exit 0

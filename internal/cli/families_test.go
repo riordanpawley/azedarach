@@ -298,27 +298,25 @@ func TestDevServerListCommandFiltersRunningServers(t *testing.T) {
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			gotReq = req
-			return responseWithJSON(req, devServerListResponseBody{
-				ProjectID: "proj-1",
-				Servers: []devserver.Server{
-					{
-						ID:      "az-1",
-						Name:    "default",
-						Port:    3010,
-						Status:  "running",
-						IssueID: "az-1",
+				return responseWithJSON(req, devServerListResponseBody{
+					ProjectID: "proj-1",
+					Servers: []devServerView{
+						{
+							Name:    "default",
+							Port:    3010,
+							Status:  "running",
+							IssueID: "az-1",
+						},
+						{
+							Name:    "secondary",
+							Port:    3011,
+							Status:  "stopped",
+							IssueID: "az-2",
+						},
 					},
-					{
-						ID:      "az-2",
-						Name:    "secondary",
-						Port:    3011,
-						Status:  "stopped",
-						IssueID: "az-2",
-					},
-				},
-			}), nil
-		},
-	}
+				}), nil
+			},
+		}
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),

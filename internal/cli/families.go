@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
 const (
@@ -58,8 +57,16 @@ type devServerListRequestBody struct {
 }
 
 type devServerListResponseBody struct {
-	ProjectID string             `json:"project_id"`
-	Servers   []devserver.Server `json:"servers"`
+	ProjectID string          `json:"project_id"`
+	Servers   []devServerView `json:"servers"`
+}
+
+type devServerView struct {
+	Name    string        `json:"name"`
+	Port    int           `json:"port"`
+	Status  string        `json:"status"`
+	IssueID string        `json:"issue_id"`
+	Uptime  time.Duration `json:"uptime"`
 }
 
 type OpenCodeInitOptions struct {
@@ -300,7 +307,13 @@ func DevServerStartCommand(deps *Dependencies, issueID string) error {
 	if err != nil {
 		return err
 	}
-	printDevServerAction("Started", issueID, srv)
+	printDevServerAction("Started", issueID, devServerView{
+		Name:    srv.Name,
+		Port:    srv.Port,
+		Status:  srv.Status,
+		IssueID: srv.IssueID,
+		Uptime:  srv.Uptime,
+	})
 	return nil
 }
 
@@ -309,7 +322,13 @@ func DevServerStopCommand(deps *Dependencies, issueID string) error {
 	if err != nil {
 		return err
 	}
-	printDevServerAction("Stopped", issueID, srv)
+	printDevServerAction("Stopped", issueID, devServerView{
+		Name:    srv.Name,
+		Port:    srv.Port,
+		Status:  srv.Status,
+		IssueID: srv.IssueID,
+		Uptime:  srv.Uptime,
+	})
 	return nil
 }
 
@@ -318,7 +337,13 @@ func DevServerRestartCommand(deps *Dependencies, issueID string) error {
 	if err != nil {
 		return err
 	}
-	printDevServerAction("Restarted", issueID, srv)
+	printDevServerAction("Restarted", issueID, devServerView{
+		Name:    srv.Name,
+		Port:    srv.Port,
+		Status:  srv.Status,
+		IssueID: srv.IssueID,
+		Uptime:  srv.Uptime,
+	})
 	return nil
 }
 
@@ -327,7 +352,13 @@ func DevServerStatusCommand(deps *Dependencies, issueID string) error {
 	if err != nil {
 		return err
 	}
-	printDevServerStatus(issueID, srv)
+	printDevServerStatus(issueID, devServerView{
+		Name:    srv.Name,
+		Port:    srv.Port,
+		Status:  srv.Status,
+		IssueID: srv.IssueID,
+		Uptime:  srv.Uptime,
+	})
 	return nil
 }
 
@@ -372,7 +403,7 @@ func mustJSONBody(v any) []byte {
 	return body
 }
 
-func printDevServerAction(action, issueID string, srv devserver.Server) {
+func printDevServerAction(action, issueID string, srv devServerView) {
 	name := strings.TrimSpace(srv.Name)
 	if name == "" {
 		name = issueID
@@ -383,7 +414,7 @@ func printDevServerAction(action, issueID string, srv devserver.Server) {
 	}
 }
 
-func printDevServerStatus(issueID string, srv devserver.Server) {
+func printDevServerStatus(issueID string, srv devServerView) {
 	name := strings.TrimSpace(srv.Name)
 	if name == "" {
 		name = issueID
@@ -398,8 +429,8 @@ func printDevServerStatus(issueID string, srv devserver.Server) {
 	}
 }
 
-func printDevServerList(servers []devserver.Server) {
-	running := make([]devserver.Server, 0, len(servers))
+func printDevServerList(servers []devServerView) {
+	running := make([]devServerView, 0, len(servers))
 	for _, srv := range servers {
 		if strings.EqualFold(strings.TrimSpace(srv.Status), "running") {
 			running = append(running, srv)
