@@ -1150,32 +1150,32 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name: "defaults",
 			args: []string{"az-1"},
-			want: IssueGetOptions{IssueID: "az-1", JSON: false, Deps: false},
+			want: IssueGetOptions{IssueID: "az-1", JSON: false},
 		},
 		{
 			name: "json output",
 			args: []string{"--json", "az-2"},
-			want: IssueGetOptions{IssueID: "az-2", JSON: true, Deps: false},
-		},
-		{
-			name: "deps projection",
-			args: []string{"--deps", "az-3"},
-			want: IssueGetOptions{IssueID: "az-3", JSON: false, Deps: true},
+			want: IssueGetOptions{IssueID: "az-2", JSON: true},
 		},
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]",
+			errContains: "usage: az issue get [--id <issue-id>] [--json] [<issue-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]",
+			errContains: "usage: az issue get [--id <issue-id>] [--json] [<issue-id>]",
+		},
+		{
+			name:        "deps flag rejected",
+			args:        []string{"--deps", "az-3"},
+			errContains: "flag provided but not defined: -deps",
 		},
 		{
 			name: "named id",
 			args: []string{"--id", "az-4"},
-			want: IssueGetOptions{IssueID: "az-4", JSON: false, Deps: false},
+			want: IssueGetOptions{IssueID: "az-4", JSON: false},
 		},
 	}
 
@@ -1199,15 +1199,15 @@ func TestParseIssueGetArgs(t *testing.T) {
 }
 
 func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
-	check, err := ParseIssueCheckArgs([]string{"--deps", "az-1"})
+	check, err := ParseIssueCheckArgs([]string{"az-1"})
 	if err != nil {
 		t.Fatalf("ParseIssueCheckArgs() error = %v", err)
 	}
-	if check.IssueID != "az-1" || !check.Deps || check.JSON {
+	if check.IssueID != "az-1" || check.JSON {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--id <issue-id>] [--json] [--deps] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--id <issue-id>] [--json] [<issue-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -1977,12 +1977,12 @@ func TestIssueGetCommandDepsProjection(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-8", Deps: true})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-8"})
 	})
 	if !strings.Contains(output, "Dependency edges:") {
 		t.Fatalf("deps output missing dependency section: %q", output)
 	}
-	if !strings.Contains(output, "- az-2 (blocks)") || !strings.Contains(output, "- az-5 (related)") {
+	if !strings.Contains(output, "- az-2 (blocks, status=unknown)") || !strings.Contains(output, "- az-5 (related, status=unknown)") {
 		t.Fatalf("deps output missing dependency rows: %q", output)
 	}
 }
@@ -2033,16 +2033,16 @@ func TestIssueGetCommandDepsProjectionCanonicalTypes(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-9", Deps: true})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-9"})
 	})
 	if !strings.Contains(output, "Dependency edges:") {
 		t.Fatalf("deps output missing dependency section: %q", output)
 	}
 	for _, want := range []string{
-		"- az-a (blocks)",
-		"- az-b (parent-child)",
-		"- az-c (related)",
-		"- az-d (discovered-from)",
+		"- az-a (blocks, status=unknown)",
+		"- az-b (parent-child, status=unknown)",
+		"- az-c (related, status=unknown)",
+		"- az-d (discovered-from, status=unknown)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("deps output missing %q: %q", want, output)
@@ -2112,13 +2112,13 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID, Deps: true})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID})
 	})
 	for _, want := range []string{
 		"Dependency edges:",
-		"- az-parent (parent-child)",
+		"- az-parent (parent-child, status=open)",
 		"Dependents:",
-		"- az-child (parent-child)",
+		"- az-child (parent-child, status=open)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("deps projection missing %q: %q", want, output)
@@ -2533,7 +2533,7 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 
 	checkOut := captureStdout(t, func() error {
-		return IssueCheckCommand(deps, IssueCheckOptions{IssueID: "az-1", Deps: true})
+		return IssueCheckCommand(deps, IssueCheckOptions{IssueID: "az-1"})
 	})
 	if !strings.Contains(checkOut, "ID: az-1") {
 		t.Fatalf("check output = %q", checkOut)
@@ -3037,13 +3037,13 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue list [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
-	if !strings.Contains(output, "issue get [--id <id>] [--json] [--deps] [<id>]") {
+	if !strings.Contains(output, "issue get [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
 	if !strings.Contains(output, "issue get-many --id <id>") {
 		t.Fatalf("usage missing issue get-many command: %q", output)
 	}
-	if !strings.Contains(output, "issue check [--id <id>] [--json] [--deps] [<id>]") {
+	if !strings.Contains(output, "issue check [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue check command: %q", output)
 	}
 	if !strings.Contains(output, "issue doctor [--id <id>] [<id>]") {
