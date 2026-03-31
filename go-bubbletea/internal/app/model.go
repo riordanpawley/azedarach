@@ -1786,14 +1786,6 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editor.EnterSelect()
 		return m, nil
 
-	case keybinds.ActionSelectToggle: // Enter select mode and toggle current task
-		task, _ := m.getCurrentTaskAndSession()
-		if task != nil {
-			m.editor.EnterSelect()
-			m.editor.ToggleSelection(task.ID)
-		}
-		return m, nil
-
 	case keybinds.ActionOpenHelp: // Help
 		return m, m.openOverlay(overlay.NewHelpOverlay())
 

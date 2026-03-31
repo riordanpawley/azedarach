@@ -1650,21 +1650,6 @@ func TestSelectModeEntry(t *testing.T) {
 		}
 	})
 
-	t.Run("a enters select mode and toggles current task", func(t *testing.T) {
-		m.editor.EnterNormal()
-		m.nav.SelectTask("az-1", 0)
-
-		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-		newModel := result.(Model)
-
-		if newModel.editor.GetMode() != ModeSelect {
-			t.Errorf("Expected ModeSelect, got %v", newModel.editor.GetMode())
-		}
-		if !newModel.editor.IsSelected("az-1") {
-			t.Fatal("expected a to toggle selection for current task from normal mode")
-		}
-	})
-
 	t.Run("escape exits select mode back to normal", func(t *testing.T) {
 		m.editor.EnterSelect()
 		m.editor.Select("az-1")
