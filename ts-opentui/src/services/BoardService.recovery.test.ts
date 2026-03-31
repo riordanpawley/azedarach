@@ -9,6 +9,7 @@ import {
 import { TmuxError } from "../core/TmuxService.js"
 import {
 	applySessionRefreshPatch,
+	applyPRStatesToTasks,
 	classifySessionRecoveryError,
 	mergeDaemonTasksWithTmuxSessionPresence,
 	reconcileLoadedTasksWithLocalCreateGrace,
@@ -327,6 +328,47 @@ describe("mergeDaemonTasksWithTmuxSessionPresence", () => {
 		})
 
 		expect(merged[0]?.hasTmuxSession).toBe(true)
+	})
+})
+
+describe("applyPRStatesToTasks", () => {
+	it("updates only tasks with refreshed PR state values", () => {
+		const tasks = [
+			{
+				id: "AZE-1",
+				title: "Task with PR",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-07T00:00:00.000Z",
+				updated_at: "2026-03-07T00:00:00.000Z",
+				implementations: ["default"],
+				sessionState: "idle" as const,
+				hasPR: true,
+				prUrl: "https://github.com/org/repo/pull/42",
+				prState: "open" as const,
+			},
+			{
+				id: "AZE-2",
+				title: "Task without PR",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-07T00:00:00.000Z",
+				updated_at: "2026-03-07T00:00:00.000Z",
+				implementations: ["default"],
+				sessionState: "idle" as const,
+			},
+		] as const
+
+		const updated = applyPRStatesToTasks({
+			tasks,
+			prStates: new Map([["AZE-1", "merged"]]),
+		})
+
+		expect(updated[0]?.prState).toBe("merged")
+		expect(updated[1]?.prState).toBeUndefined()
+		expect(updated[1]).toBe(tasks[1])
 	})
 })
 

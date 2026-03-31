@@ -2,7 +2,8 @@
  * PRStateService - Cached PR state polling via gh CLI
  *
  * Provides accurate PR state (open/draft/merged/closed) by polling GitHub.
- * Caches results for 30 seconds to minimize API calls.
+ * Cache windows adapt to check activity so active CI gets polled more often
+ * while settled PRs back off.
  *
  * Used by BoardService to enrich TaskWithSession with prState field.
  */
@@ -16,19 +17,61 @@ import { DiagnosticsService } from "./DiagnosticsService.js"
 // Types
 // ============================================================================
 
-/** TTL for PR state cache (30 seconds) */
+/** Baseline TTL for PR state cache (30 seconds) */
 const PR_STATE_CACHE_TTL_MS = 30000
+
+/** Faster polling window when checks are still pending */
+const PR_STATE_PENDING_CACHE_TTL_MS = 10000
+
+/** Slower polling window once checks have settled */
+const PR_STATE_SETTLED_CACHE_TTL_MS = 120000
 
 /** Cached PR state entry */
 interface PRStateCacheEntry {
 	readonly state: PRState
-	readonly timestamp: number
+	readonly expiresAtMs: number
 }
 
 const GHPRViewSchema = Schema.Struct({
 	state: Schema.Literal("OPEN", "CLOSED", "MERGED"),
 	isDraft: Schema.Boolean,
+	statusCheckRollup: Schema.optional(
+		Schema.NullOr(
+			Schema.Struct({
+				state: Schema.String,
+			}),
+		),
+	),
 })
+
+type GHPRView = Schema.Schema.Type<typeof GHPRViewSchema>
+
+const pendingCheckRollupStates = new Set([
+	"expected",
+	"in_progress",
+	"pending",
+	"queued",
+	"requested",
+	"waiting",
+])
+
+export const isPendingStatusCheckRollupState = (state: string | undefined): boolean => {
+	if (state === undefined) return false
+	return pendingCheckRollupStates.has(state.trim().toLowerCase())
+}
+
+export const resolvePRStateCacheTtlMs = (params: {
+	readonly state: PRState
+	readonly statusCheckRollupState: string | undefined
+}): number => {
+	if (isPendingStatusCheckRollupState(params.statusCheckRollupState)) {
+		return PR_STATE_PENDING_CACHE_TTL_MS
+	}
+	if (params.state === "merged" || params.state === "closed") {
+		return PR_STATE_SETTLED_CACHE_TTL_MS
+	}
+	return PR_STATE_CACHE_TTL_MS
+}
 
 // ============================================================================
 // Service Definition
@@ -38,7 +81,10 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
-		yield* diagnostics.trackService("PRStateService", "gh CLI polling for PR states (30s cache)")
+		yield* diagnostics.trackService(
+			"PRStateService",
+			"gh CLI polling for PR states (adaptive cache windows)",
+		)
 
 		// Cache keyed by PR URL
 		const prStateCache = yield* Ref.make<Map<string, PRStateCacheEntry>>(new Map())
@@ -81,7 +127,7 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 				// Check cache first
 				const cache = yield* Ref.get(prStateCache)
 				const cached = cache.get(prUrl)
-				if (cached && now - cached.timestamp < PR_STATE_CACHE_TTL_MS) {
+				if (cached && now < cached.expiresAtMs) {
 					return cached.state
 				}
 
@@ -99,44 +145,58 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 				const prNumber = prNumberMatch[1]
 
 				// Fetch from gh CLI
-				const command = Command.make("gh", "pr", "view", prNumber!, "--json", "state,isDraft").pipe(
-					Command.workingDirectory(projectPath),
-					Command.string,
-				)
+				const command = Command.make(
+					"gh",
+					"pr",
+					"view",
+					prNumber!,
+					"--json",
+					"state,isDraft,statusCheckRollup",
+				).pipe(Command.workingDirectory(projectPath), Command.string)
 
-				const result = yield* command.pipe(
+				const decoded = yield* command.pipe(
 					Effect.flatMap((output) => Schema.decode(Schema.parseJson(GHPRViewSchema))(output)),
-					Effect.map((data): PRState => {
-						// Map gh CLI state to our PRState type
-						if (data.isDraft) return "draft"
-						switch (data.state) {
-							case "OPEN":
-								return "open"
-							case "MERGED":
-								return "merged"
-							case "CLOSED":
-								return "closed"
-							default:
-								return "open"
-						}
-					}),
 					Effect.catchAll((error) =>
 						Effect.logWarning(error).pipe(
-							Effect.zipRight(Effect.succeed(undefined as PRState | undefined)),
+							Effect.zipRight(Effect.succeed(undefined as GHPRView | undefined)),
 						),
 					),
 				)
 
-				// Update cache if we got a result
-				if (result !== undefined) {
-					yield* Ref.update(prStateCache, (c) => {
-						const newCache = new Map(c)
-						newCache.set(prUrl, { state: result, timestamp: now })
-						return newCache
-					})
+				if (decoded === undefined) {
+					return undefined
 				}
 
-				return result
+				const result = {
+					state: decoded.isDraft
+						? "draft"
+						: (() => {
+								switch (decoded.state) {
+									case "OPEN":
+										return "open"
+									case "MERGED":
+										return "merged"
+									case "CLOSED":
+										return "closed"
+									default:
+										return "open"
+								}
+							})(),
+					checkState: decoded.statusCheckRollup?.state,
+				} as const
+
+				// Update cache if we got a result
+				const cacheTtlMs = resolvePRStateCacheTtlMs({
+					state: result.state,
+					statusCheckRollupState: result.checkState,
+				})
+				yield* Ref.update(prStateCache, (c) => {
+					const newCache = new Map(c)
+					newCache.set(prUrl, { state: result.state, expiresAtMs: now + cacheTtlMs })
+					return newCache
+				})
+
+				return result.state
 			})
 
 		/**

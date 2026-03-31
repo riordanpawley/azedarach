@@ -433,6 +433,21 @@ export const mergeDaemonTasksWithTmuxSessionPresence = (params: {
 		return hasDiscoveredTmuxSession ? { ...task, hasTmuxSession: true } : task
 	})
 
+export const applyPRStatesToTasks = (params: {
+	readonly tasks: ReadonlyArray<TaskWithSession>
+	readonly prStates: ReadonlyMap<string, PRState>
+}): ReadonlyArray<TaskWithSession> =>
+	params.tasks.map((task) => {
+		const nextState = params.prStates.get(task.id)
+		if (nextState === undefined || task.prState === nextState) {
+			return task
+		}
+		return {
+			...task,
+			prState: nextState,
+		}
+	})
+
 export const applySessionRefreshPatch = (params: {
 	readonly task: TaskWithSession
 	readonly sessionState: TaskWithSession["sessionState"]
@@ -1418,10 +1433,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						}
 					})
 					.filter((task): task is TaskWithSession => task !== null)
-				yield* Effect.log(
-					`loadTasks: daemon read-model ${daemonTasksWithMutations.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
+
+				const prInfos = daemonTasksWithMutations.flatMap((task) =>
+					task.prUrl === undefined ? [] : [{ issueId: task.id, prUrl: task.prUrl }],
 				)
-				return daemonTasksWithMutations
+				const tasksWithPrState =
+					prInfos.length === 0
+						? daemonTasksWithMutations
+						: applyPRStatesToTasks({
+								tasks: daemonTasksWithMutations,
+								prStates: yield* prStateService.getPRStates(
+									prInfos,
+									daemonProjectPath,
+								),
+							})
+
+				yield* Effect.log(
+					`loadTasks: daemon read-model ${tasksWithPrState.length} tasks fetched in ${Date.now() - loadStartTime}ms`,
+				)
+				return tasksWithPrState
 			})
 
 		const groupTasksByColumn = (

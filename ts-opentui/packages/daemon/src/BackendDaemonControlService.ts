@@ -198,6 +198,8 @@ const makeDaemonSessionRecoverySchedule = (params: {
 		Schedule.intersect(Schedule.recurs(5)),
 	)
 
+export const makeDaemonRecoverySweepSchedule = () => Schedule.fixed(SESSION_RECOVERY_POLL_INTERVAL)
+
 const readStatus = (
 	runtime: BackendDaemonServiceApi,
 	sync: BackendSyncDaemonServiceApi,
@@ -504,7 +506,7 @@ export class BackendDaemonControlService extends Effect.Service<BackendDaemonCon
 			)
 
 			yield* Effect.forkDaemon(
-				Effect.repeat(runDaemonRecoverySweep, Schedule.spaced(SESSION_RECOVERY_POLL_INTERVAL)),
+				Effect.repeat(makeDaemonRecoverySweepSchedule())(runDaemonRecoverySweep),
 			)
 
 			return makeBackendDaemonControlService({
