@@ -3539,8 +3539,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					t.Fatalf("unmarshal delete request: %v", err)
 				}
 				deleteCount++
-				if deleteCount == 2 {
-					return protocol.ResponseEnvelope{}, io.ErrUnexpectedEOF
+					if deleteCount == 2 {
+						return protocol.ResponseEnvelope{}, errors.New("permission denied")
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -3564,7 +3564,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		if result.updated != 1 || result.failed != 1 || len(result.issues) != 1 {
 			t.Fatalf("bulk delete result = %+v", result)
 		}
-		if result.issues[0].taskID != "az-2" || !strings.Contains(result.issues[0].reason, "unexpected EOF") {
+			if result.issues[0].taskID != "az-2" || !strings.Contains(result.issues[0].reason, "permission denied") {
 			t.Fatalf("issues = %+v", result.issues)
 		}
 		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandTaskDelete || got[1] != daemonclient.CommandTaskDelete {
@@ -3580,7 +3580,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatal("expected bulk action toast")
 		}
 		gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
-		if !strings.Contains(gotToast, "az-2:") || !strings.Contains(gotToast, "unexpected EOF") {
+			if !strings.Contains(gotToast, "az-2:") || !strings.Contains(gotToast, "permission denied") {
 			t.Fatalf("toast = %q, want wrapped failure reason", gotToast)
 		}
 	})

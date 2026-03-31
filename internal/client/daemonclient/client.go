@@ -3,6 +3,7 @@ package daemonclient
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/compatibility"
@@ -69,11 +70,24 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 	if req.Meta.ProjectID == "" && c.projectID != "" {
 		req.Meta.ProjectID = c.projectID
 	}
-	resp, err := c.transport.Command(ctx, req)
-	if err != nil {
-		return protocol.ResponseEnvelope{}, fmt.Errorf("daemon command transport: %w", err)
+
+	var lastErr error
+	for attempt := 0; c.policy.ShouldRetry(attempt); attempt++ {
+		resp, err := c.transport.Command(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !isRetryableCommandTransportError(err) || !c.policy.ShouldRetry(attempt+1) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return protocol.ResponseEnvelope{}, ctx.Err()
+		case <-time.After(c.policy.Delay(attempt)):
+		}
 	}
-	return resp, nil
+	return protocol.ResponseEnvelope{}, fmt.Errorf("daemon command transport: %w", lastErr)
 }
 
 // Subscribe opens a daemon event stream with reconnect attempts.
@@ -95,4 +109,21 @@ func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision u
 		}
 	}
 	return nil, fmt.Errorf("subscribe failed after retries: %w", lastErr)
+}
+
+func isRetryableCommandTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "daemon socket unavailable") {
+		return true
+	}
+	return strings.Contains(message, "dial unix") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "no such file or directory") ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "connection reset by peer") ||
+		strings.Contains(message, "use of closed network connection") ||
+		strings.Contains(message, "eof")
 }
