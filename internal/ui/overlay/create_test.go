@@ -1,14 +1,17 @@
 package overlay
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +65,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Create Task")
 	assert.Contains(t, view, "Enter")
 	assert.Contains(t, view, "Ctrl+C")
+	assert.Contains(t, view, "Ctrl+P")
 	assert.Contains(t, view, "Ctrl+O")
 	assert.Contains(t, view, "Ctrl+E")
 	assert.Contains(t, view, "Ctrl+K")
@@ -113,6 +117,11 @@ func TestCreateTaskOverlayTabNavigation(t *testing.T) {
 	// Tab to submit
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, focusAttachments, overlay.focusIndex)
+
+	// Tab to submit
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusSubmit, overlay.focusIndex)
 
 	// Tab back to title
@@ -135,7 +144,7 @@ func TestCreateTaskOverlayShiftTabNavigation(t *testing.T) {
 	// Shift+Tab should go to acceptance
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	overlay = m.(*CreateTaskOverlay)
-	assert.Equal(t, focusAcceptance, overlay.focusIndex)
+	assert.Equal(t, focusAttachments, overlay.focusIndex)
 }
 
 func TestCreateTaskOverlayTypeSelection(t *testing.T) {
@@ -569,17 +578,71 @@ func TestCreateTaskOverlayCtrlCClearsFocusedDescription(t *testing.T) {
 	assert.Equal(t, "", overlay.description.Value())
 }
 
-func TestEditTaskOverlayCtrlORequestsImageAttach(t *testing.T) {
+func TestEditTaskOverlayCtrlPAttachesFromClipboard(t *testing.T) {
 	task := domain.Task{ID: "az-77", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
-	overlay := NewEditTaskOverlay(task)
+	svc := &createTestAttachmentService{
+		attached: &attachment.Attachment{
+			ID:       "att-1",
+			IssueID:  "az-77",
+			Filename: "clipboard.png",
+			Size:     1200,
+			Created:  time.Now(),
+		},
+	}
+	overlay := NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, nil, svc)
 
-	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
 	require.NotNil(t, cmd)
 
 	msg := cmd()
-	openMsg, ok := msg.(OpenTaskImageAttachMsg)
+	addedMsg, ok := msg.(attachmentAddedMsg)
 	require.True(t, ok)
-	assert.Equal(t, "az-77", openMsg.IssueID)
+	require.NotNil(t, addedMsg.attachment)
+	assert.Equal(t, "az-77", addedMsg.attachment.IssueID)
+}
+
+func TestEditTaskOverlayDeleteAttachmentWhenFocused(t *testing.T) {
+	task := domain.Task{ID: "az-88", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
+	svc := &createTestAttachmentService{
+		files: []attachment.Attachment{
+			{ID: "att-1", IssueID: "az-88", Filename: "one.png"},
+		},
+	}
+	overlay := NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, nil, svc)
+	overlay.attachments = append([]attachment.Attachment(nil), svc.files...)
+	overlay.focusIndex = focusAttachments
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	require.NotNil(t, cmd)
+	_ = cmd()
+	assert.Equal(t, "att-1", svc.deletedID)
+}
+
+type createTestAttachmentService struct {
+	files     []attachment.Attachment
+	attached  *attachment.Attachment
+	deletedID string
+}
+
+func (s *createTestAttachmentService) List(_ context.Context, _ string) ([]attachment.Attachment, error) {
+	return append([]attachment.Attachment(nil), s.files...), nil
+}
+
+func (s *createTestAttachmentService) AttachFromClipboard(_ context.Context, _ string) (*attachment.Attachment, error) {
+	if s.attached != nil {
+		return s.attached, nil
+	}
+	now := time.Now()
+	return &attachment.Attachment{ID: "att-default", Filename: "clipboard.png", Created: now}, nil
+}
+
+func (s *createTestAttachmentService) Attach(_ context.Context, _, _ string) (*attachment.Attachment, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *createTestAttachmentService) Delete(_ context.Context, _, attachmentID string) error {
+	s.deletedID = attachmentID
+	return nil
 }
 
 // batchToSlice is a helper function to extract messages from a batch command

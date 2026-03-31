@@ -3812,7 +3812,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.applyOptimisticTaskStatus(task.ID, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
-		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptions(*task, m.availableTaskImplementations()))
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "T":
 		return m, m.deleteTaskCmd(task.ID)
 	case "d":
