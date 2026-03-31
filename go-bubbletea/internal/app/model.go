@@ -510,6 +510,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.daemonEvents == nil {
 			return m, nil
 		}
+		if msg.stream != nil && msg.stream != m.daemonEvents {
+			return m, nil
+		}
 		m.recordRuntimeEvent(msg.event)
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
@@ -518,14 +521,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRevision = msg.event.Revision
 			return m, tea.Batch(m.loadIssuesCmd(), m.waitForDaemonEventCmd())
 		case daemonEventRehydrate:
+			m.daemonEvents = nil
 			return m, m.attachDaemonCmd()
 		default:
 			return m, m.waitForDaemonEventCmd()
 		}
 
 	case daemonStreamClosedMsg:
+		if msg.stream != nil && msg.stream != m.daemonEvents {
+			return m, nil
+		}
 		m.daemonEvents = nil
-		return m, nil
+		return m, m.attachDaemonCmd()
 
 	case network.StatusMsg:
 		// Update online status
@@ -2088,10 +2095,13 @@ type projectSwitchResultMsg struct {
 }
 
 type daemonStreamEventMsg struct {
-	event protocol.EventEnvelope
+	stream <-chan protocol.EventEnvelope
+	event  protocol.EventEnvelope
 }
 
-type daemonStreamClosedMsg struct{}
+type daemonStreamClosedMsg struct {
+	stream <-chan protocol.EventEnvelope
+}
 
 type tickMsg time.Time
 
@@ -2639,17 +2649,18 @@ func (m *Model) rebuildProjectScopedServices() {
 }
 
 func (m Model) waitForDaemonEventCmd() tea.Cmd {
+	stream := m.daemonEvents
 	return func() tea.Msg {
-		if m.daemonEvents == nil {
+		if stream == nil {
 			return nil
 		}
 
-		evt, ok := <-m.daemonEvents
+		evt, ok := <-stream
 		if !ok {
-			return daemonStreamClosedMsg{}
+			return daemonStreamClosedMsg{stream: stream}
 		}
 
-		return daemonStreamEventMsg{event: evt}
+		return daemonStreamEventMsg{stream: stream, event: evt}
 	}
 }
 

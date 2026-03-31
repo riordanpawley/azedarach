@@ -501,6 +501,72 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 }
 
+func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        8,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			return make(chan protocol.EventEnvelope), nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj"
+	stream := make(chan protocol.EventEnvelope)
+	m.daemonEvents = stream
+
+	updated, cmd := m.Update(daemonStreamClosedMsg{stream: stream})
+	if cmd == nil {
+		t.Fatal("expected reattach command after active stream closure")
+	}
+	next := updated.(Model)
+	if next.daemonEvents != nil {
+		t.Fatal("expected active stream to clear before reattach")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+	}
+	if loaded.revision != 8 {
+		t.Fatalf("loaded revision = %d, want 8", loaded.revision)
+	}
+	if transport.subscribeFrom != 8 {
+		t.Fatalf("subscribe from revision = %d, want 8", transport.subscribeFrom)
+	}
+}
+
+func TestDaemonStreamClosedIgnoresStaleStreamClose(t *testing.T) {
+	m := newTestModel()
+	active := make(chan protocol.EventEnvelope)
+	stale := make(chan protocol.EventEnvelope)
+	m.daemonEvents = active
+
+	updated, cmd := m.Update(daemonStreamClosedMsg{stream: stale})
+	if cmd != nil {
+		t.Fatal("expected no command for stale stream close signal")
+	}
+	next := updated.(Model)
+	if next.daemonEvents != active {
+		t.Fatal("expected active stream to remain unchanged")
+	}
+}
+
 func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
 	t.Setenv("TMUX", "")
 	transport := &recordingDaemonTransport{
