@@ -42,6 +42,10 @@ func assertSpecProjectID(t *testing.T, req protocol.RequestEnvelope, want string
 	}
 }
 
+func ptr(s string) *string {
+	return &s
+}
+
 func TestSpecRequirementCommandsEncodeAndDecode(t *testing.T) {
 	const wantProjectID = "proj-spec"
 
@@ -519,35 +523,13 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 					t.Fatalf("request body = %+v", body)
 				}
 				respBody, err := json.Marshal(SpecLintResult{
-					Ok:                       true,
-					RequirementCount:         1,
-					LinkedRequirementCount:   1,
-					UnlinkedRequirementCount: 0,
-					IntegrityGapCount:        0,
-					GapCounts: SpecLintGapCounts{
-						UnlinkedRequirement: 0,
-						MissingIssue:        0,
-						MissingRequirement:  0,
-					},
-					Report: SpecCoverageReport{
-						Requirements: []SpecRequirementWithStats{{
-							SpecRequirement: SpecRequirement{
-								ID:       "req-1",
-								LocalID:  "r1",
-								Title:    "Requirement 1",
-								Body:     "Body",
-								Kind:     SpecRequirementKindFunctional,
-								Status:   "open",
-								Priority: 2,
-							},
-							LinkedIssueCount:      1,
-							ImplementedIssueCount: 1,
-						}},
-						UnlinkedRequirementIDs:             []string{},
-						FullyImplementedRequirementIDs:     []string{"r1"},
-						PartiallyImplementedRequirementIDs: []string{},
-						IntegrityGaps:                      []SpecCoverageGap{},
-					},
+					OK: true,
+					Diagnostics: []SpecDiagnostic{{
+						Code:     "missing-link",
+						Message:  "requirement has no link",
+						Severity: "warning",
+						ReqID:    ptr("r1"),
+					}},
 				})
 				if err != nil {
 					t.Fatalf("marshal response: %v", err)
@@ -567,7 +549,7 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LintSpec error: %v", err)
 		}
-		if !out.Ok || out.RequirementCount != 1 || out.GapCounts.MissingIssue != 0 {
+		if !out.OK || len(out.Diagnostics) != 1 || out.Diagnostics[0].Code != "missing-link" {
 			t.Fatalf("lint result = %+v", out)
 		}
 	})
@@ -587,21 +569,12 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 					t.Fatalf("request body = %+v", body)
 				}
 				respBody, err := json.Marshal(SpecParityResult{
-					Report: SpecParityReport{
-						Implementation:                     "ts-opentui",
-						TotalRequirements:                  1,
-						ImplementedRequirementIDs:          []string{"r1"},
-						PartiallyImplementedRequirementIDs: []string{},
-						TestedRequirementIDs:               []string{"r1"},
-						UncoveredRequirementIDs:            []string{},
-						RelatedOnlyRequirementIDs:          []string{},
-						Requirements: []SpecParityRequirement{{
-							ID:                 "req-1",
-							LocalID:            "r1",
-							Title:              "Requirement 1",
-							ImplementsIssueIDs: []string{"az-1"},
-						}},
-					},
+					OK: true,
+					Findings: []SpecParityFinding{{
+						ReqID:    "r1",
+						Severity: "warning",
+						Message:  "requirement has no verifying link",
+					}},
 				})
 				if err != nil {
 					t.Fatalf("marshal response: %v", err)
@@ -624,7 +597,7 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParitySpec error: %v", err)
 		}
-		if out.Report.Implementation != "ts-opentui" || len(out.Report.Requirements) != 1 {
+		if !out.OK || len(out.Findings) != 1 || out.Findings[0].ReqID != "r1" {
 			t.Fatalf("parity result = %+v", out)
 		}
 	})

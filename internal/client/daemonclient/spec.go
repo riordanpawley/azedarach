@@ -32,8 +32,7 @@ type SpecLinkType string
 
 const (
 	SpecLinkTypeImplements SpecLinkType = "implements"
-	SpecLinkTypeTests      SpecLinkType = "tests"
-	SpecLinkTypeBlocks     SpecLinkType = "blocks"
+	SpecLinkTypeVerifies   SpecLinkType = "verifies"
 	SpecLinkTypeRelates    SpecLinkType = "relates"
 )
 
@@ -282,15 +281,20 @@ type SpecLintGapCounts struct {
 	MissingRequirement  int `json:"missing_requirement"`
 }
 
+// SpecDiagnostic mirrors daemon-side lint diagnostics.
+type SpecDiagnostic struct {
+	Code     string  `json:"code"`
+	Message  string  `json:"message"`
+	Severity string  `json:"severity,omitempty"`
+	IssueID  *string `json:"issue_id,omitempty"`
+	ReqID    *string `json:"req_id,omitempty"`
+	LinkID   *string `json:"link_id,omitempty"`
+}
+
 // SpecLintResult mirrors the daemon-side lint result.
 type SpecLintResult struct {
-	Ok                       bool               `json:"ok"`
-	RequirementCount         int                `json:"requirement_count"`
-	LinkedRequirementCount   int                `json:"linked_requirement_count"`
-	UnlinkedRequirementCount int                `json:"unlinked_requirement_count"`
-	IntegrityGapCount        int                `json:"integrity_gap_count"`
-	GapCounts                SpecLintGapCounts  `json:"gap_counts"`
-	Report                   SpecCoverageReport `json:"report"`
+	OK          bool             `json:"ok"`
+	Diagnostics []SpecDiagnostic `json:"diagnostics,omitempty"`
 }
 
 // SpecParityRequest encodes the phase-1 parity command.
@@ -323,9 +327,18 @@ type SpecParityReport struct {
 	Requirements                       []SpecParityRequirement `json:"requirements"`
 }
 
+// SpecParityFinding mirrors daemon-side parity findings.
+type SpecParityFinding struct {
+	IssueID  string `json:"issue_id,omitempty"`
+	ReqID    string `json:"req_id,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Message  string `json:"message"`
+}
+
 // SpecParityResult captures the parity response body.
 type SpecParityResult struct {
-	Report SpecParityReport `json:"report"`
+	OK       bool                `json:"ok"`
+	Findings []SpecParityFinding `json:"findings,omitempty"`
 }
 
 type SpecSyncRequest struct {
