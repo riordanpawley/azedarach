@@ -1,6 +1,10 @@
 #!/usr/bin/env sh
 set -eu
 
-# TS-opentui checks were removed with the Go migration.
-# Keep this hook as a passthrough placeholder for future repo-wide checks.
+# During merge/rebase continuations, block commit progress when build/tests fail.
+if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1 || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+  "$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
+fi
+
+# Keep normal commits lightweight; dedicated integration checks run in CI/release.
 exit 0

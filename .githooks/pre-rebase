@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -eu
+
+# Block rebases when repository build/tests are red.
+"$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
+

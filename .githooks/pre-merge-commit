@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -eu
+
+# Block merge commits when repository build/tests are red.
+"$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
+
