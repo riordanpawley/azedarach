@@ -21,11 +21,11 @@ func TestNewCreateTaskOverlay(t *testing.T) {
 	assert.Equal(t, focusTitle, overlay.focusIndex)
 }
 
-func TestCreateTaskOverlayImplOptionsFallbackToDefault(t *testing.T) {
+func TestCreateTaskOverlayImplOptionsRemainEmptyWithoutOptions(t *testing.T) {
 	overlay := NewCreateTaskOverlayWithParentAndImplOptions(nil, nil)
 	require.NotNil(t, overlay)
 	assert.Equal(t, []string{"default"}, overlay.implOptions)
-	assert.Equal(t, []string{"default"}, overlay.impls)
+	assert.Empty(t, overlay.impls)
 }
 
 func TestCreateTaskOverlayNoHardcodedImplementationTriplet(t *testing.T) {
@@ -314,6 +314,54 @@ func TestCreateTaskOverlaySubmitWithImplementations(t *testing.T) {
 	assert.Equal(t, []string{"go-bubbletea", "ts-opentui"}, taskMsg.Implementations)
 }
 
+func TestEditTaskOverlaySubmitPreservesEmptyImplementations(t *testing.T) {
+	task := domain.Task{
+		ID:              "az-1",
+		Title:           "Legacy Task",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Status:          domain.StatusOpen,
+		Implementations: nil,
+	}
+	overlay := NewEditTaskOverlayWithImplOptions(task, []string{"go-bubbletea", "ts-opentui"})
+	require.NotNil(t, overlay)
+	assert.Equal(t, -1, overlay.implComboIndex)
+	assert.Empty(t, overlay.impls)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Empty(t, taskMsg.Implementations)
+}
+
+func TestEditTaskOverlaySubmitPreservesUnmatchedImplementations(t *testing.T) {
+	task := domain.Task{
+		ID:              "az-2",
+		Title:           "Legacy Impl Task",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Status:          domain.StatusOpen,
+		Implementations: []string{"legacy-impl"},
+	}
+	overlay := NewEditTaskOverlayWithImplOptions(task, []string{"go-bubbletea", "ts-opentui"})
+	require.NotNil(t, overlay)
+	assert.Equal(t, -1, overlay.implComboIndex)
+	assert.Equal(t, []string{"legacy-impl"}, overlay.impls)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, []string{"legacy-impl"}, taskMsg.Implementations)
+}
+
 func TestCreateTaskOverlaySubmitWithoutTitle(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 
@@ -492,7 +540,7 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	assert.Equal(t, "", overlay.description.Value())
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
-	assert.Equal(t, []string{"default"}, overlay.impls)
+	assert.Empty(t, overlay.impls)
 	assert.Equal(t, "", overlay.acceptanceInput.Value())
 	assert.Equal(t, focusTitle, overlay.focusIndex)
 }

@@ -10,7 +10,7 @@
 ││ ┃                                            T/B/F/E/C Set type   │
 ││ Type: [●T] [ B] [ F] [ E] [ C]               0/1/2/3/4 Set        │
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          priority              │
-││ Impls: [<] default [>]                       h/l or ←/→ Cycle impl│
+││ Impls: [<] (none) [>]                        h/l or ←/→ Cycle impl│
 ││ Acceptance Criteria:                        combinations          │
 ││ ┃   1 Acceptance criteria (optional)...      Ctrl+O Attach image  │
 ││ ┃                                           (edit task)           │

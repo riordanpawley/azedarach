@@ -253,7 +253,19 @@ func generateImplementationCombos(options []string) [][]string {
 }
 
 func normalizeImplementationSet(values []string) []string {
-	normalized := normalizeImplementationOptions(values)
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
 	sort.Strings(normalized)
 	return normalized
 }
@@ -266,13 +278,17 @@ func implementationSetKey(values []string) string {
 func (c *CreateTaskOverlay) syncImplementationSelection() {
 	c.implOptions = normalizeImplementationOptions(c.implOptions)
 	c.implCombos = generateImplementationCombos(c.implOptions)
-	if len(c.implCombos) == 0 {
-		c.implCombos = [][]string{{"default"}}
+	targetSet := normalizeImplementationSet(c.impls)
+	if len(targetSet) == 0 {
+		defaultSet := normalizeImplementationSet(c.defaults.impls)
+		if len(defaultSet) == 0 {
+			c.implComboIndex = -1
+			c.impls = nil
+			return
+		}
+		targetSet = defaultSet
 	}
-	target := implementationSetKey(c.impls)
-	if target == "" {
-		target = implementationSetKey(c.defaults.impls)
-	}
+	target := implementationSetKey(targetSet)
 	for idx, combo := range c.implCombos {
 		if implementationSetKey(combo) == target {
 			c.implComboIndex = idx
@@ -280,8 +296,8 @@ func (c *CreateTaskOverlay) syncImplementationSelection() {
 			return
 		}
 	}
-	c.implComboIndex = 0
-	c.impls = append([]string(nil), c.implCombos[0]...)
+	c.implComboIndex = -1
+	c.impls = append([]string(nil), targetSet...)
 }
 
 type taskEditorAppliedMsg struct {
@@ -541,12 +557,15 @@ func (c *CreateTaskOverlay) clearFocusedField() {
 
 func (c *CreateTaskOverlay) cycleImplementationCombo(direction int) {
 	if len(c.implCombos) == 0 {
-		c.syncImplementationSelection()
-	}
-	if len(c.implCombos) == 0 {
 		return
 	}
-	if direction > 0 {
+	if c.implComboIndex < 0 {
+		if direction > 0 {
+			c.implComboIndex = 0
+		} else {
+			c.implComboIndex = len(c.implCombos) - 1
+		}
+	} else if direction > 0 {
 		c.implComboIndex = (c.implComboIndex + 1) % len(c.implCombos)
 	} else if direction < 0 {
 		c.implComboIndex = (c.implComboIndex - 1 + len(c.implCombos)) % len(c.implCombos)
@@ -729,10 +748,9 @@ func (c *CreateTaskOverlay) renderPrioritySelector() string {
 }
 
 func (c *CreateTaskOverlay) renderImplementationSelector() string {
-	c.syncImplementationSelection()
 	current := strings.Join(c.impls, " + ")
 	if strings.TrimSpace(current) == "" {
-		current = "default"
+		current = "(none)"
 	}
 	style := c.styles.MenuItem
 	if c.focusIndex == focusImpls {
@@ -748,7 +766,6 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 	if title == "" {
 		return nil // Don't submit if title is empty
 	}
-	c.syncImplementationSelection()
 	implementations := append([]string(nil), c.impls...)
 	acceptance := strings.TrimSpace(c.acceptanceInput.Value())
 	c.acceptance = acceptance
