@@ -68,7 +68,6 @@ coverage/
 .nyc_output/
 .beads/bd.sock.startlock
 .codanna/index
-ts-opentui/.codanna/
 .fastembed_cache
 .beads/export-state/b02f4e6754393de9.json
 
@@ -81,7 +80,6 @@ ts-opentui/.codanna/
 
 # bv (beads viewer) local config and caches
 .bv/
-/ts-opentui/bin/az
 /go-bubbletea/bin/
 /go-bubbletea/azd
 /.beads
@@ -90,10 +88,8 @@ ts-opentui/.codanna/
 /go-bubbletea/.gopath/
 /.gocache/
 /.gopath/
-/ts-opentui/az
 /.agents/memories/overview.md
 /.azedarach.schema.json
 /reference-effect
 /go-bubbletea/.azedarach/mailbox
 /go-bubbletea/.azedarach
-/ts-opentui/.azedarach

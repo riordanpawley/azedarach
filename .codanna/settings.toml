@@ -36,7 +36,7 @@ ignore_patterns = [
 # Add folders using: codanna add-dir <path>
 # Remove folders using: codanna remove-dir <path>
 # List all folders using: codanna list-dirs
-indexed_paths = ["ts-opentui/src"]
+indexed_paths = ["cmd", "internal"]
 
 # Items per batch before flushing to index (default: 5000)
 batch_size = 5000
