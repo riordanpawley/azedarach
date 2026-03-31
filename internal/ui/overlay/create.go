@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
@@ -657,7 +658,8 @@ func (c *CreateTaskOverlay) cycleImplementationCombo(direction int) {
 
 func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	stacked := width < 52
-	titleWidth := max(20, width-6)
+	titleLabelWidth := lipgloss.Width("Title: ")
+	titleWidth := max(20, width-titleLabelWidth-3)
 	if stacked {
 		titleWidth = max(20, width-4)
 	}
@@ -701,8 +703,8 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 		b.WriteString("\n")
 	}
 	titlePreviewWidth := max(1, titleWidth-2)
-	titlePreviewLines := wrapDescriptionLines(c.title.Value(), titlePreviewWidth)
-	if len(titlePreviewLines) > 1 {
+	titlePreviewLines := wrapTitleLines(c.title.Value(), titlePreviewWidth)
+	if c.focusIndex == focusTitle && len(titlePreviewLines) > 1 {
 		titlePreviewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
 		b.WriteString(titlePreviewStyle.Render(strings.Join(titlePreviewLines, "\n")))
 		b.WriteString("\n")
@@ -923,6 +925,24 @@ func (c *CreateTaskOverlay) deleteSelectedAttachment() tea.Cmd {
 		}
 		return attachmentDeletedMsg{}
 	}
+}
+
+func wrapTitleLines(value string, width int) []string {
+	if width < 1 {
+		return strings.Split(value, "\n")
+	}
+	// For titles, wrap on spaces only to avoid splitting tokens like --project.
+	wordWrapped := ansi.Wrap(value, width, " ")
+	lines := strings.Split(wordWrapped, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+	}
+	return out
 }
 
 // submit creates a TaskCreatedMsg and closes the overlay
