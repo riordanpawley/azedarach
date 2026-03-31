@@ -1,177 +1,201 @@
 <!--
-File: CONTEXT.md
-Version: 2.0.1
-Updated: 2026-03-07
-Purpose: Canonical root AI context source synced to AGENTS.md and CLAUDE.md
+File: CLAUDE.md
+Version: 1.0.0
+Updated: 2025-12-21
+Purpose: Claude Code entry point for Go/Bubbletea Azedarach development
 -->
 
-<ai_context version="1.0" tool="shared">
+<ai_context version="1.0" tool="claude">
 
-# Azedarach Project Context
+# Azedarach Project Context - Go/Bubbletea Implementation
 
 > TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
 
-## Entrypoint Generation
+## Critical Rules (Always Apply)
 
-This file is maintained directly as a Claude entrypoint.
+1. **Go Best Practices**: Follow [Standard Go Project Layout](https://github.com/golang-standards/project-layout):
+   - `cmd/` - Main applications (minimal wiring only)
+   - `internal/` - Private code (compiler-enforced encapsulation)
+   - `pkg/` - Public libraries (reusable by others, use sparingly)
+   - `testdata/` - Test fixtures
 
-## Instructions Reference
+2. **Modern CLI Tools**: ALWAYS use `rg` (NOT grep), `fd` (NOT find), `bat` (NOT cat). 10x faster, gitignore-aware.
 
-**This repository has multiple implementations:**
+3. **Issue Tracking**: ALWAYS start with `az prime`, then use `az issue` for issue operations.
 
-- **ts-opentui/** -> [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
-- **go-bubbletea/** -> [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
+4. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested. When already in the target worktree, use plain `git` commands; use `git -C <path>` only when intentionally targeting a different path.
 
-Select the implementation based on user request or current working directory.
+5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
-## Critical Rules (Quick Reference)
+6. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
 
-1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use `as` casting or `any` (ts-opentui only).
-2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed), and `bat` (not cat).
-3. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
-4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
-5. **Codex/Claude Canonical Source**: Edit live instruction assets directly in this repository.
-6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
-7. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-8. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
-9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
-10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
+7. **🚨 CRITICAL: Commit Before Done 🚨**: Before saying "done", "complete", "finished", or stopping work, you MUST commit all changes. Uncommitted work is LOST work.
+
+   **MANDATORY CHECKLIST** (run these commands):
+   ```bash
+   git status                    # Check for uncommitted changes
+   git add -A                    # Stage all changes
+   git commit -m "descriptive message"   # Commit with clear message
+   ```
+
+   **If work is complete:** Use a proper descriptive commit message
+   **If work is partial/WIP:** Use `git commit -m "wip: brief description of state"`
+
+   **This applies when you:**
+   - Say "done", "complete", "finished", "all set", etc.
+   - Are about to stop responding
+   - Have completed a task or subtask
+   - Are switching to a different task
+
+8. **Dependency Injection via Interfaces**: Accept interfaces, return structs:
+   ```go
+   // GOOD: Accept interface
+   type CommandRunner interface {
+       Run(ctx context.Context, name string, args ...string) ([]byte, error)
+   }
+
+   func NewClient(runner CommandRunner) *Client { ... }
+   ```
+   This enables testing with mocks and loose coupling.
+
+9. **Functional Options Pattern**: For complex constructors with optional configuration:
+   ```go
+   type Option func(*Model)
+
+   func WithLogger(logger *slog.Logger) Option {
+       return func(m *Model) { m.logger = logger }
+   }
+
+   func NewModel(opts ...Option) *Model {
+       m := &Model{}
+       for _, opt := range opts {
+           opt(m)
+       }
+       return m
+   }
+   ```
+
+10. **Bubbletea Model Architecture: Nested Models Pattern**:
+    - Use nested models with a top-level router
+    - Share common state via pointer (CommonModel) to avoid duplication
+    - Pass ALL messages to relevant sub-models, not just "active" one
+    - Route messages: global handlers → overlays → current view
+
+11. **Bubbletea Init Pattern: Batch Sub-Model Initialization**:
+    ```go
+    func (m Model) Init() tea.Cmd {
+        return tea.Batch(
+            m.board.Init(),
+            m.detail.Init(),
+            m.settings.Init(),
+            loadInitialData,  // Your custom init command
+        )
+    }
+    ```
+
+12. **Context Propagation**: Always pass `context.Context` as first argument to functions that do I/O or goroutine work:
+    ```go
+    func (c *Client) List(ctx context.Context) ([]domain.Task, error) { ... }
+    ```
+
+13. **Error Handling**: Use Go's idiomatic error handling:
+    - Return errors from functions, never swallow them
+    - Wrap errors with context: `fmt.Errorf("operation failed: %w", err)`
+    - Use `slog` for structured logging
+
+14. **Testing**: Write tests alongside code (`*_test.go`):
+    - Use table-driven tests for multiple cases
+    - Mock external dependencies via interfaces
+    - Keep tests fast and deterministic
+
+15. **Goroutines and Channels**: Use patterns from `go-concurrency.skill.md`:
+    - Prefer `context.Context` for cancellation
+    - Use buffered channels when known capacity
+    - Never send on closed channels (detect via select with default)
 
 ## Quick Commands
 
 ```bash
-# ts-opentui (TypeScript/Bun)
-cd ts-opentui
-bun run dev                       # Start development TUI
-bun run type-check                # Full project check
-bun run build                     # Build the project
-
-# go-bubbletea (Go)
-cd go-bubbletea
-just build                        # Build Go binary
-just test                         # Run tests
-just run                          # Build and run
+# Development
+just build                       # Build the Go binary
+just test                        # Run tests
+just run                         # Build and run
 
 # Search (modern tools)
-rg "pattern" --type ts            # Search content (NOT grep)
-fd "filename" -t f                # Find files (NOT find)
+rg "pattern" --type go           # Search content (NOT grep)
+fd "filename" -t f              # Find files (NOT find)
 
 # Issue Tracking
-az prime                          # Session primer + AI workflow guide
-
-# Context
-# (No generation step; maintain context files directly)
+az prime                                                       # Session primer + workflow guidance
+az issue --help                                                # Command reference
+az issue get <issue-id>                                        # Show issue details
+az issue create "Issue title" --description "Detailed context" # Create issue
+az issue update <issue-id> --notes "progress update"           # Update progress
+az issue close <issue-id>                                      # Mark complete
 ```
-
-## Context Workflow
-
-Active context paths:
-- `.claude/agents/`
-- `.claude/commands/`
-- `.claude/hooks/`
-- `.claude/session-templates/`
-- `.claude/skills/`
-- `AGENTS.md`, `CLAUDE.md`, `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md`
-
-Behavior:
-- No automatic generation step is required.
-- OpenCode plugin files are intentionally not managed by this context workflow.
 
 ## Architecture Quick Reference
 
 ```
-ts-opentui/
-├── src/
-│   ├── ui/           # OpenTUI + React components (Board, TaskCard, etc.)
-│   ├── core/         # Effect services (SessionManager, TmuxService, etc.)
-│   ├── services/     # Application services (Navigation, Editor, etc.)
-│   └── config/       # Configuration and schemas
-
 go-bubbletea/
 ├── cmd/              # Main applications (minimal wiring)
-├── internal/         # Private code (app, services, types, ui)
+│   └── az/          # TUI entry point
+├── internal/         # Private code (compiler-enforced)
 │   ├── app/          # Bubbletea application logic
+│   ├── cli/          # CLI argument parsing
+│   ├── config/       # Configuration management
+│   ├── core/         # Domain models and services
 │   ├── services/     # Business logic (Linear, Tmux, Git)
-│   ├── types/        # Domain models
-│   └── ui/           # Bubbletea UI components
-└── docs/             # Documentation
+│   ├── types/        # Type definitions
+│   └── ui/          # Bubbletea UI components
+├── docs/             # Documentation
+├── justfile          # Build commands
+└── go.mod            # Go module definition
 ```
 
-**Stacks:**
-- **ts-opentui**: TypeScript, OpenTUI + React, Effect, tmux, az issue tracker
-- **go-bubbletea**: Go, Bubbletea, Lip Gloss, tmux, az issue tracker
+**Stack:** Go, Bubbletea (TUI framework), Lip Gloss (styling), Bubbles (components), tmux, git
 
-## Decision Matrix
+## Key Technologies
 
-When user requests work, use this matrix to decide which implementation to work on:
+- **Bubbletea**: Elm Architecture for terminal UI (Model-Update-View)
+- **Lip Gloss**: Terminal styling (colors, borders, spacing)
+- **Bubbles**: Pre-built UI components (lists, inputs, spinners)
+- **tmux**: Terminal multiplexer for session management
+- **slog**: Structured logging (Go 1.21+)
 
-| Request | Implementation | Rationale |
-|---------|---------------|------------|
-| Default / unspecified | ts-opentui/ | Primary, most mature |
-| "TypeScript", "Bun", "Effect" | ts-opentui/ | Tech-specific match |
-| "Go", "Bubbletea" | go-bubbletea/ | Tech-specific match |
-| "Gleam", "Erlang", "BEAM" | gleam/ | Experimental match |
-| Explicit app folder mentioned | That folder | User-specified |
+## Domain Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Bubbletea TUI (Model-Update-View)                 │
+│  ┌─────────┐  ┌─────────────┐  ┌─────────┐  ┌────────┐  ┌────────┐  │
+│  │  open   │ │ in_progress │ │ blocked │ │ review │ │ closed │  │
+│  └─────────┘  └─────────────┘  └─────────┘  └────────┘  └────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Service Layer (Goroutines)                         │
+│  • Session Monitor (polls tmux for state changes)                        │
+│  • Issue tracker client (`az issue`)                                     │
+│  • Tmux Client (session management)                                      │
+│  • Git Client (worktree operations)                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ## Task Management
 
-**Track all non-trivial work through issue tracking** (preserves context across sessions).
+**Track ALL work through issue tracking** (preserves context across sessions).
 
-- Run `az prime` at the start of each AI session.
-- Use `az issue` for all issue updates and transitions.
-- Any task expected to take more than one command MUST be tracked in the issue tracker.
-- Keep one active parent issue per session whenever possible.
-- If subagents are used, each subagent MUST create and maintain a child issue under the active parent issue, and close it when that subagent task is done.
+Run `az prime` first in each session, then use `az issue` for all issue operations.
 
-## Issue Tracking Policy
-
-**IMPORTANT**: This project uses **`az issue`** as the issue tracking interface. Do NOT use markdown TODOs, task lists, or parallel tracking systems.
-
-### Important Rules
-
-- ✅ First command in a new AI session: `az prime`
-- ✅ Use `az issue` for issue tracking commands
-- ✅ `az prime` is the source of AI workflow guidance for issue tracking
-- ✅ Track every task that takes more than one command in the issue tracker
-- ✅ Keep a session scoped to one active parent issue at a time when possible
-- ✅ Subagents must create, maintain, and close child issues linked to the active parent issue
-- ✅ Keep issue status updated as work progresses
-- ✅ Keep the issue tracker as the single source of truth for issue state
-- ✅ For `ts-opentui` behavior changes, update `docs/spec/` or document `Spec impact: none` with concrete file-based rationale
-- ❌ Do NOT create markdown TODO lists as a parallel tracker
-
-## Landing the Plane (Session Completion)
-
-**When ending a work session**, you MUST complete ALL steps below.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Finalize locally**:
-   ```bash
-   git status
-   ```
-   Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-5. **Clean up** - Clear stashes and local temporary state
-6. **Verify** - All changes committed locally
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
-- Avoid remote git flows unless explicitly requested.
-- Never auto-run pull/rebase/push as part of completion.
-
-## Shared Skills
-
-This repository has shared skills in `.claude/skills/` that apply to all implementations:
-
-- **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
-- **Effect Skills** (`effect/`): Effect patterns (ts-opentui only)
-- **Gleam Skills** (`gleam/`): Gleam patterns (gleam only)
-
-See `.claude/skills/README.md` for skill documentation.
+```bash
+az issue --help
+az issue get <issue-id>
+az issue create "Issue title" --description "Detailed context"
+az issue update <issue-id> --notes "progress update"
+az issue close <issue-id>
+```
 
 ## OpenCode Plugins
 
