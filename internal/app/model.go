@@ -2772,12 +2772,6 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
-		if err := launcher.Replace(ctx); err != nil {
-			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
-			}
-		}
 
 		hello := protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
@@ -2845,15 +2839,9 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			launcher.BinPath = bin
 		}
 
-		// Startup should bind daemon authority to the active project context
-		// when we have an explicit daemon binary path to execute.
-		// If no explicit binary is resolved (for example in isolated tests),
-		// fall back to attach-only behavior.
-		if launcher.BinPath != "" {
-			if err := launcher.Replace(ctx); err != nil {
-				return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon restart: %w", err)}
-			}
-		}
+		// Avoid unconditional daemon replacement on every reattach attempt.
+		// EnsureAttached will start or replace only when protocol handshake
+		// indicates it is required.
 
 		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
