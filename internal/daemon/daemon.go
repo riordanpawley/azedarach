@@ -112,6 +112,7 @@ func New(cfg Config) *Daemon {
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
+	specHandler := daemonhandlers.NewSpecHandler(unavailableSpecService{})
 
 	d := &Daemon{
 		cfg:                cfg,
@@ -154,6 +155,7 @@ func New(cfg Config) *Daemon {
 		worktreeHandler,
 		devServerHandler,
 		prHandler,
+		specHandler,
 		runtime,
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d.issues, applyRevisionAdapter{daemon: d})
@@ -233,7 +235,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 	}
 	defer d.endCommand()
 
-	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") {
+	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") || strings.HasPrefix(req.Command, "spec.") {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 		}
