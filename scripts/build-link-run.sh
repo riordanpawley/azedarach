@@ -44,8 +44,19 @@ choose_link_dir() {
 }
 
 link_dir="$(choose_link_dir)"
-ln -sf "$repo_root/bin/az" "$link_dir/az"
-ln -sf "$repo_root/bin/azd" "$link_dir/azd"
+link_binary() {
+  local src="$1"
+  local dst="$2"
+
+  if [[ -e "$dst" && "$src" -ef "$dst" ]]; then
+    return 0
+  fi
+
+  ln -sf "$src" "$dst"
+}
+
+link_binary "$repo_root/bin/az" "$link_dir/az"
+link_binary "$repo_root/bin/azd" "$link_dir/azd"
 
 echo "Linked az -> $link_dir/az"
 echo "Linked azd -> $link_dir/azd"
