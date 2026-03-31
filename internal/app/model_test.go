@@ -866,6 +866,95 @@ func TestActionSelectionCOpensCreateOverlay(t *testing.T) {
 	}
 }
 
+func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
+	m := newTestModel()
+	parentID := "az-parent"
+	childID := "az-child"
+	m.tasks = []domain.Task{
+		{
+			ID:         parentID,
+			Title:      "Parent",
+			Status:     domain.StatusDone,
+			Priority:   domain.P1,
+			Type:       domain.TypeTask,
+			HasWorktree: false,
+		},
+		{
+			ID:         childID,
+			Title:      "Child",
+			Status:     domain.StatusInProgress,
+			Priority:   domain.P1,
+			Type:       domain.TypeTask,
+			ParentID:   &parentID,
+			HasWorktree: true,
+		},
+	}
+	m.nav.SelectTask(childID, 1)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
+	if cmd != nil {
+		t.Fatalf("expected no merge command when no eligible upstream exists, got %T", cmd)
+	}
+
+	newModel := updated.(Model)
+	if len(newModel.toasts) == 0 {
+		t.Fatalf("expected warning toast when follow-on merge has no eligible upstream")
+	}
+	lastToast := newModel.toasts[len(newModel.toasts)-1]
+	if !strings.Contains(lastToast.Message, "No eligible upstream sources") {
+		t.Fatalf("unexpected toast message: %q", lastToast.Message)
+	}
+}
+
+func TestGetFollowOnMergeCandidatesRequiresUpstreamWorktree(t *testing.T) {
+	m := newTestModel()
+	parentID := "az-parent"
+	childID := "az-child"
+
+	makeTasks := func(parentHasWorktree bool) []domain.Task {
+		return []domain.Task{
+			{
+				ID:          parentID,
+				Title:       "Parent",
+				Status:      domain.StatusDone,
+				Priority:    domain.P1,
+				Type:        domain.TypeTask,
+				HasWorktree: parentHasWorktree,
+			},
+			{
+				ID:          childID,
+				Title:       "Child",
+				Status:      domain.StatusInProgress,
+				Priority:    domain.P1,
+				Type:        domain.TypeTask,
+				ParentID:    &parentID,
+				HasWorktree: true,
+			},
+		}
+	}
+
+	t.Run("excludes parent without worktree", func(t *testing.T) {
+		m.tasks = makeTasks(false)
+		target := m.tasks[1]
+		candidates := m.getFollowOnMergeCandidates(&target)
+		if len(candidates) != 0 {
+			t.Fatalf("expected no candidates without upstream worktree, got %+v", candidates)
+		}
+	})
+
+	t.Run("includes parent with worktree", func(t *testing.T) {
+		m.tasks = makeTasks(true)
+		target := m.tasks[1]
+		candidates := m.getFollowOnMergeCandidates(&target)
+		if len(candidates) != 1 {
+			t.Fatalf("expected one candidate with upstream worktree, got %+v", candidates)
+		}
+		if candidates[0].target.ID != parentID {
+			t.Fatalf("candidate source id = %q, want %q", candidates[0].target.ID, parentID)
+		}
+	})
+}
+
 func TestSettingsSaveErrorKeepsOverlayOpen(t *testing.T) {
 	m := newTestModel()
 	m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
