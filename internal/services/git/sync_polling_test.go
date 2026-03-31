@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -20,11 +21,14 @@ type pollRunner struct {
 }
 
 func (r *pollRunner) Run(ctx context.Context, args ...string) (string, error) {
+	if len(args) >= 3 && args[0] == "-C" {
+		args = args[2:]
+	}
 	key := joinArgs(args)
 	if res, ok := r.outputs[key]; ok {
 		return res.output, res.err
 	}
-	return "", nil
+	return "", errors.New("unexpected git command: " + strings.Join(args, " "))
 }
 
 func joinArgs(args []string) string {

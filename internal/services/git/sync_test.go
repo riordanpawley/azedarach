@@ -33,6 +33,9 @@ func (r *syncRunner) Run(ctx context.Context, args ...string) (string, error) {
 	if len(args) == 0 {
 		return "", fmt.Errorf("missing git command")
 	}
+	if len(args) >= 3 && args[0] == "-C" {
+		args = args[2:]
+	}
 
 	switch args[0] {
 	case "fetch":

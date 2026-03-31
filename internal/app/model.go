@@ -543,9 +543,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case daemonStreamEventMsg:
-		if m.daemonEvents == nil {
-			return m, nil
-		}
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
