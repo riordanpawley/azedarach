@@ -3043,3 +3043,106 @@ func TestDaemonOperationProgressEventUpdatesRuntimeSignalsAndClearsOnDone(t *tes
 		t.Fatalf("expected pending op fields cleared, got %+v", cleared)
 	}
 }
+
+func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.runtimeSignalWorktreeByTask = map[string]string{
+		"az-1": "/tmp/wt-az-1",
+		"az-2": "/tmp/wt-az-2",
+	}
+
+	cases := []struct {
+		name         string
+		issueID      string
+		resourceKeys []string
+		wantTaskID   string
+	}{
+		{
+			name:       "session lifecycle issue id",
+			issueID:    "az-1",
+			wantTaskID: "az-1",
+		},
+		{
+			name:       "git merge uses worktree path issue id",
+			issueID:    "/tmp/wt-az-1",
+			wantTaskID: "az-1",
+		},
+		{
+			name:         "git fetch uses worktree resource key",
+			issueID:      "",
+			resourceKeys: []string{"worktree:/tmp/wt-az-2"},
+			wantTaskID:   "az-2",
+		},
+		{
+			name:         "worktree remove uses issue resource key",
+			issueID:      "__project__",
+			resourceKeys: []string{"issue:proj:az-2"},
+			wantTaskID:   "az-2",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.resolveOperationTaskID(tt.issueID, tt.resourceKeys)
+			if got != tt.wantTaskID {
+				t.Fatalf("resolveOperationTaskID(%q, %v) = %q, want %q", tt.issueID, tt.resourceKeys, got, tt.wantTaskID)
+			}
+		})
+	}
+}
+
+func TestDaemonOperationLifecycleEventsTrackPendingForGitAndWorktreeMutations(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.runtimeSignalWorktreeByTask = map[string]string{
+		"az-1": "/tmp/wt-az-1",
+		"az-2": "/tmp/wt-az-2",
+	}
+
+	gitQueued, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-git-1",
+			IssueID:     "/tmp/wt-az-1",
+			Kind:        "git.merge",
+			State:       protocol.OperationStateQueued,
+			ResourceKeys: []string{
+				"worktree:/tmp/wt-az-1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal git queued body: %v", err)
+	}
+	m.applyOperationProgressEvent(protocol.EventEnvelope{Event: protocol.EventOperationQueued, Body: gitQueued})
+
+	worktreeRunning, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-wt-1",
+			IssueID:     "az-2",
+			Kind:        "worktree.remove",
+			State:       protocol.OperationStateRunning,
+			ResourceKeys: []string{
+				"issue:proj:az-2",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal worktree running body: %v", err)
+	}
+	m.applyOperationProgressEvent(protocol.EventEnvelope{Event: protocol.EventOperationRunning, Body: worktreeRunning})
+
+	signals := m.runtimeSignalsForBoard()
+	if got := signals["az-1"]; got.PendingOperationID != "op-git-1" || got.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("az-1 pending = %+v, want queued op-git-1", got)
+	}
+	if got := signals["az-2"]; got.PendingOperationID != "op-wt-1" || got.PendingOperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("az-2 pending = %+v, want running op-wt-1", got)
+	}
+}
