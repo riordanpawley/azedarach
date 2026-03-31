@@ -168,10 +168,12 @@ func New(cfg Config) *Daemon {
 
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
+	startedAt := time.Now()
 	lease, err := d.lock.Acquire()
 	if err != nil {
 		return err
 	}
+	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
 	shutdownDone := make(chan struct{})
@@ -205,9 +207,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
+	bootstrapStartedAt := time.Now()
 	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
+		d.cfg.Logger.Error("daemon startup phase failed", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds(), "error", err)
 		return err
 	}
+	d.cfg.Logger.Info("daemon startup phase", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds())
+	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = d.serve.Serve(serveCtx)
 	if ctx.Err() != nil {
 		<-shutdownDone
