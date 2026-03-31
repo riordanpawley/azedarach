@@ -12,6 +12,7 @@ import (
 type Config struct {
 	CLITool       string          `json:"cliTool"`
 	Git           GitConfig       `json:"git"`
+	GitHooks      GitHooksConfig  `json:"githooks"`
 	Keyboard      KeyboardConfig  `json:"keyboard"`
 	Session       SessionConfig   `json:"session"`
 	PR            PRConfig        `json:"pr"`
@@ -32,6 +33,23 @@ type GitConfig struct {
 	DefaultMergeStrategy string `json:"defaultMergeStrategy"`
 	PushEnabled          bool   `json:"pushEnabled"`
 	FetchEnabled         bool   `json:"fetchEnabled"`
+}
+
+// GitHooksConfig controls az-managed git hook behavior.
+type GitHooksConfig struct {
+	SpecSync      GitHookSpecSyncConfig `json:"specSync"`
+	BoundaryCheck GitHookTaskConfig     `json:"boundaryCheck"`
+}
+
+type GitHookSpecSyncConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Command       string `json:"command"`
+	AutoStageDocs bool   `json:"autoStageDocs"`
+}
+
+type GitHookTaskConfig struct {
+	Enabled bool   `json:"enabled"`
+	Command string `json:"command"`
 }
 
 // KeyboardConfig contains keyboard-related settings
@@ -117,6 +135,17 @@ func DefaultConfig() *Config {
 			DefaultMergeStrategy: "merge",
 			PushEnabled:          true,
 			FetchEnabled:         true,
+		},
+		GitHooks: GitHooksConfig{
+			SpecSync: GitHookSpecSyncConfig{
+				Enabled:       false,
+				Command:       "az spec sync --target md",
+				AutoStageDocs: true,
+			},
+			BoundaryCheck: GitHookTaskConfig{
+				Enabled: true,
+				Command: "just check-boundaries",
+			},
 		},
 		Keyboard: KeyboardConfig{
 			JumpLabelChars: "abcdefghijklmnopqrstuvwxyz",

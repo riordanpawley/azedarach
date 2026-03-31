@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
@@ -23,11 +25,14 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 	for _, want := range []string{
 		"notify <event> <issue-id>",
 		"hooks install <issue-id>",
+		"githooks <install|run>",
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
+		"az githooks install",
+		"az githooks run",
 		"az gate az-123",
 		"az dev gate az-123",
 		"az opencode init",
@@ -36,6 +41,62 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
 		}
+	}
+}
+
+func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".githooks"), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks: %v", err)
+	}
+	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	opts, err := ParseGitHooksInstallArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksInstallArgs error: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return GitHooksInstallCommand(&Dependencies{RepoDir: projectDir}, opts)
+	})
+	if !strings.Contains(output, "Installed git hooks in") {
+		t.Fatalf("install output = %q", output)
+	}
+
+	preCommitPath := filepath.Join(projectDir, ".githooks", "pre-commit")
+	data, err := os.ReadFile(preCommitPath)
+	if err != nil {
+		t.Fatalf("read pre-commit: %v", err)
+	}
+	if !strings.Contains(string(data), "az githooks run") {
+		t.Fatalf("pre-commit content = %q", string(data))
+	}
+}
+
+func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.GitHooks.SpecSync.Enabled = true
+	cfg.GitHooks.SpecSync.Command = "mkdir -p docs/spec && printf 'ok\\n' > docs/spec/.spec-sync-ran"
+	cfg.GitHooks.SpecSync.AutoStageDocs = false
+	cfg.GitHooks.BoundaryCheck.Enabled = false
+
+	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
+	}
+
+	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts); err != nil {
+		t.Fatalf("GitHooksRunCommand error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", ".spec-sync-ran")); err != nil {
+		t.Fatalf("expected spec sync marker: %v", err)
 	}
 }
 
@@ -298,25 +359,25 @@ func TestDevServerListCommandFiltersRunningServers(t *testing.T) {
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			gotReq = req
-				return responseWithJSON(req, devServerListResponseBody{
-					ProjectID: "proj-1",
-					Servers: []devServerView{
-						{
-							Name:    "default",
-							Port:    3010,
-							Status:  "running",
-							IssueID: "az-1",
-						},
-						{
-							Name:    "secondary",
-							Port:    3011,
-							Status:  "stopped",
-							IssueID: "az-2",
-						},
+			return responseWithJSON(req, devServerListResponseBody{
+				ProjectID: "proj-1",
+				Servers: []devServerView{
+					{
+						Name:    "default",
+						Port:    3010,
+						Status:  "running",
+						IssueID: "az-1",
 					},
-				}), nil
-			},
-		}
+					{
+						Name:    "secondary",
+						Port:    3011,
+						Status:  "stopped",
+						IssueID: "az-2",
+					},
+				},
+			}), nil
+		},
+	}
 
 	deps := &Dependencies{
 		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),

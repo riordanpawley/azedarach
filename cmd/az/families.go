@@ -56,6 +56,36 @@ func runHooksCommand(cfg *config.Config, args []string) error {
 	}
 }
 
+func runGitHooksCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintGitHooksUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "install":
+		opts, err := cli.ParseGitHooksInstallArgs(args[1:])
+		if err != nil {
+			cli.PrintGitHooksUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.GitHooksInstallCommand(deps, opts)
+		})
+	case "run":
+		opts, err := cli.ParseGitHooksRunArgs(args[1:])
+		if err != nil {
+			cli.PrintGitHooksUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.GitHooksRunCommand(deps, opts)
+		})
+	default:
+		return fmt.Errorf("unknown githooks command: %s", args[0])
+	}
+}
+
 func runGateCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintGateUsage()

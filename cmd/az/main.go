@@ -230,6 +230,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "githooks":
+		if err := runGitHooksCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "gate":
 		if err := runGateCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

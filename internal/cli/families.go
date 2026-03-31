@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -14,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
@@ -41,6 +44,16 @@ type NotifyOptions struct {
 
 type HooksInstallOptions struct {
 	IssueID    string
+	ProjectDir string
+	Verbose    bool
+}
+
+type GitHooksInstallOptions struct {
+	ProjectDir string
+	Verbose    bool
+}
+
+type GitHooksRunOptions struct {
 	ProjectDir string
 	Verbose    bool
 }
@@ -114,6 +127,38 @@ func ParseHooksInstallArgs(args []string) (HooksInstallOptions, error) {
 		return HooksInstallOptions{}, fmt.Errorf("usage: az hooks install <issue-id> [--project-dir <dir>] [--verbose]")
 	}
 	opts.IssueID = fs.Arg(0)
+	return opts, nil
+}
+
+func ParseGitHooksInstallArgs(args []string) (GitHooksInstallOptions, error) {
+	opts := GitHooksInstallOptions{}
+	fs := flag.NewFlagSet("githooks install", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return GitHooksInstallOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return GitHooksInstallOptions{}, fmt.Errorf("usage: az githooks install [--project-dir <dir>] [--verbose]")
+	}
+	return opts, nil
+}
+
+func ParseGitHooksRunArgs(args []string) (GitHooksRunOptions, error) {
+	opts := GitHooksRunOptions{}
+	fs := flag.NewFlagSet("githooks run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return GitHooksRunOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return GitHooksRunOptions{}, fmt.Errorf("usage: az githooks run [--project-dir <dir>] [--verbose]")
+	}
 	return opts, nil
 }
 
@@ -269,6 +314,102 @@ func HooksInstallCommand(deps *Dependencies, opts HooksInstallOptions) error {
 	fmt.Printf("Installed hooks for issue %s\n", opts.IssueID)
 	fmt.Printf("  File: %s\n", settingsPath)
 	fmt.Println("  Events: idle_prompt, permission_request, stop, session_end")
+	return nil
+}
+
+func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) error {
+	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	if err != nil {
+		return err
+	}
+
+	hooksDir := filepath.Join(projectDir, ".githooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return fmt.Errorf("create .githooks directory: %w", err)
+	}
+
+	preCommitPath := filepath.Join(hooksDir, "pre-commit")
+	const preCommit = "#!/usr/bin/env sh\nset -eu\naz githooks run \"$@\"\n"
+	if err := os.WriteFile(preCommitPath, []byte(preCommit), 0o755); err != nil {
+		return fmt.Errorf("write pre-commit hook: %w", err)
+	}
+
+	cmd := exec.Command("git", "-C", projectDir, "config", "core.hooksPath", ".githooks")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("set git core.hooksPath: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+
+	fmt.Printf("Installed git hooks in %s\n", hooksDir)
+	fmt.Println("Configured git core.hooksPath=.githooks")
+	if opts.Verbose {
+		fmt.Println("pre-commit now delegates to: az githooks run")
+	}
+	return nil
+}
+
+func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
+	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	if err != nil {
+		return err
+	}
+
+	cfg := (*config.Config)(nil)
+	if deps != nil && deps.Config != nil {
+		cfg = deps.Config
+	} else {
+		cfg, err = config.LoadConfig(projectDir)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+	}
+
+	specSyncCfg := cfg.GitHooks.SpecSync
+	if specSyncCfg.Enabled {
+		command := strings.TrimSpace(specSyncCfg.Command)
+		if command == "" {
+			command = "az spec sync --target md"
+		}
+		if opts.Verbose {
+			fmt.Printf("githooks: spec sync command: %s\n", command)
+		}
+		if err := runShellCommand(projectDir, command); err != nil {
+			return fmt.Errorf("githooks spec sync failed: %w", err)
+		}
+
+		if specSyncCfg.AutoStageDocs {
+			if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec")); err == nil {
+				stageCmd := exec.Command("git", "-C", projectDir, "add", "docs/spec")
+				if output, err := stageCmd.CombinedOutput(); err != nil {
+					return fmt.Errorf("githooks spec sync auto-stage failed: %w (%s)", err, strings.TrimSpace(string(output)))
+				}
+			}
+		}
+	}
+
+	boundaryCfg := cfg.GitHooks.BoundaryCheck
+	if boundaryCfg.Enabled {
+		if os.Getenv("AZEDARACH_SKIP_BOUNDARY_CHECK") == "1" {
+			fmt.Println("githooks: boundary checks skipped (AZEDARACH_SKIP_BOUNDARY_CHECK=1)")
+			return nil
+		}
+		shouldRun, err := hasBoundaryRelevantStagedPaths(projectDir)
+		if err != nil {
+			return fmt.Errorf("determine staged boundary paths: %w", err)
+		}
+		if shouldRun {
+			command := strings.TrimSpace(boundaryCfg.Command)
+			if command == "" {
+				command = "just check-boundaries"
+			}
+			if opts.Verbose {
+				fmt.Printf("githooks: boundary command: %s\n", command)
+			}
+			if err := runShellCommand(projectDir, command); err != nil {
+				return fmt.Errorf("githooks boundary check failed: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -576,6 +717,11 @@ func PrintHooksUsage() {
 	fmt.Println("Manage Claude Code hook configuration for session detection.")
 }
 
+func PrintGitHooksUsage() {
+	fmt.Println("Usage: az githooks <install|run> [--project-dir <dir>] [--verbose]")
+	fmt.Println("Manage repository git hooks and execute configured hook tasks.")
+}
+
 func PrintNotifyUsage() {
 	fmt.Println("Usage: az notify <event> <issue-id> [--verbose]")
 	fmt.Println("Handle Claude Code hook notifications (internal use).")
@@ -713,6 +859,56 @@ func writePlaceholderFile(path, content string) error {
 		return nil
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func resolveProjectDir(projectDir string, deps *Dependencies) (string, error) {
+	resolved := strings.TrimSpace(projectDir)
+	if resolved == "" && deps != nil {
+		resolved = strings.TrimSpace(deps.RepoDir)
+	}
+	if resolved == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve project directory: %w", err)
+		}
+		resolved = cwd
+	}
+	return resolved, nil
+}
+
+func runShellCommand(projectDir, command string) error {
+	cmd := exec.Command("/bin/sh", "-lc", command)
+	cmd.Dir = projectDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func hasBoundaryRelevantStagedPaths(projectDir string) (bool, error) {
+	cmd := exec.Command("git", "-C", projectDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		path := scanner.Text()
+		if strings.HasPrefix(path, "internal/") ||
+			strings.HasPrefix(path, "cmd/") ||
+			strings.HasPrefix(path, "docs/") ||
+			path == "justfile" ||
+			path == "AGENTS.md" ||
+			path == ".golangci-boundary.yml" ||
+			path == "scripts/check-boundaries.sh" ||
+			path == "scripts/afv-drift-sentinel.sh" {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func openCodePluginSource() string {
