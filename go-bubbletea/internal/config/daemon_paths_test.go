@@ -56,3 +56,42 @@ func TestGlobalDaemonPaths(t *testing.T) {
 		t.Fatalf("GlobalDaemonLockPath() = %q, want %q", got, want)
 	}
 }
+
+func TestScopedDaemonPathsUseWorktreeRoot(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	t.Setenv("PATH", "")
+
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "go-bubbletea")
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	wantRuntime := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "azedarach", "scopes", daemonScopeID(worktree))
+	if got := ScopedDaemonRuntimeDir(nested); got != wantRuntime {
+		t.Fatalf("ScopedDaemonRuntimeDir() = %q, want %q", got, wantRuntime)
+	}
+	if got := ScopedDaemonSocketPath(nested); got != filepath.Join(wantRuntime, "daemon.sock") {
+		t.Fatalf("ScopedDaemonSocketPath() = %q, want %q", got, filepath.Join(wantRuntime, "daemon.sock"))
+	}
+	if got := ScopedDaemonLockPath(nested); got != filepath.Join(wantRuntime, "daemon.lock") {
+		t.Fatalf("ScopedDaemonLockPath() = %q, want %q", got, filepath.Join(wantRuntime, "daemon.lock"))
+	}
+}
+
+func TestScopedDaemonPathsDifferAcrossWorktrees(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
+	pathA := filepath.Join(t.TempDir(), "repo-a")
+	pathB := filepath.Join(t.TempDir(), "repo-b")
+	if gotA, gotB := ScopedDaemonSocketPath(pathA), ScopedDaemonSocketPath(pathB); gotA == gotB {
+		t.Fatalf("ScopedDaemonSocketPath() should differ across scopes; got %q for both", gotA)
+	}
+}

@@ -14,9 +14,11 @@ import (
 
 func main() {
 	var socketPath string
+	var lockPath string
 	var repoDir string
 
 	flag.StringVar(&socketPath, "socket", "", "unix socket path")
+	flag.StringVar(&lockPath, "lock", "", "lock file path")
 	flag.StringVar(&repoDir, "repo", "", "repository root")
 	flag.Parse()
 
@@ -38,7 +40,9 @@ func main() {
 	if socketPath == "" {
 		socketPath = config.GlobalDaemonSocketPath()
 	}
-	lockPath := config.GlobalDaemonLockPath()
+	if lockPath == "" {
+		lockPath = config.GlobalDaemonLockPath()
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

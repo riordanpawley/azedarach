@@ -213,6 +213,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
+	daemonSocketPath := config.ScopedDaemonSocketPath(repoDir)
 	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
 		repoDir = normalizedRepoDir
 	}
@@ -221,8 +222,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		logger.Error("failed to get current directory", "error", err)
 	}
-	socketPath := config.GlobalDaemonSocketPath()
-	daemonClient := daemonclient.New(transport.NewClient(socketPath))
+	daemonClient := daemonclient.New(transport.NewClient(daemonSocketPath))
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
@@ -2470,7 +2470,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(project.Path, config.GlobalDaemonSocketPath())
+		launcher := daemonprocess.NewLauncher(project.Path, config.ScopedDaemonSocketPath(project.Path))
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2540,7 +2540,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(targetRepoDir, config.GlobalDaemonSocketPath())
+		launcher := daemonprocess.NewLauncher(targetRepoDir, config.ScopedDaemonSocketPath(targetRepoDir))
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}

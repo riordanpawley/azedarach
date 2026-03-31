@@ -53,6 +53,9 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.ProjectID != filepath.Base(repo) {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, filepath.Base(repo))
 	}
+	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	}
 }
 
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
