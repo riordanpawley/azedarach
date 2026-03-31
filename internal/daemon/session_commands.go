@@ -181,14 +181,18 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	worktree, err := d.worktree.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
 	if err != nil {
-		if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		// Recovery path: git worktree add can return non-zero after materializing
+		// a usable worktree (for example, hooks that fail post-checkout).
+		// If we can load the worktree for the issue, continue by reusing it.
+		if recoveredWorktree, recoverErr := d.worktree.Get(ctx, cmd.IssueID); recoverErr == nil {
+			worktree = recoveredWorktree
+			reusedWorktree = true
+		} else {
+			if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
 		}
-		worktree, err = d.worktree.Get(ctx, cmd.IssueID)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", err)), nil
-		}
-		reusedWorktree = true
 	}
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
