@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,10 +19,11 @@ type GitSyncService struct {
 	logger         *slog.Logger
 	projectPath    string
 
+	mu            sync.Mutex
 	commitsBehind int
 	isFetching    bool
+	pendingFetch  bool
 	lastNotified  int
-	isLocked      bool
 }
 
 type GitSyncMsg struct {
@@ -42,43 +44,88 @@ func NewGitSyncService(gitClient *Client, networkChecker *network.StatusChecker,
 
 func (s *GitSyncService) FetchAndCheck() tea.Cmd {
 	return func() tea.Msg {
-		if s.isLocked {
-			return nil
+		for {
+			if !s.beginFetch() {
+				return nil
+			}
+
+			msg := s.fetchAndCheckOnce()
+
+			if !s.finishFetch() {
+				return msg
+			}
 		}
-		s.isLocked = true
-		defer func() { s.isLocked = false }()
+	}
+}
 
-		if s.config.Git.WorkflowMode != "origin" {
-			return nil
-		}
+func (s *GitSyncService) beginFetch() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-		if !s.networkChecker.IsOnline() {
-			return nil
-		}
+	if s.isFetching {
+		s.pendingFetch = true
+		return false
+	}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	s.isFetching = true
+	return true
+}
 
-		remote := "origin"
-		baseBranch := s.config.Git.BaseBranch
+func (s *GitSyncService) finishFetch() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-		err := s.gitClient.Fetch(ctx, s.projectPath, remote)
-		if err != nil {
-			s.logger.Warn("git sync fetch failed", "error", err)
-		}
+	s.isFetching = false
 
-		revRange := fmt.Sprintf("%s..%s/%s", baseBranch, remote, baseBranch)
-		count, err := s.gitClient.RevListCount(ctx, s.projectPath, revRange)
-		if err != nil {
-			s.logger.Warn("git sync rev-list failed", "error", err)
-			count = 0
-		}
+	if s.pendingFetch {
+		s.pendingFetch = false
+		return true
+	}
 
-		s.commitsBehind = count
+	return false
+}
+
+func (s *GitSyncService) fetchAndCheckOnce() tea.Msg {
+	if s.config.Git.WorkflowMode != "origin" {
+		return nil
+	}
+
+	if !s.networkChecker.IsOnline() {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	remote := "origin"
+	baseBranch := s.config.Git.BaseBranch
+
+	err := s.gitClient.Fetch(ctx, s.projectPath, remote)
+	if err != nil {
+		s.logger.Warn("git sync fetch failed", "error", err)
+	}
+
+	revRange := fmt.Sprintf("%s..%s/%s", baseBranch, remote, baseBranch)
+	count, err := s.gitClient.RevListCount(ctx, s.projectPath, revRange)
+	if err != nil {
+		s.mu.Lock()
+		lastKnown := s.commitsBehind
+		s.mu.Unlock()
+		s.logger.Warn("git sync rev-list failed", "error", err, "lastKnownCommitsBehind", lastKnown)
 		return GitSyncMsg{
-			CommitsBehind: count,
+			CommitsBehind: lastKnown,
 			IsFetching:    false,
+			Err:           err,
 		}
+	}
+
+	s.mu.Lock()
+	s.commitsBehind = count
+	s.mu.Unlock()
+
+	return GitSyncMsg{
+		CommitsBehind: count,
+		IsFetching:    false,
 	}
 }
 
@@ -106,8 +153,10 @@ func (s *GitSyncService) Pull() tea.Cmd {
 			return GitSyncMsg{Err: err}
 		}
 
+		s.mu.Lock()
 		s.commitsBehind = 0
 		s.lastNotified = 0
+		s.mu.Unlock()
 		return GitSyncMsg{
 			CommitsBehind: 0,
 			IsFetching:    false,
@@ -116,6 +165,9 @@ func (s *GitSyncService) Pull() tea.Cmd {
 }
 
 func (s *GitSyncService) ShouldNotify(count int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.config.Git.WorkflowMode != "origin" {
 		return false
 	}

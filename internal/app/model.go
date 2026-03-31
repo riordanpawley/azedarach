@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -109,6 +110,8 @@ type pendingTaskStatus struct {
 	targetStatus   domain.Status
 	operationID    string
 	state          protocol.OperationState
+	action         string
+	updatedAt      time.Time
 }
 
 // Model is the main application state
@@ -171,9 +174,10 @@ type Model struct {
 	hasRefreshLoop bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient   *daemonclient.Client
-	daemonEvents   <-chan protocol.EventEnvelope
-	daemonRevision uint64
+	daemonClient     *daemonclient.Client
+	daemonSocketPath string
+	daemonEvents     <-chan protocol.EventEnvelope
+	daemonRevision   uint64
 
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
@@ -213,6 +217,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
+	daemonSocketPath := config.DaemonSocketPathFor(repoDir)
 	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
 		repoDir = normalizedRepoDir
 	}
@@ -221,8 +226,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		logger.Error("failed to get current directory", "error", err)
 	}
-	socketPath := config.GlobalDaemonSocketPath()
-	daemonClient := daemonclient.New(transport.NewClient(socketPath))
+	daemonClient := daemonclient.New(transport.NewClient(daemonSocketPath))
 	deps := appdeps.Build(cfg, repoDir, logger)
 
 	m := Model{
@@ -244,6 +248,7 @@ func New(cfg *config.Config) Model {
 		loading:                        true, // Start with loading state
 		spinner:                        s,
 		daemonClient:                   daemonClient,
+		daemonSocketPath:               daemonSocketPath,
 		sessionMonitor:                 deps.SessionMonitor,
 		gitClient:                      deps.GitDiffClient,
 		gitSyncService:                 deps.GitSyncService,
@@ -316,7 +321,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Key == "merge_attach" {
 			m.overlayStack.Pop()
 			issueID := msg.Value.(string)
-			session := m.sessions[issueID]
+			session := m.sessionForIssue(issueID)
+			if session == nil {
+				return m, nil
+			}
 			return m, m.fetchAndMergeCmd(session.Worktree, m.config.Git.BaseBranch, issueID, true)
 		}
 		if msg.Key == "skip_attach" {
@@ -325,6 +333,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.attachSessionCmd(issueID)
 		}
 		return m.handleSelection(msg)
+
+	case overlay.BulkActionMsg:
+		m.overlayStack.Pop()
+		return m.handleBulkAction(msg)
 
 	case overlay.SearchMsg:
 		m.editor.SetSearchQuery(msg.Query)
@@ -338,6 +350,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case issuesLoadedMsg:
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
+		}
+		if msg.daemonClient != nil {
+			m.daemonClient = msg.daemonClient
+			if strings.TrimSpace(msg.daemonSocket) != "" {
+				m.daemonSocketPath = msg.daemonSocket
+			}
 		}
 		wasLoading := m.loading
 		if msg.stale {
@@ -361,9 +379,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
+		for i := range m.tasks {
+			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		}
 		m.applyPendingStatusOverlays()
-		m.sessions = m.projectSessionProjection(tasks)
 		m.applyRuntimeSignals()
+		m.reconcilePendingStatuses()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
@@ -433,7 +454,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case monitor.SessionStateMsg:
-		if session, ok := m.sessions[msg.IssueID]; ok {
+		if session := m.sessionForIssue(msg.IssueID); session != nil {
 			oldState := session.State
 			m.logger.Debug("session state updated", "issueID", msg.IssueID, "state", msg.State)
 
@@ -450,6 +471,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionStartedMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.markTaskOperationPending(msg.issueID, "session_start", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage("Session start", msg.issueID, msg.operationID, msg.state),
@@ -457,12 +480,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, m.loadIssuesCmd()
 		}
-		for i := range m.tasks {
-			if m.tasks[i].ID == msg.issueID {
-				m.tasks[i].HasTmuxSession = true
-				break
-			}
-		}
+		m.clearPendingTaskStatus(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session started: %s", msg.issueID),
@@ -472,6 +491,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionStoppedMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.markTaskOperationPending(msg.issueID, "session_stop", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage("Session stop", msg.issueID, msg.operationID, msg.state),
@@ -479,6 +500,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, m.loadIssuesCmd()
 		}
+		m.clearPendingTaskStatus(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
@@ -487,6 +510,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionErrorMsg:
+		m.clearPendingTaskStatus(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: fmt.Sprintf("Session error: %s - %v", msg.issueID, msg.err),
@@ -514,11 +539,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.recordRuntimeEvent(msg.event)
+		if msg.event.Event == protocol.EventSessionUpdated {
+			m.applySessionProjectionEvent(msg.event)
+		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
 		case daemonEventRefreshSnapshot:
-			m.daemonRevision = msg.event.Revision
+			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+			m.daemonRevision = cursor.Advance(msg.event).Revision
 			return m, tea.Batch(m.loadIssuesCmd(), m.waitForDaemonEventCmd())
 		case daemonEventRehydrate:
 			m.daemonEvents = nil
@@ -760,13 +789,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		if msg.daemonClient != nil {
+			m.daemonClient = msg.daemonClient
+			if strings.TrimSpace(msg.daemonSocket) != "" {
+				m.daemonSocketPath = msg.daemonSocket
+			}
+		}
 
 		m.rebindProjectContext(msg.project, msg.projectConfig)
 
 		// Reuse the normal loaded-state reducer path.
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
-		m.sessions = m.projectSessionProjection(tasks)
+		for i := range m.tasks {
+			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
+		}
 		m.editor.ReconcileSelection(tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
@@ -787,6 +824,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
 		return m, m.saveTaskCmd(msg)
+
+	case overlay.OpenTaskImageAttachMsg:
+		issueID := strings.TrimSpace(msg.IssueID)
+		if issueID == "" {
+			return m, nil
+		}
+		attachOverlay := overlay.NewImageAttachOverlay(issueID, m.attachmentService)
+		return m, m.openOverlay(attachOverlay)
 
 	case taskCreatedResultMsg:
 		if msg.err != nil {
@@ -1064,7 +1109,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		if msg.newStatus == domain.StatusDone {
-			if session, ok := m.sessions[msg.taskID]; ok {
+			if session := m.sessionForIssue(msg.taskID); session != nil {
 				return m, tea.Batch(
 					m.loadIssuesCmd(),
 					m.openPROverlayCmd(session.Worktree, msg.taskID),
@@ -1813,7 +1858,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionCreateTask: // Create task
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlay()
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentAndImplOptions(nil, m.availableTaskImplementations())
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 
@@ -1961,18 +2006,18 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch action {
 	// Navigation with selection toggle
 	case keybinds.ActionMoveDown:
-		// Toggle current task selection, then move down
+		// Keep current task selected, then move down.
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
 		return m, nil
 
 	case keybinds.ActionMoveUp:
-		// Toggle current task selection, then move up
+		// Keep current task selected, then move up.
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
@@ -1992,7 +2037,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Half-page movement with selection toggle
 	case keybinds.ActionHalfPageDown:
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -2000,7 +2045,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionHalfPageUp:
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.Select(task.ID)
 		}
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -2076,6 +2121,8 @@ type issuesLoadedMsg struct {
 	tasks         []domain.Task
 	revision      uint64
 	events        <-chan protocol.EventEnvelope
+	daemonClient  *daemonclient.Client
+	daemonSocket  string
 	stale         bool
 	freshnessHint string
 }
@@ -2091,6 +2138,8 @@ type projectSwitchResultMsg struct {
 	tasks         []domain.Task
 	revision      uint64
 	events        <-chan protocol.EventEnvelope
+	daemonClient  *daemonclient.Client
+	daemonSocket  string
 	err           error
 }
 
@@ -2472,6 +2521,15 @@ func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
 	return filtered
 }
 
+func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient.Client {
+	if m.daemonClient != nil {
+		if strings.TrimSpace(m.daemonSocketPath) == "" || m.daemonSocketPath == socketPath {
+			return m.daemonClient.WithProjectID(projectID)
+		}
+	}
+	return daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+}
+
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 	return func() tea.Msg {
 		if m.daemonClient == nil {
@@ -2497,7 +2555,9 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(project.Path, config.GlobalDaemonSocketPath())
+		socketPath := config.DaemonSocketPathFor(project.Path)
+		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
+		launcher := daemonprocess.NewLauncher(project.Path, socketPath)
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2514,7 +2574,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			ClientVersion:   "dev",
 			Capabilities:    []string{"snapshot", "subscribe"},
 		}
-		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, hello)
 		if err != nil {
 			return projectSwitchResultMsg{
@@ -2529,16 +2589,14 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			}
 		}
 
-		m.daemonClient.WithProjectID(project.Name)
-
-		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return projectSwitchResultMsg{
 				project: project,
 				err:     err,
 			}
 		}
-		events, err := m.daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
+		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
 				project: project,
@@ -2552,6 +2610,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			tasks:         snapshot.Tasks,
 			revision:      snapshot.Revision,
 			events:        events,
+			daemonClient:  daemonClient,
+			daemonSocket:  socketPath,
 		}
 	}
 }
@@ -2567,7 +2627,9 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(targetRepoDir, config.GlobalDaemonSocketPath())
+		socketPath := config.DaemonSocketPathFor(targetRepoDir)
+		daemonClient := m.daemonClientForSocket(socketPath, projectID)
+		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath)
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2582,7 +2644,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			}
 		}
 
-		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(m.daemonClient), launcher)
+		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
 			ClientName:      "tui",
@@ -2596,21 +2658,23 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
 
-		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
-		events, err := m.daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
+		events, err := daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
 		if err != nil {
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
 		return issuesLoadedMsg{
-			projectID: projectID,
-			tasks:     snapshot.Tasks,
-			revision:  snapshot.Revision,
-			events:    events,
+			projectID:    projectID,
+			tasks:        snapshot.Tasks,
+			revision:     snapshot.Revision,
+			events:       events,
+			daemonClient: daemonClient,
+			daemonSocket: socketPath,
 		}
 	}
 }
@@ -2664,11 +2728,67 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 	}
 }
 
+func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
+	if evt.Event != protocol.EventSessionUpdated {
+		return
+	}
+
+	var body protocol.SessionProjectionEventBody
+	if err := json.Unmarshal(evt.Body, &body); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("decode session projection event failed", "event", evt.Event, "revision", evt.Revision, "error", err)
+		}
+		return
+	}
+
+	issueID := strings.TrimSpace(body.Session.IssueID)
+	if issueID == "" {
+		return
+	}
+
+	nextState, hasSession := projectSessionLifecycleState(body.Session.State)
+	updatedAt := body.Session.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+
+	for i := range m.tasks {
+		if m.tasks[i].ID != issueID {
+			continue
+		}
+
+		if !hasSession {
+			m.tasks[i].Session = nil
+			m.tasks[i].HasTmuxSession = false
+			m.reconcilePendingStatuses()
+			m.syncTaskWorkspaceOverlay()
+			return
+		}
+
+		next := cloneSession(m.tasks[i].Session)
+		if next == nil {
+			next = &domain.Session{IssueID: issueID}
+		}
+		next.IssueID = issueID
+		next.State = nextState
+		if next.StartedAt == nil {
+			startedAt := updatedAt
+			next.StartedAt = &startedAt
+		}
+		m.tasks[i].Session = next
+		m.tasks[i].HasTmuxSession = true
+		m.reconcilePendingStatuses()
+		m.syncTaskWorkspaceOverlay()
+		return
+	}
+}
+
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
-	switch {
-	case evt.Revision <= m.daemonRevision:
+	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+	switch cursor.Decide(evt) {
+	case protocol.StreamProjectionDecisionIgnore:
 		return daemonEventIgnore
-	case evt.Revision > m.daemonRevision+1:
+	case protocol.StreamProjectionDecisionResync:
 		return daemonEventRehydrate
 	default:
 		return daemonEventRefreshSnapshot
@@ -2998,17 +3118,6 @@ func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 	}
 }
 
-func (m Model) projectSessionProjection(tasks []domain.Task) map[string]*domain.Session {
-	sessions := make(map[string]*domain.Session)
-	for _, task := range tasks {
-		if task.Session == nil {
-			continue
-		}
-		sessions[task.ID] = cloneSession(task.Session)
-	}
-	return sessions
-}
-
 func cloneSession(session *domain.Session) *domain.Session {
 	if session == nil {
 		return nil
@@ -3024,6 +3133,19 @@ func cloneSession(session *domain.Session) *domain.Session {
 		cloned.DevServer = &devServer
 	}
 	return &cloned
+}
+
+func projectSessionLifecycleState(state protocol.SessionLifecycleState) (domain.SessionState, bool) {
+	switch state {
+	case protocol.SessionLifecycleStateStarting, protocol.SessionLifecycleStateAttached:
+		return domain.SessionBusy, true
+	case protocol.SessionLifecycleStatePaused:
+		return domain.SessionPaused, true
+	case protocol.SessionLifecycleStateStopped:
+		return "", false
+	default:
+		return domain.SessionBusy, true
+	}
 }
 
 // Helper methods
@@ -3081,11 +3203,7 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	for i := range m.tasks {
 		if m.tasks[i].ID == cursor.TaskID {
 			task := m.tasks[i]
-			session := task.Session
-			if session == nil {
-				session = m.sessions[task.ID]
-			}
-			return &task, session
+			return &task, task.Session
 		}
 	}
 	return nil, nil
@@ -3507,14 +3625,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.applyOptimisticTaskStatus(task.ID, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
-		return m, m.openOverlay(overlay.NewEditTaskOverlay(*task))
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptions(*task, m.availableTaskImplementations()))
 	case "T":
 		return m, m.deleteTaskCmd(task.ID)
 	case "d":
 		return m, m.deleteTaskCmd(task.ID)
 	case "c":
 		parentID := task.ID
-		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParent(&parentID))
+		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParentAndImplOptions(&parentID, m.availableTaskImplementations()))
 	}
 
 	return m, nil
@@ -3763,7 +3881,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool) tea.Cmd {
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if session, ok := m.sessions[taskID]; ok && session != nil {
+		if session := m.sessionForIssue(taskID); session != nil {
 			m.sessionMonitor.Stop(taskID)
 			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
 				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
@@ -4815,9 +4933,6 @@ func (m Model) sessionForIssue(issueID string) *domain.Session {
 	if issueID == "" {
 		return nil
 	}
-	if session, ok := m.sessions[issueID]; ok && session != nil {
-		return session
-	}
 	for i := range m.tasks {
 		if m.tasks[i].ID == issueID && m.tasks[i].Session != nil {
 			return m.tasks[i].Session
@@ -4855,9 +4970,7 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 				return
 			}
 			hasWorktree := false
-			if session, ok := m.sessions[task.ID]; ok && session != nil && session.Worktree != "" {
-				hasWorktree = true
-			} else if task.Session != nil && task.Session.Worktree != "" {
+			if task.Session != nil && task.Session.Worktree != "" {
 				hasWorktree = true
 			} else if task.HasWorktree {
 				hasWorktree = true
@@ -5145,6 +5258,29 @@ func (m Model) taskExists(taskID string) bool {
 	return false
 }
 
+func (m Model) availableTaskImplementations() []string {
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for i := range m.tasks {
+		for _, impl := range m.tasks[i].Implementations {
+			value := strings.TrimSpace(impl)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			impls = append(impls, value)
+		}
+	}
+	if len(impls) == 0 {
+		impls = append(impls, "default")
+	}
+	sort.Strings(impls)
+	return impls
+}
+
 func summarizeBulkIssues(issues []bulkTaskIssue) string {
 	if len(issues) == 0 {
 		return ""
@@ -5288,7 +5424,22 @@ func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatu
 		targetStatus:   targetStatus,
 		operationID:    operationID,
 		state:          state,
+		action:         "task_move",
+		updatedAt:      time.Now(),
 	}
+}
+
+func (m *Model) markTaskOperationPending(taskID, action, operationID string, state protocol.OperationState) {
+	if m.pendingStatuses == nil {
+		m.pendingStatuses = make(map[string]pendingTaskStatus)
+	}
+	key := taskIDKey(taskID)
+	current := m.pendingStatuses[key]
+	current.operationID = operationID
+	current.state = state
+	current.action = action
+	current.updatedAt = time.Now()
+	m.pendingStatuses[key] = current
 }
 
 func (m *Model) clearPendingTaskStatus(taskID string) {
@@ -5337,11 +5488,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 		return
 	}
 
-	session := task.Session
-	if session == nil {
-		session = m.sessions[taskID]
-	}
-	workspace.SyncTask(*task, session, m.tasks, m.pendingMutationForTask(taskID))
+	workspace.SyncTask(*task, task.Session, m.tasks, m.pendingMutationForTask(taskID))
 }
 
 func (m *Model) applyPendingStatusOverlays() {
@@ -5354,11 +5501,53 @@ func (m *Model) applyPendingStatusOverlays() {
 		if !ok {
 			continue
 		}
+		if pending.targetStatus == "" {
+			continue
+		}
 		if m.tasks[i].Status == pending.targetStatus {
 			delete(m.pendingStatuses, key)
 			continue
 		}
 		m.tasks[i].Status = pending.targetStatus
+	}
+}
+
+func (m *Model) reconcilePendingStatuses() {
+	if len(m.pendingStatuses) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[task.ID] = task
+	}
+
+	const stalePendingTTL = 2 * time.Minute
+	now := time.Now()
+
+	for key, pending := range m.pendingStatuses {
+		taskID := string(key)
+		task, ok := taskByID[taskID]
+		if !ok {
+			delete(m.pendingStatuses, key)
+			continue
+		}
+
+		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingStatuses, key)
+			continue
+		}
+
+		switch pending.action {
+		case "session_start":
+			if task.Session != nil || task.HasTmuxSession {
+				delete(m.pendingStatuses, key)
+			}
+		case "session_stop":
+			if task.Session == nil && !task.HasTmuxSession {
+				delete(m.pendingStatuses, key)
+			}
+		}
 	}
 }
 
@@ -5812,7 +6001,7 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 		}
 
 		// Check if task has an active session (and thus a worktree)
-		_, hasSession := m.sessions[task.ID]
+		hasSession := task.Session != nil
 
 		candidates = append(candidates, overlay.MergeTarget{
 			ID:          task.ID,

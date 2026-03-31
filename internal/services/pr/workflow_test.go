@@ -18,9 +18,12 @@ type mockRunner struct {
 	callCount int
 	outputs   [][]byte
 	errors    []error
+	calls     [][]string
 }
 
 func (m *mockRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	m.calls = append(m.calls, append([]string{name}, args...))
+
 	// If we have multiple outputs configured, use them based on call count
 	if len(m.outputs) > 0 {
 		idx := m.callCount
@@ -35,6 +38,51 @@ func (m *mockRunner) Run(ctx context.Context, name string, args ...string) ([]by
 		}
 	}
 	return m.output, m.err
+}
+
+func TestBuildPRBody(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		beadID string
+		title  string
+		want   string
+	}{
+		{
+			name:   "appends footer to body",
+			body:   "This PR adds feature X",
+			beadID: "az-123",
+			title:  "Add feature X",
+			want:   "This PR adds feature X\n\nResolves az-123: Add feature X",
+		},
+		{
+			name:   "keeps existing footer idempotent",
+			body:   "This PR adds feature X\n\nResolves az-123: Add feature X",
+			beadID: "az-123",
+			title:  "Add feature X",
+			want:   "This PR adds feature X\n\nResolves az-123: Add feature X",
+		},
+		{
+			name:   "returns footer for empty body",
+			body:   "  ",
+			beadID: "az-123",
+			title:  "Add feature X",
+			want:   "Resolves az-123: Add feature X",
+		},
+		{
+			name:   "skips footer when bead id is missing",
+			body:   "This PR adds feature X",
+			beadID: "",
+			title:  "Add feature X",
+			want:   "This PR adds feature X",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, buildPRBody(tt.body, tt.beadID, tt.title))
+		})
+	}
 }
 
 func TestPRWorkflow_Create(t *testing.T) {
@@ -153,6 +201,21 @@ func TestPRWorkflow_Create(t *testing.T) {
 			assert.Equal(t, tt.wantNumber, info.Number)
 			assert.Equal(t, tt.wantDraft, info.Draft)
 			assert.Equal(t, tt.params.Branch, info.Branch)
+			if tt.params.IssueID != "" && tt.params.Title != "" {
+				expectedBody := buildPRBody(tt.params.Body, tt.params.IssueID, tt.params.Title)
+				require.GreaterOrEqual(t, len(runner.calls), 1)
+				expectedArgs := []string{
+					"gh", "pr", "create",
+					"--title", tt.params.Title,
+					"--body", expectedBody,
+					"--head", tt.params.Branch,
+					"--base", tt.params.BaseBranch,
+				}
+				if tt.params.Draft {
+					expectedArgs = append(expectedArgs, "--draft")
+				}
+				assert.Equal(t, expectedArgs, runner.calls[0])
+			}
 		})
 	}
 }

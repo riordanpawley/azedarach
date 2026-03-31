@@ -19,12 +19,50 @@ func ResolveBaseGitRoot(startDir string) (string, error) {
 	return "", fmt.Errorf("unable to resolve git root from %s", startDir)
 }
 
+// ResolveWorktreeRoot resolves the nearest git worktree root from a nested path.
+// For non-git paths it falls back to the absolute path.
+func ResolveWorktreeRoot(startPath string) (string, error) {
+	if strings.TrimSpace(startPath) == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		startPath = cwd
+	}
+	abs, err := filepath.Abs(startPath)
+	if err != nil {
+		return "", err
+	}
+	if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
+		abs = filepath.Dir(abs)
+	}
+	if root, err := resolveWorktreeRootWithGitExec(abs); err == nil {
+		return root, nil
+	}
+	if root, err := resolveWorktreeRootFromGitMarker(abs); err == nil {
+		return root, nil
+	}
+	return abs, nil
+}
+
 func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
 	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
 	return baseGitRootFromCommonDir(startDir, strings.TrimSpace(string(out)))
+}
+
+func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
+	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--show-toplevel").Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve git worktree root: %w", err)
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return "", fmt.Errorf("resolve git worktree root: empty output")
+	}
+	return root, nil
 }
 
 func resolveBaseGitRootFromGitMarker(startDir string) (string, error) {
@@ -53,6 +91,27 @@ func resolveBaseGitRootFromGitMarker(startDir string) (string, error) {
 				gitDir = filepath.Clean(filepath.Join(dir, gitDir))
 			}
 			return baseGitRootFromCommonDir(dir, gitDir)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+
+	return "", fmt.Errorf("no .git marker found for %s", absStart)
+}
+
+func resolveWorktreeRootFromGitMarker(startDir string) (string, error) {
+	absStart, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", err
+	}
+
+	for dir := absStart; ; dir = filepath.Dir(dir) {
+		marker := filepath.Join(dir, ".git")
+		if _, statErr := os.Stat(marker); statErr == nil {
+			return dir, nil
 		}
 
 		parent := filepath.Dir(dir)

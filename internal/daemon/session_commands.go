@@ -400,6 +400,18 @@ func (d *Daemon) handleSessionRecover(ctx context.Context, req protocol.RequestE
 	return resp, nil
 }
 
+func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, state daemonstate.SessionState) error {
+	if d.sessionStore == nil {
+		return errors.New("session store unavailable")
+	}
+	event, err := d.sessionStore.UpsertSession(projectID, sessionID, issueID, state)
+	if err != nil {
+		return err
+	}
+	d.publishSessionProjectionEvent(projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
+	return nil
+}
+
 func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, sessionID string) (sessionRecoveryResult, error) {
 	result := sessionRecoveryResult{}
 	if d.sessionStore == nil {
@@ -484,8 +496,8 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			issueID = sessionIDInTmux
 		}
 		if !ok {
-			if _, err := d.sessionStore.UpsertSession(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
-				if _, err := d.sessionStore.UpsertSession(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
+			if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
+				if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
 				}
 			}
@@ -499,13 +511,13 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 
 		switch session.State {
 		case daemonstate.SessionStateStopped:
-			if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
-				if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
+			if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
+				if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
 				}
 			}
 		case daemonstate.SessionStateStarting:
-			if _, err := d.sessionStore.UpsertSession(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
+			if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 				result.AlignedDaemonSessions++
 			}
 		}

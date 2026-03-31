@@ -30,6 +30,9 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		repoDir = normalizedRepoDir
 	}
 	lockPath := config.GlobalDaemonLockPath()
+	if strings.TrimSpace(socketPath) != "" {
+		lockPath = filepath.Join(filepath.Dir(socketPath), "daemon.lock")
+	}
 	return &Launcher{
 		RepoDir:     repoDir,
 		SocketPath:  socketPath,
@@ -57,7 +60,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 		_ = logFile.Close()
 	}()
 	// Do not bind daemon lifetime to the caller context. Attach contexts are short-lived.
-	cmd := exec.Command(bin, "--repo", l.RepoDir, "--socket", l.SocketPath)
+	cmd := exec.Command(bin, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

@@ -95,6 +95,19 @@ func newDaemonTestModel(transport *recordingDaemonTransport) Model {
 	return m
 }
 
+func setTaskSession(t *testing.T, m *Model, issueID string, session *domain.Session) {
+	t.Helper()
+	for i := range m.tasks {
+		if m.tasks[i].ID != issueID {
+			continue
+		}
+		m.tasks[i].Session = cloneSession(session)
+		m.tasks[i].HasTmuxSession = session != nil
+		return
+	}
+	t.Fatalf("task %q not found", issueID)
+}
+
 func TestTaskCommandsUseDaemonClient(t *testing.T) {
 	t.Run("load", func(t *testing.T) {
 		transport := &recordingDaemonTransport{
@@ -567,6 +580,168 @@ func TestDaemonStreamClosedIgnoresStaleStreamClose(t *testing.T) {
 	}
 }
 
+func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        12,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			ch := make(chan protocol.EventEnvelope, 1)
+			ch <- protocol.EventEnvelope{Revision: 13, Event: "task.updated"}
+			return ch, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj"
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+
+	updated, cmd := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{Revision: 7, Event: "task.updated"}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if next.daemonRevision != 4 {
+		t.Fatalf("daemon revision after gap = %d, want 4", next.daemonRevision)
+	}
+	if cmd == nil {
+		t.Fatal("expected gap event to trigger rehydrate command")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("rehydrate message type = %T, want issuesLoadedMsg", msg)
+	}
+	if loaded.revision != 12 {
+		t.Fatalf("loaded revision = %d, want 12", loaded.revision)
+	}
+	if loaded.events == nil {
+		t.Fatal("expected rehydrate to resubscribe to daemon stream")
+	}
+	if transport.subscribeProject != "proj" {
+		t.Fatalf("subscribe project = %q, want proj", transport.subscribeProject)
+	}
+	if transport.subscribeFrom != 12 {
+		t.Fatalf("subscribe from revision = %d, want 12", transport.subscribeFrom)
+	}
+
+	reloaded, followCmd := next.Update(loaded)
+	reloadedModel, ok := reloaded.(Model)
+	if !ok {
+		t.Fatalf("reloaded model type = %T, want Model", reloaded)
+	}
+	if reloadedModel.daemonRevision != 12 {
+		t.Fatalf("daemon revision after rehydrate = %d, want 12", reloadedModel.daemonRevision)
+	}
+	if reloadedModel.daemonEvents == nil {
+		t.Fatal("expected daemon stream to be restored after rehydrate")
+	}
+	if followCmd == nil {
+		t.Fatal("expected restored stream to schedule the next wait")
+	}
+}
+
+func TestDaemonStreamClosedRehydratesCurrentStreamAndIgnoresStaleClose(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        8,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			ch := make(chan protocol.EventEnvelope, 1)
+			ch <- protocol.EventEnvelope{Revision: 9, Event: "task.updated"}
+			return ch, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj"
+
+	loadedMsg := m.attachDaemonCmd()()
+	loaded, ok := loadedMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", loadedMsg)
+	}
+	updated, cmd := m.Update(loaded)
+	attachedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if attachedModel.daemonEvents == nil {
+		t.Fatal("expected daemon stream to be active after attach")
+	}
+	if cmd == nil {
+		t.Fatal("expected attach to schedule stream wait")
+	}
+
+	staleStream := make(chan protocol.EventEnvelope)
+	ignored, staleCmd := attachedModel.Update(daemonStreamClosedMsg{stream: staleStream})
+	ignoredModel, ok := ignored.(Model)
+	if !ok {
+		t.Fatalf("ignored model type = %T, want Model", ignored)
+	}
+	if ignoredModel.daemonEvents == nil {
+		t.Fatal("stale close should not clear active stream")
+	}
+	if staleCmd != nil {
+		t.Fatalf("stale close command = %v, want nil", staleCmd)
+	}
+
+	closed, closeCmd := attachedModel.Update(daemonStreamClosedMsg{stream: loaded.events})
+	closedModel, ok := closed.(Model)
+	if !ok {
+		t.Fatalf("closed model type = %T, want Model", closed)
+	}
+	if closedModel.daemonEvents != nil {
+		t.Fatal("expected current stream to be cleared on close")
+	}
+	if closeCmd == nil {
+		t.Fatal("expected current stream close to trigger rehydrate")
+	}
+
+	reattachMsg := closeCmd()
+	reattached, ok := reattachMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("reattach message type = %T, want issuesLoadedMsg", reattachMsg)
+	}
+	if reattached.revision != 8 {
+		t.Fatalf("reattach revision = %d, want 8", reattached.revision)
+	}
+	if transport.subscribeFrom != 8 {
+		t.Fatalf("subscribe from revision after reattach = %d, want 8", transport.subscribeFrom)
+	}
+	if got, want := len(transport.calls), 6; got != want {
+		t.Fatalf("transport calls = %v, want %d calls", transport.calls, want)
+	}
+}
+
 func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
 	t.Setenv("TMUX", "")
 	transport := &recordingDaemonTransport{
@@ -706,11 +881,11 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
-	m.sessions["az-1"] = &domain.Session{
+	setTaskSession(t, &m, "az-1", &domain.Session{
 		IssueID:  "az-1",
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/az-1",
-	}
+	})
 	m.config.Git.BaseBranch = "main"
 
 	updated, cmd := m.Update(overlay.SelectionMsg{
@@ -889,8 +1064,8 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 			Type:   domain.TypeEpic,
 		},
 	}
-	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"}
-	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1047,8 +1222,8 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 					Type:   domain.TypeEpic,
 				},
 			}
-			m.sessions[childID] = &domain.Session{IssueID: childID, State: tt.state, Worktree: "/tmp/child"}
-			m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+			setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: tt.state, Worktree: "/tmp/child"})
+			setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
 			m.nav.SelectTask(childID, 1)
 
 			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1226,8 +1401,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 			Type:   domain.TypeEpic,
 		},
 	}
-	// Simulate stale projection: m.sessions map does not yet contain hydrated sessions.
-	m.sessions = map[string]*domain.Session{}
+	// Simulate stale projection by leaving task sessions nil and forcing daemon snapshot fallback.
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1515,8 +1689,8 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 		{ID: childID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentID},
 		{ID: parentID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
 	}
-	m.sessions[childID] = &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"}
-	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
@@ -1637,7 +1811,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 			Type:   domain.TypeTask,
 		},
 	}
-	m.sessions[issueID] = &domain.Session{IssueID: issueID, State: domain.SessionPaused, Worktree: "/tmp/az-top"}
+	setTaskSession(t, &m, issueID, &domain.Session{IssueID: issueID, State: domain.SessionPaused, Worktree: "/tmp/az-top"})
 	m.nav.SelectTask(issueID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1891,11 +2065,11 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		m.tasks = []domain.Task{
 			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
 		}
-		m.sessions["az-1"] = &domain.Session{
+		setTaskSession(t, &m, "az-1", &domain.Session{
 			IssueID:  "az-1",
 			State:    domain.SessionBusy,
 			Worktree: "/tmp/az-1",
-		}
+		})
 		m.nav.SelectTask("az-1", 1)
 
 		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
@@ -1946,11 +2120,11 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		m.tasks = []domain.Task{
 			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
 		}
-		m.sessions["az-1"] = &domain.Session{
+		setTaskSession(t, &m, "az-1", &domain.Session{
 			IssueID:  "az-1",
 			State:    domain.SessionBusy,
 			Worktree: "/tmp/az-1",
-		}
+		})
 		m.nav.SelectTask("az-1", 1)
 
 		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "W"})
@@ -2593,11 +2767,11 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 			Type:   domain.TypeTask,
 		},
 	}
-	m.sessions[parentID] = &domain.Session{
+	setTaskSession(t, &m, parentID, &domain.Session{
 		IssueID:  parentID,
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent",
-	}
+	})
 
 	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])
 	if upstreamCount != 1 {
@@ -2692,16 +2866,16 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 			Type:   domain.TypeTask,
 		},
 	}
-	m.sessions[parentA] = &domain.Session{
+	setTaskSession(t, &m, parentA, &domain.Session{
 		IssueID:  parentA,
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent-a",
-	}
-	m.sessions[parentB] = &domain.Session{
+	})
+	setTaskSession(t, &m, parentB, &domain.Session{
 		IssueID:  parentB,
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent-b",
-	}
+	})
 	m.nav.SelectTask(childID, 0)
 
 	candidates, upstreamCount := m.sessionOriginCandidates(&m.tasks[0])

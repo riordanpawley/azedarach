@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -21,7 +23,17 @@ func (a worktreeServiceAdapter) Create(ctx context.Context, _ string, issueID st
 }
 
 func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, issueID string) error {
-	return a.manager.Delete(ctx, issueID)
+	worktree, err := a.manager.Get(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	if err := a.manager.Delete(ctx, issueID); err != nil {
+		return err
+	}
+	if worktree != nil {
+		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(worktree.Path))
+	}
+	return nil
 }
 
 func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
@@ -38,6 +50,7 @@ func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID s
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}
+		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(wt.Path))
 		result.Removed = append(result.Removed, wt)
 	}
 

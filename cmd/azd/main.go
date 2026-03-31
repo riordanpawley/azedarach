@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -15,10 +17,12 @@ import (
 
 func main() {
 	var socketPath string
+	var lockPath string
 	var repoDir string
 	var showVersion bool
 
 	flag.StringVar(&socketPath, "socket", "", "unix socket path")
+	flag.StringVar(&lockPath, "lock", "", "lock file path")
 	flag.StringVar(&repoDir, "repo", "", "repository root")
 	flag.BoolVar(&showVersion, "version", false, "print version")
 	flag.BoolVar(&showVersion, "v", false, "print version")
@@ -45,12 +49,17 @@ func main() {
 	}
 
 	if socketPath == "" {
-		socketPath = config.GlobalDaemonSocketPath()
+		socketPath = config.DaemonSocketPathFor(repoDir)
 	}
-	lockPath := config.GlobalDaemonLockPath()
+	if lockPath == "" {
+		lockPath = config.DaemonLockPathFor(repoDir)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if scopeWatchPath := resolveScopedWorktreeWatchPath(repoDir); scopeWatchPath != "" {
+		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
+	}
 
 	d := daemon.New(daemon.Config{
 		RepoDir:             repoDir,
@@ -65,4 +74,48 @@ func main() {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func resolveScopedWorktreeWatchPath(repoDir string) string {
+	if !isScopedDaemonMode(os.Getenv("AZEDARACH_DAEMON_SCOPE")) {
+		return ""
+	}
+	if strings.TrimSpace(repoDir) == "" {
+		return ""
+	}
+	root, err := config.ResolveWorktreeRoot(repoDir)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(root)
+}
+
+func isScopedDaemonMode(mode string) bool {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "worktree", "scoped", "local":
+		return true
+	default:
+		return false
+	}
+}
+
+func startWorktreeExistenceWatch(ctx context.Context, stop context.CancelFunc, watchPath string, interval time.Duration) {
+	if strings.TrimSpace(watchPath) == "" || interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := os.Stat(watchPath); err != nil {
+					stop()
+					return
+				}
+			}
+		}
+	}()
 }

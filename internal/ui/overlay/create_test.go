@@ -2,6 +2,8 @@ package overlay
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,6 +19,21 @@ func TestNewCreateTaskOverlay(t *testing.T) {
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
 	assert.Equal(t, focusTitle, overlay.focusIndex)
+}
+
+func TestCreateTaskOverlayImplOptionsRemainEmptyWithoutOptions(t *testing.T) {
+	overlay := NewCreateTaskOverlayWithParentAndImplOptions(nil, nil)
+	require.NotNil(t, overlay)
+	assert.Equal(t, []string{"default"}, overlay.implOptions)
+	assert.Empty(t, overlay.impls)
+}
+
+func TestCreateTaskOverlayNoHardcodedImplementationTriplet(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("create.go"))
+	require.NoError(t, err)
+	text := string(source)
+	assert.NotContains(t, text, `[]string{"default", "go-bubbletea", "ts-opentui"}`)
+	assert.NotContains(t, text, "default, go-bubbletea, ts-opentui")
 }
 
 func TestCreateTaskOverlayTitle(t *testing.T) {
@@ -40,8 +57,12 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Description:")
 	assert.Contains(t, view, "Type:")
 	assert.Contains(t, view, "Priority:")
+	assert.Contains(t, view, "Impls:")
+	assert.Contains(t, view, "Acceptance Criteria:")
 	assert.Contains(t, view, "Create Task")
 	assert.Contains(t, view, "Enter")
+	assert.Contains(t, view, "Ctrl+C")
+	assert.Contains(t, view, "Ctrl+O")
 	assert.Contains(t, view, "Ctrl+E")
 	assert.Contains(t, view, "Ctrl+K")
 }
@@ -82,6 +103,16 @@ func TestCreateTaskOverlayTabNavigation(t *testing.T) {
 	// Tab to submit
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, focusImpls, overlay.focusIndex)
+
+	// Tab to acceptance
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, focusAcceptance, overlay.focusIndex)
+
+	// Tab to submit
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusSubmit, overlay.focusIndex)
 
 	// Tab back to title
@@ -101,10 +132,10 @@ func TestCreateTaskOverlayShiftTabNavigation(t *testing.T) {
 	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusSubmit, overlay.focusIndex)
 
-	// Shift+Tab should go to priority (3)
+	// Shift+Tab should go to acceptance
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	overlay = m.(*CreateTaskOverlay)
-	assert.Equal(t, focusPriority, overlay.focusIndex)
+	assert.Equal(t, focusAcceptance, overlay.focusIndex)
 }
 
 func TestCreateTaskOverlayTypeSelection(t *testing.T) {
@@ -228,6 +259,22 @@ func TestCreateTaskOverlaySubmitWithDescription(t *testing.T) {
 	assert.Equal(t, "This is a test description", taskMsg.Description)
 }
 
+func TestCreateTaskOverlaySubmitWithAcceptance(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Test Task")
+	overlay.acceptanceInput.SetValue("Given X\nWhen Y\nThen Z")
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "Given X\nWhen Y\nThen Z", taskMsg.Acceptance)
+}
+
 func TestCreateTaskOverlaySubmitWithCustomTypeAndPriority(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 
@@ -248,6 +295,71 @@ func TestCreateTaskOverlaySubmitWithCustomTypeAndPriority(t *testing.T) {
 	assert.Equal(t, "Bug Fix", taskMsg.Title)
 	assert.Equal(t, domain.TypeBug, taskMsg.Type)
 	assert.Equal(t, domain.P0, taskMsg.Priority)
+}
+
+func TestCreateTaskOverlaySubmitWithImplementations(t *testing.T) {
+	overlay := NewCreateTaskOverlayWithParentAndImplOptions(nil, []string{"default", "go-bubbletea", "ts-opentui"})
+	overlay.title.SetValue("Impl Scoped Task")
+	overlay.impls = []string{"go-bubbletea", "ts-opentui"}
+	overlay.syncImplementationSelection()
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, []string{"go-bubbletea", "ts-opentui"}, taskMsg.Implementations)
+}
+
+func TestEditTaskOverlaySubmitPreservesEmptyImplementations(t *testing.T) {
+	task := domain.Task{
+		ID:              "az-1",
+		Title:           "Legacy Task",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Status:          domain.StatusOpen,
+		Implementations: nil,
+	}
+	overlay := NewEditTaskOverlayWithImplOptions(task, []string{"go-bubbletea", "ts-opentui"})
+	require.NotNil(t, overlay)
+	assert.Equal(t, -1, overlay.implComboIndex)
+	assert.Empty(t, overlay.impls)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Empty(t, taskMsg.Implementations)
+}
+
+func TestEditTaskOverlaySubmitPreservesUnmatchedImplementations(t *testing.T) {
+	task := domain.Task{
+		ID:              "az-2",
+		Title:           "Legacy Impl Task",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Status:          domain.StatusOpen,
+		Implementations: []string{"legacy-impl"},
+	}
+	overlay := NewEditTaskOverlayWithImplOptions(task, []string{"go-bubbletea", "ts-opentui"})
+	require.NotNil(t, overlay)
+	assert.Equal(t, -1, overlay.implComboIndex)
+	assert.Equal(t, []string{"legacy-impl"}, overlay.impls)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, []string{"legacy-impl"}, taskMsg.Implementations)
 }
 
 func TestCreateTaskOverlaySubmitWithoutTitle(t *testing.T) {
@@ -415,6 +527,9 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	overlay.description.SetValue("Draft description")
 	overlay.taskType = domain.TypeBug
 	overlay.priority = domain.P0
+	overlay.impls = []string{"go-bubbletea"}
+	overlay.syncImplementationSelection()
+	overlay.acceptanceInput.SetValue("Must pass")
 	overlay.focusIndex = focusPriority
 
 	m, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
@@ -425,7 +540,46 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	assert.Equal(t, "", overlay.description.Value())
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
+	assert.Empty(t, overlay.impls)
+	assert.Equal(t, "", overlay.acceptanceInput.Value())
 	assert.Equal(t, focusTitle, overlay.focusIndex)
+}
+
+func TestCreateTaskOverlayCtrlCClearsFocusedTitle(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Needs clear")
+	overlay.focusIndex = focusTitle
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.Nil(t, cmd)
+
+	overlay = model.(*CreateTaskOverlay)
+	assert.Equal(t, "", overlay.title.Value())
+}
+
+func TestCreateTaskOverlayCtrlCClearsFocusedDescription(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.description.SetValue("Need to clear description")
+	overlay.focusIndex = focusDescription
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.Nil(t, cmd)
+
+	overlay = model.(*CreateTaskOverlay)
+	assert.Equal(t, "", overlay.description.Value())
+}
+
+func TestEditTaskOverlayCtrlORequestsImageAttach(t *testing.T) {
+	task := domain.Task{ID: "az-77", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
+	overlay := NewEditTaskOverlay(task)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	require.NotNil(t, cmd)
+
+	msg := cmd()
+	openMsg, ok := msg.(OpenTaskImageAttachMsg)
+	require.True(t, ok)
+	assert.Equal(t, "az-77", openMsg.IssueID)
 }
 
 // batchToSlice is a helper function to extract messages from a batch command

@@ -39,6 +39,7 @@ This repository is now single-implementation:
 6. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
 7. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 8. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors and explicit control flow.
+9. **If I say "merge in main" I mean merge this branch INTO main**: Not merge this branch into main
 
 ## Quick Commands
 
