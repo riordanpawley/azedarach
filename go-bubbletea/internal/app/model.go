@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -364,7 +365,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tasks := m.filterSuppressedHydratedTasks(msg.tasks)
 		m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		m.applyPendingStatusOverlays()
-		m.sessions = m.projectSessionProjection(tasks)
 		m.applyRuntimeSignals()
 		m.reconcilePendingStatuses()
 		m.editor.ReconcileSelection(m.tasks)
@@ -436,7 +436,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case monitor.SessionStateMsg:
-		if session, ok := m.sessions[msg.IssueID]; ok {
+		if session := m.sessionForIssue(msg.IssueID); session != nil {
 			oldState := session.State
 			m.logger.Debug("session state updated", "issueID", msg.IssueID, "state", msg.State)
 
@@ -454,13 +454,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionStartedMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
 			m.markTaskOperationPending(msg.issueID, "session_start", msg.operationID, msg.state)
-			for i := range m.tasks {
-				if m.tasks[i].ID == msg.issueID {
-					// Show immediate session affordance while daemon operation is still pending.
-					m.tasks[i].HasTmuxSession = true
-					break
-				}
-			}
 			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
@@ -470,12 +463,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadIssuesCmd()
 		}
 		m.clearPendingTaskStatus(msg.issueID)
-		for i := range m.tasks {
-			if m.tasks[i].ID == msg.issueID {
-				m.tasks[i].HasTmuxSession = true
-				break
-			}
-		}
 		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
@@ -545,8 +532,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case daemonStreamClosedMsg:
+		if msg.stream != nil && msg.stream != m.daemonEvents {
+			return m, nil
+		}
 		m.daemonEvents = nil
-		return m, nil
+		return m, m.attachDaemonCmd()
 
 	case network.StatusMsg:
 		// Update online status
@@ -2095,7 +2085,9 @@ type daemonStreamEventMsg struct {
 	event protocol.EventEnvelope
 }
 
-type daemonStreamClosedMsg struct{}
+type daemonStreamClosedMsg struct {
+	stream <-chan protocol.EventEnvelope
+}
 
 type tickMsg time.Time
 
@@ -2650,7 +2642,7 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 
 		evt, ok := <-m.daemonEvents
 		if !ok {
-			return daemonStreamClosedMsg{}
+			return daemonStreamClosedMsg{stream: m.daemonEvents}
 		}
 
 		return daemonStreamEventMsg{event: evt}

@@ -16,8 +16,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
-	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -498,6 +498,168 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 	if evt.event.Revision != 9 || evt.event.Event != "task.updated" {
 		t.Fatalf("event = %+v", evt.event)
+	}
+}
+
+func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        12,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			ch := make(chan protocol.EventEnvelope, 1)
+			ch <- protocol.EventEnvelope{Revision: 13, Event: "task.updated"}
+			return ch, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj"
+	m.daemonRevision = 4
+	m.daemonEvents = make(chan protocol.EventEnvelope)
+
+	updated, cmd := m.Update(daemonStreamEventMsg{event: protocol.EventEnvelope{Revision: 7, Event: "task.updated"}})
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if next.daemonRevision != 4 {
+		t.Fatalf("daemon revision after gap = %d, want 4", next.daemonRevision)
+	}
+	if cmd == nil {
+		t.Fatal("expected gap event to trigger rehydrate command")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("rehydrate message type = %T, want issuesLoadedMsg", msg)
+	}
+	if loaded.revision != 12 {
+		t.Fatalf("loaded revision = %d, want 12", loaded.revision)
+	}
+	if loaded.events == nil {
+		t.Fatal("expected rehydrate to resubscribe to daemon stream")
+	}
+	if transport.subscribeProject != "proj" {
+		t.Fatalf("subscribe project = %q, want proj", transport.subscribeProject)
+	}
+	if transport.subscribeFrom != 12 {
+		t.Fatalf("subscribe from revision = %d, want 12", transport.subscribeFrom)
+	}
+
+	reloaded, followCmd := next.Update(loaded)
+	reloadedModel, ok := reloaded.(Model)
+	if !ok {
+		t.Fatalf("reloaded model type = %T, want Model", reloaded)
+	}
+	if reloadedModel.daemonRevision != 12 {
+		t.Fatalf("daemon revision after rehydrate = %d, want 12", reloadedModel.daemonRevision)
+	}
+	if reloadedModel.daemonEvents == nil {
+		t.Fatal("expected daemon stream to be restored after rehydrate")
+	}
+	if followCmd == nil {
+		t.Fatal("expected restored stream to schedule the next wait")
+	}
+}
+
+func TestDaemonStreamClosedRehydratesCurrentStreamAndIgnoresStaleClose(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        8,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			ch := make(chan protocol.EventEnvelope, 1)
+			ch <- protocol.EventEnvelope{Revision: 9, Event: "task.updated"}
+			return ch, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+	m.currentProject = "proj"
+
+	loadedMsg := m.attachDaemonCmd()()
+	loaded, ok := loadedMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", loadedMsg)
+	}
+	updated, cmd := m.Update(loaded)
+	attachedModel, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if attachedModel.daemonEvents == nil {
+		t.Fatal("expected daemon stream to be active after attach")
+	}
+	if cmd == nil {
+		t.Fatal("expected attach to schedule stream wait")
+	}
+
+	staleStream := make(chan protocol.EventEnvelope)
+	ignored, staleCmd := attachedModel.Update(daemonStreamClosedMsg{stream: staleStream})
+	ignoredModel, ok := ignored.(Model)
+	if !ok {
+		t.Fatalf("ignored model type = %T, want Model", ignored)
+	}
+	if ignoredModel.daemonEvents == nil {
+		t.Fatal("stale close should not clear active stream")
+	}
+	if staleCmd != nil {
+		t.Fatalf("stale close command = %v, want nil", staleCmd)
+	}
+
+	closed, closeCmd := attachedModel.Update(daemonStreamClosedMsg{stream: loaded.events})
+	closedModel, ok := closed.(Model)
+	if !ok {
+		t.Fatalf("closed model type = %T, want Model", closed)
+	}
+	if closedModel.daemonEvents != nil {
+		t.Fatal("expected current stream to be cleared on close")
+	}
+	if closeCmd == nil {
+		t.Fatal("expected current stream close to trigger rehydrate")
+	}
+
+	reattachMsg := closeCmd()
+	reattached, ok := reattachMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("reattach message type = %T, want issuesLoadedMsg", reattachMsg)
+	}
+	if reattached.revision != 8 {
+		t.Fatalf("reattach revision = %d, want 8", reattached.revision)
+	}
+	if transport.subscribeFrom != 8 {
+		t.Fatalf("subscribe from revision after reattach = %d, want 8", transport.subscribeFrom)
+	}
+	if got, want := len(transport.calls), 6; got != want {
+		t.Fatalf("transport calls = %v, want %d calls", transport.calls, want)
 	}
 }
 
