@@ -12,9 +12,9 @@
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          priority              │
 ││ Impls: [<] (none) [>]                        h/l or ←/→ Cycle impl│
 ││ Acceptance Criteria:                        combinations          │
-││ ┃   1 Acceptance criteria (optional)...      Ctrl+O Attach image  │
+││ ┃   1 Acceptance criteria (optional)...      Ctrl+P Paste image   │
 ││ ┃                                           (edit task)           │
-││ ┃                                            Enter Create task    │
-││                                              Ctrl+E Edit in       │
-││ [ Create Task ]                             $EDITOR               │
+││ ┃                                            Ctrl+O Paste image   │
+││                                             (alias)               │
+││ [ Create Task ]                              j/k + d Manage       │
 ╰────────────────────────────────────────────────────────────────────╯

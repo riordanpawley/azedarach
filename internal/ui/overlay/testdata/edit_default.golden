@@ -9,13 +9,13 @@
 ││ ┃                                                                0/1/2/3/4 Set priority         │
 ││ ┃                                                                h/l or ←/→ Cycle impl          │
 ││ ┃                                                               combinations                    │
-││ ┃                                                                Ctrl+O Attach image (edit task)│
+││ ┃                                                                Ctrl+P Paste image (edit task) │
+││ ┃                                                                Ctrl+O Paste image (alias)     │
+││ ┃                                                                j/k + d Manage attachments     │
 ││ ┃                                                                Enter Create task              │
-││ ┃                                                                Ctrl+E Edit in $EDITOR         │
-││ ┃                                                                Ctrl+K Clear form              │
-││ Type: [●T] [ B] [ F] [ E] [ C]                                   Esc Cancel                     │
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                                              │
-││ Impls: [<] go-bubbletea [>]                                                                     │
+││ Type: [●T] [ B] [ F] [ E] [ C]                                   Ctrl+E Edit in $EDITOR         │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                               Ctrl+K Clear form              │
+││ Impls: [<] go-bubbletea [>]                                      Esc Cancel                     │
 ││ Acceptance Criteria:                                                                            │
 ││ ┃   1                                                                                           │
 ││ ┃                                                                                               │
@@ -23,8 +23,8 @@
 ││ ┃                                                                                               │
 ││ ┃                                                                                               │
 ││ ┃                                                                                               │
+││ Image Attachments:                                                                              │
 ││                                                                                                 │
-││ ─────────────────────────────────────────────────────────────                                   │
+││ Attachment service unavailable.                                                                 │
 ││                                                                                                 │
-││ [ Create Task ]                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
