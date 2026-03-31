@@ -3561,22 +3561,33 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 		if len(paths) == 0 {
 			return overlay.SelectionMsg{Key: "event-log-error", Value: errors.New("log file path is empty")}
 		}
+		availablePaths := make([]string, 0, len(paths))
 		for _, path := range paths {
 			if _, err := os.Stat(path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				return overlay.SelectionMsg{
 					Key:   "event-log-error",
 					Value: fmt.Errorf("log file unavailable: %w", err),
 				}
 			}
+			availablePaths = append(availablePaths, path)
+		}
+		if len(availablePaths) == 0 {
+			return overlay.SelectionMsg{
+				Key:   "event-log-error",
+				Value: errors.New("no log files are available to stream"),
+			}
 		}
 
-		args := make([]string, 0, len(paths)+3)
+		args := make([]string, 0, len(availablePaths)+3)
 		args = append(args, "-n", "+1", "-F")
-		args = append(args, paths...)
+		args = append(args, availablePaths...)
 		cmd := exec.Command("tail", args...)
 		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
-			quoted := make([]string, 0, len(paths))
-			for _, path := range paths {
+			quoted := make([]string, 0, len(availablePaths))
+			for _, path := range availablePaths {
 				quoted = append(quoted, shellSingleQuote(path))
 			}
 			popupCommand := fmt.Sprintf("tail -n +1 -F %s", strings.Join(quoted, " "))
@@ -3586,7 +3597,7 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 					Value: fmt.Errorf("stream logs in tmux popup: %w", err),
 				}
 			}
-			return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(paths, ", ")}
+			return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 		}
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -3597,7 +3608,7 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 				Value: fmt.Errorf("stream logs: %w", err),
 			}
 		}
-		return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(paths, ", ")}
+		return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 	}
 }
 
