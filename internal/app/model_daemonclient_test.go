@@ -2156,10 +2156,25 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 
 	t.Run("dirty worktree prompts before forced cleanup", func(t *testing.T) {
 		forceFlags := []bool{}
+		stopCalls := 0
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandSessionStop:
+					stopCalls++
+					if stopCalls > 1 {
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              false,
+							Error: &protocol.ErrorEnvelope{
+								Code:      protocol.ErrorCodeInvalidRequest,
+								Message:   "no active session found for issue: az-1",
+								Retryable: false,
+							},
+						}, nil
+					}
 					return protocol.ResponseEnvelope{
 						ProtocolVersion: req.ProtocolVersion,
 						RequestID:       req.RequestID,
@@ -2259,6 +2274,9 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if len(forceFlags) != 2 || forceFlags[0] || !forceFlags[1] {
 			t.Fatalf("force flags = %v, want [false true]", forceFlags)
+		}
+		if stopCalls != 2 {
+			t.Fatalf("stop calls = %d, want 2", stopCalls)
 		}
 	})
 }

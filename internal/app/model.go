@@ -4079,7 +4079,12 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 		if session := m.sessionForIssue(taskID); session != nil {
 			m.sessionMonitor.Stop(taskID)
 			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+				if force && isSessionAlreadyStoppedError(err) {
+					// Force-retry path may re-enter before projections clear the stale session.
+					// If daemon already stopped it, continue to worktree removal.
+				} else {
+					return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+				}
 			}
 		}
 
@@ -4113,6 +4118,21 @@ func isDirtyWorktreeRemovalError(err error) bool {
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(message, "contains modified or untracked files") ||
 		strings.Contains(message, "use --force to delete it")
+}
+
+func isSessionAlreadyStoppedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) && cmdErr.Code == protocol.ErrorCodeInvalidRequest {
+		message := strings.ToLower(strings.TrimSpace(cmdErr.Message))
+		return strings.Contains(message, "no active session found") ||
+			strings.Contains(message, "session not found")
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "no active session found") ||
+		strings.Contains(message, "session not found")
 }
 
 // NOTE: clampTaskIndex and clampTaskIndexForColumn have been removed.
