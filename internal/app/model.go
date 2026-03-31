@@ -77,6 +77,7 @@ var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
 var runGitCommandFunc = runGitCommand
+var execProcess = tea.ExecProcess
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -4004,38 +4005,39 @@ func formatAttachmentNoteLine(att *attachment.Attachment) string {
 }
 
 func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
-	return func() tea.Msg {
-		path := strings.TrimSpace(logPath)
-		if path == "" {
+	path := strings.TrimSpace(logPath)
+	if path == "" {
+		return func() tea.Msg {
 			return overlay.SelectionMsg{Key: "event-log-error", Value: errors.New("log file path is empty")}
 		}
-		if _, err := os.Stat(path); err != nil {
+	}
+	if _, err := os.Stat(path); err != nil {
+		return func() tea.Msg {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",
 				Value: fmt.Errorf("log file unavailable: %w", err),
 			}
 		}
+	}
 
-		editorName := strings.TrimSpace(os.Getenv("EDITOR"))
-		if editorName == "" {
-			editorName = strings.TrimSpace(os.Getenv("VISUAL"))
-		}
-		if editorName == "" {
-			editorName = "vim"
-		}
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
 
-		cmd := exec.Command(editorName, path)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+	cmd := exec.Command(editorName, path)
+	return execProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",
 				Value: fmt.Errorf("open log editor: %w", err),
 			}
 		}
 		return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
-	}
+	})
 }
 
 type taskDeletedResultMsg struct {
