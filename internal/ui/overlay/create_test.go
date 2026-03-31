@@ -78,6 +78,14 @@ func TestCreateTaskOverlayViewShowsLongTitleWithoutTruncatingStart(t *testing.T)
 	assert.Contains(t, view, "while editing")
 }
 
+func TestWrapTitleLinesDoesNotSplitDashedFlags(t *testing.T) {
+	lines := wrapTitleLines("add --project flag to set project explicitly in az cli commands", 24)
+	joined := strings.Join(lines, "\n")
+
+	assert.Contains(t, joined, "--project")
+	assert.NotContains(t, joined, "-\n-project")
+}
+
 func TestCreateTaskOverlayEscapeCloses(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 
