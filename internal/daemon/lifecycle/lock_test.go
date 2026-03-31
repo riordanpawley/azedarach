@@ -136,3 +136,24 @@ func TestLockManagerHandlesLegacyPIDLockFile(t *testing.T) {
 		}
 	})
 }
+
+func TestTerminateLockOwnerMissingLockIsNoop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := TerminateLockOwner(path); err != nil {
+		t.Fatalf("TerminateLockOwner() error = %v", err)
+	}
+}
+
+func TestTerminateLockOwnerRemovesStaleLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := os.WriteFile(path, []byte(`{"pid":999999,"created_at":"2026-03-24T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	if err := TerminateLockOwner(path); err != nil {
+		t.Fatalf("TerminateLockOwner() error = %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file should be removed, stat err = %v", err)
+	}
+}

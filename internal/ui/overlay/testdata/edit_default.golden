@@ -4,27 +4,27 @@
 ││ Title: > Replace top level functions                            Actions                         │
 ││ Description:                                                    ────────────────────────────────│
 ││ ┃   1 Review docs/src code of emdash.sh for improvements         Tab / Shift+Tab Switch fields  │
+││ ┃                                                                Ctrl+C Clear focused field     │
 ││ ┃                                                                T/B/F/E/C Set type             │
 ││ ┃                                                                0/1/2/3/4 Set priority         │
+││ ┃                                                                h/l or ←/→ Cycle impl          │
+││ ┃                                                               combinations                    │
+││ ┃                                                                Ctrl+O Attach image (edit task)│
 ││ ┃                                                                Enter Create task              │
 ││ ┃                                                                Ctrl+E Edit in $EDITOR         │
 ││ ┃                                                                Ctrl+K Clear form              │
-││ ┃                                                                Esc Cancel                     │
-││ ┃                                                                                               │
-││ ┃                                                                                               │
-││ ┃                                                                                               │
-││ ┃                                                                                               │
-││ ┃                                                                                               │
-││ ┃                                                                                               │
-││ ┃                                                                                               │
-││ Type: [●T] [ B] [ F] [ E] [ C]                                                                  │
+││ Type: [●T] [ B] [ F] [ E] [ C]                                   Esc Cancel                     │
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                                              │
+││ Impls: [<] go-bubbletea [>]                                                                     │
+││ Acceptance Criteria:                                                                            │
+││ ┃   1                                                                                           │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
+││ ┃                                                                                               │
 ││                                                                                                 │
 ││ ─────────────────────────────────────────────────────────────                                   │
 ││                                                                                                 │
 ││ [ Create Task ]                                                                                 │
-││                                                                                                 │
-││                                                                                                 │
-││                                                                                                 │
-││                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

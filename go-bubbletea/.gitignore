@@ -1,2 +1,0 @@
-# Runtime state should not be tracked from nested implementation directories.
-.azedarach/

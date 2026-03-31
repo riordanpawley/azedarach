@@ -639,9 +639,7 @@ func buildFanoutPlan(parentIssue string, flat []fanoutFlatNode, warnings []strin
 			issueType = "epic"
 		}
 		impl := node.Impl
-		if len(impl) == 0 {
-			impl = []string{"go-bubbletea"}
-		}
+		impl = normalizeFanoutImplementations(impl)
 		create = append(create, fanoutCreatePlan{
 			Key:        node.Key,
 			Title:      node.Title,
@@ -685,9 +683,7 @@ func applyFanoutPlan(ctx context.Context, deps *Dependencies, parentIssue string
 			parentID = resolvedParent
 		}
 		impl := node.Impl
-		if len(impl) == 0 {
-			impl = []string{"go-bubbletea"}
-		}
+		impl = normalizeFanoutImplementations(impl)
 		tt := domain.TypeTask
 		if node.Kind == "group" {
 			tt = domain.TypeEpic
@@ -742,6 +738,30 @@ func applyFanoutPlan(ctx context.Context, deps *Dependencies, parentIssue string
 		Created:     created,
 		BlocksAdded: blocksAdded,
 	}, nil
+}
+
+func normalizeFanoutImplementations(impls []string) []string {
+	if len(impls) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(impls))
+	out := make([]string, 0, len(impls))
+	for _, impl := range impls {
+		value := strings.TrimSpace(impl)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
 }
 
 func printFanoutPlan(plan fanoutPlan) {

@@ -53,6 +53,36 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.ProjectID != filepath.Base(repo) {
 		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, filepath.Base(repo))
 	}
+	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
+	}
+}
+
+func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	start := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatalf("MkdirAll(start): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt() error = %v", err)
+	}
+	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
+		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	}
 }
 
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
