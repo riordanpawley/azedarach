@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/daemon"
@@ -46,6 +48,9 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if scopeWatchPath := resolveScopedWorktreeWatchPath(); scopeWatchPath != "" {
+		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
+	}
 
 	d := daemon.New(daemon.Config{
 		RepoDir:             repoDir,
@@ -60,4 +65,49 @@ func main() {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func resolveScopedWorktreeWatchPath() string {
+	if !isScopedDaemonMode(os.Getenv("AZEDARACH_DAEMON_SCOPE")) {
+		return ""
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	root, err := config.ResolveWorktreeRoot(cwd)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(root)
+}
+
+func isScopedDaemonMode(mode string) bool {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "worktree", "scoped", "local":
+		return true
+	default:
+		return false
+	}
+}
+
+func startWorktreeExistenceWatch(ctx context.Context, stop context.CancelFunc, watchPath string, interval time.Duration) {
+	if strings.TrimSpace(watchPath) == "" || interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := os.Stat(watchPath); err != nil {
+					stop()
+					return
+				}
+			}
+		}
+	}()
 }
