@@ -50,8 +50,12 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
-	if deps.ProjectID != filepath.Base(repo) {
-		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, filepath.Base(repo))
+	wantProjectID, err := config.ProjectIDForRoot(repo)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot() error = %v", err)
+	}
+	if deps.ProjectID != wantProjectID {
+		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
 	}
 	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
 		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
@@ -82,6 +86,34 @@ func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
 	}
 	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
 		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	}
+}
+
+func TestNewDependenciesAtUsesDistinctProjectIDsForDistinctRoots(t *testing.T) {
+	base := t.TempDir()
+	startA := filepath.Join(base, "a", "repo")
+	startB := filepath.Join(base, "b", "repo")
+
+	if err := os.MkdirAll(filepath.Join(startA, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(startA .git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(startB, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(startB .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+
+	depsA, err := NewDependenciesAt(config.DefaultConfig(), startA)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt(startA) error = %v", err)
+	}
+	depsB, err := NewDependenciesAt(config.DefaultConfig(), startB)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt(startB) error = %v", err)
+	}
+
+	if depsA.ProjectID == depsB.ProjectID {
+		t.Fatalf("ProjectID collision: %q", depsA.ProjectID)
 	}
 }
 

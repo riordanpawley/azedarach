@@ -216,7 +216,10 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 		return nil, fmt.Errorf("failed to resolve project root from %q: %w", absRepoDir, err)
 	}
 
-	projectID := filepath.Base(rootRepoDir)
+	projectID, err := config.ProjectIDForRoot(rootRepoDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive project id from %q: %w", rootRepoDir, err)
+	}
 	socketPath := config.DaemonSocketPathFor(absRepoDir)
 	daemonTransport := transport.NewClient(socketPath)
 
