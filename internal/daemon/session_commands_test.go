@@ -14,6 +14,7 @@ import (
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -403,6 +404,36 @@ func TestBuildStartWorkPromptSanitizesControlCharsAndAngleBrackets(t *testing.T)
 	}
 	if strings.Contains(prompt, "\n\n\n") {
 		t.Fatalf("prompt = %q, want compact whitespace", prompt)
+	}
+}
+
+func TestResolveSessionIssuePrefersExactID(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "bgr", Title: "cant seem to start tmux session for issue bfs"},
+		{ID: "bfs", Title: "actual target issue"},
+	}
+
+	got, ok := resolveSessionIssue(tasks, "bfs")
+	if !ok {
+		t.Fatal("resolveSessionIssue returned not found, want exact match")
+	}
+	if got.ID != "bfs" {
+		t.Fatalf("resolved issue = %s, want bfs", got.ID)
+	}
+}
+
+func TestResolveSessionIssueFallsBackToFirstResult(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "bgr", Title: "first result"},
+		{ID: "bfs", Title: "second result"},
+	}
+
+	got, ok := resolveSessionIssue(tasks, "missing")
+	if !ok {
+		t.Fatal("resolveSessionIssue returned not found, want fallback to first result")
+	}
+	if got.ID != "bgr" {
+		t.Fatalf("resolved issue = %s, want bgr", got.ID)
 	}
 }
 

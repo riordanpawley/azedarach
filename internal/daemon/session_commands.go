@@ -170,14 +170,15 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	if len(tasks) == 0 {
+	task, ok := resolveSessionIssue(tasks, cmd.IssueID)
+	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.IssueID)), nil
 	}
 	baseBranch := cmd.BaseBranch
 	if baseBranch == "" {
 		baseBranch = d.cfg.BaseBranch
 	}
-	worktree, err := d.worktree.CreateWithTitle(ctx, cmd.IssueID, tasks[0].Title, baseBranch)
+	worktree, err := d.worktree.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
 	if err != nil {
 		if !errors.Is(err, git.ErrWorktreeAlreadyExists) {
@@ -194,7 +195,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	initialPrompt := strings.TrimSpace(cmd.Prompt)
 	if initialPrompt == "" {
-		initialPrompt = buildStartWorkPrompt(cmd.IssueID, tasks[0].Type.String(), tasks[0].Title)
+		initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title)
 	}
 	launchCommand := d.buildSessionLaunchCommand(cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
@@ -217,7 +218,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		worktreeLine = fmt.Sprintf("Worktree reused: %s", worktree.Path)
 	}
 	output := strings.Join([]string{
-		fmt.Sprintf("Starting session for: %s - %s", tasks[0].ID, tasks[0].Title),
+		fmt.Sprintf("Starting session for: %s - %s", task.ID, task.Title),
 		fmt.Sprintf("Creating worktree from branch: %s", baseBranch),
 		worktreeLine,
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
@@ -228,6 +229,21 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		"",
 	}, "\n")
 	return d.commandOutput(req, output), nil
+}
+
+func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.Task, bool) {
+	if len(tasks) == 0 {
+		return domain.Task{}, false
+	}
+	requestedKey := sessionKey(requestedIssueID)
+	if requestedKey != "" {
+		for _, task := range tasks {
+			if sessionKey(task.ID) == requestedKey {
+				return task, true
+			}
+		}
+	}
+	return tasks[0], true
 }
 
 func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
