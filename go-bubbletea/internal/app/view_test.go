@@ -212,6 +212,7 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	m.editor.EnterNormal()
 	m.nav.SelectTask("az-2", 0)
 
+	// Step 1: Verify initial board view.
 	boardView := m.View()
 	boardLines := strings.Split(strings.TrimRight(boardView, "\n"), "\n")
 	if len(boardLines) == 0 {
@@ -221,6 +222,7 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 		t.Fatalf("expected board headers on first line, got %q", boardLines[0])
 	}
 
+	// Step 2: Board → Tab → Compact.
 	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
 	compactModel := updated.(Model)
 	compactView := compactModel.View()
@@ -241,7 +243,22 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 		t.Fatalf("expected compact view footer to reflect view-mode toast, got %q", compactView)
 	}
 
+	// Step 3: Compact → Tab → Detail (lazyjira-inspired split pane).
 	updated, _ = compactModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	detailModel := updated.(Model)
+	if detailModel.viewMode != ViewModeDetail {
+		t.Fatalf("expected detail view mode after second tab, got %v", detailModel.viewMode)
+	}
+	detailView := detailModel.View()
+	if !strings.Contains(detailView, "List") {
+		t.Fatalf("expected 'List' pane header in detail view, got %q", detailView)
+	}
+	if got := getCursorPosition(detailModel); got.Column != 0 || got.Task != 1 {
+		t.Fatalf("cursor position changed after switching to detail view: got (%d,%d), want (0,1)", got.Column, got.Task)
+	}
+
+	// Step 4: Detail → Tab → Board (full cycle).
+	updated, _ = detailModel.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
 	boardModel := updated.(Model)
 	boardView = boardModel.View()
 	boardLines = strings.Split(strings.TrimRight(boardView, "\n"), "\n")
@@ -255,6 +272,59 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 		t.Fatalf("cursor position changed after toggling back: got (%d,%d), want (0,1)", got.Column, got.Task)
 	}
 }
+
+func TestView_DetailModePanelSwitching(t *testing.T) {
+	m := newTestModel()
+	m.width = 140 // wide enough for side-by-side
+	m.height = 30
+	m.loading = false
+	m.editor.EnterNormal()
+	m.viewMode = ViewModeDetail
+	m.detailFocusPane = detailPaneList
+
+	// List pane should be focused initially.
+	view := m.View()
+	if !strings.Contains(view, "List") {
+		t.Fatalf("expected 'List' header in detail view, got %q", view)
+	}
+
+	// 'l' key should switch focus to detail pane.
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	dm := updated.(Model)
+	if dm.detailFocusPane != detailPaneDetail {
+		t.Fatalf("expected detail pane to be focused after pressing l, got %v", dm.detailFocusPane)
+	}
+
+	// 'h' key should switch focus back to list pane.
+	updated, _ = dm.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	dm = updated.(Model)
+	if dm.detailFocusPane != detailPaneList {
+		t.Fatalf("expected list pane to be focused after pressing h, got %v", dm.detailFocusPane)
+	}
+}
+
+func TestView_DetailModeStackedOnNarrowTerminal(t *testing.T) {
+	m := newTestModel()
+	m.width = 80 // narrow – should use stacked layout
+	m.height = 30
+	m.loading = false
+	m.editor.EnterNormal()
+	m.viewMode = ViewModeDetail
+	m.detailFocusPane = detailPaneList
+
+	view := m.View()
+	if !strings.Contains(view, "List") {
+		t.Fatalf("expected 'List' header in stacked detail view, got %q", view)
+	}
+	if !strings.Contains(view, "Detail") {
+		t.Fatalf("expected 'Detail' header in stacked detail view, got %q", view)
+	}
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) > m.height {
+		t.Errorf("detail view too tall: got %d lines, want ≤ %d", len(lines), m.height)
+	}
+}
+
 
 func TestLayerWithinHeightTransparent_IgnoresANSISpaceOnlyLines(t *testing.T) {
 	m := newTestModel()

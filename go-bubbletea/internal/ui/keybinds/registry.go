@@ -172,7 +172,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (workspace)", Help: "Open dev server menu"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "w/W", Help: "Cleanup worktree / delete + cleanup"},
 
-	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
+	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Cycle view: kanban board → compact list → detail split pane"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "q", Help: "Quit"},
 }
