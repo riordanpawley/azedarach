@@ -651,19 +651,20 @@ func TestRenderRuntimeSignals(t *testing.T) {
 
 	t.Run("session and worktree signals", func(t *testing.T) {
 		signals := &RuntimeSignals{
-			HasTmuxSession:        true,
-			HasWorktree:           true,
-			GitAheadCount:         1,
-			GitBehindCount:        2,
-			HasUncommittedChanges: true,
-			GitAdditions:          10,
-			GitDeletions:          3,
-			PendingOperationState: "queued",
+			HasTmuxSession:          true,
+			HasWorktree:             true,
+			GitAheadCount:           1,
+			GitBehindCount:          2,
+			HasUncommittedChanges:   true,
+			GitAdditions:            10,
+			GitDeletions:            3,
+			PendingOperationState:   "queued",
+			PendingOperationPercent: 25,
 		}
 		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
 		if !strings.Contains(got, tmuxSessionToken) ||
 			!strings.Contains(got, worktreeToken) ||
-			!strings.Contains(got, "M:queued") ||
+			!strings.Contains(got, "M:queued(25%)") ||
 			!strings.Contains(got, "G:↓2") ||
 			!strings.Contains(got, "G:✎") ||
 			!strings.Contains(got, "+10/-3") {
@@ -696,15 +697,16 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 
 	t.Run("compacts to narrow token set", func(t *testing.T) {
 		signals := &RuntimeSignals{
-			HasTmuxSession:        true,
-			HasWorktree:           true,
-			HasUncommittedChanges: true,
-			GitAdditions:          10,
-			GitDeletions:          3,
-			PendingOperationState: "running",
+			HasTmuxSession:          true,
+			HasWorktree:             true,
+			HasUncommittedChanges:   true,
+			GitAdditions:            10,
+			GitDeletions:            3,
+			PendingOperationState:   "running",
+			PendingOperationPercent: 50,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "T") || !strings.Contains(got, "W") || !strings.Contains(got, "M:R") || !strings.Contains(got, "G*") {
+		if !strings.Contains(got, "T") || !strings.Contains(got, "W") || !strings.Contains(got, "M:R50") || !strings.Contains(got, "G*") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
 		}
 		if strings.Contains(got, "+10/-3") {

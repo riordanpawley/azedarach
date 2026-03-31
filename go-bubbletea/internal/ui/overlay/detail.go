@@ -27,10 +27,12 @@ type DetailPanel struct {
 
 // TaskMutationProgress represents in-flight mutation metadata for a task.
 type TaskMutationProgress struct {
-	OperationID    string
-	State          string
-	PreviousStatus domain.Status
-	TargetStatus   domain.Status
+	OperationID     string
+	State           string
+	ProgressPercent int
+	ProgressMessage string
+	PreviousStatus  domain.Status
+	TargetStatus    domain.Status
 }
 
 // NewDetailPanel creates a new detail panel for the given task and optional session
@@ -406,6 +408,16 @@ func (d *DetailPanel) formatMutationProgress() string {
 		progress = fmt.Sprintf("%s (%s -> %s)", state, d.formatStatus(d.mutation.PreviousStatus), d.formatStatus(d.mutation.TargetStatus))
 	}
 	if operationID := strings.TrimSpace(d.mutation.OperationID); operationID != "" {
+		if d.mutation.ProgressPercent > 0 || strings.TrimSpace(d.mutation.ProgressMessage) != "" {
+			progressBits := make([]string, 0, 2)
+			if d.mutation.ProgressPercent > 0 {
+				progressBits = append(progressBits, fmt.Sprintf("%d%%", d.mutation.ProgressPercent))
+			}
+			if message := strings.TrimSpace(d.mutation.ProgressMessage); message != "" {
+				progressBits = append(progressBits, message)
+			}
+			return fmt.Sprintf("%s [operation %s] [%s]", progress, operationID, strings.Join(progressBits, " - "))
+		}
 		return fmt.Sprintf("%s [operation %s]", progress, operationID)
 	}
 	return progress

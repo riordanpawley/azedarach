@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -111,13 +112,22 @@ type pendingTaskStatus struct {
 	state          protocol.OperationState
 }
 
+type pendingOperationProgress struct {
+	operationID string
+	state       protocol.OperationState
+	percent     int
+	message     string
+}
+
 // Model is the main application state
 type Model struct {
 	// Core data
-	tasks           []domain.Task
-	sessions        map[string]*domain.Session
-	suppressedTasks map[string]struct{}
-	pendingStatuses map[string]pendingTaskStatus
+	tasks            []domain.Task
+	sessions         map[string]*domain.Session
+	suppressedTasks  map[string]struct{}
+	pendingStatuses  map[string]pendingTaskStatus
+	operationTaskID  map[string]string
+	pendingOpsByTask map[string]pendingOperationProgress
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -229,6 +239,8 @@ func New(cfg *config.Config) Model {
 		tasks:                          []domain.Task{},
 		sessions:                       make(map[string]*domain.Session),
 		pendingStatuses:                make(map[string]pendingTaskStatus),
+		operationTaskID:                make(map[string]string),
+		pendingOpsByTask:               make(map[string]pendingOperationProgress),
 		nav:                            navigation.NewService(),
 		editor:                         editor.NewService(),
 		overlayStack:                   overlay.NewStack(),
@@ -511,6 +523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.recordRuntimeEvent(msg.event)
+		m.applyOperationProgressEvent(msg.event)
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
 			return m, m.waitForDaemonEventCmd()
@@ -2149,6 +2162,151 @@ func formatPendingOperationMessage(action, issueID, operationID string, state pr
 		return fmt.Sprintf("%s %s for %s (operation %s)", action, state, issueID, operationID)
 	}
 	return fmt.Sprintf("%s %s (operation %s)", action, state, operationID)
+}
+
+func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
+	switch evt.Event {
+	case protocol.EventOperationQueued, protocol.EventOperationRunning, protocol.EventOperationDone, protocol.EventOperationFailed, protocol.EventOperationCancelled:
+		var body protocol.OperationEventBody
+		if err := json.Unmarshal(evt.Body, &body); err != nil {
+			return
+		}
+		if strings.TrimSpace(body.Operation.OperationID) == "" {
+			return
+		}
+		taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
+		if taskID == "" {
+			taskID = m.operationTaskID[body.Operation.OperationID]
+		}
+		if taskID == "" {
+			return
+		}
+		m.operationTaskID[body.Operation.OperationID] = taskID
+		state := protocol.OperationState(body.Operation.State)
+		if operationStateTerminal(state) {
+			delete(m.pendingOpsByTask, taskIDKey(taskID))
+			delete(m.operationTaskID, body.Operation.OperationID)
+			m.syncTaskWorkspaceOverlay()
+			return
+		}
+		percent := 0
+		switch state {
+		case protocol.OperationStateRunning:
+			percent = 50
+		}
+		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
+			operationID: body.Operation.OperationID,
+			state:       state,
+			percent:     percent,
+		}
+		m.syncTaskWorkspaceOverlay()
+	case protocol.EventOperationProgress:
+		var body protocol.OperationProgressEventBody
+		if err := json.Unmarshal(evt.Body, &body); err != nil {
+			return
+		}
+		if strings.TrimSpace(body.OperationID) == "" {
+			return
+		}
+		taskID := m.operationTaskID[body.OperationID]
+		if taskID == "" {
+			return
+		}
+		if operationStateTerminal(body.State) {
+			delete(m.pendingOpsByTask, taskIDKey(taskID))
+			delete(m.operationTaskID, body.OperationID)
+			m.syncTaskWorkspaceOverlay()
+			return
+		}
+		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
+			operationID: body.OperationID,
+			state:       body.State,
+			percent:     clampOperationPercent(body.Progress.Percent),
+			message:     strings.TrimSpace(body.Progress.Message),
+		}
+		m.syncTaskWorkspaceOverlay()
+	}
+}
+
+func clampOperationPercent(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
+}
+
+func (m Model) resolveOperationTaskID(issueID string, resourceKeys []string) string {
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if taskID := m.lookupTaskID(trimmedIssueID); taskID != "" {
+		return taskID
+	}
+	if taskID := m.lookupTaskIDByWorktree(trimmedIssueID); taskID != "" {
+		return taskID
+	}
+	for _, key := range resourceKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if strings.HasPrefix(key, "issue:") {
+			parts := strings.Split(key, ":")
+			if len(parts) > 0 {
+				candidate := strings.TrimSpace(parts[len(parts)-1])
+				if taskID := m.lookupTaskID(candidate); taskID != "" {
+					return taskID
+				}
+			}
+		}
+		if strings.HasPrefix(key, "worktree:") {
+			worktree := strings.TrimPrefix(key, "worktree:")
+			if taskID := m.lookupTaskIDByWorktree(worktree); taskID != "" {
+				return taskID
+			}
+		}
+	}
+	return ""
+}
+
+func (m Model) lookupTaskID(candidate string) string {
+	key := taskIDKey(candidate)
+	if key == "" {
+		return ""
+	}
+	for _, task := range m.tasks {
+		if taskIDKey(task.ID) == key {
+			return task.ID
+		}
+	}
+	return ""
+}
+
+func (m Model) lookupTaskIDByWorktree(worktree string) string {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return ""
+	}
+	for taskID, path := range m.runtimeSignalWorktreeByTask {
+		if strings.TrimSpace(path) == worktree {
+			return taskID
+		}
+	}
+	for taskID, session := range m.sessions {
+		if session == nil {
+			continue
+		}
+		if strings.TrimSpace(session.Worktree) == worktree {
+			return taskID
+		}
+	}
+	for _, task := range m.tasks {
+		if task.Session != nil && strings.TrimSpace(task.Session.Worktree) == worktree {
+			return task.ID
+		}
+	}
+	return ""
 }
 
 type runtimeSignalsLoadedMsg struct {
@@ -5288,19 +5446,29 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 }
 
 func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgress {
-	if len(m.pendingStatuses) == 0 {
+	key := taskIDKey(taskID)
+	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 {
 		return nil
 	}
-	pending, ok := m.pendingStatuses[taskIDKey(taskID)]
-	if !ok {
+	progress := &overlay.TaskMutationProgress{}
+	if pending, ok := m.pendingStatuses[key]; ok {
+		progress.OperationID = pending.operationID
+		progress.State = string(pending.state)
+		progress.PreviousStatus = pending.previousStatus
+		progress.TargetStatus = pending.targetStatus
+	}
+	if op, ok := m.pendingOpsByTask[key]; ok {
+		if progress.OperationID == "" {
+			progress.OperationID = op.operationID
+		}
+		progress.State = string(op.state)
+		progress.ProgressPercent = op.percent
+		progress.ProgressMessage = op.message
+	}
+	if progress.OperationID == "" && strings.TrimSpace(progress.State) == "" {
 		return nil
 	}
-	return &overlay.TaskMutationProgress{
-		OperationID:    pending.operationID,
-		State:          string(pending.state),
-		PreviousStatus: pending.previousStatus,
-		TargetStatus:   pending.targetStatus,
-	}
+	return progress
 }
 
 func (m *Model) syncTaskWorkspaceOverlay() {
@@ -5878,11 +6046,11 @@ func (m Model) renderBoardView() string {
 }
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
-	if len(m.pendingStatuses) == 0 {
+	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 {
 		return m.runtimeSignalsByTask
 	}
 
-	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses))
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses)+len(m.pendingOpsByTask))
 	for taskID, signals := range m.runtimeSignalsByTask {
 		signalsByTask[taskID] = signals
 	}
@@ -5894,6 +6062,17 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 		signals := signalsByTask[task.ID]
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
+		signalsByTask[task.ID] = signals
+	}
+	for _, task := range m.tasks {
+		pending, ok := m.pendingOpsByTask[taskIDKey(task.ID)]
+		if !ok {
+			continue
+		}
+		signals := signalsByTask[task.ID]
+		signals.PendingOperationState = string(pending.state)
+		signals.PendingOperationID = pending.operationID
+		signals.PendingOperationPercent = pending.percent
 		signalsByTask[task.ID] = signals
 	}
 

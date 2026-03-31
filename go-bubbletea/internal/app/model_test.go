@@ -2929,3 +2929,117 @@ func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 		t.Fatalf("progress statuses = %s->%s, want %s->%s", progress.PreviousStatus, progress.TargetStatus, domain.StatusOpen, domain.StatusInProgress)
 	}
 }
+
+func TestPendingMutationForTaskIncludesOperationProgressPayload(t *testing.T) {
+	m := newTestModel()
+	m.pendingOpsByTask = map[string]pendingOperationProgress{
+		taskIDKey("az-1"): {
+			operationID: "op-merge",
+			state:       protocol.OperationStateRunning,
+			percent:     65,
+			message:     "running git.merge",
+		},
+	}
+
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected pending mutation progress")
+	}
+	if progress.OperationID != "op-merge" {
+		t.Fatalf("operation id = %q, want op-merge", progress.OperationID)
+	}
+	if progress.State != string(protocol.OperationStateRunning) {
+		t.Fatalf("state = %q, want %q", progress.State, protocol.OperationStateRunning)
+	}
+	if progress.ProgressPercent != 65 {
+		t.Fatalf("percent = %d, want 65", progress.ProgressPercent)
+	}
+	if progress.ProgressMessage != "running git.merge" {
+		t.Fatalf("message = %q, want running git.merge", progress.ProgressMessage)
+	}
+}
+
+func TestDaemonOperationProgressEventUpdatesRuntimeSignalsAndClearsOnDone(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.runtimeSignalWorktreeByTask = map[string]string{
+		"az-1": "/tmp/wt-az-1",
+	}
+
+	startBody, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-merge",
+			IssueID:     "/tmp/wt-az-1",
+			Kind:        "git.merge",
+			State:       protocol.OperationStateRunning,
+			ResourceKeys: []string{
+				"worktree:/tmp/wt-az-1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal operation event body: %v", err)
+	}
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationRunning,
+		Body:  startBody,
+	})
+
+	progressBody, err := json.Marshal(protocol.OperationProgressEventBody{
+		OperationID: "op-merge",
+		ProjectID:   "proj-1",
+		State:       protocol.OperationStateRunning,
+		Progress: protocol.OperationProgress{
+			Message: "running git.merge",
+			Percent: 72,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal progress body: %v", err)
+	}
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationProgress,
+		Body:  progressBody,
+	})
+
+	signals := m.runtimeSignalsForBoard()
+	got, ok := signals["az-1"]
+	if !ok {
+		t.Fatal("expected runtime signals for az-1")
+	}
+	if got.PendingOperationID != "op-merge" {
+		t.Fatalf("pending op id = %q, want op-merge", got.PendingOperationID)
+	}
+	if got.PendingOperationState != string(protocol.OperationStateRunning) {
+		t.Fatalf("pending state = %q, want running", got.PendingOperationState)
+	}
+	if got.PendingOperationPercent != 72 {
+		t.Fatalf("pending percent = %d, want 72", got.PendingOperationPercent)
+	}
+
+	doneBody, err := json.Marshal(protocol.OperationEventBody{
+		Operation: protocol.OperationRecord{
+			OperationID: "op-merge",
+			IssueID:     "/tmp/wt-az-1",
+			Kind:        "git.merge",
+			State:       protocol.OperationStateDone,
+			ResourceKeys: []string{
+				"worktree:/tmp/wt-az-1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal done body: %v", err)
+	}
+	m.applyOperationProgressEvent(protocol.EventEnvelope{
+		Event: protocol.EventOperationDone,
+		Body:  doneBody,
+	})
+
+	cleared := m.runtimeSignalsForBoard()["az-1"]
+	if cleared.PendingOperationID != "" || cleared.PendingOperationState != "" || cleared.PendingOperationPercent != 0 {
+		t.Fatalf("expected pending op fields cleared, got %+v", cleared)
+	}
+}

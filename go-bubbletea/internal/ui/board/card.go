@@ -21,15 +21,16 @@ const worktreeToken = "W:Y"
 // RuntimeSignals represents runtime metadata rendered for a task card.
 // These values are computed independently from session state.
 type RuntimeSignals struct {
-	HasTmuxSession        bool
-	HasWorktree           bool
-	GitAheadCount         int
-	GitBehindCount        int
-	HasUncommittedChanges bool
-	GitAdditions          int
-	GitDeletions          int
-	PendingOperationState string
-	PendingOperationID    string
+	HasTmuxSession          bool
+	HasWorktree             bool
+	GitAheadCount           int
+	GitBehindCount          int
+	HasUncommittedChanges   bool
+	GitAdditions            int
+	GitDeletions            int
+	PendingOperationState   string
+	PendingOperationID      string
+	PendingOperationPercent int
 }
 
 // ChildProgress summarizes completion progress for a parent task's children.
@@ -304,7 +305,7 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
-	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, false); pendingToken != "" {
+	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, false); pendingToken != "" {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
 	}
 	if signals.GitAheadCount > 0 && !hasLineChanges {
@@ -342,7 +343,7 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken("W", styles.Teal, s))
 	}
-	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, true); pendingToken != "" {
+	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, true); pendingToken != "" {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
 	}
 
@@ -356,13 +357,25 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	return strings.Join(parts, "")
 }
 
-func renderPendingOperationToken(state string, compact bool) string {
+func renderPendingOperationToken(state string, percent int, compact bool) string {
 	state = strings.ToLower(strings.TrimSpace(state))
 	if state == "" {
 		return ""
 	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
 	if compact {
+		if percent > 0 {
+			return fmt.Sprintf("M:%s%d", strings.ToUpper(string(state[0])), percent)
+		}
 		return "M:" + strings.ToUpper(string(state[0]))
+	}
+	if percent > 0 {
+		return fmt.Sprintf("M:%s(%d%%)", state, percent)
 	}
 	return "M:" + state
 }

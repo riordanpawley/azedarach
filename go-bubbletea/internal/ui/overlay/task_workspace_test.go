@@ -199,10 +199,12 @@ func TestTaskWorkspaceOverlay_View_ShowsMutationProgress(t *testing.T) {
 		Status: domain.StatusInProgress,
 	}
 	overlay := NewTaskWorkspaceOverlay(task, nil, nil, &TaskMutationProgress{
-		OperationID:    "op-status",
-		State:          "queued",
-		PreviousStatus: domain.StatusOpen,
-		TargetStatus:   domain.StatusInProgress,
+		OperationID:     "op-status",
+		State:           "queued",
+		ProgressPercent: 40,
+		ProgressMessage: "queued task.update_status",
+		PreviousStatus:  domain.StatusOpen,
+		TargetStatus:    domain.StatusInProgress,
 	}, 120, 30)
 
 	view := overlay.View()
@@ -211,6 +213,9 @@ func TestTaskWorkspaceOverlay_View_ShowsMutationProgress(t *testing.T) {
 	}
 	if !strings.Contains(view, "queued") || !strings.Contains(view, "op-status") {
 		t.Fatalf("expected mutation state and operation id in detail panel, got: %q", view)
+	}
+	if !strings.Contains(view, "40%") || !strings.Contains(view, "queued task.update_status") {
+		t.Fatalf("expected mutation progress payload in detail panel, got: %q", view)
 	}
 }
 
@@ -226,14 +231,19 @@ func TestTaskWorkspaceOverlay_SyncTaskRefreshesMutationProgress(t *testing.T) {
 		Title:  "Task",
 		Status: domain.StatusInProgress,
 	}, nil, nil, &TaskMutationProgress{
-		OperationID:    "op-sync",
-		State:          "running",
-		PreviousStatus: domain.StatusOpen,
-		TargetStatus:   domain.StatusInProgress,
+		OperationID:     "op-sync",
+		State:           "running",
+		ProgressPercent: 77,
+		ProgressMessage: "running git.merge",
+		PreviousStatus:  domain.StatusOpen,
+		TargetStatus:    domain.StatusInProgress,
 	})
 
 	view := overlay.View()
 	if !strings.Contains(view, "running") || !strings.Contains(view, "op-sync") {
 		t.Fatalf("expected synced mutation progress in detail panel, got: %q", view)
+	}
+	if !strings.Contains(view, "77%") || !strings.Contains(view, "running git.merge") {
+		t.Fatalf("expected synced mutation progress payload in detail panel, got: %q", view)
 	}
 }
