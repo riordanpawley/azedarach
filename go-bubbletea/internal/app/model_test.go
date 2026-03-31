@@ -1097,6 +1097,27 @@ func TestEventLogHotkeyPushesOverlay(t *testing.T) {
 	}
 }
 
+func TestRuntimeEventSummary_HumanizesToastAndTaskEvents(t *testing.T) {
+	toast := runtimeEventSummary(protocol.EventEnvelope{
+		Event: "ui.toast",
+		Body:  []byte("Saved settings"),
+	})
+	if toast != "Saved settings" {
+		t.Fatalf("toast summary = %q, want %q", toast, "Saved settings")
+	}
+	if strings.Contains(toast, "ui.toast") {
+		t.Fatalf("toast summary should not expose raw event key: %q", toast)
+	}
+
+	task := runtimeEventSummary(protocol.EventEnvelope{
+		Event: "task.updated",
+		Body:  []byte("az-42"),
+	})
+	if task != "Task updated: az-42" {
+		t.Fatalf("task summary = %q, want %q", task, "Task updated: az-42")
+	}
+}
+
 func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 	m := newTestModel()
 

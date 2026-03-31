@@ -3962,16 +3962,64 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 func runtimeEventSummary(evt protocol.EventEnvelope) string {
 	eventName := strings.TrimSpace(evt.Event)
 	body := compactSummaryText(string(evt.Body))
+	eventLabel := humanizeRuntimeEventName(eventName)
+	if eventName == "ui.toast" && body != "" {
+		return truncateSummary(body)
+	}
 	switch {
-	case eventName != "" && body != "":
-		return truncateSummary(eventName + ": " + body)
-	case eventName != "":
-		return truncateSummary(eventName)
+	case eventLabel != "" && body != "":
+		if strings.EqualFold(eventLabel, body) {
+			return truncateSummary(body)
+		}
+		return truncateSummary(eventLabel + ": " + body)
 	case body != "":
 		return truncateSummary(body)
+	case eventLabel != "":
+		return truncateSummary(eventLabel)
 	default:
 		return truncateSummary(strings.TrimSpace(string(evt.Kind)))
 	}
+}
+
+func humanizeRuntimeEventName(eventName string) string {
+	eventName = strings.TrimSpace(eventName)
+	switch eventName {
+	case "":
+		return ""
+	case "ui.toast":
+		return ""
+	case "task.created":
+		return "Task created"
+	case "task.updated":
+		return "Task updated"
+	case "task.deleted":
+		return "Task deleted"
+	case "task.archived":
+		return "Task archived"
+	case "session.started":
+		return "Session started"
+	case "session.stopped":
+		return "Session stopped"
+	}
+
+	tokens := strings.FieldsFunc(strings.ToLower(eventName), func(r rune) bool {
+		return r == '.' || r == '_' || r == '-'
+	})
+	if len(tokens) > 2 && tokens[1] == "event" {
+		tokens = append(tokens[:1], tokens[2:]...)
+	}
+	if len(tokens) == 0 {
+		return ""
+	}
+	if tokens[0] == "ui" && len(tokens) > 1 {
+		tokens = tokens[1:]
+	}
+	if len(tokens) == 0 {
+		return ""
+	}
+
+	tokens[0] = strings.ToUpper(tokens[0][:1]) + tokens[0][1:]
+	return strings.Join(tokens, " ")
 }
 
 func compactSummaryText(value string) string {

@@ -76,8 +76,11 @@ func TestViewWithToastKeepsStatusBarVisible(t *testing.T) {
 	if !strings.Contains(lastLine, "NORMAL") {
 		t.Fatalf("expected status bar on final line to include mode label; last line=%q", lastLine)
 	}
-	if !strings.Contains(lastLine, "ui.toast") && !strings.Contains(lastLine, "test toast") {
-		t.Fatalf("expected status bar ticker to include latest event context; last line=%q", lastLine)
+	if strings.Contains(lastLine, "ui.toast") {
+		t.Fatalf("expected status bar ticker to hide raw event key; last line=%q", lastLine)
+	}
+	if !strings.Contains(lastLine, "test toast") {
+		t.Fatalf("expected status bar ticker to include toast message; last line=%q", lastLine)
 	}
 }
 
