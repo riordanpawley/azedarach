@@ -1082,6 +1082,43 @@ func TestSelectModeSelectionAndBulkEntry(t *testing.T) {
 			t.Fatalf("expected bulk action menu, got %T", newModel.overlayStack.Current())
 		}
 	})
+
+	t.Run("move down in select mode keeps current task selected", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.editor.Select("az-1")
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsSelected("az-1") {
+			t.Fatal("expected az-1 to remain selected after moving down in select mode")
+		}
+		if got := newModel.nav.GetCursor().TaskID; got != "az-2" {
+			t.Fatalf("cursor task = %q, want az-2", got)
+		}
+	})
+
+	t.Run("a then move then a builds multi-select", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterSelect()
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		m = result.(Model)
+		result, _ = m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = result.(Model)
+		result, _ = m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		newModel := result.(Model)
+
+		if !newModel.editor.IsSelected("az-1") || !newModel.editor.IsSelected("az-2") {
+			t.Fatalf("expected az-1 and az-2 selected, got %+v", newModel.editor.GetSelectedTasksList())
+		}
+		if got := newModel.editor.SelectionCount(); got != 2 {
+			t.Fatalf("selection count = %d, want 2", got)
+		}
+	})
 }
 
 func TestSearchOverlayLiveFilteringAndModeTransitions(t *testing.T) {
