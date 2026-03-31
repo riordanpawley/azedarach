@@ -38,8 +38,8 @@ check-boundaries:
     if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --config .golangci-boundary.yml ./internal/...; else echo "WARN: golangci-lint not installed; skipping depguard boundary lint gate" >&2; fi
     ./scripts/check-boundaries.sh
     ./scripts/afv-drift-sentinel.sh
-    go test ./internal/app ./internal/cli
-    go test ./internal/daemon/... ./internal/client/...
+    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/app ./internal/cli
+    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/daemon/... ./internal/client/...
 
 boundary-check:
     @just check-boundaries

@@ -139,12 +139,12 @@ func DefaultConfig() *Config {
 		GitHooks: GitHooksConfig{
 			SpecSync: GitHookSpecSyncConfig{
 				Enabled:       false,
-				Command:       "az spec sync --target md",
+				Command:       "",
 				AutoStageDocs: true,
 			},
 			BoundaryCheck: GitHookTaskConfig{
-				Enabled: true,
-				Command: "just check-boundaries",
+				Enabled: false,
+				Command: "",
 			},
 		},
 		Keyboard: KeyboardConfig{

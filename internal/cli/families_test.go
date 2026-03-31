@@ -100,6 +100,66 @@ func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	}
 }
 
+func TestGitHooksRunCommandRequiresSpecSyncCommandWhenEnabled(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.GitHooks.SpecSync.Enabled = true
+	cfg.GitHooks.SpecSync.Command = ""
+	cfg.GitHooks.BoundaryCheck.Enabled = false
+
+	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
+	}
+
+	err = GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts)
+	if err == nil || !strings.Contains(err.Error(), "githooks spec sync command is enabled but no command is configured") {
+		t.Fatalf("expected missing spec sync command error, got %v", err)
+	}
+}
+
+func TestGitHooksRunCommandRequiresBoundaryCommandWhenEnabled(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := exec.Command("git", "-C", projectDir, "config", "user.name", "Test User").Run(); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
+	if err := exec.Command("git", "-C", projectDir, "config", "user.email", "test@example.com").Run(); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	internalDir := filepath.Join(projectDir, "internal")
+	if err := os.MkdirAll(internalDir, 0o755); err != nil {
+		t.Fatalf("mkdir internal dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(internalDir, "pkg.go"), []byte("package internal\n"), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	if err := exec.Command("git", "-C", projectDir, "add", "internal/pkg.go").Run(); err != nil {
+		t.Fatalf("git add staged boundary path: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.GitHooks.SpecSync.Enabled = false
+	cfg.GitHooks.BoundaryCheck.Enabled = true
+	cfg.GitHooks.BoundaryCheck.Command = ""
+
+	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
+	}
+
+	err = GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts)
+	if err == nil || !strings.Contains(err.Error(), "githooks boundary check is enabled but no command is configured") {
+		t.Fatalf("expected missing boundary command error, got %v", err)
+	}
+}
+
 func TestNotifyCommandParsesAndPrintsStatus(t *testing.T) {
 	opts, err := ParseNotifyArgs([]string{"--verbose", "idle_prompt", "az-123"})
 	if err != nil {
