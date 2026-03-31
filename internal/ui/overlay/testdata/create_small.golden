@@ -5,16 +5,16 @@
 ││ > Add grom renderer for detail view maybe   ──────────────────────│
 ││ Description:                                 Tab / Shift+Tab      │
 ││ ┃   1 review panel structure and            Switch fields         │
-││ ┃     preserve layout                        T/B/F/E/C Set type   │
-││ ┃                                            0/1/2/3/4 Set        │
-││ ┃                                           priority              │
-││ Type: [●T] [ B] [ F] [ E] [ C]               Impls field Comma-   │
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          separated impl keys   │
-││ Impls: > default, go-bubbletea, ts-open      Enter Create task    │
+││ ┃     preserve layout                        Ctrl+C Clear focused │
+││ ┃                                           field                 │
+││ ┃                                            T/B/F/E/C Set type   │
+││ Type: [●T] [ B] [ F] [ E] [ C]               0/1/2/3/4 Set        │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          priority              │
+││ Impls: > default, go-bubbletea, ts-open      Impls field Comma-   │
+││ Acceptance Criteria:                        separated impl keys   │
+││ ┃   1 Acceptance criteria (optional)...      Ctrl+O Attach image  │
+││ ┃                                           (edit task)           │
+││ ┃                                            Enter Create task    │
 ││                                              Ctrl+E Edit in       │
 ││ [ Create Task ]                             $EDITOR               │
-││                                              Ctrl+K Clear form    │
-││                                              Esc Cancel           │
-││                                                                   │
-││                                                                   │
 ╰────────────────────────────────────────────────────────────────────╯

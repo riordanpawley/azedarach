@@ -818,6 +818,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlayStack.Pop()
 		return m, m.saveTaskCmd(msg)
 
+	case overlay.OpenTaskImageAttachMsg:
+		issueID := strings.TrimSpace(msg.IssueID)
+		if issueID == "" {
+			return m, nil
+		}
+		attachOverlay := overlay.NewImageAttachOverlay(issueID, m.attachmentService)
+		return m, m.openOverlay(attachOverlay)
+
 	case taskCreatedResultMsg:
 		if msg.err != nil {
 			m.addToast(Toast{

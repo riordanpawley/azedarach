@@ -41,8 +41,11 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Type:")
 	assert.Contains(t, view, "Priority:")
 	assert.Contains(t, view, "Impls:")
+	assert.Contains(t, view, "Acceptance Criteria:")
 	assert.Contains(t, view, "Create Task")
 	assert.Contains(t, view, "Enter")
+	assert.Contains(t, view, "Ctrl+C")
+	assert.Contains(t, view, "Ctrl+O")
 	assert.Contains(t, view, "Ctrl+E")
 	assert.Contains(t, view, "Ctrl+K")
 }
@@ -85,6 +88,11 @@ func TestCreateTaskOverlayTabNavigation(t *testing.T) {
 	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusImpls, overlay.focusIndex)
 
+	// Tab to acceptance
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, focusAcceptance, overlay.focusIndex)
+
 	// Tab to submit
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = m.(*CreateTaskOverlay)
@@ -107,10 +115,10 @@ func TestCreateTaskOverlayShiftTabNavigation(t *testing.T) {
 	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusSubmit, overlay.focusIndex)
 
-	// Shift+Tab should go to impls
+	// Shift+Tab should go to acceptance
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	overlay = m.(*CreateTaskOverlay)
-	assert.Equal(t, focusImpls, overlay.focusIndex)
+	assert.Equal(t, focusAcceptance, overlay.focusIndex)
 }
 
 func TestCreateTaskOverlayTypeSelection(t *testing.T) {
@@ -232,6 +240,22 @@ func TestCreateTaskOverlaySubmitWithDescription(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Test Task", taskMsg.Title)
 	assert.Equal(t, "This is a test description", taskMsg.Description)
+}
+
+func TestCreateTaskOverlaySubmitWithAcceptance(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Test Task")
+	overlay.acceptanceInput.SetValue("Given X\nWhen Y\nThen Z")
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "Given X\nWhen Y\nThen Z", taskMsg.Acceptance)
 }
 
 func TestCreateTaskOverlaySubmitWithCustomTypeAndPriority(t *testing.T) {
@@ -438,6 +462,7 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	overlay.taskType = domain.TypeBug
 	overlay.priority = domain.P0
 	overlay.implInput.SetValue("go-bubbletea")
+	overlay.acceptanceInput.SetValue("Must pass")
 	overlay.focusIndex = focusPriority
 
 	m, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
@@ -449,7 +474,45 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
 	assert.Equal(t, "", overlay.implInput.Value())
+	assert.Equal(t, "", overlay.acceptanceInput.Value())
 	assert.Equal(t, focusTitle, overlay.focusIndex)
+}
+
+func TestCreateTaskOverlayCtrlCClearsFocusedTitle(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Needs clear")
+	overlay.focusIndex = focusTitle
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.Nil(t, cmd)
+
+	overlay = model.(*CreateTaskOverlay)
+	assert.Equal(t, "", overlay.title.Value())
+}
+
+func TestCreateTaskOverlayCtrlCClearsFocusedDescription(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.description.SetValue("Need to clear description")
+	overlay.focusIndex = focusDescription
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.Nil(t, cmd)
+
+	overlay = model.(*CreateTaskOverlay)
+	assert.Equal(t, "", overlay.description.Value())
+}
+
+func TestEditTaskOverlayCtrlORequestsImageAttach(t *testing.T) {
+	task := domain.Task{ID: "az-77", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
+	overlay := NewEditTaskOverlay(task)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	require.NotNil(t, cmd)
+
+	msg := cmd()
+	openMsg, ok := msg.(OpenTaskImageAttachMsg)
+	require.True(t, ok)
+	assert.Equal(t, "az-77", openMsg.IssueID)
 }
 
 // batchToSlice is a helper function to extract messages from a batch command
