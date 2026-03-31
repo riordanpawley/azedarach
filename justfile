@@ -58,9 +58,6 @@ spec-sync:
 release-homebrew *ARGS:
     ./scripts/release-homebrew.sh {{ARGS}}
 
-mtm branch="" session="bhh":
-    ./scripts/merge-to-main.sh "{{branch}}" "{{session}}"
-
 git-config-lock:
     git rev-parse --is-inside-work-tree >/dev/null
     if [ "$(git config --local --get core.bare || true)" != "false" ]; then git config --local core.bare false; fi

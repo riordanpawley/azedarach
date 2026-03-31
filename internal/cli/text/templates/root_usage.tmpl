@@ -3,6 +3,7 @@ Usage: az [command] [arguments]
 Commands:
   (no command)         Start the Azedarach TUI
   session <subcommand>  Session commands (start|attach|kill|status)
+  branch <subcommand>   Branch commands (mtm)
   start <issue-id>      Alias for 'az session start <issue-id>'
   attach <issue-id>     Alias for 'az session attach <issue-id>'
   kill <issue-id>       Alias for 'az session kill <issue-id>'
@@ -53,6 +54,7 @@ Examples:
   az session kill az-123    # Kill issue az-123's session
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123
+  az branch mtm az-123      # Merge issue branch into base branch (daemon path)
   az issue list
   az issue list --id az-1 --id az-2
   az issue list --deps

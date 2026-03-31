@@ -23,6 +23,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -314,6 +315,202 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+// BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
+func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	source, err := resolveMergeToMainSourceWorktree(ctx, deps, issueID)
+	if err != nil {
+		return err
+	}
+	baseBranch := resolveCLIBaseBranch(deps.Config)
+
+	if err := checkMergeToMainPreflight(ctx, deps, source, "."); err != nil {
+		return err
+	}
+
+	deps.Logger.Info("merging issue branch into base branch",
+		"issue_id", source.IssueID,
+		"source_worktree", source.Path,
+		"source_branch", source.Branch,
+		"base_branch", baseBranch,
+	)
+
+	if _, err := deps.DaemonClient.GitFetch(ctx, ".", "origin"); err != nil {
+		return wrapPendingGitOperation("fetch", err)
+	}
+	if _, err := deps.DaemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
+		return wrapPendingGitOperation("checkout", err)
+	}
+	result, err := deps.DaemonClient.GitMerge(ctx, ".", source.Branch)
+	if err != nil {
+		return wrapPendingGitOperation("merge", err)
+	}
+
+	if strings.TrimSpace(result.Result.Message) != "" {
+		if strings.HasSuffix(result.Result.Message, "\n") {
+			fmt.Print(result.Result.Message)
+		} else {
+			fmt.Println(result.Result.Message)
+		}
+	}
+	fmt.Printf("Merged %s into %s (%s)\n", source.Branch, baseBranch, source.IssueID)
+	return nil
+}
+
+func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (gitservice.Worktree, error) {
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return gitservice.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
+	}
+	if len(worktrees) == 0 {
+		return gitservice.Worktree{}, fmt.Errorf("no daemon worktrees found; start the issue session first")
+	}
+
+	trimmedIssueID := strings.TrimSpace(issueID)
+	if trimmedIssueID == "" {
+		trimmedIssueID = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	}
+	if trimmedIssueID != "" {
+		for _, wt := range worktrees {
+			if naming.IssueIDsEqual(wt.IssueID, trimmedIssueID) {
+				return wt, nil
+			}
+		}
+		return gitservice.Worktree{}, fmt.Errorf("worktree not found for issue %s", trimmedIssueID)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return gitservice.Worktree{}, fmt.Errorf("resolve working directory: %w", err)
+	}
+	absCWD, err := filepath.Abs(cwd)
+	if err != nil {
+		return gitservice.Worktree{}, fmt.Errorf("resolve working directory path: %w", err)
+	}
+
+	for _, wt := range worktrees {
+		if samePath(wt.Path, absCWD) {
+			return wt, nil
+		}
+	}
+	return gitservice.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch mtm <issue-id>", absCWD)
+}
+
+func samePath(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func resolveCLIBaseBranch(cfg *config.Config) string {
+	if cfg == nil {
+		return "main"
+	}
+	base := strings.TrimSpace(cfg.Git.BaseBranch)
+	if base == "" {
+		return "main"
+	}
+	return base
+}
+
+func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source gitservice.Worktree, targetWorktree string) error {
+	sourceStatus, err := deps.DaemonClient.GitStatus(ctx, source.Path)
+	if err != nil {
+		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)
+	}
+	targetStatus, err := deps.DaemonClient.GitStatus(ctx, targetWorktree)
+	if err != nil {
+		return fmt.Errorf("read target status for main: %w", err)
+	}
+
+	reasons := make([]string, 0, 2)
+	if sourceStatus.HasChanges {
+		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, summarizeGitStatusCounts(sourceStatus)))
+	}
+	if targetStatus.HasChanges {
+		reasons = append(reasons, fmt.Sprintf("target main is not clean: %s", summarizeGitStatusCounts(targetStatus)))
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+
+	lines := []string{"merge preflight failed:"}
+	for _, reason := range reasons {
+		lines = append(lines, "- "+reason)
+	}
+	if files := dirtyFilesFromGitStatus(sourceStatus); len(files) > 0 {
+		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(files, ", ")))
+	}
+	if files := dirtyFilesFromGitStatus(targetStatus); len(files) > 0 {
+		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(files, ", ")))
+	}
+	return errors.New(strings.Join(lines, "\n"))
+}
+
+func summarizeGitStatusCounts(status gitservice.GitStatus) string {
+	parts := make([]string, 0, 5)
+	if n := len(status.Staged); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d staged", n))
+	}
+	if n := len(status.Modified); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d modified", n))
+	}
+	if n := len(status.Added); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", n))
+	}
+	if n := len(status.Deleted); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", n))
+	}
+	if n := len(status.Untracked); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d untracked", n))
+	}
+	if len(parts) == 0 {
+		return "clean"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func dirtyFilesFromGitStatus(status gitservice.GitStatus) []string {
+	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
+	out := make([]string, 0, len(seen))
+
+	appendUnique := func(files []string) {
+		for _, file := range files {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			out = append(out, file)
+		}
+	}
+
+	appendUnique(status.Staged)
+	appendUnique(status.Modified)
+	appendUnique(status.Added)
+	appendUnique(status.Deleted)
+	appendUnique(status.Untracked)
+
+	sort.Strings(out)
+	return out
+}
+
+func wrapPendingGitOperation(stage string, err error) error {
+	var pending *daemonclient.OperationPendingError
+	if !errors.As(err, &pending) {
+		return err
+	}
+	if strings.TrimSpace(pending.OperationID) == "" {
+		return fmt.Errorf("%s pending: %w", stage, err)
+	}
+	return fmt.Errorf("%s queued as operation %s (%s); run `az operation get --id %s --wait` and rerun `az branch mtm`", stage, pending.OperationID, pending.State, pending.OperationID)
 }
 
 func OperationGetCommand(deps *Dependencies, opts OperationGetOptions) error {

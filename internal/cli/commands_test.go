@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -292,6 +293,211 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 
 	if output != "wrapped output\n" {
 		t.Fatalf("output = %q, want wrapped output", output)
+	}
+}
+
+func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
+	commands := make([]string, 0, 8)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-az-123",
+								"branch":   "riordan/az-123/some-change",
+								"issue_id": "az-123",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitStatus:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git status body: %v", err)
+					}
+					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != "." {
+						t.Fatalf("git status worktree = %q", body.Worktree)
+					}
+					return responseWithJSON(req, map[string]any{
+						"status": gitservice.GitStatus{HasChanges: false},
+					}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: ".",
+						Remote:   "origin",
+					}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{
+						Worktree: ".",
+						Branch:   "main",
+					}), nil
+				case daemonclient.CommandGitMerge:
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: ".",
+						Branch:   "riordan/az-123/some-change",
+						Result: gitservice.MergeResult{
+							Success: true,
+							Message: "merge complete",
+						},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	output := captureStdout(t, func() error {
+		return BranchMergeToMainCommand(deps, "az-123")
+	})
+	if !strings.Contains(output, "merge complete") {
+		t.Fatalf("output = %q, want merge output", output)
+	}
+	if !strings.Contains(output, "Merged riordan/az-123/some-change into main (az-123)") {
+		t.Fatalf("output = %q, want final summary", output)
+	}
+
+	want := []string{
+		daemonclient.CommandWorktreeList,
+		daemonclient.CommandGitStatus,
+		daemonclient.CommandGitStatus,
+		daemonclient.CommandGitFetch,
+		daemonclient.CommandGitCheckout,
+		daemonclient.CommandGitMerge,
+	}
+	filtered := make([]string, 0, len(commands))
+	for _, cmd := range commands {
+		if cmd == protocol.CommandOperationGet {
+			continue
+		}
+		filtered = append(filtered, cmd)
+	}
+	if !reflect.DeepEqual(filtered, want) {
+		t.Fatalf("commands = %#v, want %#v", filtered, want)
+	}
+}
+
+func TestBranchMergeToMainCommandFailsOnDirtyPreflight(t *testing.T) {
+	commands := make([]string, 0, 8)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-az-123",
+								"branch":   "riordan/az-123/some-change",
+								"issue_id": "az-123",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitStatus:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git status body: %v", err)
+					}
+					if body.Worktree == "/tmp/azedarach-az-123" {
+						return responseWithJSON(req, map[string]any{
+							"status": gitservice.GitStatus{
+								HasChanges: true,
+								Modified:   []string{"foo.go"},
+							},
+						}), nil
+					}
+					return responseWithJSON(req, map[string]any{
+						"status": gitservice.GitStatus{HasChanges: false},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	err := BranchMergeToMainCommand(deps, "az-123")
+	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
+		t.Fatalf("err = %v, want preflight failure", err)
+	}
+	for _, cmd := range commands {
+		if cmd == daemonclient.CommandGitFetch || cmd == daemonclient.CommandGitCheckout || cmd == daemonclient.CommandGitMerge {
+			t.Fatalf("unexpected post-preflight command: %s", cmd)
+		}
+	}
+}
+
+func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-999")
+
+	commands := make([]string, 0, 8)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-az-999",
+								"branch":   "riordan/az-999/some-change",
+								"issue_id": "az-999",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitStatus:
+					return responseWithJSON(req, map[string]any{
+						"status": gitservice.GitStatus{HasChanges: false},
+					}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"}), nil
+				case daemonclient.CommandGitMerge:
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: ".",
+						Branch:   "riordan/az-999/some-change",
+						Result: gitservice.MergeResult{
+							Success: true,
+						},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := BranchMergeToMainCommand(deps, ""); err != nil {
+		t.Fatalf("BranchMergeToMainCommand error = %v", err)
+	}
+
+	foundMerge := false
+	for _, cmd := range commands {
+		if cmd == daemonclient.CommandGitMerge {
+			foundMerge = true
+			break
+		}
+	}
+	if !foundMerge {
+		t.Fatalf("expected git merge command in flow, commands=%v", commands)
 	}
 }
 

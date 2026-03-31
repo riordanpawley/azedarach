@@ -64,6 +64,18 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "branch":
+		if len(commandArgs) == 0 {
+			fmt.Fprintf(os.Stderr, "Usage: az branch <mtm> [arguments]\n")
+			os.Exit(1)
+		}
+		branchCommand := commandArgs[0]
+		branchArgs := commandArgs[1:]
+		if err := runBranchCommand(cfg, branchCommand, branchArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "start":
 		if err := runSessionCommand(cfg, command, commandArgs, false); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -763,5 +775,23 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 			return fmt.Errorf("unknown session command: %s (usage: az session <start|attach|kill|status>)", command)
 		}
 		return fmt.Errorf("unknown session command: %s", command)
+	}
+}
+
+func runBranchCommand(cfg *config.Config, command string, args []string) error {
+	switch command {
+	case "mtm", "merge-to-main":
+		if len(args) > 1 {
+			return fmt.Errorf("usage: az branch mtm [issue-id]")
+		}
+		issueID := ""
+		if len(args) == 1 {
+			issueID = args[0]
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.BranchMergeToMainCommand(deps, issueID)
+		})
+	default:
+		return fmt.Errorf("unknown branch command: %s (usage: az branch <mtm>)", command)
 	}
 }
