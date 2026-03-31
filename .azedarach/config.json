@@ -15,6 +15,17 @@
     "showLineChanges": true,
     "workflowMode": "local"
   },
+  "githooks": {
+    "boundaryCheck": {
+      "command": "just check-boundaries",
+      "enabled": true
+    },
+    "specSync": {
+      "autoStageDocs": true,
+      "command": "az spec sync --target md",
+      "enabled": false
+    }
+  },
   "issues": {
     "path": ".azedarach",
     "syncInterval": 300
