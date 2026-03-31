@@ -38,10 +38,10 @@ func main() {
 	}
 
 	if socketPath == "" {
-		socketPath = config.GlobalDaemonSocketPath()
+		socketPath = config.DaemonSocketPathFor(repoDir)
 	}
 	if lockPath == "" {
-		lockPath = config.GlobalDaemonLockPath()
+		lockPath = config.DaemonLockPathFor(repoDir)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

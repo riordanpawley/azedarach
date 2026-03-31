@@ -95,3 +95,25 @@ func TestScopedDaemonPathsDifferAcrossWorktrees(t *testing.T) {
 		t.Fatalf("ScopedDaemonSocketPath() should differ across scopes; got %q for both", gotA)
 	}
 }
+
+func TestDaemonPathsDefaultToGlobal(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	start := filepath.Join(t.TempDir(), "repo")
+	if got := DaemonSocketPathFor(start); got != GlobalDaemonSocketPath() {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, GlobalDaemonSocketPath())
+	}
+	if got := DaemonLockPathFor(start); got != GlobalDaemonLockPath() {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, GlobalDaemonLockPath())
+	}
+}
+
+func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	start := filepath.Join(t.TempDir(), "repo")
+	if got := DaemonSocketPathFor(start); got != ScopedDaemonSocketPath(start) {
+		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(start))
+	}
+	if got := DaemonLockPathFor(start); got != ScopedDaemonLockPath(start) {
+		t.Fatalf("DaemonLockPathFor() = %q, want %q", got, ScopedDaemonLockPath(start))
+	}
+}

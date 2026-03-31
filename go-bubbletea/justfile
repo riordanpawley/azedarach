@@ -9,8 +9,8 @@ build:
 run:
     go build -o bin/az ./cmd/az
     go build -o bin/azd ./cmd/azd
-    ./bin/az daemon restart
-    go run ./cmd/az
+    AZEDARACH_DAEMON_SCOPE=worktree ./bin/az daemon restart
+    AZEDARACH_DAEMON_SCOPE=worktree go run ./cmd/az
 
 test:
     go test -v ./...

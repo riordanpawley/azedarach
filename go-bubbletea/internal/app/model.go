@@ -213,7 +213,7 @@ func New(cfg *config.Config) Model {
 	if err != nil {
 		repoDir = "."
 	}
-	daemonSocketPath := config.ScopedDaemonSocketPath(repoDir)
+	daemonSocketPath := config.DaemonSocketPathFor(repoDir)
 	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
 		repoDir = normalizedRepoDir
 	}
@@ -2470,7 +2470,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(project.Path, config.ScopedDaemonSocketPath(project.Path))
+		launcher := daemonprocess.NewLauncher(project.Path, config.DaemonSocketPathFor(project.Path))
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2540,7 +2540,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		launcher := daemonprocess.NewLauncher(targetRepoDir, config.ScopedDaemonSocketPath(targetRepoDir))
+		launcher := daemonprocess.NewLauncher(targetRepoDir, config.DaemonSocketPathFor(targetRepoDir))
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}

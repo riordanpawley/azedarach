@@ -49,6 +49,24 @@ func GlobalDaemonLockPath() string {
 	return filepath.Join(GlobalDaemonRuntimeDir(), globalDaemonLockFileName)
 }
 
+// DaemonSocketPathFor returns either the global or worktree-scoped daemon socket
+// path depending on runtime mode.
+func DaemonSocketPathFor(startPath string) string {
+	if useScopedDaemonRuntime() {
+		return ScopedDaemonSocketPath(startPath)
+	}
+	return GlobalDaemonSocketPath()
+}
+
+// DaemonLockPathFor returns either the global or worktree-scoped daemon lock path
+// depending on runtime mode.
+func DaemonLockPathFor(startPath string) string {
+	if useScopedDaemonRuntime() {
+		return ScopedDaemonLockPath(startPath)
+	}
+	return GlobalDaemonLockPath()
+}
+
 // ScopedDaemonRuntimeDir returns a deterministic runtime directory for a worktree scope.
 func ScopedDaemonRuntimeDir(startPath string) string {
 	scopeRoot, err := ResolveWorktreeRoot(startPath)
@@ -72,6 +90,11 @@ func ScopedDaemonLockPath(startPath string) string {
 func daemonScopeID(path string) string {
 	sum := sha256.Sum256([]byte(path))
 	return hex.EncodeToString(sum[:8])
+}
+
+func useScopedDaemonRuntime() bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	return mode == "worktree" || mode == "scoped" || mode == "local"
 }
 
 func daemonRuntimeDirWritable(dir string) bool {

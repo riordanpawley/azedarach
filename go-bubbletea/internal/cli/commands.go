@@ -211,7 +211,7 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	}
 
 	projectID := filepath.Base(rootRepoDir)
-	socketPath := config.ScopedDaemonSocketPath(absRepoDir)
+	socketPath := config.DaemonSocketPathFor(absRepoDir)
 	daemonTransport := transport.NewClient(socketPath)
 
 	return &Dependencies{
