@@ -10,10 +10,14 @@ build:
     go build -o bin/azd ./cmd/azd
 
 run:
-    go build -o bin/az ./cmd/az
-    go build -o bin/azd ./cmd/azd
-    AZEDARACH_DAEMON_SCOPE=worktree ./bin/az daemon restart
-    AZEDARACH_DAEMON_SCOPE=worktree go run ./cmd/az
+    just build
+    if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then \
+        AZEDARACH_DAEMON_SCOPE=worktree ./bin/az daemon restart; \
+        AZEDARACH_DAEMON_SCOPE=worktree ./bin/az; \
+    else \
+        ./bin/az daemon restart; \
+        ./bin/az; \
+    fi
 
 test:
     go test -v ./...

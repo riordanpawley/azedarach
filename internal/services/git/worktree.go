@@ -83,7 +83,16 @@ func (w *WorktreeManager) CreateWithTitle(ctx context.Context, issueID, issueTit
 	// Create worktree with new branch from baseBranch.
 	_, err = w.runner.Run(ctx, "worktree", "add", "-b", branchName, worktreePath, baseBranch)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create worktree: %w", err)
+		// A previous partial attempt may have created the branch already.
+		// In that case, attach a new worktree to the existing branch.
+		if isBranchAlreadyExistsError(err, branchName) {
+			_, retryErr := w.runner.Run(ctx, "worktree", "add", worktreePath, branchName)
+			if retryErr != nil {
+				return nil, fmt.Errorf("failed to create worktree: %w", retryErr)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to create worktree: %w", err)
+		}
 	}
 
 	w.logger.Info("worktree created successfully", "issueID", issueID, "path", worktreePath)
@@ -230,4 +239,12 @@ func (w *WorktreeManager) resolveBranchAuthor(ctx context.Context) string {
 		return envUser
 	}
 	return "author"
+}
+
+func isBranchAlreadyExistsError(err error, branchName string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already exists") && strings.Contains(msg, strings.ToLower(branchName))
 }
