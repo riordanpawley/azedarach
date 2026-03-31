@@ -2815,3 +2815,140 @@ func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 		t.Fatalf("progress statuses = %s->%s, want %s->%s", progress.PreviousStatus, progress.TargetStatus, domain.StatusOpen, domain.StatusInProgress)
 	}
 }
+
+func TestSessionStartedPendingMarksBoardAndDetailProgress(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	updatedAny, _ := m.Update(sessionStartedMsg{
+		issueID:     "az-1",
+		operationID: "op-session",
+		state:       protocol.OperationStateQueued,
+	})
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want app.Model", updatedAny)
+	}
+
+	if !updated.tasks[0].HasTmuxSession {
+		t.Fatal("expected pending session start to mark tmux session on task")
+	}
+
+	pending, ok := updated.pendingStatuses[taskIDKey("az-1")]
+	if !ok {
+		t.Fatal("expected pending status entry for session start")
+	}
+	if pending.action != "session_start" {
+		t.Fatalf("pending action = %q, want %q", pending.action, "session_start")
+	}
+	if pending.operationID != "op-session" {
+		t.Fatalf("pending operation id = %q, want %q", pending.operationID, "op-session")
+	}
+	if pending.state != protocol.OperationStateQueued {
+		t.Fatalf("pending state = %q, want %q", pending.state, protocol.OperationStateQueued)
+	}
+
+	signals := updated.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if got.PendingOperationState != string(protocol.OperationStateQueued) {
+		t.Fatalf("pending state = %q, want %q", got.PendingOperationState, protocol.OperationStateQueued)
+	}
+	if got.PendingOperationID != "op-session" {
+		t.Fatalf("pending operation id = %q, want %q", got.PendingOperationID, "op-session")
+	}
+
+	progress := updated.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected pending mutation progress for session start")
+	}
+	if progress.State != string(protocol.OperationStateQueued) {
+		t.Fatalf("progress state = %q, want %q", progress.State, protocol.OperationStateQueued)
+	}
+	if progress.OperationID != "op-session" {
+		t.Fatalf("progress operation id = %q, want %q", progress.OperationID, "op-session")
+	}
+	if progress.TargetStatus != "" {
+		t.Fatalf("progress target status = %q, want empty", progress.TargetStatus)
+	}
+}
+
+func TestApplyPendingStatusOverlaysIgnoresNonStatusPending(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "Task", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.pendingStatuses = map[string]pendingTaskStatus{
+		taskIDKey("az-1"): {
+			action:      "session_start",
+			operationID: "op-session",
+			state:       protocol.OperationStateQueued,
+			updatedAt:   time.Now(),
+		},
+	}
+
+	m.applyPendingStatusOverlays()
+
+	if m.tasks[0].Status != domain.StatusOpen {
+		t.Fatalf("task status = %q, want %q", m.tasks[0].Status, domain.StatusOpen)
+	}
+}
+
+func TestReconcilePendingStatusesClearsSessionMarkersFromHydratedProjection(t *testing.T) {
+	now := time.Now()
+
+	t.Run("session start", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:             "az-1",
+				Title:          "Task",
+				Status:         domain.StatusOpen,
+				Priority:       domain.P2,
+				Type:           domain.TypeTask,
+				HasTmuxSession: true,
+				Session:        &domain.Session{IssueID: "az-1", State: domain.SessionBusy},
+			},
+		}
+		m.pendingStatuses = map[string]pendingTaskStatus{
+			taskIDKey("az-1"): {
+				action:      "session_start",
+				operationID: "op-session",
+				state:       protocol.OperationStateRunning,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingStatuses()
+		if _, ok := m.pendingStatuses[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session_start pending marker to clear after session hydration")
+		}
+	})
+
+	t.Run("session stop", func(t *testing.T) {
+		m := newTestModel()
+		m.tasks = []domain.Task{
+			{
+				ID:       "az-1",
+				Title:    "Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			},
+		}
+		m.pendingStatuses = map[string]pendingTaskStatus{
+			taskIDKey("az-1"): {
+				action:      "session_stop",
+				operationID: "op-stop",
+				state:       protocol.OperationStateRunning,
+				updatedAt:   now,
+			},
+		}
+
+		m.reconcilePendingStatuses()
+		if _, ok := m.pendingStatuses[taskIDKey("az-1")]; ok {
+			t.Fatal("expected session_stop pending marker to clear when session projection is absent")
+		}
+	})
+}

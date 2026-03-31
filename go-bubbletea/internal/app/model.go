@@ -109,6 +109,8 @@ type pendingTaskStatus struct {
 	targetStatus   domain.Status
 	operationID    string
 	state          protocol.OperationState
+	action         string
+	updatedAt      time.Time
 }
 
 // Model is the main application state
@@ -364,6 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyPendingStatusOverlays()
 		m.sessions = m.projectSessionProjection(tasks)
 		m.applyRuntimeSignals()
+		m.reconcilePendingStatuses()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
@@ -450,6 +453,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionStartedMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.markTaskOperationPending(msg.issueID, "session_start", msg.operationID, msg.state)
+			for i := range m.tasks {
+				if m.tasks[i].ID == msg.issueID {
+					// Show immediate session affordance while daemon operation is still pending.
+					m.tasks[i].HasTmuxSession = true
+					break
+				}
+			}
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage("Session start", msg.issueID, msg.operationID, msg.state),
@@ -457,12 +469,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, m.loadIssuesCmd()
 		}
+		m.clearPendingTaskStatus(msg.issueID)
 		for i := range m.tasks {
 			if m.tasks[i].ID == msg.issueID {
 				m.tasks[i].HasTmuxSession = true
 				break
 			}
 		}
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session started: %s", msg.issueID),
@@ -472,6 +486,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionStoppedMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
+			m.markTaskOperationPending(msg.issueID, "session_stop", msg.operationID, msg.state)
+			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastInfo,
 				Message: formatPendingOperationMessage("Session stop", msg.issueID, msg.operationID, msg.state),
@@ -479,6 +495,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, m.loadIssuesCmd()
 		}
+		m.clearPendingTaskStatus(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
 			Message: fmt.Sprintf("Session stopped: %s", msg.issueID),
@@ -487,6 +505,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionErrorMsg:
+		m.clearPendingTaskStatus(msg.issueID)
+		m.syncTaskWorkspaceOverlay()
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: fmt.Sprintf("Session error: %s - %v", msg.issueID, msg.err),
@@ -5123,7 +5143,22 @@ func (m *Model) markTaskStatusPending(taskID string, previousStatus, targetStatu
 		targetStatus:   targetStatus,
 		operationID:    operationID,
 		state:          state,
+		action:         "task_move",
+		updatedAt:      time.Now(),
 	}
+}
+
+func (m *Model) markTaskOperationPending(taskID, action, operationID string, state protocol.OperationState) {
+	if m.pendingStatuses == nil {
+		m.pendingStatuses = make(map[string]pendingTaskStatus)
+	}
+	key := taskIDKey(taskID)
+	current := m.pendingStatuses[key]
+	current.operationID = operationID
+	current.state = state
+	current.action = action
+	current.updatedAt = time.Now()
+	m.pendingStatuses[key] = current
 }
 
 func (m *Model) clearPendingTaskStatus(taskID string) {
@@ -5189,11 +5224,53 @@ func (m *Model) applyPendingStatusOverlays() {
 		if !ok {
 			continue
 		}
+		if pending.targetStatus == "" {
+			continue
+		}
 		if m.tasks[i].Status == pending.targetStatus {
 			delete(m.pendingStatuses, key)
 			continue
 		}
 		m.tasks[i].Status = pending.targetStatus
+	}
+}
+
+func (m *Model) reconcilePendingStatuses() {
+	if len(m.pendingStatuses) == 0 {
+		return
+	}
+
+	taskByID := make(map[string]domain.Task, len(m.tasks))
+	for _, task := range m.tasks {
+		taskByID[task.ID] = task
+	}
+
+	const stalePendingTTL = 2 * time.Minute
+	now := time.Now()
+
+	for key, pending := range m.pendingStatuses {
+		taskID := string(key)
+		task, ok := taskByID[taskID]
+		if !ok {
+			delete(m.pendingStatuses, key)
+			continue
+		}
+
+		if !pending.updatedAt.IsZero() && now.Sub(pending.updatedAt) > stalePendingTTL {
+			delete(m.pendingStatuses, key)
+			continue
+		}
+
+		switch pending.action {
+		case "session_start":
+			if task.Session != nil || task.HasTmuxSession {
+				delete(m.pendingStatuses, key)
+			}
+		case "session_stop":
+			if task.Session == nil && !task.HasTmuxSession {
+				delete(m.pendingStatuses, key)
+			}
+		}
 	}
 }
 
