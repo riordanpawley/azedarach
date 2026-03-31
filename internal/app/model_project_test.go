@@ -258,3 +258,28 @@ func TestProjectSwitchFailureRetainsPreviousBoardState(t *testing.T) {
 		t.Fatalf("tasks = %+v, want previous board tasks retained after switch failure", updated.tasks)
 	}
 }
+
+func TestProjectSwitchResult_IgnoresStaleSwitchCompletion(t *testing.T) {
+	m := newTestModel()
+	m.projectSwitchSeq = 2
+	m.currentProject = "chefy"
+	m.tasks = []domain.Task{
+		{ID: "che-1", Title: "Chefy task"},
+	}
+
+	next, _ := m.Update(projectSwitchResultMsg{
+		switchSeq: 1,
+		project:   config.Project{Name: "az", Path: "/work/az"},
+		tasks: []domain.Task{
+			{ID: "az-1", Title: "Old project task"},
+		},
+	})
+
+	updated := next.(Model)
+	if updated.currentProject != "chefy" {
+		t.Fatalf("currentProject = %q, want %q", updated.currentProject, "chefy")
+	}
+	if len(updated.tasks) != 1 || updated.tasks[0].ID != "che-1" {
+		t.Fatalf("tasks = %+v, want stale switch result ignored", updated.tasks)
+	}
+}

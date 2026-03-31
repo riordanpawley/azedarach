@@ -621,6 +621,28 @@ func TestView_ShowsFilterAndSortSummaries(t *testing.T) {
 	}
 }
 
+func TestIssuesLoadedMsg_IgnoresStaleRefreshSequence(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.issueRefreshSeq = 3
+
+	next, _ := m.Update(issuesLoadedMsg{
+		refreshSeq: 2,
+		projectID:  m.daemonProjectID(),
+		tasks: []domain.Task{
+			{ID: "new-1", Title: "New stale payload", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+	})
+
+	updated := next.(Model)
+	if len(updated.tasks) != len(m.tasks) {
+		t.Fatalf("tasks length = %d, want %d (stale payload ignored)", len(updated.tasks), len(m.tasks))
+	}
+	if updated.tasks[0].ID != m.tasks[0].ID {
+		t.Fatalf("tasks[0] = %q, want %q (stale payload ignored)", updated.tasks[0].ID, m.tasks[0].ID)
+	}
+}
+
 func TestEscClearsFiltersInNormalMode(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()

@@ -180,6 +180,8 @@ type Model struct {
 	// Loading state
 	loading         bool
 	boardRefreshing bool
+	issueRefreshSeq uint64
+	projectSwitchSeq uint64
 	spinner         spinner.Model
 	lastRefresh     time.Time
 	hasRefreshLoop  bool
@@ -361,6 +363,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesLoadedMsg:
+		if msg.refreshSeq < m.issueRefreshSeq {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
@@ -448,6 +453,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesErrorMsg:
+		if msg.refreshSeq < m.issueRefreshSeq {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
@@ -465,6 +473,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Expire old toasts and refresh issues
 		m.expireToasts()
 		m.boardRefreshing = true
+		m.issueRefreshSeq++
 		return m, tea.Batch(
 			m.loadIssuesCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -793,11 +802,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlayStack.Pop()
 		m.loading = true
 		m.boardRefreshing = true
+		m.issueRefreshSeq++
+		m.projectSwitchSeq++
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
 
 	case projectSwitchResultMsg:
+		if msg.switchSeq != 0 && msg.switchSeq != m.projectSwitchSeq {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.loading = false
 			m.boardRefreshing = false
@@ -1723,6 +1737,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
 			m.boardRefreshing = true
+			m.issueRefreshSeq++
 			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -2160,6 +2175,7 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
+	refreshSeq    uint64
 	projectID     string
 	tasks         []domain.Task
 	revision      uint64
@@ -2171,11 +2187,13 @@ type issuesLoadedMsg struct {
 }
 
 type issuesErrorMsg struct {
+	refreshSeq uint64
 	projectID string
 	err       error
 }
 
 type projectSwitchResultMsg struct {
+	switchSeq     uint64
 	project       config.Project
 	projectConfig *config.Config
 	tasks         []domain.Task
@@ -2412,12 +2430,13 @@ type runtimeSignalsLoadedMsg struct {
 // loadIssuesCmd returns a command that fetches issues from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
+	refreshSeq := m.issueRefreshSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		if m.daemonClient == nil {
-			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
@@ -2425,14 +2444,16 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
 				return issuesLoadedMsg{
+					refreshSeq:    refreshSeq,
 					projectID:     projectID,
 					stale:         true,
 					freshnessHint: timeoutErr.Hint,
 				}
 			}
-			return issuesErrorMsg{projectID: projectID, err: err}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
+			refreshSeq: refreshSeq,
 			projectID: projectID,
 			tasks:     snapshot.Tasks,
 			revision:  snapshot.Revision,
@@ -2723,15 +2744,18 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 }
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
+	switchSeq := m.projectSwitchSeq
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("daemon client unavailable"),
 			}
 		}
 		if strings.TrimSpace(project.Path) == "" {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("project %q has empty path", project.Name),
 			}
@@ -2739,6 +2763,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		projectConfig, err := config.LoadConfig(project.Path)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
@@ -2755,6 +2780,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		}
 		if err := launcher.Replace(ctx); err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
 			}
@@ -2770,12 +2796,14 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ack, err := orch.EnsureAttached(ctx, hello)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
 			}
 		}
 		if !ack.Accepted {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
@@ -2784,6 +2812,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     err,
 			}
@@ -2791,12 +2820,14 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     err,
 			}
 		}
 
 		return projectSwitchResultMsg{
+			switchSeq:     switchSeq,
 			project:       project,
 			projectConfig: projectConfig,
 			tasks:         snapshot.Tasks,
