@@ -631,6 +631,57 @@ func (c *Client) ListSpecLinks(ctx context.Context, filter SpecLinkFilter) ([]Sp
 	return links, nil
 }
 
+// ListSpecLinksByRequirementLocalID returns links for an exact requirement local_id match.
+// Unlike selector-based filters, this does not consider external_code and therefore avoids
+// ambiguity when local_id/external_code values overlap across requirements.
+func (c *Client) ListSpecLinksByRequirementLocalID(ctx context.Context, localID string) ([]SpecLink, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	localID = strings.TrimSpace(localID)
+	if localID == "" {
+		return nil, c.wrapError("list-spec-links-by-local-id", "", errors.New("requirement local id is required"))
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			l.id,
+			l.requirement_id,
+			l.issue_id,
+			r.local_id,
+			l.role,
+			l.note,
+			COALESCE(l.implementations_json, '[]'),
+			l.fulfillment_status,
+			l.fulfilled_at,
+			l.created_at,
+			l.updated_at,
+			l.deleted_at
+		FROM spec_links l
+		JOIN spec_requirements r ON r.id = l.requirement_id
+		WHERE r.local_id = ? AND l.deleted_at IS NULL AND r.deleted_at IS NULL
+		ORDER BY l.updated_at DESC, l.id ASC
+	`, localID)
+	if err != nil {
+		return nil, c.wrapError("list-spec-links-by-local-id", localID, err)
+	}
+	defer rows.Close()
+
+	records := make([]specLinkRecord, 0, 8)
+	for rows.Next() {
+		record, scanErr := scanSpecLinkRecord(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-spec-links-by-local-id", localID, scanErr)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-spec-links-by-local-id", localID, err)
+	}
+	return recordsToSpecLinks(records), nil
+}
+
 func (c *Client) RemoveSpecLink(ctx context.Context, issueID, requirementSelector string) error {
 	db, err := c.dbHandle()
 	if err != nil {

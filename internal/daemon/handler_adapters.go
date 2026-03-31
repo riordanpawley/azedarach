@@ -177,7 +177,7 @@ func (s issueSpecService) Lint(ctx context.Context, _ protocol.SpecLintRequestBo
 	}
 	diagnostics := make([]protocol.SpecDiagnostic, 0)
 	for _, req := range requirements {
-		links, err := s.client.ListSpecLinks(ctx, issues.SpecLinkFilter{RequirementID: req.LocalID})
+		links, err := s.client.ListSpecLinksByRequirementLocalID(ctx, req.LocalID)
 		if err != nil {
 			return protocol.SpecLintResponseBody{}, err
 		}
