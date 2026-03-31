@@ -501,6 +501,78 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 	}
 }
 
+func TestBranchMergeToMainCommandIgnoresAzedarachRuntimeConfigInPreflight(t *testing.T) {
+	commands := make([]string, 0, 8)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return responseWithJSON(req, map[string]any{
+						"worktrees": []map[string]any{
+							{
+								"path":     "/tmp/azedarach-bhv",
+								"branch":   "riordan/bhv/fix-mtm-timeout",
+								"issue_id": "bhv",
+							},
+						},
+					}), nil
+				case daemonclient.CommandGitStatus:
+					var body daemonclient.GitCommandRequest
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal git status body: %v", err)
+					}
+					if body.Worktree == "." {
+						return responseWithJSON(req, map[string]any{
+							"status": gitservice.GitStatus{
+								HasChanges: true,
+								Modified:   []string{".azedarach/config.json"},
+							},
+						}), nil
+					}
+					return responseWithJSON(req, map[string]any{
+						"status": gitservice.GitStatus{HasChanges: false},
+					}), nil
+				case daemonclient.CommandGitFetch:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"}), nil
+				case daemonclient.CommandGitCheckout:
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"}), nil
+				case daemonclient.CommandGitMerge:
+					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
+						Worktree: ".",
+						Branch:   "riordan/bhv/fix-mtm-timeout",
+						Result: gitservice.MergeResult{
+							Success: true,
+						},
+					}), nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := BranchMergeToMainCommand(deps, "bhv"); err != nil {
+		t.Fatalf("BranchMergeToMainCommand error = %v", err)
+	}
+
+	foundMerge := false
+	for _, cmd := range commands {
+		if cmd == daemonclient.CommandGitMerge {
+			foundMerge = true
+			break
+		}
+	}
+	if !foundMerge {
+		t.Fatalf("expected git merge command in flow, commands=%v", commands)
+	}
+}
+
 func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),

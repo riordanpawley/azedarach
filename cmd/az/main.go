@@ -793,7 +793,7 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 
 func runBranchCommand(cfg *config.Config, command string, args []string) error {
 	switch command {
-	case "merge", "mtm", "merge-to-main":
+	case "merge", "merge-to-main":
 		if len(args) > 1 {
 			return fmt.Errorf("usage: az branch merge [issue-id]")
 		}
@@ -805,6 +805,9 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 			return cli.BranchMergeToMainCommand(deps, issueID)
 		})
 	default:
+		if command == "m2m" {
+			return fmt.Errorf("unknown branch command: %s (did you mean `az branch merge`?)", command)
+		}
 		return fmt.Errorf("unknown branch command: %s (usage: az branch <merge>)", command)
 	}
 }

@@ -41,6 +41,7 @@ const (
 	defaultExportFormat       = "json"
 	defaultIssueListLimit     = 200
 	defaultOperationListLimit = 50
+	branchMergeToMainTimeout  = 2 * time.Minute
 	exitCodeHardFailure       = 1
 	exitCodePartialFailure    = 2
 )
@@ -339,7 +340,8 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 
 // BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
 func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToMainTimeout)
+	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
@@ -446,12 +448,17 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	if err != nil {
 		return fmt.Errorf("read target status for main: %w", err)
 	}
+	sourceDirtyFiles := dirtyFilesFromGitStatus(sourceStatus)
+	targetDirtyFiles := dirtyFilesFromGitStatus(targetStatus)
+
+	sourceBlockingFiles, sourceIgnoredFiles := classifyMergePreflightDirtyFiles(sourceDirtyFiles)
+	targetBlockingFiles, targetIgnoredFiles := classifyMergePreflightDirtyFiles(targetDirtyFiles)
 
 	reasons := make([]string, 0, 2)
-	if sourceStatus.HasChanges {
+	if len(sourceBlockingFiles) > 0 {
 		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, summarizeGitStatusCounts(sourceStatus)))
 	}
-	if targetStatus.HasChanges {
+	if len(targetBlockingFiles) > 0 {
 		reasons = append(reasons, fmt.Sprintf("target main is not clean: %s", summarizeGitStatusCounts(targetStatus)))
 	}
 	if len(reasons) == 0 {
@@ -462,13 +469,38 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	for _, reason := range reasons {
 		lines = append(lines, "- "+reason)
 	}
-	if files := dirtyFilesFromGitStatus(sourceStatus); len(files) > 0 {
-		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(files, ", ")))
+	if len(sourceBlockingFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(sourceBlockingFiles, ", ")))
 	}
-	if files := dirtyFilesFromGitStatus(targetStatus); len(files) > 0 {
-		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(files, ", ")))
+	if len(targetBlockingFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(targetBlockingFiles, ", ")))
+	}
+	if len(sourceIgnoredFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- source ignored preflight files: %s", strings.Join(sourceIgnoredFiles, ", ")))
+	}
+	if len(targetIgnoredFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- target ignored preflight files: %s", strings.Join(targetIgnoredFiles, ", ")))
 	}
 	return errors.New(strings.Join(lines, "\n"))
+}
+
+func classifyMergePreflightDirtyFiles(files []string) (blocking []string, ignored []string) {
+	blocking = make([]string, 0, len(files))
+	ignored = make([]string, 0, len(files))
+	for _, file := range files {
+		if isMergePreflightIgnoredFile(file) {
+			ignored = append(ignored, file)
+			continue
+		}
+		blocking = append(blocking, file)
+	}
+	return blocking, ignored
+}
+
+func isMergePreflightIgnoredFile(path string) bool {
+	normalized := strings.TrimSpace(filepath.ToSlash(path))
+	normalized = strings.TrimPrefix(normalized, "./")
+	return normalized == ".azedarach/config.json"
 }
 
 func summarizeGitStatusCounts(status gitservice.GitStatus) string {
