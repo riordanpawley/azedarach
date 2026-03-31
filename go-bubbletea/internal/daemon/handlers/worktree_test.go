@@ -482,7 +482,7 @@ func TestWorktreeHandlerProjectIDFallbacks(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to default project id when body and metadata are empty", func(t *testing.T) {
+	t.Run("rejects when project id is missing from body and metadata", func(t *testing.T) {
 		var gotProjectID string
 		h := NewWorktreeHandler(mockWorktreeService{
 			listFn: func(_ context.Context, projectID string) ([]git.Worktree, error) {
@@ -506,11 +506,14 @@ func TestWorktreeHandlerProjectIDFallbacks(t *testing.T) {
 			Command:         CommandWorktreeList,
 			Body:            body,
 		})
-		if !resp.OK {
-			t.Fatalf("response = %+v", resp.Error)
+		if resp.OK {
+			t.Fatalf("expected invalid request for missing project route")
 		}
-		if gotProjectID != "default" {
-			t.Fatalf("project id = %q, want default", gotProjectID)
+		if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+			t.Fatalf("error = %+v, want invalid_request", resp.Error)
+		}
+		if gotProjectID != "" {
+			t.Fatalf("project id = %q, want service not called", gotProjectID)
 		}
 	})
 }

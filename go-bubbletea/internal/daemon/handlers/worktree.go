@@ -135,6 +135,14 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 
 	switch req.Command {
 	case CommandWorktreeList:
+		if cmd.ProjectID == "" {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   "missing required fields: project_id",
+				Retryable: false,
+			}
+			return resp
+		}
 		worktrees, err := h.service.List(ctx, cmd.ProjectID)
 		if err != nil {
 			resp.Error = mapWorktreeError(err)
@@ -159,10 +167,10 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 		return resp
 
 	case CommandWorktreeCreate:
-		if cmd.IssueID == "" || cmd.BaseBranch == "" {
+		if cmd.ProjectID == "" || cmd.IssueID == "" || cmd.BaseBranch == "" {
 			resp.Error = &protocol.ErrorEnvelope{
 				Code:      protocol.ErrorCodeInvalidRequest,
-				Message:   "missing required fields: issue_id/base_branch",
+				Message:   "missing required fields: project_id/issue_id/base_branch",
 				Retryable: false,
 			}
 			return resp
@@ -192,10 +200,10 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 		return resp
 
 	case CommandWorktreeRemove:
-		if cmd.IssueID == "" {
+		if cmd.ProjectID == "" || cmd.IssueID == "" {
 			resp.Error = &protocol.ErrorEnvelope{
 				Code:      protocol.ErrorCodeInvalidRequest,
-				Message:   "missing required fields: issue_id",
+				Message:   "missing required fields: project_id/issue_id",
 				Retryable: false,
 			}
 			return resp
@@ -224,6 +232,14 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 		return resp
 
 	case CommandWorktreeCleanupOrphaned:
+		if cmd.ProjectID == "" {
+			resp.Error = &protocol.ErrorEnvelope{
+				Code:      protocol.ErrorCodeInvalidRequest,
+				Message:   "missing required fields: project_id",
+				Retryable: false,
+			}
+			return resp
+		}
 		result, err := h.service.CleanupOrphaned(ctx, cmd.ProjectID)
 		if err != nil {
 			resp.Error = mapCleanupOrphanedError(err)

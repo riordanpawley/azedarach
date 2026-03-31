@@ -411,7 +411,7 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 		projectID = coalesceProjectID(body.ProjectID, projectID)
 		issueID = strings.TrimSpace(body.SessionID)
 		if issueID == "" {
-			return "", nil, "", errors.New("missing required fields: session_id")
+			return "", nil, "", errors.New("missing required fields: project_id/session_id")
 		}
 		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
 		dedupeKey = kind + ":" + issueID
@@ -476,7 +476,7 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 		projectID = coalesceProjectID(body.ProjectID, projectID)
 		issueID = strings.TrimSpace(body.IssueID)
 		if issueID == "" {
-			return "", nil, "", errors.New("missing required fields: issue_id")
+			return "", nil, "", errors.New("missing required fields: project_id/issue_id")
 		}
 		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
 		dedupeKey = kind + ":" + issueID

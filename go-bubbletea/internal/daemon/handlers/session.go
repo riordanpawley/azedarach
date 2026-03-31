@@ -64,10 +64,10 @@ func (h *SessionHandler) Handle(ctx context.Context, req protocol.RequestEnvelop
 	}
 	cmd.ProjectID = resolveProjectID(cmd.ProjectID, req.Meta)
 	cmd.SessionID = strings.TrimSpace(cmd.SessionID)
-	if cmd.SessionID == "" {
+	if cmd.ProjectID == "" || cmd.SessionID == "" {
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
-			Message:   "missing required fields: session_id",
+			Message:   "missing required fields: project_id/session_id",
 			Retryable: false,
 		}
 		return resp

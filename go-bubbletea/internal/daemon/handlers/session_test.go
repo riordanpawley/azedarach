@@ -149,7 +149,7 @@ func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to default project id when body and metadata are empty", func(t *testing.T) {
+	t.Run("rejects when project id is missing from body and metadata", func(t *testing.T) {
 		store := daemonstate.NewStore()
 		h := NewSessionHandler(store)
 		body, _ := json.Marshal(map[string]string{
@@ -164,11 +164,11 @@ func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
 			Command:         CommandSessionStart,
 			Body:            body,
 		})
-		if !resp.OK {
-			t.Fatalf("response = %+v", resp.Error)
+		if resp.OK {
+			t.Fatalf("expected invalid request for missing project route")
 		}
-		if got := store.ReadSnapshot("default"); got.Sessions["s-default"].State != daemonstate.SessionStateStarting {
-			t.Fatalf("store state = %+v, want started in default", got.Sessions["s-default"])
+		if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+			t.Fatalf("error = %+v, want invalid_request", resp.Error)
 		}
 	})
 }
