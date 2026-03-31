@@ -21,23 +21,23 @@ Commands:
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
   operation <subcommand>     Inspect/cancel background operations (get|list|cancel)
   opencode <init|plugin>     Manage OpenCode integration
-  issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
-  issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
-  issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
-  issue check [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
-  issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
-  issue update [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
-  issue close [--id <id>] [<id>]      Close an issue (sets status=closed)
-  issue delete [--id <id>] [<id>] --confirm  Permanently delete an issue
-  issue dep add --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
-  issue dep remove --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
-  issue dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
-  issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
-  issue fanout --input <path> [--apply] [--json]  Plan/apply nested issue fanout
-  issue fanout ready --root <issue-id> [--json]  List runnable leaf issues under a fanout root
-  issue fanout drift --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
+  issue list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
+  issue get [--project <project-id>] [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
+  issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
+  issue check [--project <project-id>] [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
+  issue doctor [--project <project-id>] [--id <id>] [<id>]  Run integrity checks for one issue
+  issue create [--project <project-id>] <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue update [--project <project-id>] [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
+  issue close [--project <project-id>] [--id <id>] [<id>]      Close an issue (sets status=closed)
+  issue delete [--project <project-id>] [--id <id>] [<id>] --confirm  Permanently delete an issue
+  issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
+  issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
+  issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
+  issue bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
+  issue bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
+  issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
+  issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
   mail <send|list|watch>  Mailbox event operations for orchestrator/worker coordination
   config set spec.enabled <true|false> [--project-dir <dir>]  Update project config
   sync [--all] [<directory>] [--project-dir <dir>]  Refresh issue tracker state for the current project or all worktrees
