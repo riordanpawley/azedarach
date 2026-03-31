@@ -84,51 +84,122 @@ azd --help
 
 ```mermaid
 flowchart LR
-  subgraph Frontend["Frontend (thin client)"]
-    U[User]
-    AZ[az CLI + Bubbletea TUI]
+  subgraph FE["Frontend"]
+    APP[internal/app]
+    CLI[internal/cli]
   end
 
-  subgraph Boundary["Typed Contracts + IPC"]
-    C[internal/contracts/*]
-    IPC[internal/ipc/*]
+  subgraph CL["Client Layer"]
     CLIENT[internal/client/*]
+    IPC[internal/ipc/*]
+    CONTRACTS[internal/contracts/*]
   end
 
-  subgraph Daemon["Daemon (authoritative writer)"]
-    AZD[azd daemon]
-    STATE[Session/Worktree/Devserver state]
-    OPS[Operation queue + revisioned events]
+  subgraph DM["Daemon Layer"]
+    DAEMON[internal/daemon/*]
+    DOMAIN[internal/domain]
   end
 
-  subgraph Adapters["Service adapters"]
-    ISSUES[Issue tracker]
-    GIT[git/worktree]
-    TMUX[tmux sessions]
-    DEV[devserver manager]
-    PR[GitHub PR workflow]
-  end
-
-  U --> AZ
-  AZ --> CLIENT
-  CLIENT --> C
+  APP --> CLIENT
+  CLI --> CLIENT
   CLIENT --> IPC
-  IPC --> AZD
-  AZD --> STATE
-  AZD --> OPS
-  AZD --> ISSUES
-  AZD --> GIT
-  AZD --> TMUX
-  AZD --> DEV
-  AZD --> PR
-  OPS --> CLIENT
-  CLIENT --> AZ
+  CLIENT --> CONTRACTS
+  IPC --> CONTRACTS
+  IPC --> DAEMON
+  DAEMON --> CONTRACTS
+  DAEMON --> DOMAIN
+```
+
+Runtime flow:
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant AZ as az (CLI/TUI)
+  participant DC as daemon client
+  participant AZD as azd daemon
+  participant SVC as service adapters
+  participant EVT as revisioned events
+
+  User->>AZ: command/intention
+  AZ->>DC: typed request
+  DC->>AZD: IPC envelope
+  AZD->>SVC: mutate/query authority state
+  SVC-->>AZD: result
+  AZD-->>EVT: publish snapshot/event
+  EVT-->>DC: response + updates
+  DC-->>AZ: typed projection
 ```
 
 Authority model:
 - `az`/TUI builds intents and renders projection state.
 - `azd` owns lifecycle mutations (sessions/worktrees/devservers) and publishes revisioned updates.
 - Cross-process payloads are typed contracts, not UI message types.
+
+## Flow Diagrams
+
+### User Flow: PR-Based Delivery
+
+```mermaid
+flowchart TD
+  A[Select issue] --> B[az session start ISSUE]
+  B --> C[Daemon creates worktree + tmux session]
+  C --> D[Agent implements changes]
+  D --> E[Run gate checks]
+  E --> F[Commit + push branch]
+  F --> G[Create/update draft PR]
+  G --> H[Review + iterate]
+  H --> I[Merge PR]
+  I --> J[az issue close ISSUE]
+```
+
+### User Flow: Local-Only Delivery
+
+```mermaid
+flowchart TD
+  A[Select issue] --> B[az session start ISSUE]
+  B --> C[Daemon creates worktree + tmux session]
+  C --> D[Agent implements changes]
+  D --> E[Run gate checks]
+  E --> F[Commit locally]
+  F --> G[Manual local validation]
+  G --> H[No PR created]
+  H --> I[az issue update status or close]
+```
+
+### Agent Flow: TUI-Managed Session
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant TUI as az TUI
+  participant Daemon as azd
+  participant Agent as Agent CLI
+  participant Tracker as Issue Tracker
+
+  User->>TUI: Start issue session
+  TUI->>Daemon: session.start(issue)
+  Daemon->>Tracker: issue sync/status update
+  Daemon->>Agent: launch in tmux/worktree
+  Agent-->>Daemon: hook events (waiting/done/error)
+  Daemon-->>TUI: revisioned state/events
+  User->>TUI: attach/status/gate actions
+```
+
+### Agent Flow: `az prime` (Manual or Hooks-Assisted)
+
+```mermaid
+flowchart TD
+  A[Work in issue worktree] --> B{Prime mode}
+  B -->|Manual| C[Run az prime]
+  C --> D[Copy primer into agent prompt]
+  B -->|Hooks-assisted| E[az hooks install ISSUE]
+  E --> F[Agent emits hook event]
+  F --> G[az notify EVENT ISSUE]
+  D --> H[Agent executes with issue context]
+  G --> H
+  H --> I[Optional: az gate ISSUE]
+```
 
 ## Development Commands
 
