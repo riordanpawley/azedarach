@@ -117,6 +117,31 @@ func TestNewDependenciesAtUsesDistinctProjectIDsForDistinctRoots(t *testing.T) {
 	}
 }
 
+func TestNewDependenciesAtIgnoresAmbientGitDirRoutingVars(t *testing.T) {
+	base := t.TempDir()
+	repoA := filepath.Join(base, "repo-a")
+	repoB := filepath.Join(base, "repo-b")
+
+	if err := os.MkdirAll(filepath.Join(repoA, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repoA .git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoB, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repoB .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	t.Setenv("GIT_DIR", filepath.Join(repoA, ".git"))
+	t.Setenv("GIT_WORK_TREE", repoA)
+
+	deps, err := NewDependenciesAt(config.DefaultConfig(), repoB)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt() error = %v", err)
+	}
+	if deps.RepoDir != repoB {
+		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repoB)
+	}
+}
+
 func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	if f.handshakeFn != nil {
 		return f.handshakeFn(ctx, hello)
