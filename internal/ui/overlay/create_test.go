@@ -40,6 +40,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Description:")
 	assert.Contains(t, view, "Type:")
 	assert.Contains(t, view, "Priority:")
+	assert.Contains(t, view, "Impls:")
 	assert.Contains(t, view, "Create Task")
 	assert.Contains(t, view, "Enter")
 	assert.Contains(t, view, "Ctrl+E")
@@ -82,6 +83,11 @@ func TestCreateTaskOverlayTabNavigation(t *testing.T) {
 	// Tab to submit
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = m.(*CreateTaskOverlay)
+	assert.Equal(t, focusImpls, overlay.focusIndex)
+
+	// Tab to submit
+	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusSubmit, overlay.focusIndex)
 
 	// Tab back to title
@@ -101,10 +107,10 @@ func TestCreateTaskOverlayShiftTabNavigation(t *testing.T) {
 	overlay = m.(*CreateTaskOverlay)
 	assert.Equal(t, focusSubmit, overlay.focusIndex)
 
-	// Shift+Tab should go to priority (3)
+	// Shift+Tab should go to impls
 	m, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	overlay = m.(*CreateTaskOverlay)
-	assert.Equal(t, focusPriority, overlay.focusIndex)
+	assert.Equal(t, focusImpls, overlay.focusIndex)
 }
 
 func TestCreateTaskOverlayTypeSelection(t *testing.T) {
@@ -248,6 +254,22 @@ func TestCreateTaskOverlaySubmitWithCustomTypeAndPriority(t *testing.T) {
 	assert.Equal(t, "Bug Fix", taskMsg.Title)
 	assert.Equal(t, domain.TypeBug, taskMsg.Type)
 	assert.Equal(t, domain.P0, taskMsg.Priority)
+}
+
+func TestCreateTaskOverlaySubmitWithImplementations(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.title.SetValue("Impl Scoped Task")
+	overlay.implInput.SetValue("go-bubbletea, ts-opentui")
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	require.NotNil(t, cmd)
+
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+
+	taskMsg, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, []string{"go-bubbletea", "ts-opentui"}, taskMsg.Implementations)
 }
 
 func TestCreateTaskOverlaySubmitWithoutTitle(t *testing.T) {
@@ -415,6 +437,7 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	overlay.description.SetValue("Draft description")
 	overlay.taskType = domain.TypeBug
 	overlay.priority = domain.P0
+	overlay.implInput.SetValue("go-bubbletea")
 	overlay.focusIndex = focusPriority
 
 	m, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
@@ -425,6 +448,7 @@ func TestCreateTaskOverlayCtrlKClearsDraft(t *testing.T) {
 	assert.Equal(t, "", overlay.description.Value())
 	assert.Equal(t, domain.TypeTask, overlay.taskType)
 	assert.Equal(t, domain.P2, overlay.priority)
+	assert.Equal(t, "", overlay.implInput.Value())
 	assert.Equal(t, focusTitle, overlay.focusIndex)
 }
 

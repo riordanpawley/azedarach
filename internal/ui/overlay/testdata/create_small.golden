@@ -8,13 +8,13 @@
 ││ ┃     preserve layout                        T/B/F/E/C Set type   │
 ││ ┃                                            0/1/2/3/4 Set        │
 ││ ┃                                           priority              │
-││ Type: [●T] [ B] [ F] [ E] [ C]               Enter Create task    │
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]           Ctrl+E Edit in       │
-││                                             $EDITOR               │
-││ [ Create Task ]                              Ctrl+K Clear form    │
+││ Type: [●T] [ B] [ F] [ E] [ C]               Impls field Comma-   │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          separated impl keys   │
+││ Impls: > default, go-bubbletea, ts-open      Enter Create task    │
+││                                              Ctrl+E Edit in       │
+││ [ Create Task ]                             $EDITOR               │
+││                                              Ctrl+K Clear form    │
 ││                                              Esc Cancel           │
-││                                                                   │
-││                                                                   │
 ││                                                                   │
 ││                                                                   │
 ╰────────────────────────────────────────────────────────────────────╯

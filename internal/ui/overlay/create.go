@@ -52,6 +52,7 @@ type CreateTaskOverlay struct {
 	id          string
 	title       textinput.Model
 	description textarea.Model
+	implInput   textinput.Model
 	taskType    domain.TaskType
 	priority    domain.Priority
 	status      domain.Status
@@ -90,6 +91,7 @@ const (
 	focusDescription
 	focusType
 	focusPriority
+	focusImpls
 	focusSubmit
 	focusCount
 )
@@ -106,6 +108,12 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 	ti.CharLimit = 200
 	ti.Width = 56
 
+	implInput := textinput.New()
+	implInput.Placeholder = "default, go-bubbletea, ts-opentui"
+	implInput.CharLimit = 400
+	implInput.Width = 56
+	implInput.SetValue(strings.Join(task.Implementations, ", "))
+
 	ta := textarea.New()
 	ta.SetValue(task.Description)
 	ta.CharLimit = 2000
@@ -116,6 +124,7 @@ func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
 		id:          task.ID,
 		title:       ti,
 		description: ta,
+		implInput:   implInput,
 		taskType:    task.Type,
 		priority:    task.Priority,
 		status:      task.Status,
@@ -150,9 +159,15 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 	ta.SetWidth(56)
 	ta.SetHeight(4)
 
+	implInput := textinput.New()
+	implInput.Placeholder = "default, go-bubbletea, ts-opentui"
+	implInput.CharLimit = 400
+	implInput.Width = 56
+
 	return &CreateTaskOverlay{
 		title:       ti,
 		description: ta,
+		implInput:   implInput,
 		taskType:    domain.TypeTask,
 		priority:    domain.P2,
 		status:      domain.StatusOpen,
@@ -217,12 +232,19 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if c.focusIndex == focusTitle {
 				c.title.Focus()
 				c.description.Blur()
+				c.implInput.Blur()
 			} else if c.focusIndex == focusDescription {
 				c.title.Blur()
 				c.description.Focus()
+				c.implInput.Blur()
+			} else if c.focusIndex == focusImpls {
+				c.title.Blur()
+				c.description.Blur()
+				c.implInput.Focus()
 			} else {
 				c.title.Blur()
 				c.description.Blur()
+				c.implInput.Blur()
 			}
 
 			return c, nil
@@ -282,14 +304,15 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case taskEditorAppliedMsg:
 		c.editorError = ""
-		c.title.SetValue(msg.msg.Title)
-		c.description.SetValue(msg.msg.Description)
+	c.title.SetValue(msg.msg.Title)
+	c.description.SetValue(msg.msg.Description)
 		c.taskType = msg.msg.Type
 		c.priority = msg.msg.Priority
 		c.status = msg.msg.Status
 		c.assignee = msg.msg.Assignee
 		c.labels = append([]string(nil), msg.msg.Labels...)
-		c.impls = append([]string(nil), msg.msg.Implementations...)
+	c.impls = append([]string(nil), msg.msg.Implementations...)
+	c.implInput.SetValue(strings.Join(c.impls, ", "))
 		c.design = msg.msg.Design
 		c.notes = msg.msg.Notes
 		c.acceptance = msg.msg.Acceptance
@@ -310,6 +333,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	} else if c.focusIndex == focusDescription {
 		c.description, cmd = c.description.Update(msg)
+		cmds = append(cmds, cmd)
+	} else if c.focusIndex == focusImpls {
+		c.implInput, cmd = c.implInput.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -338,6 +364,7 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "Tab / Shift+Tab", Description: "Switch fields"},
 				{Key: "T/B/F/E/C", Description: "Set type"},
 				{Key: "0/1/2/3/4", Description: "Set priority"},
+				{Key: "Impls field", Description: "Comma-separated impl keys"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
 				{Key: "Ctrl+K", Description: "Clear form"},
@@ -356,6 +383,7 @@ func (c *CreateTaskOverlay) clearToDefaults() {
 	c.assignee = c.defaults.assignee
 	c.labels = append([]string(nil), c.defaults.labels...)
 	c.impls = append([]string(nil), c.defaults.impls...)
+	c.implInput.SetValue(strings.Join(c.defaults.impls, ", "))
 	c.design = c.defaults.design
 	c.notes = c.defaults.notes
 	c.acceptance = c.defaults.acceptance
@@ -364,6 +392,7 @@ func (c *CreateTaskOverlay) clearToDefaults() {
 	c.focusIndex = focusTitle
 	c.title.Focus()
 	c.description.Blur()
+	c.implInput.Blur()
 }
 
 func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
@@ -434,6 +463,17 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	}
 	b.WriteString(" ")
 	b.WriteString(c.renderPrioritySelector())
+	b.WriteString("\n")
+
+	if c.focusIndex == focusImpls {
+		b.WriteString(focusStyle.Render("Impls:"))
+	} else {
+		b.WriteString(labelStyle.Render("Impls:"))
+	}
+	b.WriteString(" ")
+	implWidth := max(20, width-14)
+	c.implInput.Width = implWidth
+	b.WriteString(c.implInput.View())
 	b.WriteString("\n")
 	if !stacked {
 		b.WriteString("\n")
@@ -523,6 +563,8 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 	if title == "" {
 		return nil // Don't submit if title is empty
 	}
+	implementations := splitCSV(c.implInput.Value())
+	c.impls = append([]string(nil), implementations...)
 
 	return tea.Batch(
 		func() tea.Msg {
@@ -535,7 +577,7 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 				Status:          domain.StatusOpen,
 				Assignee:        strings.TrimSpace(c.assignee),
 				Labels:          append([]string(nil), c.labels...),
-				Implementations: append([]string(nil), c.impls...),
+				Implementations: append([]string(nil), implementations...),
 				Design:          strings.TrimSpace(c.design),
 				Notes:           strings.TrimSpace(c.notes),
 				Acceptance:      strings.TrimSpace(c.acceptance),
