@@ -46,7 +46,7 @@ type TaskUpdateParams struct {
 	Description     string          `json:"description"`
 	Type            domain.TaskType `json:"type"`
 	Priority        domain.Priority `json:"priority"`
-	Implementations []string        `json:"implementations,omitempty"`
+	Implementations []string        `json:"implementations"`
 }
 
 // TaskStatusRequest contains the payload used to update a task status.

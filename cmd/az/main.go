@@ -250,20 +250,20 @@ func main() {
 
 	case "impl":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az impl delete <implementation> --confirm\n")
+			fmt.Fprintf(os.Stderr, "Usage: az impl delete --confirm <implementation>\n")
 			os.Exit(1)
 		}
 		implCommand := commandArgs[0]
 		implArgs := commandArgs[1:]
 		if implCommand == "help" || implCommand == "-h" || implCommand == "--help" {
-			fmt.Println("Usage: az impl delete <implementation> --confirm")
+			fmt.Println("Usage: az impl delete --confirm <implementation>")
 			os.Exit(0)
 		}
 		switch implCommand {
 		case "delete":
 			opts, err := cli.ParseImplDeleteArgs(implArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az impl delete <implementation> --confirm\n")
+				fmt.Fprintf(os.Stderr, "Usage: az impl delete --confirm <implementation>\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -275,7 +275,7 @@ func main() {
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown impl command: %s\n", implCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az impl delete <implementation> --confirm\n")
+			fmt.Fprintf(os.Stderr, "Usage: az impl delete --confirm <implementation>\n")
 			os.Exit(1)
 		}
 

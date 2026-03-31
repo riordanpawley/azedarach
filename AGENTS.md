@@ -66,6 +66,9 @@ This file is intentionally an overlay with go-bubbletea-specific rules only.
 15. **Repo-Local Go Cache Env (Critical)**:
    - `.envrc` exports repo-local `GOCACHE`/`GOPATH` (`.gocache`, `.gopath`).
    - After `direnv allow`, use normal `go ...` commands from the repository root without per-command env prefixes.
+16. **CLI Argument Ordering (Critical)**:
+   - For CLI command design and documentation, place flags/options before positional arguments.
+   - Usage/help/examples must match parser behavior (no positional-before-flag forms in docs).
 
 ## Thin-Client Boundary Contract (Critical)
 

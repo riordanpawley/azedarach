@@ -439,11 +439,11 @@ func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
 		return ImplDeleteOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return ImplDeleteOptions{}, fmt.Errorf("usage: az impl delete <implementation> --confirm")
+		return ImplDeleteOptions{}, fmt.Errorf("usage: az impl delete --confirm <implementation>")
 	}
 	opts.Implementation = strings.TrimSpace(fs.Arg(0))
 	if opts.Implementation == "" {
-		return ImplDeleteOptions{}, fmt.Errorf("usage: az impl delete <implementation> --confirm")
+		return ImplDeleteOptions{}, fmt.Errorf("usage: az impl delete --confirm <implementation>")
 	}
 	if !opts.Confirm {
 		return ImplDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")

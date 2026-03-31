@@ -667,17 +667,17 @@ func TestParseImplDeleteArgs(t *testing.T) {
 		{
 			name:        "missing implementation",
 			args:        []string{"--confirm"},
-			errContains: "usage: az impl delete <implementation> --confirm",
+			errContains: "usage: az impl delete --confirm <implementation>",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"go-bubbletea", "extra", "--confirm"},
-			errContains: "usage: az impl delete <implementation> --confirm",
+			errContains: "usage: az impl delete --confirm <implementation>",
 		},
 		{
 			name:        "reject positional before flag",
 			args:        []string{"go-bubbletea", "--confirm"},
-			errContains: "usage: az impl delete <implementation> --confirm",
+			errContains: "usage: az impl delete --confirm <implementation>",
 		},
 	}
 
@@ -2978,13 +2978,13 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "sync [--all] [<directory>] [--project-dir <dir>]") {
 		t.Fatalf("usage missing sync command: %q", output)
 	}
-	if !strings.Contains(output, "impl delete <implementation> --confirm") {
+	if !strings.Contains(output, "impl delete --confirm <implementation>") {
 		t.Fatalf("usage missing impl delete command: %q", output)
 	}
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
 	}
-	if !strings.Contains(output, "az impl delete ts-opentui --confirm") {
+	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
 		t.Fatalf("usage missing impl delete example: %q", output)
 	}
 	if !strings.Contains(output, "operation <subcommand>") {
