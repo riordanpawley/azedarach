@@ -109,7 +109,14 @@ func (w *WorktreeManager) Delete(ctx context.Context, issueID string) error {
 	// git worktree remove <path>
 	_, err = w.runner.Run(ctx, "worktree", "remove", worktree.Path)
 	if err != nil {
-		return fmt.Errorf("failed to remove worktree: %w", err)
+		if shouldForceWorktreeRemove(err) {
+			w.logger.Warn("worktree remove failed due local changes; retrying with --force", "issueID", issueID, "path", worktree.Path, "error", err)
+			if _, forceErr := w.runner.Run(ctx, "worktree", "remove", "--force", worktree.Path); forceErr != nil {
+				return fmt.Errorf("failed to force remove worktree: %w", forceErr)
+			}
+		} else {
+			return fmt.Errorf("failed to remove worktree: %w", err)
+		}
 	}
 
 	// Delete branch
@@ -123,6 +130,20 @@ func (w *WorktreeManager) Delete(ctx context.Context, issueID string) error {
 	w.logger.Info("worktree deleted successfully", "issueID", issueID)
 
 	return nil
+}
+
+func shouldForceWorktreeRemove(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "contains modified or untracked files") {
+		return true
+	}
+	if strings.Contains(message, "use --force to delete it") {
+		return true
+	}
+	return false
 }
 
 // Get returns information about the worktree for the given issue ID.

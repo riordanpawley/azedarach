@@ -242,6 +242,24 @@ func TestOperationRuntimeWorktreeCleanupPublishesProgressEvents(t *testing.T) {
 	}
 }
 
+func TestOperationProgressForState_UsesTerminalStateMessage(t *testing.T) {
+	failed := operationProgressForState(daemonops.StateFailed, daemonhandlers.CommandWorktreeRemove)
+	if failed.Message != "failed "+daemonhandlers.CommandWorktreeRemove {
+		t.Fatalf("failed message = %q", failed.Message)
+	}
+	if failed.Percent != 100 {
+		t.Fatalf("failed percent = %d, want 100", failed.Percent)
+	}
+
+	cancelled := operationProgressForState(daemonops.StateCancelled, "session.stop")
+	if cancelled.Message != "cancelled session.stop" {
+		t.Fatalf("cancelled message = %q", cancelled.Message)
+	}
+	if cancelled.Percent != 100 {
+		t.Fatalf("cancelled percent = %d, want 100", cancelled.Percent)
+	}
+}
+
 func TestOperationRuntimeCancelMarksRunningOperationCancelled(t *testing.T) {
 	blocked := make(chan struct{})
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
