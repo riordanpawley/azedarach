@@ -1423,12 +1423,12 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--id <issue-id>] [--json] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		},
 		{
 			name:        "deps flag rejected",
@@ -1470,7 +1470,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--id <issue-id>] [--json] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -1489,7 +1489,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueDoctorArgs() named id = %+v", doctor)
 	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--id <issue-id>] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
 	}
 }
@@ -1512,7 +1512,7 @@ func TestParseIssueGetManyArgs(t *testing.T) {
 	}
 
 	_, err = ParseIssueGetManyArgs([]string{"--json"})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue get-many --id <issue-id>") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue get-many [--project <project-id>] --id <issue-id>") {
 		t.Fatalf("expected usage error for missing ids, got %v", err)
 	}
 }
@@ -1558,7 +1558,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 		{
 			name:        "missing title",
 			args:        []string{},
-			errContains: "usage: az issue create <title>",
+			errContains: "usage: az issue create [--project <project-id>] <title>",
 		},
 	}
 
@@ -1601,12 +1601,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--id <issue-id>] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--id <issue-id>] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [<issue-id>]",
 		},
 		{
 			name: "named id",
@@ -1701,7 +1701,7 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 		{
 			name:        "invalid status arg count",
 			args:        []string{},
-			errContains: "usage: az issue update [--id <issue-id>]",
+			errContains: "usage: az issue update [--project <project-id>] [--id <issue-id>]",
 		},
 		{
 			name: "named id",
@@ -3297,49 +3297,49 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
 	}
-	if !strings.Contains(output, "issue list [--json] [--deps]") {
+	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
-	if !strings.Contains(output, "issue get [--id <id>] [--json] [<id>]") {
+	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
-	if !strings.Contains(output, "issue get-many --id <id>") {
+	if !strings.Contains(output, "issue get-many [--project <project-id>] --id <id>") {
 		t.Fatalf("usage missing issue get-many command: %q", output)
 	}
-	if !strings.Contains(output, "issue check [--id <id>] [--json] [<id>]") {
+	if !strings.Contains(output, "issue check [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue check command: %q", output)
 	}
-	if !strings.Contains(output, "issue doctor [--id <id>] [<id>]") {
+	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue doctor command: %q", output)
 	}
-	if !strings.Contains(output, "issue create <title>") {
+	if !strings.Contains(output, "issue create [--project <project-id>] <title>") {
 		t.Fatalf("usage missing issue create command: %q", output)
 	}
-	if !strings.Contains(output, "issue update [--id <id>] [<id>]") {
+	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue update command: %q", output)
 	}
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close [--id <id>] [<id>]") {
+	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
-	if !strings.Contains(output, "issue delete [--id <id>] [<id>] --confirm") {
+	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [<id>] --confirm") {
 		t.Fatalf("usage missing issue delete command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep add --issue-id <issue-id> --depends-on-id <depends-on-id>") {
+	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id>") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep remove --issue-id <issue-id> --depends-on-id <depends-on-id>") {
+	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id>") {
 		t.Fatalf("usage missing issue dep remove command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep bulk apply --input <path>") {
+	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
 		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-create --impl <implementation> --input <path>") {
+	if !strings.Contains(output, "issue bulk-create [--project <project-id>] --impl <implementation> --input <path>") {
 		t.Fatalf("usage missing issue bulk-create command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-update --impl <implementation> --input <path>") {
+	if !strings.Contains(output, "issue bulk-update [--project <project-id>] --impl <implementation> --input <path>") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
 	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
