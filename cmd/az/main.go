@@ -66,7 +66,7 @@ func main() {
 
 	case "branch":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az branch <merge> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az branch <merge|mtm> [arguments]\n")
 			os.Exit(1)
 		}
 		branchCommand := commandArgs[0]
@@ -792,6 +792,9 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 			return cli.BranchMergeToMainCommand(deps, issueID)
 		})
 	default:
-		return fmt.Errorf("unknown branch command: %s (usage: az branch <merge>)", command)
+		if command == "m2m" {
+			return fmt.Errorf("unknown branch command: %s (did you mean `az branch mtm`?)", command)
+		}
+		return fmt.Errorf("unknown branch command: %s (usage: az branch <merge|mtm>)", command)
 	}
 }
