@@ -702,16 +702,63 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 		return
 	}
 	projectID := coalesceProjectID(record.ProjectID, "")
+	eventRevision := s.nextRevision(projectID)
 	s.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		ProjectID:       projectID,
 		Meta:            protocol.Metadata{ProjectID: projectID},
-		Revision:        s.nextRevision(projectID),
+		Revision:        eventRevision,
 		Event:           eventName,
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,
 	})
+	progressBody, err := json.Marshal(protocol.OperationProgressEventBody{
+		OperationID: record.ID,
+		ProjectID:   projectID,
+		State:       protocol.OperationState(record.State),
+		Progress:    operationProgressForState(record.State, record.Kind),
+	})
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("marshal operation progress event body failed", "operation_id", record.ID, "error", err)
+		}
+		return
+	}
+	s.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       projectID,
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Revision:        s.nextRevision(projectID),
+		Event:           protocol.EventOperationProgress,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Body:            progressBody,
+	})
+}
+
+func operationProgressForState(state daemonops.State, kind string) protocol.OperationProgress {
+	progress := protocol.OperationProgress{
+		Unit: "percent",
+	}
+	switch state {
+	case daemonops.StateQueued:
+		progress.Message = "queued " + strings.TrimSpace(kind)
+		progress.Current = 0
+		progress.Total = 100
+		progress.Percent = 0
+	case daemonops.StateRunning:
+		progress.Message = "running " + strings.TrimSpace(kind)
+		progress.Current = 50
+		progress.Total = 100
+		progress.Percent = 50
+	default:
+		progress.Message = "completed " + strings.TrimSpace(kind)
+		progress.Current = 100
+		progress.Total = 100
+		progress.Percent = 100
+	}
+	return progress
 }
 
 func daemonOperationRecord(record daemonops.Record) protocol.OperationRecord {

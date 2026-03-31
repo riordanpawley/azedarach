@@ -97,11 +97,28 @@ func TestOperationRuntimeSubmitGetListPublishesLifecycleEvents(t *testing.T) {
 		t.Fatalf("operations len = %d, want 1", len(listBody.Operations))
 	}
 
-	events := collectOperationEvents(t, ch, 3)
-	want := []string{protocol.EventOperationQueued, protocol.EventOperationRunning, protocol.EventOperationDone}
+	events := collectOperationEvents(t, ch, 6)
+	want := []string{
+		protocol.EventOperationQueued,
+		protocol.EventOperationProgress,
+		protocol.EventOperationRunning,
+		protocol.EventOperationProgress,
+		protocol.EventOperationDone,
+		protocol.EventOperationProgress,
+	}
 	for i, event := range events {
 		if event.Event != want[i] {
 			t.Fatalf("event[%d] = %s, want %s", i, event.Event, want[i])
+		}
+		if event.Event == protocol.EventOperationProgress {
+			var body protocol.OperationProgressEventBody
+			if err := json.Unmarshal(event.Body, &body); err != nil {
+				t.Fatalf("unmarshal progress event body: %v", err)
+			}
+			if body.OperationID != submitBody.Operation.OperationID {
+				t.Fatalf("progress operation id = %s, want %s", body.OperationID, submitBody.Operation.OperationID)
+			}
+			continue
 		}
 		var body protocol.OperationEventBody
 		if err := json.Unmarshal(event.Body, &body); err != nil {
@@ -144,11 +161,28 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMerge)
 	}
 
-	events := collectOperationEvents(t, ch, 3)
-	want := []string{protocol.EventOperationQueued, protocol.EventOperationRunning, protocol.EventOperationDone}
+	events := collectOperationEvents(t, ch, 6)
+	want := []string{
+		protocol.EventOperationQueued,
+		protocol.EventOperationProgress,
+		protocol.EventOperationRunning,
+		protocol.EventOperationProgress,
+		protocol.EventOperationDone,
+		protocol.EventOperationProgress,
+	}
 	for i, event := range events {
 		if event.Event != want[i] {
 			t.Fatalf("event[%d] = %s, want %s", i, event.Event, want[i])
+		}
+		if event.Event == protocol.EventOperationProgress {
+			var progress protocol.OperationProgressEventBody
+			if err := json.Unmarshal(event.Body, &progress); err != nil {
+				t.Fatalf("unmarshal progress event body: %v", err)
+			}
+			if progress.OperationID != submitBody.Operation.OperationID {
+				t.Fatalf("progress operation id = %s, want %s", progress.OperationID, submitBody.Operation.OperationID)
+			}
+			continue
 		}
 		var body protocol.OperationEventBody
 		if err := json.Unmarshal(event.Body, &body); err != nil {
@@ -160,6 +194,51 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 		if body.Operation.Kind != daemonhandlers.CommandGitMerge {
 			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMerge)
 		}
+	}
+}
+
+func TestOperationRuntimeWorktreeCleanupPublishesProgressEvents(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
+	runtime.worktreeHandler = daemonhandlers.NewWorktreeHandler(runtimeWorktreeService{})
+
+	payload := mustJSON(t, map[string]string{"project_id": "proj-1"})
+	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "proj-1",
+		Kind:      daemonhandlers.CommandWorktreeCleanupOrphaned,
+		IssueID:   "__project__",
+		Payload:   payload,
+	})
+	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
+	defer cancel()
+
+	resp := runtime.Handle(context.Background(), submitReq)
+	if !resp.OK {
+		t.Fatalf("submit response = %+v", resp)
+	}
+	var submitBody protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &submitBody); err != nil {
+		t.Fatalf("unmarshal submit body: %v", err)
+	}
+
+	_ = waitForRuntimeState(t, runtime, submitBody.Operation.OperationID, daemonops.StateDone)
+	events := collectOperationEvents(t, ch, 6)
+	if events[1].Event != protocol.EventOperationProgress || events[3].Event != protocol.EventOperationProgress || events[5].Event != protocol.EventOperationProgress {
+		t.Fatalf("expected progress events at queued/running/done slots, got %q %q %q", events[1].Event, events[3].Event, events[5].Event)
+	}
+	var queued protocol.OperationProgressEventBody
+	if err := json.Unmarshal(events[1].Body, &queued); err != nil {
+		t.Fatalf("unmarshal queued progress body: %v", err)
+	}
+	var running protocol.OperationProgressEventBody
+	if err := json.Unmarshal(events[3].Body, &running); err != nil {
+		t.Fatalf("unmarshal running progress body: %v", err)
+	}
+	var done protocol.OperationProgressEventBody
+	if err := json.Unmarshal(events[5].Body, &done); err != nil {
+		t.Fatalf("unmarshal done progress body: %v", err)
+	}
+	if queued.Progress.Percent != 0 || running.Progress.Percent != 50 || done.Progress.Percent != 100 {
+		t.Fatalf("progress percents = %d/%d/%d, want 0/50/100", queued.Progress.Percent, running.Progress.Percent, done.Progress.Percent)
 	}
 }
 
