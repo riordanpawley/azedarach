@@ -28,6 +28,7 @@ import {
 	type SyncRequiredError,
 } from "./IssueTrackerClient.js"
 import { getIssueSessionName, WINDOW_NAMES } from "./paths.js"
+import { buildIssuePRBody, buildIssuePRTitle, type PRDraftContext } from "./prBody.js"
 import type { SessionError } from "./SessionManager.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
@@ -744,6 +745,12 @@ const getCommandErrorOutput = (error: unknown): string => {
 		.trim()
 }
 
+const toNonEmptyLines = (input: string): readonly string[] =>
+	input
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+
 const hasStagedChanges = (
 	cwd: string,
 ): Effect.Effect<boolean, GitError, CommandExecutor.CommandExecutor> =>
@@ -1049,99 +1056,6 @@ Start by running \`az prime\`.
 Then run \`az prompt pr create\` and follow that guidance.
 Create or update the PR with improved title/body/checklist based on the current branch diff.`
 	})
-
-/**
- * Generate PR title from bead
- */
-const generateIssuePRTitle = (issue: Issue): string => {
-	const typePrefix = issue.issue_type ? `[${issue.issue_type}] ` : ""
-	return `${typePrefix}${issue.title} (${issue.id})`
-}
-
-/**
- * Generate PR body from bead
- */
-interface PRDraftContext {
-	readonly baseBranch: string
-	readonly commitSubjects: readonly string[]
-	readonly changedFiles: readonly string[]
-}
-
-const toNonEmptyLines = (input: string): readonly string[] =>
-	input
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0)
-
-const limitWithOverflow = (
-	items: readonly string[],
-	limit: number,
-): { readonly visible: readonly string[]; readonly overflowCount: number } => ({
-	visible: items.slice(0, limit),
-	overflowCount: Math.max(0, items.length - limit),
-})
-
-const generateIssuePRBody = (issue: Issue, draftContext?: PRDraftContext): string => {
-	const lines: string[] = []
-
-	lines.push(`## Summary`)
-	lines.push(``)
-	lines.push(`Resolves ${issue.id}: ${issue.title}`)
-	if (draftContext) {
-		lines.push(`Base branch: \`${draftContext.baseBranch}\``)
-	}
-	lines.push(``)
-
-	if (issue.description) {
-		lines.push(`## Description`)
-		lines.push(``)
-		lines.push(issue.description)
-		lines.push(``)
-	}
-
-	if (issue.design) {
-		lines.push(`## Design Notes`)
-		lines.push(``)
-		lines.push(issue.design)
-		lines.push(``)
-	}
-
-	if (draftContext && draftContext.commitSubjects.length > 0) {
-		const { visible, overflowCount } = limitWithOverflow(draftContext.commitSubjects, 8)
-		lines.push(`## What Changed`)
-		lines.push(``)
-		for (const subject of visible) {
-			lines.push(`- ${subject}`)
-		}
-		if (overflowCount > 0) {
-			lines.push(`- ...and ${overflowCount} more commit${overflowCount === 1 ? "" : "s"}`)
-		}
-		lines.push(``)
-	}
-
-	if (draftContext && draftContext.changedFiles.length > 0) {
-		const { visible, overflowCount } = limitWithOverflow(draftContext.changedFiles, 20)
-		lines.push(`## Changed Files`)
-		lines.push(``)
-		for (const file of visible) {
-			lines.push(`- \`${file}\``)
-		}
-		if (overflowCount > 0) {
-			lines.push(`- ...and ${overflowCount} more file${overflowCount === 1 ? "" : "s"}`)
-		}
-		lines.push(``)
-	}
-
-	lines.push(`## Test Plan`)
-	lines.push(``)
-	lines.push(`- [ ] Manual testing`)
-	lines.push(`- [ ] Type check passes`)
-	lines.push(``)
-	lines.push(`---`)
-	lines.push(`🤖 Generated with [Azedarach](https://github.com/riordanpawley/azedarach)`)
-
-	return lines.join("\n")
-}
 
 /**
  * Parse gh pr view JSON output to PR type
@@ -1560,8 +1474,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						})
 
 						// Generate PR title and body
-						const title = options.title ?? generateIssuePRTitle(issue)
-						const body = options.body ?? generateIssuePRBody(issue, draftContext)
+						const title = options.title ?? buildIssuePRTitle(issue)
+						const body = options.body ?? buildIssuePRBody(issue, draftContext)
 
 						// Create PR via gh CLI
 						const ghArgs = ["pr", "create", "--title", title, "--body", body, "--base", baseBranch]

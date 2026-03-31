@@ -6,8 +6,15 @@
 
 import { Effect } from "effect"
 import { PRWorkflow } from "../../../../src/core/PRWorkflow.js"
+import {
+	appendLinkedIssueAutoCloseFooter,
+	buildIssuePRBody,
+	buildIssuePRTitle,
+} from "../../../../src/core/prBody.js"
 import { ProjectService } from "../../../../src/services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
+
+export { appendLinkedIssueAutoCloseFooter, buildIssuePRBody, buildIssuePRTitle }
 
 // ============================================================================
 // PR Workflow Atoms
