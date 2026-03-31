@@ -588,6 +588,20 @@ func TestView_ShowsRuntimeSignalLoadingIndicator(t *testing.T) {
 	}
 }
 
+func TestView_ShowsBoardRefreshingIndicators(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.boardRefreshing = true
+
+	view := m.View()
+	if !strings.Contains(view, "REFRESHING BOARD - please wait") {
+		t.Fatalf("view = %q, want board refresh banner", view)
+	}
+	if !strings.Contains(view, "!!! REFRESHING BOARD !!!") {
+		t.Fatalf("view = %q, want board refresh status indicator", view)
+	}
+}
+
 func TestView_ShowsFilterAndSortSummaries(t *testing.T) {
 	m := newTestModel()
 	m.loading = false

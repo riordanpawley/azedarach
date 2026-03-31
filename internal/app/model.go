@@ -178,10 +178,11 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading        bool
-	spinner        spinner.Model
-	lastRefresh    time.Time
-	hasRefreshLoop bool
+	loading         bool
+	boardRefreshing bool
+	spinner         spinner.Model
+	lastRefresh     time.Time
+	hasRefreshLoop  bool
 
 	// Shared daemon client for task-domain operations
 	daemonClient     *daemonclient.Client
@@ -372,6 +373,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasLoading := m.loading
 		if msg.stale {
 			m.loading = false
+			m.boardRefreshing = false
 			if wasLoading && msg.freshnessHint != "" {
 				m.addToast(Toast{
 					Level:   ToastWarning,
@@ -405,6 +407,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRevision = msg.revision
 		}
 		m.loading = false
+		m.boardRefreshing = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
 		if wasLoading {
@@ -454,12 +457,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		m.loading = false
+		m.boardRefreshing = false
 		// Still schedule a refresh to retry
 		return m, tickEvery(5 * time.Second)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
 		m.expireToasts()
+		m.boardRefreshing = true
 		return m, tea.Batch(
 			m.loadIssuesCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -786,12 +791,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.ProjectSelectedMsg:
 		// Close overlay
 		m.overlayStack.Pop()
+		m.loading = true
+		m.boardRefreshing = true
+		m.tasks = nil
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
 
 	case projectSwitchResultMsg:
 		if msg.err != nil {
+			m.loading = false
+			m.boardRefreshing = false
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Project switch failed: %v", msg.err),
@@ -821,6 +831,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRevision = msg.revision
 		}
 		m.loading = false
+		m.boardRefreshing = false
 		m.lastRefresh = time.Now()
 		m.daemonEvents = msg.events
 
@@ -1251,7 +1262,9 @@ func (m Model) View() string {
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
-	if m.runtimeSignalsBusy {
+	if m.boardRefreshing {
+		sb.SetLoadingIndicator("!!! REFRESHING BOARD !!!")
+	} else if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
 	if current := m.overlayStack.Current(); current != nil {
@@ -1710,6 +1723,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	case "r":
 		if m.editor.GetMode() != ModeAction {
+			m.boardRefreshing = true
 			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -6320,12 +6334,23 @@ func (m Model) renderBoardView() string {
 
 	contentHeight := board.BoardContentHeight(m.height)
 	toolbar := ""
+	refreshBanner := ""
+	if m.boardRefreshing {
+		refreshBanner = lipgloss.NewStyle().
+			Background(styles.Yellow).
+			Foreground(styles.Base).
+			Bold(true).
+			Width(m.width).
+			Align(lipgloss.Center).
+			Render("REFRESHING BOARD - please wait")
+		contentHeight -= lipgloss.Height(refreshBanner)
+	}
 	if m.isDrillDownActive() {
 		toolbar = m.renderDrillDownToolbar()
 		contentHeight -= lipgloss.Height(toolbar) + 1
-		if contentHeight < 6 {
-			contentHeight = 6
-		}
+	}
+	if contentHeight < 6 {
+		contentHeight = 6
 	}
 
 	boardView := board.Render(
@@ -6341,10 +6366,18 @@ func (m Model) renderBoardView() string {
 		m.width,
 		contentHeight,
 	)
-	if toolbar == "" {
+	if toolbar == "" && refreshBanner == "" {
 		return boardView
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, toolbar, boardView)
+	parts := make([]string, 0, 3)
+	if refreshBanner != "" {
+		parts = append(parts, refreshBanner)
+	}
+	if toolbar != "" {
+		parts = append(parts, toolbar)
+	}
+	parts = append(parts, boardView)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {

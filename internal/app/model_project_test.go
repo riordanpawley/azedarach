@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
 func TestResolveInitialProjectName(t *testing.T) {
@@ -202,5 +204,34 @@ func TestProjectSwitchResultRebindsProjectScopedServices(t *testing.T) {
 	wantPrefix := filepath.Join(newRepo, ".azedarach", "images", "che-1") + string(os.PathSeparator)
 	if !strings.HasPrefix(attached.Path, wantPrefix) {
 		t.Fatalf("attachment path = %q, want prefix %q", attached.Path, wantPrefix)
+	}
+}
+
+func TestProjectSelectedMsgStartsVisibleRefreshAndClearsStaleBoard(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.tasks = []domain.Task{
+		{ID: "old-1", Title: "Old task"},
+	}
+	m.sessions = map[string]*domain.Session{
+		"old-1": {Worktree: "/tmp/old-1"},
+	}
+
+	next, cmd := m.Update(overlay.ProjectSelectedMsg{
+		Project: config.Project{Name: "beta", Path: "/work/beta"},
+	})
+
+	updated := next.(Model)
+	if cmd == nil {
+		t.Fatal("expected project switch command to be scheduled")
+	}
+	if !updated.loading {
+		t.Fatal("expected loading state while switching projects")
+	}
+	if !updated.boardRefreshing {
+		t.Fatal("expected board refresh indicator while switching projects")
+	}
+	if len(updated.tasks) != 0 {
+		t.Fatalf("tasks = %+v, want cleared stale board tasks", updated.tasks)
 	}
 }
