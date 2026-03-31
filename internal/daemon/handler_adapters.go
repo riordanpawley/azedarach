@@ -22,12 +22,12 @@ func (a worktreeServiceAdapter) Create(ctx context.Context, _ string, issueID st
 	return a.manager.Create(ctx, issueID, baseBranch)
 }
 
-func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, issueID string) error {
+func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, issueID string, force bool) error {
 	worktree, err := a.manager.Get(ctx, issueID)
 	if err != nil {
 		return err
 	}
-	if err := a.manager.Delete(ctx, issueID); err != nil {
+	if err := a.manager.DeleteWithOptions(ctx, issueID, force); err != nil {
 		return err
 	}
 	if worktree != nil {

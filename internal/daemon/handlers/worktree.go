@@ -51,7 +51,7 @@ func WithWorktreeLongRunningExecutor(executor WorktreeLongRunningExecutor) Workt
 type worktreeService interface {
 	List(context.Context, string) ([]git.Worktree, error)
 	Create(context.Context, string, string, string) (*git.Worktree, error)
-	Delete(context.Context, string, string) error
+	Delete(context.Context, string, string, bool) error
 	CleanupOrphaned(context.Context, string) (*CleanupOrphanedResult, error)
 }
 
@@ -77,6 +77,7 @@ type worktreeCommandBody struct {
 	ProjectID  string `json:"project_id"`
 	IssueID    string `json:"issue_id,omitempty"`
 	BaseBranch string `json:"base_branch,omitempty"`
+	Force      bool   `json:"force,omitempty"`
 }
 
 type worktreePayload struct {
@@ -209,7 +210,7 @@ func (h *WorktreeHandler) HandleDirect(ctx context.Context, req protocol.Request
 			return resp
 		}
 
-		if err := h.service.Delete(ctx, cmd.ProjectID, cmd.IssueID); err != nil {
+		if err := h.service.Delete(ctx, cmd.ProjectID, cmd.IssueID, cmd.Force); err != nil {
 			resp.Error = mapWorktreeError(err)
 			return resp
 		}

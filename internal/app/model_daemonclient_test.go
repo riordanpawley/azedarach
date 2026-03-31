@@ -2153,6 +2153,114 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("requests = %v", got)
 		}
 	})
+
+	t.Run("dirty worktree prompts before forced cleanup", func(t *testing.T) {
+		forceFlags := []bool{}
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandSessionStop:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				case daemonclient.CommandWorktreeRemove:
+					var body struct {
+						ProjectID string `json:"project_id"`
+						IssueID   string `json:"issue_id"`
+						Force     bool   `json:"force,omitempty"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal worktree remove request: %v", err)
+					}
+					forceFlags = append(forceFlags, body.Force)
+					if !body.Force {
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							OK:              false,
+							Error: &protocol.ErrorEnvelope{
+								Code:      protocol.ErrorCodeConflict,
+								Message:   "failed to remove worktree: contains modified or untracked files, use --force to delete it",
+								Retryable: false,
+							},
+						}, nil
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+		}
+		setTaskSession(t, &m, "az-1", &domain.Session{
+			IssueID:  "az-1",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-1",
+		})
+		m.nav.SelectTask("az-1", 1)
+
+		_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
+		if cmd == nil {
+			t.Fatal("expected initial cleanup command")
+		}
+		initialMsg := cmd()
+		cleanupResult, ok := initialMsg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", initialMsg)
+		}
+		if !cleanupResult.needsForce {
+			t.Fatalf("needsForce = false, want true")
+		}
+
+		updatedAny, confirmCmd := m.Update(cleanupResult)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending forced cleanup confirmation")
+		}
+
+		updatedAny, runForceCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if runForceCmd == nil {
+			t.Fatal("expected forced cleanup command")
+		}
+		forceMsg := runForceCmd()
+		forceResult, ok := forceMsg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", forceMsg)
+		}
+		if forceResult.err != nil {
+			t.Fatalf("forced cleanup err = %v", forceResult.err)
+		}
+		if len(forceFlags) != 2 || forceFlags[0] || !forceFlags[1] {
+			t.Fatalf("force flags = %v, want [false true]", forceFlags)
+		}
+	})
 }
 
 func TestAbortMergeCmdUsesDaemonClient(t *testing.T) {

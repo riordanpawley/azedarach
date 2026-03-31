@@ -32,7 +32,7 @@ func (runtimeWorktreeService) List(context.Context, string) ([]git.Worktree, err
 func (runtimeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, error) {
 	return &git.Worktree{Path: "/tmp/worktree", Branch: "az/test", IssueID: "AZ-1"}, nil
 }
-func (runtimeWorktreeService) Delete(context.Context, string, string) error { return nil }
+func (runtimeWorktreeService) Delete(context.Context, string, string, bool) error { return nil }
 func (runtimeWorktreeService) CleanupOrphaned(context.Context, string) (*daemonhandlers.CleanupOrphanedResult, error) {
 	return &daemonhandlers.CleanupOrphanedResult{}, nil
 }

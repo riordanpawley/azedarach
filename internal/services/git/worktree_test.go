@@ -185,11 +185,10 @@ branch refs/heads/az/issue-123
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
-func TestWorktreeManager_Delete_RetriesWithForceForDirtyWorktree(t *testing.T) {
+func TestWorktreeManager_DeleteWithOptions_UsesForceWhenRequested(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
 	issueID := "issue-123"
-	removeCalls := 0
 
 	mock := NewMockRunner()
 	mock.handler = func(ctx context.Context, args ...string) (string, error) {
@@ -204,10 +203,6 @@ branch refs/heads/az/issue-123
 `, nil
 		}
 		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
-			removeCalls++
-			if removeCalls == 1 {
-				return "", fmt.Errorf("fatal: '/home/user/test-repo-issue-123' contains modified or untracked files, use --force to delete it")
-			}
 			return "", nil
 		}
 		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
@@ -218,10 +213,9 @@ branch refs/heads/az/issue-123
 
 	manager := NewWorktreeManager(mock, repoDir, slog.Default())
 
-	err := manager.Delete(ctx, issueID)
+	err := manager.DeleteWithOptions(ctx, issueID, true)
 
 	require.NoError(t, err)
-	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
 	mock.AssertCommand(t, "worktree remove --force /home/user/test-repo-issue-123")
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }

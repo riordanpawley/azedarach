@@ -72,6 +72,7 @@ type worktreePayload struct {
 type worktreeCommandBody struct {
 	ProjectID string `json:"project_id"`
 	IssueID   string `json:"issue_id,omitempty"`
+	Force     bool   `json:"force,omitempty"`
 }
 
 type longRunningResultEnvelope struct {
@@ -233,9 +234,15 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 
 // RemoveWorktree asks the daemon to remove one worktree for an issue in the current project route.
 func (c *Client) RemoveWorktree(ctx context.Context, issueID string) error {
+	return c.RemoveWorktreeWithOptions(ctx, issueID, false)
+}
+
+// RemoveWorktreeWithOptions asks the daemon to remove one worktree for an issue in the current project route.
+func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, force bool) error {
 	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
 		ProjectID: c.projectRoute(),
 		IssueID:   issueID,
+		Force:     force,
 	}, nil)
 }
 
