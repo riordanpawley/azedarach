@@ -1650,6 +1650,21 @@ func TestSelectModeEntry(t *testing.T) {
 		}
 	})
 
+	t.Run("a enters select mode and toggles current task", func(t *testing.T) {
+		m.editor.EnterNormal()
+		m.nav.SelectTask("az-1", 0)
+
+		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		newModel := result.(Model)
+
+		if newModel.editor.GetMode() != ModeSelect {
+			t.Errorf("Expected ModeSelect, got %v", newModel.editor.GetMode())
+		}
+		if !newModel.editor.IsSelected("az-1") {
+			t.Fatal("expected a to toggle selection for current task from normal mode")
+		}
+	})
+
 	t.Run("escape exits select mode back to normal", func(t *testing.T) {
 		m.editor.EnterSelect()
 		m.editor.Select("az-1")
@@ -1677,6 +1692,35 @@ func TestSelectModeEntry(t *testing.T) {
 			t.Fatal("expected selection to be cleared after v from select")
 		}
 	})
+}
+
+func TestBulkActionMsgRoutesThroughUpdate(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterSelect()
+	m.editor.Select("az-1")
+	m.nav.SelectTask("az-1", 0)
+	opened, _ := m.handleSelectMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = opened.(Model)
+
+	if _, ok := m.overlayStack.Current().(*overlay.BulkActionMenu); !ok {
+		t.Fatalf("expected bulk action menu, got %T", m.overlayStack.Current())
+	}
+
+	updated, _ := m.Update(overlay.BulkActionMsg{
+		Action:      "x",
+		SelectedIDs: []string{"az-1"},
+	})
+	m = updated.(Model)
+
+	if m.overlayStack.Current() != nil {
+		t.Fatalf("expected bulk action overlay to close, got %T", m.overlayStack.Current())
+	}
+	if !m.editor.IsNormal() {
+		t.Fatalf("expected normal mode after clear selection action, got %v", m.editor.GetMode())
+	}
+	if m.editor.HasSelection() {
+		t.Fatal("expected selection to be cleared after bulk clear action")
+	}
 }
 
 func TestCreateTaskOverlayPersistsAcrossCloseReopen(t *testing.T) {

@@ -326,6 +326,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleSelection(msg)
 
+	case overlay.BulkActionMsg:
+		m.overlayStack.Pop()
+		return m.handleBulkAction(msg)
+
 	case overlay.SearchMsg:
 		m.editor.SetSearchQuery(msg.Query)
 		if current := m.overlayStack.Current(); current != nil {
@@ -1780,6 +1784,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionEnterSelect: // Visual select
 		m.editor.EnterSelect()
+		return m, nil
+
+	case keybinds.ActionSelectToggle: // Enter select mode and toggle current task
+		task, _ := m.getCurrentTaskAndSession()
+		if task != nil {
+			m.editor.EnterSelect()
+			m.editor.ToggleSelection(task.ID)
+		}
 		return m, nil
 
 	case keybinds.ActionOpenHelp: // Help

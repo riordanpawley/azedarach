@@ -79,6 +79,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenFilter, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "f", Display: "f"}}, Hint: "filter"},
 	{ID: ActionOpenSort, Mode: types.ModeNormal, Keys: []KeySpec{{Input: ",", Display: ","}}, Hint: "sort"},
 	{ID: ActionEnterSelect, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "v", Display: "v"}}, Hint: "select"},
+	{ID: ActionSelectToggle, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "a", Display: "a"}, {Input: "5", Display: "5"}}, Hint: "toggle", HintKey: "a/5"},
 	{ID: ActionDrillDown, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "enter", Display: "Enter"}}, Hint: "drill"},
 	{ID: ActionCreateTask, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "c", Display: "c"}}, Hint: "create"},
 	{ID: ActionOpenSettings, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "s", Display: "s"}}, Hint: "settings"},
