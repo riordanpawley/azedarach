@@ -756,6 +756,24 @@ func PrintOpenCodePluginUsage() {
 	fmt.Println("Usage: az opencode plugin install [--global-dir <dir>] [--project-dir <dir>] [--verbose]")
 }
 
+func PrintSpecUsage() {
+	fmt.Println("Usage: az spec <req|link|read|lint|parity|sync> [arguments]")
+	fmt.Println("  req      Manage spec requirements (phase-1 restore target)")
+	fmt.Println("  link     Manage issue/requirement traceability links")
+	fmt.Println("  read     Read consolidated spec view")
+	fmt.Println("  lint     Validate spec consistency")
+	fmt.Println("  parity   Report issue/spec drift")
+	fmt.Println("  sync     Sync spec artifacts (phase-1 supports: --target md)")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  az spec req list --json")
+	fmt.Println("  az spec link list --issue az-123")
+	fmt.Println("  az spec read --issue az-123")
+	fmt.Println("  az spec lint --strict")
+	fmt.Println("  az spec parity --fail-on-out")
+	fmt.Println("  az spec sync --target md --check")
+}
+
 func readJSONObject(path string) (map[string]any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

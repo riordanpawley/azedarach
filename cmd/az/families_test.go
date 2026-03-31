@@ -84,6 +84,37 @@ func TestRunDevHelpAndGateRegression(t *testing.T) {
 	}
 }
 
+func TestRunSpecCommandHelpAndValidation(t *testing.T) {
+	helpOut := captureMainStdout(t, func() error {
+		return runSpecCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|lint|parity|sync> [arguments]") {
+		t.Fatalf("help output = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "az spec sync --target md --check") {
+		t.Fatalf("help output missing sync example = %q", helpOut)
+	}
+
+	cfgDisabled := config.DefaultConfig()
+	cfgDisabled.Spec.Enabled = false
+	err := runSpecCommand(cfgDisabled, []string{"req", "list"})
+	if err == nil || !strings.Contains(err.Error(), "spec workflows are disabled for this project") {
+		t.Fatalf("disabled error = %v", err)
+	}
+
+	cfgEnabled := config.DefaultConfig()
+	cfgEnabled.Spec.Enabled = true
+	err = runSpecCommand(cfgEnabled, []string{"unknown"})
+	if err == nil || !strings.Contains(err.Error(), "unknown spec command") {
+		t.Fatalf("unknown command error = %v", err)
+	}
+
+	err = runSpecCommand(cfgEnabled, []string{"sync", "--target", "html"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az spec sync --target md") {
+		t.Fatalf("invalid target error = %v", err)
+	}
+}
+
 func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
 	projectDir := t.TempDir()
 	transport := &devServerTransport{

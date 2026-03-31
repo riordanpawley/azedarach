@@ -21,6 +21,7 @@ Commands:
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
   operation <subcommand>     Inspect/cancel background operations (get|list|cancel)
   opencode <init|plugin>     Manage OpenCode integration
+  spec <subcommand>          Spec workflows (req|link|read|lint|parity|sync)
   issue list [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
   issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
@@ -102,6 +103,8 @@ Examples:
   az operation cancel --id op-123 --reason "No longer needed"
   az opencode init
   az opencode plugin install
+  az spec req list --json
+  az spec sync --target md --check
   az prime
   az export --format json
   az export --format json --out snapshot.json

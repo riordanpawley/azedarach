@@ -29,6 +29,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
+		"spec <subcommand>",
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
 		"az githooks install",
@@ -37,6 +38,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az dev gate az-123",
 		"az opencode init",
 		"az opencode plugin install",
+		"az spec req list --json",
+		"az spec sync --target md --check",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
