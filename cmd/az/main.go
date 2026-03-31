@@ -17,7 +17,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "-v", "--version":
-			fmt.Println(buildinfo.Version)
+			fmt.Println(buildinfo.VersionString())
 			return
 		case "help", "-h", "--help":
 			cli.PrintUsage()
@@ -337,7 +337,7 @@ func main() {
 		case "get":
 			opts, err := cli.ParseIssueGetArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -365,7 +365,7 @@ func main() {
 		case "check":
 			opts, err := cli.ParseIssueCheckArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

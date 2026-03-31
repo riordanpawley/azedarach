@@ -2,9 +2,9 @@ Usage: az issue <list|get|get-many|check|doctor|create|update|close|delete|dep|b
 
 Commands:
   list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
-  get [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]  Show a single issue by ID
+  get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Show a single issue by ID
   get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
-  check [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]  Alias for get
+  check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
   doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]  Run integrity checks for one issue
   create [--project <project-id>] <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
   update [--project <project-id>] [--id <issue-id>] [<issue-id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields

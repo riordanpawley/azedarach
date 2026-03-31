@@ -334,7 +334,7 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
 
-	cmd := exec.Command("git", "-C", projectDir, "config", "core.hooksPath", ".githooks")
+	cmd := newGitCommand(projectDir, "config", "core.hooksPath", ".githooks")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("set git core.hooksPath: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
@@ -367,7 +367,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 	if specSyncCfg.Enabled {
 		command := strings.TrimSpace(specSyncCfg.Command)
 		if command == "" {
-			command = "az spec sync --target md"
+			return fmt.Errorf("githooks spec sync command is enabled but no command is configured")
 		}
 		if opts.Verbose {
 			fmt.Printf("githooks: spec sync command: %s\n", command)
@@ -378,7 +378,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 
 		if specSyncCfg.AutoStageDocs {
 			if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec")); err == nil {
-				stageCmd := exec.Command("git", "-C", projectDir, "add", "docs/spec")
+				stageCmd := newGitCommand(projectDir, "add", "docs/spec")
 				if output, err := stageCmd.CombinedOutput(); err != nil {
 					return fmt.Errorf("githooks spec sync auto-stage failed: %w (%s)", err, strings.TrimSpace(string(output)))
 				}
@@ -399,7 +399,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 		if shouldRun {
 			command := strings.TrimSpace(boundaryCfg.Command)
 			if command == "" {
-				command = "just check-boundaries"
+				return fmt.Errorf("githooks boundary check is enabled but no command is configured")
 			}
 			if opts.Verbose {
 				fmt.Printf("githooks: boundary command: %s\n", command)
@@ -879,13 +879,14 @@ func resolveProjectDir(projectDir string, deps *Dependencies) (string, error) {
 func runShellCommand(projectDir, command string) error {
 	cmd := exec.Command("/bin/sh", "-lc", command)
 	cmd.Dir = projectDir
+	cmd.Env = gitExecEnvWithoutRoutingVars()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func hasBoundaryRelevantStagedPaths(projectDir string) (bool, error) {
-	cmd := exec.Command("git", "-C", projectDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	cmd := newGitCommand(projectDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, err

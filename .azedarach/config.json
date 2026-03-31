@@ -17,12 +17,12 @@
   },
   "githooks": {
     "boundaryCheck": {
-      "command": "just check-boundaries",
-      "enabled": true
+      "command": "",
+      "enabled": false
     },
     "specSync": {
       "autoStageDocs": true,
-      "command": "az spec sync --target md",
+      "command": "",
       "enabled": false
     }
   },

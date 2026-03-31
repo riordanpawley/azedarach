@@ -19,6 +19,7 @@ type HelloAck struct {
 	Accepted              bool      `json:"accepted" msgpack:"accepted"`
 	DaemonProtocolVersion Version   `json:"daemon_protocol_version" msgpack:"daemon_protocol_version"`
 	DaemonVersion         string    `json:"daemon_version" msgpack:"daemon_version"`
+	DaemonProjectID       string    `json:"daemon_project_id,omitempty" msgpack:"daemon_project_id,omitempty"`
 	ErrorCode             ErrorCode `json:"error_code,omitempty" msgpack:"error_code,omitempty"`
 	RetryAfterRestart     bool      `json:"retry_after_restart,omitempty" msgpack:"retry_after_restart,omitempty"`
 	Reason                string    `json:"reason,omitempty" msgpack:"reason,omitempty"`

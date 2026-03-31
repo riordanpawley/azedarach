@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"syscall"
@@ -125,6 +126,104 @@ func TestSubscribeStreamsEvents(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for event")
+	}
+}
+
+func TestCommandHonorsContextDeadlineOverDefaultTimeout(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socket := tempSocketPath(t)
+	defer os.Remove(socket)
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			time.Sleep(6 * time.Second)
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				CompletedAt:     time.Now().UTC(),
+				OK:              true,
+			}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
+
+	client := NewClient(socket)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cmdCancel()
+
+	_, err := client.Command(cmdCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-context-deadline",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		SentAt:          time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("command: %v", err)
+	}
+}
+
+func TestCommandTimesOutWhenContextDeadlineIsShorterThanClientTimeout(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socket := tempSocketPath(t)
+	defer os.Remove(socket)
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			time.Sleep(800 * time.Millisecond)
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				CompletedAt:     time.Now().UTC(),
+				OK:              true,
+			}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	waitForSocket(t, socket, errCh)
+
+	client := NewClient(socket).WithTimeout(10 * time.Second)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cmdCancel()
+
+	_, err := client.Command(cmdCtx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-short-context",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		SentAt:          time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("expected timeout error, got: %v", err)
 	}
 }
 

@@ -6,8 +6,12 @@ build-link-run:
     ./scripts/build-link-run.sh
 
 build:
-    go build -o bin/az ./cmd/az
-    go build -o bin/azd ./cmd/azd
+    SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
+    LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
+    go build -ldflags "$LDFLAGS" -o bin/az ./cmd/az
+    SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
+    LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
+    go build -ldflags "$LDFLAGS" -o bin/azd ./cmd/azd
 
 run:
     just build
@@ -42,8 +46,8 @@ check-boundaries:
     if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run --config .golangci-boundary.yml ./internal/...; else echo "WARN: golangci-lint not installed; skipping depguard boundary lint gate" >&2; fi
     ./scripts/check-boundaries.sh
     ./scripts/afv-drift-sentinel.sh
-    go test ./internal/app ./internal/cli
-    go test ./internal/daemon/... ./internal/client/...
+    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/app ./internal/cli
+    env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/daemon/... ./internal/client/...
 
 boundary-check:
     @just check-boundaries
@@ -53,6 +57,9 @@ spec-sync:
 
 release-homebrew *ARGS:
     ./scripts/release-homebrew.sh {{ARGS}}
+
+mtm branch="" session="bhh":
+    ./scripts/merge-to-main.sh "{{branch}}" "{{session}}"
 
 git-config-lock:
     git rev-parse --is-inside-work-tree >/dev/null

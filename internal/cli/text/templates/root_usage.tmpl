@@ -22,9 +22,9 @@ Commands:
   operation <subcommand>     Inspect/cancel background operations (get|list|cancel)
   opencode <init|plugin>     Manage OpenCode integration
   issue list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
-  issue get [--project <project-id>] [--id <id>] [--json] [--deps] [<id>]  Show a single issue from daemon-backed store
+  issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
-  issue check [--project <project-id>] [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
+  issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [<id>]  Run integrity checks for one issue
   issue create [--project <project-id>] <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
   issue update [--project <project-id>] [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
@@ -58,8 +58,8 @@ Examples:
   az issue list --deps
   az issue get --id az-123 --json
   az issue get-many --id az-123 --id az-456 --json
-  az issue get --id az-123 --deps
-  az issue check --id az-123 --deps
+  az issue get --id az-123
+  az issue check --id az-123
   az issue doctor --id az-123
   az issue create "New task" --impl go-bubbletea --type task --priority P2
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1 --update-impl go-bubbletea

@@ -90,7 +90,6 @@ type IssueGetOptions struct {
 	Project string
 	IssueID string
 	JSON    bool
-	Deps    bool
 }
 
 type IssueGetManyOptions struct {
@@ -103,7 +102,6 @@ type IssueCheckOptions struct {
 	Project string
 	IssueID string
 	JSON    bool
-	Deps    bool
 }
 
 type IssueCreateOptions struct {
@@ -230,7 +228,10 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 		return nil, fmt.Errorf("failed to resolve project root from %q: %w", absRepoDir, err)
 	}
 
-	projectID := filepath.Base(rootRepoDir)
+	projectID, err := config.ProjectIDForRoot(rootRepoDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive project id from %q: %w", rootRepoDir, err)
+	}
 	socketPath := config.DaemonSocketPathFor(absRepoDir)
 	daemonTransport := transport.NewClient(socketPath)
 
@@ -627,13 +628,12 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
-	fs.BoolVar(&opts.Deps, "deps", false, "include dependency details")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	if err := fs.Parse(args); err != nil {
 		return IssueGetOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -642,7 +642,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]")
+		return IssueGetOptions{}, fmt.Errorf("usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -731,13 +731,12 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
 	getOpts, err := ParseIssueGetArgs(args)
 	if err != nil {
-		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]")
+		return IssueCheckOptions{}, fmt.Errorf("usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	return IssueCheckOptions{
 		Project: getOpts.Project,
 		IssueID: getOpts.IssueID,
 		JSON:    getOpts.JSON,
-		Deps:    getOpts.Deps,
 	}, nil
 }
 
@@ -1520,10 +1519,8 @@ func IssueGetCommand(deps *Dependencies, opts IssueGetOptions) error {
 	}
 	dependencies, dependents := buildDependencyProjection(task, snapshot.Tasks)
 	fmt.Printf("Dependencies: %d\n", len(dependencies))
-	if opts.Deps {
-		printDependencies(dependencies)
-		printDependents(dependents)
-	}
+	printDependencies(dependencies)
+	printDependents(dependents)
 	if task.Description != "" {
 		fmt.Printf("Description: %s\n", task.Description)
 	}
@@ -1537,7 +1534,6 @@ func IssueCheckCommand(deps *Dependencies, opts IssueCheckOptions) error {
 		Project: opts.Project,
 		IssueID: opts.IssueID,
 		JSON:    opts.JSON,
-		Deps:    opts.Deps,
 	})
 }
 
@@ -2338,23 +2334,29 @@ func formatDependencySummary(deps []domain.Dependency) string {
 	return strings.Join(parts, ",")
 }
 
-func printDependencies(deps []domain.Dependency) {
+type dependencyDetails struct {
+	ID     string
+	Type   domain.DependencyType
+	Status string
+}
+
+func printDependencies(deps []dependencyDetails) {
 	if len(deps) == 0 {
 		return
 	}
 	fmt.Println("Dependency edges:")
 	for _, dep := range deps {
-		fmt.Printf("- %s (%s)\n", dep.ID, dep.Type)
+		fmt.Printf("- %s (%s, status=%s)\n", dep.ID, dep.Type, dep.Status)
 	}
 }
 
-func printDependents(deps []domain.Dependency) {
+func printDependents(deps []dependencyDetails) {
 	if len(deps) == 0 {
 		return
 	}
 	fmt.Println("Dependents:")
 	for _, dep := range deps {
-		fmt.Printf("- %s (%s)\n", dep.ID, dep.Type)
+		fmt.Printf("- %s (%s, status=%s)\n", dep.ID, dep.Type, dep.Status)
 	}
 }
 
@@ -2422,8 +2424,13 @@ func buildListDependencyContext(tasks []domain.Task) ([]string, []dependencyLink
 	return topLevelIDs, links
 }
 
-func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]domain.Dependency, []domain.Dependency) {
-	dependencies := make([]domain.Dependency, 0, len(task.Dependencies)+1)
+func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]dependencyDetails, []dependencyDetails) {
+	statusByID := make(map[string]string, len(allTasks))
+	for _, candidate := range allTasks {
+		statusByID[candidate.ID] = candidate.Status.String()
+	}
+
+	dependencies := make([]dependencyDetails, 0, len(task.Dependencies)+1)
 	seenDependencies := make(map[string]struct{}, len(task.Dependencies)+1)
 
 	addDependency := func(dep domain.Dependency) {
@@ -2436,7 +2443,15 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]doma
 			return
 		}
 		seenDependencies[key] = struct{}{}
-		dependencies = append(dependencies, domain.Dependency{ID: id, Type: dep.Type})
+		status := statusByID[id]
+		if status == "" {
+			status = "unknown"
+		}
+		dependencies = append(dependencies, dependencyDetails{
+			ID:     id,
+			Type:   dep.Type,
+			Status: status,
+		})
 	}
 
 	for _, dep := range task.Dependencies {
@@ -2449,7 +2464,7 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]doma
 		})
 	}
 
-	dependents := make([]domain.Dependency, 0, 8)
+	dependents := make([]dependencyDetails, 0, 8)
 	seenDependents := map[string]struct{}{}
 	addDependent := func(dep domain.Dependency) {
 		id := strings.TrimSpace(dep.ID)
@@ -2461,7 +2476,15 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]doma
 			return
 		}
 		seenDependents[key] = struct{}{}
-		dependents = append(dependents, domain.Dependency{ID: id, Type: dep.Type})
+		status := statusByID[id]
+		if status == "" {
+			status = "unknown"
+		}
+		dependents = append(dependents, dependencyDetails{
+			ID:     id,
+			Type:   dep.Type,
+			Status: status,
+		})
 	}
 
 	for _, candidate := range allTasks {
@@ -3077,6 +3100,29 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 	}
 	if !ack.Accepted {
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
+	}
+	if strings.TrimSpace(ack.DaemonProjectID) != "" &&
+		strings.TrimSpace(deps.ProjectID) != "" &&
+		!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
+		if err := launcher.Replace(ctx); err != nil {
+			return fmt.Errorf("daemon project mismatch (%s != %s): replace failed: %w", ack.DaemonProjectID, deps.ProjectID, err)
+		}
+		ack, err = orch.EnsureAttached(ctx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      clientName,
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if err != nil {
+			return fmt.Errorf("daemon re-attach failed after project mismatch: %w", err)
+		}
+		if !ack.Accepted {
+			return fmt.Errorf("daemon handshake rejected after project mismatch: %s", ack.Reason)
+		}
+		if strings.TrimSpace(ack.DaemonProjectID) != "" &&
+			!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
+			return fmt.Errorf("daemon project mismatch after replace (%s != %s)", ack.DaemonProjectID, deps.ProjectID)
+		}
 	}
 	return nil
 }

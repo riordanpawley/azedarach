@@ -83,12 +83,13 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(defaultTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(defaultTimeout))
 
 	first, err := readFrame(conn, s.codec)
 	if err != nil {
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	switch first.Type {
 	case frameTypeHello:
 		if first.Hello == nil {
@@ -112,6 +113,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
+		_ = conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
 		_ = writeFrame(conn, s.codec, rpcFrame{
 			Type:     frameTypeHelloAck,
 			HelloAck: &ack,
@@ -142,12 +144,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				},
 			}
 		}
+		_ = conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
 		_ = writeFrame(conn, s.codec, rpcFrame{
 			Type:     frameTypeResponse,
 			Response: &resp,
 		})
 	case frameTypeSubscribe:
-		_ = conn.SetDeadline(time.Time{})
+		_ = conn.SetReadDeadline(time.Time{})
+		_ = conn.SetWriteDeadline(time.Time{})
 		if first.Subscribe == nil || first.Subscribe.ProjectID == "" {
 			_ = writeFrame(conn, s.codec, rpcFrame{
 				Type: frameTypeError,

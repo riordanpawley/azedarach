@@ -50,8 +50,12 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
 	}
-	if deps.ProjectID != filepath.Base(repo) {
-		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, filepath.Base(repo))
+	wantProjectID, err := config.ProjectIDForRoot(repo)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot() error = %v", err)
+	}
+	if deps.ProjectID != wantProjectID {
+		t.Fatalf("ProjectID = %q, want %q", deps.ProjectID, wantProjectID)
 	}
 	if deps.DaemonSocket != config.GlobalDaemonSocketPath() {
 		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.GlobalDaemonSocketPath())
@@ -82,6 +86,59 @@ func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
 	}
 	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
 		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	}
+}
+
+func TestNewDependenciesAtUsesDistinctProjectIDsForDistinctRoots(t *testing.T) {
+	base := t.TempDir()
+	startA := filepath.Join(base, "a", "repo")
+	startB := filepath.Join(base, "b", "repo")
+
+	if err := os.MkdirAll(filepath.Join(startA, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(startA .git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(startB, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(startB .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+
+	depsA, err := NewDependenciesAt(config.DefaultConfig(), startA)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt(startA) error = %v", err)
+	}
+	depsB, err := NewDependenciesAt(config.DefaultConfig(), startB)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt(startB) error = %v", err)
+	}
+
+	if depsA.ProjectID == depsB.ProjectID {
+		t.Fatalf("ProjectID collision: %q", depsA.ProjectID)
+	}
+}
+
+func TestNewDependenciesAtIgnoresAmbientGitDirRoutingVars(t *testing.T) {
+	base := t.TempDir()
+	repoA := filepath.Join(base, "repo-a")
+	repoB := filepath.Join(base, "repo-b")
+
+	if err := os.MkdirAll(filepath.Join(repoA, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repoA .git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoB, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repoB .git): %v", err)
+	}
+
+	t.Setenv("PATH", "")
+	t.Setenv("GIT_DIR", filepath.Join(repoA, ".git"))
+	t.Setenv("GIT_WORK_TREE", repoA)
+
+	deps, err := NewDependenciesAt(config.DefaultConfig(), repoB)
+	if err != nil {
+		t.Fatalf("NewDependenciesAt() error = %v", err)
+	}
+	if deps.RepoDir != repoB {
+		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repoB)
 	}
 }
 
@@ -1150,32 +1207,32 @@ func TestParseIssueGetArgs(t *testing.T) {
 		{
 			name: "defaults",
 			args: []string{"az-1"},
-			want: IssueGetOptions{IssueID: "az-1", JSON: false, Deps: false},
+			want: IssueGetOptions{IssueID: "az-1", JSON: false},
 		},
 		{
 			name: "json output",
 			args: []string{"--json", "az-2"},
-			want: IssueGetOptions{IssueID: "az-2", JSON: true, Deps: false},
-		},
-		{
-			name: "deps projection",
-			args: []string{"--deps", "az-3"},
-			want: IssueGetOptions{IssueID: "az-3", JSON: false, Deps: true},
+			want: IssueGetOptions{IssueID: "az-2", JSON: true},
 		},
 		{
 			name:        "missing issue id",
 			args:        []string{},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		},
 		{
 			name:        "too many args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]",
+			errContains: "usage: az issue get [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
+		},
+		{
+			name:        "deps flag rejected",
+			args:        []string{"--deps", "az-3"},
+			errContains: "flag provided but not defined: -deps",
 		},
 		{
 			name: "named id",
 			args: []string{"--id", "az-4"},
-			want: IssueGetOptions{IssueID: "az-4", JSON: false, Deps: false},
+			want: IssueGetOptions{IssueID: "az-4", JSON: false},
 		},
 	}
 
@@ -1199,15 +1256,15 @@ func TestParseIssueGetArgs(t *testing.T) {
 }
 
 func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
-	check, err := ParseIssueCheckArgs([]string{"--deps", "az-1"})
+	check, err := ParseIssueCheckArgs([]string{"az-1"})
 	if err != nil {
 		t.Fatalf("ParseIssueCheckArgs() error = %v", err)
 	}
-	if check.IssueID != "az-1" || !check.Deps || check.JSON {
+	if check.IssueID != "az-1" || check.JSON {
 		t.Fatalf("ParseIssueCheckArgs() = %+v", check)
 	}
 	_, err = ParseIssueCheckArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [--deps] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
 		t.Fatalf("expected check usage error, got %v", err)
 	}
 
@@ -1977,12 +2034,12 @@ func TestIssueGetCommandDepsProjection(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-8", Deps: true})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-8"})
 	})
 	if !strings.Contains(output, "Dependency edges:") {
 		t.Fatalf("deps output missing dependency section: %q", output)
 	}
-	if !strings.Contains(output, "- az-2 (blocks)") || !strings.Contains(output, "- az-5 (related)") {
+	if !strings.Contains(output, "- az-2 (blocks, status=unknown)") || !strings.Contains(output, "- az-5 (related, status=unknown)") {
 		t.Fatalf("deps output missing dependency rows: %q", output)
 	}
 }
@@ -2033,16 +2090,16 @@ func TestIssueGetCommandDepsProjectionCanonicalTypes(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-9", Deps: true})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: "az-9"})
 	})
 	if !strings.Contains(output, "Dependency edges:") {
 		t.Fatalf("deps output missing dependency section: %q", output)
 	}
 	for _, want := range []string{
-		"- az-a (blocks)",
-		"- az-b (parent-child)",
-		"- az-c (related)",
-		"- az-d (discovered-from)",
+		"- az-a (blocks, status=unknown)",
+		"- az-b (parent-child, status=unknown)",
+		"- az-c (related, status=unknown)",
+		"- az-d (discovered-from, status=unknown)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("deps output missing %q: %q", want, output)
@@ -2112,13 +2169,13 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID, Deps: true})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID})
 	})
 	for _, want := range []string{
 		"Dependency edges:",
-		"- az-parent (parent-child)",
+		"- az-parent (parent-child, status=open)",
 		"Dependents:",
-		"- az-child (parent-child)",
+		"- az-child (parent-child, status=open)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("deps projection missing %q: %q", want, output)
@@ -2533,7 +2590,7 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 
 	checkOut := captureStdout(t, func() error {
-		return IssueCheckCommand(deps, IssueCheckOptions{IssueID: "az-1", Deps: true})
+		return IssueCheckCommand(deps, IssueCheckOptions{IssueID: "az-1"})
 	})
 	if !strings.Contains(checkOut, "ID: az-1") {
 		t.Fatalf("check output = %q", checkOut)
@@ -3037,13 +3094,13 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
-	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [--deps] [<id>]") {
+	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue get command: %q", output)
 	}
 	if !strings.Contains(output, "issue get-many [--project <project-id>] --id <id>") {
 		t.Fatalf("usage missing issue get-many command: %q", output)
 	}
-	if !strings.Contains(output, "issue check [--project <project-id>] [--id <id>] [--json] [--deps] [<id>]") {
+	if !strings.Contains(output, "issue check [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue check command: %q", output)
 	}
 	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [<id>]") {
@@ -3376,6 +3433,70 @@ func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	err := RestartDaemonCommand(deps)
 	if err == nil || !strings.Contains(err.Error(), "restart daemon: boom") {
 		t.Fatalf("error = %v, want restart daemon boom", err)
+	}
+}
+
+func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	handshakes := 0
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				handshakes++
+				if handshakes == 1 {
+					return protocol.HelloAck{Accepted: true, DaemonProjectID: "other-proj"}, nil
+				}
+				return protocol.HelloAck{Accepted: true, DaemonProjectID: "proj"}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
+		t.Fatalf("ensureDaemon() error = %v", err)
+	}
+	if !fake.replaceCalled {
+		t.Fatalf("expected replace to be called on daemon project mismatch")
+	}
+	if handshakes < 2 {
+		t.Fatalf("handshakes = %d, want at least 2", handshakes)
+	}
+}
+
+func TestEnsureDaemonProjectMismatchReplaceFailure(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{replaceErr: errors.New("replace failed")}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true, DaemonProjectID: "wrong"}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+		RepoDir:   t.TempDir(),
+	}
+
+	err := ensureDaemon(context.Background(), deps, "cli")
+	if err == nil || !strings.Contains(err.Error(), "replace failed") {
+		t.Fatalf("error = %v, want replace failure", err)
 	}
 }
 

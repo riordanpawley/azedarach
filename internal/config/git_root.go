@@ -46,7 +46,8 @@ func ResolveWorktreeRoot(startPath string) (string, error) {
 }
 
 func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
-	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	cmd := gitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
@@ -54,7 +55,8 @@ func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
 }
 
 func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
-	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--show-toplevel").Output()
+	cmd := gitExecCommand(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git worktree root: %w", err)
 	}
@@ -63,6 +65,39 @@ func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
 		return "", fmt.Errorf("resolve git worktree root: empty output")
 	}
 	return root, nil
+}
+
+func gitExecCommand(startDir string, args ...string) *exec.Cmd {
+	cmdArgs := append([]string{"-C", startDir}, args...)
+	cmd := exec.Command("git", cmdArgs...)
+	cmd.Env = gitExecEnv(os.Environ())
+	return cmd
+}
+
+func gitExecEnv(env []string) []string {
+	const (
+		gitDirKey           = "GIT_DIR="
+		gitWorkTreeKey      = "GIT_WORK_TREE="
+		gitCommonDirKey     = "GIT_COMMON_DIR="
+		gitIndexFileKey     = "GIT_INDEX_FILE="
+		gitObjectDirKey     = "GIT_OBJECT_DIRECTORY="
+		gitAltObjectDirsKey = "GIT_ALTERNATE_OBJECT_DIRECTORIES="
+	)
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, gitDirKey),
+			strings.HasPrefix(kv, gitWorkTreeKey),
+			strings.HasPrefix(kv, gitCommonDirKey),
+			strings.HasPrefix(kv, gitIndexFileKey),
+			strings.HasPrefix(kv, gitObjectDirKey),
+			strings.HasPrefix(kv, gitAltObjectDirsKey):
+			continue
+		default:
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func resolveBaseGitRootFromGitMarker(startDir string) (string, error) {
