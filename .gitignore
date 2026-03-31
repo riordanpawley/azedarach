@@ -89,3 +89,4 @@ coverage/
 /.azedarach.schema.json
 /reference-effect
 /go-bubbletea
+/ts-opentui
