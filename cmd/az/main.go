@@ -356,7 +356,7 @@ func main() {
 		case "create":
 			opts, err := cli.ParseIssueCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue create <title> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue create <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -370,7 +370,7 @@ func main() {
 		case "update":
 			opts, err := cli.ParseIssueUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue update [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -469,7 +469,7 @@ func main() {
 		case "bulk-create":
 			opts, err := cli.ParseIssueBulkCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create --impl <implementation> --input <path> [--dry-run]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -483,7 +483,7 @@ func main() {
 		case "bulk-update":
 			opts, err := cli.ParseIssueBulkUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update --impl <implementation> --input <path> [--dry-run]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

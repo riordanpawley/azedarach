@@ -24,15 +24,15 @@ Commands:
   issue get-many --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--id <id>] [--json] [--deps] [<id>]  Alias for issue get
   issue doctor [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create <title> [--type ...] [--priority ...] [--description ...]  Create an issue
-  issue update [--id <id>] [<id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...]  Update issue fields
+  issue create <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue update [--id <id>] [<id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   issue close [--id <id>] [<id>]      Close an issue (sets status=closed)
   issue delete [--id <id>] [<id>] --confirm  Permanently delete an issue
   issue dep add --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
   issue dep remove --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
   issue dep bulk apply --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create --input <path> [--dry-run]  Execute bulk create operations
-  issue bulk-update --input <path> [--dry-run]  Execute bulk update operations
+  issue bulk-create --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
+  issue bulk-update --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
   issue fanout --input <path> [--apply] [--json]  Plan/apply nested issue fanout
   issue fanout ready --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
@@ -59,15 +59,15 @@ Examples:
   az issue get --id az-123 --deps
   az issue check --id az-123 --deps
   az issue doctor --id az-123
-  az issue create "New task" --type task --priority P2
-  az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1
+  az issue create "New task" --impl go-bubbletea --type task --priority P2
+  az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1 --update-impl go-bubbletea
   az issue close --id az-123
   az issue delete --id az-123 --confirm
   az issue dep add --issue-id az-456 --depends-on-id az-123 --type blocks
   az issue dep remove --issue-id az-456 --depends-on-id az-123 --type blocks --confirm
   az issue dep bulk apply --input ./dep-bulk.json --dry-run --json
-  az issue bulk-create --input ./bulk-create.json
-  az issue bulk-update --input ./bulk-update.json --dry-run
+  az issue bulk-create --impl go-bubbletea --input ./bulk-create.json
+  az issue bulk-update --impl go-bubbletea --input ./bulk-update.json --dry-run
   az issue fanout --input ./fanout.json
   az issue fanout --input ./fanout.json --apply
   az issue fanout ready --root az-123 --json
