@@ -72,6 +72,11 @@ type SyncOptions struct {
 	ProjectDir string
 }
 
+type ImplDeleteOptions struct {
+	Implementation string
+	Confirm        bool
+}
+
 type IssueListOptions struct {
 	JSON  bool
 	Deps  bool
@@ -421,6 +426,27 @@ func ParseSyncArgs(args []string) (SyncOptions, error) {
 		opts.ProjectDir = strings.TrimSpace(fs.Arg(0))
 	default:
 		return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
+	}
+	return opts, nil
+}
+
+func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
+	opts := ImplDeleteOptions{}
+	fs := flag.NewFlagSet("impl delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm deletion of implementation assignments")
+	if err := fs.Parse(args); err != nil {
+		return ImplDeleteOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return ImplDeleteOptions{}, fmt.Errorf("usage: az impl delete <implementation> --confirm")
+	}
+	opts.Implementation = strings.TrimSpace(fs.Arg(0))
+	if opts.Implementation == "" {
+		return ImplDeleteOptions{}, fmt.Errorf("usage: az impl delete <implementation> --confirm")
+	}
+	if !opts.Confirm {
+		return ImplDeleteOptions{}, fmt.Errorf("missing required flag: --confirm")
 	}
 	return opts, nil
 }
@@ -1147,6 +1173,63 @@ func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 	if err := os.WriteFile(opts.Out, resp.Body, 0644); err != nil {
 		return fmt.Errorf("write export output to %s: %w", opts.Out, err)
 	}
+	return nil
+}
+
+func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	impl := strings.TrimSpace(opts.Implementation)
+	if impl == "" {
+		return fmt.Errorf("implementation is required")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list issues for implementation delete: %w", err)
+	}
+
+	updated := make([]string, 0, 8)
+	for _, task := range snapshot.Tasks {
+		if len(task.Implementations) == 0 {
+			continue
+		}
+		nextImpls := make([]string, 0, len(task.Implementations))
+		removed := false
+		for _, existing := range task.Implementations {
+			if strings.TrimSpace(existing) == impl {
+				removed = true
+				continue
+			}
+			nextImpls = append(nextImpls, existing)
+		}
+		if !removed {
+			continue
+		}
+
+		update := daemonclient.TaskUpdateParams{
+			Title:           task.Title,
+			Description:     task.Description,
+			Type:            task.Type,
+			Priority:        task.Priority,
+			Implementations: nextImpls,
+		}
+		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID, update); err != nil {
+			return fmt.Errorf("failed to remove implementation %s from issue %s: %w", impl, task.ID, err)
+		}
+		updated = append(updated, task.ID)
+	}
+
+	if len(updated) == 0 {
+		fmt.Printf("No issues reference implementation: %s\n", impl)
+		return nil
+	}
+	fmt.Printf("Deleted implementation assignment: %s\n", impl)
+	fmt.Printf("Updated issues: %d\n", len(updated))
 	return nil
 }
 

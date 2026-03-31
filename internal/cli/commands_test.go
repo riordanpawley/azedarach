@@ -647,6 +647,59 @@ func TestParseSyncArgs(t *testing.T) {
 	}
 }
 
+func TestParseImplDeleteArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        ImplDeleteOptions
+		errContains string
+	}{
+		{
+			name: "valid",
+			args: []string{"--confirm", "go-bubbletea"},
+			want: ImplDeleteOptions{Implementation: "go-bubbletea", Confirm: true},
+		},
+		{
+			name:        "missing confirm",
+			args:        []string{"go-bubbletea"},
+			errContains: "missing required flag: --confirm",
+		},
+		{
+			name:        "missing implementation",
+			args:        []string{"--confirm"},
+			errContains: "usage: az impl delete <implementation> --confirm",
+		},
+		{
+			name:        "extra args",
+			args:        []string{"go-bubbletea", "extra", "--confirm"},
+			errContains: "usage: az impl delete <implementation> --confirm",
+		},
+		{
+			name:        "reject positional before flag",
+			args:        []string{"go-bubbletea", "--confirm"},
+			errContains: "usage: az impl delete <implementation> --confirm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseImplDeleteArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseImplDeleteArgs() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseImplDeleteArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExportCommandWritesStdoutByDefault(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
 	payload := mustSnapshotPayloadJSON(t, protocol.SnapshotPayload{
@@ -909,6 +962,89 @@ func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(output, "Snapshot: tasks=2 revision=42") {
 		t.Fatalf("sync output missing snapshot summary: %q", output)
+	}
+}
+
+func TestImplDeleteCommandRemovesAssignmentsAcrossIssues(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "One", Description: "desc", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, Implementations: []string{"go-bubbletea", "ts-opentui"}},
+		{ID: "az-2", Title: "Two", Description: "desc", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug, Implementations: []string{"ts-opentui"}},
+		{ID: "az-3", Title: "Three", Description: "desc", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeFeature, Implementations: []string{"go-bubbletea"}},
+	}
+	payload, err := json.Marshal(tasks)
+	if err != nil {
+		t.Fatalf("marshal tasks: %v", err)
+	}
+
+	type updateReq struct {
+		TaskID string `json:"task_id"`
+		daemonclient.TaskUpdateParams
+	}
+	updates := make([]updateReq, 0, 2)
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            payload,
+					}, nil
+				case daemonclient.CommandTaskUpdate:
+					var body updateReq
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("unmarshal update request: %v", err)
+					}
+					updates = append(updates, body)
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return ImplDeleteCommand(deps, ImplDeleteOptions{Implementation: "ts-opentui", Confirm: true})
+	})
+	if !strings.Contains(output, "Deleted implementation assignment: ts-opentui") {
+		t.Fatalf("output missing delete summary: %q", output)
+	}
+	if !strings.Contains(output, "Updated issues: 2") {
+		t.Fatalf("output missing update count: %q", output)
+	}
+	if len(updates) != 2 {
+		t.Fatalf("update call count = %d, want 2", len(updates))
+	}
+
+	got := map[string][]string{}
+	for _, update := range updates {
+		got[update.TaskID] = update.Implementations
+	}
+	if !reflect.DeepEqual(got["az-1"], []string{"go-bubbletea"}) {
+		t.Fatalf("az-1 implementations = %+v, want [go-bubbletea]", got["az-1"])
+	}
+	if len(got["az-2"]) != 0 {
+		t.Fatalf("az-2 implementations = %+v, want empty", got["az-2"])
+	}
+	if _, ok := got["az-3"]; ok {
+		t.Fatalf("did not expect az-3 update, got map=%+v", got)
 	}
 }
 
@@ -2842,8 +2978,14 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "sync [--all] [<directory>] [--project-dir <dir>]") {
 		t.Fatalf("usage missing sync command: %q", output)
 	}
+	if !strings.Contains(output, "impl delete <implementation> --confirm") {
+		t.Fatalf("usage missing impl delete command: %q", output)
+	}
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
+	}
+	if !strings.Contains(output, "az impl delete ts-opentui --confirm") {
+		t.Fatalf("usage missing impl delete example: %q", output)
 	}
 	if !strings.Contains(output, "operation <subcommand>") {
 		t.Fatalf("usage missing operation command family: %q", output)
