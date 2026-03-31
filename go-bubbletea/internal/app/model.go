@@ -1167,6 +1167,8 @@ func (m Model) View() string {
 	sb.SetEventTicker(m.eventTicker)
 	sb.SetCurrentProject(m.daemonProjectID())
 	sb.SetSelectionSummary(m.selectionSummary())
+	sb.SetFilterSummary(m.filterSummary())
+	sb.SetSortSummary(m.sortSummary())
 	if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
@@ -1650,10 +1652,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editor.EnterNormal()
 			return m, nil
 		}
+		if m.editor.IsSearch() {
+			m.editor.ClearSearch()
+			m.editor.EnterNormal()
+			return m, nil
+		}
 		if !m.editor.IsNormal() {
 			m.editor.EnterNormal()
 			return m, nil
 		}
+		if m.editor.IsFilterActive() {
+			m.editor.ClearFilters()
+			columns := m.buildColumns()
+			m.ensureCursorVisible(columns)
+		}
+		return m, nil
 	}
 
 	// Mode-specific handling
@@ -3899,6 +3912,57 @@ func (m Model) selectionSummary() string {
 		return fmt.Sprintf("Selected: %d (%d hidden)", len(selected), hiddenCount)
 	}
 	return fmt.Sprintf("Selected: %d", len(selected))
+}
+
+func (m Model) filterSummary() string {
+	filter := m.editor.GetFilter()
+	if filter == nil || !filter.IsActive() {
+		return "F:none"
+	}
+
+	parts := make([]string, 0, 7)
+	if query := strings.TrimSpace(filter.SearchQuery); query != "" {
+		parts = append(parts, "q="+query)
+	}
+	if count := len(filter.Status); count > 0 {
+		parts = append(parts, fmt.Sprintf("st:%d", count))
+	}
+	if count := len(filter.Priority); count > 0 {
+		parts = append(parts, fmt.Sprintf("pr:%d", count))
+	}
+	if count := len(filter.Type); count > 0 {
+		parts = append(parts, fmt.Sprintf("ty:%d", count))
+	}
+	if count := len(filter.SessionState); count > 0 {
+		parts = append(parts, fmt.Sprintf("ss:%d", count))
+	}
+	if !filter.HideEpicChildren {
+		parts = append(parts, "children:show")
+	}
+	if filter.AgeMaxDays != nil {
+		parts = append(parts, fmt.Sprintf("age<=%dd", *filter.AgeMaxDays))
+	}
+	if len(parts) == 0 {
+		return "F:active"
+	}
+	return "F:" + strings.Join(parts, ",")
+}
+
+func (m Model) sortSummary() string {
+	sortState := m.editor.GetSort()
+	if sortState == nil {
+		return "S:session/asc"
+	}
+
+	field := strings.TrimSpace(string(sortState.Field))
+	if field == "" {
+		field = string(domain.SortBySession)
+	}
+	order := "asc"
+	if sortState.Order == domain.SortDesc {
+		order = "desc"
+	}
+	return fmt.Sprintf("S:%s/%s", field, order)
 }
 
 // renderLoading renders a centered loading spinner with message

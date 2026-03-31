@@ -19,6 +19,8 @@ type StatusBar struct {
 	hintBindings     []keybinds.Binding
 	currentProject   string
 	selectionSummary string
+	filterSummary    string
+	sortSummary      string
 	loadingIndicator string
 	eventTicker      *eventticker.Ring
 	styles           *styles.Styles
@@ -36,6 +38,16 @@ func New(mode types.Mode, width int, styles *styles.Styles) StatusBar {
 // SetSelectionSummary sets the optional selection summary rendered in the status bar.
 func (sb *StatusBar) SetSelectionSummary(summary string) {
 	sb.selectionSummary = summary
+}
+
+// SetFilterSummary sets the current filter summary rendered in the status bar.
+func (sb *StatusBar) SetFilterSummary(summary string) {
+	sb.filterSummary = summary
+}
+
+// SetSortSummary sets the current sort summary rendered in the status bar.
+func (sb *StatusBar) SetSortSummary(summary string) {
+	sb.sortSummary = summary
 }
 
 // SetLoadingIndicator sets the loading label rendered before other status hints.
@@ -99,12 +111,41 @@ func (sb StatusBar) Render() string {
 		return appendPart(style, text)
 	}
 
+	mandatorySlots := make([]statusSlot, 0, 2)
+	if strings.TrimSpace(sb.filterSummary) != "" {
+		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusInfo, text: sb.filterSummary})
+	}
+	if strings.TrimSpace(sb.sortSummary) != "" {
+		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusInfo, text: sb.sortSummary})
+	}
+	if len(mandatorySlots) > 0 && contentWidth <= 18 {
+		return sb.styles.StatusBar.Width(sb.width).Render(sb.compactMandatoryStatus())
+	}
 	modeLabel := " " + sb.mode.String() + " "
 	modeLabelWidth := lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
+	if len(mandatorySlots) > 0 {
+		mandatoryNeed := separatorWidth + 3 // compact fallback marker "F/S"
+		if contentWidth < modeLabelWidth+mandatoryNeed {
+			modeLabel = sb.mode.String()
+			modeLabelWidth = lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
+		}
+		if contentWidth < modeLabelWidth+mandatoryNeed {
+			modeLabel = shortModeLabel(sb.mode)
+			modeLabelWidth = lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
+		}
+	}
 
 	if sb.currentProject != "" {
 		projectStyle := sb.styles.StatusInfo.Copy().Bold(true)
-		reservedForMode := modeLabelWidth + separatorWidth
+		reservedForMode := modeLabelWidth
+		switch {
+		case len(mandatorySlots) > 1:
+			// Guarantee room for compact mandatory fallback marker "F/S".
+			reservedForMode += separatorWidth + 3
+		case len(mandatorySlots) == 1:
+			reservedForMode += separatorWidth + 1
+		}
+		reservedForMode += separatorWidth // separator between project and mode
 		projectWidth := contentWidth - reservedForMode
 		if projectWidth > 0 {
 			renderedProject, _ := renderWithin(projectStyle, sb.currentProject, projectWidth)
@@ -117,6 +158,18 @@ func (sb StatusBar) Render() string {
 
 	if !appendSlot(sb.styles.StatusMode, modeLabel) {
 		return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
+	}
+	partsBeforeMandatory := append([]string(nil), parts...)
+	widthBeforeMandatory := visibleWidth
+	for _, slot := range mandatorySlots {
+		if !appendSlot(slot.style, slot.text) {
+			if len(mandatorySlots) > 1 {
+				parts = append([]string(nil), partsBeforeMandatory...)
+				visibleWidth = widthBeforeMandatory
+				_ = appendSlot(sb.styles.StatusInfo, "F/S")
+			}
+			return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
+		}
 	}
 
 	slots := make([]statusSlot, 0, 4)
@@ -215,4 +268,56 @@ func truncateHintBindings(mode types.Mode, bindings []keybinds.Binding) []keybin
 		Description: fmt.Sprintf("+%d more", len(bindings)-maxHints),
 	})
 	return truncated
+}
+
+func shortModeLabel(mode types.Mode) string {
+	switch mode {
+	case types.ModeNormal:
+		return "N"
+	case types.ModeSelect:
+		return "V"
+	case types.ModeSearch:
+		return "/"
+	case types.ModeGoto:
+		return "G"
+	case types.ModeAction:
+		return "A"
+	default:
+		return "?"
+	}
+}
+
+func (sb StatusBar) compactMandatoryStatus() string {
+	parts := []string{shortModeLabel(sb.mode)}
+	if strings.TrimSpace(sb.filterSummary) != "" {
+		parts = append(parts, compactFilterToken(sb.filterSummary))
+	}
+	if strings.TrimSpace(sb.sortSummary) != "" {
+		parts = append(parts, compactSortToken(sb.sortSummary))
+	}
+	return strings.Join(parts, " ")
+}
+
+func compactFilterToken(summary string) string {
+	if strings.EqualFold(strings.TrimSpace(summary), "F:none") {
+		return "F:0"
+	}
+	return "F:1"
+}
+
+func compactSortToken(summary string) string {
+	trimmed := strings.TrimSpace(summary)
+	field := "?"
+	order := "a"
+	if strings.HasPrefix(trimmed, "S:") {
+		payload := strings.TrimPrefix(trimmed, "S:")
+		fieldPart, orderPart, found := strings.Cut(payload, "/")
+		if f := strings.TrimSpace(fieldPart); f != "" {
+			field = strings.ToLower(string(f[0]))
+		}
+		if found && strings.EqualFold(strings.TrimSpace(orderPart), "desc") {
+			order = "d"
+		}
+	}
+	return "S:" + field + order
 }
