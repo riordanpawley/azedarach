@@ -142,29 +142,40 @@ Authority model:
 
 ```mermaid
 flowchart TD
-  A[Select issue] --> B[az session start ISSUE]
-  B --> C[Daemon creates worktree + tmux session]
-  C --> D[Agent implements changes]
-  D --> E[Run gate checks]
-  E --> F[Commit + push branch]
-  F --> G[Create/update draft PR]
-  G --> H[Review + iterate]
-  H --> I[Merge PR]
-  I --> J[az issue close ISSUE]
+  A[User: Select issue] --> B[User: az session start ISSUE]
+  B --> C[Azedarach/Daemon: Create worktree + tmux session]
+  C --> D[AI Agent: Implement changes]
+  D --> E{Azedarach/Daemon: Gate checks pass?}
+  E -->|No| F[AI Agent: Fix code/tests]
+  F --> D
+  E -->|Yes| G{User: Publish strategy}
+  G -->|Create PR| H[AI Agent: Commit + push branch]
+  H --> I[AI Agent: Create/update draft PR]
+  I --> J{Reviewer/User: Review approved?}
+  J -->|No| K[AI Agent: Address review feedback]
+  K --> H
+  J -->|Yes| L[User/Reviewer: Merge PR]
+  L --> M[User or Azedarach: az issue close ISSUE]
+  G -->|Local only| N[User: Keep changes local]
+  N --> O[User: az issue update status]
 ```
 
 ### User Flow: Local-Only Delivery
 
 ```mermaid
 flowchart TD
-  A[Select issue] --> B[az session start ISSUE]
-  B --> C[Daemon creates worktree + tmux session]
-  C --> D[Agent implements changes]
-  D --> E[Run gate checks]
-  E --> F[Commit locally]
-  F --> G[Manual local validation]
-  G --> H[No PR created]
-  H --> I[az issue update status or close]
+  A[User: Select issue] --> B[User: az session start ISSUE]
+  B --> C[Azedarach/Daemon: Create worktree + tmux session]
+  C --> D[AI Agent: Implement changes]
+  D --> E{Azedarach/Daemon: Gate checks pass?}
+  E -->|No| F[AI Agent: Fix code/tests]
+  F --> D
+  E -->|Yes| G{User: Need remote collaboration?}
+  G -->|No| H[AI Agent or User: Commit locally]
+  H --> I{User: Task complete?}
+  I -->|No| D
+  I -->|Yes| J[User: az issue close ISSUE]
+  G -->|Yes| K[User: Switch to PR-based flow]
 ```
 
 ### Agent Flow: TUI-Managed Session
@@ -190,15 +201,24 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  A[Work in issue worktree] --> B{Prime mode}
-  B -->|Manual| C[Run az prime]
-  C --> D[Copy primer into agent prompt]
-  B -->|Hooks-assisted| E[az hooks install ISSUE]
-  E --> F[Agent emits hook event]
-  F --> G[az notify EVENT ISSUE]
-  D --> H[Agent executes with issue context]
-  G --> H
-  H --> I[Optional: az gate ISSUE]
+  A[User: Work in issue worktree] --> B{User: How is context injected?}
+  B -->|Manual priming| C[User: Run az prime]
+  C --> D[User: Paste primer into agent prompt]
+  D --> E[AI Agent: Start with issue/spec context]
+
+  B -->|Hooks-assisted| F[User: az hooks install ISSUE]
+  F --> G[AI Agent: Emit hook event]
+  G --> H{Azedarach: Event type}
+  H -->|idle_prompt| I[Azedarach/User: az notify idle_prompt ISSUE]
+  H -->|session_ready/done| J[Azedarach/User: az notify EVENT ISSUE]
+  I --> E
+  J --> E
+
+  E --> K{User: Need interactive steering?}
+  K -->|Yes| L[User: Attach via TUI/session command]
+  K -->|No| M[AI Agent: Continue unattended]
+  L --> N[User/Azedarach: Optional az gate ISSUE]
+  M --> N
 ```
 
 ## Development Commands
