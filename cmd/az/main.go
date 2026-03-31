@@ -66,7 +66,7 @@ func main() {
 
 	case "branch":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az branch <mtm> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az branch <merge> [arguments]\n")
 			os.Exit(1)
 		}
 		branchCommand := commandArgs[0]
@@ -780,9 +780,9 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 
 func runBranchCommand(cfg *config.Config, command string, args []string) error {
 	switch command {
-	case "mtm", "merge-to-main":
+	case "merge", "mtm", "merge-to-main":
 		if len(args) > 1 {
-			return fmt.Errorf("usage: az branch mtm [issue-id]")
+			return fmt.Errorf("usage: az branch merge [issue-id]")
 		}
 		issueID := ""
 		if len(args) == 1 {
@@ -792,6 +792,6 @@ func runBranchCommand(cfg *config.Config, command string, args []string) error {
 			return cli.BranchMergeToMainCommand(deps, issueID)
 		})
 	default:
-		return fmt.Errorf("unknown branch command: %s (usage: az branch <mtm>)", command)
+		return fmt.Errorf("unknown branch command: %s (usage: az branch <merge>)", command)
 	}
 }

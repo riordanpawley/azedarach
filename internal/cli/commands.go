@@ -399,7 +399,7 @@ func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, i
 			return wt, nil
 		}
 	}
-	return gitservice.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch mtm <issue-id>", absCWD)
+	return gitservice.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
 }
 
 func samePath(left, right string) bool {
@@ -510,7 +510,7 @@ func wrapPendingGitOperation(stage string, err error) error {
 	if strings.TrimSpace(pending.OperationID) == "" {
 		return fmt.Errorf("%s pending: %w", stage, err)
 	}
-	return fmt.Errorf("%s queued as operation %s (%s); run `az operation get --id %s --wait` and rerun `az branch mtm`", stage, pending.OperationID, pending.State, pending.OperationID)
+	return fmt.Errorf("%s queued as operation %s (%s); run `az operation get --id %s --wait` and rerun `az branch merge`", stage, pending.OperationID, pending.State, pending.OperationID)
 }
 
 func OperationGetCommand(deps *Dependencies, opts OperationGetOptions) error {
