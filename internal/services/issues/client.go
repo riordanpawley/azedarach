@@ -82,6 +82,7 @@ func NewClientAtPath(dbPath string, logger *slog.Logger) *Client {
 }
 
 func (c *Client) dbHandle() (*sql.DB, error) {
+	initStartedAt := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -104,20 +105,35 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	pingDoneAt := time.Now()
 	if err := c.configureSQLite(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	configDoneAt := time.Now()
 	if err := c.runMigrations(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	migrationsDoneAt := time.Now()
 	if err := c.normalizeDependencyEnumRows(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	normalizeDoneAt := time.Now()
 
 	c.db = db
+	if c.logger != nil {
+		c.logger.Info(
+			"issue store init timings",
+			"db_path", c.dbPath,
+			"total_ms", normalizeDoneAt.Sub(initStartedAt).Milliseconds(),
+			"ping_ms", pingDoneAt.Sub(initStartedAt).Milliseconds(),
+			"configure_sqlite_ms", configDoneAt.Sub(pingDoneAt).Milliseconds(),
+			"migrations_ms", migrationsDoneAt.Sub(configDoneAt).Milliseconds(),
+			"normalize_dependency_rows_ms", normalizeDoneAt.Sub(migrationsDoneAt).Milliseconds(),
+		)
+	}
 	return c.db, nil
 }
 
