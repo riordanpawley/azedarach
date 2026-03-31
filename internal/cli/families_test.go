@@ -49,7 +49,9 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projectDir, ".githooks"), 0o755); err != nil {
 		t.Fatalf("mkdir .githooks: %v", err)
 	}
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	cmd := exec.Command("git", "-C", projectDir, "init")
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -77,7 +79,9 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 
 func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	cmd := exec.Command("git", "-C", projectDir, "init")
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 

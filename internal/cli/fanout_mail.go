@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -907,14 +906,14 @@ func fanoutDesignMetadata(node fanoutFlatNode) string {
 
 func gitChangedFiles(worktree string) ([]string, error) {
 	cmds := [][]string{
-		{"git", "-C", worktree, "diff", "--name-only"},
-		{"git", "-C", worktree, "diff", "--name-only", "--cached"},
-		{"git", "-C", worktree, "ls-files", "--others", "--exclude-standard"},
+		{"diff", "--name-only"},
+		{"diff", "--name-only", "--cached"},
+		{"ls-files", "--others", "--exclude-standard"},
 	}
 	seen := map[string]struct{}{}
 	out := make([]string, 0, 16)
 	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := newGitCommand(worktree, args...)
 		output, err := cmd.Output()
 		if err != nil {
 			return nil, err
