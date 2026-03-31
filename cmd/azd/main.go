@@ -29,7 +29,7 @@ func main() {
 	flag.Parse()
 
 	if showVersion || (len(flag.Args()) == 1 && flag.Args()[0] == "version") {
-		fmt.Println(buildinfo.Version)
+		fmt.Println(buildinfo.VersionString())
 		return
 	}
 

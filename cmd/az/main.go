@@ -17,7 +17,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "-v", "--version":
-			fmt.Println(buildinfo.Version)
+			fmt.Println(buildinfo.VersionString())
 			return
 		case "help", "-h", "--help":
 			cli.PrintUsage()

@@ -6,8 +6,12 @@ build-link-run:
     ./scripts/build-link-run.sh
 
 build:
-    go build -o bin/az ./cmd/az
-    go build -o bin/azd ./cmd/azd
+    SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
+    LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
+    go build -ldflags "$LDFLAGS" -o bin/az ./cmd/az
+    SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
+    LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
+    go build -ldflags "$LDFLAGS" -o bin/azd ./cmd/azd
 
 run:
     just build

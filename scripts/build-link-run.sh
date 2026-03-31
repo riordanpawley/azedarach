@@ -11,8 +11,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 mkdir -p bin
-go build -o bin/az ./cmd/az
-go build -o bin/azd ./cmd/azd
+sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
+go build -ldflags "$ldflags" -o bin/az ./cmd/az
+go build -ldflags "$ldflags" -o bin/azd ./cmd/azd
 
 choose_link_dir() {
   if [ -n "${AZ_LINK_DIR:-}" ]; then

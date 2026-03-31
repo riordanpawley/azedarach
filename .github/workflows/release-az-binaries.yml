@@ -39,7 +39,7 @@ jobs:
         run: |
           mkdir -p release-assets
           VERSION="${GITHUB_REF_NAME#v}"
-          LDFLAGS="-s -w -X github.com/riordanpawley/azedarach/internal/buildinfo.Version=${VERSION}"
+          LDFLAGS="-s -w -X github.com/riordanpawley/azedarach/internal/buildinfo.Version=${VERSION} -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${GITHUB_SHA}"
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="$LDFLAGS" -o "release-assets/az-${{ matrix.label }}" ./cmd/az
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="$LDFLAGS" -o "release-assets/azd-${{ matrix.label }}" ./cmd/azd
 
