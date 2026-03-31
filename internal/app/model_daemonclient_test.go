@@ -514,6 +514,29 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 }
 
+func TestShouldAttemptDaemonReattach(t *testing.T) {
+	t.Run("socket missing transport error", func(t *testing.T) {
+		err := errors.New("daemon command transport: dial unix /Users/riordan/.azedarach/run/daemon.sock: connect: no such file or directory")
+		if !shouldAttemptDaemonReattach(err) {
+			t.Fatal("expected daemon reattach for missing socket transport error")
+		}
+	})
+
+	t.Run("daemon socket unavailable", func(t *testing.T) {
+		err := errors.New("daemon socket unavailable: stat /tmp/azedarach/daemon.sock: no such file or directory")
+		if !shouldAttemptDaemonReattach(err) {
+			t.Fatal("expected daemon reattach for unavailable socket error")
+		}
+	})
+
+	t.Run("command validation failure", func(t *testing.T) {
+		err := errors.New("failed to update task: invalid request: status transition blocked")
+		if shouldAttemptDaemonReattach(err) {
+			t.Fatal("did not expect daemon reattach for non-transport daemon error")
+		}
+	})
+}
+
 func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

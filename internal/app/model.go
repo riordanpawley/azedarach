@@ -454,8 +454,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		m.loading = false
-		// Still schedule a refresh to retry
-		return m, tickEvery(5 * time.Second)
+		cmds := []tea.Cmd{tickEvery(5 * time.Second)}
+		if shouldAttemptDaemonReattach(msg.err) {
+			cmds = append(cmds, m.attachDaemonCmd())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
@@ -2388,6 +2391,22 @@ type runtimeSignalsLoadedMsg struct {
 	worktreeByTask      map[string]string
 	refreshedAt         time.Time
 	partialFailureCount int
+}
+
+func shouldAttemptDaemonReattach(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "daemon socket unavailable") {
+		return true
+	}
+	if !strings.Contains(message, "daemon command transport") {
+		return false
+	}
+	return strings.Contains(message, "dial unix") ||
+		strings.Contains(message, "connect: no such file or directory") ||
+		strings.Contains(message, "connection refused")
 }
 
 // Commands
