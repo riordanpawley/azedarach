@@ -20,7 +20,7 @@ Commands:
   dev list                   List running dev servers across issues
   project <subcommand>       Project registry management (list|add|remove)
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
-  operation <subcommand>     Inspect/cancel background operations (get|list|cancel)
+  operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
   opencode <init|plugin>     Manage OpenCode integration
   issue list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
@@ -101,6 +101,7 @@ Examples:
   az impl delete --confirm ts-opentui
   az operation list --limit 20
   az operation get --id op-123 --wait
+  az operation logs --id op-123
   az operation cancel --id op-123 --reason "No longer needed"
   az opencode init
   az opencode plugin install

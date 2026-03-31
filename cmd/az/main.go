@@ -102,7 +102,7 @@ func main() {
 
 	case "operation":
 		if len(commandArgs) == 0 {
-			fmt.Fprintf(os.Stderr, "Usage: az operation <get|list|cancel> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az operation <get|list|logs|cancel> [arguments]\n")
 			os.Exit(1)
 		}
 		opCommand := commandArgs[0]
@@ -134,6 +134,19 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+		case "logs":
+			opts, err := cli.ParseOperationLogsArgs(opArgs)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Usage: az operation logs --id <operation-id>\n")
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.OperationLogsCommand(deps, opts)
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		case "cancel":
 			opts, err := cli.ParseOperationCancelArgs(opArgs)
 			if err != nil {
@@ -149,7 +162,7 @@ func main() {
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown operation command: %s\n", opCommand)
-			fmt.Fprintf(os.Stderr, "Usage: az operation <get|list|cancel> [arguments]\n")
+			fmt.Fprintf(os.Stderr, "Usage: az operation <get|list|logs|cancel> [arguments]\n")
 			os.Exit(1)
 		}
 
