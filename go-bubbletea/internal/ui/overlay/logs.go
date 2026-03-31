@@ -22,26 +22,33 @@ func EventLogHotkeyHint() string {
 type EventLogOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	logFilePath string
-	events      []protocol.EventEnvelope
-	scroll      int
-	maxScroll   int
-	viewHeight  int
-	styles      *Styles
+	tuiLogFilePath    string
+	daemonLogFilePath string
+	events            []protocol.EventEnvelope
+	scroll            int
+	maxScroll         int
+	viewHeight        int
+	styles            *Styles
 }
 
 // NewEventLogOverlay creates an event log overlay from chronologically ordered events.
 func NewEventLogOverlay(events []protocol.EventEnvelope) *EventLogOverlay {
-	return NewEventLogOverlayWithLogFile(events, "")
+	return NewEventLogOverlayWithLogFiles(events, "", "")
 }
 
 // NewEventLogOverlayWithLogFile creates an event log overlay with optional az.log path.
 func NewEventLogOverlayWithLogFile(events []protocol.EventEnvelope, logFilePath string) *EventLogOverlay {
+	return NewEventLogOverlayWithLogFiles(events, logFilePath, "")
+}
+
+// NewEventLogOverlayWithLogFiles creates an event log overlay with optional TUI and daemon log paths.
+func NewEventLogOverlayWithLogFiles(events []protocol.EventEnvelope, tuiLogFilePath, daemonLogFilePath string) *EventLogOverlay {
 	overlay := &EventLogOverlay{
-		logFilePath: logFilePath,
-		scroll:      0,
-		viewHeight:  18,
-		styles:      New(),
+		tuiLogFilePath:    strings.TrimSpace(tuiLogFilePath),
+		daemonLogFilePath: strings.TrimSpace(daemonLogFilePath),
+		scroll:            0,
+		viewHeight:        18,
+		styles:            New(),
 	}
 	overlay.SetEvents(events)
 	return overlay
@@ -88,21 +95,32 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			o.scroll = o.maxScroll
 			return o, nil
 		case "s":
-			if strings.TrimSpace(o.logFilePath) != "" {
+			paths := o.streamLogPaths()
+			if len(paths) > 0 {
 				return o, func() tea.Msg {
 					return SelectionMsg{
 						Key:   "event-log-stream",
-						Value: o.logFilePath,
+						Value: paths,
 					}
 				}
 			}
 			return o, nil
-		case "e":
-			if strings.TrimSpace(o.logFilePath) != "" {
+		case "t":
+			if o.tuiLogFilePath != "" {
 				return o, func() tea.Msg {
 					return SelectionMsg{
 						Key:   "event-log-editor",
-						Value: o.logFilePath,
+						Value: o.tuiLogFilePath,
+					}
+				}
+			}
+			return o, nil
+		case "d":
+			if o.daemonLogFilePath != "" {
+				return o, func() tea.Msg {
+					return SelectionMsg{
+						Key:   "event-log-editor",
+						Value: o.daemonLogFilePath,
 					}
 				}
 			}
@@ -164,8 +182,11 @@ func (o *EventLogOverlay) Size() (width, height int) {
 
 func (o *EventLogOverlay) renderContentLines() []string {
 	lines := make([]string, 0, len(o.events)*4+6)
-	if strings.TrimSpace(o.logFilePath) != "" {
-		lines = append(lines, o.styles.MenuItemDisabled.Render("Log file: "+o.logFilePath))
+	if o.tuiLogFilePath != "" {
+		lines = append(lines, o.styles.MenuItemDisabled.Render("TUI log: "+o.tuiLogFilePath))
+	}
+	if o.daemonLogFilePath != "" {
+		lines = append(lines, o.styles.MenuItemDisabled.Render("Daemon log: "+o.daemonLogFilePath))
 	}
 
 	if len(o.events) == 0 {
@@ -293,7 +314,7 @@ func (o *EventLogOverlay) renderScrollableContent(contentHeight int) string {
 }
 
 func (o *EventLogOverlay) actionBindings(scrollable bool) []keybinds.Binding {
-	bindings := make([]keybinds.Binding, 0, 5)
+	bindings := make([]keybinds.Binding, 0, 7)
 	if scrollable {
 		bindings = append(bindings,
 			keybinds.Binding{Key: "j/k", Description: "scroll"},
@@ -301,11 +322,27 @@ func (o *EventLogOverlay) actionBindings(scrollable bool) []keybinds.Binding {
 		)
 	}
 	bindings = append(bindings,
-		keybinds.Binding{Key: "s", Description: "stream (Ctrl+C then q)"},
-		keybinds.Binding{Key: "e", Description: "edit"},
+		keybinds.Binding{Key: "s", Description: "stream (Ctrl+C to stop)"},
 	)
+	if o.tuiLogFilePath != "" {
+		bindings = append(bindings, keybinds.Binding{Key: "t", Description: "open TUI log"})
+	}
+	if o.daemonLogFilePath != "" {
+		bindings = append(bindings, keybinds.Binding{Key: "d", Description: "open daemon log"})
+	}
 	bindings = append(bindings, keybinds.Binding{Key: "Esc/q/backspace", Description: "close"})
 	return bindings
+}
+
+func (o *EventLogOverlay) streamLogPaths() []string {
+	paths := make([]string, 0, 2)
+	if o.daemonLogFilePath != "" {
+		paths = append(paths, o.daemonLogFilePath)
+	}
+	if o.tuiLogFilePath != "" {
+		paths = append(paths, o.tuiLogFilePath)
+	}
+	return paths
 }
 
 func truncateRunes(s string, maxLen int) string {

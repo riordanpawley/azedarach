@@ -11,9 +11,9 @@
 │                                                                    │
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
-│ s stream (Ctrl+C then q)                                           │
-│ e edit                                                             │
+│ s stream (Ctrl+C to stop)                                          │
 │ Esc/q/backspace close                                              │
+│                                                                    │
 │                                                                    │
 │                                                                    │
 │                                                                    │

@@ -232,6 +232,55 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
+func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
+	m := newTestModel()
+	m.repoDir = "/tmp/worktree"
+
+	got := m.daemonLogFilePath()
+	want := filepath.Join("/tmp/worktree", ".azedarach", "daemon.log")
+	if got != want {
+		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestOpenLogStreamCmd_SkipsMissingPathsWhenAnotherLogExists(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+
+	tmpDir := t.TempDir()
+	tuiLog := filepath.Join(tmpDir, "az.log")
+	if err := os.WriteFile(tuiLog, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write tui log: %v", err)
+	}
+	missingDaemonLog := filepath.Join(tmpDir, "daemon.log")
+
+	var popupCommand string
+	m.tmuxClient = mockTmuxService{
+		popupFn: func(_ context.Context, title, width, height, command string) error {
+			popupCommand = command
+			return nil
+		},
+	}
+
+	msg := m.openLogStreamCmd(missingDaemonLog, tuiLog)()
+	selection, ok := msg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("openLogStreamCmd() returned %T, want overlay.SelectionMsg", msg)
+	}
+	if selection.Key != "event-log-opened" {
+		t.Fatalf("selection key = %q, want %q", selection.Key, "event-log-opened")
+	}
+	if got, ok := selection.Value.(string); !ok || got != tuiLog {
+		t.Fatalf("opened value = %#v, want %q", selection.Value, tuiLog)
+	}
+	if !strings.Contains(popupCommand, shellSingleQuote(tuiLog)) {
+		t.Fatalf("popup command = %q, want tui log path", popupCommand)
+	}
+	if strings.Contains(popupCommand, shellSingleQuote(missingDaemonLog)) {
+		t.Fatalf("popup command unexpectedly included missing path: %q", popupCommand)
+	}
+}
+
 func TestUpdate_ForwardsNonKeyMessagesToActiveOverlay(t *testing.T) {
 	m := newTestModel()
 	probe := &probeOverlay{}

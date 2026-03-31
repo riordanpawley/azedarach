@@ -1691,7 +1691,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	switch msg.String() {
 	case overlay.EventLogHotkey:
-		return m, m.openOverlay(overlay.NewEventLogOverlayWithLogFile(m.runtimeEvents, m.eventLogFilePath()))
+		return m, m.openOverlay(overlay.NewEventLogOverlayWithLogFiles(
+			m.runtimeEvents,
+			m.eventLogFilePath(),
+			m.daemonLogFilePath(),
+		))
 	case "O": // Orchestration overlay
 		return m, m.openOrchestrationOverlay()
 	case "X": // Bulk cleanup (Shift+X)
@@ -3185,8 +3189,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			overlay.WithCurrentProjectName(m.currentProject),
 		))
 	case "event-log-stream":
-		if path, ok := msg.Value.(string); ok {
-			return m, m.openLogStreamCmd(path)
+		switch value := msg.Value.(type) {
+		case string:
+			return m, m.openLogStreamCmd(value)
+		case []string:
+			return m, m.openLogStreamCmd(value...)
 		}
 		return m, nil
 	case "event-log-editor":
@@ -3509,6 +3516,14 @@ func (m Model) eventLogFilePath() string {
 	return resolveTUILogFilePath(m.config)
 }
 
+func (m Model) daemonLogFilePath() string {
+	repoDir := strings.TrimSpace(m.repoDir)
+	if repoDir == "" {
+		repoDir = "."
+	}
+	return filepath.Join(repoDir, ".azedarach", "daemon.log")
+}
+
 func resolveTUILogFilePath(cfg *config.Config) string {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
@@ -3546,29 +3561,56 @@ func (m Model) configSourcePath() string {
 	return filepath.Join(base, config.ConfigDirName, config.ConfigFileName)
 }
 
-func (m Model) openLogStreamCmd(logPath string) tea.Cmd {
+func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 	return func() tea.Msg {
-		path := strings.TrimSpace(logPath)
-		if path == "" {
+		paths := make([]string, 0, len(logPaths))
+		for _, logPath := range logPaths {
+			path := strings.TrimSpace(logPath)
+			if path == "" {
+				continue
+			}
+			paths = append(paths, path)
+		}
+		if len(paths) == 0 {
 			return overlay.SelectionMsg{Key: "event-log-error", Value: errors.New("log file path is empty")}
 		}
-		if _, err := os.Stat(path); err != nil {
+		availablePaths := make([]string, 0, len(paths))
+		for _, path := range paths {
+			if _, err := os.Stat(path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return overlay.SelectionMsg{
+					Key:   "event-log-error",
+					Value: fmt.Errorf("log file unavailable: %w", err),
+				}
+			}
+			availablePaths = append(availablePaths, path)
+		}
+		if len(availablePaths) == 0 {
 			return overlay.SelectionMsg{
 				Key:   "event-log-error",
-				Value: fmt.Errorf("log file unavailable: %w", err),
+				Value: errors.New("no log files are available to stream"),
 			}
 		}
 
-		cmd := exec.Command("less", "--intr=^C", "+F", path)
+		args := make([]string, 0, len(availablePaths)+3)
+		args = append(args, "-n", "+1", "-F")
+		args = append(args, availablePaths...)
+		cmd := exec.Command("tail", args...)
 		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
-			popupCommand := fmt.Sprintf("less --intr=^C +F %s", shellSingleQuote(path))
-			if err := m.tmuxClient.DisplayPopup(context.Background(), "az.log", "90%", "90%", popupCommand); err != nil {
+			quoted := make([]string, 0, len(availablePaths))
+			for _, path := range availablePaths {
+				quoted = append(quoted, shellSingleQuote(path))
+			}
+			popupCommand := fmt.Sprintf("tail -n +1 -F %s", strings.Join(quoted, " "))
+			if err := m.tmuxClient.DisplayPopup(context.Background(), "az.logs", "90%", "90%", popupCommand); err != nil {
 				return overlay.SelectionMsg{
 					Key:   "event-log-error",
 					Value: fmt.Errorf("stream logs in tmux popup: %w", err),
 				}
 			}
-			return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
+			return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 		}
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
@@ -3579,7 +3621,7 @@ func (m Model) openLogStreamCmd(logPath string) tea.Cmd {
 				Value: fmt.Errorf("stream logs: %w", err),
 			}
 		}
-		return overlay.SelectionMsg{Key: "event-log-opened", Value: path}
+		return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 	}
 }
 
