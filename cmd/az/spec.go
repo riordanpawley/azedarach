@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/cli"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
@@ -102,15 +105,15 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 
 	switch args[0] {
 	case "req":
-		return runSpecReqCommand(args[1:])
+		return runSpecReqCommand(cfg, args[1:])
 	case "link":
-		return runSpecLinkCommand(args[1:])
+		return runSpecLinkCommand(cfg, args[1:])
 	case "read":
-		return runSpecReadCommand(args[1:])
+		return runSpecReadCommand(cfg, args[1:])
 	case "lint":
-		return runSpecLintCommand(args[1:])
+		return runSpecLintCommand(cfg, args[1:])
 	case "parity":
-		return runSpecParityCommand(args[1:])
+		return runSpecParityCommand(cfg, args[1:])
 	case "sync":
 		return runSpecSyncCommand(args[1:])
 	default:
@@ -118,7 +121,7 @@ func runSpecCommand(cfg *config.Config, args []string) error {
 	}
 }
 
-func runSpecReqCommand(args []string) error {
+func runSpecReqCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintSpecReqUsage()
 		return nil
@@ -126,46 +129,46 @@ func runSpecReqCommand(args []string) error {
 
 	switch args[0] {
 	case "list":
-		_, err := parseSpecReqListArgs(args[1:])
+		opts, err := parseSpecReqListArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecReqUsage()
 			return err
 		}
-		return specNotImplementedError("req", "list")
+		return runSpecReqListRPC(cfg, opts)
 	case "get":
-		_, err := parseSpecReqGetArgs(args[1:])
+		opts, err := parseSpecReqGetArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecReqUsage()
 			return err
 		}
-		return specNotImplementedError("req", "get")
+		return runSpecReqGetRPC(cfg, opts)
 	case "create":
-		_, err := parseSpecReqCreateArgs(args[1:])
+		opts, err := parseSpecReqCreateArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecReqUsage()
 			return err
 		}
-		return specNotImplementedError("req", "create")
+		return runSpecReqCreateRPC(cfg, opts)
 	case "update":
-		_, err := parseSpecReqUpdateArgs(args[1:])
+		opts, err := parseSpecReqUpdateArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecReqUsage()
 			return err
 		}
-		return specNotImplementedError("req", "update")
+		return runSpecReqUpdateRPC(cfg, opts)
 	case "delete":
-		_, err := parseSpecReqDeleteArgs(args[1:])
+		opts, err := parseSpecReqDeleteArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecReqUsage()
 			return err
 		}
-		return specNotImplementedError("req", "delete")
+		return runSpecReqDeleteRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown spec req command: %s", args[0])
 	}
 }
 
-func runSpecLinkCommand(args []string) error {
+func runSpecLinkCommand(cfg *config.Config, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		cli.PrintSpecLinkUsage()
 		return nil
@@ -173,68 +176,68 @@ func runSpecLinkCommand(args []string) error {
 
 	switch args[0] {
 	case "list":
-		_, err := parseSpecLinkListArgs(args[1:])
+		opts, err := parseSpecLinkListArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecLinkUsage()
 			return err
 		}
-		return specNotImplementedError("link", "list")
+		return runSpecLinkListRPC(cfg, opts)
 	case "add":
-		_, err := parseSpecLinkAddArgs(args[1:])
+		opts, err := parseSpecLinkAddArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecLinkUsage()
 			return err
 		}
-		return specNotImplementedError("link", "add")
+		return runSpecLinkAddRPC(cfg, opts)
 	case "remove":
-		_, err := parseSpecLinkRemoveArgs(args[1:])
+		opts, err := parseSpecLinkRemoveArgs(args[1:])
 		if err != nil {
 			cli.PrintSpecLinkUsage()
 			return err
 		}
-		return specNotImplementedError("link", "remove")
+		return runSpecLinkRemoveRPC(cfg, opts)
 	default:
 		return fmt.Errorf("unknown spec link command: %s", args[0])
 	}
 }
 
-func runSpecReadCommand(args []string) error {
+func runSpecReadCommand(cfg *config.Config, args []string) error {
 	if len(args) > 0 && isHelpArg(args[0]) {
 		cli.PrintSpecReadUsage()
 		return nil
 	}
-	_, err := parseSpecReadArgs(args)
+	opts, err := parseSpecReadArgs(args)
 	if err != nil {
 		cli.PrintSpecReadUsage()
 		return err
 	}
-	return specNotImplementedError("read")
+	return runSpecReadRPC(cfg, opts)
 }
 
-func runSpecLintCommand(args []string) error {
+func runSpecLintCommand(cfg *config.Config, args []string) error {
 	if len(args) > 0 && isHelpArg(args[0]) {
 		cli.PrintSpecLintUsage()
 		return nil
 	}
-	_, err := parseSpecLintArgs(args)
+	opts, err := parseSpecLintArgs(args)
 	if err != nil {
 		cli.PrintSpecLintUsage()
 		return err
 	}
-	return specNotImplementedError("lint")
+	return runSpecLintRPC(cfg, opts)
 }
 
-func runSpecParityCommand(args []string) error {
+func runSpecParityCommand(cfg *config.Config, args []string) error {
 	if len(args) > 0 && isHelpArg(args[0]) {
 		cli.PrintSpecParityUsage()
 		return nil
 	}
-	_, err := parseSpecParityArgs(args)
+	opts, err := parseSpecParityArgs(args)
 	if err != nil {
 		cli.PrintSpecParityUsage()
 		return err
 	}
-	return specNotImplementedError("parity")
+	return runSpecParityRPC(cfg, opts)
 }
 
 func runSpecSyncCommand(args []string) error {
@@ -265,6 +268,216 @@ func runSpecSyncCommand(args []string) error {
 		}
 	}
 	return runErr
+}
+
+func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
+	req := protocol.SpecRequirementListRequestBody{
+		IssueID: opts.Issue,
+		Status:  protocol.SpecRequirementStatus(opts.Status),
+		IDs:     opts.IDs,
+	}
+	var out protocol.SpecRequirementListResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementList, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	for _, r := range out.Requirements {
+		fmt.Printf("%s\t%s\t%s\n", r.ID, r.Status, r.Title)
+	}
+	return nil
+}
+
+func runSpecReqGetRPC(cfg *config.Config, opts specReqGetOptions) error {
+	req := protocol.SpecRequirementGetRequestBody{ID: opts.ID}
+	var out protocol.SpecRequirementGetResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementGet, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("%s\t%s\t%s\n", out.Requirement.ID, out.Requirement.Status, out.Requirement.Title)
+	return nil
+}
+
+func runSpecReqCreateRPC(cfg *config.Config, opts specReqCreateOptions) error {
+	req := protocol.SpecRequirementCreateRequestBody{
+		ID:          opts.ID,
+		Title:       opts.Title,
+		Description: opts.Description,
+		IssueID:     opts.Issue,
+	}
+	var out protocol.SpecRequirementCreateResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementCreate, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Created requirement: %s\n", out.Requirement.ID)
+	return nil
+}
+
+func runSpecReqUpdateRPC(cfg *config.Config, opts specReqUpdateOptions) error {
+	req := protocol.SpecRequirementUpdateRequestBody{ID: opts.ID}
+	if opts.Title != "" {
+		v := opts.Title
+		req.Title = &v
+	}
+	if opts.Description != "" {
+		v := opts.Description
+		req.Description = &v
+	}
+	if opts.Status != "" {
+		v := protocol.SpecRequirementStatus(opts.Status)
+		req.Status = &v
+	}
+	var out protocol.SpecRequirementUpdateResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementUpdate, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Updated requirement: %s\n", out.Requirement.ID)
+	return nil
+}
+
+func runSpecReqDeleteRPC(cfg *config.Config, opts specReqDeleteOptions) error {
+	req := protocol.SpecRequirementDeleteRequestBody{ID: opts.ID, Confirm: opts.Confirm}
+	var out protocol.SpecRequirementDeleteResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementDelete, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Deleted requirement: %s\n", out.ID)
+	return nil
+}
+
+func runSpecLinkListRPC(cfg *config.Config, opts specLinkListOptions) error {
+	req := protocol.SpecLinkListRequestBody{IssueID: opts.Issue, ReqID: opts.Req, IDs: opts.IDs}
+	var out protocol.SpecLinkListResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecLinkList, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	for _, l := range out.Links {
+		fmt.Printf("%s\t%s\t%s\t%s\n", l.ID, l.IssueID, l.ReqID, l.Role)
+	}
+	return nil
+}
+
+func runSpecLinkAddRPC(cfg *config.Config, opts specLinkAddOptions) error {
+	req := protocol.SpecLinkAddRequestBody{
+		IssueID: opts.Issue,
+		ReqID:   opts.Req,
+		Role:    protocol.SpecLinkRole(opts.Role),
+		Note:    opts.Note,
+	}
+	var out protocol.SpecLinkAddResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecLinkAdd, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Linked issue %s -> %s\n", out.Link.IssueID, out.Link.ReqID)
+	return nil
+}
+
+func runSpecLinkRemoveRPC(cfg *config.Config, opts specLinkRemoveOptions) error {
+	req := protocol.SpecLinkRemoveRequestBody{IssueID: opts.Issue, ReqID: opts.Req}
+	var out protocol.SpecLinkRemoveResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecLinkRemove, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Removed link %s -> %s\n", out.IssueID, out.ReqID)
+	return nil
+}
+
+func runSpecReadRPC(cfg *config.Config, opts specReadOptions) error {
+	req := protocol.SpecReadRequestBody{IssueID: opts.Issue, ReqID: opts.Req}
+	var out protocol.SpecReadResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecRead, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Requirements: %d\nLinks: %d\n", len(out.Requirements), len(out.Links))
+	return nil
+}
+
+func runSpecLintRPC(cfg *config.Config, opts specLintOptions) error {
+	req := protocol.SpecLintRequestBody{Strict: opts.Strict}
+	var out protocol.SpecLintResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecLint, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Lint OK: %t (diagnostics=%d)\n", out.OK, len(out.Diagnostics))
+	return nil
+}
+
+func runSpecParityRPC(cfg *config.Config, opts specParityOptions) error {
+	req := protocol.SpecParityRequestBody{FailOnOut: opts.FailOnOut}
+	var out protocol.SpecParityResponseBody
+	if err := runSpecRPC(cfg, protocol.CommandSpecParity, req, &out); err != nil {
+		return err
+	}
+	if opts.JSON {
+		return printJSON(out)
+	}
+	fmt.Printf("Parity OK: %t (findings=%d)\n", out.OK, len(out.Findings))
+	return nil
+}
+
+func runSpecRPC(cfg *config.Config, command string, body any, out any) error {
+	return runCommand(cfg, func(deps *cli.Dependencies) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal %s request: %w", command, err)
+		}
+		resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       fmt.Sprintf("%s-%d", command, time.Now().UnixNano()),
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         command,
+			SentAt:          time.Now().UTC(),
+			Body:            payload,
+			Meta:            protocol.Metadata{ProjectID: deps.ProjectID},
+		})
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			if resp.Error == nil {
+				return fmt.Errorf("%s failed", command)
+			}
+			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+		}
+		if out == nil || len(resp.Body) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(resp.Body, out); err != nil {
+			return fmt.Errorf("decode %s response: %w", command, err)
+		}
+		return nil
+	})
 }
 
 func parseSpecReqListArgs(args []string) (specReqListOptions, error) {

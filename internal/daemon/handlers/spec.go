@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 var ErrSpecUnavailable = errors.New("spec service unavailable")
@@ -325,7 +326,19 @@ func mapSpecError(err error) *protocol.ErrorEnvelope {
 			Message:   err.Error(),
 			Retryable: false,
 		}
+	case errors.Is(err, domain.ErrConflict):
+		return &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeConflict,
+			Message:   err.Error(),
+			Retryable: false,
+		}
 	case errors.Is(err, errSpecNotFound):
+		return &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   err.Error(),
+			Retryable: false,
+		}
+	case errors.Is(err, domain.ErrNotFound):
 		return &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeInvalidRequest,
 			Message:   err.Error(),

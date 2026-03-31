@@ -109,16 +109,17 @@ func New(cfg Config) *Daemon {
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
+	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
-	specHandler := daemonhandlers.NewSpecHandler(unavailableSpecService{})
+	specHandler := daemonhandlers.NewSpecHandler(issueSpecService{client: issuesClient})
 
 	d := &Daemon{
 		cfg:                cfg,
 		lock:               lifecycle.NewLockManager(cfg.LockPath),
 		hub:                publish.NewHub(512, 64, cfg.Logger),
-		issues:             issues.NewClient(cfg.RepoDir, cfg.Logger),
+		issues:             issuesClient,
 		tmux:               tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                gitClient,
 		worktree:           git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
