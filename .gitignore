@@ -80,16 +80,12 @@ coverage/
 
 # bv (beads viewer) local config and caches
 .bv/
-/go-bubbletea/bin/
-/go-bubbletea/azd
+/bin/
+/azd
 /.beads
-/go-bubbletea/.beads/
-/go-bubbletea/.gocache/
-/go-bubbletea/.gopath/
 /.gocache/
 /.gopath/
 /.agents/memories/overview.md
 /.azedarach.schema.json
 /reference-effect
-/go-bubbletea/.azedarach/mailbox
-/go-bubbletea/.azedarach
+/go-bubbletea
