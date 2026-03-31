@@ -233,8 +233,6 @@ func runProjectCommand(cfg *config.Config, args []string) error {
 		return runProjectAddCommand(args[1:])
 	case "remove":
 		return runProjectRemoveCommand(args[1:])
-	case "switch":
-		return runProjectSwitchCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown project command: %s", args[0])
 	}
@@ -334,42 +332,6 @@ func runProjectRemoveCommand(args []string) error {
 	}
 
 	fmt.Printf("Removed project %s\n", name)
-	return nil
-}
-
-func runProjectSwitchCommand(args []string) error {
-	fs := flag.NewFlagSet("project switch", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	if err := fs.Parse(args); err != nil {
-		printProjectSwitchUsage()
-		return err
-	}
-	if fs.NArg() != 1 {
-		printProjectSwitchUsage()
-		return fmt.Errorf("usage: az project switch <name>")
-	}
-	name := strings.TrimSpace(fs.Arg(0))
-	if name == "" {
-		printProjectSwitchUsage()
-		return fmt.Errorf("usage: az project switch <name>")
-	}
-
-	registry, err := config.LoadProjectsRegistry()
-	if err != nil {
-		return fmt.Errorf("load projects registry: %w", err)
-	}
-	project, err := registry.Get(name)
-	if err != nil {
-		return fmt.Errorf("switch project: %w", err)
-	}
-	if err := registry.SetDefault(name); err != nil {
-		return fmt.Errorf("switch project: %w", err)
-	}
-	if err := config.SaveProjectsRegistry(registry); err != nil {
-		return fmt.Errorf("save projects registry: %w", err)
-	}
-
-	fmt.Printf("Switched default project to %s (%s)\n", project.Name, project.Path)
 	return nil
 }
 
@@ -706,12 +668,11 @@ func printDevListUsage() {
 }
 
 func printProjectUsage() {
-	fmt.Println("Usage: az project <list|add|remove|switch>")
+	fmt.Println("Usage: az project <list|add|remove>")
 	fmt.Println("Manage registered projects.")
 	fmt.Println("  list [--json]")
 	fmt.Println("  add <path> [--name <name>]")
 	fmt.Println("  remove <name>")
-	fmt.Println("  switch <name>")
 }
 
 func printProjectListUsage() {
@@ -724,10 +685,6 @@ func printProjectAddUsage() {
 
 func printProjectRemoveUsage() {
 	fmt.Println("Usage: az project remove <name>")
-}
-
-func printProjectSwitchUsage() {
-	fmt.Println("Usage: az project switch <name>")
 }
 
 func printJSON(v any) error {

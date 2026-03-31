@@ -17,7 +17,7 @@ Commands:
   dev restart <issue-id>     Restart a dev server for an issue
   dev status <issue-id>      Show dev server status for an issue
   dev list                   List running dev servers across issues
-  project <subcommand>       Project registry management (list|add|remove|switch)
+  project <subcommand>       Project registry management (list|add|remove)
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
   operation <subcommand>     Inspect/cancel background operations (get|list|cancel)
   opencode <init|plugin>     Manage OpenCode integration
@@ -95,7 +95,6 @@ Examples:
   az dev list
   az project list
   az project add /path/to/project --name azedarach
-  az project switch azedarach
   az project remove azedarach
   az impl delete --confirm ts-opentui
   az operation list --limit 20

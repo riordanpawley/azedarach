@@ -224,11 +224,12 @@ func TestRunProjectCommands(t *testing.T) {
 		t.Fatalf("list output missing default marker = %q", listOut)
 	}
 
-	switchOut := captureMainStdout(t, func() error {
-		return runProjectCommand(config.DefaultConfig(), []string{"switch", "azedarach"})
-	})
-	if !strings.Contains(switchOut, "Switched default project to azedarach") {
-		t.Fatalf("switch output = %q", switchOut)
+	err := runProjectCommand(config.DefaultConfig(), []string{"switch", "azedarach"})
+	if err == nil {
+		t.Fatal("expected switch subcommand to be rejected")
+	}
+	if !strings.Contains(err.Error(), "unknown project command: switch") {
+		t.Fatalf("switch error = %v", err)
 	}
 
 	removeOut := captureMainStdout(t, func() error {
