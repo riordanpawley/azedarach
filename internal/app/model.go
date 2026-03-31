@@ -793,7 +793,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlayStack.Pop()
 		m.loading = true
 		m.boardRefreshing = true
-		m.tasks = nil
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)

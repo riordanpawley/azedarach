@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,7 +208,7 @@ func TestProjectSwitchResultRebindsProjectScopedServices(t *testing.T) {
 	}
 }
 
-func TestProjectSelectedMsgStartsVisibleRefreshAndClearsStaleBoard(t *testing.T) {
+func TestProjectSelectedMsgStartsVisibleRefreshWithoutDiscardingCurrentBoard(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
 	m.tasks = []domain.Task{
@@ -231,7 +232,29 @@ func TestProjectSelectedMsgStartsVisibleRefreshAndClearsStaleBoard(t *testing.T)
 	if !updated.boardRefreshing {
 		t.Fatal("expected board refresh indicator while switching projects")
 	}
-	if len(updated.tasks) != 0 {
-		t.Fatalf("tasks = %+v, want cleared stale board tasks", updated.tasks)
+	if len(updated.tasks) != 1 || updated.tasks[0].ID != "old-1" {
+		t.Fatalf("tasks = %+v, want previous board tasks preserved until switch succeeds", updated.tasks)
+	}
+}
+
+func TestProjectSwitchFailureRetainsPreviousBoardState(t *testing.T) {
+	m := newTestModel()
+	m.loading = true
+	m.boardRefreshing = true
+	m.tasks = []domain.Task{
+		{ID: "old-1", Title: "Old task"},
+	}
+
+	next, _ := m.Update(projectSwitchResultMsg{err: fmt.Errorf("boom")})
+	updated := next.(Model)
+
+	if updated.loading {
+		t.Fatal("expected loading state cleared on switch failure")
+	}
+	if updated.boardRefreshing {
+		t.Fatal("expected refresh indicator cleared on switch failure")
+	}
+	if len(updated.tasks) != 1 || updated.tasks[0].ID != "old-1" {
+		t.Fatalf("tasks = %+v, want previous board tasks retained after switch failure", updated.tasks)
 	}
 }
