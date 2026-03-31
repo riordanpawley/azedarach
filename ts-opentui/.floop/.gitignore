@@ -1,7 +1,0 @@
-# SQLite database files (source of truth is JSONL)
-floop.db
-floop.db-shm
-floop.db-wal
-
-# Audit logs (runtime data, not version controlled)
-audit.jsonl

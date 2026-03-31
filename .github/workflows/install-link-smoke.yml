@@ -1,0 +1,42 @@
+name: Install Link Smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  smoke:
+    name: ${{ matrix.os }} install/link
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14
+          - macos-15-intel
+          - ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build + link binaries without launching TUI
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          AZ_LINK_DIR="$RUNNER_TEMP/bin" ./scripts/build-link-run.sh --no-run
+          test -x "$RUNNER_TEMP/bin/az"
+          test -x "$RUNNER_TEMP/bin/azd"
+
+      - name: Smoke commands
+        run: |
+          "$RUNNER_TEMP/bin/az" --version
+          "$RUNNER_TEMP/bin/az" --help
+          "$RUNNER_TEMP/bin/azd" --version
+          "$RUNNER_TEMP/bin/azd" --help
