@@ -5058,7 +5058,7 @@ func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, source
 	}
 }
 
-func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
+func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
 	if task == nil {
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -5240,14 +5240,14 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			if task.ID != taskID {
 				continue
 			}
-			if !isEligibleUpstreamSource(task, relation) {
-				return
-			}
 			hasWorktree := false
 			if task.Session != nil && task.Session.Worktree != "" {
 				hasWorktree = true
 			} else if task.HasWorktree {
 				hasWorktree = true
+			}
+			if !isEligibleUpstreamSource(task, relation, hasWorktree) {
+				return
 			}
 			candidates = append(candidates, followOnMergeCandidate{
 				target: overlay.MergeTarget{
@@ -5291,10 +5291,10 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 	return candidates
 }
 
-func isEligibleUpstreamSource(task domain.Task, relation string) bool {
+func isEligibleUpstreamSource(task domain.Task, relation string, hasWorktree bool) bool {
 	switch relation {
 	case string(domain.DependencyParentChild), string(domain.DependencyBlocks):
-		return task.Status == domain.StatusInProgress || task.Status == domain.StatusDone
+		return hasWorktree && (task.Status == domain.StatusInProgress || task.Status == domain.StatusDone)
 	default:
 		return false
 	}

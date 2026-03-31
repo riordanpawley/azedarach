@@ -998,8 +998,8 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 				{ID: nonReadyID, Type: domain.DependencyBlocks},
 			},
 		},
-		{ID: parentID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic},
-		{ID: blockerID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask},
+		{ID: parentID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic, HasWorktree: true},
+		{ID: blockerID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
 		{ID: nonReadyID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
 	}
 	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
@@ -1117,6 +1117,8 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 			Title:  "Parent epic",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeEpic,
+			// Candidate eligibility is based on task projection worktree signals.
+			HasWorktree: true,
 		},
 	}
 	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
@@ -1454,6 +1456,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 			Title:  "Parent epic",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeEpic,
+			HasWorktree: true,
 		},
 	}
 	// Simulate stale projection by leaving task sessions nil and forcing daemon snapshot fallback.
