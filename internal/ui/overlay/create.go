@@ -700,6 +700,13 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 		b.WriteString(c.title.View())
 		b.WriteString("\n")
 	}
+	titlePreviewWidth := max(1, titleWidth-2)
+	titlePreviewLines := wrapDescriptionLines(c.title.Value(), titlePreviewWidth)
+	if len(titlePreviewLines) > 1 {
+		titlePreviewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
+		b.WriteString(titlePreviewStyle.Render(strings.Join(titlePreviewLines, "\n")))
+		b.WriteString("\n")
+	}
 
 	// Description field
 	if c.focusIndex == focusDescription {

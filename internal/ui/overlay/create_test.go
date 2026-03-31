@@ -71,6 +71,17 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Ctrl+K")
 }
 
+func TestCreateTaskOverlayViewShowsLongTitleWithoutTruncatingStart(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	longTitle := "fix overlay title wrapping so very long create task names remain readable in the form without truncating the beginning while editing"
+	overlay.title.SetValue(longTitle)
+
+	view := overlay.View()
+
+	assert.Contains(t, view, "fix overlay title wrapping")
+	assert.Contains(t, view, "while editing")
+}
+
 func TestCreateTaskOverlayEscapeCloses(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 
