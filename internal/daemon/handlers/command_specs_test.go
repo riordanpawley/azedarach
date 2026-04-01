@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -113,5 +114,116 @@ func TestCommandSpecRegistryDaemonDispatchOwnership(t *testing.T) {
 		if got := DaemonRoutesThroughDispatcher(tt.command); got != tt.want {
 			t.Fatalf("DaemonRoutesThroughDispatcher(%q) = %v, want %v", tt.command, got, tt.want)
 		}
+	}
+}
+
+func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
+	knownCommands := []string{
+		CommandSessionStart,
+		CommandSessionAttach,
+		CommandSessionPause,
+		CommandSessionResume,
+		CommandSessionStop,
+		commandSessionStatus,
+		commandSessionRecover,
+		protocol.CommandOperationSubmit,
+		protocol.CommandOperationGet,
+		protocol.CommandOperationList,
+		protocol.CommandOperationCancel,
+		CommandPRCreate,
+		CommandGitBranchBehind,
+		protocol.CommandSpecRequirementList,
+		protocol.CommandSpecRequirementGet,
+		protocol.CommandSpecRequirementCreate,
+		protocol.CommandSpecRequirementUpdate,
+		protocol.CommandSpecRequirementDelete,
+		protocol.CommandSpecLinkList,
+		protocol.CommandSpecLinkAdd,
+		protocol.CommandSpecLinkRemove,
+		protocol.CommandSpecRead,
+		protocol.CommandSpecLint,
+		protocol.CommandSpecParity,
+		protocol.CommandSpecSync,
+		protocol.CommandSpecSyncMD,
+		CommandGitFetch,
+		CommandGitMerge,
+		CommandGitCheckout,
+		CommandGitAbortMerge,
+		CommandGitDiffStat,
+		CommandGitStatus,
+		CommandGitRuntimeSignals,
+		CommandGitMergePreflight,
+		CommandGitDiscardChanges,
+		CommandGitCheckpoint,
+		CommandWorktreeList,
+		CommandWorktreeCreate,
+		CommandWorktreeRemove,
+		CommandWorktreeCleanupOrphaned,
+		CommandDevServerStart,
+		CommandDevServerStop,
+		CommandDevServerStatus,
+		CommandDevServerList,
+		protocol.CommandIssueFanout,
+		protocol.CommandIssueFanoutDrift,
+		protocol.CommandMailSend,
+		protocol.CommandMailList,
+		protocol.CommandMailWatch,
+		commandTaskList,
+		commandTaskCreate,
+		commandTaskUpdateStatus,
+		commandTaskUpdateDetails,
+		commandTaskAppendNotes,
+		commandTaskDelete,
+		commandTaskArchive,
+		commandTaskDependencyAdd,
+		commandTaskDependencyRemove,
+		commandTaskSnapshotExport,
+		protocol.CommandTaskBulkApply,
+	}
+
+	registered := RegisteredCommands()
+	if len(registered) != len(knownCommands) {
+		t.Fatalf("registered command count = %d, want %d", len(registered), len(knownCommands))
+	}
+
+	for _, command := range knownCommands {
+		if _, ok := LookupCommandSpec(command); !ok {
+			t.Fatalf("expected registry entry for %q", command)
+		}
+	}
+	for _, command := range registered {
+		if !slices.Contains(knownCommands, command) {
+			t.Fatalf("registry contains unexpected command %q", command)
+		}
+	}
+}
+
+func TestCommandSpecRegistryValidation(t *testing.T) {
+	if err := ValidateCommandSpecs(); err != nil {
+		t.Fatalf("ValidateCommandSpecs() error = %v", err)
+	}
+}
+
+func TestDispatcherWiringValidation(t *testing.T) {
+	if err := ValidateDispatcherWiring(nil); err == nil {
+		t.Fatal("expected nil dispatcher validation error")
+	}
+
+	incomplete := &Dispatcher{}
+	if err := ValidateDispatcherWiring(incomplete); err == nil {
+		t.Fatal("expected missing handler validation error")
+	}
+
+	complete := &Dispatcher{
+		session:   &SessionHandler{},
+		git:       &GitHandler{},
+		pr:        &PRHandler{},
+		spec:      &SpecHandler{},
+		operation: &routeOperationHandler{},
+		worktree:  &WorktreeHandler{},
+		devserver: &DevServerHandler{},
+	}
+	if err := ValidateDispatcherWiring(complete); err != nil {
+		t.Fatalf("expected complete dispatcher wiring validation to pass: %v", err)
 	}
 }

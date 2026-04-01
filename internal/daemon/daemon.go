@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -197,6 +198,9 @@ func New(cfg Config) *Daemon {
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
 	startedAt := time.Now()
+	if err := d.validateCommandPolicyConfiguration(); err != nil {
+		return err
+	}
 	lease, err := d.lock.Acquire()
 	if err != nil {
 		return err
@@ -252,6 +256,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		<-shutdownDone
 	}
 	return err
+}
+
+func (d *Daemon) validateCommandPolicyConfiguration() error {
+	if err := daemonhandlers.ValidateCommandSpecs(); err != nil {
+		return fmt.Errorf("daemon command-spec registry validation failed: %w", err)
+	}
+	if d.router != nil {
+		if err := daemonhandlers.ValidateDispatcherWiring(d.router); err != nil {
+			return fmt.Errorf("daemon command-spec wiring validation failed: %w", err)
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {

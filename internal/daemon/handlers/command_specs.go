@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -173,4 +175,85 @@ func syncDependentOperationKind(body []byte) bool {
 	}
 	kind := strings.TrimSpace(req.Kind)
 	return strings.HasPrefix(kind, "task.") || strings.HasPrefix(kind, "session.")
+}
+
+// RegisteredCommands returns all commands in the registry sorted lexicographically.
+func RegisteredCommands() []string {
+	commands := make([]string, 0, len(commandSpecRegistry))
+	for command := range commandSpecRegistry {
+		commands = append(commands, command)
+	}
+	sort.Strings(commands)
+	return commands
+}
+
+// ValidateCommandSpecs verifies command registry invariants.
+func ValidateCommandSpecs() error {
+	for key, spec := range commandSpecRegistry {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			return fmt.Errorf("command spec registry contains empty command key")
+		}
+		if trimmedKey != key {
+			return fmt.Errorf("command spec key %q contains surrounding whitespace", key)
+		}
+		if strings.TrimSpace(spec.Command) == "" {
+			return fmt.Errorf("command spec %q has empty Command field", key)
+		}
+		if spec.Command != key {
+			return fmt.Errorf("command spec %q declares mismatched Command value %q", key, spec.Command)
+		}
+		switch spec.DispatchTarget {
+		case CommandDispatchNone, CommandDispatchSession, CommandDispatchOperation, CommandDispatchPR, CommandDispatchSpec, CommandDispatchGit, CommandDispatchWorktree, CommandDispatchDevServer:
+		default:
+			return fmt.Errorf("command spec %q declares unknown dispatch target %d", key, spec.DispatchTarget)
+		}
+		if spec.syncBootstrapPolicy == syncBootstrapPolicyOperationKind && key != protocol.CommandOperationSubmit {
+			return fmt.Errorf("command spec %q uses operation-kind sync policy but is not %q", key, protocol.CommandOperationSubmit)
+		}
+	}
+	return nil
+}
+
+// ValidateDispatcherWiring verifies that registered dispatch targets have handlers.
+func ValidateDispatcherWiring(d *Dispatcher) error {
+	if d == nil {
+		return fmt.Errorf("dispatcher is nil")
+	}
+	for command, spec := range commandSpecRegistry {
+		switch spec.DispatchTarget {
+		case CommandDispatchNone:
+		case CommandDispatchSession:
+			if d.session == nil {
+				return fmt.Errorf("command %q dispatches to session handler but dispatcher session handler is nil", command)
+			}
+		case CommandDispatchOperation:
+			if d.operation == nil {
+				return fmt.Errorf("command %q dispatches to operation handler but dispatcher operation handler is nil", command)
+			}
+		case CommandDispatchPR:
+			if d.pr == nil {
+				return fmt.Errorf("command %q dispatches to PR handler but dispatcher PR handler is nil", command)
+			}
+		case CommandDispatchSpec:
+			if d.spec == nil {
+				return fmt.Errorf("command %q dispatches to spec handler but dispatcher spec handler is nil", command)
+			}
+		case CommandDispatchGit:
+			if d.git == nil {
+				return fmt.Errorf("command %q dispatches to git handler but dispatcher git handler is nil", command)
+			}
+		case CommandDispatchWorktree:
+			if d.worktree == nil {
+				return fmt.Errorf("command %q dispatches to worktree handler but dispatcher worktree handler is nil", command)
+			}
+		case CommandDispatchDevServer:
+			if d.devserver == nil {
+				return fmt.Errorf("command %q dispatches to devserver handler but dispatcher devserver handler is nil", command)
+			}
+		default:
+			return fmt.Errorf("command %q has unknown dispatch target %d", command, spec.DispatchTarget)
+		}
+	}
+	return nil
 }
