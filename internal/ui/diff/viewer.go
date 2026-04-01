@@ -112,14 +112,14 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 		if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
-				"git diff %s --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- ':^.azedarach' | less -RS",
+				"git diff %s HEAD --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s HEAD -- ':^.azedarach' | less -RS",
 				shellSingleQuote(mergeBase),
 				shellSingleQuote(mergeBase),
 			)
 		} else {
 			title = " " + filePath + " "
 			command = fmt.Sprintf(
-				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- %s | less -RS",
+				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s HEAD -- %s | less -RS",
 				shellSingleQuote(mergeBase),
 				shellSingleQuote(filePath),
 			)
