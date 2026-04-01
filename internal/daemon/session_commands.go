@@ -51,6 +51,29 @@ func sessionKey(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func sessionProjectionIssueID(session daemonstate.Session, namingScope string) string {
+	issueID := strings.TrimSpace(session.IssueID)
+	if issueID != "" {
+		return issueID
+	}
+	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
+		return parsedIssueID
+	}
+	return strings.TrimSpace(session.ID)
+}
+
+func sessionProjectionByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
+	byIssueKey := make(map[string]daemonstate.Session, len(sessions))
+	for _, session := range sessions {
+		key := sessionKey(sessionProjectionIssueID(session, namingScope))
+		if key == "" {
+			continue
+		}
+		byIssueKey[key] = session
+	}
+	return byIssueKey
+}
+
 func sessionStopPendingKey(projectID, issueID string) string {
 	project := strings.TrimSpace(projectID)
 	if project == "" {
@@ -683,17 +706,22 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		}
 	}
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
-	snapshotByKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
+	snapshotSessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
 	for _, session := range snapshot.Sessions {
-		issueID := strings.TrimSpace(session.IssueID)
-		if issueID == "" {
-			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
-				issueID = parsedIssueID
-			} else {
-				issueID = session.ID
+		snapshotSessions = append(snapshotSessions, session)
+	}
+	snapshotByKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
+
+	projectionByKey := map[string]daemonstate.Session{}
+	if d.projectionStore != nil {
+		cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("failed to load cached session projections while enriching tasks", "project_id", projectID, "error", err)
 			}
+		} else {
+			projectionByKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
 		}
-		snapshotByKey[sessionKey(issueID)] = session
 	}
 
 	for i := range tasks {
@@ -705,7 +733,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 
 		state := domain.SessionBusy
 		var startedAt *time.Time
-		if session, ok := snapshotByKey[taskKey]; ok {
+		session, ok := snapshotByKey[taskKey]
+		if !ok {
+			session, ok = projectionByKey[taskKey]
+		}
+		if ok {
 			if !session.UpdatedAt.IsZero() {
 				started := session.UpdatedAt.UTC()
 				startedAt = &started
@@ -784,18 +816,20 @@ func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, proje
 
 	namingScope := d.sessionNamingScope(projectID)
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
-	byIssueKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
+	snapshotSessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
 	for _, session := range snapshot.Sessions {
-		key := sessionKey(session.IssueID)
-		if key == "" {
-			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
-				key = sessionKey(parsedIssueID)
-			}
+		snapshotSessions = append(snapshotSessions, session)
+	}
+	byIssueKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
+
+	cachedByIssueKey := map[string]daemonstate.Session{}
+	cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load cached session projection snapshot failed", "project_id", projectID, "error", err)
 		}
-		if key == "" {
-			continue
-		}
-		byIssueKey[key] = session
+	} else {
+		cachedByIssueKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
 	}
 
 	for _, name := range tmuxSessions {
@@ -817,6 +851,14 @@ func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, proje
 			}
 			if !existing.UpdatedAt.IsZero() {
 				row.UpdatedAt = existing.UpdatedAt
+			}
+		} else if cached, exists := cachedByIssueKey[issueKey]; exists {
+			row.State = cached.State
+			if row.State == daemonstate.SessionStateStopped {
+				row.State = daemonstate.SessionStateAttached
+			}
+			if !cached.UpdatedAt.IsZero() {
+				row.UpdatedAt = cached.UpdatedAt
 			}
 		}
 		if err := d.projectionStore.UpsertSession(ctx, projectID, row); err != nil {
