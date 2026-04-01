@@ -46,7 +46,7 @@ func ResolveWorktreeRoot(startPath string) (string, error) {
 }
 
 func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
-	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	out, err := gitCommandWithoutGitDirEnv("-C", startDir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
@@ -54,7 +54,7 @@ func resolveBaseGitRootWithGitExec(startDir string) (string, error) {
 }
 
 func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
-	out, err := exec.Command("git", "-C", startDir, "rev-parse", "--path-format=absolute", "--show-toplevel").Output()
+	out, err := gitCommandWithoutGitDirEnv("-C", startDir, "rev-parse", "--path-format=absolute", "--show-toplevel").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve git worktree root: %w", err)
 	}
@@ -63,6 +63,22 @@ func resolveWorktreeRootWithGitExec(startDir string) (string, error) {
 		return "", fmt.Errorf("resolve git worktree root: empty output")
 	}
 	return root, nil
+}
+
+func gitCommandWithoutGitDirEnv(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GIT_DIR=") ||
+			strings.HasPrefix(entry, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(entry, "GIT_INDEX_FILE=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	cmd.Env = filtered
+	return cmd
 }
 
 func resolveBaseGitRootFromGitMarker(startDir string) (string, error) {

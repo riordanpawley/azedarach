@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -914,7 +913,7 @@ func gitChangedFiles(worktree string) ([]string, error) {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, 16)
 	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := gitCommandWithoutGitDirEnv(args[1:]...)
 		output, err := cmd.Output()
 		if err != nil {
 			return nil, err

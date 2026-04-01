@@ -29,7 +29,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
-		"codex <install|init|guard>",
+		"codex <install|guard>",
 		"az notify idle_prompt az-123",
 		"az notify --json post_tool_use",
 		"az hooks install az-123",
@@ -53,7 +53,7 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projectDir, ".githooks"), 0o755); err != nil {
 		t.Fatalf("mkdir .githooks: %v", err)
 	}
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 
 func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -102,6 +102,22 @@ func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", ".spec-sync-ran")); err != nil {
 		t.Fatalf("expected spec sync marker: %v", err)
 	}
+}
+
+func runGitCommandIsolated(repoDir string, args ...string) error {
+	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GIT_DIR=") ||
+			strings.HasPrefix(entry, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(entry, "GIT_INDEX_FILE=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	cmd.Env = filtered
+	return cmd.Run()
 }
 
 func TestNotifyCommandParsesAndPrintsStatus(t *testing.T) {

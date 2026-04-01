@@ -69,7 +69,7 @@ func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runCodexCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "Usage: az codex <install|init|guard>") {
+	if !strings.Contains(output, "Usage: az codex <install|guard>") {
 		t.Fatalf("help output = %q", output)
 	}
 

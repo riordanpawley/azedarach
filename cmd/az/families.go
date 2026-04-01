@@ -221,7 +221,7 @@ func runCodexCommand(cfg *config.Config, args []string) error {
 	}
 
 	switch args[0] {
-	case "install", "init":
+	case "install":
 		opts, err := cli.ParseCodexInstallArgs(args[1:])
 		if err != nil {
 			cli.PrintCodexUsage()
