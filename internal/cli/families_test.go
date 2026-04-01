@@ -29,9 +29,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
-		"codex <install|guard>",
+		"codex <install|guard|hook>",
 		"az notify idle_prompt az-123",
-		"az notify --json post_tool_use",
 		"az hooks install az-123",
 		"az githooks install",
 		"az githooks run",
@@ -40,7 +39,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az opencode init",
 		"az opencode plugin install",
 		"az codex install",
-		"az codex guard --json pre-tool-use",
+		"az codex hook run --json pre-tool-use",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
@@ -181,16 +180,9 @@ func TestCodexInstallCommandWritesHooksConfig(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
-		"az notify --json session_start",
-		"az notify --json user_prompt_submit",
-		"az notify --json pre_tool_use",
-		"az notify --json post_tool_use",
-		"az notify --json stop",
-		"az codex guard --json session-start",
-		"az codex guard --json user-prompt-submit",
-		"az codex guard --json pre-tool-use",
-		"az codex guard --json post-tool-use",
-		"az codex guard --json stop",
+		"az codex hook run --json session-start",
+		"az codex hook run --json pre-tool-use",
+		"az codex hook run --json stop",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("hooks config missing %q: %s", want, content)
@@ -228,11 +220,17 @@ func TestCodexInstallCommandMergesExistingHooks(t *testing.T) {
 	if !strings.Contains(content, "echo custom") {
 		t.Fatalf("existing custom event hook removed: %s", content)
 	}
-	if !strings.Contains(content, "az notify --json post_tool_use") {
-		t.Fatalf("codex post-tool hook missing: %s", content)
+	if strings.Contains(content, "az notify --json post_tool_use") {
+		t.Fatalf("legacy notify hook should be removed: %s", content)
 	}
-	if !strings.Contains(content, "az codex guard --json post-tool-use") {
-		t.Fatalf("codex post-tool guard hook missing: %s", content)
+	if strings.Contains(content, "az codex guard --json post-tool-use") {
+		t.Fatalf("legacy guard hook should be removed: %s", content)
+	}
+	if strings.Contains(content, "az codex hook run --json post-tool-use") {
+		t.Fatalf("post-tool-use hook should not be installed: %s", content)
+	}
+	if strings.Contains(content, "az codex hook run --json user-prompt-submit") {
+		t.Fatalf("user-prompt-submit hook should not be installed: %s", content)
 	}
 }
 
@@ -275,9 +273,9 @@ func TestCodexGuardRequiresPrimeBeforeOtherCommands(t *testing.T) {
 	}
 
 	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"az prime"}}`)
-	if err := CodexGuardCommand(deps, CodexGuardOptions{Event: "post-tool-use", JSON: true}); err != nil {
+	if err := CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true}); err != nil {
 		restore()
-		t.Fatalf("post-tool-use guard error: %v", err)
+		t.Fatalf("pre-tool-use prime guard error: %v", err)
 	}
 	restore()
 
@@ -315,6 +313,33 @@ func TestCodexGuardSessionStartSkipsReminderWhenPromptMentionsPrime(t *testing.T
 	})
 	if strings.TrimSpace(output) != "{}" {
 		t.Fatalf("session-start output = %q, want {}", output)
+	}
+}
+
+func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
+	projectDir := t.TempDir()
+	deps := &Dependencies{RepoDir: projectDir}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-3","tool_input":{"command":"pwd"}}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "pre-tool-use", JSON: true})
+	})
+	if !strings.Contains(output, `"decision":"block"`) {
+		t.Fatalf("hook run output = %q, want block decision", output)
 	}
 }
 

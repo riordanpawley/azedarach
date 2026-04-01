@@ -239,6 +239,24 @@ func runCodexCommand(cfg *config.Config, args []string) error {
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.CodexGuardCommand(deps, opts)
 		})
+	case "hook":
+		if len(args) < 2 || isHelpArg(args[1]) {
+			cli.PrintCodexUsage()
+			return nil
+		}
+		switch args[1] {
+		case "run":
+			opts, err := cli.ParseCodexHookRunArgs(args[2:])
+			if err != nil {
+				cli.PrintCodexUsage()
+				return err
+			}
+			return runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.CodexHookRunCommand(deps, opts)
+			})
+		default:
+			return fmt.Errorf("unknown codex hook command: %s", args[1])
+		}
 	default:
 		return fmt.Errorf("unknown codex command: %s", args[0])
 	}

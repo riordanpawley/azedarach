@@ -1,76 +1,35 @@
 {
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "az notify --json session_start",
-            "statusMessage": "Sending startup notification"
-          },
-          {
-            "type": "command",
-            "command": "az codex guard --json session-start"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "az notify --json user_prompt_submit"
-          },
-          {
-            "type": "command",
-            "command": "az codex guard --json user-prompt-submit"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "az notify --json pre_tool_use"
-          },
-          {
-            "type": "command",
-            "command": "az codex guard --json pre-tool-use"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "az notify --json post_tool_use"
-          },
-          {
-            "type": "command",
-            "command": "az codex guard --json post-tool-use"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "az notify --json stop"
-          },
-          {
-            "type": "command",
-            "command": "az codex guard --json stop"
-          }
-        ]
-      }
-    ]
-  }
+	"hooks": {
+		"PreToolUse": [
+			{
+				"hooks": [
+					{
+						"command": "az codex hook run --json pre-tool-use",
+						"type": "command"
+					}
+				]
+			}
+		],
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"command": "az codex hook run --json session-start",
+						"type": "command"
+					}
+				],
+				"matcher": "startup|resume"
+			}
+		],
+		"Stop": [
+			{
+				"hooks": [
+					{
+						"command": "az codex hook run --json stop",
+						"type": "command"
+					}
+				]
+			}
+		]
+	}
 }

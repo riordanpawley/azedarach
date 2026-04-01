@@ -112,6 +112,11 @@ type CodexGuardOptions struct {
 	JSON  bool
 }
 
+type CodexHookRunOptions struct {
+	Event string
+	JSON  bool
+}
+
 func ParseNotifyArgs(args []string) (NotifyOptions, error) {
 	opts := NotifyOptions{}
 	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
@@ -269,42 +274,71 @@ func ParseCodexGuardArgs(args []string) (CodexGuardOptions, error) {
 		return CodexGuardOptions{}, fmt.Errorf("usage: az codex guard [--json] <session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop>")
 	}
 	opts.Event = strings.TrimSpace(fs.Arg(0))
-	switch opts.Event {
-	case "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop":
-	default:
+	if !isCodexGuardEvent(opts.Event) {
 		return CodexGuardOptions{}, fmt.Errorf("unsupported codex guard event: %s", opts.Event)
 	}
 	return opts, nil
 }
 
+func ParseCodexHookRunArgs(args []string) (CodexHookRunOptions, error) {
+	opts := CodexHookRunOptions{}
+	fs := flag.NewFlagSet("codex hook run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "hook-json output")
+	if err := fs.Parse(args); err != nil {
+		return CodexHookRunOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return CodexHookRunOptions{}, fmt.Errorf("usage: az codex hook run [--json] <session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop>")
+	}
+	opts.Event = strings.TrimSpace(fs.Arg(0))
+	if !isCodexGuardEvent(opts.Event) {
+		return CodexHookRunOptions{}, fmt.Errorf("unsupported codex hook event: %s", opts.Event)
+	}
+	return opts, nil
+}
+
+func isCodexGuardEvent(event string) bool {
+	switch event {
+	case "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop":
+		return true
+	default:
+		return false
+	}
+}
+
 func NotifyCommand(_ *Dependencies, opts NotifyOptions) error {
+	output, err := renderNotifyOutput(opts)
+	if err != nil {
+		return err
+	}
+	fmt.Println(output)
+	return nil
+}
+
+func renderNotifyOutput(opts NotifyOptions) (string, error) {
 	status, ok := hookEventStatuses[opts.Event]
 	if !ok {
-		return fmt.Errorf("invalid event type: %s", opts.Event)
+		return "", fmt.Errorf("invalid event type: %s", opts.Event)
 	}
 
 	if opts.JSON {
 		// Hook-compatible command output: an empty JSON object is accepted by Codex
 		// hook schemas and avoids text parsing failures.
-		fmt.Println("{}")
-		return nil
+		return "{}", nil
 	}
 
 	if opts.Verbose {
 		if strings.TrimSpace(opts.IssueID) != "" {
-			fmt.Printf("Hook notification: %s for %s -> %s\n", opts.Event, opts.IssueID, status)
-		} else {
-			fmt.Printf("Hook notification: %s -> %s\n", opts.Event, status)
+			return fmt.Sprintf("Hook notification: %s for %s -> %s", opts.Event, opts.IssueID, status), nil
 		}
-		return nil
+		return fmt.Sprintf("Hook notification: %s -> %s", opts.Event, status), nil
 	}
 
 	if strings.TrimSpace(opts.IssueID) != "" {
-		fmt.Printf("Hook notification: %s -> %s\n", opts.IssueID, status)
-		return nil
+		return fmt.Sprintf("Hook notification: %s -> %s", opts.IssueID, status), nil
 	}
-	fmt.Printf("Hook notification: %s -> %s\n", opts.Event, status)
-	return nil
+	return fmt.Sprintf("Hook notification: %s -> %s", opts.Event, status), nil
 }
 
 func HooksInstallCommand(deps *Dependencies, opts HooksInstallOptions) error {
@@ -827,16 +861,31 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 		hooks[eventName] = mergeHookEntries(hooks[eventName], entry, command)
 	}
 
-	mergeCodexHookEntry("SessionStart", fmt.Sprintf("az notify --json %s", hookEventSessionStart), "startup|resume")
-	mergeCodexHookEntry("SessionStart", "az codex guard --json session-start", "startup|resume")
-	mergeCodexHookEntry("UserPromptSubmit", fmt.Sprintf("az notify --json %s", hookEventUserPromptSubmit), "")
-	mergeCodexHookEntry("UserPromptSubmit", "az codex guard --json user-prompt-submit", "")
-	mergeCodexHookEntry("PreToolUse", fmt.Sprintf("az notify --json %s", hookEventPreToolUse), "")
-	mergeCodexHookEntry("PreToolUse", "az codex guard --json pre-tool-use", "")
-	mergeCodexHookEntry("PostToolUse", fmt.Sprintf("az notify --json %s", hookEventPostToolUse), "")
-	mergeCodexHookEntry("PostToolUse", "az codex guard --json post-tool-use", "")
-	mergeCodexHookEntry("Stop", fmt.Sprintf("az notify --json %s", hookEventStop), "")
-	mergeCodexHookEntry("Stop", "az codex guard --json stop", "")
+	type codexHookInstallSpec struct {
+		eventName   string
+		notifyEvent string
+		guardEvent  string
+		matcher     string
+	}
+	specs := []codexHookInstallSpec{
+		{eventName: "SessionStart", notifyEvent: hookEventSessionStart, guardEvent: "session-start", matcher: "startup|resume"},
+		{eventName: "UserPromptSubmit", notifyEvent: hookEventUserPromptSubmit, guardEvent: "user-prompt-submit"},
+		{eventName: "PreToolUse", notifyEvent: hookEventPreToolUse, guardEvent: "pre-tool-use"},
+		{eventName: "PostToolUse", notifyEvent: hookEventPostToolUse, guardEvent: "post-tool-use"},
+		{eventName: "Stop", notifyEvent: hookEventStop, guardEvent: "stop"},
+	}
+	for _, spec := range specs {
+		legacyNotifyCommand := fmt.Sprintf("az notify --json %s", spec.notifyEvent)
+		legacyGuardCommand := fmt.Sprintf("az codex guard --json %s", spec.guardEvent)
+		combinedCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
+		hooks[spec.eventName] = removeHookCommands(hooks[spec.eventName], legacyNotifyCommand, legacyGuardCommand, combinedCommand)
+		shouldInstall := spec.eventName == "SessionStart" || spec.eventName == "PreToolUse" || spec.eventName == "Stop"
+		if shouldInstall {
+			mergeCodexHookEntry(spec.eventName, combinedCommand, spec.matcher)
+		} else if len(normalizeAnySlice(hooks[spec.eventName])) == 0 {
+			delete(hooks, spec.eventName)
+		}
+	}
 
 	hooksConfig["hooks"] = hooks
 	if err := writeJSONObject(hooksPath, hooksConfig); err != nil {
@@ -845,8 +894,46 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 
 	fmt.Printf("Installed Codex hooks in %s\n", hooksPath)
 	if opts.Verbose {
-		fmt.Println("  Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop")
+		fmt.Println("  Events: SessionStart, PreToolUse, Stop")
 	}
+	return nil
+}
+
+func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
+	projectDir, err := resolveProjectDir("", deps)
+	if err != nil {
+		return err
+	}
+	payloadMap, err := parseHookPayload(os.Stdin)
+	if err != nil {
+		return err
+	}
+
+	notifyEvent, err := codexNotifyEventForGuardEvent(opts.Event)
+	if err != nil {
+		return err
+	}
+	if !opts.JSON {
+		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: notifyEvent})
+		if err != nil {
+			return err
+		}
+		fmt.Println(notifyOutput)
+	}
+
+	response, err := codexGuardResponse(projectDir, CodexGuardOptions{Event: opts.Event}, payloadMap)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	printCodexGuardResponse(response)
 	return nil
 }
 
@@ -865,12 +952,56 @@ func CodexGuardCommand(deps *Dependencies, opts CodexGuardOptions) error {
 	if err != nil {
 		return err
 	}
-	payload, _ := io.ReadAll(os.Stdin)
+	payloadMap, err := parseHookPayload(os.Stdin)
+	if err != nil {
+		return err
+	}
+	response, err := codexGuardResponse(projectDir, opts, payloadMap)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	printCodexGuardResponse(response)
+	return nil
+}
+
+func parseHookPayload(r io.Reader) (map[string]any, error) {
+	payload, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read hook payload: %w", err)
+	}
 	payloadMap := map[string]any{}
 	if len(strings.TrimSpace(string(payload))) > 0 {
 		_ = json.Unmarshal(payload, &payloadMap)
 	}
+	return payloadMap, nil
+}
 
+func codexNotifyEventForGuardEvent(event string) (string, error) {
+	switch event {
+	case "session-start":
+		return hookEventSessionStart, nil
+	case "user-prompt-submit":
+		return hookEventUserPromptSubmit, nil
+	case "pre-tool-use":
+		return hookEventPreToolUse, nil
+	case "post-tool-use":
+		return hookEventPostToolUse, nil
+	case "stop":
+		return hookEventStop, nil
+	default:
+		return "", fmt.Errorf("unsupported codex hook event: %s", event)
+	}
+}
+
+func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap map[string]any) (map[string]any, error) {
 	threadID := codexGuardThreadID(payloadMap)
 	if threadID == "" {
 		threadID = "default"
@@ -896,7 +1027,16 @@ func CodexGuardCommand(deps *Dependencies, opts CodexGuardOptions) error {
 		}
 	case "pre-tool-use":
 		command := codexGuardCommandFromPayload(payloadMap)
-		if strings.TrimSpace(command) != "" && !codexGuardIsPrimeCommand(command) && (!threadState.Primed || threadState.NeedsRefresh) {
+		if codexGuardIsPrimeCommand(command) {
+			// Temporary tradeoff: we mark prime success during PreToolUse to reduce Codex
+			// hook spam by removing PostToolUse hooks. Revert this once hook noise is fixed.
+			threadState.Primed = true
+			threadState.NeedsRefresh = false
+			threadState.LastPrimeAt = time.Now().UTC()
+			state.Threads[threadID] = threadState
+			break
+		}
+		if strings.TrimSpace(command) != "" && (!threadState.Primed || threadState.NeedsRefresh) {
 			response["decision"] = "block"
 			if threadState.NeedsRefresh {
 				response["reason"] = "Run `az prime` before continuing so your context is refreshed after compaction."
@@ -905,31 +1045,20 @@ func CodexGuardCommand(deps *Dependencies, opts CodexGuardOptions) error {
 			}
 		}
 	case "post-tool-use":
-		command := codexGuardCommandFromPayload(payloadMap)
-		if codexGuardIsPrimeCommand(command) {
-			threadState.Primed = true
-			threadState.NeedsRefresh = false
-			threadState.LastPrimeAt = time.Now().UTC()
-			state.Threads[threadID] = threadState
-		}
 	case "stop":
 		delete(state.Threads, threadID)
 	}
 
 	if err := writeCodexGuardState(statePath, state); err != nil {
-		return err
+		return nil, err
 	}
-	if opts.JSON {
-		encoded, err := json.Marshal(response)
-		if err != nil {
-			return err
-		}
-		fmt.Println(string(encoded))
-		return nil
-	}
+	return response, nil
+}
+
+func printCodexGuardResponse(response map[string]any) {
 	if len(response) == 0 {
 		fmt.Println("codex guard: allow")
-		return nil
+		return
 	}
 	if message, ok := response["systemMessage"].(string); ok {
 		fmt.Println(message)
@@ -937,7 +1066,6 @@ func CodexGuardCommand(deps *Dependencies, opts CodexGuardOptions) error {
 	if reason, ok := response["reason"].(string); ok {
 		fmt.Println(reason)
 	}
-	return nil
 }
 
 func PrintHooksUsage() {
@@ -985,8 +1113,8 @@ func PrintOpenCodePluginUsage() {
 }
 
 func PrintCodexUsage() {
-	fmt.Println("Usage: az codex <install|guard> [--project-dir <dir>] [--verbose]")
-	fmt.Println("Install Codex hook configuration and run Codex guard hooks.")
+	fmt.Println("Usage: az codex <install|guard|hook> [--project-dir <dir>] [--verbose]")
+	fmt.Println("Install Codex hook configuration and run Codex hook/guard commands.")
 }
 
 func readJSONObject(path string) (map[string]any, error) {
@@ -1044,6 +1172,55 @@ func hookEntryContainsCommand(entry any, command string) bool {
 		}
 	}
 	return false
+}
+
+func removeHookCommands(existing any, commands ...string) []any {
+	removeSet := map[string]struct{}{}
+	for _, command := range commands {
+		trimmed := strings.TrimSpace(command)
+		if trimmed != "" {
+			removeSet[trimmed] = struct{}{}
+		}
+	}
+	return pruneHookEntries(normalizeAnySlice(existing), removeSet)
+}
+
+func pruneHookEntries(entries []any, removeSet map[string]struct{}) []any {
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		pruned, keep := pruneHookEntry(entry, removeSet)
+		if keep {
+			out = append(out, pruned)
+		}
+	}
+	return out
+}
+
+func pruneHookEntry(entry any, removeSet map[string]struct{}) (any, bool) {
+	typed, ok := entry.(map[string]any)
+	if !ok {
+		return entry, true
+	}
+	if value, ok := typed["command"].(string); ok {
+		if _, remove := removeSet[strings.TrimSpace(value)]; remove {
+			return nil, false
+		}
+	}
+	if nested, ok := typed["hooks"]; ok {
+		prunedNested := pruneHookEntries(normalizeAnySlice(nested), removeSet)
+		if len(prunedNested) == 0 {
+			delete(typed, "hooks")
+		} else {
+			typed["hooks"] = prunedNested
+		}
+	}
+	if _, hasCommand := typed["command"]; hasCommand {
+		return typed, true
+	}
+	if nested, hasNested := typed["hooks"]; hasNested && len(normalizeAnySlice(nested)) > 0 {
+		return typed, true
+	}
+	return nil, false
 }
 
 func normalizeAnySlice(value any) []any {
