@@ -2487,7 +2487,6 @@ func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
 // loadIssuesCmd returns a command that fetches issues from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
-	expectedDaemonProjectID := daemonProjectIDForPath(m.activeProjectPath())
 	refreshSeq := m.issueRefreshSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -2510,17 +2509,6 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		}
 		if !ack.Accepted {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
-		}
-		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
-			return issuesErrorMsg{
-				refreshSeq: refreshSeq,
-				projectID:  projectID,
-				err: fmt.Errorf(
-					"daemon identity mismatch: expected %s got %s",
-					expectedDaemonProjectID,
-					strings.TrimSpace(ack.DaemonProjectID),
-				),
-			}
 		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
@@ -2829,7 +2817,6 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 	switchSeq := m.projectSwitchSeq
-	expectedDaemonProjectID := daemonProjectIDForPath(project.Path)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
@@ -2893,17 +2880,6 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:       fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
 		}
-		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
-			return projectSwitchResultMsg{
-				switchSeq: switchSeq,
-				project:   project,
-				err: fmt.Errorf(
-					"daemon identity mismatch: expected %s got %s",
-					expectedDaemonProjectID,
-					strings.TrimSpace(ack.DaemonProjectID),
-				),
-			}
-		}
 
 		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
@@ -2938,7 +2914,6 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	targetRepoDir := m.activeProjectPath()
-	expectedDaemonProjectID := daemonProjectIDForPath(targetRepoDir)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
@@ -2970,16 +2945,6 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		}
 		if !ack.Accepted {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
-		}
-		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
-			return issuesErrorMsg{
-				projectID: projectID,
-				err: fmt.Errorf(
-					"daemon identity mismatch: expected %s got %s",
-					expectedDaemonProjectID,
-					strings.TrimSpace(ack.DaemonProjectID),
-				),
-			}
 		}
 
 		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
@@ -3154,15 +3119,6 @@ func daemonProjectIDForPath(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(projectID)
-}
-
-func daemonProjectIDMismatch(actual, expected string) bool {
-	actual = strings.TrimSpace(actual)
-	expected = strings.TrimSpace(expected)
-	if actual == "" || expected == "" {
-		return false
-	}
-	return !strings.EqualFold(actual, expected)
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {
@@ -4208,6 +4164,9 @@ func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
 	}
 
 	cmd := exec.Command(editorName, path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return execProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return overlay.SelectionMsg{
@@ -6262,7 +6221,7 @@ func predictsMergeConflicts(output string, err error) bool {
 	return strings.Contains(err.Error(), "CONFLICT")
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, _ bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
@@ -6270,29 +6229,6 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
-	if !refreshStatus {
-		for i := range m.tasks {
-			task := m.tasks[i]
-			if task.ID == sourceID && task.HasUncommittedChanges {
-				reasons = append(reasons, fmt.Sprintf("Source %s is not clean (cached runtime status)", sourceID))
-			}
-			if task.ID == targetID && task.HasUncommittedChanges {
-				reasons = append(reasons, fmt.Sprintf("Target %s is not clean (cached runtime status)", targetID))
-			}
-		}
-		if len(reasons) == 0 {
-			return nil
-		}
-		return &mergePreflightFailureMsg{
-			sourceID:       sourceID,
-			sourceWorktree: sourceWorktree,
-			targetID:       targetID,
-			targetWorktree: targetWorktree,
-			reasons:        reasons,
-			sourceFiles:    sourceFiles,
-			targetFiles:    targetFiles,
-		}
-	}
 
 	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
 	if sourceErr != nil {

@@ -254,11 +254,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
-	ack := protocol.NegotiateHello(hello, daemonVersion)
-	if projectID, err := appconfig.ProjectIDForRoot(d.cfg.RepoDir); err == nil {
-		ack.DaemonProjectID = projectID
-	}
-	return ack, nil
+	return protocol.NegotiateHello(hello, daemonVersion), nil
 }
 
 func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, func(), error) {

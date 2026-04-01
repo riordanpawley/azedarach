@@ -147,21 +147,6 @@ func TestDaemonProjectIDForPath(t *testing.T) {
 	}
 }
 
-func TestDaemonProjectIDMismatch(t *testing.T) {
-	if daemonProjectIDMismatch("abc", "abc") {
-		t.Fatal("expected equal IDs not to mismatch")
-	}
-	if !daemonProjectIDMismatch("abc", "def") {
-		t.Fatal("expected different IDs to mismatch")
-	}
-	if daemonProjectIDMismatch("", "def") {
-		t.Fatal("expected empty actual ID to skip mismatch")
-	}
-	if daemonProjectIDMismatch("abc", "") {
-		t.Fatal("expected empty expected ID to skip mismatch")
-	}
-}
-
 func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {
 	m := newTestModel()
 	m.config = &config.Config{

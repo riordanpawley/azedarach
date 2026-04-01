@@ -3,6 +3,7 @@ package diff
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,8 +14,7 @@ import (
 )
 
 type DiffClient interface {
-	ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]gitservice.ChangedFile, error)
-	MergeBase(ctx context.Context, worktree, baseBranch string) (string, error)
+	Status(ctx context.Context, worktree string) (*gitservice.GitStatus, error)
 }
 
 type PopupOpener func(ctx context.Context, title, command string) error
@@ -66,7 +66,11 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 		if d.gitClient == nil {
 			return loadChangedFilesMsg{Err: fmt.Errorf("git client unavailable")}
 		}
-		files, err := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
+		status, err := d.gitClient.Status(context.Background(), d.worktree)
+		if err != nil {
+			return loadChangedFilesMsg{Err: err}
+		}
+		files := statusChangedFiles(status)
 		return loadChangedFilesMsg{Files: files, Err: err}
 	}
 }
@@ -92,25 +96,18 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 			return popupResultMsg{Err: fmt.Errorf("diff popup unavailable")}
 		}
 
-		mergeBase, err := d.gitClient.MergeBase(context.Background(), d.worktree, d.effectiveBaseBranch())
-		if err != nil {
-			return popupResultMsg{Err: err}
-		}
-
 		var title string
 		var command string
 		if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
-				"git diff %s --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- ':^.azedarach' | less -RS",
-				shellSingleQuote(mergeBase),
-				shellSingleQuote(mergeBase),
+				"git diff --stat --color=always -- ':^.azedarach' && echo \"\" && git diff --cached --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff --cached -- ':^.azedarach' | less -RS",
 			)
 		} else {
 			title = " " + filePath + " "
 			command = fmt.Sprintf(
-				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- %s | less -RS",
-				shellSingleQuote(mergeBase),
+				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff -- %s && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff --cached -- %s | less -RS",
+				shellSingleQuote(filePath),
 				shellSingleQuote(filePath),
 			)
 		}
@@ -430,6 +427,47 @@ func shellSingleQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func statusChangedFiles(status *gitservice.GitStatus) []gitservice.ChangedFile {
+	if status == nil {
+		return []gitservice.ChangedFile{}
+	}
+
+	byPath := make(map[string]gitservice.ChangedFile)
+	rank := make(map[string]int)
+
+	put := func(paths []string, status gitservice.DiffFileStatus, priority int) {
+		for _, path := range paths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			if currentPriority, exists := rank[path]; exists && currentPriority >= priority {
+				continue
+			}
+			byPath[path] = gitservice.ChangedFile{
+				Path:   path,
+				Status: status,
+			}
+			rank[path] = priority
+		}
+	}
+
+	put(status.Modified, gitservice.DiffFileModified, 1)
+	put(status.Staged, gitservice.DiffFileModified, 1)
+	put(status.Added, gitservice.DiffFileAdded, 2)
+	put(status.Untracked, gitservice.DiffFileAdded, 2)
+	put(status.Deleted, gitservice.DiffFileDeleted, 3)
+
+	out := make([]gitservice.ChangedFile, 0, len(byPath))
+	for _, file := range byPath {
+		out = append(out, file)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
 }
 
 func plural(n int) string {

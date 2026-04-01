@@ -21,6 +21,7 @@ Commands:
   project <subcommand>       Project registry management (list|add|remove)
   impl delete --confirm <implementation>  Remove an implementation assignment from all issues
   operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
+  log [sources]              Tail/stream daemon, TUI, and CLI log files
   opencode <init|plugin>     Manage OpenCode integration
   codex <install|guard|hook>  Install Codex hook configuration and run hook commands
   spec <subcommand>          Spec workflows (req|link|read|lint|parity|sync)
@@ -29,15 +30,15 @@ Commands:
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue create [--project <project-id>] <title> [--impl <implementation>] [--type ...] [--priority ...] [--description ...]  Create an issue
   issue update [--project <project-id>] [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   issue close [--project <project-id>] [--id <id>] [<id>]      Close an issue (sets status=closed)
   issue delete [--project <project-id>] [--id <id>] [<id>] --confirm  Permanently delete an issue
   issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
   issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
   issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
-  issue bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk create operations
+  issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk update operations
   issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
@@ -105,6 +106,8 @@ Examples:
   az operation get --id op-123 --wait
   az operation logs --id op-123
   az operation cancel --id op-123 --reason "No longer needed"
+  az log
+  az log --no-follow --lines 100 daemon tui
   az opencode init
   az opencode plugin install
   az codex install

@@ -180,6 +180,20 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "log":
+		logOpts, err := cli.ParseLogArgs(commandArgs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Usage: az log [--source daemon,tui,cli] [--lines N] [--follow|--no-follow] [daemon|tui|cli ...]\n")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.LogCommand(deps, logOpts)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "config":
 		if len(commandArgs) == 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
@@ -430,7 +444,7 @@ func main() {
 		case "create":
 			opts, err := cli.ParseIssueCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue create [--project <project-id>] <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue create [--project <project-id>] <title> [--impl <implementation>] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -543,7 +557,7 @@ func main() {
 		case "bulk-create":
 			opts, err := cli.ParseIssueBulkCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -557,7 +571,7 @@ func main() {
 		case "bulk-update":
 			opts, err := cli.ParseIssueBulkUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
