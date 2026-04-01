@@ -3734,7 +3734,7 @@ func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	}
 }
 
-func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
+func TestEnsureDaemonProjectMismatchDoesNotReplace(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })
 
@@ -3749,10 +3749,7 @@ func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
 				handshakes++
-				if handshakes == 1 {
-					return protocol.HelloAck{Accepted: true, DaemonProjectID: "other-proj"}, nil
-				}
-				return protocol.HelloAck{Accepted: true, DaemonProjectID: "proj"}, nil
+				return protocol.HelloAck{Accepted: true, DaemonProjectID: "other-proj"}, nil
 			},
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -3763,15 +3760,15 @@ func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
 	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
 		t.Fatalf("ensureDaemon() error = %v", err)
 	}
-	if !fake.replaceCalled {
-		t.Fatalf("expected replace to be called on daemon project mismatch")
+	if fake.replaceCalled {
+		t.Fatalf("expected no replace on daemon project mismatch")
 	}
-	if handshakes < 2 {
-		t.Fatalf("handshakes = %d, want at least 2", handshakes)
+	if handshakes != 1 {
+		t.Fatalf("handshakes = %d, want 1", handshakes)
 	}
 }
 
-func TestEnsureDaemonProjectMismatchReplaceFailure(t *testing.T) {
+func TestEnsureDaemonProjectMismatchReplaceErrorIsIgnored(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })
 
@@ -3792,9 +3789,11 @@ func TestEnsureDaemonProjectMismatchReplaceFailure(t *testing.T) {
 		RepoDir:   t.TempDir(),
 	}
 
-	err := ensureDaemon(context.Background(), deps, "cli")
-	if err == nil || !strings.Contains(err.Error(), "replace failed") {
-		t.Fatalf("error = %v, want replace failure", err)
+	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
+		t.Fatalf("ensureDaemon() error = %v", err)
+	}
+	if fake.replaceCalled {
+		t.Fatalf("expected no replace call when daemon project differs")
 	}
 }
 
