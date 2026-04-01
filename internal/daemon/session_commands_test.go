@@ -914,3 +914,99 @@ func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
 		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, sessionSnapshot.UpdatedAt.UTC())
 	}
 }
+
+func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
+	const (
+		projectID = "proj-cache-fallback"
+		issueID   = "bib"
+	)
+
+	store := daemonstate.NewStore()
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = projectionStore.Close()
+	})
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	cachedStartedAt := time.Date(2026, time.April, 1, 10, 0, 0, 0, time.UTC)
+	if err := projectionStore.UpsertSession(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: cachedStartedAt,
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+
+	d := &Daemon{
+		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore:    store,
+		projectionStore: projectionStore,
+	}
+
+	tasks := []domain.Task{
+		{ID: issueID, Title: "projection fallback", Type: domain.TypeTask},
+	}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 {
+		t.Fatalf("len(enriched) = %d, want 1", len(enriched))
+	}
+	if enriched[0].Session == nil {
+		t.Fatal("expected session projection")
+	}
+	if enriched[0].Session.StartedAt == nil {
+		t.Fatal("expected started_at from cached projection")
+	}
+	if !enriched[0].Session.StartedAt.Equal(cachedStartedAt) {
+		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, cachedStartedAt)
+	}
+}
+
+func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing.T) {
+	const (
+		projectID = "proj-cache-preserve"
+		issueID   = "bic"
+	)
+
+	store := daemonstate.NewStore()
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = projectionStore.Close()
+	})
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	cachedStartedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
+	if err := projectionStore.UpsertSession(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: cachedStartedAt,
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore:    store,
+		projectionStore: projectionStore,
+	}
+
+	if err := d.persistTmuxSessionProjectionSnapshot(context.Background(), projectID, []string{sessionID}); err != nil {
+		t.Fatalf("persist tmux session projection snapshot: %v", err)
+	}
+
+	sessions, err := projectionStore.ListSessions(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list projection sessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len(sessions) = %d, want 1", len(sessions))
+	}
+	if !sessions[0].UpdatedAt.Equal(cachedStartedAt) {
+		t.Fatalf("updated_at = %v, want %v", sessions[0].UpdatedAt, cachedStartedAt)
+	}
+}
