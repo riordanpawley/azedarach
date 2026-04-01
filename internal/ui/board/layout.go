@@ -7,7 +7,7 @@ const (
 	DefaultColumnCount  = 4
 	MinVisibleColumns   = 2
 	MinColumnWidth      = 30
-	SingleColumnWidth   = 60
+	SingleColumnWidth   = 72
 )
 
 func BoardContentHeight(totalHeight int) int {
@@ -38,7 +38,7 @@ func VisibleColumnCount(totalColumns int, boardWidth int) int {
 	if totalColumns <= 0 {
 		return 0
 	}
-	if boardWidth < SingleColumnWidth {
+	if boardWidth <= SingleColumnWidth {
 		return 1
 	}
 	if totalColumns <= MinVisibleColumns {
