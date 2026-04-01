@@ -815,7 +815,7 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 	}
 }
 
-func TestLogCommandBuildsTailInvocation(t *testing.T) {
+func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 	repoDir := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
@@ -831,40 +831,34 @@ func TestLogCommandBuildsTailInvocation(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(tuiLogPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(tui log dir): %v", err)
 	}
-	if err := os.WriteFile(daemonLogPath, []byte("daemon\n"), 0o644); err != nil {
+	if err := os.WriteFile(daemonLogPath, []byte("2026/04/01 16:50:04 INFO daemon started\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(daemon log): %v", err)
 	}
-	if err := os.WriteFile(tuiLogPath, []byte("tui\n"), 0o644); err != nil {
+	if err := os.WriteFile(tuiLogPath, []byte("time=2026-04-01T16:50:15.468+11:00 level=INFO msg=\"hello from tui\"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(tui log): %v", err)
 	}
 
-	var gotArgs []string
-	origTail := runLogTailCommand
-	runLogTailCommand = func(args []string) error {
-		gotArgs = append([]string{}, args...)
-		return nil
-	}
-	t.Cleanup(func() {
-		runLogTailCommand = origTail
+	output := captureStdout(t, func() error {
+		return LogCommand(deps, LogOptions{
+			Sources: []string{"daemon", "tui", "cli"},
+			Lines:   25,
+			Follow:  false,
+		})
 	})
-
-	err := LogCommand(deps, LogOptions{
-		Sources: []string{"daemon", "tui", "cli"},
-		Lines:   25,
-		Follow:  true,
-	})
-	if err != nil {
-		t.Fatalf("LogCommand() error = %v", err)
+	if !strings.Contains(output, "[daemon] 2026-04-01 16:50:04") {
+		t.Fatalf("output = %q, want daemon timestamp in normalized format", output)
 	}
-
-	want := []string{
-		"-n", "25",
-		"-F",
-		daemonLogPath,
-		tuiLogPath,
+	if !strings.Contains(output, "INFO daemon started") {
+		t.Fatalf("output = %q, want daemon message", output)
 	}
-	if !reflect.DeepEqual(gotArgs, want) {
-		t.Fatalf("tail args = %v, want %v", gotArgs, want)
+	if !strings.Contains(output, "[tui]") {
+		t.Fatalf("output = %q, want tui source prefix", output)
+	}
+	if strings.Contains(output, "time=2026-04-01T16:50:15.468+11:00") {
+		t.Fatalf("output = %q, want tui time field removed from message body", output)
+	}
+	if !strings.Contains(output, "level=INFO msg=\"hello from tui\"") {
+		t.Fatalf("output = %q, want tui message payload", output)
 	}
 }
 
@@ -876,26 +870,13 @@ func TestLogCommandErrorsWhenAllSelectedLogsMissing(t *testing.T) {
 		RepoDir: t.TempDir(),
 	}
 
-	called := false
-	origTail := runLogTailCommand
-	runLogTailCommand = func(args []string) error {
-		called = true
-		return nil
-	}
-	t.Cleanup(func() {
-		runLogTailCommand = origTail
-	})
-
 	err := LogCommand(deps, LogOptions{
-		Sources: []string{"daemon", "cli"},
+		Sources: []string{"daemon", "tui", "cli"},
 		Lines:   10,
 		Follow:  false,
 	})
 	if err == nil || !strings.Contains(err.Error(), "none of the selected log files exist yet") {
 		t.Fatalf("LogCommand() error = %v, want missing files error", err)
-	}
-	if called {
-		t.Fatal("tail should not be invoked when no selected logs exist")
 	}
 }
 
