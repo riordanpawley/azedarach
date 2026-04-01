@@ -44,6 +44,13 @@ type runtimeSignalProjection struct {
 	refreshedAt time.Time
 }
 
+var (
+	_ daemonhandlers.GitService               = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitMergePreflightService = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitDiscardChangesService = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitCheckpointService     = (*gitServiceAdapter)(nil)
+)
+
 func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remote string) error {
 	if err := a.client.Fetch(ctx, worktree, remote); err != nil {
 		return err
