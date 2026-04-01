@@ -30,7 +30,7 @@ Commands:
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] <title> [--impl <implementation>] [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] <title>  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
   issue update [--project <project-id>] [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   issue close [--project <project-id>] [--id <id>] [<id>]      Close an issue (sets status=closed)
   issue delete [--project <project-id>] [--id <id>] [<id>] --confirm  Permanently delete an issue
@@ -66,7 +66,9 @@ Examples:
   az issue get --id az-123
   az issue check --id az-123
   az issue doctor --id az-123
-  az issue create "New task" --impl go-bubbletea --type task --priority P2
+  az issue create --impl go-bubbletea "New task"
+  az issue create "Follow-up task"                # auto-parent under AZEDARACH_ISSUE_ID
+  az issue create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az issue update --id az-123 --status in_progress --title "Renamed task" --priority P1 --update-impl go-bubbletea
   az issue update --id az-123 --append-notes "Follow-up detail"
   az issue close --id az-123

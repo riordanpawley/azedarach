@@ -116,12 +116,15 @@ type IssueCheckOptions struct {
 }
 
 type IssueCreateOptions struct {
-	Project        string
-	Implementation string
-	Title          string
-	Description    string
-	Type           domain.TaskType
-	Priority       domain.Priority
+	Project               string
+	Title                 string
+	Description           string
+	Type                  domain.TaskType
+	Priority              domain.Priority
+	PriorityExplicit      bool
+	Deferred              bool
+	Implementations       []string
+	AutoParentFromIssueID *string
 }
 
 type IssueCloseOptions struct {
@@ -1012,24 +1015,30 @@ func ParseIssueGetManyArgs(args []string) (IssueGetManyOptions, error) {
 }
 
 func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
-	opts := IssueCreateOptions{
-		Type:     domain.TypeTask,
-		Priority: domain.P2,
-	}
+	opts := IssueCreateOptions{Type: domain.TypeTask}
 	var priorityRaw string
 	var typeRaw string
+	impls := make([]string, 0, 2)
 	fs := flag.NewFlagSet("issue create", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
-	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
+	fs.Func("impl", "target implementation key (repeatable)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty impl value")
+		}
+		impls = append(impls, trimmed)
+		return nil
+	})
 	fs.StringVar(&opts.Description, "description", "", "issue description")
-	fs.StringVar(&priorityRaw, "priority", "P2", "issue priority (P0-P4)")
+	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
+	fs.BoolVar(&opts.Deferred, "deferred", false, "mark follow-up as deferred (defaults priority to P4 unless --priority provided)")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
 	if err := fs.Parse(args); err != nil {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> [--impl <implementation>] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] <title>")
 	}
 	opts.Title = fs.Arg(0)
 
@@ -1037,12 +1046,23 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	if err != nil {
 		return IssueCreateOptions{}, err
 	}
-	priority, err := parsePriority(priorityRaw)
-	if err != nil {
-		return IssueCreateOptions{}, err
+	if strings.TrimSpace(priorityRaw) != "" {
+		priority, err := parsePriority(priorityRaw)
+		if err != nil {
+			return IssueCreateOptions{}, err
+		}
+		opts.Priority = priority
+		opts.PriorityExplicit = true
+	} else if opts.Deferred {
+		opts.Priority = domain.P4
+	} else {
+		opts.Priority = domain.P2
 	}
 	opts.Type = taskType
-	opts.Priority = priority
+	opts.Implementations = dedupeOrderedIDs(impls)
+	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+		opts.AutoParentFromIssueID = &issueID
+	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
 }
@@ -1936,9 +1956,36 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
-	if err != nil {
-		return err
+
+	var parentID *string
+	implementations := append([]string{}, opts.Implementations...)
+	if opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
+		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
+		snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
+		}
+		parentTask, ok := findTaskByID(snapshot.Tasks, parentIssueID)
+		if !ok {
+			return fmt.Errorf("active issue not found for auto-parenting: %s", parentIssueID)
+		}
+		parentID = &parentIssueID
+		if len(implementations) == 0 {
+			implementations = append([]string{}, parentTask.Implementations...)
+		}
+	}
+	if len(implementations) == 0 {
+		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, "")
+		if err != nil {
+			return err
+		}
+		implementations = append(implementations, resolvedImpl)
+	} else if len(implementations) == 1 {
+		resolvedImpl, err := resolveIssueWriteImplementation(ctx, deps, implementations[0])
+		if err != nil {
+			return err
+		}
+		implementations[0] = resolvedImpl
 	}
 
 	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
@@ -1946,13 +1993,21 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		Description:     opts.Description,
 		Type:            opts.Type,
 		Priority:        opts.Priority,
-		Implementations: []string{impl},
+		ParentID:        parentID,
+		Implementations: dedupeOrderedIDs(implementations),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create issue: %w", err)
 	}
 
-	fmt.Printf("Created issue: %s\n", taskID)
+	message := fmt.Sprintf("Created issue: %s", taskID)
+	if parentID != nil && strings.TrimSpace(*parentID) != "" {
+		message = fmt.Sprintf("%s (parent: %s, auto-parent from AZEDARACH_ISSUE_ID)", message, strings.TrimSpace(*parentID))
+	}
+	if opts.Deferred {
+		message = fmt.Sprintf("%s [deferred]", message)
+	}
+	fmt.Println(message)
 	return nil
 }
 
@@ -3035,7 +3090,7 @@ func PrimeCommand(deps *Dependencies) error {
 		} else if task, ok := findTaskByID(snapshot.Tasks, issueID); ok {
 			issueSection = renderPrimeIssueSection(issueID, task)
 			if task.Status == domain.StatusDone {
-				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue child \"Next task\"` or `az issue list --limit 20`).", task.ID)
+				activeIssueClosedWarning = fmt.Sprintf("- Active issue `%s` is currently `closed`; start by picking/opening actionable work (for example `az issue create \"Next task\" --deferred` or `az issue list --limit 20`).", task.ID)
 			}
 		} else {
 			issueSection = fmt.Sprintf("Active issue context (AZEDARACH_ISSUE_ID=%s):\nIssue not found in current project snapshot; run `az issue get %s`.\n", issueID, issueID)
