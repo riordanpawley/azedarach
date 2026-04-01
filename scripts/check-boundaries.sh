@@ -27,6 +27,21 @@ has_prefix() {
 is_authority_service_import() {
   local pkg="$1"
   case "$pkg" in
+    "$prefix/services/git"|"$prefix/services/git/"*|\
+    "$prefix/services/issues"|"$prefix/services/issues/"*|\
+    "$prefix/services/worktree"|"$prefix/services/worktree/"*|\
+    "$prefix/services/tmux"|"$prefix/services/tmux/"*|\
+    "$prefix/services/devserver"|"$prefix/services/devserver/"*|\
+    "$prefix/services/pr"|"$prefix/services/pr/"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_ui_authority_service_import() {
+  local pkg="$1"
+  case "$pkg" in
     "$prefix/services/worktree"|"$prefix/services/worktree/"*|\
     "$prefix/services/tmux"|"$prefix/services/tmux/"*|\
     "$prefix/services/devserver"|"$prefix/services/devserver/"*|\
@@ -47,22 +62,38 @@ while IFS= read -r line; do
       continue
     fi
 
-    if { has_prefix "$importer" "$prefix/app" || has_prefix "$importer" "$prefix/cli"; } \
+    if { has_prefix "$importer" "$prefix/tui" || has_prefix "$importer" "$prefix/cli"; } \
       && has_prefix "$imported" "$prefix/daemon"; then
       fail "$importer imports daemon package $imported"
     fi
 
-    if { has_prefix "$importer" "$prefix/cli" || has_prefix "$importer" "$prefix/ui"; } \
+    if { has_prefix "$importer" "$prefix/tui" || has_prefix "$importer" "$prefix/cli"; } \
       && is_authority_service_import "$imported"; then
       fail "$importer imports authority service $imported"
     fi
 
+    if has_prefix "$importer" "$prefix/ui" \
+      && is_ui_authority_service_import "$imported"; then
+      fail "$importer imports authority service $imported"
+    fi
+
     if has_prefix "$importer" "$prefix/contracts" \
-      && { has_prefix "$imported" "$prefix/app" || has_prefix "$imported" "$prefix/daemon" || has_prefix "$imported" "$prefix/ui"; }; then
+      && { has_prefix "$imported" "$prefix/tui" || has_prefix "$imported" "$prefix/daemon" || has_prefix "$imported" "$prefix/ui"; }; then
       fail "$importer imports forbidden runtime package $imported"
     fi
   done
 done < <(go list -f '{{.ImportPath}} -> {{range .Imports}}{{.}} {{end}}' ./internal/...)
+
+if rg -n --no-heading --glob '!**/*_test.go' \
+  'exec\.Command(Context)?\([^)]*"git"|runGitCommand\(|newGitCommand\(' \
+  internal/tui internal/cli >/dev/null; then
+  fail "non-test app/cli code contains direct git subprocess usage"
+fi
+
+if ! env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/tui -run '^TestIntegrationBoundaryGuard_NoDirectGitExecInAppOrCli$' -count=1; then
+  printf 'Boundary runtime git-exec guard failed\n' >&2
+  exit 1
+fi
 
 if (( violations > 0 )); then
   printf 'Boundary graph check failed: %d violation(s)\n' "$violations" >&2

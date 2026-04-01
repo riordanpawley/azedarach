@@ -21,7 +21,7 @@ INTERVAL=0.1
 
 echo "Starting performance test..."
 
-cat <<'GOEOF' >internal/app/perf_test.go
+cat <<'GOEOF' >internal/tui/perf_test.go
 package app
 
 import (
@@ -122,7 +122,7 @@ func TestPerformanceRamp(t *testing.T) {
 GOEOF
 
 echo "Running Go performance test..."
-go test -v ./internal/app -run TestPerformanceRamp -bench BenchmarkUpdateLoop || true
+go test -v ./internal/tui -run TestPerformanceRamp -bench BenchmarkUpdateLoop || true
 
 # Cleanup
-rm internal/app/perf_test.go
+rm internal/tui/perf_test.go

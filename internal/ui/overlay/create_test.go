@@ -724,6 +724,49 @@ func TestParseTaskTemplate(t *testing.T) {
 	assert.Equal(t, domain.P1, msg.Priority)
 }
 
+func TestParseTaskTemplate_IgnoresTemplateDividerInsideSections(t *testing.T) {
+	markdown := strings.Join([]string{
+		"# Divider Parsing",
+		"───────────────────────────────────────────────────",
+		"",
+		"Type:     task        (task | bug | feature | epic | chore)",
+		"Priority: P2          (P0 = highest, P4 = lowest)",
+		"Status:   open        (open | in_progress | blocked | closed)",
+		"Assignee:",
+		"Labels:",
+		"Impl:     default",
+		"Estimate:",
+		"",
+		"───────────────────────────────────────────────────",
+		"## Description",
+		"",
+		"First line",
+		"",
+		"───────────────────────────────────────────────────",
+		"## Design",
+		"",
+		"Design line",
+		"",
+		"───────────────────────────────────────────────────",
+		"## Notes",
+		"",
+		"Notes line",
+		"",
+		"───────────────────────────────────────────────────",
+		"## Acceptance Criteria",
+		"",
+		"AC line",
+		"",
+	}, "\n")
+
+	msg, err := parseTaskTemplate(markdown, "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "First line", msg.Description)
+	assert.Equal(t, "Design line", msg.Design)
+	assert.Equal(t, "Notes line", msg.Notes)
+	assert.Equal(t, "AC line", msg.Acceptance)
+}
+
 func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	overlay.editorFlow = func(_ string) (string, error) {

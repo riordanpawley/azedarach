@@ -27,6 +27,7 @@ const (
 	taskTemplateAnchorDesign      = "DESIGN"
 	taskTemplateAnchorNotes       = "NOTES"
 	taskTemplateAnchorAcceptance  = "ACCEPTANCE"
+	taskTemplateDivider           = "───────────────────────────────────────────────────"
 	createTaskOverlayWidth        = 100
 	createTaskOverlayHeight       = 30
 )
@@ -1091,7 +1092,7 @@ func serializeTaskTemplate(
 	}
 	lines := []string{
 		"# " + title,
-		"───────────────────────────────────────────────────",
+		taskTemplateDivider,
 		"",
 		fmt.Sprintf("Type:     %s        (task | bug | feature | epic | chore)", string(taskType)),
 		fmt.Sprintf("Priority: P%d          (P0 = highest, P4 = lowest)", int(priority)),
@@ -1101,22 +1102,22 @@ func serializeTaskTemplate(
 		"Impl:     " + implValue,
 		"Estimate: " + estimateValue,
 		"",
-		"───────────────────────────────────────────────────",
+		taskTemplateDivider,
 		"## Description",
 		"",
 		description,
 		"",
-		"───────────────────────────────────────────────────",
+		taskTemplateDivider,
 		"## Design",
 		"",
 		design,
 		"",
-		"───────────────────────────────────────────────────",
+		taskTemplateDivider,
 		"## Notes",
 		"",
 		notes,
 		"",
-		"───────────────────────────────────────────────────",
+		taskTemplateDivider,
 		"## Acceptance Criteria",
 		"",
 		acceptance,
@@ -1124,7 +1125,7 @@ func serializeTaskTemplate(
 	}
 	if id != "" {
 		lines = append(lines,
-			"───────────────────────────────────────────────────",
+			taskTemplateDivider,
 			fmt.Sprintf("ID: %s (read-only)", id),
 			"",
 		)
@@ -1288,6 +1289,9 @@ func parseSection(markdown, sectionName string) string {
 			break
 		}
 		if inSection {
+			if strings.TrimSpace(line) == taskTemplateDivider {
+				continue
+			}
 			content = append(content, line)
 		}
 	}

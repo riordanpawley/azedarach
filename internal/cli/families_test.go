@@ -228,6 +228,74 @@ func TestNotifyCommandJSONOutput(t *testing.T) {
 	}
 }
 
+func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
+	opts, err := ParseNotifyArgs([]string{"--json", "idle_prompt", "az-123"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotReq = req
+			return responseWithOutput(req, "ok"), nil
+		},
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+	output := captureStdout(t, func() error {
+		return NotifyCommand(deps, opts)
+	})
+
+	if gotReq.Command != daemonclient.CommandSessionPause {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionPause)
+	}
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("notify json output = %q, want {}", output)
+	}
+}
+
+func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-from-env")
+	opts, err := ParseNotifyArgs([]string{"--json", "session_start"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotReq = req
+			return responseWithOutput(req, "ok"), nil
+		},
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+	if err := NotifyCommand(deps, opts); err != nil {
+		t.Fatalf("NotifyCommand error: %v", err)
+	}
+
+	if gotReq.Command != daemonclient.CommandSessionResume {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
+	}
+
+	var body struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.SessionID != "az-from-env" {
+		t.Fatalf("session_id = %q, want az-from-env", body.SessionID)
+	}
+}
+
 func TestParseNotifyArgsRejectsFlagsAfterPositionals(t *testing.T) {
 	_, err := ParseNotifyArgs([]string{"post_tool_use", "--json"})
 	if err == nil {

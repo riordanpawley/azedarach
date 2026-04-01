@@ -29,6 +29,9 @@ func (runtimeGitService) DiffStat(context.Context, string, string, string) (stri
 func (runtimeGitService) Status(context.Context, string, string) (*git.GitStatus, error) {
 	return &git.GitStatus{}, nil
 }
+func (runtimeGitService) RuntimeSignals(context.Context, string, []daemonhandlers.GitRuntimeSignalsTarget, string, bool, string) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
+	return nil, 0, nil
+}
 
 func (runtimeWorktreeService) List(context.Context, string) ([]git.Worktree, error) { return nil, nil }
 func (runtimeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, error) {

@@ -85,7 +85,7 @@ Scope: Go runtime restoration of `az spec` commands with daemon-authoritative ex
 
 1. CLI `az spec` write/read actions execute via daemonclient typed requests/responses.
 2. Daemon handlers own DB transactions and validation for spec mutations.
-3. No direct `internal/app` or `internal/cli` store mutation paths for spec writes.
+3. No direct `internal/tui` or `internal/cli` store mutation paths for spec writes.
 
 ## Audit and Mutation Requirements
 
