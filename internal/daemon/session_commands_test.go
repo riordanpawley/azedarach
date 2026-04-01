@@ -680,3 +680,54 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		}
 	}
 }
+
+func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
+	const (
+		projectID = "proj-time"
+		issueID   = "bia"
+	)
+
+	store := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed starting session: %v", err)
+	}
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed attached session: %v", err)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	sessionSnapshot, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing seeded session %q in snapshot", sessionID)
+	}
+	if sessionSnapshot.UpdatedAt.IsZero() {
+		t.Fatal("expected seeded session updated_at")
+	}
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: store,
+	}
+
+	tasks := []domain.Task{
+		{ID: issueID, Title: "session elapsed should render", Type: domain.TypeTask},
+	}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 {
+		t.Fatalf("len(enriched) = %d, want 1", len(enriched))
+	}
+	if enriched[0].Session == nil {
+		t.Fatal("expected session projection to be attached")
+	}
+	if enriched[0].Session.StartedAt == nil {
+		t.Fatal("expected session started_at to be seeded from daemon snapshot")
+	}
+	if !enriched[0].Session.StartedAt.Equal(sessionSnapshot.UpdatedAt.UTC()) {
+		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, sessionSnapshot.UpdatedAt.UTC())
+	}
+}

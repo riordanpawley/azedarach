@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
@@ -588,7 +589,12 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		}
 
 		state := domain.SessionBusy
+		var startedAt *time.Time
 		if session, ok := snapshotByKey[taskKey]; ok {
+			if !session.UpdatedAt.IsZero() {
+				started := session.UpdatedAt.UTC()
+				startedAt = &started
+			}
 			switch session.State {
 			case daemonstate.SessionStatePaused:
 				state = domain.SessionPaused
@@ -599,8 +605,9 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			}
 		}
 		tasks[i].Session = &domain.Session{
-			IssueID: taskID,
-			State:   state,
+			IssueID:   taskID,
+			State:     state,
+			StartedAt: startedAt,
 		}
 	}
 
