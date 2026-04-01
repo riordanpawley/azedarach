@@ -16,21 +16,23 @@ import (
 const CardContentHeight = 4
 
 const tmuxSessionToken = "T:Y"
+const descendantTmuxSessionToken = "TD:Y"
 const worktreeToken = "W:Y"
 
 // RuntimeSignals represents runtime metadata rendered for a task card.
 // These values are computed independently from session state.
 type RuntimeSignals struct {
-	HasTmuxSession          bool
-	HasWorktree             bool
-	GitAheadCount           int
-	GitBehindCount          int
-	HasUncommittedChanges   bool
-	GitAdditions            int
-	GitDeletions            int
-	PendingOperationState   string
-	PendingOperationID      string
-	PendingOperationPercent int
+	HasTmuxSession           bool
+	HasDescendantTmuxSession bool
+	HasWorktree              bool
+	GitAheadCount            int
+	GitBehindCount           int
+	HasUncommittedChanges    bool
+	GitAdditions             int
+	GitDeletions             int
+	PendingOperationState    string
+	PendingOperationID       string
+	PendingOperationPercent  int
 }
 
 // ChildProgress summarizes completion progress for a parent task's children.
@@ -302,6 +304,9 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if signals.HasTmuxSession {
 		parts = append(parts, renderRuntimeSignalToken(tmuxSessionToken, styles.Sky, s))
 	}
+	if signals.HasDescendantTmuxSession {
+		parts = append(parts, renderRuntimeSignalToken(descendantTmuxSessionToken, styles.Sky, s))
+	}
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
@@ -339,6 +344,9 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 	parts := make([]string, 0, 3)
 	if signals.HasTmuxSession {
 		parts = append(parts, renderRuntimeSignalToken("T", styles.Sky, s))
+	}
+	if signals.HasDescendantTmuxSession {
+		parts = append(parts, renderRuntimeSignalToken("Td", styles.Sky, s))
 	}
 	if signals.HasWorktree {
 		parts = append(parts, renderRuntimeSignalToken("W", styles.Teal, s))
