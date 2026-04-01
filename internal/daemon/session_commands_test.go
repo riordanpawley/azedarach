@@ -364,13 +364,25 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex SessionStart hook override", command)
 	}
+	if !strings.Contains(command, "hooks.UserPromptSubmit=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex UserPromptSubmit hook override", command)
+	}
+	if !strings.Contains(command, "hooks.PreToolUse=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex PreToolUse hook override", command)
+	}
+	if !strings.Contains(command, "hooks.PostToolUse=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex PostToolUse hook override", command)
+	}
 	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
-	if !strings.Contains(command, "az notify user_prompt axt-123 codex-axt-123") {
-		t.Fatalf("command = %q, want codex user_prompt notify command", command)
+	if !strings.Contains(command, "az notify idle_prompt axt-123 >/dev/null 2>&1") {
+		t.Fatalf("command = %q, want codex idle_prompt notify command", command)
 	}
-	if !strings.Contains(command, "az notify session_end axt-123 codex-axt-123") {
+	if !strings.Contains(command, "az notify permission_request axt-123 >/dev/null 2>&1") {
+		t.Fatalf("command = %q, want codex permission_request notify command", command)
+	}
+	if !strings.Contains(command, "az notify session_end axt-123 >/dev/null 2>&1") {
 		t.Fatalf("command = %q, want codex session_end notify command", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {

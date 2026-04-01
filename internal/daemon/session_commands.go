@@ -635,10 +635,16 @@ func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, image
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		startCommand := fmt.Sprintf("az notify user_prompt %s %s", issueID, sessionID)
-		stopCommand := fmt.Sprintf("az notify session_end %s %s", issueID, sessionID)
+		sessionStartCommand := fmt.Sprintf("az notify idle_prompt %s >/dev/null 2>&1", issueID)
+		userPromptSubmitCommand := fmt.Sprintf("az notify idle_prompt %s >/dev/null 2>&1", issueID)
+		preToolUseCommand := fmt.Sprintf("az notify permission_request %s >/dev/null 2>&1", issueID)
+		postToolUseCommand := fmt.Sprintf("az notify idle_prompt %s >/dev/null 2>&1", issueID)
+		stopCommand := fmt.Sprintf("az notify session_end %s >/dev/null 2>&1", issueID)
 		parts = append(parts,
-			buildCodexConfigOverrideArg("hooks.SessionStart", startCommand),
+			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
+			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),
+			buildCodexConfigOverrideArg("hooks.PreToolUse", preToolUseCommand),
+			buildCodexConfigOverrideArg("hooks.PostToolUse", postToolUseCommand),
 			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
 		)
 		for _, imagePath := range imagePaths {

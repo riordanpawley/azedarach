@@ -12,6 +12,36 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" user_prompt \"tc\" \"az-tc\"'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" pre_tool_use \"tc\" \"az-tc\"'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" post_tool_use \"tc\" \"az-tc\"'"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
