@@ -19,7 +19,13 @@ const (
 	CommandGitMergePreflight = "git.merge_preflight"
 	CommandGitDiscard        = "git.discard_changes"
 	CommandGitCheckpoint     = "git.checkpoint"
+	DefaultCheckpointMessage = git.DefaultCheckpointMessage
 )
+
+type Worktree = git.Worktree
+type GitStatus = git.GitStatus
+type MergeResult = git.MergeResult
+type GitSyncMsg = git.GitSyncMsg
 
 // GitCommandRequest captures the daemon request body for git workflow commands.
 type GitCommandRequest struct {

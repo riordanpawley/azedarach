@@ -33,7 +33,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
-	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
@@ -615,7 +614,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logger.Debug("network status updated", "online", msg.Online)
 		return m, nil
 
-	case git.GitSyncMsg:
+	case daemonclient.GitSyncMsg:
 		if msg.Err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -4684,7 +4683,7 @@ type fetchAndMergeResultMsg struct {
 	worktree    string
 	issueID     string
 	attachAfter bool
-	result      *git.MergeResult
+	result      *daemonclient.MergeResult
 	stage       string
 	operationID string
 	state       protocol.OperationState
@@ -5010,7 +5009,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 type mergeResultMsg struct {
 	sourceID    string
 	targetID    string
-	result      *git.MergeResult
+	result      *daemonclient.MergeResult
 	stage       string
 	state       protocol.OperationState
 	operationID string
@@ -6092,7 +6091,7 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 	}
 }
 
-func (m Model) listDaemonWorktrees(ctx context.Context) ([]git.Worktree, error) {
+func (m Model) listDaemonWorktrees(ctx context.Context) ([]daemonclient.Worktree, error) {
 	if m.daemonClient == nil {
 		return nil, fmt.Errorf("daemon client unavailable")
 	}
@@ -6145,7 +6144,7 @@ func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID
 	return domain.SessionIdle, false, nil
 }
 
-func summarizeStatusChangeCounts(status git.GitStatus) string {
+func summarizeStatusChangeCounts(status daemonclient.GitStatus) string {
 	parts := make([]string, 0, 5)
 	if n := len(status.Staged); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d staged", n))
@@ -6168,7 +6167,7 @@ func summarizeStatusChangeCounts(status git.GitStatus) string {
 	return strings.Join(parts, ", ")
 }
 
-func dirtyFilesFromStatus(status git.GitStatus) []string {
+func dirtyFilesFromStatus(status daemonclient.GitStatus) []string {
 	seen := make(map[string]struct{}, 16)
 	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
 	appendUnique := func(files []string) {
@@ -6347,7 +6346,7 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 			}
 		}
 
-		if _, err := m.daemonClient.GitCheckpointCommit(ctx, worktree, git.DefaultCheckpointMessage); err != nil {
+		if _, err := m.daemonClient.GitCheckpointCommit(ctx, worktree, daemonclient.DefaultCheckpointMessage); err != nil {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
@@ -6374,7 +6373,7 @@ func daemonCommandMessage(err error) error {
 	return err
 }
 
-func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {
+func findDaemonWorktree(worktrees []daemonclient.Worktree, worktreePath, issueID string) (daemonclient.Worktree, bool) {
 	for _, wt := range worktrees {
 		if worktreePath != "" && wt.Path == worktreePath {
 			return wt, true
@@ -6383,7 +6382,7 @@ func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) 
 			return wt, true
 		}
 	}
-	return git.Worktree{}, false
+	return daemonclient.Worktree{}, false
 }
 
 func (m Model) resolveWorktreeBranch(ctx context.Context, worktree, issueID string) (string, error) {

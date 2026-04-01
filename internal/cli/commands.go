@@ -27,7 +27,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 var newLauncher = func(repoDir, socketPath string) daemonStarter {
@@ -393,13 +392,13 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 	return nil
 }
 
-func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (gitservice.Worktree, error) {
+func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
-		return gitservice.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
+		return daemonclient.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
 	}
 	if len(worktrees) == 0 {
-		return gitservice.Worktree{}, fmt.Errorf("no daemon worktrees found; start the issue session first")
+		return daemonclient.Worktree{}, fmt.Errorf("no daemon worktrees found; start the issue session first")
 	}
 
 	trimmedIssueID := strings.TrimSpace(issueID)
@@ -412,16 +411,16 @@ func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, i
 				return wt, nil
 			}
 		}
-		return gitservice.Worktree{}, fmt.Errorf("worktree not found for issue %s", trimmedIssueID)
+		return daemonclient.Worktree{}, fmt.Errorf("worktree not found for issue %s", trimmedIssueID)
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return gitservice.Worktree{}, fmt.Errorf("resolve working directory: %w", err)
+		return daemonclient.Worktree{}, fmt.Errorf("resolve working directory: %w", err)
 	}
 	absCWD, err := filepath.Abs(cwd)
 	if err != nil {
-		return gitservice.Worktree{}, fmt.Errorf("resolve working directory path: %w", err)
+		return daemonclient.Worktree{}, fmt.Errorf("resolve working directory path: %w", err)
 	}
 
 	for _, wt := range worktrees {
@@ -429,7 +428,7 @@ func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, i
 			return wt, nil
 		}
 	}
-	return gitservice.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
+	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
 }
 
 func samePath(left, right string) bool {
@@ -447,7 +446,7 @@ func resolveCLIBaseBranch(cfg *config.Config) string {
 	return base
 }
 
-func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source gitservice.Worktree, targetWorktree string) error {
+func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, targetWorktree string) error {
 	sourceStatus, err := deps.DaemonClient.GitStatus(ctx, source.Path)
 	if err != nil {
 		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)
@@ -483,7 +482,7 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	return errors.New(strings.Join(lines, "\n"))
 }
 
-func summarizeGitStatusCounts(status gitservice.GitStatus) string {
+func summarizeGitStatusCounts(status daemonclient.GitStatus) string {
 	parts := make([]string, 0, 5)
 	if n := len(status.Staged); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d staged", n))
@@ -506,7 +505,7 @@ func summarizeGitStatusCounts(status gitservice.GitStatus) string {
 	return strings.Join(parts, ", ")
 }
 
-func dirtyFilesFromGitStatus(status gitservice.GitStatus) []string {
+func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
 	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
 	out := make([]string, 0, len(seen))
 
