@@ -170,7 +170,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 				gotReq = req
 				return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
@@ -282,7 +282,7 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 					Body:            body,
 				}, nil
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
@@ -348,7 +348,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 		RepoDir:   t.TempDir(),
@@ -1384,30 +1384,9 @@ func TestConfigSetCommandRejectsUnsupportedKey(t *testing.T) {
 	}
 }
 
-type fakeWorktreeLister struct {
-	worktrees []gitservice.Worktree
-	err       error
-}
-
-func (f fakeWorktreeLister) List(context.Context) ([]gitservice.Worktree, error) {
-	return f.worktrees, f.err
-}
-
-func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
-	oldLister := newSyncWorktreeLister
-	t.Cleanup(func() {
-		newSyncWorktreeLister = oldLister
-	})
-	newSyncWorktreeLister = func(repoDir string, logger *slog.Logger) syncWorktreeLister {
-		return fakeWorktreeLister{
-			worktrees: []gitservice.Worktree{
-				{Path: filepath.Join(repoDir, "worktree-a")},
-				{Path: filepath.Join(repoDir, "worktree-b")},
-			},
-		}
-	}
-
-	var gotReq protocol.RequestEnvelope
+func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
+	var gotWorktreeReq protocol.RequestEnvelope
+	var gotSnapshotReq protocol.RequestEnvelope
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "Sync task one", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		{ID: "az-2", Title: "Sync task two", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
@@ -1421,19 +1400,55 @@ func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				gotReq = req
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					Meta:            req.Meta,
-					OK:              true,
-					CompletedAt:     req.SentAt,
-					Revision:        42,
-					Body:            payload,
-				}, nil
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					gotWorktreeReq = req
+					body, err := json.Marshal(map[string]any{
+						"project_id": "proj",
+						"worktrees": []map[string]any{
+							{
+								"path":     filepath.Join("worktree-a"),
+								"branch":   "az/worktree-a",
+								"issue_id": "az-1",
+							},
+							{
+								"path":     filepath.Join("worktree-b"),
+								"branch":   "az/worktree-b",
+								"issue_id": "az-2",
+							},
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal worktrees: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        41,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskList:
+					gotSnapshotReq = req
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        42,
+						Body:            payload,
+					}, nil
+				default:
+					t.Fatalf("unexpected command = %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 		RepoDir:   t.TempDir(),
@@ -1443,8 +1458,23 @@ func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
 		return SyncCommand(deps, SyncOptions{All: true})
 	})
 
-	if gotReq.Command != "task.list" {
-		t.Fatalf("command = %q, want %q", gotReq.Command, "task.list")
+	if gotWorktreeReq.Command != daemonclient.CommandWorktreeList {
+		t.Fatalf("worktree command = %q, want %q", gotWorktreeReq.Command, daemonclient.CommandWorktreeList)
+	}
+	if gotWorktreeReq.Meta.ProjectID != "proj" {
+		t.Fatalf("worktree project_id = %q, want proj", gotWorktreeReq.Meta.ProjectID)
+	}
+	var worktreeBody struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(gotWorktreeReq.Body, &worktreeBody); err != nil {
+		t.Fatalf("unmarshal worktree request: %v", err)
+	}
+	if worktreeBody.ProjectID != "proj" {
+		t.Fatalf("worktree request project_id = %q, want proj", worktreeBody.ProjectID)
+	}
+	if gotSnapshotReq.Command != daemonclient.CommandTaskList {
+		t.Fatalf("snapshot command = %q, want %q", gotSnapshotReq.Command, daemonclient.CommandTaskList)
 	}
 	if !strings.Contains(output, "Syncing issue tracker state...") {
 		t.Fatalf("sync output missing heading: %q", output)

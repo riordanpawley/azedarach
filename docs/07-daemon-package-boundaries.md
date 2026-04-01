@@ -8,8 +8,8 @@ parallel slices can land without architectural regression.
 ## Boundary Rules
 
 1. Frontend boundary:
-- `internal/app` and `internal/cli` may import `internal/client/*`, `internal/contracts/*`, and UI/domain packages.
-- `internal/app` and `internal/cli` must not import `internal/daemon/*` or daemon-owned mutation services directly.
+- `internal/tui` and `internal/cli` may import `internal/client/*`, `internal/contracts/*`, and UI/domain packages.
+- `internal/tui` and `internal/cli` must not import `internal/daemon/*` or daemon-owned mutation services directly.
 
 2. Daemon boundary:
 - `internal/daemon/*` may import `internal/contracts/*`, `internal/ipc/*`, `internal/domain`, and service adapters.
@@ -17,7 +17,7 @@ parallel slices can land without architectural regression.
 
 3. Contract boundary:
 - `internal/contracts/*` is transport/runtime agnostic and contains only typed payloads, protocol enums, and compatibility structures.
-- `internal/contracts/*` must not import `internal/daemon/*` or `internal/app`.
+- `internal/contracts/*` must not import `internal/daemon/*` or `internal/tui`.
 
 4. IPC boundary:
 - `internal/ipc/*` handles framing, encode/decode, and client/server transport primitives.
@@ -30,7 +30,7 @@ parallel slices can land without architectural regression.
 ## Import Direction (Allowed)
 
 ```text
-internal/app, internal/cli
+internal/tui, internal/cli
   -> internal/client/*
   -> internal/contracts/*
 
@@ -50,7 +50,7 @@ internal/contracts/*
 
 ## Enforcement Checklist
 
-1. No direct `internal/app` or `internal/cli` imports of daemon-owned service mutation clients.
+1. No direct `internal/tui` or `internal/cli` imports of daemon-owned service mutation clients.
 2. No `internal/daemon` imports of Bubble Tea or UI packages.
 3. Cross-process payloads use `internal/contracts/*` types, never `tea.Msg`.
 4. New handler/client code paths expose typed errors and revision metadata.

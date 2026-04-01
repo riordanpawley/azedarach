@@ -11,12 +11,16 @@ import (
 )
 
 type fakeGitService struct {
-	fetchFn      func(context.Context, string, string, string) error
-	mergeFn      func(context.Context, string, string, string) (*git.MergeResult, error)
-	checkoutFn   func(context.Context, string, string, string) error
-	abortMergeFn func(context.Context, string, string) error
-	diffStatFn   func(context.Context, string, string, string) (string, error)
-	statusFn     func(context.Context, string, string) (*git.GitStatus, error)
+	fetchFn          func(context.Context, string, string, string) error
+	mergeFn          func(context.Context, string, string, string) (*git.MergeResult, error)
+	checkoutFn       func(context.Context, string, string, string) error
+	abortMergeFn     func(context.Context, string, string) error
+	diffStatFn       func(context.Context, string, string, string) (string, error)
+	statusFn         func(context.Context, string, string) (*git.GitStatus, error)
+	runtimeSignalsFn func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
+	preflightFn      func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
+	discardFn        func(context.Context, string, string) (*GitDiscardChangesResult, error)
+	checkpointFn     func(context.Context, string, GitCheckpointRequest) (*GitCheckpointResult, error)
 }
 
 type recordingGitLongRunningExecutor struct {
@@ -68,6 +72,38 @@ func (f *fakeGitService) Status(ctx context.Context, projectID, worktree string)
 		return f.statusFn(ctx, projectID, worktree)
 	}
 	return &git.GitStatus{}, nil
+}
+
+func (f *fakeGitService) RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error) {
+	if f.runtimeSignalsFn != nil {
+		return f.runtimeSignalsFn(ctx, projectID, targets, baseBranch, compareRemote, remote)
+	}
+	return nil, 0, nil
+}
+
+func (f *fakeGitService) MergePreflight(ctx context.Context, projectID string, req GitMergePreflightRequest) (*GitMergePreflightResult, error) {
+	if f.preflightFn != nil {
+		return f.preflightFn(ctx, projectID, req)
+	}
+	return &GitMergePreflightResult{
+		SourceWorktree: req.SourceWorktree,
+		TargetWorktree: req.TargetWorktree,
+		Clean:          true,
+	}, nil
+}
+
+func (f *fakeGitService) DiscardChanges(ctx context.Context, projectID, worktree string) (*GitDiscardChangesResult, error) {
+	if f.discardFn != nil {
+		return f.discardFn(ctx, projectID, worktree)
+	}
+	return &GitDiscardChangesResult{Worktree: worktree}, nil
+}
+
+func (f *fakeGitService) Checkpoint(ctx context.Context, projectID string, req GitCheckpointRequest) (*GitCheckpointResult, error) {
+	if f.checkpointFn != nil {
+		return f.checkpointFn(ctx, projectID, req)
+	}
+	return &GitCheckpointResult{Worktree: req.Worktree, Message: req.Message}, nil
 }
 
 func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope {
@@ -131,6 +167,33 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			}
 			return &git.GitStatus{HasChanges: true, Modified: []string{"README.md"}}, nil
 		},
+		preflightFn: func(_ context.Context, _ string, req GitMergePreflightRequest) (*GitMergePreflightResult, error) {
+			if req.SourceWorktree != "/tmp/az-1" || req.TargetWorktree != "/tmp/main" {
+				t.Fatalf("preflight worktrees = %+v", req)
+			}
+			if req.TargetRef != "main" || req.SourceBranch != "az/az-1" {
+				t.Fatalf("preflight refs = %+v", req)
+			}
+			return &GitMergePreflightResult{
+				SourceID:       req.SourceID,
+				SourceWorktree: req.SourceWorktree,
+				TargetID:       req.TargetID,
+				TargetWorktree: req.TargetWorktree,
+				Clean:          true,
+			}, nil
+		},
+		discardFn: func(_ context.Context, _ string, worktree string) (*GitDiscardChangesResult, error) {
+			if worktree != "/tmp/az-1" {
+				t.Fatalf("discard args = %q", worktree)
+			}
+			return &GitDiscardChangesResult{Worktree: worktree}, nil
+		},
+		checkpointFn: func(_ context.Context, _ string, req GitCheckpointRequest) (*GitCheckpointResult, error) {
+			if req.Worktree != "/tmp/az-1" || req.Message != "chore: pre-merge checkpoint" {
+				t.Fatalf("checkpoint args = %+v", req)
+			}
+			return &GitCheckpointResult{Worktree: req.Worktree, Message: req.Message}, nil
+		},
 	})
 
 	for _, tc := range []struct {
@@ -167,6 +230,28 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			name:    "status",
 			req:     gitRequest(t, CommandGitStatus, gitCommandBody{Worktree: "/tmp/az-1"}),
 			wantCmd: CommandGitStatus,
+		},
+		{
+			name: "merge preflight",
+			req: gitRequest(t, CommandGitMergePreflight, GitMergePreflightRequest{
+				SourceID:       "az-1",
+				SourceWorktree: "/tmp/az-1",
+				TargetID:       "main",
+				TargetWorktree: "/tmp/main",
+				TargetRef:      "main",
+				SourceBranch:   "az/az-1",
+			}),
+			wantCmd: CommandGitMergePreflight,
+		},
+		{
+			name:    "discard changes",
+			req:     gitRequest(t, CommandGitDiscardChanges, GitDiscardChangesRequest{Worktree: "/tmp/az-1"}),
+			wantCmd: CommandGitDiscardChanges,
+		},
+		{
+			name:    "checkpoint",
+			req:     gitRequest(t, CommandGitCheckpoint, GitCheckpointRequest{Worktree: "/tmp/az-1", Message: "chore: pre-merge checkpoint"}),
+			wantCmd: CommandGitCheckpoint,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,6 +311,30 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				if body.Worktree != "/tmp/az-1" || !body.Status.HasChanges {
 					t.Fatalf("response body = %+v", body)
 				}
+			case CommandGitMergePreflight:
+				var body GitMergePreflightResult
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.SourceWorktree != "/tmp/az-1" || body.TargetWorktree != "/tmp/main" || !body.Clean {
+					t.Fatalf("response body = %+v", body)
+				}
+			case CommandGitDiscardChanges:
+				var body GitDiscardChangesResult
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" {
+					t.Fatalf("response body = %+v", body)
+				}
+			case CommandGitCheckpoint:
+				var body GitCheckpointResult
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("unmarshal response: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" || body.Message != "chore: pre-merge checkpoint" {
+					t.Fatalf("response body = %+v", body)
+				}
 			}
 		})
 	}
@@ -250,6 +359,15 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 		},
 		statusFn: func(context.Context, string, string) (*git.GitStatus, error) {
 			return nil, context.DeadlineExceeded
+		},
+		preflightFn: func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error) {
+			return nil, errors.New("preflight failed")
+		},
+		discardFn: func(context.Context, string, string) (*GitDiscardChangesResult, error) {
+			return nil, context.DeadlineExceeded
+		},
+		checkpointFn: func(context.Context, string, GitCheckpointRequest) (*GitCheckpointResult, error) {
+			return nil, errors.New("checkpoint failed")
 		},
 	})
 
@@ -324,6 +442,57 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
 		t.Fatalf("unexpected status validation error: %+v", resp.Error)
 	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitMergePreflight, GitMergePreflightRequest{}))
+	if resp.OK {
+		t.Fatal("expected merge preflight validation failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected merge preflight validation error: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitMergePreflight, GitMergePreflightRequest{
+		SourceWorktree: "/tmp/az-1",
+		TargetWorktree: "/tmp/main",
+	}))
+	if resp.OK {
+		t.Fatal("expected merge preflight failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal {
+		t.Fatalf("unexpected merge preflight mapping: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitDiscardChanges, GitDiscardChangesRequest{}))
+	if resp.OK {
+		t.Fatal("expected discard validation failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected discard validation error: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitDiscardChanges, GitDiscardChangesRequest{Worktree: "/tmp/az-1"}))
+	if resp.OK {
+		t.Fatal("expected discard timeout failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeTimeout || !resp.Error.Retryable {
+		t.Fatalf("unexpected discard mapping: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitCheckpoint, GitCheckpointRequest{}))
+	if resp.OK {
+		t.Fatal("expected checkpoint validation failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected checkpoint validation error: %+v", resp.Error)
+	}
+
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitCheckpoint, GitCheckpointRequest{Worktree: "/tmp/az-1"}))
+	if resp.OK {
+		t.Fatal("expected checkpoint failure")
+	}
+	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal {
+		t.Fatalf("unexpected checkpoint mapping: %+v", resp.Error)
+	}
 }
 
 func TestGitHandlerUsesLongRunningExecutorForMutatingCommands(t *testing.T) {
@@ -341,5 +510,14 @@ func TestGitHandlerUsesLongRunningExecutorForMutatingCommands(t *testing.T) {
 	_ = handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{Worktree: "/tmp/az-1"}))
 	if len(executor.commands) != 1 {
 		t.Fatalf("status should not use long-running executor, commands = %v", executor.commands)
+	}
+
+	_ = handler.Handle(context.Background(), gitRequest(t, CommandGitDiscardChanges, GitDiscardChangesRequest{Worktree: "/tmp/az-1"}))
+	_ = handler.Handle(context.Background(), gitRequest(t, CommandGitCheckpoint, GitCheckpointRequest{Worktree: "/tmp/az-1", Message: "checkpoint"}))
+	if got, want := len(executor.commands), 3; got != want {
+		t.Fatalf("commands length = %d, want %d (%v)", got, want, executor.commands)
+	}
+	if executor.commands[1] != CommandGitDiscardChanges || executor.commands[2] != CommandGitCheckpoint {
+		t.Fatalf("commands = %v", executor.commands)
 	}
 }
