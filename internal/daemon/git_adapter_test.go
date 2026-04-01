@@ -140,18 +140,25 @@ func TestGitServiceAdapterMergePreflightUsesWorktreeAwareClient(t *testing.T) {
 	}}
 
 	adapter := &gitServiceAdapter{client: git.NewClient(runner, slog.Default())}
-	result, err := adapter.MergePreflight(context.Background(), "default", "/tmp/source", "/tmp/target", "main", "az/source")
+	result, err := adapter.MergePreflight(context.Background(), "default", daemonhandlers.GitMergePreflightRequest{
+		SourceID:       "az-source",
+		SourceWorktree: "/tmp/source",
+		TargetID:       "main",
+		TargetWorktree: "/tmp/target",
+		TargetRef:      "main",
+		SourceBranch:   "az/source",
+	})
 	if err != nil {
 		t.Fatalf("MergePreflight: %v", err)
 	}
 	if result == nil {
 		t.Fatal("MergePreflight result is nil")
 	}
-	if !result.SourceStatus.HasChanges {
-		t.Fatal("source status should report changes")
+	if result.Clean {
+		t.Fatal("expected unclean merge preflight result")
 	}
-	if !result.HasConflicts {
-		t.Fatal("expected conflict result")
+	if !reflect.DeepEqual(result.SourceFiles, []string{"source.txt"}) {
+		t.Fatalf("source files = %v, want [source.txt]", result.SourceFiles)
 	}
 	if !reflect.DeepEqual(result.ConflictFiles, []string{"cmd/az/main.go"}) {
 		t.Fatalf("conflict files = %v, want [cmd/az/main.go]", result.ConflictFiles)
@@ -194,8 +201,12 @@ func TestGitServiceAdapterDiscardChangesPublishesOnStatusChange(t *testing.T) {
 	}
 	adapter.storeRuntimeSignal(runtimeSignalCacheKey(projectID, issueID, worktree, "main", false, "origin"), daemonhandlers.GitRuntimeSignalsResult{IssueID: issueID, Worktree: worktree}, time.Now())
 
-	if err := adapter.DiscardChanges(ctx, projectID, worktree); err != nil {
+	result, err := adapter.DiscardChanges(ctx, projectID, worktree)
+	if err != nil {
 		t.Fatalf("DiscardChanges: %v", err)
+	}
+	if result == nil || result.Worktree != worktree {
+		t.Fatalf("discard result = %+v, want worktree %q", result, worktree)
 	}
 	if updates != 1 {
 		t.Fatalf("status update publishes = %d, want 1", updates)
@@ -237,8 +248,12 @@ func TestGitServiceAdapterDiscardChangesSkipsPublishWhenStatusUnchanged(t *testi
 	cacheKey := runtimeSignalCacheKey(projectID, issueID, worktree, "main", false, "origin")
 	adapter.storeRuntimeSignal(cacheKey, daemonhandlers.GitRuntimeSignalsResult{IssueID: issueID, Worktree: worktree}, time.Now())
 
-	if err := adapter.DiscardChanges(ctx, projectID, worktree); err != nil {
+	result, err := adapter.DiscardChanges(ctx, projectID, worktree)
+	if err != nil {
 		t.Fatalf("DiscardChanges: %v", err)
+	}
+	if result == nil || result.Worktree != worktree {
+		t.Fatalf("discard result = %+v, want worktree %q", result, worktree)
 	}
 	if updates != 0 {
 		t.Fatalf("status update publishes = %d, want 0", updates)
@@ -283,8 +298,15 @@ func TestGitServiceAdapterCreateCheckpointPublishesOnStatusChange(t *testing.T) 
 		onStatusUpdate:  func(_, _, _ string) { updates++ },
 	}
 
-	if err := adapter.CreateCheckpoint(ctx, projectID, worktree, ""); err != nil {
+	result, err := adapter.Checkpoint(ctx, projectID, daemonhandlers.GitCheckpointRequest{
+		Worktree: worktree,
+		Message:  "",
+	})
+	if err != nil {
 		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	if result == nil || result.Worktree != worktree || result.Message != git.DefaultCheckpointMessage {
+		t.Fatalf("checkpoint result = %+v", result)
 	}
 	if updates != 1 {
 		t.Fatalf("status update publishes = %d, want 1", updates)
@@ -312,7 +334,10 @@ func TestGitServiceAdapterCreateCheckpointReturnsNoChangesWithoutPublishing(t *t
 		onStatusUpdate: func(_, _, _ string) { updates++ },
 	}
 
-	err := adapter.CreateCheckpoint(ctx, projectID, worktree, "")
+	_, err := adapter.Checkpoint(ctx, projectID, daemonhandlers.GitCheckpointRequest{
+		Worktree: worktree,
+		Message:  "",
+	})
 	if !errors.Is(err, git.ErrNoChangesToCommit) {
 		t.Fatalf("CreateCheckpoint error = %v, want ErrNoChangesToCommit", err)
 	}

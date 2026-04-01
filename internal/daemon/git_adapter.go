@@ -79,24 +79,64 @@ func (a *gitServiceAdapter) AbortMerge(ctx context.Context, projectID, worktree 
 	return nil
 }
 
-func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, sourceWorktree, targetWorktree, targetRef, sourceBranch string) (*git.MergePreflightResult, error) {
-	return a.client.MergePreflight(ctx, sourceWorktree, targetWorktree, targetRef, sourceBranch)
+func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, req daemonhandlers.GitMergePreflightRequest) (*daemonhandlers.GitMergePreflightResult, error) {
+	result, err := a.client.MergePreflight(ctx, req.SourceWorktree, req.TargetWorktree, req.TargetRef, req.SourceBranch)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("merge preflight returned no result")
+	}
+
+	resp := &daemonhandlers.GitMergePreflightResult{
+		SourceID:       req.SourceID,
+		SourceWorktree: req.SourceWorktree,
+		TargetID:       req.TargetID,
+		TargetWorktree: req.TargetWorktree,
+		Clean:          true,
+		ConflictFiles:  append([]string(nil), result.ConflictFiles...),
+	}
+
+	if result.SourceStatus.HasChanges {
+		resp.Clean = false
+		resp.SourceFiles = gitStatusFiles(result.SourceStatus)
+		resp.Reasons = append(resp.Reasons, "Source worktree has uncommitted changes")
+	}
+	if result.TargetStatus.HasChanges {
+		resp.Clean = false
+		resp.TargetFiles = gitStatusFiles(result.TargetStatus)
+		resp.Reasons = append(resp.Reasons, "Target worktree has uncommitted changes")
+	}
+	if result.HasConflicts {
+		resp.Clean = false
+		if len(result.ConflictFiles) > 0 {
+			resp.Reasons = append(resp.Reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(result.ConflictFiles), strings.Join(result.ConflictFiles, ", ")))
+		} else {
+			resp.Reasons = append(resp.Reasons, "Merge would conflict; merge and resolve main into the source branch first")
+		}
+	}
+
+	return resp, nil
 }
 
-func (a *gitServiceAdapter) DiscardChanges(ctx context.Context, projectID, worktree string) error {
+func (a *gitServiceAdapter) DiscardChanges(ctx context.Context, projectID, worktree string) (*daemonhandlers.GitDiscardChangesResult, error) {
 	if err := a.client.DiscardChanges(ctx, worktree); err != nil {
-		return err
+		return nil, err
 	}
 	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
-	return nil
+	return &daemonhandlers.GitDiscardChangesResult{Worktree: worktree}, nil
 }
 
-func (a *gitServiceAdapter) CreateCheckpoint(ctx context.Context, projectID, worktree, message string) error {
-	if err := a.client.CreateCheckpoint(ctx, worktree, message); err != nil {
-		return err
+func (a *gitServiceAdapter) Checkpoint(ctx context.Context, projectID string, req daemonhandlers.GitCheckpointRequest) (*daemonhandlers.GitCheckpointResult, error) {
+	if err := a.client.CreateCheckpoint(ctx, req.Worktree, req.Message); err != nil {
+		return nil, err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
-	return nil
+	a.refreshGitStatusWriteThrough(ctx, projectID, req.Worktree, true, false)
+	message := strings.TrimSpace(req.Message)
+	if message == "" {
+		message = git.DefaultCheckpointMessage
+	}
+	return &daemonhandlers.GitCheckpointResult{Worktree: req.Worktree, Message: message}, nil
 }
 
 func (a *gitServiceAdapter) DiffStat(ctx context.Context, _ string, worktree, baseBranch string) (string, error) {
@@ -279,6 +319,30 @@ func (a *gitServiceAdapter) ensureStatusPoller(projectID, worktree string) {
 			}
 		}
 	}()
+}
+
+func gitStatusFiles(status git.GitStatus) []string {
+	seen := make(map[string]struct{})
+	files := make([]string, 0, len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Staged))
+	add := func(list []string) {
+		for _, file := range list {
+			file = strings.TrimSpace(file)
+			if file == "" {
+				continue
+			}
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			files = append(files, file)
+		}
+	}
+	add(status.Modified)
+	add(status.Added)
+	add(status.Deleted)
+	add(status.Untracked)
+	add(status.Staged)
+	return files
 }
 
 func normalizeProjectID(projectID string) string {
