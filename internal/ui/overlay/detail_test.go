@@ -111,12 +111,11 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	assert.Contains(t, view, "npm run dev")
 }
 
-func TestDetailPanelViewWithSessionShowsCleanGitStatus(t *testing.T) {
+func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
 	task := domain.Task{
-		ID:          "az-789",
-		Title:       "Task with clean repo",
-		Status:      domain.StatusInProgress,
-		GitAheadCount: 2,
+		ID:         "az-789",
+		Title:      "Task with unavailable git telemetry",
+		Status:     domain.StatusInProgress,
 		HasWorktree: true,
 	}
 	session := &domain.Session{
@@ -129,8 +128,7 @@ func TestDetailPanelViewWithSessionShowsCleanGitStatus(t *testing.T) {
 	view := panel.View()
 
 	assert.Contains(t, view, "Git:")
-	assert.Contains(t, view, "clean")
-	assert.Contains(t, view, "up 2, down 0")
+	assert.Contains(t, view, "unknown")
 }
 
 func TestDetailPanelViewWithParent(t *testing.T) {

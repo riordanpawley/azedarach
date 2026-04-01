@@ -461,6 +461,10 @@ func (d *DetailPanel) hasGitStatusData() bool {
 	if d.session != nil && strings.TrimSpace(d.session.Worktree) != "" {
 		return true
 	}
+	return d.hasGitTelemetrySignal()
+}
+
+func (d *DetailPanel) hasGitTelemetrySignal() bool {
 	if d.task.HasUncommittedChanges {
 		return true
 	}
@@ -471,6 +475,10 @@ func (d *DetailPanel) hasGitStatusData() bool {
 }
 
 func (d *DetailPanel) formatGitStatus() string {
+	if !d.hasGitTelemetrySignal() {
+		return "unknown"
+	}
+
 	status := "clean"
 	if d.task.HasUncommittedChanges || d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
 		status = "dirty"
