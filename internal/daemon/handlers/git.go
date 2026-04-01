@@ -13,12 +13,13 @@ import (
 )
 
 const (
-	CommandGitFetch      = "git.fetch"
-	CommandGitMerge      = "git.merge"
-	CommandGitCheckout   = "git.checkout"
-	CommandGitAbortMerge = "git.abort_merge"
-	CommandGitDiffStat   = "git.diff_stat"
-	CommandGitStatus     = "git.status"
+	CommandGitFetch          = "git.fetch"
+	CommandGitMerge          = "git.merge"
+	CommandGitCheckout       = "git.checkout"
+	CommandGitAbortMerge     = "git.abort_merge"
+	CommandGitDiffStat       = "git.diff_stat"
+	CommandGitStatus         = "git.status"
+	CommandGitRuntimeSignals = "git.runtime_signals"
 )
 
 // GitService captures the daemon-owned git operations needed by client workflows.
@@ -29,6 +30,7 @@ type GitService interface {
 	AbortMerge(ctx context.Context, projectID, worktree string) error
 	DiffStat(ctx context.Context, projectID, worktree, baseBranch string) (string, error)
 	Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
+	RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error)
 }
 
 // GitHandler routes daemon git workflow commands.
@@ -61,11 +63,28 @@ func NewGitHandler(service GitService, opts ...GitHandlerOption) *GitHandler {
 }
 
 type gitCommandBody struct {
-	ProjectID  string `json:"project_id,omitempty"`
-	Worktree   string `json:"worktree"`
-	Remote     string `json:"remote,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	BaseBranch string `json:"base_branch,omitempty"`
+	ProjectID     string                    `json:"project_id,omitempty"`
+	Worktree      string                    `json:"worktree"`
+	Remote        string                    `json:"remote,omitempty"`
+	Branch        string                    `json:"branch,omitempty"`
+	BaseBranch    string                    `json:"base_branch,omitempty"`
+	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
+	CompareRemote bool                      `json:"compare_remote,omitempty"`
+}
+
+type GitRuntimeSignalsTarget struct {
+	IssueID  string `json:"issue_id"`
+	Worktree string `json:"worktree"`
+}
+
+type GitRuntimeSignalsResult struct {
+	IssueID               string `json:"issue_id"`
+	Worktree              string `json:"worktree"`
+	HasUncommittedChanges bool   `json:"has_uncommitted_changes"`
+	GitAdditions          int    `json:"git_additions"`
+	GitDeletions          int    `json:"git_deletions"`
+	GitAheadCount         int    `json:"git_ahead_count"`
+	GitBehindCount        int    `json:"git_behind_count"`
 }
 
 type gitActionResultBody struct {
@@ -88,6 +107,11 @@ type gitMergeResultBody struct {
 	Worktree string          `json:"worktree"`
 	Branch   string          `json:"branch"`
 	Result   git.MergeResult `json:"result"`
+}
+
+type gitRuntimeSignalsBody struct {
+	Signals         []GitRuntimeSignalsResult `json:"signals"`
+	PartialFailures int                       `json:"partial_failures"`
 }
 
 // Handle executes one git workflow command from a daemon request envelope.
@@ -135,6 +159,8 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 		return h.handleDiffStat(ctx, resp, cmd)
 	case CommandGitStatus:
 		return h.handleStatus(ctx, resp, cmd)
+	case CommandGitRuntimeSignals:
+		return h.handleRuntimeSignals(ctx, resp, cmd)
 	default:
 		resp.Error = &protocol.ErrorEnvelope{
 			Code:      protocol.ErrorCodeUnsupportedCommand,
@@ -152,6 +178,31 @@ func isGitLongRunningCommand(command string) bool {
 	default:
 		return false
 	}
+}
+
+func (h *GitHandler) handleRuntimeSignals(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	signals, partialFailures, err := h.service.RuntimeSignals(ctx, cmd.ProjectID, cmd.Targets, cmd.BaseBranch, cmd.CompareRemote, cmd.Remote)
+	if err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+
+	body, err := json.Marshal(gitRuntimeSignalsBody{
+		Signals:         signals,
+		PartialFailures: partialFailures,
+	})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("marshal response body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+
+	resp.OK = true
+	resp.Body = body
+	return resp
 }
 
 func (h *GitHandler) handleFetch(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {

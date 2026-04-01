@@ -1452,10 +1452,10 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 			ParentID: &parentID,
 		},
 		{
-			ID:     parentID,
-			Title:  "Parent epic",
-			Status: domain.StatusInProgress,
-			Type:   domain.TypeEpic,
+			ID:          parentID,
+			Title:       "Parent epic",
+			Status:      domain.StatusInProgress,
+			Type:        domain.TypeEpic,
 			HasWorktree: true,
 		},
 	}
@@ -3685,8 +3685,8 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					t.Fatalf("unmarshal delete request: %v", err)
 				}
 				deleteCount++
-					if deleteCount == 2 {
-						return protocol.ResponseEnvelope{}, errors.New("permission denied")
+				if deleteCount == 2 {
+					return protocol.ResponseEnvelope{}, errors.New("permission denied")
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -3710,7 +3710,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 		if result.updated != 1 || result.failed != 1 || len(result.issues) != 1 {
 			t.Fatalf("bulk delete result = %+v", result)
 		}
-			if result.issues[0].taskID != "az-2" || !strings.Contains(result.issues[0].reason, "permission denied") {
+		if result.issues[0].taskID != "az-2" || !strings.Contains(result.issues[0].reason, "permission denied") {
 			t.Fatalf("issues = %+v", result.issues)
 		}
 		if got := transport.requests; len(got) != 2 || got[0] != daemonclient.CommandTaskDelete || got[1] != daemonclient.CommandTaskDelete {
@@ -3726,7 +3726,7 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 			t.Fatal("expected bulk action toast")
 		}
 		gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
-			if !strings.Contains(gotToast, "az-2:") || !strings.Contains(gotToast, "permission denied") {
+		if !strings.Contains(gotToast, "az-2:") || !strings.Contains(gotToast, "permission denied") {
 			t.Fatalf("toast = %q, want wrapped failure reason", gotToast)
 		}
 	})
@@ -3880,7 +3880,7 @@ func TestBulkDeleteReportsSkippedDriftedIDs(t *testing.T) {
 }
 
 func TestRefreshRuntimeSignalsCmdPrioritizesActiveTmuxSessionsForDiffStat(t *testing.T) {
-	var diffStatWorktrees []string
+	var requestedWorktrees []string
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -3913,35 +3913,24 @@ func TestRefreshRuntimeSignalsCmdPrioritizesActiveTmuxSessionsForDiffStat(t *tes
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandGitStatus:
+			case daemonclient.CommandGitRuntimeSignals:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal status body: %v", err)
+					t.Fatalf("unmarshal runtime signals body: %v", err)
+				}
+				for _, target := range body.Targets {
+					requestedWorktrees = append(requestedWorktrees, target.Worktree)
 				}
 				respBody, err := json.Marshal(struct {
-					Status git.GitStatus `json:"status"`
-				}{Status: git.GitStatus{HasChanges: true}})
+					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
+				}{
+					Signals: []daemonclient.GitRuntimeSignalsResult{
+						{IssueID: "az-active", Worktree: "/tmp/active", HasUncommittedChanges: true, GitAdditions: 2, GitDeletions: 1},
+						{IssueID: "az-inactive", Worktree: "/tmp/inactive", HasUncommittedChanges: true, GitAdditions: 2, GitDeletions: 1},
+					},
+				})
 				if err != nil {
-					t.Fatalf("marshal status response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case daemonclient.CommandGitDiffStat:
-				var body daemonclient.GitCommandRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal diff stat body: %v", err)
-				}
-				diffStatWorktrees = append(diffStatWorktrees, body.Worktree)
-				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "1 file changed, 2 insertions(+), 1 deletion(-)"})
-				if err != nil {
-					t.Fatalf("marshal diff response: %v", err)
+					t.Fatalf("marshal runtime signals response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -3977,16 +3966,16 @@ func TestRefreshRuntimeSignalsCmdPrioritizesActiveTmuxSessionsForDiffStat(t *tes
 	if len(loaded.signalsByTask) != 2 {
 		t.Fatalf("signalsByTask len = %d, want 2", len(loaded.signalsByTask))
 	}
-	if len(diffStatWorktrees) != 2 {
-		t.Fatalf("diff stat calls = %d, want 2", len(diffStatWorktrees))
+	if len(requestedWorktrees) != 2 {
+		t.Fatalf("runtime targets = %d, want 2", len(requestedWorktrees))
 	}
-	if diffStatWorktrees[0] != "/tmp/active" {
-		t.Fatalf("first diff stat worktree = %q, want active session worktree", diffStatWorktrees[0])
+	if requestedWorktrees[0] != "/tmp/active" {
+		t.Fatalf("first runtime target = %q, want active session worktree", requestedWorktrees[0])
 	}
 }
 
 func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
-	var diffStatWorktrees []string
+	var requestedWorktrees []string
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -4019,35 +4008,23 @@ func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandGitStatus:
+			case daemonclient.CommandGitRuntimeSignals:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal status body: %v", err)
+					t.Fatalf("unmarshal runtime signals body: %v", err)
 				}
 				respBody, err := json.Marshal(struct {
-					Status git.GitStatus `json:"status"`
-				}{Status: git.GitStatus{HasChanges: true}})
+					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
+				}{
+					Signals: []daemonclient.GitRuntimeSignalsResult{
+						{IssueID: "az-active", Worktree: "/tmp/active", HasUncommittedChanges: true, GitAdditions: 5, GitDeletions: 2},
+					},
+				})
 				if err != nil {
-					t.Fatalf("marshal status response: %v", err)
+					t.Fatalf("marshal runtime signals response: %v", err)
 				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case daemonclient.CommandGitDiffStat:
-				var body daemonclient.GitCommandRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal diff stat body: %v", err)
-				}
-				diffStatWorktrees = append(diffStatWorktrees, body.Worktree)
-				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "1 file changed, 5 insertions(+), 2 deletions(-)"})
-				if err != nil {
-					t.Fatalf("marshal diff response: %v", err)
+				for _, target := range body.Targets {
+					requestedWorktrees = append(requestedWorktrees, target.Worktree)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -4107,8 +4084,8 @@ func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
 	if !ok {
 		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
 	}
-	if len(diffStatWorktrees) != 1 || diffStatWorktrees[0] != "/tmp/active" {
-		t.Fatalf("diff stat worktrees = %v, want only active session worktree", diffStatWorktrees)
+	if len(requestedWorktrees) != 1 || requestedWorktrees[0] != "/tmp/active" {
+		t.Fatalf("runtime targets = %v, want only active session worktree", requestedWorktrees)
 	}
 	if loaded.signalsByTask["az-inactive"].GitAdditions != 9 || loaded.signalsByTask["az-inactive"].GitDeletions != 4 {
 		t.Fatalf("inactive cached signals = %+v, want cached additions/deletions", loaded.signalsByTask["az-inactive"])
@@ -4119,7 +4096,7 @@ func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
 }
 
 func TestRefreshRuntimeSignalsCmdBypassesCacheWhenWorktreePathChanges(t *testing.T) {
-	var diffStatWorktrees []string
+	var requestedWorktrees []string
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -4151,31 +4128,23 @@ func TestRefreshRuntimeSignalsCmdBypassesCacheWhenWorktreePathChanges(t *testing
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandGitStatus:
-				respBody, err := json.Marshal(struct {
-					Status git.GitStatus `json:"status"`
-				}{Status: git.GitStatus{HasChanges: true}})
-				if err != nil {
-					t.Fatalf("marshal status response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			case daemonclient.CommandGitDiffStat:
+			case daemonclient.CommandGitRuntimeSignals:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal diff stat body: %v", err)
+					t.Fatalf("unmarshal runtime signals body: %v", err)
 				}
-				diffStatWorktrees = append(diffStatWorktrees, body.Worktree)
 				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "1 file changed, 7 insertions(+), 3 deletions(-)"})
+					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
+				}{
+					Signals: []daemonclient.GitRuntimeSignalsResult{
+						{IssueID: "az-inactive", Worktree: "/tmp/new-inactive", HasUncommittedChanges: true, GitAdditions: 7, GitDeletions: 3},
+					},
+				})
 				if err != nil {
-					t.Fatalf("marshal diff response: %v", err)
+					t.Fatalf("marshal runtime signals response: %v", err)
+				}
+				for _, target := range body.Targets {
+					requestedWorktrees = append(requestedWorktrees, target.Worktree)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -4216,8 +4185,8 @@ func TestRefreshRuntimeSignalsCmdBypassesCacheWhenWorktreePathChanges(t *testing
 	if !ok {
 		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
 	}
-	if len(diffStatWorktrees) != 1 || diffStatWorktrees[0] != "/tmp/new-inactive" {
-		t.Fatalf("diff stat worktrees = %v, want fresh call for new worktree path", diffStatWorktrees)
+	if len(requestedWorktrees) != 1 || requestedWorktrees[0] != "/tmp/new-inactive" {
+		t.Fatalf("runtime targets = %v, want fresh call for new worktree path", requestedWorktrees)
 	}
 	if loaded.worktreeByTask["az-inactive"] != "/tmp/new-inactive" {
 		t.Fatalf("cached worktree = %q, want %q", loaded.worktreeByTask["az-inactive"], "/tmp/new-inactive")
@@ -4256,14 +4225,16 @@ func TestRefreshRuntimeSignalsCmdDoesNotMarkFailedRefreshAsFresh(t *testing.T) {
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandGitStatus:
-				return protocol.ResponseEnvelope{}, errors.New("status failed")
-			case daemonclient.CommandGitDiffStat:
+			case daemonclient.CommandGitRuntimeSignals:
 				respBody, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: "1 file changed, 1 insertion(+)"})
+					Signals         []daemonclient.GitRuntimeSignalsResult `json:"signals"`
+					PartialFailures int                                    `json:"partial_failures"`
+				}{
+					Signals:         nil,
+					PartialFailures: 1,
+				})
 				if err != nil {
-					t.Fatalf("marshal diff response: %v", err)
+					t.Fatalf("marshal runtime signals response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
@@ -4335,26 +4306,23 @@ func TestRefreshRuntimeSignalsCmdSkipsRemoteBehindCheckInLocalWorkflowMode(t *te
 					OK:              true,
 					Body:            body,
 				}, nil
-			case daemonclient.CommandGitStatus:
-				body, err := json.Marshal(struct {
-					Status git.GitStatus `json:"status"`
-				}{Status: git.GitStatus{HasChanges: false}})
-				if err != nil {
-					t.Fatalf("marshal git status response: %v", err)
+			case daemonclient.CommandGitRuntimeSignals:
+				var reqBody daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &reqBody); err != nil {
+					t.Fatalf("unmarshal runtime signals request: %v", err)
 				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitDiffStat:
+				if reqBody.CompareRemote {
+					t.Fatalf("compare_remote = true, want false in local workflow mode")
+				}
 				body, err := json.Marshal(struct {
-					Output string `json:"output"`
-				}{Output: ""})
+					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
+				}{
+					Signals: []daemonclient.GitRuntimeSignalsResult{
+						{IssueID: "az-1", Worktree: "/tmp/az-1"},
+					},
+				})
 				if err != nil {
-					t.Fatalf("marshal diff stat response: %v", err)
+					t.Fatalf("marshal runtime signals response: %v", err)
 				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,

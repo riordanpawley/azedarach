@@ -116,6 +116,7 @@ func New(cfg Config) *Daemon {
 		client:          gitClient,
 		projectionStore: projectionStore,
 		logger:          cfg.Logger,
+		baseBranch:      cfg.BaseBranch,
 	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)

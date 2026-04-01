@@ -7,20 +7,23 @@ import (
 )
 
 const (
-	CommandGitFetch      = "git.fetch"
-	CommandGitMerge      = "git.merge"
-	CommandGitCheckout   = "git.checkout"
-	CommandGitAbortMerge = "git.abort_merge"
-	CommandGitDiffStat   = "git.diff_stat"
-	CommandGitStatus     = "git.status"
+	CommandGitFetch          = "git.fetch"
+	CommandGitMerge          = "git.merge"
+	CommandGitCheckout       = "git.checkout"
+	CommandGitAbortMerge     = "git.abort_merge"
+	CommandGitDiffStat       = "git.diff_stat"
+	CommandGitStatus         = "git.status"
+	CommandGitRuntimeSignals = "git.runtime_signals"
 )
 
 // GitCommandRequest captures the daemon request body for git workflow commands.
 type GitCommandRequest struct {
-	Worktree   string `json:"worktree"`
-	Remote     string `json:"remote,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	BaseBranch string `json:"base_branch,omitempty"`
+	Worktree      string                    `json:"worktree"`
+	Remote        string                    `json:"remote,omitempty"`
+	Branch        string                    `json:"branch,omitempty"`
+	BaseBranch    string                    `json:"base_branch,omitempty"`
+	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
+	CompareRemote bool                      `json:"compare_remote,omitempty"`
 }
 
 // GitCommandResponse captures the daemon response body for git workflow commands.
@@ -43,6 +46,26 @@ type gitOutputBody struct {
 
 type gitStatusBody struct {
 	Status git.GitStatus `json:"status"`
+}
+
+type GitRuntimeSignalsTarget struct {
+	IssueID  string `json:"issue_id"`
+	Worktree string `json:"worktree"`
+}
+
+type GitRuntimeSignalsResult struct {
+	IssueID               string `json:"issue_id"`
+	Worktree              string `json:"worktree"`
+	HasUncommittedChanges bool   `json:"has_uncommitted_changes"`
+	GitAdditions          int    `json:"git_additions"`
+	GitDeletions          int    `json:"git_deletions"`
+	GitAheadCount         int    `json:"git_ahead_count"`
+	GitBehindCount        int    `json:"git_behind_count"`
+}
+
+type gitRuntimeSignalsBody struct {
+	Signals         []GitRuntimeSignalsResult `json:"signals"`
+	PartialFailures int                       `json:"partial_failures"`
 }
 
 // GitFetch asks the daemon to fetch updates for a worktree from the requested remote.
@@ -129,4 +152,18 @@ func (c *Client) GitStatus(ctx context.Context, worktree string) (git.GitStatus,
 		return git.GitStatus{}, err
 	}
 	return resp.Status, nil
+}
+
+// GitRuntimeSignals asks the daemon to compute runtime git signals for issue worktrees.
+func (c *Client) GitRuntimeSignals(ctx context.Context, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error) {
+	var resp gitRuntimeSignalsBody
+	if err := c.commandJSON(ctx, CommandGitRuntimeSignals, GitCommandRequest{
+		Targets:       targets,
+		BaseBranch:    baseBranch,
+		CompareRemote: compareRemote,
+		Remote:        remote,
+	}, &resp); err != nil {
+		return nil, 0, err
+	}
+	return resp.Signals, resp.PartialFailures, nil
 }

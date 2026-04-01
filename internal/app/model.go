@@ -2609,6 +2609,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 		worktreeByTask := make(map[string]string, len(prioritizedTasks))
 		partialFailures := 0
 		now := time.Now()
+		targetsToRefresh := make([]daemonclient.GitRuntimeSignalsTarget, 0, len(prioritizedTasks))
 		for _, task := range prioritizedTasks {
 			cachedSignals, hasCachedSignals := m.runtimeSignalsByTask[task.ID]
 			signals := board.RuntimeSignals{HasTmuxSession: task.Session != nil}
@@ -2640,41 +2641,41 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				continue
 			}
 
-			status, statusErr := m.daemonClient.GitStatus(ctx, worktreePath)
-			refreshSucceeded := statusErr == nil
-			if statusErr == nil {
-				signals.HasUncommittedChanges = status.HasChanges
-			} else {
-				partialFailures++
-			}
-
-			diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath, baseBranch)
-			if diffErr == nil {
-				signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
-			} else {
-				partialFailures++
-				refreshSucceeded = false
-			}
-
-			if m.shouldCompareAgainstRemote() {
-				behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
-					Worktree:   worktreePath,
-					BaseBranch: baseBranch,
-					Remote:     "origin",
-				})
-				if behindErr == nil {
-					signals.GitAheadCount = behind.CommitsAhead
-					signals.GitBehindCount = behind.CommitsBehind
-				} else {
-					partialFailures++
-					refreshSucceeded = false
-				}
-			}
-			if refreshSucceeded {
-				refreshedAtByTask[task.ID] = now
-			}
 			worktreeByTask[task.ID] = worktreePath
 			signalsByTask[task.ID] = signals
+			targetsToRefresh = append(targetsToRefresh, daemonclient.GitRuntimeSignalsTarget{
+				IssueID:  task.ID,
+				Worktree: worktreePath,
+			})
+		}
+
+		if len(targetsToRefresh) > 0 {
+			signals, signalPartialFailures, err := m.daemonClient.GitRuntimeSignals(
+				ctx,
+				targetsToRefresh,
+				baseBranch,
+				m.shouldCompareAgainstRemote(),
+				"origin",
+			)
+			if err != nil {
+				partialFailures += len(targetsToRefresh)
+			} else {
+				partialFailures += signalPartialFailures
+				for _, signal := range signals {
+					issueID := strings.TrimSpace(signal.IssueID)
+					if issueID == "" {
+						continue
+					}
+					baseSignals := signalsByTask[issueID]
+					baseSignals.HasUncommittedChanges = signal.HasUncommittedChanges
+					baseSignals.GitAdditions = signal.GitAdditions
+					baseSignals.GitDeletions = signal.GitDeletions
+					baseSignals.GitAheadCount = signal.GitAheadCount
+					baseSignals.GitBehindCount = signal.GitBehindCount
+					signalsByTask[issueID] = baseSignals
+					refreshedAtByTask[issueID] = now
+				}
+			}
 		}
 
 		return runtimeSignalsLoadedMsg{

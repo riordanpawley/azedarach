@@ -11,12 +11,13 @@ import (
 )
 
 type fakeGitService struct {
-	fetchFn      func(context.Context, string, string, string) error
-	mergeFn      func(context.Context, string, string, string) (*git.MergeResult, error)
-	checkoutFn   func(context.Context, string, string, string) error
-	abortMergeFn func(context.Context, string, string) error
-	diffStatFn   func(context.Context, string, string, string) (string, error)
-	statusFn     func(context.Context, string, string) (*git.GitStatus, error)
+	fetchFn          func(context.Context, string, string, string) error
+	mergeFn          func(context.Context, string, string, string) (*git.MergeResult, error)
+	checkoutFn       func(context.Context, string, string, string) error
+	abortMergeFn     func(context.Context, string, string) error
+	diffStatFn       func(context.Context, string, string, string) (string, error)
+	statusFn         func(context.Context, string, string) (*git.GitStatus, error)
+	runtimeSignalsFn func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
 }
 
 type recordingGitLongRunningExecutor struct {
@@ -68,6 +69,13 @@ func (f *fakeGitService) Status(ctx context.Context, projectID, worktree string)
 		return f.statusFn(ctx, projectID, worktree)
 	}
 	return &git.GitStatus{}, nil
+}
+
+func (f *fakeGitService) RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error) {
+	if f.runtimeSignalsFn != nil {
+		return f.runtimeSignalsFn(ctx, projectID, targets, baseBranch, compareRemote, remote)
+	}
+	return nil, 0, nil
 }
 
 func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope {
