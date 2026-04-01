@@ -132,6 +132,36 @@ func TestActiveProjectPath(t *testing.T) {
 	})
 }
 
+func TestDaemonProjectIDForPath(t *testing.T) {
+	got := daemonProjectIDForPath("/work/azedarach")
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("expected non-empty daemon project id for valid path")
+	}
+
+	if got2 := daemonProjectIDForPath("/work/azedarach"); got2 != got {
+		t.Fatalf("daemonProjectIDForPath() not deterministic: %q != %q", got2, got)
+	}
+
+	if got := daemonProjectIDForPath("   "); got != "" {
+		t.Fatalf("daemonProjectIDForPath(blank) = %q, want empty", got)
+	}
+}
+
+func TestDaemonProjectIDMismatch(t *testing.T) {
+	if daemonProjectIDMismatch("abc", "abc") {
+		t.Fatal("expected equal IDs not to mismatch")
+	}
+	if !daemonProjectIDMismatch("abc", "def") {
+		t.Fatal("expected different IDs to mismatch")
+	}
+	if daemonProjectIDMismatch("", "def") {
+		t.Fatal("expected empty actual ID to skip mismatch")
+	}
+	if daemonProjectIDMismatch("abc", "") {
+		t.Fatal("expected empty expected ID to skip mismatch")
+	}
+}
+
 func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {
 	m := newTestModel()
 	m.config = &config.Config{
