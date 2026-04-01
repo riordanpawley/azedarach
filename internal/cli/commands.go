@@ -1466,14 +1466,6 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 	return nil
 }
 
-type syncWorktreeLister interface {
-	List(context.Context) ([]gitservice.Worktree, error)
-}
-
-var newSyncWorktreeLister = func(repoDir string, logger *slog.Logger) syncWorktreeLister {
-	return gitservice.NewWorktreeManager(gitservice.NewExecRunner(repoDir), repoDir, logger)
-}
-
 func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 	if deps == nil {
 		return fmt.Errorf("sync: missing dependencies")
@@ -1491,10 +1483,9 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 
 	targetPaths := []string{projectDir}
 	if opts.All {
-		lister := newSyncWorktreeLister(projectDir, deps.Logger)
-		worktrees, err := lister.List(ctx)
+		worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 		if err != nil {
-			return fmt.Errorf("list git worktrees: %w", err)
+			return fmt.Errorf("list daemon worktrees: %w", err)
 		}
 		targetPaths = targetPaths[:0]
 		seen := make(map[string]struct{}, len(worktrees))
