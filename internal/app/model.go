@@ -179,10 +179,14 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading        bool
-	spinner        spinner.Model
-	lastRefresh    time.Time
-	hasRefreshLoop bool
+	loading         bool
+	boardRefreshing bool
+	issueRefreshSeq uint64
+	projectSwitchSeq uint64
+	projectSwitchInFlight bool
+	spinner         spinner.Model
+	lastRefresh     time.Time
+	hasRefreshLoop  bool
 
 	// Shared daemon client for task-domain operations
 	daemonClient     *daemonclient.Client
@@ -364,6 +368,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesLoadedMsg:
+		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
@@ -376,6 +383,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasLoading := m.loading
 		if msg.stale {
 			m.loading = false
+			m.boardRefreshing = false
 			if wasLoading && msg.freshnessHint != "" {
 				m.addToast(Toast{
 					Level:   ToastWarning,
@@ -410,6 +418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastDaemonReattachAttempt = time.Time{}
 		m.loading = false
+		m.boardRefreshing = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
 		if wasLoading {
@@ -450,6 +459,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesErrorMsg:
+		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
@@ -460,6 +472,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: now.Add(8 * time.Second),
 		})
 		m.loading = false
+		m.boardRefreshing = false
 		cmds := []tea.Cmd{tickEvery(5 * time.Second)}
 		if shouldQueueDaemonReattach(m.lastDaemonReattachAttempt, now, msg.err) {
 			m.lastDaemonReattachAttempt = now
@@ -470,6 +483,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Expire old toasts and refresh issues
 		m.expireToasts()
+		m.boardRefreshing = true
+		m.issueRefreshSeq++
 		return m, tea.Batch(
 			m.loadIssuesCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -556,6 +571,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case daemonStreamEventMsg:
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
+		}
+		if projectID := strings.TrimSpace(msg.event.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+			return m, m.waitForDaemonEventCmd()
 		}
 		m.recordRuntimeEvent(msg.event)
 		m.applyOperationProgressEvent(msg.event)
@@ -796,12 +814,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.ProjectSelectedMsg:
 		// Close overlay
 		m.overlayStack.Pop()
+		m.loading = false
+		m.boardRefreshing = true
+		m.projectSwitchInFlight = true
+		m.issueRefreshSeq++
+		m.projectSwitchSeq++
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
 
 	case projectSwitchResultMsg:
+		if msg.switchSeq != 0 && msg.switchSeq != m.projectSwitchSeq {
+			return m, nil
+		}
 		if msg.err != nil {
+			m.loading = false
+			m.boardRefreshing = false
+			m.projectSwitchInFlight = false
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Project switch failed: %v", msg.err),
@@ -831,6 +860,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRevision = msg.revision
 		}
 		m.loading = false
+		m.boardRefreshing = false
+		m.projectSwitchInFlight = false
 		m.lastRefresh = time.Now()
 		m.daemonEvents = msg.events
 
@@ -1257,7 +1288,9 @@ func (m Model) View() string {
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
-	if m.runtimeSignalsBusy {
+	if m.boardRefreshing {
+		sb.SetModeSuffix(m.spinner.View())
+	} else if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
 	if current := m.overlayStack.Current(); current != nil {
@@ -1705,7 +1738,7 @@ func isChildOfParent(task domain.Task, parentID string) bool {
 
 // handleKey processes keyboard input based on current mode
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Global keys (work in any mode)
+	// Always-available global keys.
 	switch msg.String() {
 	case "ctrl+c":
 		// Cleanup before quitting
@@ -1714,8 +1747,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	}
+
+	// Freeze board interactions while switching project contexts.
+	if m.projectSwitchInFlight {
+		return m, nil
+	}
+
+	// Remaining global keys (work in any mode)
+	switch msg.String() {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
+			m.boardRefreshing = true
+			m.issueRefreshSeq++
 			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -1756,7 +1800,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-
 	// Mode-specific handling
 	switch m.editor.GetMode() {
 	case ModeNormal:
@@ -2153,6 +2196,7 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
+	refreshSeq    uint64
 	projectID     string
 	tasks         []domain.Task
 	revision      uint64
@@ -2164,11 +2208,13 @@ type issuesLoadedMsg struct {
 }
 
 type issuesErrorMsg struct {
+	refreshSeq uint64
 	projectID string
 	err       error
 }
 
 type projectSwitchResultMsg struct {
+	switchSeq     uint64
 	project       config.Project
 	projectConfig *config.Config
 	tasks         []domain.Task
@@ -2431,12 +2477,13 @@ func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
 // loadIssuesCmd returns a command that fetches issues from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
+	refreshSeq := m.issueRefreshSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		if m.daemonClient == nil {
-			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
@@ -2444,14 +2491,16 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
 				return issuesLoadedMsg{
+					refreshSeq:    refreshSeq,
 					projectID:     projectID,
 					stale:         true,
 					freshnessHint: timeoutErr.Hint,
 				}
 			}
-			return issuesErrorMsg{projectID: projectID, err: err}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
+			refreshSeq: refreshSeq,
 			projectID: projectID,
 			tasks:     snapshot.Tasks,
 			revision:  snapshot.Revision,
@@ -2742,15 +2791,18 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 }
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
+	switchSeq := m.projectSwitchSeq
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("daemon client unavailable"),
 			}
 		}
 		if strings.TrimSpace(project.Path) == "" {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("project %q has empty path", project.Name),
 			}
@@ -2758,6 +2810,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		projectConfig, err := config.LoadConfig(project.Path)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
@@ -2772,6 +2825,13 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
+		if err := launcher.Replace(ctx); err != nil {
+			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
+				project: project,
+				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
+			}
+		}
 
 		hello := protocol.Hello{
 			ProtocolVersion: protocol.CurrentVersion,
@@ -2783,12 +2843,14 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ack, err := orch.EnsureAttached(ctx, hello)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
 			}
 		}
 		if !ack.Accepted {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
@@ -2797,6 +2859,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     err,
 			}
@@ -2804,12 +2867,14 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
+				switchSeq: switchSeq,
 				project: project,
 				err:     err,
 			}
 		}
 
 		return projectSwitchResultMsg{
+			switchSeq:     switchSeq,
 			project:       project,
 			projectConfig: projectConfig,
 			tasks:         snapshot.Tasks,
@@ -2937,6 +3002,9 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 		if m.logger != nil {
 			m.logger.Warn("decode session projection event failed", "event", evt.Event, "revision", evt.Revision, "error", err)
 		}
+		return
+	}
+	if projectID := strings.TrimSpace(body.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
 		return
 	}
 
@@ -6325,9 +6393,9 @@ func (m Model) renderBoardView() string {
 	if m.isDrillDownActive() {
 		toolbar = m.renderDrillDownToolbar()
 		contentHeight -= lipgloss.Height(toolbar) + 1
-		if contentHeight < 6 {
-			contentHeight = 6
-		}
+	}
+	if contentHeight < 6 {
+		contentHeight = 6
 	}
 
 	boardView := board.Render(
@@ -6346,7 +6414,12 @@ func (m Model) renderBoardView() string {
 	if toolbar == "" {
 		return boardView
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, toolbar, boardView)
+	parts := make([]string, 0, 2)
+	if toolbar != "" {
+		parts = append(parts, toolbar)
+	}
+	parts = append(parts, boardView)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {

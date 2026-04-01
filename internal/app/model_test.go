@@ -588,6 +588,23 @@ func TestView_ShowsRuntimeSignalLoadingIndicator(t *testing.T) {
 	}
 }
 
+func TestView_ShowsBoardRefreshingIndicators(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.boardRefreshing = true
+
+	view := m.View()
+	if strings.Contains(view, "REFRESHING BOARD - please wait") {
+		t.Fatalf("view = %q, should not show full-width refresh banner", view)
+	}
+	if strings.Contains(view, "!!! REFRESHING BOARD !!!") {
+		t.Fatalf("view = %q, should not show extra refresh status text", view)
+	}
+	if !strings.Contains(view, "NORMAL") {
+		t.Fatalf("view = %q, want mode badge while refreshing", view)
+	}
+}
+
 func TestView_ShowsFilterAndSortSummaries(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
@@ -601,6 +618,51 @@ func TestView_ShowsFilterAndSortSummaries(t *testing.T) {
 	}
 	if !strings.Contains(view, "S:updated/desc") {
 		t.Fatalf("view = %q, want sort summary in status bar", view)
+	}
+}
+
+func TestIssuesLoadedMsg_IgnoresStaleRefreshSequence(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.issueRefreshSeq = 3
+
+	next, _ := m.Update(issuesLoadedMsg{
+		refreshSeq: 2,
+		projectID:  m.daemonProjectID(),
+		tasks: []domain.Task{
+			{ID: "new-1", Title: "New stale payload", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+	})
+
+	updated := next.(Model)
+	if len(updated.tasks) != len(m.tasks) {
+		t.Fatalf("tasks length = %d, want %d (stale payload ignored)", len(updated.tasks), len(m.tasks))
+	}
+	if updated.tasks[0].ID != m.tasks[0].ID {
+		t.Fatalf("tasks[0] = %q, want %q (stale payload ignored)", updated.tasks[0].ID, m.tasks[0].ID)
+	}
+}
+
+func TestIssuesLoadedMsg_AcceptsUnsequencedDaemonReattachSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.loading = true
+	m.issueRefreshSeq = 5
+
+	next, _ := m.Update(issuesLoadedMsg{
+		refreshSeq: 0, // attachDaemonCmd/rehydrate path
+		projectID:  m.daemonProjectID(),
+		tasks: []domain.Task{
+			{ID: "rehydrated-1", Title: "Rehydrated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		},
+		revision: 42,
+	})
+
+	updated := next.(Model)
+	if len(updated.tasks) != 1 || updated.tasks[0].ID != "rehydrated-1" {
+		t.Fatalf("tasks = %+v, want unsequenced reattach snapshot applied", updated.tasks)
+	}
+	if updated.daemonRevision != 42 {
+		t.Fatalf("daemonRevision = %d, want 42", updated.daemonRevision)
 	}
 }
 
@@ -3044,6 +3106,29 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 		if _, behind := msg.(branchBehindMsg); !behind {
 			t.Fatalf("attach cmd returned %T, want sessionAttachedMsg or branchBehindMsg", msg)
 		}
+	}
+}
+
+func TestDaemonStreamEventMsg_IgnoresDifferentProject(t *testing.T) {
+	m := newTestModel()
+	m.currentProject = "chefy"
+	beforeEvents := len(m.runtimeEvents)
+	beforeRevision := m.daemonRevision
+
+	next, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: "az",
+			Revision:  99,
+			Event:     "task.updated",
+		},
+	})
+	updated := next.(Model)
+
+	if len(updated.runtimeEvents) != beforeEvents {
+		t.Fatalf("runtimeEvents len = %d, want %d (cross-project event ignored)", len(updated.runtimeEvents), beforeEvents)
+	}
+	if updated.daemonRevision != beforeRevision {
+		t.Fatalf("daemonRevision = %d, want %d (cross-project event ignored)", updated.daemonRevision, beforeRevision)
 	}
 }
 

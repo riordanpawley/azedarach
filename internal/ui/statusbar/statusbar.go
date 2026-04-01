@@ -15,6 +15,7 @@ import (
 // StatusBar represents the status bar at the bottom of the TUI
 type StatusBar struct {
 	mode             types.Mode
+	modeSuffix       string
 	width            int
 	hintBindings     []keybinds.Binding
 	currentProject   string
@@ -67,6 +68,11 @@ func (sb *StatusBar) SetEventTicker(ticker *eventticker.Ring) {
 
 func (sb *StatusBar) SetHintBindings(bindings []keybinds.Binding) {
 	sb.hintBindings = append([]keybinds.Binding(nil), bindings...)
+}
+
+// SetModeSuffix sets optional text rendered inside the mode badge after mode label.
+func (sb *StatusBar) SetModeSuffix(suffix string) {
+	sb.modeSuffix = strings.TrimSpace(suffix)
 }
 
 // Render renders the status bar as a string
@@ -122,6 +128,9 @@ func (sb StatusBar) Render() string {
 		return sb.styles.StatusBar.Width(sb.width).Render(sb.compactMandatoryStatus())
 	}
 	modeLabel := " " + sb.mode.String() + " "
+	if sb.modeSuffix != "" {
+		modeLabel = " " + sb.mode.String() + " " + sb.modeSuffix + " "
+	}
 	modeLabelWidth := lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
 	if len(mandatorySlots) > 0 {
 		mandatoryNeed := separatorWidth + 3 // compact fallback marker "F/S"
