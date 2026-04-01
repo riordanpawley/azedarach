@@ -3571,6 +3571,9 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
 	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
+		concreteLauncher.WithLogger(deps.Logger)
+	}
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,

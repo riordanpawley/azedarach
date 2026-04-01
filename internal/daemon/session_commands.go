@@ -213,7 +213,14 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	_ = d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress)
+	if updateErr := d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
+			"project_id", cmd.ProjectID,
+			"issue_id", cmd.IssueID,
+			"session_id", cmd.SessionID,
+			"error", updateErr,
+		)
+	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -492,13 +499,36 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		}
 		wt, getErr := d.worktree.Get(ctx, issueID)
 		if getErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation skipped worktree restore",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"error", getErr,
+				)
+			}
 			continue
 		}
 		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
 		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to recreate tmux session",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"worktree", wt.Path,
+					"error", newErr,
+				)
+			}
 			continue
 		}
-		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false, nil, ""))
+		if sendErr := d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false, nil, "")); sendErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("session reconciliation failed to seed launch command",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", canonicalSessionID,
+				"error", sendErr,
+			)
+		}
 		tmuxSet[issueKey] = struct{}{}
 		tmuxNameByIssueKey[issueKey] = canonicalSessionID
 		result.RecreatedTmuxSessions++
@@ -528,7 +558,21 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
 				if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
+				} else if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("session reconciliation failed to mark session attached",
+						"project_id", projectID,
+						"issue_id", issueID,
+						"session_id", sessionIDInTmux,
+						"error", err,
+					)
 				}
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to mark session starting",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", sessionIDInTmux,
+					"error", err,
+				)
 			}
 			continue
 		}
@@ -543,11 +587,32 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
 				if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
+				} else if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("session reconciliation failed to transition stopped session to attached",
+						"project_id", projectID,
+						"issue_id", issueID,
+						"session_id", canonicalSessionID,
+						"error", err,
+					)
 				}
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to transition stopped session to starting",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"error", err,
+				)
 			}
 		case daemonstate.SessionStateStarting:
 			if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 				result.AlignedDaemonSessions++
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to transition session to attached",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"error", err,
+				)
 			}
 		}
 	}
@@ -562,6 +627,12 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 
 	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, projectID)
 	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to list tmux sessions while enriching task session state",
+				"project_id", projectID,
+				"error", err,
+			)
+		}
 		return tasks
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
