@@ -2080,11 +2080,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		worktree := ""
-		if session != nil {
-			worktree = session.Worktree
-		}
-		return m, m.updateFromMainCmd(task.ID, worktree, false)
+		return m, m.updateFromMainCmd(task.ID, false)
 	case "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
@@ -3811,11 +3807,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		// Update from main using active session worktree when present, otherwise
 		// resolve the issue worktree from daemon-owned projection state.
-		worktree := ""
-		if session != nil {
-			worktree = session.Worktree
-		}
-		return m, m.updateFromMainCmd(task.ID, worktree, false)
+		return m, m.updateFromMainCmd(task.ID, false)
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
@@ -6103,18 +6095,20 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 	}
 }
 
-func (m Model) updateFromMainCmd(issueID, worktree string, attachAfter bool) tea.Cmd {
+func (m Model) updateFromMainCmd(issueID string, attachAfter bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
 
-		resolvedWorktree := strings.TrimSpace(worktree)
+		resolvedWorktree, err := m.resolveIssueWorktreePathFromDaemon(ctx, issueID)
 		if resolvedWorktree == "" {
-			if fallback, err := m.resolveIssueWorktreePath(ctx, issueID); err == nil {
-				resolvedWorktree = strings.TrimSpace(fallback)
+			return fetchAndMergeResultMsg{
+				issueID:     issueID,
+				attachAfter: attachAfter,
+				err:         fmt.Errorf("no active session/worktree - start session first"),
 			}
 		}
-		if resolvedWorktree == "" {
+		if err != nil {
 			return fetchAndMergeResultMsg{
 				issueID:     issueID,
 				attachAfter: attachAfter,
@@ -6144,6 +6138,20 @@ func (m Model) resolveIssueWorktreePath(ctx context.Context, issueID string) (st
 	}
 	if session := m.sessionForIssue(issueID); session != nil && session.Worktree != "" {
 		return session.Worktree, nil
+	}
+	worktrees, err := m.listDaemonWorktrees(ctx)
+	if err != nil {
+		return "", err
+	}
+	if wt, ok := findDaemonWorktree(worktrees, "", issueID); ok && wt.Path != "" {
+		return wt.Path, nil
+	}
+	return "", fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func (m Model) resolveIssueWorktreePathFromDaemon(ctx context.Context, issueID string) (string, error) {
+	if issueID == "" {
+		return "", fmt.Errorf("issue ID is required")
 	}
 	worktrees, err := m.listDaemonWorktrees(ctx)
 	if err != nil {
