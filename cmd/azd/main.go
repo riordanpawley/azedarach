@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/daemon"
+	"github.com/riordanpawley/azedarach/internal/logging"
 )
 
 func main() {
@@ -69,12 +71,18 @@ func main() {
 		CLITool:              cfg.CLITool,
 		SessionShell:         cfg.Session.Shell,
 		SessionInitCommands:  cfg.Session.InitCommands,
+		Logger:              newDaemonLogger(),
 		WorktreeInitCommands: cfg.Worktree.InitCommands,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func newDaemonLogger() *slog.Logger {
+	// Daemon stderr is redirected to daemon.log by the launcher.
+	return logging.NewTextStreamLogger(os.Stderr, slog.LevelInfo)
 }
 
 func resolveScopedWorktreeWatchPath(repoDir string) string {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,10 +11,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -26,6 +26,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -229,7 +230,8 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 }
 
 func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error) {
-	logger := slog.Default()
+	logPath := filepath.Join(resolveSessionLogDir(cfg), "az-cli.log")
+	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
 
 	if strings.TrimSpace(repoDir) == "" {
 		return nil, fmt.Errorf("failed to get current directory: empty repo dir")
@@ -3175,14 +3177,6 @@ type applyExecutionSummaryBody struct {
 	Failed    int `json:"failed"`
 }
 
-var runLogTailCommand = func(args []string) error {
-	cmd := exec.Command("tail", args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
 func LogCommand(deps *Dependencies, opts LogOptions) error {
 	if deps == nil {
 		return fmt.Errorf("dependencies are required")
@@ -3199,10 +3193,11 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 		repoDir = "."
 	}
 	sessionLogDir := resolveSessionLogDir(deps.Config)
-	logPaths := make([]string, 0, len(opts.Sources))
+	logSources := make([]logSourceSpec, 0, len(opts.Sources))
 	seen := make(map[string]struct{}, len(opts.Sources))
 	for _, source := range opts.Sources {
 		var logPath string
+		normalizedSource := strings.ToLower(strings.TrimSpace(source))
 		switch strings.ToLower(strings.TrimSpace(source)) {
 		case "daemon":
 			logPath = filepath.Join(repoDir, ".azedarach", "daemon.log")
@@ -3213,38 +3208,212 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 		default:
 			return fmt.Errorf("unknown log source %q", source)
 		}
-		if _, ok := seen[logPath]; ok {
+		if _, ok := seen[normalizedSource]; ok {
 			continue
 		}
-		seen[logPath] = struct{}{}
-		logPaths = append(logPaths, logPath)
+		seen[normalizedSource] = struct{}{}
+		logSources = append(logSources, logSourceSpec{
+			Name: normalizedSource,
+			Path: logPath,
+		})
 	}
-	if len(logPaths) == 0 {
+	if len(logSources) == 0 {
 		return fmt.Errorf("no log files selected")
 	}
-	availableLogPaths := make([]string, 0, len(logPaths))
-	for _, path := range logPaths {
-		if _, err := os.Stat(path); err != nil {
+	availableLogSources := make([]logSourceSpec, 0, len(logSources))
+	for _, source := range logSources {
+		if _, err := os.Stat(source.Path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				fmt.Fprintf(os.Stderr, "warning: log file not found, skipping: %s\n", path)
+				fmt.Fprintf(os.Stderr, "warning: log file not found, skipping: %s\n", source.Path)
 				continue
 			}
-			return fmt.Errorf("inspect log file %s: %w", path, err)
+			return fmt.Errorf("inspect log file %s: %w", source.Path, err)
 		}
-		availableLogPaths = append(availableLogPaths, path)
+		availableLogSources = append(availableLogSources, source)
 	}
-	if len(availableLogPaths) == 0 {
+	if len(availableLogSources) == 0 {
 		return fmt.Errorf("none of the selected log files exist yet")
 	}
 
-	tailArgs := make([]string, 0, len(availableLogPaths)+3)
-	tailArgs = append(tailArgs, "-n", strconv.Itoa(opts.Lines))
-	if opts.Follow {
-		tailArgs = append(tailArgs, "-F")
+	for _, source := range availableLogSources {
+		lines, err := readLastLogLines(source.Path, opts.Lines)
+		if err != nil {
+			return fmt.Errorf("read log file %s: %w", source.Path, err)
+		}
+		for _, line := range lines {
+			fmt.Fprintln(os.Stdout, formatLogStreamLine(source.Name, line))
+		}
 	}
-	tailArgs = append(tailArgs, availableLogPaths...)
+	if !opts.Follow {
+		return nil
+	}
 
-	return runLogTailCommand(tailArgs)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return followLogSources(ctx, availableLogSources, os.Stdout)
+}
+
+type logSourceSpec struct {
+	Name string
+	Path string
+}
+
+type logFollowState struct {
+	Source logSourceSpec
+	Offset int64
+	Carry  string
+}
+
+func readLastLogLines(path string, maxLines int) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	lines := make([]string, 0, maxLines)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		if len(lines) > maxLines {
+			lines = lines[1:]
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
+func followLogSources(ctx context.Context, sources []logSourceSpec, out io.Writer) error {
+	states := make([]*logFollowState, 0, len(sources))
+	for _, source := range sources {
+		info, err := os.Stat(source.Path)
+		if err != nil {
+			return fmt.Errorf("inspect log file %s: %w", source.Path, err)
+		}
+		states = append(states, &logFollowState{
+			Source: source,
+			Offset: info.Size(),
+		})
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			for _, state := range states {
+				if err := flushNewLogData(state, out); err != nil {
+					return err
+				}
+			}
+		}
+	}
+}
+
+func flushNewLogData(state *logFollowState, out io.Writer) error {
+	info, err := os.Stat(state.Source.Path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			state.Offset = 0
+			state.Carry = ""
+			return nil
+		}
+		return fmt.Errorf("inspect log file %s: %w", state.Source.Path, err)
+	}
+	if info.Size() < state.Offset {
+		state.Offset = 0
+		state.Carry = ""
+	}
+	if info.Size() == state.Offset {
+		return nil
+	}
+
+	file, err := os.Open(state.Source.Path)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", state.Source.Path, err)
+	}
+	defer file.Close()
+	if _, err := file.Seek(state.Offset, io.SeekStart); err != nil {
+		return fmt.Errorf("seek log file %s: %w", state.Source.Path, err)
+	}
+
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if strings.HasSuffix(line, "\n") {
+			fullLine := state.Carry + strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+			state.Carry = ""
+			if _, err := fmt.Fprintln(out, formatLogStreamLine(state.Source.Name, fullLine)); err != nil {
+				return fmt.Errorf("write log output: %w", err)
+			}
+		} else {
+			state.Carry += line
+		}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		return fmt.Errorf("read log file %s: %w", state.Source.Path, readErr)
+	}
+
+	state.Offset = info.Size()
+	return nil
+}
+
+var logTimeLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006/01/02 15:04:05",
+}
+
+var daemonTimePrefixLayout = "2006/01/02 15:04:05"
+
+func formatLogStreamLine(source, rawLine string) string {
+	line := strings.TrimRight(rawLine, "\r")
+	if ts, rest, ok := extractLogTimestamp(line); ok {
+		displayTime := ts.In(time.Local).Format("2006-01-02 15:04:05 MST")
+		if strings.TrimSpace(rest) == "" {
+			return fmt.Sprintf("[%s] %s", source, displayTime)
+		}
+		return fmt.Sprintf("[%s] %s %s", source, displayTime, rest)
+	}
+	return fmt.Sprintf("[%s] %s", source, line)
+}
+
+func extractLogTimestamp(line string) (time.Time, string, bool) {
+	if len(line) >= len(daemonTimePrefixLayout) {
+		prefix := line[:len(daemonTimePrefixLayout)]
+		if ts, err := time.ParseInLocation(daemonTimePrefixLayout, prefix, time.Local); err == nil {
+			rest := strings.TrimSpace(line[len(daemonTimePrefixLayout):])
+			return ts, rest, true
+		}
+	}
+
+	if !strings.HasPrefix(line, "time=") {
+		return time.Time{}, "", false
+	}
+	spaceIdx := strings.IndexByte(line, ' ')
+	timeField := line
+	rest := ""
+	if spaceIdx >= 0 {
+		timeField = line[:spaceIdx]
+		rest = strings.TrimSpace(line[spaceIdx+1:])
+	}
+	rawTS := strings.TrimPrefix(timeField, "time=")
+	for _, layout := range logTimeLayouts {
+		ts, err := time.Parse(layout, rawTS)
+		if err == nil {
+			return ts, rest, true
+		}
+	}
+	return time.Time{}, "", false
 }
 
 func resolveSessionLogDir(cfg *config.Config) string {

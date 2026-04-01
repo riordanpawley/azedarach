@@ -30,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
@@ -4005,18 +4006,7 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 }
 
 func newTUILogger(logPath string) *slog.Logger {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		logger.Warn("failed to create tui log directory; falling back to stderr logger", "log_path", logPath, "error", err)
-		return logger
-	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		logger.Warn("failed to open tui log file; falling back to stderr logger", "log_path", logPath, "error", err)
-		return logger
-	}
-	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return logging.NewTextFileLogger(logPath, slog.LevelInfo)
 }
 
 func (m Model) configSourcePath() string {
