@@ -410,13 +410,13 @@ func (i *ImageAttachOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImageAttachOverlay) Size() (width, height int) {
 	if i.inputActive {
-		return i.Clamp(84, 18)
+		return i.ClampResponsive(84, 18)
 	}
 	switch i.mode {
 	case imageAttachModePreview:
-		return i.Clamp(84, 24)
+		return i.ClampResponsive(84, 24)
 	default:
-		return i.Clamp(84, i.listModeHeight())
+		return i.ClampResponsive(84, i.listModeHeight())
 	}
 }
 

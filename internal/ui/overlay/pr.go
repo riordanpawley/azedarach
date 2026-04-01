@@ -310,5 +310,5 @@ func (p *PRCreateOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (p *PRCreateOverlay) Size() (width, height int) {
-	return p.Clamp(80, 28)
+	return p.ClampResponsive(80, 28)
 }

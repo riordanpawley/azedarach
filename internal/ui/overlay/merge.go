@@ -287,7 +287,7 @@ func (m *MergeSelectOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (m *MergeSelectOverlay) Size() (width, height int) {
-	return m.Clamp(60, m.sizeHeight())
+	return m.ClampResponsive(60, m.sizeHeight())
 }
 
 func (m *MergeSelectOverlay) sizeHeight() int {

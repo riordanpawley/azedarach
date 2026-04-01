@@ -177,7 +177,7 @@ func (o *EventLogOverlay) Size() (width, height int) {
 	// Keep footer pinned to bottom while avoiding oversized empty interiors.
 	neededViewHeight := len(o.renderContentLines()) + 1 // + footer row
 	o.viewHeight = min(maxViewHeight, max(minViewHeight, neededViewHeight))
-	return o.Clamp(92, o.viewHeight+chromeHeight)
+	return o.ClampResponsive(92, o.viewHeight+chromeHeight)
 }
 
 func (o *EventLogOverlay) renderContentLines() []string {

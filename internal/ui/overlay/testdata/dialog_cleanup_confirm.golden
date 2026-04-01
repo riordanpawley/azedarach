@@ -1,18 +1,27 @@
-╭────────────────────────────────────────────────────────────────────────────╮
-│CONFIRM DESTRUCTIVE OPERATION                                               │
-│────────────────────────────────────────────────────────────────────────────│
-││ ⚠ Confirm Destructive Operation                  Actions                  │
-││                                                  ─────────────────────────│
-││ This will perform the following operations:       Y confirm               │
-││                                                   N cancel                │
-││   • Delete completed tasks (>30 days)             Enter confirm           │
-││                                                   Esc cancel              │
-││   • Remove orphaned worktrees                     ←/→/Tab toggle          │
-││  (…                                                                       │
-││                                                                           │
-││ Are you sure you want to continue?                                        │
-││                                                                           │
-││                                                                           │
-││ Default action: Yes                                                       │
-││                                                                           │
-╰────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│CONFIRM DESTRUCTIVE OPERATION                                                                 │
+│──────────────────────────────────────────────────────────────────────────────────────────────│
+││ ⚠ Confirm Destructive Operation                              Actions                        │
+││                                                              ───────────────────────────────│
+││ This will perform the following operations:                   Y confirm                     │
+││                                                               N cancel                      │
+││   • Delete completed tasks (>30 days)                         Enter confirm                 │
+││  (~10 tas…                                                    Esc cancel                    │
+││   • Remove orphaned worktrees                                 ←/→/Tab toggle                │
+││  (~5 worktrees)                                                                             │
+││                                                                                             │
+││ Are you sure you want to continue?                                                          │
+││                                                                                             │
+││                                                                                             │
+││ Default action: Yes                                                                         │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+││                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -202,7 +202,7 @@ func (m *MergePreflightOverlay) Title() string {
 }
 
 func (m *MergePreflightOverlay) Size() (width, height int) {
-	return m.Clamp(90, m.sizeHeight())
+	return m.ClampResponsive(90, m.sizeHeight())
 }
 
 func (m *MergePreflightOverlay) sizeHeight() int {

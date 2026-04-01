@@ -160,7 +160,7 @@ func (c *ConflictOverlay) Size() (width, height int) {
 	if fileLines > 10 {
 		fileLines = 10
 	}
-	return c.Clamp(84, 12+fileLines)
+	return c.ClampResponsive(84, 12+fileLines)
 }
 
 func (c *ConflictOverlay) renderConflictList(width int) string {

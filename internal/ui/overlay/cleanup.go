@@ -426,8 +426,8 @@ func (c *BulkCleanupOverlay) Title() string {
 // Size returns the overlay dimensions
 func (c *BulkCleanupOverlay) Size() (width, height int) {
 	if c.confirmMode {
-		return c.Clamp(78, 18)
+		return c.ClampResponsive(78, 18)
 	}
 	// Height: categories * 2 (label + description) + header + padding
-	return c.Clamp(86, (len(c.categories)*2)+12)
+	return c.ClampResponsive(86, (len(c.categories)*2)+12)
 }

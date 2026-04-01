@@ -52,6 +52,33 @@ func TestCreateTaskOverlaySize(t *testing.T) {
 	assert.Equal(t, 30, height)
 }
 
+func TestCreateTaskOverlaySizeUses80PercentOnLargeViewport(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 200, Height: 60})
+
+	width, height := overlay.Size()
+	assert.Equal(t, 160, width)
+	assert.Equal(t, 48, height)
+}
+
+func TestCreateTaskOverlaySizeFallsBackToFullScreenWhen80PercentTooSmall(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.ApplyWindowSize(tea.WindowSizeMsg{Width: 120, Height: 36})
+
+	width, height := overlay.Size()
+	assert.Equal(t, 118, width)
+	assert.Equal(t, 34, height)
+}
+
+func TestCreateTaskOverlayRenderFormContentClampsInputWidthsOnNarrowPane(t *testing.T) {
+	overlay := NewCreateTaskOverlay()
+	overlay.renderFormContent(16, 20)
+
+	assert.LessOrEqual(t, overlay.title.Width, 16)
+	assert.LessOrEqual(t, overlay.description.Width(), 16)
+	assert.LessOrEqual(t, overlay.acceptanceInput.Width(), 16)
+}
+
 func TestCreateTaskOverlayView(t *testing.T) {
 	overlay := NewCreateTaskOverlay()
 	view := overlay.View()

@@ -146,7 +146,7 @@ func (h *HelpOverlay) Title() string {
 // Size returns the overlay dimensions
 func (h *HelpOverlay) Size() (width, height int) {
 	h.viewHeight = 20 // Content viewing area
-	return h.Clamp(72, 24)
+	return h.ClampResponsive(72, 24)
 }
 
 // getCategories returns all keybinding categories
