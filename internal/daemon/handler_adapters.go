@@ -3,11 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -278,18 +283,63 @@ func mapSpecStoreError(err error) error {
 }
 
 type worktreeServiceAdapter struct {
-	manager *git.WorktreeManager
+	manager            *git.WorktreeManager
+	projectionStore    *daemonstate.ProjectionStore
+	logger             *slog.Logger
+	pollInterval       time.Duration
+	onProjectionUpdate func(projectID, issueID, path string)
+
+	mu      sync.Mutex
+	pollers map[string]context.CancelFunc
 }
 
-func (a worktreeServiceAdapter) List(ctx context.Context, _ string) ([]git.Worktree, error) {
-	return a.manager.List(ctx)
+func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]git.Worktree, error) {
+	projectID = normalizedProjectID(projectID)
+	if a.projectionStore == nil {
+		return a.manager.List(ctx)
+	}
+
+	cached, err := a.projectionStore.ListWorktrees(ctx, projectID)
+	if err == nil && len(cached) > 0 {
+		a.ensureBackgroundPoller(projectID)
+		return mapProjectionWorktrees(cached), nil
+	}
+
+	worktrees, listErr := a.manager.List(ctx)
+	if listErr != nil {
+		if err == nil {
+			return mapProjectionWorktrees(cached), nil
+		}
+		return nil, listErr
+	}
+	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
+	a.ensureBackgroundPoller(projectID)
+	return worktrees, nil
 }
 
-func (a worktreeServiceAdapter) Create(ctx context.Context, _ string, issueID string, baseBranch string) (*git.Worktree, error) {
-	return a.manager.Create(ctx, issueID, baseBranch)
+func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, error) {
+	worktree, err := a.manager.Create(ctx, issueID, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+	if a.projectionStore != nil && worktree != nil {
+		if upsertErr := a.projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+			ProjectID: normalizedProjectID(projectID),
+			IssueID:   worktree.IssueID,
+			Path:      worktree.Path,
+			Branch:    worktree.Branch,
+			UpdatedAt: time.Now().UTC(),
+		}); upsertErr != nil && a.logger != nil {
+			a.logger.Warn("failed to upsert worktree projection on create", "project_id", projectID, "issue_id", issueID, "error", upsertErr)
+		}
+		if a.onProjectionUpdate != nil {
+			a.onProjectionUpdate(normalizedProjectID(projectID), worktree.IssueID, worktree.Path)
+		}
+	}
+	return worktree, nil
 }
 
-func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, issueID string, force bool) error {
+func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, force bool) error {
 	worktree, err := a.manager.Get(ctx, issueID)
 	if err != nil {
 		return err
@@ -300,10 +350,18 @@ func (a worktreeServiceAdapter) Delete(ctx context.Context, _ string, issueID st
 	if worktree != nil {
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(worktree.Path))
 	}
+	if a.projectionStore != nil {
+		if deleteErr := a.projectionStore.DeleteWorktree(ctx, normalizedProjectID(projectID), issueID); deleteErr != nil && a.logger != nil {
+			a.logger.Warn("failed to delete worktree projection", "project_id", projectID, "issue_id", issueID, "error", deleteErr)
+		}
+		if a.onProjectionUpdate != nil {
+			a.onProjectionUpdate(normalizedProjectID(projectID), issueID, "")
+		}
+	}
 	return nil
 }
 
-func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
+func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
 	worktrees, err := a.manager.List(ctx)
 	if err != nil {
 		return nil, err
@@ -319,7 +377,136 @@ func (a worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID s
 		}
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(wt.Path))
 		result.Removed = append(result.Removed, wt)
+		if a.projectionStore != nil {
+			if deleteErr := a.projectionStore.DeleteWorktree(ctx, normalizedProjectID(projectID), wt.IssueID); deleteErr != nil && a.logger != nil {
+				a.logger.Warn("failed to delete worktree projection during cleanup", "project_id", projectID, "issue_id", wt.IssueID, "error", deleteErr)
+			}
+			if a.onProjectionUpdate != nil {
+				a.onProjectionUpdate(normalizedProjectID(projectID), wt.IssueID, "")
+			}
+		}
 	}
 
 	return result, nil
+}
+
+func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {
+	if a.projectionStore == nil {
+		return
+	}
+	interval := a.pollInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	projectID = normalizedProjectID(projectID)
+
+	a.mu.Lock()
+	if a.pollers == nil {
+		a.pollers = make(map[string]context.CancelFunc)
+	}
+	if _, exists := a.pollers[projectID]; exists {
+		a.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.pollers[projectID] = cancel
+	a.mu.Unlock()
+
+	go func() {
+		a.pollAndPersistWorktrees(ctx, projectID)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.pollAndPersistWorktrees(ctx, projectID)
+			}
+		}
+	}()
+}
+
+func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, projectID string) {
+	var previous []daemonstate.WorktreeProjection
+	if a.projectionStore != nil {
+		if cached, err := a.projectionStore.ListWorktrees(ctx, projectID); err == nil {
+			previous = cached
+		}
+	}
+	worktrees, err := a.manager.List(ctx)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Debug("worktree projection poll failed", "project_id", projectID, "error", err)
+		}
+		return
+	}
+	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
+	if a.onProjectionUpdate != nil {
+		publishWorktreeProjectionDelta(a.onProjectionUpdate, projectID, previous, worktrees)
+	}
+}
+
+func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Context, projectID string, worktrees []git.Worktree) {
+	if a.projectionStore == nil {
+		return
+	}
+	rows := make([]daemonstate.WorktreeProjection, 0, len(worktrees))
+	now := time.Now().UTC()
+	for _, wt := range worktrees {
+		if strings.TrimSpace(wt.IssueID) == "" {
+			continue
+		}
+		rows = append(rows, daemonstate.WorktreeProjection{
+			ProjectID: normalizedProjectID(projectID),
+			IssueID:   wt.IssueID,
+			Path:      wt.Path,
+			Branch:    wt.Branch,
+			UpdatedAt: now,
+		})
+	}
+	if err := a.projectionStore.ReplaceWorktrees(ctx, normalizedProjectID(projectID), rows); err != nil && a.logger != nil {
+		a.logger.Warn("replace worktree projection snapshot failed", "project_id", projectID, "error", err)
+	}
+}
+
+func mapProjectionWorktrees(projections []daemonstate.WorktreeProjection) []git.Worktree {
+	out := make([]git.Worktree, 0, len(projections))
+	for _, projection := range projections {
+		out = append(out, git.Worktree{
+			Path:    projection.Path,
+			Branch:  projection.Branch,
+			IssueID: projection.IssueID,
+		})
+	}
+	return out
+}
+
+func publishWorktreeProjectionDelta(publish func(projectID, issueID, path string), projectID string, previous []daemonstate.WorktreeProjection, next []git.Worktree) {
+	prevByIssue := make(map[string]string, len(previous))
+	for _, row := range previous {
+		prevByIssue[row.IssueID] = row.Path + "|" + row.Branch
+	}
+	nextByIssue := make(map[string]git.Worktree, len(next))
+	for _, row := range next {
+		nextByIssue[row.IssueID] = row
+	}
+	for issueID, wt := range nextByIssue {
+		nextKey := wt.Path + "|" + wt.Branch
+		if prevByIssue[issueID] != nextKey {
+			publish(projectID, issueID, wt.Path)
+		}
+		delete(prevByIssue, issueID)
+	}
+	for issueID := range prevByIssue {
+		publish(projectID, issueID, "")
+	}
+}
+
+func normalizedProjectID(projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "default"
+	}
+	return projectID
 }

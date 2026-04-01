@@ -23,12 +23,12 @@ const (
 
 // GitService captures the daemon-owned git operations needed by client workflows.
 type GitService interface {
-	Fetch(ctx context.Context, worktree, remote string) error
-	Merge(ctx context.Context, worktree, branch string) (*git.MergeResult, error)
-	Checkout(ctx context.Context, worktree, branch string) error
-	AbortMerge(ctx context.Context, worktree string) error
-	DiffStat(ctx context.Context, worktree, baseBranch string) (string, error)
-	Status(ctx context.Context, worktree string) (*git.GitStatus, error)
+	Fetch(ctx context.Context, projectID, worktree, remote string) error
+	Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error)
+	Checkout(ctx context.Context, projectID, worktree, branch string) error
+	AbortMerge(ctx context.Context, projectID, worktree string) error
+	DiffStat(ctx context.Context, projectID, worktree, baseBranch string) (string, error)
+	Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
 }
 
 // GitHandler routes daemon git workflow commands.
@@ -61,6 +61,7 @@ func NewGitHandler(service GitService, opts ...GitHandlerOption) *GitHandler {
 }
 
 type gitCommandBody struct {
+	ProjectID  string `json:"project_id,omitempty"`
 	Worktree   string `json:"worktree"`
 	Remote     string `json:"remote,omitempty"`
 	Branch     string `json:"branch,omitempty"`
@@ -119,6 +120,8 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 		return resp
 	}
 
+	cmd.ProjectID = resolveProjectID(cmd.ProjectID, req.Meta)
+
 	switch req.Command {
 	case CommandGitFetch:
 		return h.handleFetch(ctx, resp, cmd)
@@ -166,7 +169,7 @@ func (h *GitHandler) handleFetch(ctx context.Context, resp protocol.ResponseEnve
 		cmd.Remote = "origin"
 	}
 
-	if err := h.service.Fetch(ctx, cmd.Worktree, cmd.Remote); err != nil {
+	if err := h.service.Fetch(ctx, cmd.ProjectID, cmd.Worktree, cmd.Remote); err != nil {
 		resp.Error = mapGitError(err)
 		return resp
 	}
@@ -199,7 +202,7 @@ func (h *GitHandler) handleMerge(ctx context.Context, resp protocol.ResponseEnve
 		return resp
 	}
 
-	result, err := h.service.Merge(ctx, cmd.Worktree, cmd.Branch)
+	result, err := h.service.Merge(ctx, cmd.ProjectID, cmd.Worktree, cmd.Branch)
 	if err != nil {
 		resp.Error = mapGitError(err)
 		return resp
@@ -242,7 +245,7 @@ func (h *GitHandler) handleCheckout(ctx context.Context, resp protocol.ResponseE
 		return resp
 	}
 
-	if err := h.service.Checkout(ctx, cmd.Worktree, cmd.Branch); err != nil {
+	if err := h.service.Checkout(ctx, cmd.ProjectID, cmd.Worktree, cmd.Branch); err != nil {
 		resp.Error = mapGitError(err)
 		return resp
 	}
@@ -275,7 +278,7 @@ func (h *GitHandler) handleAbortMerge(ctx context.Context, resp protocol.Respons
 		return resp
 	}
 
-	if err := h.service.AbortMerge(ctx, cmd.Worktree); err != nil {
+	if err := h.service.AbortMerge(ctx, cmd.ProjectID, cmd.Worktree); err != nil {
 		resp.Error = mapGitError(err)
 		return resp
 	}
@@ -307,7 +310,7 @@ func (h *GitHandler) handleDiffStat(ctx context.Context, resp protocol.ResponseE
 		return resp
 	}
 
-	output, err := h.service.DiffStat(ctx, cmd.Worktree, cmd.BaseBranch)
+	output, err := h.service.DiffStat(ctx, cmd.ProjectID, cmd.Worktree, cmd.BaseBranch)
 	if err != nil {
 		resp.Error = mapGitError(err)
 		return resp
@@ -341,7 +344,7 @@ func (h *GitHandler) handleStatus(ctx context.Context, resp protocol.ResponseEnv
 		return resp
 	}
 
-	status, err := h.service.Status(ctx, cmd.Worktree)
+	status, err := h.service.Status(ctx, cmd.ProjectID, cmd.Worktree)
 	if err != nil {
 		resp.Error = mapGitError(err)
 		return resp

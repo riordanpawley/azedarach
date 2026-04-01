@@ -11,12 +11,12 @@ import (
 )
 
 type fakeGitService struct {
-	fetchFn      func(context.Context, string, string) error
-	mergeFn      func(context.Context, string, string) (*git.MergeResult, error)
-	checkoutFn   func(context.Context, string, string) error
-	abortMergeFn func(context.Context, string) error
-	diffStatFn   func(context.Context, string, string) (string, error)
-	statusFn     func(context.Context, string) (*git.GitStatus, error)
+	fetchFn      func(context.Context, string, string, string) error
+	mergeFn      func(context.Context, string, string, string) (*git.MergeResult, error)
+	checkoutFn   func(context.Context, string, string, string) error
+	abortMergeFn func(context.Context, string, string) error
+	diffStatFn   func(context.Context, string, string, string) (string, error)
+	statusFn     func(context.Context, string, string) (*git.GitStatus, error)
 }
 
 type recordingGitLongRunningExecutor struct {
@@ -28,44 +28,44 @@ func (r *recordingGitLongRunningExecutor) Execute(ctx context.Context, req proto
 	return exec(ctx)
 }
 
-func (f *fakeGitService) Fetch(ctx context.Context, worktree, remote string) error {
+func (f *fakeGitService) Fetch(ctx context.Context, projectID, worktree, remote string) error {
 	if f.fetchFn != nil {
-		return f.fetchFn(ctx, worktree, remote)
+		return f.fetchFn(ctx, projectID, worktree, remote)
 	}
 	return nil
 }
 
-func (f *fakeGitService) Merge(ctx context.Context, worktree, branch string) (*git.MergeResult, error) {
+func (f *fakeGitService) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
 	if f.mergeFn != nil {
-		return f.mergeFn(ctx, worktree, branch)
+		return f.mergeFn(ctx, projectID, worktree, branch)
 	}
 	return &git.MergeResult{Success: true}, nil
 }
 
-func (f *fakeGitService) Checkout(ctx context.Context, worktree, branch string) error {
+func (f *fakeGitService) Checkout(ctx context.Context, projectID, worktree, branch string) error {
 	if f.checkoutFn != nil {
-		return f.checkoutFn(ctx, worktree, branch)
+		return f.checkoutFn(ctx, projectID, worktree, branch)
 	}
 	return nil
 }
 
-func (f *fakeGitService) AbortMerge(ctx context.Context, worktree string) error {
+func (f *fakeGitService) AbortMerge(ctx context.Context, projectID, worktree string) error {
 	if f.abortMergeFn != nil {
-		return f.abortMergeFn(ctx, worktree)
+		return f.abortMergeFn(ctx, projectID, worktree)
 	}
 	return nil
 }
 
-func (f *fakeGitService) DiffStat(ctx context.Context, worktree, baseBranch string) (string, error) {
+func (f *fakeGitService) DiffStat(ctx context.Context, projectID, worktree, baseBranch string) (string, error) {
 	if f.diffStatFn != nil {
-		return f.diffStatFn(ctx, worktree, baseBranch)
+		return f.diffStatFn(ctx, projectID, worktree, baseBranch)
 	}
 	return "", nil
 }
 
-func (f *fakeGitService) Status(ctx context.Context, worktree string) (*git.GitStatus, error) {
+func (f *fakeGitService) Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	if f.statusFn != nil {
-		return f.statusFn(ctx, worktree)
+		return f.statusFn(ctx, projectID, worktree)
 	}
 	return &git.GitStatus{}, nil
 }
@@ -87,13 +87,13 @@ func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope
 
 func TestGitHandlerRoutesCommands(t *testing.T) {
 	handler := NewGitHandler(&fakeGitService{
-		fetchFn: func(_ context.Context, worktree, remote string) error {
+		fetchFn: func(_ context.Context, _ string, worktree, remote string) error {
 			if worktree != "/tmp/az-1" || remote != "origin" {
 				t.Fatalf("fetch args = %q %q", worktree, remote)
 			}
 			return nil
 		},
-		mergeFn: func(_ context.Context, worktree, branch string) (*git.MergeResult, error) {
+		mergeFn: func(_ context.Context, _ string, worktree, branch string) (*git.MergeResult, error) {
 			if worktree != "/tmp/az-1" || branch != "main" {
 				t.Fatalf("merge args = %q %q", worktree, branch)
 			}
@@ -104,19 +104,19 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				Message:       "merge conflicted",
 			}, nil
 		},
-		checkoutFn: func(_ context.Context, worktree, branch string) error {
+		checkoutFn: func(_ context.Context, _ string, worktree, branch string) error {
 			if worktree != "/tmp/az-1" || branch != "feature/one" {
 				t.Fatalf("checkout args = %q %q", worktree, branch)
 			}
 			return nil
 		},
-		abortMergeFn: func(_ context.Context, worktree string) error {
+		abortMergeFn: func(_ context.Context, _ string, worktree string) error {
 			if worktree != "/tmp/az-1" {
 				t.Fatalf("abort merge args = %q", worktree)
 			}
 			return nil
 		},
-		diffStatFn: func(_ context.Context, worktree, baseBranch string) (string, error) {
+		diffStatFn: func(_ context.Context, _ string, worktree, baseBranch string) (string, error) {
 			if worktree != "/tmp/az-1" {
 				t.Fatalf("diff stat args = %q", worktree)
 			}
@@ -125,7 +125,7 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			}
 			return " README.md | 2 ++\n 1 file changed, 2 insertions(+)", nil
 		},
-		statusFn: func(_ context.Context, worktree string) (*git.GitStatus, error) {
+		statusFn: func(_ context.Context, _ string, worktree string) (*git.GitStatus, error) {
 			if worktree != "/tmp/az-1" {
 				t.Fatalf("status args = %q", worktree)
 			}
@@ -233,22 +233,22 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 
 func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 	handler := NewGitHandler(&fakeGitService{
-		fetchFn: func(context.Context, string, string) error {
+		fetchFn: func(context.Context, string, string, string) error {
 			return context.DeadlineExceeded
 		},
-		mergeFn: func(context.Context, string, string) (*git.MergeResult, error) {
+		mergeFn: func(context.Context, string, string, string) (*git.MergeResult, error) {
 			return nil, errors.New("merge failed")
 		},
-		checkoutFn: func(context.Context, string, string) error {
+		checkoutFn: func(context.Context, string, string, string) error {
 			return nil
 		},
-		abortMergeFn: func(context.Context, string) error {
+		abortMergeFn: func(context.Context, string, string) error {
 			return context.DeadlineExceeded
 		},
-		diffStatFn: func(context.Context, string, string) (string, error) {
+		diffStatFn: func(context.Context, string, string, string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
-		statusFn: func(context.Context, string) (*git.GitStatus, error) {
+		statusFn: func(context.Context, string, string) (*git.GitStatus, error) {
 			return nil, context.DeadlineExceeded
 		},
 	})

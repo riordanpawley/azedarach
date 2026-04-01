@@ -3109,6 +3109,49 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	}
 }
 
+func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayOpen(t *testing.T) {
+	m := newTestModel()
+	task := m.tasks[0]
+	task.HasTmuxSession = true
+	task.Session = nil
+	m.tasks[0] = task
+	m.nav.SelectTask(task.ID, 0)
+
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30))
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "a"})
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+	updated := updatedAny.(Model)
+
+	current := updated.overlayStack.Current()
+	if _, ok := current.(*overlay.TaskWorkspaceOverlay); !ok {
+		t.Fatalf("expected task workspace overlay to remain open, got %T", current)
+	}
+}
+
+func TestHandleSelection_AttachFromNonWorkspaceClosesOverlay(t *testing.T) {
+	m := newTestModel()
+	task := m.tasks[0]
+	task.HasTmuxSession = true
+	task.Session = nil
+	m.tasks[0] = task
+	m.nav.SelectTask(task.ID, 0)
+
+	m.overlayStack.Push(overlay.NewActionMenu(task, nil))
+
+	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "a"})
+	if cmd == nil {
+		t.Fatal("expected attach command")
+	}
+	updated := updatedAny.(Model)
+
+	if !updated.overlayStack.IsEmpty() {
+		t.Fatalf("expected non-workspace overlay to close, got %T", updated.overlayStack.Current())
+	}
+}
+
 func TestDaemonStreamEventMsg_IgnoresDifferentProject(t *testing.T) {
 	m := newTestModel()
 	m.currentProject = "chefy"

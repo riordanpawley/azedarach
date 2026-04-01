@@ -1975,6 +1975,64 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 	}
 }
 
+func TestCheckMergePreflightUsesLiveGitStatusWhenRefreshFlagFalse(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandGitStatus:
+				respBody, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+				if err != nil {
+					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newTestModel()
+	m.daemonClient = daemonclient.New(transport)
+	m.tasks = []domain.Task{
+		{ID: "az-source", HasUncommittedChanges: true},
+		{ID: "main", HasUncommittedChanges: true},
+	}
+
+	preflight := m.checkMergePreflight(
+		context.Background(),
+		"az-source",
+		"main",
+		"/tmp/az-source",
+		"/tmp/main",
+		"",
+		"",
+		false, // legacy flag value; should still do live status checks
+	)
+
+	if preflight != nil {
+		t.Fatalf("preflight = %+v, want nil for clean live status", preflight)
+	}
+
+	var statusCalls int
+	for _, command := range transport.requests {
+		if command == daemonclient.CommandGitStatus {
+			statusCalls++
+		}
+	}
+	if statusCalls != 2 {
+		t.Fatalf("git status calls = %d, want 2", statusCalls)
+	}
+}
+
 func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 	sourceID := "az-source"
 	transport := &recordingDaemonTransport{

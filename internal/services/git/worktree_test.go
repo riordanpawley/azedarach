@@ -691,6 +691,7 @@ func TestExecRunner_IgnoresConflictingGitEnv(t *testing.T) {
 	ctx := context.Background()
 
 	initCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "init")
+	initCmd.Env = sanitizedGitEnv(os.Environ())
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v: %s", err, string(out))
 	}

@@ -201,6 +201,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
 		}
 	}
+	d.persistWorktreeProjection(cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -212,7 +213,14 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	_ = d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress)
+	if updateErr := d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
+			"project_id", cmd.ProjectID,
+			"issue_id", cmd.IssueID,
+			"session_id", cmd.SessionID,
+			"error", updateErr,
+		)
+	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -376,7 +384,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, cmd.ProjectID, cmd.IssueID); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("session reconciliation during session.status failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", err)
 	}
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, cmd.ProjectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -471,6 +479,7 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 	if err != nil {
 		return err
 	}
+	d.persistSessionProjection(projectID, event.Session)
 	d.publishSessionProjectionEvent(projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
 	return nil
 }
@@ -526,13 +535,36 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		}
 		wt, getErr := d.worktree.Get(ctx, issueID)
 		if getErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation skipped worktree restore",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"error", getErr,
+				)
+			}
 			continue
 		}
 		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
 		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to recreate tmux session",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"worktree", wt.Path,
+					"error", newErr,
+				)
+			}
 			continue
 		}
-		_ = d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false, nil, ""))
+		if sendErr := d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false, nil, "")); sendErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("session reconciliation failed to seed launch command",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", canonicalSessionID,
+				"error", sendErr,
+			)
+		}
 		tmuxSet[issueKey] = struct{}{}
 		tmuxNameByIssueKey[issueKey] = canonicalSessionID
 		result.RecreatedTmuxSessions++
@@ -562,7 +594,21 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
 				if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
+				} else if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("session reconciliation failed to mark session attached",
+						"project_id", projectID,
+						"issue_id", issueID,
+						"session_id", sessionIDInTmux,
+						"error", err,
+					)
 				}
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to mark session starting",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", sessionIDInTmux,
+					"error", err,
+				)
 			}
 			continue
 		}
@@ -577,11 +623,32 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 			if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateStarting); err == nil {
 				if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 					result.AlignedDaemonSessions++
+				} else if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("session reconciliation failed to transition stopped session to attached",
+						"project_id", projectID,
+						"issue_id", issueID,
+						"session_id", canonicalSessionID,
+						"error", err,
+					)
 				}
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to transition stopped session to starting",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"error", err,
+				)
 			}
 		case daemonstate.SessionStateStarting:
 			if err := d.upsertSessionAndPublish(projectID, canonicalSessionID, issueID, daemonstate.SessionStateAttached); err == nil {
 				result.AlignedDaemonSessions++
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to transition session to attached",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"error", err,
+				)
 			}
 		}
 	}
@@ -594,8 +661,14 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		return tasks
 	}
 
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, projectID)
 	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to list tmux sessions while enriching task session state",
+				"project_id", projectID,
+				"error", err,
+			)
+		}
 		return tasks
 	}
 	tmuxSet := make(map[string]struct{}, len(tmuxSessions))
@@ -654,6 +727,104 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 
 	return tasks
+}
+
+func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	if d.projectionStore != nil {
+		cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+		if err == nil && len(cachedSessions) > 0 {
+			cachedActive := make([]string, 0, len(cachedSessions))
+			for _, session := range cachedSessions {
+				if session.State == daemonstate.SessionStateStopped {
+					continue
+				}
+				if strings.TrimSpace(session.ID) == "" {
+					continue
+				}
+				cachedActive = append(cachedActive, session.ID)
+			}
+			if len(cachedActive) > 0 {
+				d.triggerSessionProjectionRefresh(projectID, d.refreshSessionProjectionCache)
+				return cachedActive, nil
+			}
+		}
+	}
+
+	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.persistTmuxSessionProjectionSnapshot(ctx, projectID, tmuxSessions); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("persist tmux session projection snapshot failed", "project_id", projectID, "error", err)
+	}
+	return tmuxSessions, nil
+}
+
+func (d *Daemon) refreshSessionProjectionCache(ctx context.Context, projectID string) error {
+	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return err
+	}
+	return d.persistTmuxSessionProjectionSnapshot(ctx, projectID, tmuxSessions)
+}
+
+func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, projectID string, tmuxSessions []string) error {
+	if d.projectionStore == nil || d.sessionStore == nil {
+		return nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	namingScope := d.sessionNamingScope(projectID)
+	snapshot := d.sessionStore.ReadSnapshot(projectID)
+	byIssueKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
+	for _, session := range snapshot.Sessions {
+		key := sessionKey(session.IssueID)
+		if key == "" {
+			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
+				key = sessionKey(parsedIssueID)
+			}
+		}
+		if key == "" {
+			continue
+		}
+		byIssueKey[key] = session
+	}
+
+	for _, name := range tmuxSessions {
+		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		if !ok {
+			issueID = name
+		}
+		issueKey := sessionKey(issueID)
+		row := daemonstate.Session{
+			ID:        name,
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateAttached,
+			UpdatedAt: time.Now().UTC(),
+		}
+		if existing, exists := byIssueKey[issueKey]; exists {
+			row.State = existing.State
+			if row.State == daemonstate.SessionStateStopped {
+				row.State = daemonstate.SessionStateAttached
+			}
+			if !existing.UpdatedAt.IsZero() {
+				row.UpdatedAt = existing.UpdatedAt
+			}
+		}
+		if err := d.projectionStore.UpsertSession(ctx, projectID, row); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {

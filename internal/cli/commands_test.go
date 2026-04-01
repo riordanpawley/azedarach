@@ -501,7 +501,7 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 	}
 }
 
-func TestBranchMergeToMainCommandIgnoresAzedarachRuntimeConfigInPreflight(t *testing.T) {
+func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -557,19 +557,15 @@ func TestBranchMergeToMainCommandIgnoresAzedarachRuntimeConfigInPreflight(t *tes
 		RepoDir:   t.TempDir(),
 	}
 
-	if err := BranchMergeToMainCommand(deps, "bhv"); err != nil {
-		t.Fatalf("BranchMergeToMainCommand error = %v", err)
+	err := BranchMergeToMainCommand(deps, "bhv")
+	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
+		t.Fatalf("err = %v, want preflight failure", err)
 	}
 
-	foundMerge := false
 	for _, cmd := range commands {
 		if cmd == daemonclient.CommandGitMerge {
-			foundMerge = true
-			break
+			t.Fatalf("unexpected post-preflight command: %s", cmd)
 		}
-	}
-	if !foundMerge {
-		t.Fatalf("expected git merge command in flow, commands=%v", commands)
 	}
 }
 
