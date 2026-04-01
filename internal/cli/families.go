@@ -1119,6 +1119,89 @@ func PrintCodexUsage() {
 	fmt.Println("Install Codex hook configuration and run Codex hook/guard commands.")
 }
 
+func PrintSpecUsage() {
+	fmt.Println("Usage: az spec <req|link|read|lint|parity|sync> [arguments]")
+	fmt.Println("  req      Manage spec requirements (list|get|create|update|delete)")
+	fmt.Println("  link     Manage issue/requirement traceability links (list|add|remove)")
+	fmt.Println("  read     Read consolidated spec view")
+	fmt.Println("  lint     Validate spec consistency")
+	fmt.Println("  parity   Report issue/spec drift")
+	fmt.Println("  sync     Sync spec artifacts to Markdown (phase-1 target: md)")
+	fmt.Println("")
+	fmt.Println("Requirement commands:")
+	fmt.Println("  az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec req get --id <req-id> [--json]")
+	fmt.Println("  az spec req create --id <req-id> --title <text> [--description <text>] [--issue <issue-id>] [--json]")
+	fmt.Println("  az spec req update --id <req-id> [--title <text>] [--description <text>] [--status <open|accepted|superseded>] [--json]")
+	fmt.Println("  az spec req delete --id <req-id> --confirm [--json]")
+	fmt.Println("")
+	fmt.Println("Link commands:")
+	fmt.Println("  az spec link list [--json] [--issue <issue-id>] [--req <req-id>] [--id <link-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
+	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
+	fmt.Println("")
+	fmt.Println("Read/lint/parity/sync:")
+	fmt.Println("  az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
+	fmt.Println("  az spec lint [--json] [--strict]")
+	fmt.Println("  az spec parity [--json] [--fail-on-out]")
+	fmt.Println("  az spec sync --target md [--check] [--json]")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  az spec req list --json")
+	fmt.Println("  az spec req get --id bfs-req-1")
+	fmt.Println("  az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh")
+	fmt.Println("  az spec link list --issue az-123")
+	fmt.Println("  az spec link add --issue bgh --req bfs-req-1 --role implements")
+	fmt.Println("  az spec read --issue az-123")
+	fmt.Println("  az spec lint --strict")
+	fmt.Println("  az spec parity --fail-on-out")
+	fmt.Println("  az spec sync --target md --check")
+}
+
+func PrintSpecReqUsage() {
+	fmt.Println("Usage: az spec req <list|get|create|update|delete> [arguments]")
+	fmt.Println("  list    List requirements")
+	fmt.Println("  get     Show a requirement by id")
+	fmt.Println("  create  Create a requirement")
+	fmt.Println("  update  Update a requirement")
+	fmt.Println("  delete  Delete a requirement")
+	fmt.Println("")
+	fmt.Println("Grammar:")
+	fmt.Println("  az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec req get --id <req-id> [--json]")
+	fmt.Println("  az spec req create --id <req-id> --title <text> [--description <text>] [--issue <issue-id>] [--json]")
+	fmt.Println("  az spec req update --id <req-id> [--title <text>] [--description <text>] [--status <open|accepted|superseded>] [--json]")
+	fmt.Println("  az spec req delete --id <req-id> --confirm [--json]")
+}
+
+func PrintSpecLinkUsage() {
+	fmt.Println("Usage: az spec link <list|add|remove> [arguments]")
+	fmt.Println("  list    List issue/requirement links")
+	fmt.Println("  add     Create a traceability link")
+	fmt.Println("  remove  Remove a traceability link")
+	fmt.Println("")
+	fmt.Println("Grammar:")
+	fmt.Println("  az spec link list [--json] [--issue <issue-id>] [--req <req-id>] [--id <link-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
+	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
+}
+
+func PrintSpecReadUsage() {
+	fmt.Println("Usage: az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
+}
+
+func PrintSpecLintUsage() {
+	fmt.Println("Usage: az spec lint [--json] [--strict]")
+}
+
+func PrintSpecParityUsage() {
+	fmt.Println("Usage: az spec parity [--json] [--fail-on-out]")
+}
+
+func PrintSpecSyncUsage() {
+	fmt.Println("Usage: az spec sync --target md [--check] [--json]")
+}
+
 func readJSONObject(path string) (map[string]any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

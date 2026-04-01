@@ -140,6 +140,61 @@ func (h *routeOperationHandler) Handle(_ context.Context, req protocol.RequestEn
 	}
 }
 
+type routeSpecService struct {
+	lastRead protocol.SpecReadRequestBody
+}
+
+func (s *routeSpecService) ListRequirements(context.Context, protocol.SpecRequirementListRequestBody) (protocol.SpecRequirementListResponseBody, error) {
+	return protocol.SpecRequirementListResponseBody{}, nil
+}
+
+func (s *routeSpecService) GetRequirement(context.Context, protocol.SpecRequirementGetRequestBody) (protocol.SpecRequirementGetResponseBody, error) {
+	return protocol.SpecRequirementGetResponseBody{}, nil
+}
+
+func (s *routeSpecService) CreateRequirement(context.Context, protocol.SpecRequirementCreateRequestBody) (protocol.SpecRequirementCreateResponseBody, error) {
+	return protocol.SpecRequirementCreateResponseBody{}, nil
+}
+
+func (s *routeSpecService) UpdateRequirement(context.Context, protocol.SpecRequirementUpdateRequestBody) (protocol.SpecRequirementUpdateResponseBody, error) {
+	return protocol.SpecRequirementUpdateResponseBody{}, nil
+}
+
+func (s *routeSpecService) DeleteRequirement(context.Context, protocol.SpecRequirementDeleteRequestBody) (protocol.SpecRequirementDeleteResponseBody, error) {
+	return protocol.SpecRequirementDeleteResponseBody{}, nil
+}
+
+func (s *routeSpecService) ListLinks(context.Context, protocol.SpecLinkListRequestBody) (protocol.SpecLinkListResponseBody, error) {
+	return protocol.SpecLinkListResponseBody{}, nil
+}
+
+func (s *routeSpecService) AddLink(context.Context, protocol.SpecLinkAddRequestBody) (protocol.SpecLinkAddResponseBody, error) {
+	return protocol.SpecLinkAddResponseBody{}, nil
+}
+
+func (s *routeSpecService) RemoveLink(context.Context, protocol.SpecLinkRemoveRequestBody) (protocol.SpecLinkRemoveResponseBody, error) {
+	return protocol.SpecLinkRemoveResponseBody{}, nil
+}
+
+func (s *routeSpecService) Read(_ context.Context, req protocol.SpecReadRequestBody) (protocol.SpecReadResponseBody, error) {
+	s.lastRead = req
+	return protocol.SpecReadResponseBody{
+		Requirements: []protocol.SpecRequirement{{ID: "REQ-1", Status: protocol.SpecRequirementStatusOpen}},
+	}, nil
+}
+
+func (s *routeSpecService) Lint(context.Context, protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
+	return protocol.SpecLintResponseBody{}, nil
+}
+
+func (s *routeSpecService) Parity(context.Context, protocol.SpecParityRequestBody) (protocol.SpecParityResponseBody, error) {
+	return protocol.SpecParityResponseBody{}, nil
+}
+
+func (s *routeSpecService) SyncMD(context.Context, protocol.SpecSyncMDRequestBody) (protocol.SpecSyncMDResponseBody, error) {
+	return protocol.SpecSyncMDResponseBody{}, nil
+}
+
 func TestDispatcherMixedRouting(t *testing.T) {
 	session := NewSessionHandler(daemonstate.NewStore())
 	gitHandler := NewGitHandler(&fakeGitService{
@@ -152,7 +207,8 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	worktree := NewWorktreeHandler(&fakeWorktreeService{})
 	devserverH := NewDevServerHandler(newRouteDevServerManager())
 	operationH := &routeOperationHandler{}
-	dispatch := NewDispatcher(session, gitHandler, worktree, devserverH, operationH)
+	specService := &routeSpecService{}
+	dispatch := NewDispatcher(session, gitHandler, worktree, devserverH, operationH, NewSpecHandler(specService))
 
 	mkReq := func(cmd string, body any) protocol.RequestEnvelope {
 		b, _ := json.Marshal(body)
@@ -230,6 +286,17 @@ func TestDispatcherMixedRouting(t *testing.T) {
 	}
 	if operationH.lastBody.DedupeKey != "proj::aey::session.start" {
 		t.Fatalf("operation handler body = %+v", operationH.lastBody)
+	}
+
+	r8 := dispatch.Handle(context.Background(), mkReq(protocol.CommandSpecRead, protocol.SpecReadRequestBody{
+		IssueID: "proj-issue",
+		ReqID:   "REQ-1",
+	}))
+	if !r8.OK {
+		t.Fatalf("spec route failed: %+v", r8.Error)
+	}
+	if specService.lastRead.IssueID != "proj-issue" || specService.lastRead.ReqID != "REQ-1" {
+		t.Fatalf("spec service request = %+v", specService.lastRead)
 	}
 }
 
