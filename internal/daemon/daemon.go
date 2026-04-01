@@ -116,6 +116,7 @@ func New(cfg Config) *Daemon {
 		client:          gitClient,
 		projectionStore: projectionStore,
 		logger:          cfg.Logger,
+		baseBranch:      cfg.BaseBranch,
 	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
@@ -350,6 +351,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionStart(ctx, req)
 	case "session.attach":
 		return d.handleSessionAttach(ctx, req)
+	case "session.pause":
+		return d.handleSessionPause(ctx, req)
+	case "session.resume":
+		return d.handleSessionResume(ctx, req)
 	case "session.stop":
 		return d.handleSessionStop(ctx, req)
 	case "session.status":

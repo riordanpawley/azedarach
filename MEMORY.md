@@ -477,7 +477,7 @@ go tool cover -html=coverage.out
 go test -run TestBoardModel ./...
 
 # Run tests in specific package
-go test ./internal/app
+go test ./internal/tui
 
 # Run benchmarks
 go test -bench=. ./...

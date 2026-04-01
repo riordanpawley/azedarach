@@ -15,11 +15,11 @@ This policy is a follow-up to:
 Authoritative ownership:
 - `internal/daemon/*` owns lifecycle + durable mutation authority.
 - `internal/client/*` is the only frontend transport boundary.
-- `internal/app` and `internal/cli` are thin intent/render layers with ephemeral runtime state.
+- `internal/tui` and `internal/cli` are thin intent/render layers with ephemeral runtime state.
 
 Hard import direction:
-- `internal/app`, `internal/cli` -> `internal/client/*`, `internal/contracts/*`, ui/domain helpers.
-- `internal/app`, `internal/cli` X> `internal/daemon/*`.
+- `internal/tui`, `internal/cli` -> `internal/client/*`, `internal/contracts/*`, ui/domain helpers.
+- `internal/tui`, `internal/cli` X> `internal/daemon/*`.
 - `internal/daemon/*` X> Bubble Tea/UI packages.
 
 ## Enforcement Levels
@@ -27,7 +27,7 @@ Hard import direction:
 ### Level 0 (current baseline)
 
 - Existing sentinel checks in `scripts/afv-drift-sentinel.sh` are required.
-- Session projection checks in `internal/app/model.go` run in hard-fail mode.
+- Session projection checks in `internal/tui/model.go` run in hard-fail mode.
 
 ### Level 1 (implemented)
 

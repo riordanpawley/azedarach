@@ -132,12 +132,53 @@ func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResu
 func (c *Client) AbortMerge(ctx context.Context, worktree string) error {
 	c.logger.Info("aborting merge", "worktree", worktree)
 
-	_, err := c.runner.Run(ctx, "merge", "--abort")
+	_, err := c.runInWorktree(ctx, worktree, "merge", "--abort")
 	if err != nil {
 		return fmt.Errorf("failed to abort merge: %w", err)
 	}
 
 	c.logger.Info("merge aborted successfully")
+	return nil
+}
+
+// MergeTreeWriteTree runs git merge-tree --write-tree to predict merge conflicts.
+func (c *Client) MergeTreeWriteTree(ctx context.Context, worktree, targetRef, sourceBranch string) (string, error) {
+	output, err := c.runInWorktree(ctx, worktree, "merge-tree", "--write-tree", targetRef, sourceBranch)
+	if err != nil {
+		return output, fmt.Errorf("failed to run merge-tree: %w", err)
+	}
+	return output, nil
+}
+
+// RestoreAll restores tracked changes in both index and worktree.
+func (c *Client) RestoreAll(ctx context.Context, worktree string) error {
+	if _, err := c.runInWorktree(ctx, worktree, "restore", "--staged", "--worktree", "."); err != nil {
+		return fmt.Errorf("failed to restore changes: %w", err)
+	}
+	return nil
+}
+
+// CleanForce removes untracked files and directories.
+func (c *Client) CleanForce(ctx context.Context, worktree string) error {
+	if _, err := c.runInWorktree(ctx, worktree, "clean", "-fd"); err != nil {
+		return fmt.Errorf("failed to clean changes: %w", err)
+	}
+	return nil
+}
+
+// AddAll stages all changes in the worktree.
+func (c *Client) AddAll(ctx context.Context, worktree string) error {
+	if _, err := c.runInWorktree(ctx, worktree, "add", "-A"); err != nil {
+		return fmt.Errorf("failed to stage changes: %w", err)
+	}
+	return nil
+}
+
+// Commit creates a commit in the worktree.
+func (c *Client) Commit(ctx context.Context, worktree, message string) error {
+	if _, err := c.runInWorktree(ctx, worktree, "commit", "-m", message); err != nil {
+		return fmt.Errorf("failed to commit changes: %w", err)
+	}
 	return nil
 }
 

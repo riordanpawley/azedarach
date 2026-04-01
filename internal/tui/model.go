@@ -33,7 +33,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
-	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
@@ -75,7 +74,6 @@ var executablePath = os.Executable
 var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
-var runGitCommandFunc = runGitCommand
 var execProcess = tea.ExecProcess
 
 // Re-export Toast type and constants for convenience
@@ -616,7 +614,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logger.Debug("network status updated", "online", msg.Online)
 		return m, nil
 
-	case git.GitSyncMsg:
+	case daemonclient.GitSyncMsg:
 		if msg.Err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -2623,6 +2621,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 		worktreeByTask := make(map[string]string, len(prioritizedTasks))
 		partialFailures := 0
 		now := time.Now()
+		targetsToRefresh := make([]daemonclient.GitRuntimeSignalsTarget, 0, len(prioritizedTasks))
 		for _, task := range prioritizedTasks {
 			cachedSignals, hasCachedSignals := m.runtimeSignalsByTask[task.ID]
 			signals := board.RuntimeSignals{HasTmuxSession: task.Session != nil}
@@ -2654,41 +2653,41 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				continue
 			}
 
-			status, statusErr := m.daemonClient.GitStatus(ctx, worktreePath)
-			refreshSucceeded := statusErr == nil
-			if statusErr == nil {
-				signals.HasUncommittedChanges = status.HasChanges
-			} else {
-				partialFailures++
-			}
-
-			diffStat, diffErr := m.daemonClient.GitDiffStat(ctx, worktreePath, baseBranch)
-			if diffErr == nil {
-				signals.GitAdditions, signals.GitDeletions = parseDiffStatTotals(diffStat)
-			} else {
-				partialFailures++
-				refreshSucceeded = false
-			}
-
-			if m.shouldCompareAgainstRemote() {
-				behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
-					Worktree:   worktreePath,
-					BaseBranch: baseBranch,
-					Remote:     "origin",
-				})
-				if behindErr == nil {
-					signals.GitAheadCount = behind.CommitsAhead
-					signals.GitBehindCount = behind.CommitsBehind
-				} else {
-					partialFailures++
-					refreshSucceeded = false
-				}
-			}
-			if refreshSucceeded {
-				refreshedAtByTask[task.ID] = now
-			}
 			worktreeByTask[task.ID] = worktreePath
 			signalsByTask[task.ID] = signals
+			targetsToRefresh = append(targetsToRefresh, daemonclient.GitRuntimeSignalsTarget{
+				IssueID:  task.ID,
+				Worktree: worktreePath,
+			})
+		}
+
+		if len(targetsToRefresh) > 0 {
+			signals, signalPartialFailures, err := m.daemonClient.GitRuntimeSignals(
+				ctx,
+				targetsToRefresh,
+				baseBranch,
+				m.shouldCompareAgainstRemote(),
+				"origin",
+			)
+			if err != nil {
+				partialFailures += len(targetsToRefresh)
+			} else {
+				partialFailures += signalPartialFailures
+				for _, signal := range signals {
+					issueID := strings.TrimSpace(signal.IssueID)
+					if issueID == "" {
+						continue
+					}
+					baseSignals := signalsByTask[issueID]
+					baseSignals.HasUncommittedChanges = signal.HasUncommittedChanges
+					baseSignals.GitAdditions = signal.GitAdditions
+					baseSignals.GitDeletions = signal.GitDeletions
+					baseSignals.GitAheadCount = signal.GitAheadCount
+					baseSignals.GitBehindCount = signal.GitBehindCount
+					signalsByTask[issueID] = baseSignals
+					refreshedAtByTask[issueID] = now
+				}
+			}
 		}
 
 		return runtimeSignalsLoadedMsg{
@@ -4694,7 +4693,7 @@ type fetchAndMergeResultMsg struct {
 	worktree    string
 	issueID     string
 	attachAfter bool
-	result      *git.MergeResult
+	result      *daemonclient.MergeResult
 	stage       string
 	operationID string
 	state       protocol.OperationState
@@ -5020,7 +5019,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 type mergeResultMsg struct {
 	sourceID    string
 	targetID    string
-	result      *git.MergeResult
+	result      *daemonclient.MergeResult
 	stage       string
 	state       protocol.OperationState
 	operationID string
@@ -6131,7 +6130,7 @@ func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool)
 	}
 }
 
-func (m Model) listDaemonWorktrees(ctx context.Context) ([]git.Worktree, error) {
+func (m Model) listDaemonWorktrees(ctx context.Context) ([]daemonclient.Worktree, error) {
 	if m.daemonClient == nil {
 		return nil, fmt.Errorf("daemon client unavailable")
 	}
@@ -6198,7 +6197,7 @@ func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID
 	return domain.SessionIdle, false, nil
 }
 
-func summarizeStatusChangeCounts(status git.GitStatus) string {
+func summarizeStatusChangeCounts(status daemonclient.GitStatus) string {
 	parts := make([]string, 0, 5)
 	if n := len(status.Staged); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d staged", n))
@@ -6221,7 +6220,7 @@ func summarizeStatusChangeCounts(status git.GitStatus) string {
 	return strings.Join(parts, ", ")
 }
 
-func dirtyFilesFromStatus(status git.GitStatus) []string {
+func dirtyFilesFromStatus(status daemonclient.GitStatus) []string {
 	seen := make(map[string]struct{}, 16)
 	out := make([]string, 0, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
 	appendUnique := func(files []string) {
@@ -6316,16 +6315,22 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	targetRef = strings.TrimSpace(targetRef)
 	sourceBranch = strings.TrimSpace(sourceBranch)
 	if len(reasons) == 0 && targetRef != "" && sourceBranch != "" {
-		output, err := runGitCommandFunc(ctx, targetWorktree, "merge-tree", "--write-tree", targetRef, sourceBranch)
-		if predictsMergeConflicts(output, err) {
-			conflicts := parseMergePreflightConflictFiles(output)
-			if len(conflicts) == 0 && err != nil {
-				conflicts = parseMergePreflightConflictFiles(err.Error())
-			}
-			if len(conflicts) > 0 {
-				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(conflicts), strings.Join(conflicts, ", ")))
+		resp, err := m.daemonClient.GitMergePreflight(ctx, sourceID, sourceWorktree, targetID, targetWorktree, targetRef, sourceBranch)
+		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("Could not predict merge conflicts (%s -> %s): %v", sourceID, targetID, err))
+		} else if !resp.Clean {
+			if len(resp.Reasons) > 0 {
+				reasons = append(reasons, resp.Reasons...)
+			} else if len(resp.ConflictFiles) > 0 {
+				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(resp.ConflictFiles), strings.Join(resp.ConflictFiles, ", ")))
 			} else {
 				reasons = append(reasons, "Merge would conflict; merge and resolve main into the source branch first")
+			}
+			if len(resp.SourceFiles) > 0 {
+				sourceFiles = append(sourceFiles[:0], resp.SourceFiles...)
+			}
+			if len(resp.TargetFiles) > 0 {
+				targetFiles = append(targetFiles[:0], resp.TargetFiles...)
 			}
 		}
 	}
@@ -6344,34 +6349,23 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	}
 }
 
-func runGitCommand(ctx context.Context, worktree string, args ...string) (string, error) {
-	worktree = strings.TrimSpace(worktree)
-	if worktree == "" {
-		return "", fmt.Errorf("worktree is required")
-	}
-	fullArgs := make([]string, 0, len(args)+2)
-	fullArgs = append(fullArgs, "-C", worktree)
-	fullArgs = append(fullArgs, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		trimmed := strings.TrimSpace(string(output))
-		if trimmed == "" {
-			return "", err
-		}
-		return "", fmt.Errorf("%w: %s", err, trimmed)
-	}
-	return strings.TrimSpace(string(output)), nil
-}
-
 func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		_, err := runGitCommandFunc(ctx, worktree, "restore", "--staged", "--worktree", ".")
-		if err == nil {
-			_, err = runGitCommandFunc(ctx, worktree, "clean", "-fd")
+		if m.daemonClient == nil {
+			return mergePreflightActionResultMsg{
+				action:   "discard",
+				side:     side,
+				worktree: worktree,
+				err:      fmt.Errorf("daemon client unavailable"),
+			}
+		}
+
+		_, err := m.daemonClient.GitDiscardChanges(ctx, worktree)
+		if err != nil {
+			err = daemonCommandMessage(err)
 		}
 		return mergePreflightActionResultMsg{
 			action:   "discard",
@@ -6387,31 +6381,30 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 
-		if m.daemonClient != nil {
-			if status, err := m.daemonClient.GitStatus(ctx, worktree); err == nil && !status.HasChanges {
-				return mergePreflightActionResultMsg{
-					action:   "commit",
-					side:     side,
-					worktree: worktree,
-					err:      fmt.Errorf("no changes to commit"),
-				}
+		if m.daemonClient == nil {
+			return mergePreflightActionResultMsg{
+				action:   "commit",
+				side:     side,
+				worktree: worktree,
+				err:      fmt.Errorf("daemon client unavailable"),
 			}
 		}
 
-		if _, err := runGitCommandFunc(ctx, worktree, "add", "-A"); err != nil {
+		if status, err := m.daemonClient.GitStatus(ctx, worktree); err == nil && !status.HasChanges {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
 				worktree: worktree,
-				err:      err,
+				err:      fmt.Errorf("no changes to commit"),
 			}
 		}
-		if _, err := runGitCommandFunc(ctx, worktree, "commit", "-m", "chore: pre-merge checkpoint"); err != nil {
+
+		if _, err := m.daemonClient.GitCheckpointCommit(ctx, worktree, daemonclient.DefaultCheckpointMessage); err != nil {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
 				worktree: worktree,
-				err:      err,
+				err:      daemonCommandMessage(err),
 			}
 		}
 		return mergePreflightActionResultMsg{
@@ -6422,7 +6415,18 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 	}
 }
 
-func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {
+func daemonCommandMessage(err error) error {
+	if err == nil {
+		return nil
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) {
+		return fmt.Errorf("%s", strings.TrimSpace(cmdErr.Message))
+	}
+	return err
+}
+
+func findDaemonWorktree(worktrees []daemonclient.Worktree, worktreePath, issueID string) (daemonclient.Worktree, bool) {
 	for _, wt := range worktrees {
 		if worktreePath != "" && wt.Path == worktreePath {
 			return wt, true
@@ -6431,7 +6435,7 @@ func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) 
 			return wt, true
 		}
 	}
-	return git.Worktree{}, false
+	return daemonclient.Worktree{}, false
 }
 
 func (m Model) resolveWorktreeBranch(ctx context.Context, worktree, issueID string) (string, error) {

@@ -2,16 +2,8 @@ package cli
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 )
-
-func newGitCommand(projectDir string, args ...string) *exec.Cmd {
-	cmdArgs := append([]string{"-C", projectDir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Env = gitExecEnvWithoutRoutingVars()
-	return cmd
-}
 
 func gitExecEnvWithoutRoutingVars() []string {
 	env := os.Environ()
