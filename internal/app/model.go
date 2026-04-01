@@ -5077,7 +5077,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree, refreshStatus); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree, baseBranch, branch, refreshStatus); preflight != nil {
 			return *preflight
 		}
 
@@ -5141,7 +5141,7 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, refreshStatus); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, "HEAD", sourceBranch, refreshStatus); preflight != nil {
 			return *preflight
 		}
 
@@ -6202,7 +6202,49 @@ func dirtyFilesFromStatus(status git.GitStatus) []string {
 	return out
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree string, refreshStatus bool) *mergePreflightFailureMsg {
+func parseMergePreflightConflictFiles(output string) []string {
+	conflicts := make([]string, 0)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if !strings.Contains(line, "CONFLICT") {
+			continue
+		}
+		if strings.Contains(line, "Merge conflict in ") {
+			parts := strings.Split(line, "Merge conflict in ")
+			if len(parts) >= 2 {
+				if file := strings.TrimSpace(parts[1]); file != "" {
+					conflicts = append(conflicts, file)
+				}
+			}
+			continue
+		}
+		if idx := strings.Index(line, "): "); idx != -1 {
+			rest := line[idx+3:]
+			var file string
+			if idx2 := strings.Index(rest, " deleted in "); idx2 != -1 {
+				file = strings.TrimSpace(rest[:idx2])
+			} else if idx2 := strings.Index(rest, " modified in "); idx2 != -1 {
+				file = strings.TrimSpace(rest[:idx2])
+			}
+			if file != "" {
+				conflicts = append(conflicts, file)
+			}
+		}
+	}
+	return conflicts
+}
+
+func predictsMergeConflicts(output string, err error) bool {
+	if strings.Contains(output, "CONFLICT") {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "CONFLICT")
+}
+
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
@@ -6248,6 +6290,23 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	} else if targetStatus.HasChanges {
 		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
 		targetFiles = dirtyFilesFromStatus(targetStatus)
+	}
+
+	targetRef = strings.TrimSpace(targetRef)
+	sourceBranch = strings.TrimSpace(sourceBranch)
+	if len(reasons) == 0 && targetRef != "" && sourceBranch != "" {
+		output, err := runGitCommandFunc(ctx, targetWorktree, "merge-tree", "--write-tree", targetRef, sourceBranch)
+		if predictsMergeConflicts(output, err) {
+			conflicts := parseMergePreflightConflictFiles(output)
+			if len(conflicts) == 0 && err != nil {
+				conflicts = parseMergePreflightConflictFiles(err.Error())
+			}
+			if len(conflicts) > 0 {
+				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(conflicts), strings.Join(conflicts, ", ")))
+			} else {
+				reasons = append(reasons, "Merge would conflict; merge and resolve main into the source branch first")
+			}
+		}
 	}
 
 	if len(reasons) == 0 {

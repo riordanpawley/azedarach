@@ -1975,6 +1975,94 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 	}
 }
 
+func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
+	sourceID := "az-source"
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-source", Branch: "az/az-source", IssueID: sourceID},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitStatus:
+				respBody, err := json.Marshal(struct {
+					Status git.GitStatus `json:"status"`
+				}{Status: git.GitStatus{HasChanges: false}})
+				if err != nil {
+					t.Fatalf("marshal status response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	original := runGitCommandFunc
+	expectedWorktree := ""
+	runGitCommandFunc = func(_ context.Context, worktree string, args ...string) (string, error) {
+		if expectedWorktree != "" && worktree != expectedWorktree {
+			t.Fatalf("merge-tree worktree = %q, want %s", worktree, expectedWorktree)
+		}
+		if len(args) != 4 || args[0] != "merge-tree" || args[1] != "--write-tree" || args[2] != "main" || args[3] != "az/az-source" {
+			t.Fatalf("merge-tree args = %v", args)
+		}
+		return "CONFLICT (content): Merge conflict in cmd/az/main.go", errors.New("merge-tree conflict")
+	}
+	defer func() {
+		runGitCommandFunc = original
+	}()
+
+	m := newTestModel()
+	expectedWorktree = m.activeProjectPath()
+	m.daemonClient = daemonclient.New(transport)
+	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
+
+	preflight, ok := msg.(mergePreflightFailureMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want mergePreflightFailureMsg", msg)
+	}
+	if len(preflight.reasons) == 0 || !strings.Contains(preflight.reasons[0], "Merge would conflict") {
+		t.Fatalf("preflight reasons = %+v, want conflict reason", preflight.reasons)
+	}
+	for _, command := range transport.requests {
+		if command == daemonclient.CommandGitFetch || command == daemonclient.CommandGitCheckout || command == daemonclient.CommandGitMerge {
+			t.Fatalf("unexpected git merge command during preflight conflict failure: %v", transport.requests)
+		}
+	}
+}
+
 func TestDiscardChangesCmdRunsRestoreThenClean(t *testing.T) {
 	var calls [][]string
 	original := runGitCommandFunc
