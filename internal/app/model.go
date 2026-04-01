@@ -2080,7 +2080,11 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.updateFromMainCmd(task.ID, false)
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
+		}
+		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
 	case "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
@@ -3805,9 +3809,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Git actions
 	case "u":
-		// Update from main using active session worktree when present, otherwise
-		// resolve the issue worktree from daemon-owned projection state.
-		return m, m.updateFromMainCmd(task.ID, false)
+		// Update from base branch using local worktree hint when available.
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
+		}
+		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
@@ -6095,12 +6102,16 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 	}
 }
 
-func (m Model) updateFromMainCmd(issueID string, attachAfter bool) tea.Cmd {
+func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
 
-		resolvedWorktree, err := m.resolveIssueWorktreePathFromDaemon(ctx, issueID)
+		resolvedWorktree := strings.TrimSpace(worktreeHint)
+		var err error
+		if resolvedWorktree == "" {
+			resolvedWorktree, err = m.resolveIssueWorktreePathFromDaemon(ctx, issueID)
+		}
 		if resolvedWorktree == "" {
 			return fetchAndMergeResultMsg{
 				issueID:     issueID,
@@ -6116,7 +6127,7 @@ func (m Model) updateFromMainCmd(issueID string, attachAfter bool) tea.Cmd {
 			}
 		}
 
-		return m.fetchAndMergeCmd(resolvedWorktree, "main", issueID, attachAfter)()
+		return m.fetchAndMergeCmd(resolvedWorktree, m.resolveBaseBranch(), issueID, attachAfter)()
 	}
 }
 
