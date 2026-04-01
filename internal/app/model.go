@@ -4150,6 +4150,9 @@ func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
 	}
 
 	cmd := exec.Command(editorName, path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return execProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return overlay.SelectionMsg{
