@@ -1670,6 +1670,73 @@ func TestParseIssueCreateArgs(t *testing.T) {
 	}
 }
 
+func TestParseIssueChildArgs(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
+	tests := []struct {
+		name        string
+		args        []string
+		want        IssueChildOptions
+		errContains string
+	}{
+		{
+			name: "defaults with env parent",
+			args: []string{"Child title"},
+			want: IssueChildOptions{
+				ParentID: "az-parent",
+				Title:    "Child title",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+			},
+		},
+		{
+			name: "explicit options",
+			args: []string{"--parent", "az-root", "--impl", "go-bubbletea", "--impl", "go-bubbletea", "--type", "bug", "--priority", "P0", "--description", "details", "Child title"},
+			want: IssueChildOptions{
+				ParentID:        "az-root",
+				Title:           "Child title",
+				Description:     "details",
+				Type:            domain.TypeBug,
+				Priority:        domain.P0,
+				Implementations: []string{"go-bubbletea"},
+			},
+		},
+		{
+			name:        "invalid priority",
+			args:        []string{"--priority", "high", "Child title"},
+			errContains: "invalid priority: high",
+		},
+		{
+			name:        "missing title",
+			args:        []string{},
+			errContains: "usage: az issue child [--project <project-id>] [--parent <issue-id>]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseIssueChildArgs(tt.args)
+			if tt.errContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseIssueChildArgs() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ParseIssueChildArgs() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	_, err := ParseIssueChildArgs([]string{"Child title"})
+	if err == nil || !strings.Contains(err.Error(), "missing parent issue context") {
+		t.Fatalf("expected missing parent context error, got %v", err)
+	}
+}
+
 func TestParseIssueCloseArgs(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -2824,6 +2891,89 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueChildCommandCreatesChildUnderParent(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				body := []byte{}
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					tasks, err := json.Marshal([]domain.Task{
+						{
+							ID:              "az-parent",
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list response: %v", err)
+					}
+					body = tasks
+				case daemonclient.CommandTaskCreate:
+					payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
+					if err != nil {
+						t.Fatalf("marshal task create response: %v", err)
+					}
+					body = payload
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueChildCommand(deps, IssueChildOptions{
+			ParentID: "az-parent",
+			Title:    "Child issue",
+			Type:     domain.TypeTask,
+			Priority: domain.P2,
+		})
+	})
+
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if requests[0].Command != daemonclient.CommandTaskList {
+		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskList)
+	}
+	if requests[1].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
+	}
+
+	var createReq daemonclient.TaskCreateParams
+	if err := json.Unmarshal(requests[1].Body, &createReq); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
+		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
+	}
+	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
+		t.Fatalf("create implementations = %+v, want [go-bubbletea]", createReq.Implementations)
+	}
+	if createReq.Title != "Child issue" || createReq.Type != domain.TypeTask || createReq.Priority != domain.P2 {
+		t.Fatalf("create body = %+v", createReq)
+	}
+	if !strings.Contains(output, "Created child issue: az-child (parent: az-parent)") {
+		t.Fatalf("output missing child create message: %q", output)
+	}
+}
+
 func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotDeleteReq protocol.RequestEnvelope
@@ -3403,6 +3553,9 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	}
 	if !strings.Contains(output, "issue create [--project <project-id>] <title>") {
 		t.Fatalf("usage missing issue create command: %q", output)
+	}
+	if !strings.Contains(output, "issue child [--project <project-id>] [--parent <issue-id>]") {
+		t.Fatalf("usage missing issue child command: %q", output)
 	}
 	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue update command: %q", output)

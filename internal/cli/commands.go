@@ -116,6 +116,16 @@ type IssueCreateOptions struct {
 	Priority       domain.Priority
 }
 
+type IssueChildOptions struct {
+	Project         string
+	ParentID        string
+	Title           string
+	Description     string
+	Type            domain.TaskType
+	Priority        domain.Priority
+	Implementations []string
+}
+
 type IssueCloseOptions struct {
 	Project string
 	IssueID string
@@ -1000,6 +1010,62 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	return opts, nil
 }
 
+func ParseIssueChildArgs(args []string) (IssueChildOptions, error) {
+	opts := IssueChildOptions{
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	}
+	var priorityRaw string
+	var typeRaw string
+	var parentIDFlag string
+	impls := make([]string, 0, 2)
+	fs := flag.NewFlagSet("issue child", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&parentIDFlag, "parent", "", "parent issue id (defaults to AZEDARACH_ISSUE_ID)")
+	fs.StringVar(&opts.Description, "description", "", "issue description")
+	fs.StringVar(&priorityRaw, "priority", "P2", "issue priority (P0-P4)")
+	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
+	fs.Func("impl", "child implementation key (repeatable; defaults to parent implementations)", func(v string) error {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fmt.Errorf("empty impl value")
+		}
+		impls = append(impls, trimmed)
+		return nil
+	})
+	if err := fs.Parse(args); err != nil {
+		return IssueChildOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return IssueChildOptions{}, fmt.Errorf("usage: az issue child [--project <project-id>] [--parent <issue-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] <title>")
+	}
+	opts.Title = fs.Arg(0)
+	if strings.TrimSpace(parentIDFlag) != "" {
+		opts.ParentID = strings.TrimSpace(parentIDFlag)
+	}
+	if strings.TrimSpace(opts.ParentID) == "" {
+		opts.ParentID = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	}
+	if strings.TrimSpace(opts.ParentID) == "" {
+		return IssueChildOptions{}, fmt.Errorf("missing parent issue context: set AZEDARACH_ISSUE_ID or pass --parent <issue-id>")
+	}
+
+	taskType, err := parseTaskType(typeRaw)
+	if err != nil {
+		return IssueChildOptions{}, err
+	}
+	priority, err := parsePriority(priorityRaw)
+	if err != nil {
+		return IssueChildOptions{}, err
+	}
+	opts.Type = taskType
+	opts.Priority = priority
+	opts.Implementations = dedupeOrderedIDs(impls)
+	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
 func ParseIssueCheckArgs(args []string) (IssueCheckOptions, error) {
 	getOpts, err := ParseIssueGetArgs(args)
 	if err != nil {
@@ -1872,6 +1938,51 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	}
 
 	fmt.Printf("Created issue: %s\n", taskID)
+	return nil
+}
+
+func IssueChildCommand(deps *Dependencies, opts IssueChildOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+
+	parentID := strings.TrimSpace(opts.ParentID)
+	if parentID == "" {
+		return fmt.Errorf("missing parent issue id")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load parent issue %s: %w", parentID, err)
+	}
+	parentTask, ok := findTaskByID(snapshot.Tasks, parentID)
+	if !ok {
+		return fmt.Errorf("parent issue not found: %s", parentID)
+	}
+
+	implementations := dedupeOrderedIDs(opts.Implementations)
+	if len(implementations) == 0 {
+		implementations = append([]string{}, parentTask.Implementations...)
+	}
+
+	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
+		Title:           opts.Title,
+		Description:     opts.Description,
+		Type:            opts.Type,
+		Priority:        opts.Priority,
+		ParentID:        &parentID,
+		Implementations: implementations,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create child issue under %s: %w", parentID, err)
+	}
+
+	fmt.Printf("Created child issue: %s (parent: %s)\n", taskID, parentID)
 	return nil
 }
 
