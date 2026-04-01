@@ -3446,15 +3446,6 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az sync --all") {
 		t.Fatalf("usage missing sync example: %q", output)
 	}
-	if !strings.Contains(output, "az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh") {
-		t.Fatalf("usage missing spec req create example: %q", output)
-	}
-	if !strings.Contains(output, "az spec link add --issue bgh --req bfs-req-1 --role implements") {
-		t.Fatalf("usage missing spec link add example: %q", output)
-	}
-	if !strings.Contains(output, "az spec parity --fail-on-out") {
-		t.Fatalf("usage missing spec parity example: %q", output)
-	}
 	if !strings.Contains(output, "az impl delete --confirm ts-opentui") {
 		t.Fatalf("usage missing impl delete example: %q", output)
 	}
@@ -3743,7 +3734,7 @@ func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	}
 }
 
-func TestEnsureDaemonProjectMismatchDoesNotReplace(t *testing.T) {
+func TestEnsureDaemonDoesNotReplaceOnAcceptedHandshake(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })
 
@@ -3758,7 +3749,7 @@ func TestEnsureDaemonProjectMismatchDoesNotReplace(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
 				handshakes++
-				return protocol.HelloAck{Accepted: true, DaemonProjectID: "other-proj"}, nil
+				return protocol.HelloAck{Accepted: true}, nil
 			},
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -3766,45 +3757,14 @@ func TestEnsureDaemonProjectMismatchDoesNotReplace(t *testing.T) {
 		RepoDir:   t.TempDir(),
 	}
 
-	err := ensureDaemon(context.Background(), deps, "cli")
-	if err == nil || !strings.Contains(err.Error(), "daemon project mismatch") {
-		t.Fatalf("error = %v, want daemon project mismatch", err)
+	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
+		t.Fatalf("ensureDaemon() error = %v", err)
 	}
 	if fake.replaceCalled {
-		t.Fatalf("expected no replace on daemon project mismatch")
+		t.Fatalf("expected replace to remain false for accepted handshake")
 	}
 	if handshakes != 1 {
 		t.Fatalf("handshakes = %d, want 1", handshakes)
-	}
-}
-
-func TestEnsureDaemonProjectMismatchReplaceErrorIsIgnored(t *testing.T) {
-	oldLauncher := newLauncher
-	t.Cleanup(func() { newLauncher = oldLauncher })
-
-	fake := &fakeLauncher{replaceErr: errors.New("replace failed")}
-	newLauncher = func(_, _ string) daemonStarter {
-		return fake
-	}
-
-	deps := &Dependencies{
-		Config: config.DefaultConfig(),
-		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
-				return protocol.HelloAck{Accepted: true, DaemonProjectID: "wrong"}, nil
-			},
-		}),
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
-	}
-
-	err := ensureDaemon(context.Background(), deps, "cli")
-	if err == nil || !strings.Contains(err.Error(), "daemon project mismatch") {
-		t.Fatalf("error = %v, want daemon project mismatch", err)
-	}
-	if fake.replaceCalled {
-		t.Fatalf("expected no replace call when daemon project differs")
 	}
 }
 

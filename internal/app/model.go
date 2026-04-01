@@ -179,20 +179,20 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading         bool
-	boardRefreshing bool
-	issueRefreshSeq uint64
+	loading               bool
+	boardRefreshing       bool
+	issueRefreshSeq       uint64
 	projectSwitchSeq      uint64
 	projectSwitchInFlight bool
-	spinner         spinner.Model
-	lastRefresh     time.Time
-	hasRefreshLoop  bool
+	spinner               spinner.Model
+	lastRefresh           time.Time
+	hasRefreshLoop        bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient     *daemonclient.Client
-	daemonSocketPath string
-	daemonEvents     <-chan protocol.EventEnvelope
-	daemonRevision   uint64
+	daemonClient              *daemonclient.Client
+	daemonSocketPath          string
+	daemonEvents              <-chan protocol.EventEnvelope
+	daemonRevision            uint64
 	lastDaemonReattachAttempt time.Time
 
 	// Session management services
@@ -2209,8 +2209,8 @@ type issuesLoadedMsg struct {
 
 type issuesErrorMsg struct {
 	refreshSeq uint64
-	projectID string
-	err       error
+	projectID  string
+	err        error
 }
 
 type projectSwitchResultMsg struct {
@@ -2477,7 +2477,6 @@ func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
 // loadIssuesCmd returns a command that fetches issues from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
-	expectedDaemonProjectID := daemonProjectIDForPath(m.activeProjectPath())
 	refreshSeq := m.issueRefreshSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -2501,17 +2500,6 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		if !ack.Accepted {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
-		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
-			return issuesErrorMsg{
-				refreshSeq: refreshSeq,
-				projectID:  projectID,
-				err: fmt.Errorf(
-					"daemon identity mismatch: expected %s got %s",
-					expectedDaemonProjectID,
-					strings.TrimSpace(ack.DaemonProjectID),
-				),
-			}
-		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
@@ -2528,9 +2516,9 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		}
 		return issuesLoadedMsg{
 			refreshSeq: refreshSeq,
-			projectID: projectID,
-			tasks:     snapshot.Tasks,
-			revision:  snapshot.Revision,
+			projectID:  projectID,
+			tasks:      snapshot.Tasks,
+			revision:   snapshot.Revision,
 		}
 	}
 }
@@ -2819,28 +2807,27 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 	switchSeq := m.projectSwitchSeq
-	expectedDaemonProjectID := daemonProjectIDForPath(project.Path)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("daemon client unavailable"),
+				project:   project,
+				err:       fmt.Errorf("daemon client unavailable"),
 			}
 		}
 		if strings.TrimSpace(project.Path) == "" {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("project %q has empty path", project.Name),
+				project:   project,
+				err:       fmt.Errorf("project %q has empty path", project.Name),
 			}
 		}
 		projectConfig, err := config.LoadConfig(project.Path)
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2856,8 +2843,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err := launcher.Replace(ctx); err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2872,26 +2859,15 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
 			}
 		}
 		if !ack.Accepted {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
-			}
-		}
-		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
-			return projectSwitchResultMsg{
-				switchSeq: switchSeq,
 				project:   project,
-				err: fmt.Errorf(
-					"daemon identity mismatch: expected %s got %s",
-					expectedDaemonProjectID,
-					strings.TrimSpace(ack.DaemonProjectID),
-				),
+				err:       fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
 		}
 
@@ -2899,16 +2875,16 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     err,
+				project:   project,
+				err:       err,
 			}
 		}
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     err,
+				project:   project,
+				err:       err,
 			}
 		}
 
@@ -2928,7 +2904,6 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	targetRepoDir := m.activeProjectPath()
-	expectedDaemonProjectID := daemonProjectIDForPath(targetRepoDir)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
@@ -2960,16 +2935,6 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 		}
 		if !ack.Accepted {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
-		}
-		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
-			return issuesErrorMsg{
-				projectID: projectID,
-				err: fmt.Errorf(
-					"daemon identity mismatch: expected %s got %s",
-					expectedDaemonProjectID,
-					strings.TrimSpace(ack.DaemonProjectID),
-				),
-			}
 		}
 
 		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
@@ -3140,15 +3105,6 @@ func daemonProjectIDForPath(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(projectID)
-}
-
-func daemonProjectIDMismatch(actual, expected string) bool {
-	actual = strings.TrimSpace(actual)
-	expected = strings.TrimSpace(expected)
-	if actual == "" || expected == "" {
-		return false
-	}
-	return !strings.EqualFold(actual, expected)
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {

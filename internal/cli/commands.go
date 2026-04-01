@@ -3401,14 +3401,5 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 	if !ack.Accepted {
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
-	if strings.TrimSpace(ack.DaemonProjectID) != "" &&
-		strings.TrimSpace(deps.ProjectID) != "" &&
-		!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
-		return fmt.Errorf(
-			"daemon project mismatch (%s != %s): refusing cross-project daemon route (use scoped daemon mode or restart daemon in this repo)",
-			strings.TrimSpace(ack.DaemonProjectID),
-			strings.TrimSpace(deps.ProjectID),
-		)
-	}
 	return nil
 }
