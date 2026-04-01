@@ -214,6 +214,54 @@ func runOpenCodePluginCommand(cfg *config.Config, args []string) error {
 	}
 }
 
+func runCodexCommand(cfg *config.Config, args []string) error {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		cli.PrintCodexUsage()
+		return nil
+	}
+
+	switch args[0] {
+	case "install":
+		opts, err := cli.ParseCodexInstallArgs(args[1:])
+		if err != nil {
+			cli.PrintCodexUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.CodexInstallCommand(deps, opts)
+		})
+	case "guard":
+		opts, err := cli.ParseCodexGuardArgs(args[1:])
+		if err != nil {
+			cli.PrintCodexUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.CodexGuardCommand(deps, opts)
+		})
+	case "hook":
+		if len(args) < 2 || isHelpArg(args[1]) {
+			cli.PrintCodexUsage()
+			return nil
+		}
+		switch args[1] {
+		case "run":
+			opts, err := cli.ParseCodexHookRunArgs(args[2:])
+			if err != nil {
+				cli.PrintCodexUsage()
+				return err
+			}
+			return runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.CodexHookRunCommand(deps, opts)
+			})
+		default:
+			return fmt.Errorf("unknown codex hook command: %s", args[1])
+		}
+	default:
+		return fmt.Errorf("unknown codex command: %s", args[0])
+	}
+}
+
 type projectAddOptions struct {
 	Path string
 	Name string

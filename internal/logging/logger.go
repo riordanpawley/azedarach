@@ -8,14 +8,18 @@ import (
 )
 
 // NewTextFileLogger returns a text slog logger that writes to path.
-// If setup fails it falls back to a discard logger at the same level.
+// If setup fails it falls back to stderr and emits a warning.
 func NewTextFileLogger(path string, level slog.Leveler) *slog.Logger {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return NewDiscardLogger(level)
+		logger := NewTextStreamLogger(os.Stderr, level)
+		logger.Warn("failed to create log directory; falling back to stderr logger", "log_path", path, "error", err)
+		return logger
 	}
 	logFile, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return NewDiscardLogger(level)
+		logger := NewTextStreamLogger(os.Stderr, level)
+		logger.Warn("failed to open log file; falling back to stderr logger", "log_path", path, "error", err)
+		return logger
 	}
 	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: level}))
 }

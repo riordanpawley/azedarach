@@ -64,14 +64,15 @@ func main() {
 	}
 
 	d := daemon.New(daemon.Config{
-		RepoDir:             repoDir,
-		SocketPath:          socketPath,
-		LockPath:            lockPath,
-		BaseBranch:          cfg.Git.BaseBranch,
-		CLITool:             cfg.CLITool,
-		SessionShell:        cfg.Session.Shell,
-		SessionInitCommands: cfg.Session.InitCommands,
+		RepoDir:              repoDir,
+		SocketPath:           socketPath,
+		LockPath:             lockPath,
+		BaseBranch:           cfg.Git.BaseBranch,
+		CLITool:              cfg.CLITool,
+		SessionShell:         cfg.Session.Shell,
+		SessionInitCommands:  cfg.Session.InitCommands,
 		Logger:              newDaemonLogger(),
+		WorktreeInitCommands: cfg.Worktree.InitCommands,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

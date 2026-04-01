@@ -121,17 +121,29 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return nil, c.wrapError("open-db", "", err)
 	}
 	normalizeDoneAt := time.Now()
+	if err := c.ensureSpecSchema(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
+	specSchemaDoneAt := time.Now()
+	if err := c.ensureSpecAuditSchema(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
+	specAuditDoneAt := time.Now()
 
 	c.db = db
 	if c.logger != nil {
 		c.logger.Info(
 			"issue store init timings",
 			"db_path", c.dbPath,
-			"total_ms", normalizeDoneAt.Sub(initStartedAt).Milliseconds(),
+			"total_ms", specAuditDoneAt.Sub(initStartedAt).Milliseconds(),
 			"ping_ms", pingDoneAt.Sub(initStartedAt).Milliseconds(),
 			"configure_sqlite_ms", configDoneAt.Sub(pingDoneAt).Milliseconds(),
 			"migrations_ms", migrationsDoneAt.Sub(configDoneAt).Milliseconds(),
 			"normalize_dependency_rows_ms", normalizeDoneAt.Sub(migrationsDoneAt).Milliseconds(),
+			"ensure_spec_schema_ms", specSchemaDoneAt.Sub(normalizeDoneAt).Milliseconds(),
+			"ensure_spec_audit_schema_ms", specAuditDoneAt.Sub(specSchemaDoneAt).Milliseconds(),
 		)
 	}
 	return c.db, nil

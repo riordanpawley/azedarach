@@ -5,7 +5,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/tui"
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/cli"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
@@ -231,6 +231,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "spec":
+		if err := runSpecCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "sync":
 		if len(commandArgs) > 0 {
 			if commandArgs[0] == "help" || commandArgs[0] == "-h" || commandArgs[0] == "--help" {
@@ -326,6 +332,12 @@ func main() {
 
 	case "opencode":
 		if err := runOpenCodeCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "codex":
+		if err := runCodexCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -432,7 +444,7 @@ func main() {
 		case "create":
 			opts, err := cli.ParseIssueCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue create [--project <project-id>] <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue create [--project <project-id>] <title> [--impl <implementation>] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -545,7 +557,7 @@ func main() {
 		case "bulk-create":
 			opts, err := cli.ParseIssueBulkCreateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -559,7 +571,7 @@ func main() {
 		case "bulk-update":
 			opts, err := cli.ParseIssueBulkUpdateArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

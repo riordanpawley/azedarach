@@ -35,9 +35,9 @@ just check-boundaries
 go test ./...
 
 # Focused daemon/client boundary checks
-go test ./internal/app ./internal/cli
+go test ./internal/tui ./internal/cli
 go test ./internal/daemon/... ./internal/client/...
-go test ./internal/app ./internal/cli ./internal/daemon/...
+go test ./internal/tui ./internal/cli ./internal/daemon/...
 ```
 
 ## Fast Search Commands
@@ -91,10 +91,10 @@ fd "filename" -t f internal cmd
 ## Thin-Client Boundary Contract (Critical)
 
 1. Daemon owns durable/project lifecycle authority; CLI/TUI are clients for presentation/runtime-ephemeral state.
-2. `internal/app` and `internal/cli` must not directly execute authority operations via `internal/services/{git,tmux,issues,devserver,pr}` when daemon command paths exist.
+2. `internal/tui` and `internal/cli` must not directly execute authority operations via `internal/services/{git,tmux,issues,devserver,pr}` when daemon command paths exist.
 3. Boundary operations must go through `internal/client/daemonclient` with typed request/response contracts.
 4. Session lifecycle must be daemon-authoritative. TUI session maps are projections only.
-5. `internal/app` teardown may stop/clear `SessionMonitor`, but must not call `SessionMonitor.Start` or recreate lifecycle monitoring locally.
+5. `internal/tui` teardown may stop/clear `SessionMonitor`, but must not call `SessionMonitor.Start` or recreate lifecycle monitoring locally.
 6. `m.sessions` mutations must come from daemon snapshot refresh (`projectSessionProjection`), not local authority writes/callbacks.
 7. If runtime assets are user-global (socket/lock), preserve project isolation and avoid cross-repo authority bleed.
 8. Include regression guards so direct client-side authority operations fail tests if reintroduced.

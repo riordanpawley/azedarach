@@ -2,16 +2,8 @@ package cli
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 )
-
-func newGitCommand(projectDir string, args ...string) *exec.Cmd {
-	cmdArgs := append([]string{"-C", projectDir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Env = gitExecEnvWithoutRoutingVars()
-	return cmd
-}
 
 func gitExecEnvWithoutRoutingVars() []string {
 	env := os.Environ()
@@ -30,4 +22,10 @@ func gitExecEnvWithoutRoutingVars() []string {
 		}
 	}
 	return out
+}
+
+// GitExecEnvWithoutRoutingVarsForTests exposes sanitized git env for tests
+// outside the internal/cli package that need deterministic git subprocesses.
+func GitExecEnvWithoutRoutingVarsForTests() []string {
+	return gitExecEnvWithoutRoutingVars()
 }

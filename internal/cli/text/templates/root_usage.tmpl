@@ -23,20 +23,22 @@ Commands:
   operation <subcommand>     Inspect/cancel background operations (get|list|logs|cancel)
   log [sources]              Tail/stream daemon, TUI, and CLI log files
   opencode <init|plugin>     Manage OpenCode integration
+  codex <install|guard|hook>  Install Codex hook configuration and run hook commands
+  spec <subcommand>          Spec workflows (req|link|read|lint|parity|sync)
   issue list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
   issue doctor [--project <project-id>] [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  issue create [--project <project-id>] <title> [--impl <implementation>] [--type ...] [--priority ...] [--description ...]  Create an issue
   issue update [--project <project-id>] [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   issue close [--project <project-id>] [--id <id>] [<id>]      Close an issue (sets status=closed)
   issue delete [--project <project-id>] [--id <id>] [<id>] --confirm  Permanently delete an issue
   issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
   issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
   issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
-  issue bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk create operations
+  issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk update operations
   issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
@@ -108,6 +110,16 @@ Examples:
   az log --no-follow --lines 100 daemon tui
   az opencode init
   az opencode plugin install
+  az codex install
+  az codex hook run --json pre-tool-use
+  az spec req list --json
+  az spec req get --id bfs-req-1
+  az spec req create --id bfs-req-1 --title "Restore az spec grammar" --issue bgh
+  az spec link add --issue bgh --req bfs-req-1 --role implements
+  az spec read --issue bgh
+  az spec lint --strict
+  az spec parity --fail-on-out
+  az spec sync --target md --check
   az prime
   az export --format json
   az export --format json --out snapshot.json

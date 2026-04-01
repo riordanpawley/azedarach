@@ -497,7 +497,7 @@ func TestChangedFiles(t *testing.T) {
 				args[3] == "HEAD" &&
 				args[4] == "--" &&
 				args[5] == ":^.azedarach" {
-				return "M\tinternal/app/model.go\nA\tnew.go\nD\told.go\nR100\tfrom.go\tto.go", nil
+				return "M\tinternal/tui/model.go\nA\tnew.go\nD\told.go\nR100\tfrom.go\tto.go", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -512,7 +512,7 @@ func TestChangedFiles(t *testing.T) {
 		t.Fatalf("ChangedFiles() len = %d, want 4", len(files))
 	}
 
-	if files[0].Path != "internal/app/model.go" || files[0].Status != DiffFileModified {
+	if files[0].Path != "internal/tui/model.go" || files[0].Status != DiffFileModified {
 		t.Fatalf("first file = %+v", files[0])
 	}
 	if files[1].Path != "new.go" || files[1].Status != DiffFileAdded {

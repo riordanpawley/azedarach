@@ -170,7 +170,7 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 				gotReq = req
 				return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
@@ -282,7 +282,7 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 					Body:            body,
 				}, nil
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 	}
@@ -348,7 +348,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 		RepoDir:   t.TempDir(),
@@ -501,7 +501,7 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 	}
 }
 
-func TestBranchMergeToMainCommandIgnoresAzedarachRuntimeConfigInPreflight(t *testing.T) {
+func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -557,19 +557,15 @@ func TestBranchMergeToMainCommandIgnoresAzedarachRuntimeConfigInPreflight(t *tes
 		RepoDir:   t.TempDir(),
 	}
 
-	if err := BranchMergeToMainCommand(deps, "bhv"); err != nil {
-		t.Fatalf("BranchMergeToMainCommand error = %v", err)
+	err := BranchMergeToMainCommand(deps, "bhv")
+	if err == nil || !strings.Contains(err.Error(), "merge preflight failed") {
+		t.Fatalf("err = %v, want preflight failure", err)
 	}
 
-	foundMerge := false
 	for _, cmd := range commands {
 		if cmd == daemonclient.CommandGitMerge {
-			foundMerge = true
-			break
+			t.Fatalf("unexpected post-preflight command: %s", cmd)
 		}
-	}
-	if !foundMerge {
-		t.Fatalf("expected git merge command in flow, commands=%v", commands)
 	}
 }
 
@@ -1369,30 +1365,9 @@ func TestConfigSetCommandRejectsUnsupportedKey(t *testing.T) {
 	}
 }
 
-type fakeWorktreeLister struct {
-	worktrees []gitservice.Worktree
-	err       error
-}
-
-func (f fakeWorktreeLister) List(context.Context) ([]gitservice.Worktree, error) {
-	return f.worktrees, f.err
-}
-
-func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
-	oldLister := newSyncWorktreeLister
-	t.Cleanup(func() {
-		newSyncWorktreeLister = oldLister
-	})
-	newSyncWorktreeLister = func(repoDir string, logger *slog.Logger) syncWorktreeLister {
-		return fakeWorktreeLister{
-			worktrees: []gitservice.Worktree{
-				{Path: filepath.Join(repoDir, "worktree-a")},
-				{Path: filepath.Join(repoDir, "worktree-b")},
-			},
-		}
-	}
-
-	var gotReq protocol.RequestEnvelope
+func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
+	var gotWorktreeReq protocol.RequestEnvelope
+	var gotSnapshotReq protocol.RequestEnvelope
 	tasks := []domain.Task{
 		{ID: "az-1", Title: "Sync task one", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		{ID: "az-2", Title: "Sync task two", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
@@ -1406,19 +1381,55 @@ func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				gotReq = req
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					Meta:            req.Meta,
-					OK:              true,
-					CompletedAt:     req.SentAt,
-					Revision:        42,
-					Body:            payload,
-				}, nil
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					gotWorktreeReq = req
+					body, err := json.Marshal(map[string]any{
+						"project_id": "proj",
+						"worktrees": []map[string]any{
+							{
+								"path":     filepath.Join("worktree-a"),
+								"branch":   "az/worktree-a",
+								"issue_id": "az-1",
+							},
+							{
+								"path":     filepath.Join("worktree-b"),
+								"branch":   "az/worktree-b",
+								"issue_id": "az-2",
+							},
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal worktrees: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        41,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskList:
+					gotSnapshotReq = req
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        42,
+						Body:            payload,
+					}, nil
+				default:
+					t.Fatalf("unexpected command = %q", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
 			},
-		}),
+		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
 		RepoDir:   t.TempDir(),
@@ -1428,8 +1439,23 @@ func TestSyncCommandAllUsesWorktreeTargetsAndDaemonSnapshot(t *testing.T) {
 		return SyncCommand(deps, SyncOptions{All: true})
 	})
 
-	if gotReq.Command != "task.list" {
-		t.Fatalf("command = %q, want %q", gotReq.Command, "task.list")
+	if gotWorktreeReq.Command != daemonclient.CommandWorktreeList {
+		t.Fatalf("worktree command = %q, want %q", gotWorktreeReq.Command, daemonclient.CommandWorktreeList)
+	}
+	if gotWorktreeReq.Meta.ProjectID != "proj" {
+		t.Fatalf("worktree project_id = %q, want proj", gotWorktreeReq.Meta.ProjectID)
+	}
+	var worktreeBody struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(gotWorktreeReq.Body, &worktreeBody); err != nil {
+		t.Fatalf("unmarshal worktree request: %v", err)
+	}
+	if worktreeBody.ProjectID != "proj" {
+		t.Fatalf("worktree request project_id = %q, want proj", worktreeBody.ProjectID)
+	}
+	if gotSnapshotReq.Command != daemonclient.CommandTaskList {
+		t.Fatalf("snapshot command = %q, want %q", gotSnapshotReq.Command, daemonclient.CommandTaskList)
 	}
 	if !strings.Contains(output, "Syncing issue tracker state...") {
 		t.Fatalf("sync output missing heading: %q", output)
@@ -1733,9 +1759,13 @@ func TestParseIssueCreateArgs(t *testing.T) {
 			},
 		},
 		{
-			name:        "missing impl",
-			args:        []string{"Title"},
-			errContains: "missing required flag: --impl",
+			name: "missing impl allowed at parse-time",
+			args: []string{"Title"},
+			want: IssueCreateOptions{
+				Title:    "Title",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+			},
 		},
 		{
 			name:        "invalid priority",
@@ -1978,9 +2008,12 @@ func TestParseIssueBulkArgs(t *testing.T) {
 	if create.Implementation != "go-bubbletea" || create.InputPath != "bulk-create.json" || !create.DryRun {
 		t.Fatalf("ParseIssueBulkCreateArgs() = %+v", create)
 	}
-	_, err = ParseIssueBulkCreateArgs([]string{"--input", "bulk-create.json"})
-	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl") {
-		t.Fatalf("expected missing impl error for bulk-create, got %v", err)
+	createNoImpl, err := ParseIssueBulkCreateArgs([]string{"--input", "bulk-create.json"})
+	if err != nil {
+		t.Fatalf("ParseIssueBulkCreateArgs() missing impl should parse, got %v", err)
+	}
+	if createNoImpl.Implementation != "" || createNoImpl.InputPath != "bulk-create.json" || createNoImpl.DryRun {
+		t.Fatalf("ParseIssueBulkCreateArgs() missing impl = %+v", createNoImpl)
 	}
 
 	update, err := ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea", "--input", "bulk-update.json"})
@@ -1989,6 +2022,13 @@ func TestParseIssueBulkArgs(t *testing.T) {
 	}
 	if update.Implementation != "go-bubbletea" || update.InputPath != "bulk-update.json" || update.DryRun {
 		t.Fatalf("ParseIssueBulkUpdateArgs() = %+v", update)
+	}
+	updateNoImpl, err := ParseIssueBulkUpdateArgs([]string{"--input", "bulk-update.json"})
+	if err != nil {
+		t.Fatalf("ParseIssueBulkUpdateArgs() missing impl should parse, got %v", err)
+	}
+	if updateNoImpl.Implementation != "" || updateNoImpl.InputPath != "bulk-update.json" || updateNoImpl.DryRun {
+		t.Fatalf("ParseIssueBulkUpdateArgs() missing impl = %+v", updateNoImpl)
 	}
 	_, err = ParseIssueBulkUpdateArgs([]string{"--impl", "go-bubbletea"})
 	if err == nil || !strings.Contains(err.Error(), "missing required flag: --input") {
@@ -2006,6 +2046,124 @@ func TestParseIssueBulkArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue dep bulk apply") {
 		t.Fatalf("expected impl forbidden error for dep bulk apply, got %v", err)
 	}
+}
+
+func TestResolveIssueWriteImplementation(t *testing.T) {
+	t.Run("explicit implementation wins", func(t *testing.T) {
+		impl, err := resolveIssueWriteImplementation(context.Background(), nil, "go-bubbletea")
+		if err != nil {
+			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
+		}
+		if impl != "go-bubbletea" {
+			t.Fatalf("resolveIssueWriteImplementation() = %q, want go-bubbletea", impl)
+		}
+	})
+
+	t.Run("defaults to configured single implementation", func(t *testing.T) {
+		deps := &Dependencies{
+			Config: config.DefaultConfig(),
+			DaemonClient: daemonclient.New(&fakeDaemonTransport{
+				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					if req.Command != daemonclient.CommandTaskList {
+						t.Fatalf("unexpected command %q", req.Command)
+					}
+					body, err := json.Marshal([]domain.Task{
+						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal tasks: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				},
+			}),
+		}
+		impl, err := resolveIssueWriteImplementation(context.Background(), deps, "")
+		if err != nil {
+			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
+		}
+		if impl != "go-bubbletea" {
+			t.Fatalf("resolveIssueWriteImplementation() = %q, want go-bubbletea", impl)
+		}
+	})
+
+	t.Run("falls back to default when no implementations are configured", func(t *testing.T) {
+		deps := &Dependencies{
+			Config: config.DefaultConfig(),
+			DaemonClient: daemonclient.New(&fakeDaemonTransport{
+				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					if req.Command != daemonclient.CommandTaskList {
+						t.Fatalf("unexpected command %q", req.Command)
+					}
+					body, err := json.Marshal([]domain.Task{
+						{ID: "az-1"},
+					})
+					if err != nil {
+						t.Fatalf("marshal tasks: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				},
+			}),
+		}
+		impl, err := resolveIssueWriteImplementation(context.Background(), deps, "")
+		if err != nil {
+			t.Fatalf("resolveIssueWriteImplementation() error = %v", err)
+		}
+		if impl != "default" {
+			t.Fatalf("resolveIssueWriteImplementation() = %q, want default", impl)
+		}
+	})
+
+	t.Run("requires explicit selection when multiple implementations are configured", func(t *testing.T) {
+		deps := &Dependencies{
+			Config: config.DefaultConfig(),
+			DaemonClient: daemonclient.New(&fakeDaemonTransport{
+				commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					if req.Command != daemonclient.CommandTaskList {
+						t.Fatalf("unexpected command %q", req.Command)
+					}
+					body, err := json.Marshal([]domain.Task{
+						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+						{ID: "az-2", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal tasks: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				},
+			}),
+		}
+		_, err := resolveIssueWriteImplementation(context.Background(), deps, "")
+		if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)") {
+			t.Fatalf("expected multi-implementation error, got %v", err)
+		}
+	})
 }
 
 func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
@@ -2906,6 +3064,9 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 				if createReq.Title != "New issue" || createReq.Description != "Context" || createReq.Type != domain.TypeFeature || createReq.Priority != domain.P1 {
 					t.Fatalf("create body = %+v", createReq)
 				}
+				if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
+					t.Fatalf("create implementations = %+v, want [go-bubbletea]", createReq.Implementations)
+				}
 			case "close":
 				var statusReq daemonclient.TaskStatusRequest
 				if err := json.Unmarshal(gotReq.Body, &statusReq); err != nil {
@@ -2919,6 +3080,142 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 				t.Fatalf("output missing %q: %q", tt.wantText, output)
 			}
 		})
+	}
+}
+
+func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {
+	var createReq daemonclient.TaskCreateParams
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{
+						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskCreate:
+					if err := json.Unmarshal(req.Body, &createReq); err != nil {
+						t.Fatalf("unmarshal create request: %v", err)
+					}
+					body, err := json.Marshal(map[string]string{"task_id": "az-55"})
+					if err != nil {
+						t.Fatalf("marshal create response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:       "Auto impl",
+		Description: "details",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	if err != nil {
+		t.Fatalf("IssueCreateCommand() error = %v", err)
+	}
+	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
+		t.Fatalf("create implementations = %+v, want [go-bubbletea]", createReq.Implementations)
+	}
+}
+
+func TestIssueCreateCommandRequiresImplWhenMultipleConfigured(t *testing.T) {
+	createCalled := false
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := json.Marshal([]domain.Task{
+						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
+						{ID: "az-2", Implementations: []string{"default"}},
+					})
+					if err != nil {
+						t.Fatalf("marshal list response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        1,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskCreate:
+					createCalled = true
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:       "Needs impl",
+		Description: "details",
+		Type:        domain.TypeTask,
+		Priority:    domain.P2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required flag: --impl (multiple implementations configured: default, go-bubbletea)") {
+		t.Fatalf("expected multi-implementation error, got %v", err)
+	}
+	if createCalled {
+		t.Fatalf("task.create should not be called when implementation selection is ambiguous")
 	}
 }
 
@@ -3529,10 +3826,10 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
 		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-create [--project <project-id>] --impl <implementation> --input <path>") {
+	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path>") {
 		t.Fatalf("usage missing issue bulk-create command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-update [--project <project-id>] --impl <implementation> --input <path>") {
+	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path>") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
 	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
@@ -3838,7 +4135,7 @@ func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	}
 }
 
-func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
+func TestEnsureDaemonDoesNotReplaceOnAcceptedHandshake(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })
 
@@ -3853,10 +4150,7 @@ func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
 				handshakes++
-				if handshakes == 1 {
-					return protocol.HelloAck{Accepted: true, DaemonProjectID: "other-proj"}, nil
-				}
-				return protocol.HelloAck{Accepted: true, DaemonProjectID: "proj"}, nil
+				return protocol.HelloAck{Accepted: true}, nil
 			},
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -3867,38 +4161,11 @@ func TestEnsureDaemonReplacesOnProjectMismatch(t *testing.T) {
 	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
 		t.Fatalf("ensureDaemon() error = %v", err)
 	}
-	if !fake.replaceCalled {
-		t.Fatalf("expected replace to be called on daemon project mismatch")
+	if fake.replaceCalled {
+		t.Fatalf("expected replace to remain false for accepted handshake")
 	}
-	if handshakes < 2 {
-		t.Fatalf("handshakes = %d, want at least 2", handshakes)
-	}
-}
-
-func TestEnsureDaemonProjectMismatchReplaceFailure(t *testing.T) {
-	oldLauncher := newLauncher
-	t.Cleanup(func() { newLauncher = oldLauncher })
-
-	fake := &fakeLauncher{replaceErr: errors.New("replace failed")}
-	newLauncher = func(_, _ string) daemonStarter {
-		return fake
-	}
-
-	deps := &Dependencies{
-		Config: config.DefaultConfig(),
-		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
-				return protocol.HelloAck{Accepted: true, DaemonProjectID: "wrong"}, nil
-			},
-		}),
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
-	}
-
-	err := ensureDaemon(context.Background(), deps, "cli")
-	if err == nil || !strings.Contains(err.Error(), "replace failed") {
-		t.Fatalf("error = %v, want replace failure", err)
+	if handshakes != 1 {
+		t.Fatalf("handshakes = %d, want 1", handshakes)
 	}
 }
 

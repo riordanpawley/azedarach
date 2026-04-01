@@ -11,10 +11,23 @@ import (
 )
 
 type fakeDiffClient struct {
+	status      *gitservice.GitStatus
+	statusErr   error
 	changedFiles []gitservice.ChangedFile
 	changedErr   error
 	mergeBase    string
 	mergeBaseErr error
+}
+
+func (f *fakeDiffClient) Status(context.Context, string) (*gitservice.GitStatus, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.status == nil {
+		return &gitservice.GitStatus{}, nil
+	}
+	copied := *f.status
+	return &copied, nil
 }
 
 func (f *fakeDiffClient) ChangedFiles(context.Context, string, string) ([]gitservice.ChangedFile, error) {
@@ -36,9 +49,11 @@ func (f *fakeDiffClient) MergeBase(context.Context, string, string) (string, err
 
 func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 	client := &fakeDiffClient{
-		changedFiles: []gitservice.ChangedFile{
-			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+		status: &gitservice.GitStatus{
+			HasChanges: true,
+			Modified:   []string{"internal/tui/model.go"},
 		},
+		mergeBase: "base123",
 	}
 
 	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
@@ -52,15 +67,16 @@ func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 	if len(viewer.files) != 1 {
 		t.Fatalf("files=%d, want 1", len(viewer.files))
 	}
-	if viewer.files[0].Path != "internal/app/model.go" {
-		t.Fatalf("file path=%q, want internal/app/model.go", viewer.files[0].Path)
+	if viewer.files[0].Path != "internal/tui/model.go" {
+		t.Fatalf("file path=%q, want internal/tui/model.go", viewer.files[0].Path)
 	}
 }
 
 func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	client := &fakeDiffClient{
-		changedFiles: []gitservice.ChangedFile{
-			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+		status: &gitservice.GitStatus{
+			HasChanges: true,
+			Modified:   []string{"internal/tui/model.go"},
 		},
 		mergeBase: "base123",
 	}
@@ -86,10 +102,10 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	updated, _ = viewer.Update(result)
 	viewer = updated.(*DiffViewer)
 
-	if gotTitle != " internal/app/model.go " {
+	if gotTitle != " internal/tui/model.go " {
 		t.Fatalf("popup title=%q", gotTitle)
 	}
-	if !strings.Contains(gotCommand, "git diff 'base123' -- 'internal/app/model.go'") {
+	if !strings.Contains(gotCommand, "git diff 'base123' -- 'internal/tui/model.go'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 	if !strings.Contains(viewer.popupStatus, "Opened diff popup") {
@@ -99,8 +115,9 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 
 func TestDiffViewerAllDiffPopup(t *testing.T) {
 	client := &fakeDiffClient{
-		changedFiles: []gitservice.ChangedFile{
-			{Path: "a.go", Status: gitservice.DiffFileModified},
+		status: &gitservice.GitStatus{
+			HasChanges: true,
+			Modified:   []string{"a.go"},
 		},
 		mergeBase: "base456",
 	}
@@ -127,11 +144,10 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 
 func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
 	client := &fakeDiffClient{
-		changedFiles: []gitservice.ChangedFile{
-			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
-			{Path: "internal/services/git/client.go", Status: gitservice.DiffFileModified},
+		status: &gitservice.GitStatus{
+			HasChanges: true,
+			Modified:   []string{"internal/tui/model.go", "internal/services/git/client.go"},
 		},
-		mergeBase: "base789",
 	}
 
 	var gotTitle string
@@ -181,8 +197,9 @@ func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
 
 func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
 	client := &fakeDiffClient{
-		changedFiles: []gitservice.ChangedFile{
-			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+		status: &gitservice.GitStatus{
+			HasChanges: true,
+			Modified:   []string{"internal/tui/model.go"},
 		},
 	}
 	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
@@ -213,13 +230,10 @@ func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
 
 func TestDiffViewerSearchClampsCursorAfterFilterEdit(t *testing.T) {
 	client := &fakeDiffClient{
-		changedFiles: []gitservice.ChangedFile{
-			{Path: "alpha.go", Status: gitservice.DiffFileModified},
-			{Path: "beta.go", Status: gitservice.DiffFileModified},
-			{Path: "gamma.go", Status: gitservice.DiffFileModified},
-			{Path: "internal/services/git/client.go", Status: gitservice.DiffFileModified},
+		status: &gitservice.GitStatus{
+			HasChanges: true,
+			Modified:   []string{"alpha.go", "beta.go", "gamma.go", "internal/services/git/client.go"},
 		},
-		mergeBase: "base789",
 	}
 
 	var gotTitle string
@@ -270,5 +284,56 @@ func TestDiffViewerClose(t *testing.T) {
 	}
 	if _, ok := cmd().(overlay.CloseOverlayMsg); !ok {
 		t.Fatalf("message type=%T, want overlay.CloseOverlayMsg", cmd())
+	}
+}
+
+func TestStatusChangedFilesDeduplicatesAndSortsWithPriority(t *testing.T) {
+	status := &gitservice.GitStatus{
+		Modified:  []string{"z.go", "a.go"},
+		Staged:    []string{"b.go", "a.go"},
+		Added:     []string{"c.go"},
+		Untracked: []string{"u.go"},
+		Deleted:   []string{"z.go"},
+	}
+
+	files := statusChangedFiles(status)
+	if len(files) != 5 {
+		t.Fatalf("files len=%d, want 5", len(files))
+	}
+	if files[0].Path != "a.go" || files[0].Status != gitservice.DiffFileModified {
+		t.Fatalf("files[0]=%+v", files[0])
+	}
+	if files[1].Path != "b.go" || files[1].Status != gitservice.DiffFileModified {
+		t.Fatalf("files[1]=%+v", files[1])
+	}
+	if files[2].Path != "c.go" || files[2].Status != gitservice.DiffFileAdded {
+		t.Fatalf("files[2]=%+v", files[2])
+	}
+	if files[3].Path != "u.go" || files[3].Status != gitservice.DiffFileAdded {
+		t.Fatalf("files[3]=%+v", files[3])
+	}
+	if files[4].Path != "z.go" || files[4].Status != gitservice.DiffFileDeleted {
+		t.Fatalf("files[4]=%+v", files[4])
+	}
+}
+
+func TestDiffViewerInitFallsBackToBaseChangedFilesWhenStatusClean(t *testing.T) {
+	client := &fakeDiffClient{
+		status: &gitservice.GitStatus{},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/tui/model.go", Status: gitservice.DiffFileModified},
+		},
+	}
+
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	if len(viewer.files) != 1 {
+		t.Fatalf("files=%d, want 1", len(viewer.files))
+	}
+	if viewer.files[0].Path != "internal/tui/model.go" {
+		t.Fatalf("file path=%q, want internal/tui/model.go", viewer.files[0].Path)
 	}
 }

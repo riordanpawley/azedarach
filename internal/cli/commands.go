@@ -28,7 +28,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 var newLauncher = func(repoDir, socketPath string) daemonStarter {
@@ -395,13 +394,13 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 	return nil
 }
 
-func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (gitservice.Worktree, error) {
+func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, issueID string) (daemonclient.Worktree, error) {
 	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 	if err != nil {
-		return gitservice.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
+		return daemonclient.Worktree{}, fmt.Errorf("list daemon worktrees: %w", err)
 	}
 	if len(worktrees) == 0 {
-		return gitservice.Worktree{}, fmt.Errorf("no daemon worktrees found; start the issue session first")
+		return daemonclient.Worktree{}, fmt.Errorf("no daemon worktrees found; start the issue session first")
 	}
 
 	trimmedIssueID := strings.TrimSpace(issueID)
@@ -414,16 +413,16 @@ func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, i
 				return wt, nil
 			}
 		}
-		return gitservice.Worktree{}, fmt.Errorf("worktree not found for issue %s", trimmedIssueID)
+		return daemonclient.Worktree{}, fmt.Errorf("worktree not found for issue %s", trimmedIssueID)
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return gitservice.Worktree{}, fmt.Errorf("resolve working directory: %w", err)
+		return daemonclient.Worktree{}, fmt.Errorf("resolve working directory: %w", err)
 	}
 	absCWD, err := filepath.Abs(cwd)
 	if err != nil {
-		return gitservice.Worktree{}, fmt.Errorf("resolve working directory path: %w", err)
+		return daemonclient.Worktree{}, fmt.Errorf("resolve working directory path: %w", err)
 	}
 
 	for _, wt := range worktrees {
@@ -431,7 +430,7 @@ func resolveMergeToMainSourceWorktree(ctx context.Context, deps *Dependencies, i
 			return wt, nil
 		}
 	}
-	return gitservice.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
+	return daemonclient.Worktree{}, fmt.Errorf("could not infer issue from current worktree %q; pass issue ID: az branch merge <issue-id>", absCWD)
 }
 
 func samePath(left, right string) bool {
@@ -449,7 +448,7 @@ func resolveCLIBaseBranch(cfg *config.Config) string {
 	return base
 }
 
-func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source gitservice.Worktree, targetWorktree string) error {
+func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source daemonclient.Worktree, targetWorktree string) error {
 	sourceStatus, err := deps.DaemonClient.GitStatus(ctx, source.Path)
 	if err != nil {
 		return fmt.Errorf("read source status for %s: %w", source.IssueID, err)
@@ -461,14 +460,11 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	sourceDirtyFiles := dirtyFilesFromGitStatus(sourceStatus)
 	targetDirtyFiles := dirtyFilesFromGitStatus(targetStatus)
 
-	sourceBlockingFiles, sourceIgnoredFiles := classifyMergePreflightDirtyFiles(sourceDirtyFiles)
-	targetBlockingFiles, targetIgnoredFiles := classifyMergePreflightDirtyFiles(targetDirtyFiles)
-
 	reasons := make([]string, 0, 2)
-	if len(sourceBlockingFiles) > 0 {
+	if len(sourceDirtyFiles) > 0 {
 		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, summarizeGitStatusCounts(sourceStatus)))
 	}
-	if len(targetBlockingFiles) > 0 {
+	if len(targetDirtyFiles) > 0 {
 		reasons = append(reasons, fmt.Sprintf("target main is not clean: %s", summarizeGitStatusCounts(targetStatus)))
 	}
 	if len(reasons) == 0 {
@@ -479,41 +475,16 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	for _, reason := range reasons {
 		lines = append(lines, "- "+reason)
 	}
-	if len(sourceBlockingFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(sourceBlockingFiles, ", ")))
+	if len(sourceDirtyFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(sourceDirtyFiles, ", ")))
 	}
-	if len(targetBlockingFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(targetBlockingFiles, ", ")))
-	}
-	if len(sourceIgnoredFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- source ignored preflight files: %s", strings.Join(sourceIgnoredFiles, ", ")))
-	}
-	if len(targetIgnoredFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- target ignored preflight files: %s", strings.Join(targetIgnoredFiles, ", ")))
+	if len(targetDirtyFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(targetDirtyFiles, ", ")))
 	}
 	return errors.New(strings.Join(lines, "\n"))
 }
 
-func classifyMergePreflightDirtyFiles(files []string) (blocking []string, ignored []string) {
-	blocking = make([]string, 0, len(files))
-	ignored = make([]string, 0, len(files))
-	for _, file := range files {
-		if isMergePreflightIgnoredFile(file) {
-			ignored = append(ignored, file)
-			continue
-		}
-		blocking = append(blocking, file)
-	}
-	return blocking, ignored
-}
-
-func isMergePreflightIgnoredFile(path string) bool {
-	normalized := strings.TrimSpace(filepath.ToSlash(path))
-	normalized = strings.TrimPrefix(normalized, "./")
-	return normalized == ".azedarach/config.json"
-}
-
-func summarizeGitStatusCounts(status gitservice.GitStatus) string {
+func summarizeGitStatusCounts(status daemonclient.GitStatus) string {
 	parts := make([]string, 0, 5)
 	if n := len(status.Staged); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d staged", n))
@@ -536,7 +507,7 @@ func summarizeGitStatusCounts(status gitservice.GitStatus) string {
 	return strings.Join(parts, ", ")
 }
 
-func dirtyFilesFromGitStatus(status gitservice.GitStatus) []string {
+func dirtyFilesFromGitStatus(status daemonclient.GitStatus) []string {
 	seen := make(map[string]struct{}, len(status.Staged)+len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked))
 	out := make([]string, 0, len(seen))
 
@@ -1058,12 +1029,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> [--impl <implementation>] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
 	}
 	opts.Title = fs.Arg(0)
-	if opts.Implementation == "" {
-		return IssueCreateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 
 	taskType, err := parseTaskType(typeRaw)
 	if err != nil {
@@ -1383,9 +1351,6 @@ func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	if fs.NArg() != 0 {
 		return IssueBulkCreateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
@@ -1407,14 +1372,55 @@ func ParseIssueBulkUpdateArgs(args []string) (IssueBulkUpdateOptions, error) {
 	if fs.NArg() != 0 {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
+}
+
+func configuredIssueImplementations(tasks []domain.Task) []string {
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for _, task := range tasks {
+		for _, impl := range task.Implementations {
+			trimmed := strings.TrimSpace(impl)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			impls = append(impls, trimmed)
+		}
+	}
+	sort.Strings(impls)
+	return impls
+}
+
+func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
+	trimmed := strings.TrimSpace(provided)
+	if trimmed != "" {
+		return trimmed, nil
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		return "", fmt.Errorf("missing required flag: --impl")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve implementation context: %w", err)
+	}
+	impls := configuredIssueImplementations(snapshot.Tasks)
+	switch len(impls) {
+	case 0:
+		return "default", nil
+	case 1:
+		return impls[0], nil
+	default:
+		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
+	}
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -1461,14 +1467,6 @@ func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
 	return nil
 }
 
-type syncWorktreeLister interface {
-	List(context.Context) ([]gitservice.Worktree, error)
-}
-
-var newSyncWorktreeLister = func(repoDir string, logger *slog.Logger) syncWorktreeLister {
-	return gitservice.NewWorktreeManager(gitservice.NewExecRunner(repoDir), repoDir, logger)
-}
-
 func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 	if deps == nil {
 		return fmt.Errorf("sync: missing dependencies")
@@ -1486,10 +1484,9 @@ func SyncCommand(deps *Dependencies, opts SyncOptions) error {
 
 	targetPaths := []string{projectDir}
 	if opts.All {
-		lister := newSyncWorktreeLister(projectDir, deps.Logger)
-		worktrees, err := lister.List(ctx)
+		worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
 		if err != nil {
-			return fmt.Errorf("list git worktrees: %w", err)
+			return fmt.Errorf("list daemon worktrees: %w", err)
 		}
 		targetPaths = targetPaths[:0]
 		seen := make(map[string]struct{}, len(worktrees))
@@ -1939,12 +1936,17 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
+	if err != nil {
+		return err
+	}
 
 	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-		Title:       opts.Title,
-		Description: opts.Description,
-		Type:        opts.Type,
-		Priority:    opts.Priority,
+		Title:           opts.Title,
+		Description:     opts.Description,
+		Type:            opts.Type,
+		Priority:        opts.Priority,
+		Implementations: []string{impl},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create issue: %w", err)
@@ -2231,6 +2233,10 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
+	if err != nil {
+		return err
+	}
 
 	inputBytes, err := os.ReadFile(opts.InputPath)
 	if err != nil {
@@ -2261,11 +2267,12 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 			return fmt.Errorf("bulk-create item %d: %w", i, err)
 		}
 		body, err := json.Marshal(daemonclient.TaskCreateParams{
-			Title:       item.Title,
-			Description: item.Description,
-			Type:        taskType,
-			Priority:    priority,
-			ParentID:    item.ParentID,
+			Title:           item.Title,
+			Description:     item.Description,
+			Type:            taskType,
+			Priority:        priority,
+			Implementations: []string{impl},
+			ParentID:        item.ParentID,
 		})
 		if err != nil {
 			return fmt.Errorf("marshal bulk-create item %d: %w", i, err)
@@ -2286,6 +2293,9 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if _, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation); err != nil {
 		return err
 	}
 
@@ -3720,6 +3730,9 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
 	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
+		concreteLauncher.WithLogger(deps.Logger)
+	}
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -3732,29 +3745,6 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 	}
 	if !ack.Accepted {
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
-	}
-	if strings.TrimSpace(ack.DaemonProjectID) != "" &&
-		strings.TrimSpace(deps.ProjectID) != "" &&
-		!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
-		if err := launcher.Replace(ctx); err != nil {
-			return fmt.Errorf("daemon project mismatch (%s != %s): replace failed: %w", ack.DaemonProjectID, deps.ProjectID, err)
-		}
-		ack, err = orch.EnsureAttached(ctx, protocol.Hello{
-			ProtocolVersion: protocol.CurrentVersion,
-			ClientName:      clientName,
-			ClientVersion:   "dev",
-			Capabilities:    []string{"snapshot", "subscribe"},
-		})
-		if err != nil {
-			return fmt.Errorf("daemon re-attach failed after project mismatch: %w", err)
-		}
-		if !ack.Accepted {
-			return fmt.Errorf("daemon handshake rejected after project mismatch: %s", ack.Reason)
-		}
-		if strings.TrimSpace(ack.DaemonProjectID) != "" &&
-			!strings.EqualFold(strings.TrimSpace(ack.DaemonProjectID), strings.TrimSpace(deps.ProjectID)) {
-			return fmt.Errorf("daemon project mismatch after replace (%s != %s)", ack.DaemonProjectID, deps.ProjectID)
-		}
 	}
 	return nil
 }

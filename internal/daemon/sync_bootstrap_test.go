@@ -137,6 +137,7 @@ func TestSyncBootstrapGuardBlocksDependentCommands(t *testing.T) {
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-2",
 		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "proj-a"},
 		Command:         "git.status",
 	})
 	if err != nil {

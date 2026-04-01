@@ -99,14 +99,14 @@ func TestActiveProjectPath(t *testing.T) {
 		},
 	}
 
-	t.Run("uses current project path when available", func(t *testing.T) {
+	t.Run("uses pinned repoDir when available", func(t *testing.T) {
 		m := Model{
 			currentProject:  "beta",
 			projectRegistry: registry,
 			repoDir:         "/work/alpha",
 		}
-		if got := m.activeProjectPath(); got != "/work/beta" {
-			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/beta")
+		if got := m.activeProjectPath(); got != "/work/alpha" {
+			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/alpha")
 		}
 	})
 
@@ -120,6 +120,31 @@ func TestActiveProjectPath(t *testing.T) {
 			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/alpha")
 		}
 	})
+
+	t.Run("falls back to registry path when repoDir is empty", func(t *testing.T) {
+		m := Model{
+			currentProject:  "beta",
+			projectRegistry: registry,
+		}
+		if got := m.activeProjectPath(); got != "/work/beta" {
+			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/beta")
+		}
+	})
+}
+
+func TestDaemonProjectIDForPath(t *testing.T) {
+	got := daemonProjectIDForPath("/work/azedarach")
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("expected non-empty daemon project id for valid path")
+	}
+
+	if got2 := daemonProjectIDForPath("/work/azedarach"); got2 != got {
+		t.Fatalf("daemonProjectIDForPath() not deterministic: %q != %q", got2, got)
+	}
+
+	if got := daemonProjectIDForPath("   "); got != "" {
+		t.Fatalf("daemonProjectIDForPath(blank) = %q, want empty", got)
+	}
 }
 
 func TestProjectSwitchResultUpdatesModelConfig(t *testing.T) {

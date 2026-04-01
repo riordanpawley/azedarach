@@ -7,7 +7,7 @@
 For non-trivial apps, use nested models with a **top-level router**:
 
 ```go
-// internal/app/model.go
+// internal/tui/model.go
 
 type Model struct {
     // Shared state accessible to all sub-models
@@ -371,7 +371,7 @@ log.Printf("received msg: %T %v", msg, msg)
 ## File Organization (Recommended)
 
 ```
-internal/app/
+internal/tui/
 ├── model.go        # Model struct, New(), common methods
 ├── init.go         # Init() and startup commands
 ├── update.go       # Update() message router
