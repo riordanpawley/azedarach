@@ -3212,13 +3212,27 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 	if len(logPaths) == 0 {
 		return fmt.Errorf("no log files selected")
 	}
+	availableLogPaths := make([]string, 0, len(logPaths))
+	for _, path := range logPaths {
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: log file not found, skipping: %s\n", path)
+				continue
+			}
+			return fmt.Errorf("inspect log file %s: %w", path, err)
+		}
+		availableLogPaths = append(availableLogPaths, path)
+	}
+	if len(availableLogPaths) == 0 {
+		return fmt.Errorf("none of the selected log files exist yet")
+	}
 
-	tailArgs := make([]string, 0, len(logPaths)+3)
+	tailArgs := make([]string, 0, len(availableLogPaths)+3)
 	tailArgs = append(tailArgs, "-n", strconv.Itoa(opts.Lines))
 	if opts.Follow {
 		tailArgs = append(tailArgs, "-F")
 	}
-	tailArgs = append(tailArgs, logPaths...)
+	tailArgs = append(tailArgs, availableLogPaths...)
 
 	return runLogTailCommand(tailArgs)
 }

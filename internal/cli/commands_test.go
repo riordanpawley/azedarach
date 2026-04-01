@@ -816,11 +816,26 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 }
 
 func TestLogCommandBuildsTailInvocation(t *testing.T) {
+	repoDir := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
 	deps := &Dependencies{
 		Config:  cfg,
-		RepoDir: "/tmp/repo",
+		RepoDir: repoDir,
+	}
+	daemonLogPath := filepath.Join(repoDir, ".azedarach", "daemon.log")
+	tuiLogPath := filepath.Join(cfg.Session.LogDir, "az.log")
+	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(daemon log dir): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tuiLogPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(tui log dir): %v", err)
+	}
+	if err := os.WriteFile(daemonLogPath, []byte("daemon\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(daemon log): %v", err)
+	}
+	if err := os.WriteFile(tuiLogPath, []byte("tui\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(tui log): %v", err)
 	}
 
 	var gotArgs []string
@@ -845,12 +860,42 @@ func TestLogCommandBuildsTailInvocation(t *testing.T) {
 	want := []string{
 		"-n", "25",
 		"-F",
-		filepath.Join("/tmp/repo", ".azedarach", "daemon.log"),
-		filepath.Join(cfg.Session.LogDir, "az.log"),
-		filepath.Join(cfg.Session.LogDir, "az-cli.log"),
+		daemonLogPath,
+		tuiLogPath,
 	}
 	if !reflect.DeepEqual(gotArgs, want) {
 		t.Fatalf("tail args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestLogCommandErrorsWhenAllSelectedLogsMissing(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	deps := &Dependencies{
+		Config:  cfg,
+		RepoDir: t.TempDir(),
+	}
+
+	called := false
+	origTail := runLogTailCommand
+	runLogTailCommand = func(args []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() {
+		runLogTailCommand = origTail
+	})
+
+	err := LogCommand(deps, LogOptions{
+		Sources: []string{"daemon", "cli"},
+		Lines:   10,
+		Follow:  false,
+	})
+	if err == nil || !strings.Contains(err.Error(), "none of the selected log files exist yet") {
+		t.Fatalf("LogCommand() error = %v, want missing files error", err)
+	}
+	if called {
+		t.Fatal("tail should not be invoked when no selected logs exist")
 	}
 }
 
