@@ -1,6 +1,8 @@
 package overlay
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -255,13 +257,11 @@ func (o *EventLogOverlay) renderBodyLines(body []byte) []string {
 		return nil
 	}
 
-	const maxLineLen = 96
-	rawLines := strings.Split(text, "\n")
-	lines := make([]string, 0, len(rawLines))
-	for _, line := range rawLines {
-		lines = append(lines, truncateRunes(line, maxLineLen))
+	if formatted, ok := formatJSONLogBody([]byte(text)); ok {
+		text = formatted
 	}
-	return lines
+
+	return strings.Split(text, "\n")
 }
 
 func (o *EventLogOverlay) clampScroll() {
@@ -345,17 +345,14 @@ func (o *EventLogOverlay) streamLogPaths() []string {
 	return paths
 }
 
-func truncateRunes(s string, maxLen int) string {
-	if maxLen <= 0 {
-		return ""
+func formatJSONLogBody(raw []byte) (string, bool) {
+	if !json.Valid(raw) {
+		return "", false
 	}
 
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		return "", false
 	}
-	if maxLen <= 3 {
-		return string(runes[:maxLen])
-	}
-	return string(runes[:maxLen-3]) + "..."
+	return buf.String(), true
 }
