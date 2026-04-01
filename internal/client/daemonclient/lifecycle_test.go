@@ -148,7 +148,7 @@ func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
 	}
 }
 
-func TestSessionAttachAndStatusCommandsRouteThroughDaemon(t *testing.T) {
+func TestSessionAttachPauseResumeAndStatusCommandsRouteThroughDaemon(t *testing.T) {
 	tests := []struct {
 		name        string
 		wantCommand string
@@ -166,6 +166,18 @@ func TestSessionAttachAndStatusCommandsRouteThroughDaemon(t *testing.T) {
 			wantCommand: CommandSessionStatus,
 			sessionID:   "",
 			output:      "Active Sessions (1)\n",
+		},
+		{
+			name:        "pause",
+			wantCommand: CommandSessionPause,
+			sessionID:   "az-1",
+			output:      "paused",
+		},
+		{
+			name:        "resume",
+			wantCommand: CommandSessionResume,
+			sessionID:   "az-1",
+			output:      "resumed",
 		},
 	}
 
@@ -197,6 +209,10 @@ func TestSessionAttachAndStatusCommandsRouteThroughDaemon(t *testing.T) {
 			switch tt.wantCommand {
 			case CommandSessionAttach:
 				got, err = client.AttachSession(context.Background(), tt.sessionID)
+			case CommandSessionPause:
+				got, err = client.PauseSession(context.Background(), tt.sessionID)
+			case CommandSessionResume:
+				got, err = client.ResumeSession(context.Background(), tt.sessionID)
 			case CommandSessionStatus:
 				got, err = client.SessionStatus(context.Background(), tt.sessionID)
 			default:

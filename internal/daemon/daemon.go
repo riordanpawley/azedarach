@@ -49,18 +49,22 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues             *issues.Client
-	tmux               *tmux.Client
-	git                *git.Client
-	worktree           *git.WorktreeManager
-	gitHandler         *daemonhandlers.GitHandler
-	worktreeHandler    *daemonhandlers.WorktreeHandler
-	session            *daemonhandlers.SessionHandler
-	sessionStore       *daemonstate.Store
-	sessionLongRunning SessionLongRunningExecutor
-	operationRuntime   *operationRuntime
-	sessionStopMu      sync.Mutex
-	sessionStopPending map[string]int
+	issues                       *issues.Client
+	tmux                         *tmux.Client
+	git                          *git.Client
+	worktree                     *git.WorktreeManager
+	gitHandler                   *daemonhandlers.GitHandler
+	worktreeHandler              *daemonhandlers.WorktreeHandler
+	session                      *daemonhandlers.SessionHandler
+	sessionStore                 *daemonstate.Store
+	projectionStore              *daemonstate.ProjectionStore
+	sessionLongRunning           SessionLongRunningExecutor
+	operationRuntime             *operationRuntime
+	sessionStopMu                sync.Mutex
+	sessionStopPending           map[string]int
+	projectionRefreshMu          sync.Mutex
+	sessionProjectionRefreshing  map[string]bool
+	sessionProjectionLastRefresh map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -107,6 +111,12 @@ func New(cfg Config) *Daemon {
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
+	projectionStore := daemonstate.NewProjectionStore(cfg.RepoDir, cfg.Logger)
+	gitService := &gitServiceAdapter{
+		client:          gitClient,
+		projectionStore: projectionStore,
+		logger:          cfg.Logger,
+	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
@@ -117,19 +127,25 @@ func New(cfg Config) *Daemon {
 	specHandler := daemonhandlers.NewSpecHandler(issueSpecService{client: issuesClient})
 
 	d := &Daemon{
-		cfg:                cfg,
-		lock:               lifecycle.NewLockManager(cfg.LockPath),
-		hub:                publish.NewHub(512, 64, cfg.Logger),
-		issues:             issuesClient,
-		tmux:               tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:                gitClient,
-		worktree:           git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
-		session:            sessionHandler,
-		sessionStore:       sessionStore,
-		sessionStopPending: map[string]int{},
-		revision:           map[string]uint64{},
+		cfg:                          cfg,
+		lock:                         lifecycle.NewLockManager(cfg.LockPath),
+		hub:                          publish.NewHub(512, 64, cfg.Logger),
+		issues:                       issuesClient,
+		tmux:                         tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:                          gitClient,
+		worktree:                     git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
+		session:                      sessionHandler,
+		sessionStore:                 sessionStore,
+		projectionStore:              projectionStore,
+		sessionStopPending:           map[string]int{},
+		sessionProjectionRefreshing:  map[string]bool{},
+		sessionProjectionLastRefresh: map[string]time.Time{},
+		revision:                     map[string]uint64{},
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
+	gitService.onStatusUpdate = func(projectID, issueID, worktree string) {
+		d.publishGitStatusProjectionEvent(projectID, issueID, worktree)
+	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      cfg.RepoDir,
 		logger:       cfg.Logger,
@@ -140,9 +156,16 @@ func New(cfg Config) *Daemon {
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
-	gitHandler := daemonhandlers.NewGitHandler(gitClient, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
+	gitHandler := daemonhandlers.NewGitHandler(gitService, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
-		worktreeServiceAdapter{manager: d.worktree},
+		&worktreeServiceAdapter{
+			manager:         d.worktree,
+			projectionStore: d.projectionStore,
+			logger:          cfg.Logger,
+			onProjectionUpdate: func(projectID, issueID, path string) {
+				d.publishWorktreeProjectionEvent(projectID, issueID, path)
+			},
+		},
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
 	)
 	runtime.gitHandler = gitHandler
@@ -208,6 +231,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
 			}
 		}
+		if d.projectionStore != nil {
+			if closeErr := d.projectionStore.Close(); closeErr != nil {
+				d.cfg.Logger.Warn("failed to close projection store", "error", closeErr)
+			}
+		}
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
@@ -234,7 +262,40 @@ func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uin
 	return ch, cancel, nil
 }
 
-func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (resp protocol.ResponseEnvelope, err error) {
+	startedAt := time.Now()
+	projectID := strings.TrimSpace(req.Meta.ProjectID)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info(
+			"daemon command received",
+			"command", req.Command,
+			"request_id", req.RequestID,
+			"project_id", projectID,
+		)
+	}
+	defer func() {
+		if d.cfg.Logger == nil {
+			return
+		}
+		attrs := []any{
+			"command", req.Command,
+			"request_id", req.RequestID,
+			"project_id", projectID,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		}
+		switch {
+		case err != nil:
+			d.cfg.Logger.Error("daemon command transport failed", append(attrs, "error", err)...)
+		case resp.Error != nil:
+			d.cfg.Logger.Warn(
+				"daemon command failed",
+				append(attrs, "error_code", resp.Error.Code, "error", resp.Error.Message)...,
+			)
+		default:
+			d.cfg.Logger.Info("daemon command completed", attrs...)
+		}
+	}()
+
 	if resp, handled := d.guardSyncDependentCommand(req); handled {
 		return resp, nil
 	}
@@ -289,6 +350,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleSessionStart(ctx, req)
 	case "session.attach":
 		return d.handleSessionAttach(ctx, req)
+	case "session.pause":
+		return d.handleSessionPause(ctx, req)
+	case "session.resume":
+		return d.handleSessionResume(ctx, req)
 	case "session.stop":
 		return d.handleSessionStop(ctx, req)
 	case "session.status":
@@ -431,6 +496,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 		if err != nil {
 			return err
 		}
+		d.persistSessionProjection(projectID, session)
 		d.publishSessionProjectionEvent(projectID, req.Meta, session)
 		return nil
 	}
@@ -438,6 +504,95 @@ func (d *Daemon) applySessionLifecycleTransition(
 		return errors.New(resp.Error.Message)
 	}
 	return errors.New("session lifecycle transition failed")
+}
+
+func (d *Daemon) persistSessionProjection(projectID string, session daemonstate.Session) {
+	if d.projectionStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.projectionStore.UpsertSession(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn(
+			"persist session projection failed",
+			"project_id", projectID,
+			"session_id", session.ID,
+			"issue_id", session.IssueID,
+			"state", session.State,
+			"error", err,
+		)
+	}
+}
+
+func (d *Daemon) triggerSessionProjectionRefresh(projectID string, refreshFn func(context.Context, string) error) {
+	if d.projectionStore == nil || refreshFn == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	const minRefreshInterval = 3 * time.Second
+	now := time.Now()
+
+	d.projectionRefreshMu.Lock()
+	if d.sessionProjectionRefreshing == nil {
+		d.sessionProjectionRefreshing = map[string]bool{}
+	}
+	if d.sessionProjectionLastRefresh == nil {
+		d.sessionProjectionLastRefresh = map[string]time.Time{}
+	}
+	if d.sessionProjectionRefreshing[projectID] {
+		d.projectionRefreshMu.Unlock()
+		return
+	}
+	if last := d.sessionProjectionLastRefresh[projectID]; !last.IsZero() && now.Sub(last) < minRefreshInterval {
+		d.projectionRefreshMu.Unlock()
+		return
+	}
+	d.sessionProjectionRefreshing[projectID] = true
+	d.sessionProjectionLastRefresh[projectID] = now
+	d.projectionRefreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			d.projectionRefreshMu.Lock()
+			d.sessionProjectionRefreshing[projectID] = false
+			d.projectionRefreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := refreshFn(ctx, projectID); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("session projection refresh failed", "project_id", projectID, "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) persistWorktreeProjection(projectID, issueID, path, branch string) {
+	if d.projectionStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+		ProjectID: strings.TrimSpace(projectID),
+		IssueID:   strings.TrimSpace(issueID),
+		Path:      strings.TrimSpace(path),
+		Branch:    strings.TrimSpace(branch),
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn(
+			"persist worktree projection failed",
+			"project_id", projectID,
+			"issue_id", issueID,
+			"path", path,
+			"branch", branch,
+			"error", err,
+		)
+		return
+	}
+	d.publishWorktreeProjectionEvent(projectID, issueID, path)
 }
 
 func (d *Daemon) successResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
@@ -535,6 +690,74 @@ func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.M
 		Meta:            meta,
 		Revision:        rev,
 		Event:           protocol.EventSessionUpdated,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Body:            body,
+	})
+	return rev
+}
+
+func (d *Daemon) publishWorktreeProjectionEvent(projectID, issueID, worktree string) uint64 {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rev := d.nextRevision(projectID)
+	if d.hub == nil {
+		return rev
+	}
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: projectID,
+		IssueID:   strings.TrimSpace(issueID),
+		Worktree:  strings.TrimSpace(worktree),
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("marshal worktree projection event body failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return rev
+	}
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       projectID,
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Revision:        rev,
+		Event:           protocol.EventWorktreeProjectionUpdated,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Body:            body,
+	})
+	return rev
+}
+
+func (d *Daemon) publishGitStatusProjectionEvent(projectID, issueID, worktree string) uint64 {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rev := d.nextRevision(projectID)
+	if d.hub == nil {
+		return rev
+	}
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: projectID,
+		IssueID:   strings.TrimSpace(issueID),
+		Worktree:  strings.TrimSpace(worktree),
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("marshal git status projection event body failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return rev
+	}
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       projectID,
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Revision:        rev,
+		Event:           protocol.EventGitStatusUpdated,
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,

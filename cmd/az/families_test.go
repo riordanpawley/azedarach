@@ -50,7 +50,9 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	gitInit := exec.Command("git", "-C", projectDir, "init")
+	gitInit.Env = cli.GitExecEnvWithoutRoutingVarsForTests()
+	if err := gitInit.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 

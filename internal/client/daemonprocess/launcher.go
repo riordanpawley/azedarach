@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ type Launcher struct {
 	SocketPath  string
 	LockPath    string
 	BinPath     string
+	Logger      *slog.Logger
 	openLogFile func(path string) (io.WriteCloser, error)
 }
 
@@ -37,8 +39,18 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		RepoDir:     repoDir,
 		SocketPath:  socketPath,
 		LockPath:    lockPath,
+		Logger:      slog.Default(),
 		openLogFile: openDaemonLog,
 	}
+}
+
+// WithLogger overrides launcher logging sink for lifecycle warnings.
+func (l *Launcher) WithLogger(logger *slog.Logger) *Launcher {
+	if l == nil || logger == nil {
+		return l
+	}
+	l.Logger = logger
+	return l
 }
 
 // Start spawns daemon process in background.
@@ -73,7 +85,13 @@ func (l *Launcher) Start(ctx context.Context) error {
 // Replace attempts to stop existing lock-owner process, then starts daemon.
 func (l *Launcher) Replace(ctx context.Context) error {
 	if pid, ok := l.readLockedPID(); ok {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && l.Logger != nil {
+			l.Logger.Warn("failed to terminate existing daemon process before replace",
+				"pid", pid,
+				"lock_path", l.LockPath,
+				"error", err,
+			)
+		}
 	}
 	return l.Start(ctx)
 }

@@ -198,11 +198,11 @@ func (s *routeSpecService) SyncMD(context.Context, protocol.SpecSyncMDRequestBod
 func TestDispatcherMixedRouting(t *testing.T) {
 	session := NewSessionHandler(daemonstate.NewStore())
 	gitHandler := NewGitHandler(&fakeGitService{
-		fetchFn: func(context.Context, string, string) error { return nil },
-		mergeFn: func(context.Context, string, string) (*git.MergeResult, error) {
+		fetchFn: func(context.Context, string, string, string) error { return nil },
+		mergeFn: func(context.Context, string, string, string) (*git.MergeResult, error) {
 			return &git.MergeResult{Success: true}, nil
 		},
-		checkoutFn: func(context.Context, string, string) error { return nil },
+		checkoutFn: func(context.Context, string, string, string) error { return nil },
 	})
 	worktree := NewWorktreeHandler(&fakeWorktreeService{})
 	devserverH := NewDevServerHandler(newRouteDevServerManager())

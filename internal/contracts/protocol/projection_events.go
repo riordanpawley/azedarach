@@ -1,0 +1,15 @@
+package protocol
+
+import "time"
+
+const (
+	EventWorktreeProjectionUpdated = "worktree.projection.updated"
+	EventGitStatusUpdated          = "git.status.updated"
+)
+
+type ProjectionUpdateEventBody struct {
+	ProjectID string    `json:"project_id" msgpack:"project_id"`
+	IssueID   string    `json:"issue_id" msgpack:"issue_id"`
+	Worktree  string    `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
+	UpdatedAt time.Time `json:"updated_at" msgpack:"updated_at"`
+}

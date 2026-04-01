@@ -10,8 +10,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -74,6 +76,12 @@ type ConfigSetOptions struct {
 type SyncOptions struct {
 	All        bool
 	ProjectDir string
+}
+
+type LogOptions struct {
+	Sources []string
+	Lines   int
+	Follow  bool
 }
 
 type ImplDeleteOptions struct {
@@ -451,14 +459,11 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	sourceDirtyFiles := dirtyFilesFromGitStatus(sourceStatus)
 	targetDirtyFiles := dirtyFilesFromGitStatus(targetStatus)
 
-	sourceBlockingFiles, sourceIgnoredFiles := classifyMergePreflightDirtyFiles(sourceDirtyFiles)
-	targetBlockingFiles, targetIgnoredFiles := classifyMergePreflightDirtyFiles(targetDirtyFiles)
-
 	reasons := make([]string, 0, 2)
-	if len(sourceBlockingFiles) > 0 {
+	if len(sourceDirtyFiles) > 0 {
 		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, summarizeGitStatusCounts(sourceStatus)))
 	}
-	if len(targetBlockingFiles) > 0 {
+	if len(targetDirtyFiles) > 0 {
 		reasons = append(reasons, fmt.Sprintf("target main is not clean: %s", summarizeGitStatusCounts(targetStatus)))
 	}
 	if len(reasons) == 0 {
@@ -469,38 +474,13 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source g
 	for _, reason := range reasons {
 		lines = append(lines, "- "+reason)
 	}
-	if len(sourceBlockingFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(sourceBlockingFiles, ", ")))
+	if len(sourceDirtyFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- source dirty files: %s", strings.Join(sourceDirtyFiles, ", ")))
 	}
-	if len(targetBlockingFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(targetBlockingFiles, ", ")))
-	}
-	if len(sourceIgnoredFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- source ignored preflight files: %s", strings.Join(sourceIgnoredFiles, ", ")))
-	}
-	if len(targetIgnoredFiles) > 0 {
-		lines = append(lines, fmt.Sprintf("- target ignored preflight files: %s", strings.Join(targetIgnoredFiles, ", ")))
+	if len(targetDirtyFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("- target dirty files: %s", strings.Join(targetDirtyFiles, ", ")))
 	}
 	return errors.New(strings.Join(lines, "\n"))
-}
-
-func classifyMergePreflightDirtyFiles(files []string) (blocking []string, ignored []string) {
-	blocking = make([]string, 0, len(files))
-	ignored = make([]string, 0, len(files))
-	for _, file := range files {
-		if isMergePreflightIgnoredFile(file) {
-			ignored = append(ignored, file)
-			continue
-		}
-		blocking = append(blocking, file)
-	}
-	return blocking, ignored
-}
-
-func isMergePreflightIgnoredFile(path string) bool {
-	normalized := strings.TrimSpace(filepath.ToSlash(path))
-	normalized = strings.TrimPrefix(normalized, "./")
-	return normalized == ".azedarach/config.json"
 }
 
 func summarizeGitStatusCounts(status gitservice.GitStatus) string {
@@ -694,6 +674,75 @@ func ParseSyncArgs(args []string) (SyncOptions, error) {
 		return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
 	}
 	return opts, nil
+}
+
+func ParseLogArgs(args []string) (LogOptions, error) {
+	opts := LogOptions{
+		Lines:  200,
+		Follow: true,
+	}
+	fs := flag.NewFlagSet("log", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var sourceList string
+	var noFollow bool
+	fs.StringVar(&sourceList, "source", "", "comma-separated log sources: daemon,tui,cli")
+	fs.IntVar(&opts.Lines, "lines", 200, "number of lines to show before streaming")
+	fs.BoolVar(&opts.Follow, "follow", true, "keep streaming logs")
+	fs.BoolVar(&noFollow, "no-follow", false, "print and exit without following")
+	if err := fs.Parse(args); err != nil {
+		return LogOptions{}, err
+	}
+	if noFollow {
+		opts.Follow = false
+	}
+	if opts.Lines < 1 {
+		return LogOptions{}, fmt.Errorf("--lines must be greater than 0")
+	}
+
+	requestedSources := make([]string, 0, len(fs.Args())+3)
+	requestedSources = append(requestedSources, splitLogSourceList(sourceList)...)
+	for _, arg := range fs.Args() {
+		trimmed := strings.TrimSpace(arg)
+		if strings.HasPrefix(trimmed, "-") {
+			return LogOptions{}, fmt.Errorf("flags must come before positional sources (got %q after sources)", trimmed)
+		}
+		requestedSources = append(requestedSources, splitLogSourceList(trimmed)...)
+	}
+
+	if len(requestedSources) == 0 {
+		opts.Sources = []string{"daemon", "tui", "cli"}
+		return opts, nil
+	}
+
+	seen := make(map[string]struct{}, len(requestedSources))
+	opts.Sources = make([]string, 0, len(requestedSources))
+	for _, source := range requestedSources {
+		normalized := strings.ToLower(strings.TrimSpace(source))
+		switch normalized {
+		case "daemon", "tui", "cli":
+		default:
+			return LogOptions{}, fmt.Errorf("unknown log source %q (expected daemon, tui, or cli)", source)
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		opts.Sources = append(opts.Sources, normalized)
+	}
+	return opts, nil
+}
+
+func splitLogSourceList(value string) []string {
+	raw := strings.Split(strings.TrimSpace(value), ",")
+	out := make([]string, 0, len(raw))
+	for _, source := range raw {
+		trimmed := strings.TrimSpace(source)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
@@ -979,12 +1028,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> [--impl <implementation>] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
 	}
 	opts.Title = fs.Arg(0)
-	if opts.Implementation == "" {
-		return IssueCreateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 
 	taskType, err := parseTaskType(typeRaw)
 	if err != nil {
@@ -1304,9 +1350,6 @@ func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	if fs.NArg() != 0 {
 		return IssueBulkCreateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
@@ -1328,14 +1371,55 @@ func ParseIssueBulkUpdateArgs(args []string) (IssueBulkUpdateOptions, error) {
 	if fs.NArg() != 0 {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
+}
+
+func configuredIssueImplementations(tasks []domain.Task) []string {
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for _, task := range tasks {
+		for _, impl := range task.Implementations {
+			trimmed := strings.TrimSpace(impl)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			impls = append(impls, trimmed)
+		}
+	}
+	sort.Strings(impls)
+	return impls
+}
+
+func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
+	trimmed := strings.TrimSpace(provided)
+	if trimmed != "" {
+		return trimmed, nil
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		return "", fmt.Errorf("missing required flag: --impl")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve implementation context: %w", err)
+	}
+	impls := configuredIssueImplementations(snapshot.Tasks)
+	switch len(impls) {
+	case 0:
+		return "default", nil
+	case 1:
+		return impls[0], nil
+	default:
+		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
+	}
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -1860,12 +1944,17 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
+	if err != nil {
+		return err
+	}
 
 	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-		Title:       opts.Title,
-		Description: opts.Description,
-		Type:        opts.Type,
-		Priority:    opts.Priority,
+		Title:           opts.Title,
+		Description:     opts.Description,
+		Type:            opts.Type,
+		Priority:        opts.Priority,
+		Implementations: []string{impl},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create issue: %w", err)
@@ -2152,6 +2241,10 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
+	if err != nil {
+		return err
+	}
 
 	inputBytes, err := os.ReadFile(opts.InputPath)
 	if err != nil {
@@ -2182,11 +2275,12 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 			return fmt.Errorf("bulk-create item %d: %w", i, err)
 		}
 		body, err := json.Marshal(daemonclient.TaskCreateParams{
-			Title:       item.Title,
-			Description: item.Description,
-			Type:        taskType,
-			Priority:    priority,
-			ParentID:    item.ParentID,
+			Title:           item.Title,
+			Description:     item.Description,
+			Type:            taskType,
+			Priority:        priority,
+			Implementations: []string{impl},
+			ParentID:        item.ParentID,
 		})
 		if err != nil {
 			return fmt.Errorf("marshal bulk-create item %d: %w", i, err)
@@ -2207,6 +2301,9 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if _, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation); err != nil {
 		return err
 	}
 
@@ -3088,6 +3185,92 @@ type applyExecutionSummaryBody struct {
 	Failed    int `json:"failed"`
 }
 
+var runLogTailCommand = func(args []string) error {
+	cmd := exec.Command("tail", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func LogCommand(deps *Dependencies, opts LogOptions) error {
+	if deps == nil {
+		return fmt.Errorf("dependencies are required")
+	}
+	if len(opts.Sources) == 0 {
+		opts.Sources = []string{"daemon", "tui", "cli"}
+	}
+	if opts.Lines < 1 {
+		return fmt.Errorf("--lines must be greater than 0")
+	}
+
+	repoDir := strings.TrimSpace(deps.RepoDir)
+	if repoDir == "" {
+		repoDir = "."
+	}
+	sessionLogDir := resolveSessionLogDir(deps.Config)
+	logPaths := make([]string, 0, len(opts.Sources))
+	seen := make(map[string]struct{}, len(opts.Sources))
+	for _, source := range opts.Sources {
+		var logPath string
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "daemon":
+			logPath = filepath.Join(repoDir, ".azedarach", "daemon.log")
+		case "tui":
+			logPath = filepath.Join(sessionLogDir, "az.log")
+		case "cli":
+			logPath = filepath.Join(sessionLogDir, "az-cli.log")
+		default:
+			return fmt.Errorf("unknown log source %q", source)
+		}
+		if _, ok := seen[logPath]; ok {
+			continue
+		}
+		seen[logPath] = struct{}{}
+		logPaths = append(logPaths, logPath)
+	}
+	if len(logPaths) == 0 {
+		return fmt.Errorf("no log files selected")
+	}
+	availableLogPaths := make([]string, 0, len(logPaths))
+	for _, path := range logPaths {
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "warning: log file not found, skipping: %s\n", path)
+				continue
+			}
+			return fmt.Errorf("inspect log file %s: %w", path, err)
+		}
+		availableLogPaths = append(availableLogPaths, path)
+	}
+	if len(availableLogPaths) == 0 {
+		return fmt.Errorf("none of the selected log files exist yet")
+	}
+
+	tailArgs := make([]string, 0, len(availableLogPaths)+3)
+	tailArgs = append(tailArgs, "-n", strconv.Itoa(opts.Lines))
+	if opts.Follow {
+		tailArgs = append(tailArgs, "-F")
+	}
+	tailArgs = append(tailArgs, availableLogPaths...)
+
+	return runLogTailCommand(tailArgs)
+}
+
+func resolveSessionLogDir(cfg *config.Config) string {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	logDir := strings.TrimSpace(cfg.Session.LogDir)
+	if logDir != "" {
+		return logDir
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(homeDir, ".azedarach", "logs")
+	}
+	return filepath.Join(".", ".azedarach", "logs")
+}
+
 func newSessionRequest(command, projectID, sessionID, baseBranch string) protocol.RequestEnvelope {
 	body, _ := json.Marshal(sessionRequestBody{
 		ProjectID:  projectID,
@@ -3388,6 +3571,9 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
 	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
+		concreteLauncher.WithLogger(deps.Logger)
+	}
 	orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(deps.DaemonClient), launcher)
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
 		ProtocolVersion: protocol.CurrentVersion,
