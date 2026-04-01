@@ -27,6 +27,8 @@ type EventLogOverlay struct {
 	tuiLogFilePath    string
 	daemonLogFilePath string
 	events            []protocol.EventEnvelope
+	cachedContentLines []string
+	contentDirty       bool
 	scroll            int
 	maxScroll         int
 	viewHeight        int
@@ -48,6 +50,7 @@ func NewEventLogOverlayWithLogFiles(events []protocol.EventEnvelope, tuiLogFileP
 	overlay := &EventLogOverlay{
 		tuiLogFilePath:    strings.TrimSpace(tuiLogFilePath),
 		daemonLogFilePath: strings.TrimSpace(daemonLogFilePath),
+		contentDirty:      true,
 		scroll:            0,
 		viewHeight:        18,
 		styles:            New(),
@@ -59,12 +62,14 @@ func NewEventLogOverlayWithLogFiles(events []protocol.EventEnvelope, tuiLogFileP
 // SetEvents replaces the event list and normalizes it to newest-first order.
 func (o *EventLogOverlay) SetEvents(events []protocol.EventEnvelope) {
 	o.events = reverseEvents(events)
+	o.contentDirty = true
 	o.clampScroll()
 }
 
 // AddEvent prepends a single event so the newest event stays at the top.
 func (o *EventLogOverlay) AddEvent(evt protocol.EventEnvelope) {
 	o.events = append([]protocol.EventEnvelope{evt}, o.events...)
+	o.contentDirty = true
 	o.clampScroll()
 }
 
@@ -77,6 +82,14 @@ func (o *EventLogOverlay) Init() tea.Cmd {
 func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlD:
+			o.scroll = min(o.maxScroll, o.scroll+o.halfPageStep())
+			return o, nil
+		case tea.KeyCtrlU:
+			o.scroll = max(0, o.scroll-o.halfPageStep())
+			return o, nil
+		}
 		switch msg.String() {
 		case "esc", "q", "backspace":
 			return o, func() tea.Msg { return CloseOverlayMsg{} }
@@ -177,7 +190,7 @@ func (o *EventLogOverlay) Size() (width, height int) {
 	)
 
 	// Keep footer pinned to bottom while avoiding oversized empty interiors.
-	neededViewHeight := len(o.renderContentLines()) + 1 // + footer row
+	neededViewHeight := len(o.contentLines()) + 1 // + footer row
 	o.viewHeight = min(maxViewHeight, max(minViewHeight, neededViewHeight))
 	return o.ClampResponsive(92, o.viewHeight+chromeHeight)
 }
@@ -201,6 +214,15 @@ func (o *EventLogOverlay) renderContentLines() []string {
 	}
 
 	return lines
+}
+
+func (o *EventLogOverlay) contentLines() []string {
+	if !o.contentDirty {
+		return o.cachedContentLines
+	}
+	o.cachedContentLines = o.renderContentLines()
+	o.contentDirty = false
+	return o.cachedContentLines
 }
 
 func (o *EventLogOverlay) footerLine(scrollable bool) string {
@@ -286,7 +308,7 @@ func reverseEvents(events []protocol.EventEnvelope) []protocol.EventEnvelope {
 }
 
 func (o *EventLogOverlay) renderScrollableContent(contentHeight int) string {
-	contentLines := o.renderContentLines()
+	contentLines := o.contentLines()
 	contentHeight = max(1, contentHeight-1)
 	o.maxScroll = max(0, len(contentLines)-contentHeight)
 	if o.scroll > o.maxScroll {
@@ -313,11 +335,20 @@ func (o *EventLogOverlay) renderScrollableContent(contentHeight int) string {
 	return strings.Join(visibleContent, "\n")
 }
 
+func (o *EventLogOverlay) halfPageStep() int {
+	step := o.viewHeight / 2
+	if step < 1 {
+		return 1
+	}
+	return step
+}
+
 func (o *EventLogOverlay) actionBindings(scrollable bool) []keybinds.Binding {
 	bindings := make([]keybinds.Binding, 0, 7)
 	if scrollable {
 		bindings = append(bindings,
 			keybinds.Binding{Key: "j/k", Description: "scroll"},
+			keybinds.Binding{Key: "ctrl+u/d", Description: "half-page"},
 			keybinds.Binding{Key: "g/G", Description: "top/bottom"},
 		)
 	}

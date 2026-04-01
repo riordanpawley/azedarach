@@ -155,6 +155,20 @@ func TestEventLogOverlay_Update_NavigationAndClose(t *testing.T) {
 		t.Fatalf("scroll after G = %d, want %d", overlay.scroll, overlay.maxScroll)
 	}
 
+	overlay.scroll = 0
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll <= 0 {
+		t.Fatalf("scroll after ctrl+d = %d, want > 0", overlay.scroll)
+	}
+
+	afterHalfDown := overlay.scroll
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll >= afterHalfDown {
+		t.Fatalf("scroll after ctrl+u = %d, want < %d", overlay.scroll, afterHalfDown)
+	}
+
 	for _, keyMsg := range []tea.KeyMsg{
 		{Type: tea.KeyEsc},
 		{Type: tea.KeyRunes, Runes: []rune("q")},
@@ -248,6 +262,31 @@ func TestEventLogOverlay_RenderBodyLines_PrettyPrintsJSON(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "\n  \"project_id\": \"azedarach\"") {
 		t.Fatalf("missing pretty-printed field: %q", rendered)
+	}
+}
+
+func TestEventLogOverlay_ContentCacheInvalidation(t *testing.T) {
+	overlay := NewEventLogOverlay([]protocol.EventEnvelope{
+		testEvent(1, "daemon.event.one"),
+		testEvent(2, "daemon.event.two"),
+	})
+
+	if !overlay.contentDirty {
+		t.Fatal("expected initial content cache to be dirty")
+	}
+
+	first := overlay.contentLines()
+	if overlay.contentDirty {
+		t.Fatal("expected cache to be clean after rendering content lines")
+	}
+	second := overlay.contentLines()
+	if len(first) != len(second) {
+		t.Fatalf("cache size mismatch: %d vs %d", len(first), len(second))
+	}
+
+	overlay.AddEvent(testEvent(3, "daemon.event.three"))
+	if !overlay.contentDirty {
+		t.Fatal("expected cache invalidation after AddEvent")
 	}
 }
 
