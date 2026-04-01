@@ -211,6 +211,7 @@ const (
 	ConfigDirName        = ".azedarach"
 	ConfigFileName       = "config.json"
 	ConfigSchemaFileName = "config.schema.json"
+	ConfigSchemaURL      = "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json"
 	CurrentConfigVersion = 7
 )
 
@@ -248,20 +249,12 @@ func LoadConfig(projectPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse %s: %w", configPath, err)
 	}
 
-	// Older configs may store init commands under worktree.initCommands; map for runtime use.
-	if len(cfg.Worktree.InitCommands) > 0 {
-		cfg.Session.InitCommands = append([]string(nil), cfg.Worktree.InitCommands...)
-	}
-
 	return MergeWithDefaults(cfg), nil
 }
 
 // SaveConfig saves configuration to the specified path with version information
 func SaveConfig(cfg *Config, path string) error {
 	cfgCopy := *cfg
-	if len(cfgCopy.Session.InitCommands) > 0 {
-		cfgCopy.Worktree.InitCommands = append([]string(nil), cfgCopy.Session.InitCommands...)
-	}
 	data, err := marshalConfigFile(&cfgCopy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -287,7 +280,7 @@ func marshalConfigFile(cfg *Config) ([]byte, error) {
 	if err := json.Unmarshal(cfgJSON, &raw); err != nil {
 		return nil, err
 	}
-	raw["$schema"] = "./" + ConfigSchemaFileName
+	raw["$schema"] = ConfigSchemaURL
 	raw["$version"] = CurrentConfigVersion
 	return json.MarshalIndent(raw, "", "  ")
 }

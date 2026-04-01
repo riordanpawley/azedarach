@@ -28,15 +28,16 @@ const daemonVersion = "dev"
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir             string
-	SocketPath          string
-	LockPath            string
-	BaseBranch          string
-	CLITool             string
-	SessionShell        string
-	SessionInitCommands []string
-	Logger              *slog.Logger
-	IdleTimeout         time.Duration
+	RepoDir              string
+	SocketPath           string
+	LockPath             string
+	BaseBranch           string
+	CLITool              string
+	SessionShell         string
+	SessionInitCommands  []string
+	WorktreeInitCommands []string
+	Logger               *slog.Logger
+	IdleTimeout          time.Duration
 }
 
 // Daemon is the daemon runtime root.

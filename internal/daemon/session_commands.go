@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"unicode"
 
@@ -189,6 +190,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", err)), nil
 		}
 		reusedWorktree = true
+	}
+	if !reusedWorktree {
+		if err := d.runWorktreeInitCommands(ctx, worktree.Path); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
+		}
 	}
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -623,6 +629,33 @@ func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool,
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
+func (d *Daemon) runWorktreeInitCommands(ctx context.Context, worktreePath string) error {
+	commands := d.cfg.WorktreeInitCommands
+	if len(commands) == 0 {
+		return nil
+	}
+
+	shell := strings.TrimSpace(d.cfg.SessionShell)
+	if shell == "" {
+		shell = appconfig.DefaultSessionShell()
+	}
+
+	for _, initCmd := range commands {
+		trimmed := strings.TrimSpace(initCmd)
+		if trimmed == "" {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
+		cmd.Dir = worktreePath
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
+		}
+	}
+
+	return nil
+}
+
 func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
 	tool := strings.TrimSpace(d.cfg.CLITool)
 	if tool == "" {
@@ -635,11 +668,11 @@ func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, image
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		sessionStartCommand := fmt.Sprintf("az notify idle_prompt %s >/dev/null 2>&1", issueID)
-		userPromptSubmitCommand := fmt.Sprintf("az notify idle_prompt %s >/dev/null 2>&1", issueID)
-		preToolUseCommand := fmt.Sprintf("az notify permission_request %s >/dev/null 2>&1", issueID)
-		postToolUseCommand := fmt.Sprintf("az notify idle_prompt %s >/dev/null 2>&1", issueID)
-		stopCommand := fmt.Sprintf("az notify session_end %s >/dev/null 2>&1", issueID)
+		sessionStartCommand := "az notify session_start --json"
+		userPromptSubmitCommand := "az notify user_prompt_submit --json"
+		preToolUseCommand := "az notify pre_tool_use --json"
+		postToolUseCommand := "az notify post_tool_use --json"
+		stopCommand := "az notify stop --json"
 		parts = append(parts,
 			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
 			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),

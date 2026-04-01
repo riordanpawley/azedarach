@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -376,14 +378,20 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
-	if !strings.Contains(command, "az notify idle_prompt axt-123 >/dev/null 2>&1") {
-		t.Fatalf("command = %q, want codex idle_prompt notify command", command)
+	if !strings.Contains(command, "az notify session_start --json") {
+		t.Fatalf("command = %q, want codex session_start notify command", command)
 	}
-	if !strings.Contains(command, "az notify permission_request axt-123 >/dev/null 2>&1") {
-		t.Fatalf("command = %q, want codex permission_request notify command", command)
+	if !strings.Contains(command, "az notify user_prompt_submit --json") {
+		t.Fatalf("command = %q, want codex user_prompt_submit notify command", command)
 	}
-	if !strings.Contains(command, "az notify session_end axt-123 >/dev/null 2>&1") {
-		t.Fatalf("command = %q, want codex session_end notify command", command)
+	if !strings.Contains(command, "az notify pre_tool_use --json") {
+		t.Fatalf("command = %q, want codex pre_tool_use notify command", command)
+	}
+	if !strings.Contains(command, "az notify post_tool_use --json") {
+		t.Fatalf("command = %q, want codex post_tool_use notify command", command)
+	}
+	if !strings.Contains(command, "az notify stop --json") {
+		t.Fatalf("command = %q, want codex stop notify command", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {
 		t.Fatalf("command = %q, want codex image argument for /tmp/a.png", command)
@@ -460,6 +468,49 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true, nil, "")
 	if !strings.Contains(command, "--dangerously-skip-permissions") {
 		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
+	}
+}
+
+func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
+	worktree := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"printf seeded > .worktree-init-test",
+			},
+		},
+	}
+
+	if err := d.runWorktreeInitCommands(context.Background(), worktree); err != nil {
+		t.Fatalf("runWorktreeInitCommands error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".worktree-init-test"))
+	if err != nil {
+		t.Fatalf("read init marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "seeded" {
+		t.Fatalf("init marker content = %q, want seeded", string(data))
+	}
+}
+
+func TestRunWorktreeInitCommandsReturnsCommandFailure(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"exit 7",
+			},
+		},
+	}
+
+	err := d.runWorktreeInitCommands(context.Background(), t.TempDir())
+	if err == nil {
+		t.Fatal("runWorktreeInitCommands error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "exit 7") {
+		t.Fatalf("error = %q, want failed command context", err.Error())
 	}
 }
 
