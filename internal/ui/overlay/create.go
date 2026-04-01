@@ -28,7 +28,6 @@ const (
 	taskTemplateAnchorNotes       = "NOTES"
 	taskTemplateAnchorAcceptance  = "ACCEPTANCE"
 	createTaskOverlayWidth        = 100
-	createTaskOverlayWideWidth    = 120
 	createTaskOverlayHeight       = 30
 )
 
@@ -566,7 +565,8 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the form
 func (c *CreateTaskOverlay) View() string {
-	width, height := c.Clamp(c.desiredOverlayWidth(), createTaskOverlayHeight)
+	targetWidth, targetHeight := c.desiredOverlaySize()
+	width, height := c.Clamp(targetWidth, targetHeight)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            c.styles,
 		width:             width,
@@ -600,11 +600,17 @@ func (c *CreateTaskOverlay) View() string {
 	})
 }
 
-func (c *CreateTaskOverlay) desiredOverlayWidth() int {
-	if c.width >= 132 {
-		return createTaskOverlayWideWidth
+func (c *CreateTaskOverlay) desiredOverlaySize() (int, int) {
+	if c.width <= 0 || c.height <= 0 {
+		return createTaskOverlayWidth, createTaskOverlayHeight
 	}
-	return createTaskOverlayWidth
+
+	width80 := (c.width * 8) / 10
+	height80 := (c.height * 8) / 10
+	if width80 < createTaskOverlayWidth || height80 < createTaskOverlayHeight {
+		return c.width, c.height
+	}
+	return width80, height80
 }
 
 func (c *CreateTaskOverlay) clearToDefaults() {
@@ -1306,5 +1312,6 @@ func (c *CreateTaskOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (c *CreateTaskOverlay) Size() (width, height int) {
-	return c.Clamp(createTaskOverlayWidth, createTaskOverlayHeight)
+	targetWidth, targetHeight := c.desiredOverlaySize()
+	return c.Clamp(targetWidth, targetHeight)
 }
