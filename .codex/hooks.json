@@ -6,8 +6,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" user_prompt \"tc\" \"az-tc\"'",
+            "command": "az notify --json session_start",
             "statusMessage": "Sending startup notification"
+          },
+          {
+            "type": "command",
+            "command": "az codex guard --json session-start"
           }
         ]
       }
@@ -17,7 +21,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" user_prompt \"tc\" \"az-tc\"'"
+            "command": "az notify --json user_prompt_submit"
+          },
+          {
+            "type": "command",
+            "command": "az codex guard --json user-prompt-submit"
           }
         ]
       }
@@ -27,7 +35,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" pre_tool_use \"tc\" \"az-tc\"'"
+            "command": "az notify --json pre_tool_use"
+          },
+          {
+            "type": "command",
+            "command": "az codex guard --json pre-tool-use"
           }
         ]
       }
@@ -37,7 +49,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" post_tool_use \"tc\" \"az-tc\"'"
+            "command": "az notify --json post_tool_use"
+          },
+          {
+            "type": "command",
+            "command": "az codex guard --json post-tool-use"
           }
         ]
       }
@@ -47,7 +63,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" session_end \"tc\" \"az-tc\"'"
+            "command": "az notify --json stop"
+          },
+          {
+            "type": "command",
+            "command": "az codex guard --json stop"
           }
         ]
       }

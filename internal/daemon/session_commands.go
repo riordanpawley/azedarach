@@ -668,11 +668,11 @@ func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, image
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		sessionStartCommand := "az notify session_start --json"
-		userPromptSubmitCommand := "az notify user_prompt_submit --json"
-		preToolUseCommand := "az notify pre_tool_use --json"
-		postToolUseCommand := "az notify post_tool_use --json"
-		stopCommand := "az notify stop --json"
+		sessionStartCommand := "az notify --json session_start"
+		userPromptSubmitCommand := "az notify --json user_prompt_submit"
+		preToolUseCommand := "az notify --json pre_tool_use"
+		postToolUseCommand := "az notify --json post_tool_use"
+		stopCommand := "az notify --json stop"
 		parts = append(parts,
 			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
 			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),

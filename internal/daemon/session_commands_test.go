@@ -378,19 +378,19 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
-	if !strings.Contains(command, "az notify session_start --json") {
+	if !strings.Contains(command, "az notify --json session_start") {
 		t.Fatalf("command = %q, want codex session_start notify command", command)
 	}
-	if !strings.Contains(command, "az notify user_prompt_submit --json") {
+	if !strings.Contains(command, "az notify --json user_prompt_submit") {
 		t.Fatalf("command = %q, want codex user_prompt_submit notify command", command)
 	}
-	if !strings.Contains(command, "az notify pre_tool_use --json") {
+	if !strings.Contains(command, "az notify --json pre_tool_use") {
 		t.Fatalf("command = %q, want codex pre_tool_use notify command", command)
 	}
-	if !strings.Contains(command, "az notify post_tool_use --json") {
+	if !strings.Contains(command, "az notify --json post_tool_use") {
 		t.Fatalf("command = %q, want codex post_tool_use notify command", command)
 	}
-	if !strings.Contains(command, "az notify stop --json") {
+	if !strings.Contains(command, "az notify --json stop") {
 		t.Fatalf("command = %q, want codex stop notify command", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {

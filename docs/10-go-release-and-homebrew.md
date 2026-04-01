@@ -51,3 +51,9 @@ If a release is bad, use this order:
 - Post-release smoke checks download released assets and run:
   - `az --version`, `az --help`
   - `azd --version`, `azd --help`
+
+## Config Schema for Homebrew Users
+
+- Project configs write `$schema` as:
+  - `https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json`
+- This keeps JSON schema validation/autocomplete working for users installed via Homebrew, since the schema is fetched from a public URL instead of local repo paths.
