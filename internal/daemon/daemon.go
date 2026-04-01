@@ -289,6 +289,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return d.handleSessionStart(ctx, req)
 	case "session.attach":
 		return d.handleSessionAttach(ctx, req)
+	case "session.pause":
+		return d.handleSessionPause(ctx, req)
+	case "session.resume":
+		return d.handleSessionResume(ctx, req)
 	case "session.stop":
 		return d.handleSessionStop(ctx, req)
 	case "session.status":

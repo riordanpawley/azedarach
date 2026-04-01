@@ -287,6 +287,42 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 	return d.commandOutput(req, output), nil
 }
 
+func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		cmd.IssueID,
+		daemonhandlers.CommandSessionPause,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session pause transition: %v", err)), nil
+	}
+	return d.commandOutput(req, fmt.Sprintf("Paused session: %s\n", cmd.IssueID)), nil
+}
+
+func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		cmd.IssueID,
+		daemonhandlers.CommandSessionResume,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session resume transition: %v", err)), nil
+	}
+	return d.commandOutput(req, fmt.Sprintf("Resumed session: %s\n", cmd.IssueID)), nil
+}
+
 func (d *Daemon) handleSessionStop(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	if d.sessionLongRunning != nil {
 		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
