@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 // DetailPanel displays full task details with scrollable description
@@ -191,47 +192,48 @@ func (d *DetailPanel) View() string {
 	b.WriteString("\n")
 
 	// Worktree/session runtime info if present
-	if d.session != nil {
+	session := d.sessionForDisplay()
+	if session != nil {
 		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Worktree"))
+		b.WriteString(headerStyle.Render("Session"))
 		b.WriteString("\n")
 
 		b.WriteString(labelStyle.Render("State:"))
 		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(fmt.Sprintf("%s %s", d.session.State.Icon(), string(d.session.State))))
+		b.WriteString(valueStyle.Render(fmt.Sprintf("%s %s", session.State.Icon(), string(session.State))))
 		b.WriteString("\n")
 
 		if d.hasGitStatusData() {
 			b.WriteString(labelStyle.Render("Git:"))
 			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.formatGitStatus()))
+			b.WriteString(d.formatGitStatus())
 			b.WriteString("\n")
 		}
 
-		if d.session.StartedAt != nil {
+		if session.StartedAt != nil {
 			b.WriteString(labelStyle.Render("Created:"))
 			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.formatTime(*d.session.StartedAt)))
+			b.WriteString(valueStyle.Render(d.formatTime(*session.StartedAt)))
 			b.WriteString("\n")
 
-			age := time.Since(*d.session.StartedAt)
+			age := time.Since(*session.StartedAt)
 			b.WriteString(labelStyle.Render("Age:"))
 			b.WriteString("  ")
 			b.WriteString(valueStyle.Render(d.formatDuration(age)))
 			b.WriteString("\n")
 		}
 
-		if d.session.Worktree != "" {
+		if session.Worktree != "" {
 			b.WriteString(labelStyle.Render("Path:"))
 			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.session.Worktree))
+			b.WriteString(valueStyle.Render(session.Worktree))
 			b.WriteString("\n")
 		}
 
-		if d.session.DevServer != nil && d.session.DevServer.Running {
+		if session.DevServer != nil && session.DevServer.Running {
 			b.WriteString(labelStyle.Render("Dev Server:"))
 			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(fmt.Sprintf(":%d (%s)", d.session.DevServer.Port, d.session.DevServer.Command)))
+			b.WriteString(valueStyle.Render(fmt.Sprintf(":%d (%s)", session.DevServer.Port, session.DevServer.Command)))
 			b.WriteString("\n")
 		}
 	}
@@ -458,7 +460,7 @@ func (d *DetailPanel) hasGitStatusData() bool {
 	if d.task.HasWorktree {
 		return true
 	}
-	if d.session != nil && strings.TrimSpace(d.session.Worktree) != "" {
+	if session := d.sessionForDisplay(); session != nil && strings.TrimSpace(session.Worktree) != "" {
 		return true
 	}
 	return d.hasGitTelemetrySignal()
@@ -480,22 +482,39 @@ func (d *DetailPanel) formatGitStatus() string {
 	}
 
 	status := "clean"
+	statusColor := uistyles.Green
 	if d.task.HasUncommittedChanges || d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
 		status = "dirty"
+		statusColor = uistyles.Peach
 	}
 
+	statusToken := lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(status)
 	details := make([]string, 0, 2)
 	if d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
-		details = append(details, fmt.Sprintf("+%d/-%d", d.task.GitAdditions, d.task.GitDeletions))
+		add := lipgloss.NewStyle().Foreground(uistyles.Green).Bold(true).Render(fmt.Sprintf("+%d", d.task.GitAdditions))
+		del := lipgloss.NewStyle().Foreground(uistyles.Red).Bold(true).Render(fmt.Sprintf("-%d", d.task.GitDeletions))
+		sep := lipgloss.NewStyle().Foreground(uistyles.Overlay0).Render("/")
+		details = append(details, add+sep+del)
 	}
 	if d.task.GitAheadCount > 0 || d.task.GitBehindCount > 0 {
-		details = append(details, fmt.Sprintf("up %d, down %d", d.task.GitAheadCount, d.task.GitBehindCount))
+		up := lipgloss.NewStyle().Foreground(uistyles.Green).Bold(true).Render(fmt.Sprintf("up %d", d.task.GitAheadCount))
+		down := lipgloss.NewStyle().Foreground(uistyles.Yellow).Bold(true).Render(fmt.Sprintf("down %d", d.task.GitBehindCount))
+		comma := lipgloss.NewStyle().Foreground(uistyles.Overlay0).Render(", ")
+		details = append(details, up+comma+down)
 	}
 
 	if len(details) == 0 {
-		return status
+		return statusToken
 	}
-	return fmt.Sprintf("%s (%s)", status, strings.Join(details, "; "))
+	sep := lipgloss.NewStyle().Foreground(uistyles.Overlay0).Render("; ")
+	return fmt.Sprintf("%s (%s)", statusToken, strings.Join(details, sep))
+}
+
+func (d *DetailPanel) sessionForDisplay() *domain.Session {
+	if d.session != nil {
+		return d.session
+	}
+	return d.task.Session
 }
 
 func wrapDescriptionLines(description string, width int) []string {

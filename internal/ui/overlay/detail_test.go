@@ -99,7 +99,7 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	view := panel.View()
 
 	// Check worktree/runtime info is present
-	assert.Contains(t, view, "Worktree")
+	assert.Contains(t, view, "Session")
 	assert.Contains(t, view, "busy")
 	assert.Contains(t, view, "Created:")
 	assert.Contains(t, view, "Git:")
@@ -109,6 +109,28 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	assert.Contains(t, view, "/path/to/worktree")
 	assert.Contains(t, view, ":3000")
 	assert.Contains(t, view, "npm run dev")
+}
+
+func TestDetailPanelViewWithTaskSessionFallback(t *testing.T) {
+	startTime := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	task := domain.Task{
+		ID:     "az-321",
+		Title:  "Task with projected session",
+		Status: domain.StatusInProgress,
+		Session: &domain.Session{
+			IssueID:   "az-321",
+			State:     domain.SessionBusy,
+			StartedAt: &startTime,
+			Worktree:  "/tmp/az-321",
+		},
+	}
+
+	panel := NewDetailPanel(task, nil)
+	view := panel.View()
+
+	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "busy")
+	assert.Contains(t, view, "/tmp/az-321")
 }
 
 func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
