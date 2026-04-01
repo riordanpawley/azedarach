@@ -26,6 +26,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -230,7 +231,8 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 }
 
 func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error) {
-	logger := slog.Default()
+	logPath := filepath.Join(resolveSessionLogDir(cfg), "az-cli.log")
+	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
 
 	if strings.TrimSpace(repoDir) == "" {
 		return nil, fmt.Errorf("failed to get current directory: empty repo dir")

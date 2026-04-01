@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -31,6 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
@@ -179,20 +179,20 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading         bool
-	boardRefreshing bool
-	issueRefreshSeq uint64
-	projectSwitchSeq uint64
+	loading               bool
+	boardRefreshing       bool
+	issueRefreshSeq       uint64
+	projectSwitchSeq      uint64
 	projectSwitchInFlight bool
-	spinner         spinner.Model
-	lastRefresh     time.Time
-	hasRefreshLoop  bool
+	spinner               spinner.Model
+	lastRefresh           time.Time
+	hasRefreshLoop        bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient     *daemonclient.Client
-	daemonSocketPath string
-	daemonEvents     <-chan protocol.EventEnvelope
-	daemonRevision   uint64
+	daemonClient              *daemonclient.Client
+	daemonSocketPath          string
+	daemonEvents              <-chan protocol.EventEnvelope
+	daemonRevision            uint64
 	lastDaemonReattachAttempt time.Time
 
 	// Session management services
@@ -2209,8 +2209,8 @@ type issuesLoadedMsg struct {
 
 type issuesErrorMsg struct {
 	refreshSeq uint64
-	projectID string
-	err       error
+	projectID  string
+	err        error
 }
 
 type projectSwitchResultMsg struct {
@@ -2501,9 +2501,9 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		}
 		return issuesLoadedMsg{
 			refreshSeq: refreshSeq,
-			projectID: projectID,
-			tasks:     snapshot.Tasks,
-			revision:  snapshot.Revision,
+			projectID:  projectID,
+			tasks:      snapshot.Tasks,
+			revision:   snapshot.Revision,
 		}
 	}
 }
@@ -2796,23 +2796,23 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("daemon client unavailable"),
+				project:   project,
+				err:       fmt.Errorf("daemon client unavailable"),
 			}
 		}
 		if strings.TrimSpace(project.Path) == "" {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("project %q has empty path", project.Name),
+				project:   project,
+				err:       fmt.Errorf("project %q has empty path", project.Name),
 			}
 		}
 		projectConfig, err := config.LoadConfig(project.Path)
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2828,8 +2828,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err := launcher.Replace(ctx); err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2844,15 +2844,15 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
 			}
 		}
 		if !ack.Accepted {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
+				project:   project,
+				err:       fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
 		}
 
@@ -2860,16 +2860,16 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     err,
+				project:   project,
+				err:       err,
 			}
 		}
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     err,
+				project:   project,
+				err:       err,
 			}
 		}
 
@@ -3952,14 +3952,7 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 }
 
 func newTUILogger(logPath string) *slog.Logger {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	}
-	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return logging.NewTextFileLogger(logPath, slog.LevelInfo)
 }
 
 func (m Model) configSourcePath() string {
