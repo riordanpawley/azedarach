@@ -28,6 +28,7 @@ const (
 	taskTemplateAnchorNotes       = "NOTES"
 	taskTemplateAnchorAcceptance  = "ACCEPTANCE"
 	createTaskOverlayWidth        = 100
+	createTaskOverlayWideWidth    = 120
 	createTaskOverlayHeight       = 30
 )
 
@@ -565,7 +566,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the form
 func (c *CreateTaskOverlay) View() string {
-	width, height := c.Clamp(createTaskOverlayWidth, createTaskOverlayHeight)
+	width, height := c.Clamp(c.desiredOverlayWidth(), createTaskOverlayHeight)
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            c.styles,
 		width:             width,
@@ -597,6 +598,13 @@ func (c *CreateTaskOverlay) View() string {
 			})
 		},
 	})
+}
+
+func (c *CreateTaskOverlay) desiredOverlayWidth() int {
+	if c.width >= 132 {
+		return createTaskOverlayWideWidth
+	}
+	return createTaskOverlayWidth
 }
 
 func (c *CreateTaskOverlay) clearToDefaults() {
@@ -659,11 +667,11 @@ func (c *CreateTaskOverlay) cycleImplementationCombo(direction int) {
 func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	stacked := width < 52
 	titleLabelWidth := lipgloss.Width("Title: ")
-	titleWidth := max(20, width-titleLabelWidth-3)
+	titleWidth := max(8, width-titleLabelWidth-3)
 	if stacked {
-		titleWidth = max(20, width-4)
+		titleWidth = max(8, width-4)
 	}
-	descriptionWidth := max(24, width-4)
+	descriptionWidth := max(10, width-4)
 	descriptionHeight := max(4, height-16)
 	if stacked {
 		descriptionHeight = max(4, height-20)
