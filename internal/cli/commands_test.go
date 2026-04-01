@@ -1654,9 +1654,19 @@ func TestParseIssueGetArgs(t *testing.T) {
 			want: IssueGetOptions{IssueID: "az-4", JSON: false},
 		},
 		{
+			name:        "single-dash long flag rejected",
+			args:        []string{"-id", "az-4"},
+			errContains: "invalid flag \"-id\": use --id",
+		},
+		{
 			name: "interspersed json flag after positional id",
 			args: []string{"az-4", "--json"},
 			want: IssueGetOptions{IssueID: "az-4", JSON: true},
+		},
+		{
+			name:        "single-dash long interspersed flag rejected",
+			args:        []string{"az-4", "-json"},
+			errContains: "invalid flag \"-json\": use --json",
 		},
 	}
 

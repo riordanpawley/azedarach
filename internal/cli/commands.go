@@ -747,12 +747,16 @@ func splitLogSourceList(value string) []string {
 }
 
 func parseWithInterspersedFlags(fs *flag.FlagSet, args []string) error {
-	return fs.Parse(normalizeInterspersedFlags(fs, args))
+	normalized, err := normalizeInterspersedFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	return fs.Parse(normalized)
 }
 
-func normalizeInterspersedFlags(fs *flag.FlagSet, args []string) []string {
+func normalizeInterspersedFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	if len(args) == 0 {
-		return args
+		return args, nil
 	}
 
 	flagTokens := make([]string, 0, len(args))
@@ -767,6 +771,13 @@ func normalizeInterspersedFlags(fs *flag.FlagSet, args []string) []string {
 			positionals = append(positionals, token)
 			continue
 		}
+		if isSingleDashLongFlagToken(token) {
+			flagName := strings.TrimPrefix(token, "-")
+			if idx := strings.Index(flagName, "="); idx >= 0 {
+				flagName = flagName[:idx]
+			}
+			return nil, fmt.Errorf("invalid flag %q: use --%s (single dash is reserved for one-letter aliases)", token, flagName)
+		}
 
 		flagTokens = append(flagTokens, token)
 		if consumesFlagValue(fs, token) && i+1 < len(args) {
@@ -776,18 +787,22 @@ func normalizeInterspersedFlags(fs *flag.FlagSet, args []string) []string {
 	}
 
 	if len(flagTokens) == 0 || len(positionals) == 0 {
-		return args
+		return args, nil
 	}
 
 	normalized := make([]string, 0, len(flagTokens)+len(positionals)+1)
 	normalized = append(normalized, flagTokens...)
 	normalized = append(normalized, "--")
 	normalized = append(normalized, positionals...)
-	return normalized
+	return normalized, nil
 }
 
 func isFlagToken(token string) bool {
 	return strings.HasPrefix(token, "-") && token != "-"
+}
+
+func isSingleDashLongFlagToken(token string) bool {
+	return strings.HasPrefix(token, "-") && !strings.HasPrefix(token, "--") && len(strings.TrimPrefix(token, "-")) > 1
 }
 
 func consumesFlagValue(fs *flag.FlagSet, token string) bool {
