@@ -709,6 +709,39 @@ func TestOperationCommandsParseAndRender(t *testing.T) {
 	}
 }
 
+func TestParseLogArgs(t *testing.T) {
+	opts, err := ParseLogArgs([]string{"--source", "daemon,tui", "--lines", "50", "--no-follow", "cli"})
+	if err != nil {
+		t.Fatalf("ParseLogArgs() error = %v", err)
+	}
+	if opts.Lines != 50 || opts.Follow {
+		t.Fatalf("ParseLogArgs() lines/follow = %+v", opts)
+	}
+	if got, want := opts.Sources, []string{"daemon", "tui", "cli"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseLogArgs() sources = %v, want %v", got, want)
+	}
+
+	defaultOpts, err := ParseLogArgs(nil)
+	if err != nil {
+		t.Fatalf("ParseLogArgs(nil) error = %v", err)
+	}
+	if got, want := defaultOpts.Sources, []string{"daemon", "tui", "cli"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseLogArgs(nil) sources = %v, want %v", got, want)
+	}
+
+	_, err = ParseLogArgs([]string{"daemon", "tui", "--no-follow", "--lines", "100"})
+	if err == nil || !strings.Contains(err.Error(), "flags must come before positional sources") {
+		t.Fatalf("ParseLogArgs(interspersed) error = %v, want ordering guidance", err)
+	}
+
+	if _, err := ParseLogArgs([]string{"worker"}); err == nil {
+		t.Fatal("expected unknown source error")
+	}
+	if _, err := ParseLogArgs([]string{"--lines", "0"}); err == nil {
+		t.Fatal("expected lines validation error")
+	}
+}
+
 func TestOperationCommandsUseDaemonClient(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -779,6 +812,90 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("output = %q, want %q", output, needle)
 		}
+	}
+}
+
+func TestLogCommandBuildsTailInvocation(t *testing.T) {
+	repoDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	deps := &Dependencies{
+		Config:  cfg,
+		RepoDir: repoDir,
+	}
+	daemonLogPath := filepath.Join(repoDir, ".azedarach", "daemon.log")
+	tuiLogPath := filepath.Join(cfg.Session.LogDir, "az.log")
+	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(daemon log dir): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tuiLogPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(tui log dir): %v", err)
+	}
+	if err := os.WriteFile(daemonLogPath, []byte("daemon\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(daemon log): %v", err)
+	}
+	if err := os.WriteFile(tuiLogPath, []byte("tui\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(tui log): %v", err)
+	}
+
+	var gotArgs []string
+	origTail := runLogTailCommand
+	runLogTailCommand = func(args []string) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	t.Cleanup(func() {
+		runLogTailCommand = origTail
+	})
+
+	err := LogCommand(deps, LogOptions{
+		Sources: []string{"daemon", "tui", "cli"},
+		Lines:   25,
+		Follow:  true,
+	})
+	if err != nil {
+		t.Fatalf("LogCommand() error = %v", err)
+	}
+
+	want := []string{
+		"-n", "25",
+		"-F",
+		daemonLogPath,
+		tuiLogPath,
+	}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("tail args = %v, want %v", gotArgs, want)
+	}
+}
+
+func TestLogCommandErrorsWhenAllSelectedLogsMissing(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	deps := &Dependencies{
+		Config:  cfg,
+		RepoDir: t.TempDir(),
+	}
+
+	called := false
+	origTail := runLogTailCommand
+	runLogTailCommand = func(args []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() {
+		runLogTailCommand = origTail
+	})
+
+	err := LogCommand(deps, LogOptions{
+		Sources: []string{"daemon", "cli"},
+		Lines:   10,
+		Follow:  false,
+	})
+	if err == nil || !strings.Contains(err.Error(), "none of the selected log files exist yet") {
+		t.Fatalf("LogCommand() error = %v, want missing files error", err)
+	}
+	if called {
+		t.Fatal("tail should not be invoked when no selected logs exist")
 	}
 }
 
@@ -3654,8 +3771,14 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "export") {
 		t.Fatalf("usage missing export command: %q", output)
 	}
+	if !strings.Contains(output, "log [sources]") {
+		t.Fatalf("usage missing log command: %q", output)
+	}
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
+	}
+	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
+		t.Fatalf("usage missing log example: %q", output)
 	}
 	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)
