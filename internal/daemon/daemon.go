@@ -49,18 +49,22 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues             *issues.Client
-	tmux               *tmux.Client
-	git                *git.Client
-	worktree           *git.WorktreeManager
-	gitHandler         *daemonhandlers.GitHandler
-	worktreeHandler    *daemonhandlers.WorktreeHandler
-	session            *daemonhandlers.SessionHandler
-	sessionStore       *daemonstate.Store
-	sessionLongRunning SessionLongRunningExecutor
-	operationRuntime   *operationRuntime
-	sessionStopMu      sync.Mutex
-	sessionStopPending map[string]int
+	issues                       *issues.Client
+	tmux                         *tmux.Client
+	git                          *git.Client
+	worktree                     *git.WorktreeManager
+	gitHandler                   *daemonhandlers.GitHandler
+	worktreeHandler              *daemonhandlers.WorktreeHandler
+	session                      *daemonhandlers.SessionHandler
+	sessionStore                 *daemonstate.Store
+	projectionStore              *daemonstate.ProjectionStore
+	sessionLongRunning           SessionLongRunningExecutor
+	operationRuntime             *operationRuntime
+	sessionStopMu                sync.Mutex
+	sessionStopPending           map[string]int
+	projectionRefreshMu          sync.Mutex
+	sessionProjectionRefreshing  map[string]bool
+	sessionProjectionLastRefresh map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -110,6 +114,7 @@ func New(cfg Config) *Daemon {
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
+	projectionStore := daemonstate.NewProjectionStore(cfg.RepoDir, cfg.Logger)
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
@@ -117,17 +122,20 @@ func New(cfg Config) *Daemon {
 	specHandler := daemonhandlers.NewSpecHandler(issueSpecService{client: issuesClient})
 
 	d := &Daemon{
-		cfg:                cfg,
-		lock:               lifecycle.NewLockManager(cfg.LockPath),
-		hub:                publish.NewHub(512, 64, cfg.Logger),
-		issues:             issuesClient,
-		tmux:               tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:                gitClient,
-		worktree:           git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
-		session:            sessionHandler,
-		sessionStore:       sessionStore,
-		sessionStopPending: map[string]int{},
-		revision:           map[string]uint64{},
+		cfg:                          cfg,
+		lock:                         lifecycle.NewLockManager(cfg.LockPath),
+		hub:                          publish.NewHub(512, 64, cfg.Logger),
+		issues:                       issuesClient,
+		tmux:                         tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:                          gitClient,
+		worktree:                     git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
+		session:                      sessionHandler,
+		sessionStore:                 sessionStore,
+		projectionStore:              projectionStore,
+		sessionStopPending:           map[string]int{},
+		sessionProjectionRefreshing:  map[string]bool{},
+		sessionProjectionLastRefresh: map[string]time.Time{},
+		revision:                     map[string]uint64{},
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	runtime := newOperationRuntime(operationRuntimeConfig{
@@ -142,7 +150,11 @@ func New(cfg Config) *Daemon {
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
 	gitHandler := daemonhandlers.NewGitHandler(gitClient, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
-		worktreeServiceAdapter{manager: d.worktree},
+		&worktreeServiceAdapter{
+			manager:         d.worktree,
+			projectionStore: d.projectionStore,
+			logger:          cfg.Logger,
+		},
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
 	)
 	runtime.gitHandler = gitHandler
@@ -206,6 +218,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.issues != nil {
 			if closeErr := d.issues.CloseDB(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
+			}
+		}
+		if d.projectionStore != nil {
+			if closeErr := d.projectionStore.Close(); closeErr != nil {
+				d.cfg.Logger.Warn("failed to close projection store", "error", closeErr)
 			}
 		}
 		_ = lease.Release()
@@ -435,6 +452,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 		if err != nil {
 			return err
 		}
+		d.persistSessionProjection(projectID, session)
 		d.publishSessionProjectionEvent(projectID, req.Meta, session)
 		return nil
 	}
@@ -442,6 +460,93 @@ func (d *Daemon) applySessionLifecycleTransition(
 		return errors.New(resp.Error.Message)
 	}
 	return errors.New("session lifecycle transition failed")
+}
+
+func (d *Daemon) persistSessionProjection(projectID string, session daemonstate.Session) {
+	if d.projectionStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.projectionStore.UpsertSession(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn(
+			"persist session projection failed",
+			"project_id", projectID,
+			"session_id", session.ID,
+			"issue_id", session.IssueID,
+			"state", session.State,
+			"error", err,
+		)
+	}
+}
+
+func (d *Daemon) triggerSessionProjectionRefresh(projectID string, refreshFn func(context.Context, string) error) {
+	if d.projectionStore == nil || refreshFn == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	const minRefreshInterval = 3 * time.Second
+	now := time.Now()
+
+	d.projectionRefreshMu.Lock()
+	if d.sessionProjectionRefreshing == nil {
+		d.sessionProjectionRefreshing = map[string]bool{}
+	}
+	if d.sessionProjectionLastRefresh == nil {
+		d.sessionProjectionLastRefresh = map[string]time.Time{}
+	}
+	if d.sessionProjectionRefreshing[projectID] {
+		d.projectionRefreshMu.Unlock()
+		return
+	}
+	if last := d.sessionProjectionLastRefresh[projectID]; !last.IsZero() && now.Sub(last) < minRefreshInterval {
+		d.projectionRefreshMu.Unlock()
+		return
+	}
+	d.sessionProjectionRefreshing[projectID] = true
+	d.sessionProjectionLastRefresh[projectID] = now
+	d.projectionRefreshMu.Unlock()
+
+	go func() {
+		defer func() {
+			d.projectionRefreshMu.Lock()
+			d.sessionProjectionRefreshing[projectID] = false
+			d.projectionRefreshMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := refreshFn(ctx, projectID); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("session projection refresh failed", "project_id", projectID, "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) persistWorktreeProjection(projectID, issueID, path, branch string) {
+	if d.projectionStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+		ProjectID: strings.TrimSpace(projectID),
+		IssueID:   strings.TrimSpace(issueID),
+		Path:      strings.TrimSpace(path),
+		Branch:    strings.TrimSpace(branch),
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn(
+			"persist worktree projection failed",
+			"project_id", projectID,
+			"issue_id", issueID,
+			"path", path,
+			"branch", branch,
+			"error", err,
+		)
+	}
 }
 
 func (d *Daemon) successResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {

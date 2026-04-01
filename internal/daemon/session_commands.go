@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
@@ -200,6 +201,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
 		}
 	}
+	d.persistWorktreeProjection(cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -339,7 +341,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, cmd.ProjectID, cmd.IssueID); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("session reconciliation during session.status failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", err)
 	}
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, cmd.ProjectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -434,6 +436,7 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 	if err != nil {
 		return err
 	}
+	d.persistSessionProjection(projectID, event.Session)
 	d.publishSessionProjectionEvent(projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
 	return nil
 }
@@ -557,7 +560,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 		return tasks
 	}
 
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	tmuxSessions, err := d.listTmuxSessionsCacheFirst(ctx, projectID)
 	if err != nil {
 		return tasks
 	}
@@ -611,6 +614,104 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	}
 
 	return tasks
+}
+
+func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	if d.projectionStore != nil {
+		cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+		if err == nil && len(cachedSessions) > 0 {
+			cachedActive := make([]string, 0, len(cachedSessions))
+			for _, session := range cachedSessions {
+				if session.State == daemonstate.SessionStateStopped {
+					continue
+				}
+				if strings.TrimSpace(session.ID) == "" {
+					continue
+				}
+				cachedActive = append(cachedActive, session.ID)
+			}
+			if len(cachedActive) > 0 {
+				d.triggerSessionProjectionRefresh(projectID, d.refreshSessionProjectionCache)
+				return cachedActive, nil
+			}
+		}
+	}
+
+	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.persistTmuxSessionProjectionSnapshot(ctx, projectID, tmuxSessions); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("persist tmux session projection snapshot failed", "project_id", projectID, "error", err)
+	}
+	return tmuxSessions, nil
+}
+
+func (d *Daemon) refreshSessionProjectionCache(ctx context.Context, projectID string) error {
+	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return err
+	}
+	return d.persistTmuxSessionProjectionSnapshot(ctx, projectID, tmuxSessions)
+}
+
+func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, projectID string, tmuxSessions []string) error {
+	if d.projectionStore == nil || d.sessionStore == nil {
+		return nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	namingScope := d.sessionNamingScope(projectID)
+	snapshot := d.sessionStore.ReadSnapshot(projectID)
+	byIssueKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
+	for _, session := range snapshot.Sessions {
+		key := sessionKey(session.IssueID)
+		if key == "" {
+			if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
+				key = sessionKey(parsedIssueID)
+			}
+		}
+		if key == "" {
+			continue
+		}
+		byIssueKey[key] = session
+	}
+
+	for _, name := range tmuxSessions {
+		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		if !ok {
+			issueID = name
+		}
+		issueKey := sessionKey(issueID)
+		row := daemonstate.Session{
+			ID:        name,
+			IssueID:   issueID,
+			State:     daemonstate.SessionStateAttached,
+			UpdatedAt: time.Now().UTC(),
+		}
+		if existing, exists := byIssueKey[issueKey]; exists {
+			row.State = existing.State
+			if row.State == daemonstate.SessionStateStopped {
+				row.State = daemonstate.SessionStateAttached
+			}
+			if !existing.UpdatedAt.IsZero() {
+				row.UpdatedAt = existing.UpdatedAt
+			}
+		}
+		if err := d.projectionStore.UpsertSession(ctx, projectID, row); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
