@@ -54,7 +54,12 @@ func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 	stop := startDaemonForTest(t, repoDir, socketPath, lockPath)
 	defer stop()
 
-	client := New(transport.NewClient(socketPath).WithTimeout(20 * time.Second)).WithProjectID("proj-sqlite")
+	client := New(transport.NewClient(socketPath).WithTimeout(20 * time.Second)).
+		WithProjectID("proj-sqlite").
+		WithReadWaitPolicy(ReadWaitPolicy{
+			Default:  15 * time.Second,
+			Explicit: 20 * time.Second,
+		})
 	readCtx, cancelRead := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelRead()
 	snapshot, err := client.ListTasksSnapshot(readCtx)
