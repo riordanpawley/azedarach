@@ -300,7 +300,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	if resp, handled := d.guardSyncDependentCommand(req); handled {
 		return resp, nil
 	}
-	if commandRequiresExplicitProjectID(req.Command) && strings.TrimSpace(req.Meta.ProjectID) == "" {
+	if daemonhandlers.CommandRequiresProjectID(req.Command) && strings.TrimSpace(req.Meta.ProjectID) == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required metadata: project_id"), nil
 	}
 	if err := d.beginCommand(); err != nil {
@@ -308,7 +308,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	defer d.endCommand()
 
-	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") || strings.HasPrefix(req.Command, "spec.") {
+	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 		}
@@ -363,30 +363,6 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionRecover(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
-	}
-}
-
-func commandRequiresExplicitProjectID(command string) bool {
-	switch {
-	case strings.HasPrefix(command, "git."),
-		strings.HasPrefix(command, "pr."),
-		strings.HasPrefix(command, "worktree."),
-		strings.HasPrefix(command, "devserver."),
-		strings.HasPrefix(command, "operation."),
-		strings.HasPrefix(command, "task."),
-		strings.HasPrefix(command, "session."):
-		return true
-	}
-
-	switch command {
-	case protocol.CommandIssueFanout,
-		protocol.CommandIssueFanoutDrift,
-		protocol.CommandMailSend,
-		protocol.CommandMailList,
-		protocol.CommandMailWatch:
-		return true
-	default:
-		return false
 	}
 }
 
