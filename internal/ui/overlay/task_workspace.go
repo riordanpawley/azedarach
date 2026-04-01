@@ -27,14 +27,13 @@ type TaskWorkspaceOverlay struct {
 // NewTaskWorkspaceOverlay creates a large overlay with details + action panel.
 func NewTaskWorkspaceOverlay(
 	task domain.Task,
-	session *domain.Session,
 	relatedTasks []domain.Task,
 	mutation *TaskMutationProgress,
 	viewportWidth int,
 	viewportHeight int,
 ) *TaskWorkspaceOverlay {
-	detail := NewDetailPanel(task, session).WithRelatedTasks(relatedTasks).WithMutationProgress(mutation)
-	actions := NewActionMenu(task, session).WithRelatedTasks(relatedTasks)
+	detail := NewDetailPanel(task).WithRelatedTasks(relatedTasks).WithMutationProgress(mutation)
+	actions := NewActionMenu(task, task.Session).WithRelatedTasks(relatedTasks)
 
 	overlayWidth := viewportWidth
 	overlayHeight := viewportHeight - 1
@@ -227,14 +226,13 @@ func (w *TaskWorkspaceOverlay) TaskID() string {
 }
 
 // SyncTask updates workspace detail/actions from refreshed task projection data.
-func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, session *domain.Session, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
+func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
 	w.detail.task = task
-	w.detail.session = session
 	w.detail.relatedTasks = append([]domain.Task(nil), relatedTasks...)
 	w.detail.mutation = cloneTaskMutationProgress(mutation)
 
 	w.actions.task = task
-	w.actions.session = session
+	w.actions.session = task.Session
 	w.actions.relatedTasks = append([]domain.Task(nil), relatedTasks...)
 	w.actions.actions = w.actions.buildActions()
 	if len(w.actions.actions) == 0 {

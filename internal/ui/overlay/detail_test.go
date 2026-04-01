@@ -23,23 +23,22 @@ func TestNewDetailPanel(t *testing.T) {
 		UpdatedAt:   time.Now(),
 	}
 
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 	require.NotNil(t, panel)
 	assert.Equal(t, task.ID, panel.task.ID)
-	assert.Nil(t, panel.session)
 	assert.Equal(t, 0, panel.scrollY)
 }
 
 func TestDetailPanelTitle(t *testing.T) {
 	task := domain.Task{ID: "test"}
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	assert.Equal(t, "Task Details", panel.Title())
 }
 
 func TestDetailPanelSize(t *testing.T) {
 	task := domain.Task{ID: "test"}
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	width, height := panel.Size()
 	assert.Equal(t, 70, width)
@@ -58,7 +57,7 @@ func TestDetailPanelView(t *testing.T) {
 		UpdatedAt:   time.Date(2025, 1, 2, 14, 30, 0, 0, time.UTC),
 	}
 
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 	view := panel.View()
 
 	// Check that key information is present
@@ -94,12 +93,13 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 			Running: true,
 		},
 	}
+	task.Session = session
 
-	panel := NewDetailPanel(task, session)
+	panel := NewDetailPanel(task)
 	view := panel.View()
 
 	// Check worktree/runtime info is present
-	assert.Contains(t, view, "Worktree")
+	assert.Contains(t, view, "Session")
 	assert.Contains(t, view, "busy")
 	assert.Contains(t, view, "Created:")
 	assert.Contains(t, view, "Git:")
@@ -109,6 +109,28 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	assert.Contains(t, view, "/path/to/worktree")
 	assert.Contains(t, view, ":3000")
 	assert.Contains(t, view, "npm run dev")
+}
+
+func TestDetailPanelViewWithTaskSessionFallback(t *testing.T) {
+	startTime := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	task := domain.Task{
+		ID:     "az-321",
+		Title:  "Task with projected session",
+		Status: domain.StatusInProgress,
+		Session: &domain.Session{
+			IssueID:   "az-321",
+			State:     domain.SessionBusy,
+			StartedAt: &startTime,
+			Worktree:  "/tmp/az-321",
+		},
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "busy")
+	assert.Contains(t, view, "/tmp/az-321")
 }
 
 func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
@@ -123,8 +145,9 @@ func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *test
 		State:    domain.SessionIdle,
 		Worktree: "/tmp/az-789",
 	}
+	task.Session = session
 
-	panel := NewDetailPanel(task, session)
+	panel := NewDetailPanel(task)
 	view := panel.View()
 
 	assert.Contains(t, view, "Git:")
@@ -140,7 +163,7 @@ func TestDetailPanelViewWithParent(t *testing.T) {
 		Status:   domain.StatusOpen,
 	}
 
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 	view := panel.View()
 
 	assert.Contains(t, view, "Parent:")
@@ -181,7 +204,7 @@ func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 		},
 	}
 
-	panel := NewDetailPanel(task, nil).WithRelatedTasks(related)
+	panel := NewDetailPanel(task).WithRelatedTasks(related)
 	view := panel.View()
 
 	assert.Contains(t, view, "Dependencies")
@@ -204,7 +227,7 @@ func TestDetailPanelScrolling(t *testing.T) {
 		Description: description,
 	}
 
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	// Initial scroll position should be 0
 	assert.Equal(t, 0, panel.scrollY)
@@ -252,7 +275,7 @@ func TestDetailPanelScrollLimits(t *testing.T) {
 		Description: "Short description",
 	}
 
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	// Should not scroll below 0
 	m, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
@@ -272,7 +295,7 @@ func TestDetailPanelScrollAccountsForWrappedLines(t *testing.T) {
 		ID:          "wrap-test",
 		Description: strings.Repeat("verylongtokenwithoutspaces", 20),
 	}
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 	panel.viewHeight = 5
 	panel.wrapWidth = 20
 	_ = panel.View()
@@ -290,7 +313,7 @@ func TestWrapDescriptionLines_HardWrapFallbackForLongToken(t *testing.T) {
 
 func TestDetailPanelEscapeCloses(t *testing.T) {
 	task := domain.Task{ID: "test"}
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	// Test Esc key
 	_, cmd := panel.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -313,7 +336,7 @@ func TestDetailPanelEscapeCloses(t *testing.T) {
 
 func TestDetailPanelFormatStatus(t *testing.T) {
 	task := domain.Task{ID: "test"}
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	tests := []struct {
 		status   domain.Status
@@ -335,7 +358,7 @@ func TestDetailPanelFormatStatus(t *testing.T) {
 
 func TestDetailPanelFormatDuration(t *testing.T) {
 	task := domain.Task{ID: "test"}
-	panel := NewDetailPanel(task, nil)
+	panel := NewDetailPanel(task)
 
 	tests := []struct {
 		duration time.Duration
