@@ -307,13 +307,38 @@ func isCodexGuardEvent(event string) bool {
 	}
 }
 
-func NotifyCommand(_ *Dependencies, opts NotifyOptions) error {
+func NotifyCommand(deps *Dependencies, opts NotifyOptions) error {
+	issueID := strings.TrimSpace(opts.IssueID)
+	if issueID == "" {
+		issueID = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	}
+	if issueID != "" && deps != nil && deps.DaemonClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := notifyDaemonSessionStatus(ctx, deps, issueID, opts.Event); err != nil && opts.Verbose {
+			fmt.Fprintf(os.Stderr, "notify daemon update failed: %v\n", err)
+		}
+	}
+
 	output, err := renderNotifyOutput(opts)
 	if err != nil {
 		return err
 	}
 	fmt.Println(output)
 	return nil
+}
+
+func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
+	switch event {
+	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
+		_, err := deps.DaemonClient.PauseSession(ctx, issueID)
+		return err
+	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
+		_, err := deps.DaemonClient.ResumeSession(ctx, issueID)
+		return err
+	default:
+		return nil
+	}
 }
 
 func renderNotifyOutput(opts NotifyOptions) (string, error) {

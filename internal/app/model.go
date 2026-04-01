@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -579,6 +578,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyOperationProgressEvent(msg.event)
 		if msg.event.Event == protocol.EventSessionUpdated {
 			m.applySessionProjectionEvent(msg.event)
+		}
+		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
+			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+			if !m.runtimeSignalsBusy && m.shouldRefreshRuntimeSignals() {
+				m.runtimeSignalsBusy = true
+				cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
@@ -2836,7 +2845,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 
 		socketPath := config.DaemonSocketPathFor(project.Path)
 		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
-		launcher := daemonprocess.NewLauncher(project.Path, socketPath)
+		launcher := daemonprocess.NewLauncher(project.Path, socketPath).WithLogger(m.logger)
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2914,7 +2923,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 
 		socketPath := config.DaemonSocketPathFor(targetRepoDir)
 		daemonClient := m.daemonClientForSocket(socketPath, projectID)
-		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath)
+		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath).WithLogger(m.logger)
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -3069,6 +3078,10 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
+	switch evt.Event {
+	case protocol.EventWorktreeProjectionUpdated, protocol.EventGitStatusUpdated:
+		return daemonEventIgnore
+	}
 	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 	switch cursor.Decide(evt) {
 	case protocol.StreamProjectionDecisionIgnore:
@@ -3694,8 +3707,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Close the overlay first
-	m.overlayStack.Pop()
+	// Keep task workspace open when attaching so users can return to the
+	// full detail/actions panel after attach without reopening it.
+	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+		m.overlayStack.Pop()
+	}
 
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
@@ -3951,6 +3967,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func isTaskWorkspaceOverlay(current overlay.Overlay) bool {
+	if current == nil {
+		return false
+	}
+	_, ok := current.(*overlay.TaskWorkspaceOverlay)
+	return ok
+}
+
 func (m Model) eventLogFilePath() string {
 	if strings.TrimSpace(m.logFilePath) != "" {
 		return m.logFilePath
@@ -3983,11 +4007,15 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 
 func newTUILogger(logPath string) *slog.Logger {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Warn("failed to create tui log directory; falling back to stderr logger", "log_path", logPath, "error", err)
+		return logger
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Warn("failed to open tui log file; falling back to stderr logger", "log_path", logPath, "error", err)
+		return logger
 	}
 	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
@@ -4150,6 +4178,9 @@ func (m Model) openLogEditorCmd(logPath string) tea.Cmd {
 	}
 
 	cmd := exec.Command(editorName, path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return execProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return overlay.SelectionMsg{
@@ -4595,6 +4626,10 @@ func humanizeRuntimeEventName(eventName string) string {
 		return "Session started"
 	case "session.stopped":
 		return "Session stopped"
+	case protocol.EventWorktreeProjectionUpdated:
+		return "Worktree projection updated"
+	case protocol.EventGitStatusUpdated:
+		return "Git status updated"
 	}
 
 	tokens := strings.FieldsFunc(strings.ToLower(eventName), func(r rune) bool {
@@ -6200,7 +6235,7 @@ func predictsMergeConflicts(output string, err error) bool {
 	return strings.Contains(err.Error(), "CONFLICT")
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, _ bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
@@ -6208,29 +6243,6 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
-	if !refreshStatus {
-		for i := range m.tasks {
-			task := m.tasks[i]
-			if task.ID == sourceID && task.HasUncommittedChanges {
-				reasons = append(reasons, fmt.Sprintf("Source %s is not clean (cached runtime status)", sourceID))
-			}
-			if task.ID == targetID && task.HasUncommittedChanges {
-				reasons = append(reasons, fmt.Sprintf("Target %s is not clean (cached runtime status)", targetID))
-			}
-		}
-		if len(reasons) == 0 {
-			return nil
-		}
-		return &mergePreflightFailureMsg{
-			sourceID:       sourceID,
-			sourceWorktree: sourceWorktree,
-			targetID:       targetID,
-			targetWorktree: targetWorktree,
-			reasons:        reasons,
-			sourceFiles:    sourceFiles,
-			targetFiles:    targetFiles,
-		}
-	}
 
 	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
 	if sourceErr != nil {

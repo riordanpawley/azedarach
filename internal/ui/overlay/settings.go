@@ -517,47 +517,45 @@ func (m *SettingsOverlay) persistConfig() tea.Cmd {
 
 // openConfigInEditor opens the config file in $EDITOR
 func openConfigInEditor() tea.Cmd {
-	return func() tea.Msg {
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = os.Getenv("VISUAL")
-		}
-		if editor == "" {
-			editor = "vim" // Default to vim
-		}
+	editor := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editor == "" {
+		editor = "vim"
+	}
 
-		cwd, err := os.Getwd()
-		if err != nil {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return func() tea.Msg {
 			return SelectionMsg{
 				Key:   "editor-error",
 				Value: fmt.Errorf("failed to resolve cwd: %w", err),
 			}
 		}
-		baseDir, err := config.ResolveConfigBase(cwd)
+	}
+	baseDir, err := config.ResolveConfigBase(cwd)
+	if err != nil {
+		baseDir = cwd
+	}
+	configPath := filepath.Join(baseDir, config.ConfigDirName, config.ConfigFileName)
+
+	cmd := exec.Command(editor, configPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return overlayExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
-			baseDir = cwd
-		}
-		configPath := filepath.Join(baseDir, config.ConfigDirName, config.ConfigFileName)
-
-		// Create the command
-		cmd := exec.Command(editor, configPath)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		// Run the editor
-		if err := cmd.Run(); err != nil {
 			return SelectionMsg{
 				Key:   "editor-error",
 				Value: fmt.Errorf("failed to open editor: %w", err),
 			}
 		}
-
 		return SelectionMsg{
 			Key:   "editor-closed",
 			Value: nil,
 		}
-	}
+	})
 }
 
 // NewSettingsOverlayWithEditor creates a settings overlay with editor service integration.

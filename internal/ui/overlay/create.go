@@ -31,6 +31,8 @@ const (
 	createTaskOverlayHeight       = 30
 )
 
+var overlayExecProcess = tea.ExecProcess
+
 // TaskCreatedMsg is emitted when a new task is created
 type TaskCreatedMsg struct {
 	ID              string
@@ -159,7 +161,6 @@ func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, imp
 		parentID:        task.ParentID,
 		focusIndex:      focusTitle,
 		styles:          New(),
-		editorFlow:      runTaskTemplateInEditor,
 		defaults: createTaskDefaults{
 			title:       task.Title,
 			description: task.Description,
@@ -210,7 +211,6 @@ func NewCreateTaskOverlayWithParentAndImplOptions(parentID *string, implOptions 
 		parentID:        parentID,
 		focusIndex:      focusTitle,
 		styles:          New(),
-		editorFlow:      runTaskTemplateInEditor,
 		defaults: createTaskDefaults{
 			taskType: domain.TypeTask,
 			priority: domain.P2,
@@ -980,36 +980,70 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 }
 
 func (c *CreateTaskOverlay) editInEditorCmd() tea.Cmd {
-	return func() tea.Msg {
-		template := serializeTaskTemplate(
-			c.id,
-			c.title.Value(),
-			c.description.Value(),
-			c.taskType,
-			c.priority,
-			c.status,
-			c.assignee,
-			c.labels,
-			c.impls,
-			c.design,
-			c.notes,
-			c.acceptanceInput.Value(),
-			c.estimate,
-		)
-		editorFlow := c.editorFlow
-		if editorFlow == nil {
-			editorFlow = runTaskTemplateInEditor
+	template := serializeTaskTemplate(
+		c.id,
+		c.title.Value(),
+		c.description.Value(),
+		c.taskType,
+		c.priority,
+		c.status,
+		c.assignee,
+		c.labels,
+		c.impls,
+		c.design,
+		c.notes,
+		c.acceptanceInput.Value(),
+		c.estimate,
+	)
+
+	if c.editorFlow != nil {
+		return func() tea.Msg {
+			edited, err := c.editorFlow(template)
+			if err != nil {
+				return taskEditorErrorMsg{err: err}
+			}
+			created, err := parseTaskTemplate(edited, c.id, c.parentID)
+			if err != nil {
+				return taskEditorErrorMsg{err: err}
+			}
+			return taskEditorAppliedMsg{msg: created}
 		}
-		edited, err := editorFlow(template)
-		if err != nil {
-			return taskEditorErrorMsg{err: err}
+	}
+
+	tempFile := filepath.Join(os.TempDir(), fmt.Sprintf("azedarach-task-%d.md", time.Now().UnixNano()))
+	if err := os.WriteFile(tempFile, []byte(template), 0600); err != nil {
+		return func() tea.Msg {
+			return taskEditorErrorMsg{err: fmt.Errorf("write temp file: %w", err)}
 		}
-		created, err := parseTaskTemplate(edited, c.id, c.parentID)
+	}
+
+	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editorName == "" {
+		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
+	}
+	if editorName == "" {
+		editorName = "vim"
+	}
+
+	cmd := exec.Command(editorName, tempFile)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return overlayExecProcess(cmd, func(err error) tea.Msg {
+		defer os.Remove(tempFile)
 		if err != nil {
-			return taskEditorErrorMsg{err: err}
+			return taskEditorErrorMsg{err: fmt.Errorf("open editor: %w", err)}
+		}
+		edited, readErr := os.ReadFile(tempFile)
+		if readErr != nil {
+			return taskEditorErrorMsg{err: fmt.Errorf("read edited file: %w", readErr)}
+		}
+		created, parseErr := parseTaskTemplate(string(edited), c.id, c.parentID)
+		if parseErr != nil {
+			return taskEditorErrorMsg{err: parseErr}
 		}
 		return taskEditorAppliedMsg{msg: created}
-	}
+	})
 }
 
 func serializeTaskTemplate(
@@ -1258,37 +1292,6 @@ func parseSection(markdown, sectionName string) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(content, "\n"))
-}
-
-func runTaskTemplateInEditor(template string) (string, error) {
-	tempFile := filepath.Join(os.TempDir(), fmt.Sprintf("azedarach-task-%d.md", time.Now().UnixNano()))
-	if err := os.WriteFile(tempFile, []byte(template), 0600); err != nil {
-		return "", fmt.Errorf("write temp file: %w", err)
-	}
-	defer os.Remove(tempFile)
-
-	editorName := strings.TrimSpace(os.Getenv("EDITOR"))
-	if editorName == "" {
-		editorName = strings.TrimSpace(os.Getenv("VISUAL"))
-	}
-	if editorName == "" {
-		editorName = "vim"
-	}
-
-	cmd := exec.Command("sh", "-c", fmt.Sprintf(`%s %q`, editorName, tempFile))
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("open editor: %w", err)
-	}
-
-	edited, err := os.ReadFile(tempFile)
-	if err != nil {
-		return "", fmt.Errorf("read edited file: %w", err)
-	}
-	return string(edited), nil
 }
 
 // Title returns the overlay title

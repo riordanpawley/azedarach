@@ -13,8 +13,8 @@ Commands:
   dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from]  Add a dependency edge
   dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]  Remove a dependency edge
   dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
-  bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk create operations
+  bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk update operations
   fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
   fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics
