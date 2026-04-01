@@ -1,0 +1,457 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/diff"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
+)
+
+func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) {
+	count := len(msg.SelectedIDs)
+	if count == 0 {
+		return m, nil
+	}
+
+	switch msg.Action {
+	case "h": // Move left (previous status)
+		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
+
+	case "l": // Move right (next status)
+		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
+
+	case "o": // Set to Open
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusOpen)
+
+	case "i": // Set to In Progress
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInProgress)
+
+	case "b": // Set to Blocked
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusBlocked)
+
+	case "D": // Set to Done
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusDone)
+
+	case "d": // Delete selected
+		return m, m.bulkDeleteCmd(msg.SelectedIDs)
+
+	case "a":
+		return m, m.bulkArchiveCmd(msg.SelectedIDs)
+
+	case "x": // Clear selection
+		m.editor.ClearSelection()
+		m.editor.EnterNormal()
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Selection cleared",
+			Expires: time.Now().Add(2 * time.Second),
+		})
+	}
+
+	return m, nil
+}
+
+// handleSelection handles overlay selection messages
+func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
+	// Handle special overlay-specific messages first (before popping overlay)
+	switch msg.Key {
+	case "abort", "claude", "manual":
+		// Conflict resolution messages - extract the value
+		if resolution, ok := msg.Value.(overlay.ConflictResolutionMsg); ok {
+			return m.handleConflictResolution(resolution)
+		}
+	case "merge":
+		// Merge target selection message
+		if mergeMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
+			return m.handleMergeTargetSelection(mergeMsg)
+		}
+	case "m":
+		task, session := m.getCurrentTaskAndSession()
+		return m, m.followOnMergeSelectionCmd(task, session)
+	case "merge_preflight_abort":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.abortMergeCmd(worktree)
+	case "merge_preflight_discard_source":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.discardChangesCmd("source", worktree)
+	case "merge_preflight_discard_target":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.discardChangesCmd("target", worktree)
+	case "merge_preflight_commit_source":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.commitChangesCmd("source", worktree)
+	case "merge_preflight_commit_target":
+		m.overlayStack.Pop()
+		worktree, ok := msg.Value.(string)
+		if !ok || strings.TrimSpace(worktree) == "" {
+			return m, nil
+		}
+		return m, m.commitChangesCmd("target", worktree)
+	case "merge_preflight_refresh":
+		m.overlayStack.Pop()
+		return m, m.loadIssuesCmd()
+	case "projects":
+		// Settings -> Manage projects
+		m.overlayStack.Pop() // Close settings
+		return m, m.openOverlay(overlay.NewProjectSelectorWithOptions(
+			m.projectRegistry,
+			overlay.WithInitialCursor(m.projectSelectorCursor()),
+			overlay.WithCurrentProjectName(m.currentProject),
+		))
+	case "event-log-stream":
+		switch value := msg.Value.(type) {
+		case string:
+			return m, m.openLogStreamCmd(value)
+		case []string:
+			return m, m.openLogStreamCmd(value...)
+		}
+		return m, nil
+	case "event-log-editor":
+		if path, ok := msg.Value.(string); ok {
+			return m, m.openLogEditorCmd(path)
+		}
+		return m, nil
+	case "event-log-error":
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Log action failed: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+	case "event-log-opened":
+		return m, tea.ClearScreen
+	case "editor-error":
+		// Editor open error
+		m.overlayStack.Pop()
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Editor error: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+	case "editor-closed":
+		// Editor closed successfully
+		m.overlayStack.Pop()
+		return m, nil
+	case "select_child":
+		// Epic drill-down: child task selected
+		m.overlayStack.Pop()
+		if childID, ok := msg.Value.(string); ok {
+			// Jump to the child task by ID
+			columns := m.buildColumns()
+			m.nav.JumpToTaskByID(columns, childID)
+			m.ensureCursorVisible(columns)
+		}
+		return m, nil
+	case "set-default-success", "remove-success", "detect-success":
+		// Project registry actions succeeded - just show success toast
+		if name, ok := msg.Value.(string); ok {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Project %s: %s", msg.Key[:len(msg.Key)-8], name), // Remove "-success"
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, nil
+	case "settings-save-error":
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to save settings: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+	case "set-default-error", "remove-error", "add-error", "save-error", "detect-error":
+		// Project registry actions failed
+		if err, ok := msg.Value.(error); ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Error: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+	}
+
+	// Keep task workspace open when attaching so users can return to the
+	// full detail/actions panel after attach without reopening it.
+	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+		m.overlayStack.Pop()
+	}
+
+	if msg.Key == "yes" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		m.pendingCleanup = nil
+		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, true)
+	}
+	if msg.Key == "no" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		m.pendingCleanup = nil
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled forced cleanup for %s", pending.taskID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
+	task, session := m.getCurrentTaskAndSession()
+	if task == nil {
+		return m, nil
+	}
+
+	// Handle the selection based on key
+	switch msg.Key {
+	// Session actions
+	case "s":
+		// Start session
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+	case "S":
+		// Start session directly without origin/base selection prompt.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+	case "!":
+		// Start session with dangerous skip-permissions mode.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true)
+	case "session_origin":
+		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
+			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false)
+		}
+		return m, nil
+	case "a":
+		// Attach to session
+		if session != nil {
+			// Check if branch is behind main
+			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
+		} else if task.HasTmuxSession {
+			// We still have tmux presence, so attempt direct attach even when
+			// the session projection is stale or not yet hydrated.
+			return m, m.attachSessionCmd(task.ID)
+		} else {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session for this task",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+	case "p":
+		// TODO: Pause session
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Pause session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "x":
+		// Stop session
+		if session != nil {
+			return m, m.stopSessionCmd(task.ID)
+		} else {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session for this task",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+	case "R":
+		// TODO: Resume session
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: "Resume session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+	// Git actions
+	case "u":
+		// Update from base branch using local worktree hint when available.
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
+		}
+		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
+
+	case "m":
+		// Follow-on merge from dependency-aware context.
+		return m, m.followOnMergeSelectionCmd(task, session)
+
+	case "P":
+		// Create PR (with overlay)
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		// Get current branch name and open PR creation overlay
+		return m, m.openPROverlayCmd(session.Worktree, task.ID)
+	case "O":
+		// Open PR in browser for current branch
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openPRCmd(session.Worktree, task.ID)
+	case "M":
+		// Abort in-progress merge in worktree
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.abortMergeCmd(session.Worktree)
+	case "H":
+		// Open Helix in the task worktree.
+		if session == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.openHelixCmd(session.Worktree, task.ID)
+
+	case "f":
+		// Show diff viewer
+		diffWorktree := strings.TrimSpace(m.repoDir)
+		if session != nil && strings.TrimSpace(session.Worktree) != "" {
+			diffWorktree = strings.TrimSpace(session.Worktree)
+		}
+		if diffWorktree == "" {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No worktree available for diff",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		// Open diff viewer overlay
+		openPopup := func(ctx context.Context, title, command string) error {
+			if strings.TrimSpace(os.Getenv("TMUX")) == "" || m.tmuxClient == nil {
+				return fmt.Errorf("diff popup unavailable outside tmux; run inside tmux and retry")
+			}
+			popupCommand := fmt.Sprintf("cd %s && %s", shellSingleQuote(diffWorktree), command)
+			return m.tmuxClient.DisplayPopup(ctx, title, "95%", "95%", popupCommand)
+		}
+		viewer := diff.NewDiffViewer(diffWorktree, m.config.Git.BaseBranch, m.gitClient, openPopup)
+		cmd := m.openOverlay(viewer)
+		return m, cmd
+	case "w":
+		// Cleanup worktree and keep task.
+		return m, m.cleanupWorktreeCmd(task.ID, false, false)
+	case "W":
+		// Delete task and cleanup worktree.
+		return m, m.cleanupWorktreeCmd(task.ID, true, false)
+
+	case "i":
+		// Image attachments
+		attachOverlay := overlay.NewImageAttachOverlay(task.ID, m.attachmentService)
+		return m, m.openOverlay(attachOverlay)
+
+	case "r":
+		// Dev server menu
+		servers := m.getDevServerInfo(task.ID)
+		devOverlay := overlay.NewDevServerOverlay(
+			servers,
+			task.ID,
+			func(serverID string) tea.Cmd { return m.toggleDevServer(serverID) },
+			func(serverID string) tea.Cmd { return m.viewDevServer(serverID) },
+			func(serverID string) tea.Cmd { return m.restartDevServer(serverID) },
+			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+		)
+		return m, m.openOverlay(devOverlay)
+
+	case "b":
+		return m, m.openMergeTargetSelection(task)
+
+	// Task actions
+	case "h":
+		// Move task left (to previous status)
+		if task.Status == domain.StatusOpen {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Task is already in Open status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		newStatus, ok := shiftedTaskStatus(task.Status, -1)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Failed to compute previous status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		m.applyOptimisticTaskStatus(task.ID, newStatus)
+		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
+
+	case "l":
+		// Move task right (to next status)
+		if task.Status == domain.StatusDone {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "Task is already in Done status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		newStatus, ok := shiftedTaskStatus(task.Status, 1)
+		if !ok {
+			m.addToast(Toast{
+				Level:   ToastError,
+				Message: "Failed to compute next status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		m.applyOptimisticTaskStatus(task.ID, newStatus)
+		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
+	case "e":
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
+	case "T":
+		return m, m.deleteTaskCmd(task.ID)
+	case "d":
+		return m, m.deleteTaskCmd(task.ID)
+	case "c":
+		parentID := task.ID
+		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParentAndImplOptions(&parentID, m.availableTaskImplementations()))
+	}
+
+	return m, nil
+}
