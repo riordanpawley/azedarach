@@ -2070,7 +2070,21 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openMergeTargetSelection(task)
 	case "m":
 		return m, m.followOnMergeSelectionCmd(task, session)
-	case "u", "P":
+	case "u":
+		if task == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No focused issue to update",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
+		}
+		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
+	case "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: "Action unavailable in go-bubbletea action mode; no git operation was started. " +
@@ -3795,16 +3809,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Git actions
 	case "u":
-		// Update from main
-		if session == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
+		// Update from base branch using local worktree hint when available.
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
 		}
-		return m, m.fetchAndMergeCmd(session.Worktree, "main", task.ID, false)
+		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
@@ -6081,6 +6091,35 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 	}
 }
 
+func (m Model) updateFromBaseCmd(issueID, worktreeHint string, attachAfter bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		resolvedWorktree := strings.TrimSpace(worktreeHint)
+		var err error
+		if resolvedWorktree == "" {
+			resolvedWorktree, err = m.resolveIssueWorktreePathFromDaemon(ctx, issueID)
+		}
+		if resolvedWorktree == "" {
+			return fetchAndMergeResultMsg{
+				issueID:     issueID,
+				attachAfter: attachAfter,
+				err:         fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+		if err != nil {
+			return fetchAndMergeResultMsg{
+				issueID:     issueID,
+				attachAfter: attachAfter,
+				err:         fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+
+		return m.fetchAndMergeCmd(resolvedWorktree, m.resolveBaseBranch(), issueID, attachAfter)()
+	}
+}
+
 func (m Model) listDaemonWorktrees(ctx context.Context) ([]daemonclient.Worktree, error) {
 	if m.daemonClient == nil {
 		return nil, fmt.Errorf("daemon client unavailable")
@@ -6099,6 +6138,20 @@ func (m Model) resolveIssueWorktreePath(ctx context.Context, issueID string) (st
 	}
 	if session := m.sessionForIssue(issueID); session != nil && session.Worktree != "" {
 		return session.Worktree, nil
+	}
+	worktrees, err := m.listDaemonWorktrees(ctx)
+	if err != nil {
+		return "", err
+	}
+	if wt, ok := findDaemonWorktree(worktrees, "", issueID); ok && wt.Path != "" {
+		return wt.Path, nil
+	}
+	return "", fmt.Errorf("worktree not found for issue %s", issueID)
+}
+
+func (m Model) resolveIssueWorktreePathFromDaemon(ctx context.Context, issueID string) (string, error) {
+	if issueID == "" {
+		return "", fmt.Errorf("issue ID is required")
 	}
 	worktrees, err := m.listDaemonWorktrees(ctx)
 	if err != nil {

@@ -934,20 +934,20 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	childID := "az-child"
 	m.tasks = []domain.Task{
 		{
-			ID:         parentID,
-			Title:      "Parent",
-			Status:     domain.StatusDone,
-			Priority:   domain.P1,
-			Type:       domain.TypeTask,
+			ID:          parentID,
+			Title:       "Parent",
+			Status:      domain.StatusDone,
+			Priority:    domain.P1,
+			Type:        domain.TypeTask,
 			HasWorktree: false,
 		},
 		{
-			ID:         childID,
-			Title:      "Child",
-			Status:     domain.StatusInProgress,
-			Priority:   domain.P1,
-			Type:       domain.TypeTask,
-			ParentID:   &parentID,
+			ID:          childID,
+			Title:       "Child",
+			Status:      domain.StatusInProgress,
+			Priority:    domain.P1,
+			Type:        domain.TypeTask,
+			ParentID:    &parentID,
 			HasWorktree: true,
 		},
 	}
@@ -2096,8 +2096,8 @@ func TestModeTransitions(t *testing.T) {
 	})
 }
 
-func TestActionModeOperationalKeysFailFastWithGuidance(t *testing.T) {
-	keys := []string{"u", "P"}
+func TestActionModeUnavailablePRKeyFailsFastWithGuidance(t *testing.T) {
+	keys := []string{"P"}
 
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
