@@ -3757,8 +3757,9 @@ func TestEnsureDaemonProjectMismatchDoesNotReplace(t *testing.T) {
 		RepoDir:   t.TempDir(),
 	}
 
-	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
-		t.Fatalf("ensureDaemon() error = %v", err)
+	err := ensureDaemon(context.Background(), deps, "cli")
+	if err == nil || !strings.Contains(err.Error(), "daemon project mismatch") {
+		t.Fatalf("error = %v, want daemon project mismatch", err)
 	}
 	if fake.replaceCalled {
 		t.Fatalf("expected no replace on daemon project mismatch")
@@ -3789,8 +3790,9 @@ func TestEnsureDaemonProjectMismatchReplaceErrorIsIgnored(t *testing.T) {
 		RepoDir:   t.TempDir(),
 	}
 
-	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
-		t.Fatalf("ensureDaemon() error = %v", err)
+	err := ensureDaemon(context.Background(), deps, "cli")
+	if err == nil || !strings.Contains(err.Error(), "daemon project mismatch") {
+		t.Fatalf("error = %v, want daemon project mismatch", err)
 	}
 	if fake.replaceCalled {
 		t.Fatalf("expected no replace call when daemon project differs")

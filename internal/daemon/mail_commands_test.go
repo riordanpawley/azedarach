@@ -26,6 +26,7 @@ func TestMailSendSerializesSequenceNumbers(t *testing.T) {
 			ProtocolVersion: protocol.CurrentVersion,
 			RequestID:       fmt.Sprintf("req-%s", issue),
 			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: "proj-mail"},
 			Command:         protocol.CommandMailSend,
 			Body: mustMarshal(t, protocol.MailSendCommandBody{
 				RepoDir:     repoDir,
