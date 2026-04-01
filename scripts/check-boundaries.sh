@@ -64,6 +64,11 @@ while IFS= read -r line; do
   done
 done < <(go list -f '{{.ImportPath}} -> {{range .Imports}}{{.}} {{end}}' ./internal/...)
 
+if ! env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/app -run '^TestIntegrationBoundaryGuard_NoDirectGitExecInAppOrCli$' -count=1; then
+  printf 'Boundary runtime git-exec guard failed\n' >&2
+  exit 1
+fi
+
 if (( violations > 0 )); then
   printf 'Boundary graph check failed: %d violation(s)\n' "$violations" >&2
   exit 1

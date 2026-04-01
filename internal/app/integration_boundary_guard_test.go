@@ -4,65 +4,120 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-func TestIntegrationBoundaryGuard_NoDirectTmuxOrGitExecInApp(t *testing.T) {
+func TestIntegrationBoundaryGuard_NoDirectGitExecInAppOrCli(t *testing.T) {
 	t.Helper()
 
-	entries, err := os.ReadDir(".")
+	repoRoot, err := repoRootFromTestFile()
 	if err != nil {
-		t.Fatalf("read app dir: %v", err)
+		t.Fatalf("resolve repo root: %v", err)
+	}
+
+	violations, err := findDirectGitExecViolations(repoRoot)
+	if err != nil {
+		t.Fatalf("scan runtime source: %v", err)
+	}
+
+	if len(violations) == 0 {
+		return
+	}
+
+	sort.Strings(violations)
+	t.Fatalf("runtime app/cli code must route direct git subprocesses through sanctioned helpers; found violations at %v", violations)
+}
+
+func repoRootFromTestFile() (string, error) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", os.ErrInvalid
+	}
+	// This file lives in internal/app, so two parents up is the repo root.
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..")), nil
+}
+
+func findDirectGitExecViolations(repoRoot string) ([]string, error) {
+	targetRoots := []string{
+		filepath.Join(repoRoot, "internal", "app"),
+		filepath.Join(repoRoot, "internal", "cli"),
 	}
 
 	fset := token.NewFileSet()
-	var violations []string
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-
-		file, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+	violations := make([]string, 0, 4)
+	for _, root := range targetRoots {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
 			}
 
-			if !isExecCommandCall(call.Fun) || len(call.Args) == 0 {
-				return true
+			relPath, err := filepath.Rel(repoRoot, path)
+			if err != nil {
+				return err
+			}
+			relPath = filepath.ToSlash(relPath)
+
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
 			}
 
-			cmdName, ok := stringLiteral(call.Args[0])
-			if !ok {
-				return true
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok || !isExecCommandCall(call.Fun) || len(call.Args) == 0 {
+						return true
+					}
+
+					cmdName, ok := stringLiteral(call.Args[0])
+					if !ok || cmdName != "git" {
+						return true
+					}
+					if isAllowedGitExec(relPath, fn.Name.Name) {
+						return true
+					}
+
+					position := fset.Position(call.Pos())
+					violations = append(violations, relPath+":"+fn.Name.Name+":"+strconv.Itoa(position.Line))
+					return true
+				})
 			}
 
-			if cmdName != "tmux" && cmdName != "git" {
-				return true
-			}
-
-			violations = append(violations, fset.Position(call.Pos()).String())
-			return true
+			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	if len(violations) > 0 {
-		t.Fatalf("internal/app must route tmux/git process calls through integration services; found direct exec at %v", violations)
+	return violations, nil
+}
+
+func isAllowedGitExec(path, function string) bool {
+	allowedFunctions, ok := allowedGitExec[path]
+	if !ok {
+		return false
 	}
+	_, ok = allowedFunctions[function]
+	return ok
 }
 
 func isExecCommandCall(fun ast.Expr) bool {
@@ -91,4 +146,16 @@ func stringLiteral(expr ast.Expr) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(unquoted), true
+}
+
+var allowedGitExec = map[string]map[string]struct{}{
+	"internal/app/model.go": {
+		"runGitCommand": {},
+	},
+	"internal/cli/families.go": {
+		"gitCommandWithoutGitDirEnv": {},
+	},
+	"internal/cli/git_exec.go": {
+		"newGitCommand": {},
+	},
 }
