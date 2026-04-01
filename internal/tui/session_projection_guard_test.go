@@ -32,7 +32,7 @@ func TestSessionProjectionGuard_NoLocalMonitorStart(t *testing.T) {
 	})
 
 	if len(violations) > 0 {
-		t.Fatalf("internal/app/model.go must not start local session monitors; found Start call(s) at %v", violations)
+		t.Fatalf("internal/tui/model.go must not start local session monitors; found Start call(s) at %v", violations)
 	}
 }
 
@@ -63,7 +63,7 @@ func TestSessionProjectionGuard_NoDirectSessionProjectionWrites(t *testing.T) {
 	})
 
 	if len(violations) > 0 {
-		t.Fatalf("internal/app/model.go must keep session projection writes local-only; found write(s) at %v", violations)
+		t.Fatalf("internal/tui/model.go must keep session projection writes local-only; found write(s) at %v", violations)
 	}
 }
 
@@ -92,7 +92,7 @@ func TestSessionProjectionGuard_NoDirectSessionProjectionDeletes(t *testing.T) {
 	})
 
 	if len(violations) > 0 {
-		t.Fatalf("internal/app/model.go must keep session projection deletes local-only; found delete(s) at %v", violations)
+		t.Fatalf("internal/tui/model.go must keep session projection deletes local-only; found delete(s) at %v", violations)
 	}
 }
 

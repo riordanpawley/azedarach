@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -471,9 +470,8 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 	if err := os.WriteFile(preCommitPath, []byte(preCommit), 0o755); err != nil {
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
-	cmd := newGitCommand(projectDir, "config", "core.hooksPath", ".githooks")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("set git core.hooksPath: %w (%s)", err, strings.TrimSpace(string(output)))
+	if err := setGitHooksPath(projectDir, ".githooks"); err != nil {
+		return fmt.Errorf("set git core.hooksPath: %w", err)
 	}
 
 	fmt.Printf("Installed git hooks in %s\n", hooksDir)
@@ -512,14 +510,8 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 		if err := runShellCommand(projectDir, command); err != nil {
 			return fmt.Errorf("githooks spec sync failed: %w", err)
 		}
-
-		if specSyncCfg.AutoStageDocs {
-			if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec")); err == nil {
-				stageCmd := newGitCommand(projectDir, "add", "docs/spec")
-				if output, err := stageCmd.CombinedOutput(); err != nil {
-					return fmt.Errorf("githooks spec sync auto-stage failed: %w (%s)", err, strings.TrimSpace(string(output)))
-				}
-			}
+		if specSyncCfg.AutoStageDocs && opts.Verbose {
+			fmt.Println("githooks: docs/spec auto-stage skipped (thin-client mode); stage manually if needed")
 		}
 	}
 
@@ -529,21 +521,15 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 			fmt.Println("githooks: boundary checks skipped (AZEDARACH_SKIP_BOUNDARY_CHECK=1)")
 			return nil
 		}
-		shouldRun, err := hasBoundaryRelevantStagedPaths(projectDir)
-		if err != nil {
-			return fmt.Errorf("determine staged boundary paths: %w", err)
+		command := strings.TrimSpace(boundaryCfg.Command)
+		if command == "" {
+			return fmt.Errorf("githooks boundary check is enabled but no command is configured")
 		}
-		if shouldRun {
-			command := strings.TrimSpace(boundaryCfg.Command)
-			if command == "" {
-				return fmt.Errorf("githooks boundary check is enabled but no command is configured")
-			}
-			if opts.Verbose {
-				fmt.Printf("githooks: boundary command: %s\n", command)
-			}
-			if err := runShellCommand(projectDir, command); err != nil {
-				return fmt.Errorf("githooks boundary check failed: %w", err)
-			}
+		if opts.Verbose {
+			fmt.Printf("githooks: boundary command: %s\n", command)
+		}
+		if err := runShellCommand(projectDir, command); err != nil {
+			return fmt.Errorf("githooks boundary check failed: %w", err)
 		}
 	}
 
@@ -1509,31 +1495,62 @@ func runShellCommand(projectDir, command string) error {
 	return cmd.Run()
 }
 
-func hasBoundaryRelevantStagedPaths(projectDir string) (bool, error) {
-	cmd := newGitCommand(projectDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
-	output, err := cmd.Output()
+func setGitHooksPath(projectDir, hooksPath string) error {
+	configPath, err := resolveGitConfigPath(projectDir)
 	if err != nil {
-		return false, err
+		return err
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read git config: %w", err)
+	}
+	content := string(raw)
+	if strings.Contains(content, "hooksPath = "+hooksPath) {
+		return nil
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		path := scanner.Text()
-		if strings.HasPrefix(path, "internal/") ||
-			strings.HasPrefix(path, "cmd/") ||
-			strings.HasPrefix(path, "docs/") ||
-			path == "justfile" ||
-			path == "AGENTS.md" ||
-			path == ".golangci-boundary.yml" ||
-			path == "scripts/check-boundaries.sh" ||
-			path == "scripts/afv-drift-sentinel.sh" {
-			return true, nil
+	if strings.Contains(content, "[core]") {
+		lines := strings.Split(content, "\n")
+		inserted := false
+		for i := 0; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) != "[core]" {
+				continue
+			}
+			j := i + 1
+			for ; j < len(lines); j++ {
+				trimmed := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+					break
+				}
+				if strings.HasPrefix(trimmed, "hooksPath") {
+					lines[j] = "\thooksPath = " + hooksPath
+					inserted = true
+					break
+				}
+			}
+			if !inserted {
+				block := append([]string{}, lines[:j]...)
+				block = append(block, "\thooksPath = "+hooksPath)
+				block = append(block, lines[j:]...)
+				lines = block
+				inserted = true
+			}
+			break
 		}
+		if inserted {
+			content = strings.Join(lines, "\n")
+		}
+	} else {
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += "[core]\n\thooksPath = " + hooksPath + "\n"
 	}
-	if err := scanner.Err(); err != nil {
-		return false, err
+
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write git config: %w", err)
 	}
-	return false, nil
+	return nil
 }
 
 func openCodePluginSource() string {
@@ -1542,18 +1559,27 @@ func openCodePluginSource() string {
 		"module.exports = {}\n"
 }
 
-func gitCommandWithoutGitDirEnv(args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "GIT_DIR=") ||
-			strings.HasPrefix(entry, "GIT_WORK_TREE=") ||
-			strings.HasPrefix(entry, "GIT_INDEX_FILE=") {
-			continue
-		}
-		filtered = append(filtered, entry)
+func resolveGitConfigPath(projectDir string) (string, error) {
+	gitPath := filepath.Join(projectDir, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", fmt.Errorf("stat .git: %w", err)
 	}
-	cmd.Env = filtered
-	return cmd
+	if info.IsDir() {
+		return filepath.Join(gitPath, "config"), nil
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", fmt.Errorf("read .git file: %w", err)
+	}
+	line := strings.TrimSpace(string(data))
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(strings.ToLower(line), prefix) {
+		return "", fmt.Errorf("unsupported .git file format")
+	}
+	dir := strings.TrimSpace(line[len(prefix):])
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(projectDir, dir)
+	}
+	return filepath.Join(dir, "config"), nil
 }

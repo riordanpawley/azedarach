@@ -51,7 +51,7 @@ func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 	client := &fakeDiffClient{
 		status: &gitservice.GitStatus{
 			HasChanges: true,
-			Modified:   []string{"internal/app/model.go"},
+			Modified:   []string{"internal/tui/model.go"},
 		},
 		mergeBase: "base123",
 	}
@@ -67,8 +67,8 @@ func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 	if len(viewer.files) != 1 {
 		t.Fatalf("files=%d, want 1", len(viewer.files))
 	}
-	if viewer.files[0].Path != "internal/app/model.go" {
-		t.Fatalf("file path=%q, want internal/app/model.go", viewer.files[0].Path)
+	if viewer.files[0].Path != "internal/tui/model.go" {
+		t.Fatalf("file path=%q, want internal/tui/model.go", viewer.files[0].Path)
 	}
 }
 
@@ -76,7 +76,7 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	client := &fakeDiffClient{
 		status: &gitservice.GitStatus{
 			HasChanges: true,
-			Modified:   []string{"internal/app/model.go"},
+			Modified:   []string{"internal/tui/model.go"},
 		},
 		mergeBase: "base123",
 	}
@@ -102,10 +102,10 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	updated, _ = viewer.Update(result)
 	viewer = updated.(*DiffViewer)
 
-	if gotTitle != " internal/app/model.go " {
+	if gotTitle != " internal/tui/model.go " {
 		t.Fatalf("popup title=%q", gotTitle)
 	}
-	if !strings.Contains(gotCommand, "git diff 'base123' -- 'internal/app/model.go'") {
+	if !strings.Contains(gotCommand, "git diff 'base123' -- 'internal/tui/model.go'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 	if !strings.Contains(viewer.popupStatus, "Opened diff popup") {
@@ -146,7 +146,7 @@ func TestDiffViewerSearchFiltersAndKeepsSelectionActions(t *testing.T) {
 	client := &fakeDiffClient{
 		status: &gitservice.GitStatus{
 			HasChanges: true,
-			Modified:   []string{"internal/app/model.go", "internal/services/git/client.go"},
+			Modified:   []string{"internal/tui/model.go", "internal/services/git/client.go"},
 		},
 	}
 
@@ -199,7 +199,7 @@ func TestDiffViewerEscInSearchModeClearsFilter(t *testing.T) {
 	client := &fakeDiffClient{
 		status: &gitservice.GitStatus{
 			HasChanges: true,
-			Modified:   []string{"internal/app/model.go"},
+			Modified:   []string{"internal/tui/model.go"},
 		},
 	}
 	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
@@ -321,7 +321,7 @@ func TestDiffViewerInitFallsBackToBaseChangedFilesWhenStatusClean(t *testing.T) 
 	client := &fakeDiffClient{
 		status: &gitservice.GitStatus{},
 		changedFiles: []gitservice.ChangedFile{
-			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+			{Path: "internal/tui/model.go", Status: gitservice.DiffFileModified},
 		},
 	}
 
@@ -333,7 +333,7 @@ func TestDiffViewerInitFallsBackToBaseChangedFilesWhenStatusClean(t *testing.T) 
 	if len(viewer.files) != 1 {
 		t.Fatalf("files=%d, want 1", len(viewer.files))
 	}
-	if viewer.files[0].Path != "internal/app/model.go" {
-		t.Fatalf("file path=%q, want internal/app/model.go", viewer.files[0].Path)
+	if viewer.files[0].Path != "internal/tui/model.go" {
+		t.Fatalf("file path=%q, want internal/tui/model.go", viewer.files[0].Path)
 	}
 }

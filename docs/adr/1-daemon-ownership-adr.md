@@ -7,7 +7,7 @@ Accepted
 ## Context
 
 The legacy go-bubbletea implementation keeps lifecycle and mutation authority in
-frontend paths (`internal/app` and `internal/cli`), which makes multi-client
+frontend paths (`internal/tui` and `internal/cli`), which makes multi-client
 coherence and restart/reconnect behavior hard to guarantee.
 
 The daemon split requires:

@@ -1,5 +1,5 @@
---- internal/app/model.go
-+++ internal/app/model.go
+--- internal/tui/model.go
++++ internal/tui/model.go
 @@ -2107,11 +2107,16 @@ func (m Model) renderBoardView() string {
  		Task:   pos.Task,
  	}

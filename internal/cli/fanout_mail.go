@@ -922,38 +922,6 @@ func fanoutDesignMetadata(node fanoutFlatNode) string {
 	return fmt.Sprintf("fanout.key=%s\nfanout.kind=%s\nfanout.file_budget=%s", node.Key, node.Kind, budgets)
 }
 
-func gitChangedFiles(worktree string) ([]string, error) {
-	cmds := [][]string{
-		{"diff", "--name-only"},
-		{"diff", "--name-only", "--cached"},
-		{"ls-files", "--others", "--exclude-standard"},
-	}
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 16)
-	for _, args := range cmds {
-		cmd := newGitCommand(worktree, args...)
-		output, err := cmd.Output()
-		if err != nil {
-			return nil, err
-		}
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			line = filepath.ToSlash(line)
-			if _, ok := seen[line]; ok {
-				continue
-			}
-			seen[line] = struct{}{}
-			out = append(out, line)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
 func lockMailbox(repoDir, parentIssue string) (func(), error) {
 	path := mailboxLockPath(repoDir, parentIssue)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

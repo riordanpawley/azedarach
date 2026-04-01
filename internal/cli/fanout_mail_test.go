@@ -3,10 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -342,38 +339,6 @@ func TestOutOfBudgetFiles_MixedPatterns(t *testing.T) {
 	}
 }
 
-func TestGitChangedFilesIncludesStagedAndUntracked(t *testing.T) {
-	repoDir := t.TempDir()
-	runGitCommand(t, repoDir, "init")
-
-	stagedPath := filepath.Join(repoDir, "staged.txt")
-	untrackedPath := filepath.Join(repoDir, "untracked.txt")
-	if err := os.WriteFile(stagedPath, []byte("staged\n"), 0o644); err != nil {
-		t.Fatalf("write staged file: %v", err)
-	}
-	if err := os.WriteFile(untrackedPath, []byte("untracked\n"), 0o644); err != nil {
-		t.Fatalf("write untracked file: %v", err)
-	}
-	runGitCommand(t, repoDir, "add", "staged.txt")
-
-	got, err := gitChangedFiles(repoDir)
-	if err != nil {
-		t.Fatalf("gitChangedFiles error: %v", err)
-	}
-	want := []string{"staged.txt", "untracked.txt"}
-	if !sort.StringsAreSorted(got) {
-		t.Fatalf("gitChangedFiles output not sorted: %v", got)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("gitChangedFiles len = %d, want %d (%v)", len(got), len(want), got)
-	}
-	for i, path := range want {
-		if got[i] != path {
-			t.Fatalf("gitChangedFiles[%d] = %q, want %q (full=%v)", i, got[i], path, got)
-		}
-	}
-}
-
 func TestMailSendCommandSerializesSequenceNumbers(t *testing.T) {
 	const attempts = 8
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -485,16 +450,6 @@ func TestMailSendCommandSerializesSequenceNumbers(t *testing.T) {
 		if listed[0].Seq != 1 || listed[1].Seq != 2 {
 			t.Fatalf("attempt %d seqs = [%d,%d], want [1,2]", attempt, listed[0].Seq, listed[1].Seq)
 		}
-	}
-}
-
-func runGitCommand(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = gitExecEnvWithoutRoutingVars()
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, output)
 	}
 }
 
