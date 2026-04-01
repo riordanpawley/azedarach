@@ -143,6 +143,9 @@ func New(cfg Config) *Daemon {
 		revision:                     map[string]uint64{},
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
+	gitService.onStatusUpdate = func(projectID, issueID, worktree string) {
+		d.publishGitStatusProjectionEvent(projectID, issueID, worktree)
+	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      cfg.RepoDir,
 		logger:       cfg.Logger,
@@ -159,6 +162,9 @@ func New(cfg Config) *Daemon {
 			manager:         d.worktree,
 			projectionStore: d.projectionStore,
 			logger:          cfg.Logger,
+			onProjectionUpdate: func(projectID, issueID, path string) {
+				d.publishWorktreeProjectionEvent(projectID, issueID, path)
+			},
 		},
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
 	)
@@ -551,7 +557,9 @@ func (d *Daemon) persistWorktreeProjection(projectID, issueID, path, branch stri
 			"branch", branch,
 			"error", err,
 		)
+		return
 	}
+	d.publishWorktreeProjectionEvent(projectID, issueID, path)
 }
 
 func (d *Daemon) successResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
@@ -649,6 +657,74 @@ func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.M
 		Meta:            meta,
 		Revision:        rev,
 		Event:           protocol.EventSessionUpdated,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Body:            body,
+	})
+	return rev
+}
+
+func (d *Daemon) publishWorktreeProjectionEvent(projectID, issueID, worktree string) uint64 {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rev := d.nextRevision(projectID)
+	if d.hub == nil {
+		return rev
+	}
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: projectID,
+		IssueID:   strings.TrimSpace(issueID),
+		Worktree:  strings.TrimSpace(worktree),
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("marshal worktree projection event body failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return rev
+	}
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       projectID,
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Revision:        rev,
+		Event:           protocol.EventWorktreeProjectionUpdated,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       time.Now().UTC(),
+		Body:            body,
+	})
+	return rev
+}
+
+func (d *Daemon) publishGitStatusProjectionEvent(projectID, issueID, worktree string) uint64 {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	rev := d.nextRevision(projectID)
+	if d.hub == nil {
+		return rev
+	}
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: projectID,
+		IssueID:   strings.TrimSpace(issueID),
+		Worktree:  strings.TrimSpace(worktree),
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("marshal git status projection event body failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return rev
+	}
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		ProjectID:       projectID,
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Revision:        rev,
+		Event:           protocol.EventGitStatusUpdated,
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,

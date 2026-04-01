@@ -179,20 +179,20 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading         bool
-	boardRefreshing bool
-	issueRefreshSeq uint64
+	loading               bool
+	boardRefreshing       bool
+	issueRefreshSeq       uint64
 	projectSwitchSeq      uint64
 	projectSwitchInFlight bool
-	spinner         spinner.Model
-	lastRefresh     time.Time
-	hasRefreshLoop  bool
+	spinner               spinner.Model
+	lastRefresh           time.Time
+	hasRefreshLoop        bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient     *daemonclient.Client
-	daemonSocketPath string
-	daemonEvents     <-chan protocol.EventEnvelope
-	daemonRevision   uint64
+	daemonClient              *daemonclient.Client
+	daemonSocketPath          string
+	daemonEvents              <-chan protocol.EventEnvelope
+	daemonRevision            uint64
 	lastDaemonReattachAttempt time.Time
 
 	// Session management services
@@ -579,6 +579,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyOperationProgressEvent(msg.event)
 		if msg.event.Event == protocol.EventSessionUpdated {
 			m.applySessionProjectionEvent(msg.event)
+		}
+		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
+			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+			if !m.runtimeSignalsBusy && m.shouldRefreshRuntimeSignals() {
+				m.runtimeSignalsBusy = true
+				cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
@@ -2209,8 +2219,8 @@ type issuesLoadedMsg struct {
 
 type issuesErrorMsg struct {
 	refreshSeq uint64
-	projectID string
-	err       error
+	projectID  string
+	err        error
 }
 
 type projectSwitchResultMsg struct {
@@ -2528,9 +2538,9 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		}
 		return issuesLoadedMsg{
 			refreshSeq: refreshSeq,
-			projectID: projectID,
-			tasks:     snapshot.Tasks,
-			revision:  snapshot.Revision,
+			projectID:  projectID,
+			tasks:      snapshot.Tasks,
+			revision:   snapshot.Revision,
 		}
 	}
 }
@@ -2824,23 +2834,23 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("daemon client unavailable"),
+				project:   project,
+				err:       fmt.Errorf("daemon client unavailable"),
 			}
 		}
 		if strings.TrimSpace(project.Path) == "" {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("project %q has empty path", project.Name),
+				project:   project,
+				err:       fmt.Errorf("project %q has empty path", project.Name),
 			}
 		}
 		projectConfig, err := config.LoadConfig(project.Path)
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2856,8 +2866,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err := launcher.Replace(ctx); err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2872,15 +2882,15 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
+				project:   project,
+				err:       fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
 			}
 		}
 		if !ack.Accepted {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
+				project:   project,
+				err:       fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
 		}
 		if daemonProjectIDMismatch(ack.DaemonProjectID, expectedDaemonProjectID) {
@@ -2899,16 +2909,16 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     err,
+				project:   project,
+				err:       err,
 			}
 		}
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
-				project: project,
-				err:     err,
+				project:   project,
+				err:       err,
 			}
 		}
 
@@ -3104,6 +3114,10 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
+	switch evt.Event {
+	case protocol.EventWorktreeProjectionUpdated, protocol.EventGitStatusUpdated:
+		return daemonEventIgnore
+	}
 	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 	switch cursor.Decide(evt) {
 	case protocol.StreamProjectionDecisionIgnore:
@@ -4639,6 +4653,10 @@ func humanizeRuntimeEventName(eventName string) string {
 		return "Session started"
 	case "session.stopped":
 		return "Session stopped"
+	case protocol.EventWorktreeProjectionUpdated:
+		return "Worktree projection updated"
+	case protocol.EventGitStatusUpdated:
+		return "Git status updated"
 	}
 
 	tokens := strings.FieldsFunc(strings.ToLower(eventName), func(r rune) bool {

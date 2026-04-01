@@ -283,10 +283,11 @@ func mapSpecStoreError(err error) error {
 }
 
 type worktreeServiceAdapter struct {
-	manager         *git.WorktreeManager
-	projectionStore *daemonstate.ProjectionStore
-	logger          *slog.Logger
-	pollInterval    time.Duration
+	manager            *git.WorktreeManager
+	projectionStore    *daemonstate.ProjectionStore
+	logger             *slog.Logger
+	pollInterval       time.Duration
+	onProjectionUpdate func(projectID, issueID, path string)
 
 	mu      sync.Mutex
 	pollers map[string]context.CancelFunc
@@ -331,6 +332,9 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		}); upsertErr != nil && a.logger != nil {
 			a.logger.Warn("failed to upsert worktree projection on create", "project_id", projectID, "issue_id", issueID, "error", upsertErr)
 		}
+		if a.onProjectionUpdate != nil {
+			a.onProjectionUpdate(normalizedProjectID(projectID), worktree.IssueID, worktree.Path)
+		}
 	}
 	return worktree, nil
 }
@@ -349,6 +353,9 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	if a.projectionStore != nil {
 		if deleteErr := a.projectionStore.DeleteWorktree(ctx, normalizedProjectID(projectID), issueID); deleteErr != nil && a.logger != nil {
 			a.logger.Warn("failed to delete worktree projection", "project_id", projectID, "issue_id", issueID, "error", deleteErr)
+		}
+		if a.onProjectionUpdate != nil {
+			a.onProjectionUpdate(normalizedProjectID(projectID), issueID, "")
 		}
 	}
 	return nil
@@ -373,6 +380,9 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 		if a.projectionStore != nil {
 			if deleteErr := a.projectionStore.DeleteWorktree(ctx, normalizedProjectID(projectID), wt.IssueID); deleteErr != nil && a.logger != nil {
 				a.logger.Warn("failed to delete worktree projection during cleanup", "project_id", projectID, "issue_id", wt.IssueID, "error", deleteErr)
+			}
+			if a.onProjectionUpdate != nil {
+				a.onProjectionUpdate(normalizedProjectID(projectID), wt.IssueID, "")
 			}
 		}
 	}
@@ -418,6 +428,12 @@ func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {
 }
 
 func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, projectID string) {
+	var previous []daemonstate.WorktreeProjection
+	if a.projectionStore != nil {
+		if cached, err := a.projectionStore.ListWorktrees(ctx, projectID); err == nil {
+			previous = cached
+		}
+	}
 	worktrees, err := a.manager.List(ctx)
 	if err != nil {
 		if a.logger != nil {
@@ -426,6 +442,9 @@ func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, pr
 		return
 	}
 	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
+	if a.onProjectionUpdate != nil {
+		publishWorktreeProjectionDelta(a.onProjectionUpdate, projectID, previous, worktrees)
+	}
 }
 
 func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Context, projectID string, worktrees []git.Worktree) {
@@ -461,6 +480,27 @@ func mapProjectionWorktrees(projections []daemonstate.WorktreeProjection) []git.
 		})
 	}
 	return out
+}
+
+func publishWorktreeProjectionDelta(publish func(projectID, issueID, path string), projectID string, previous []daemonstate.WorktreeProjection, next []git.Worktree) {
+	prevByIssue := make(map[string]string, len(previous))
+	for _, row := range previous {
+		prevByIssue[row.IssueID] = row.Path + "|" + row.Branch
+	}
+	nextByIssue := make(map[string]git.Worktree, len(next))
+	for _, row := range next {
+		nextByIssue[row.IssueID] = row
+	}
+	for issueID, wt := range nextByIssue {
+		nextKey := wt.Path + "|" + wt.Branch
+		if prevByIssue[issueID] != nextKey {
+			publish(projectID, issueID, wt.Path)
+		}
+		delete(prevByIssue, issueID)
+	}
+	for issueID := range prevByIssue {
+		publish(projectID, issueID, "")
+	}
 }
 
 func normalizedProjectID(projectID string) string {
