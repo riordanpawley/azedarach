@@ -1,35 +1,25 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "az codex hook run --json pre-tool-use",
-            "type": "command"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "command": "az codex hook run --json session-start",
-            "type": "command"
-          }
-        ],
-        "matcher": "startup|resume"
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "command": "az codex hook run --json stop",
-            "type": "command"
-          }
-        ]
-      }
-    ]
-  }
+	"hooks": {
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"command": "az codex hook run --json session-start",
+						"type": "command"
+					}
+				],
+				"matcher": "startup|resume"
+			}
+		],
+		"Stop": [
+			{
+				"hooks": [
+					{
+						"command": "az codex hook run --json stop",
+						"type": "command"
+					}
+				]
+			}
+		]
+	}
 }
