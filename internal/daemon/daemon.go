@@ -234,7 +234,40 @@ func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uin
 	return ch, cancel, nil
 }
 
-func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (resp protocol.ResponseEnvelope, err error) {
+	startedAt := time.Now()
+	projectID := strings.TrimSpace(req.Meta.ProjectID)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info(
+			"daemon command received",
+			"command", req.Command,
+			"request_id", req.RequestID,
+			"project_id", projectID,
+		)
+	}
+	defer func() {
+		if d.cfg.Logger == nil {
+			return
+		}
+		attrs := []any{
+			"command", req.Command,
+			"request_id", req.RequestID,
+			"project_id", projectID,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		}
+		switch {
+		case err != nil:
+			d.cfg.Logger.Error("daemon command transport failed", append(attrs, "error", err)...)
+		case resp.Error != nil:
+			d.cfg.Logger.Warn(
+				"daemon command failed",
+				append(attrs, "error_code", resp.Error.Code, "error", resp.Error.Message)...,
+			)
+		default:
+			d.cfg.Logger.Info("daemon command completed", attrs...)
+		}
+	}()
+
 	if resp, handled := d.guardSyncDependentCommand(req); handled {
 		return resp, nil
 	}
