@@ -1901,9 +1901,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
-		task, session := m.getCurrentTaskAndSession()
+		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
-			return m, m.openOverlay(overlay.NewTaskWorkspaceOverlay(*task, session, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height))
+			return m, m.openOverlay(overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height))
 		}
 		return m, nil
 
@@ -5887,7 +5887,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 		return
 	}
 
-	workspace.SyncTask(*task, task.Session, m.tasks, m.pendingMutationForTask(taskID))
+	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(taskID))
 }
 
 func (m *Model) applyPendingStatusOverlays() {

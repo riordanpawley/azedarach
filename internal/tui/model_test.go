@@ -3117,7 +3117,7 @@ func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayOpen(t *testing.T) {
 	m.tasks[0] = task
 	m.nav.SelectTask(task.ID, 0)
 
-	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, nil, nil, nil, 120, 30))
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, nil, nil, 120, 30))
 
 	updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "a"})
 	if cmd == nil {

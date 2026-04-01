@@ -17,7 +17,6 @@ type DetailPanel struct {
 	task           domain.Task
 	relatedTasks   []domain.Task
 	mutation       *TaskMutationProgress
-	session        *domain.Session
 	scrollY        int
 	contentHeight  int
 	viewHeight     int
@@ -37,7 +36,7 @@ type TaskMutationProgress struct {
 }
 
 // NewDetailPanel creates a new detail panel for the given task and optional session
-func NewDetailPanel(task domain.Task, session *domain.Session) *DetailPanel {
+func NewDetailPanel(task domain.Task) *DetailPanel {
 	// Calculate contentHeight based on description
 	contentHeight := 0
 	if task.Description != "" {
@@ -46,7 +45,6 @@ func NewDetailPanel(task domain.Task, session *domain.Session) *DetailPanel {
 
 	return &DetailPanel{
 		task:           task,
-		session:        session,
 		scrollY:        0,
 		contentHeight:  contentHeight,
 		viewHeight:     20, // Default, will be updated in Size()
@@ -192,7 +190,7 @@ func (d *DetailPanel) View() string {
 	b.WriteString("\n")
 
 	// Worktree/session runtime info if present
-	session := d.sessionForDisplay()
+	session := d.task.Session
 	if session != nil {
 		b.WriteString("\n")
 		b.WriteString(headerStyle.Render("Session"))
@@ -460,7 +458,7 @@ func (d *DetailPanel) hasGitStatusData() bool {
 	if d.task.HasWorktree {
 		return true
 	}
-	if session := d.sessionForDisplay(); session != nil && strings.TrimSpace(session.Worktree) != "" {
+	if d.task.Session != nil && strings.TrimSpace(d.task.Session.Worktree) != "" {
 		return true
 	}
 	return d.hasGitTelemetrySignal()
@@ -510,12 +508,6 @@ func (d *DetailPanel) formatGitStatus() string {
 	return fmt.Sprintf("%s (%s)", statusToken, strings.Join(details, sep))
 }
 
-func (d *DetailPanel) sessionForDisplay() *domain.Session {
-	if d.session != nil {
-		return d.session
-	}
-	return d.task.Session
-}
 
 func wrapDescriptionLines(description string, width int) []string {
 	if width < 1 {
