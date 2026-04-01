@@ -25,7 +25,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 	for _, want := range []string{
 		"notify <event> <issue-id>",
 		"hooks install <issue-id>",
-		"githooks <install|run|notify>",
+		"githooks <install|update|run|notify>",
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
@@ -34,6 +34,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
 		"az githooks install",
+		"az githooks update",
 		"az githooks run",
 		"az githooks notify",
 		"az gate az-123",
@@ -72,7 +73,7 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return GitHooksInstallCommand(&Dependencies{RepoDir: projectDir}, opts)
 	})
-	if !strings.Contains(output, "Installed git hooks in") {
+	if !strings.Contains(output, "Installed/updated git hooks in") {
 		t.Fatalf("install output = %q", output)
 	}
 
@@ -93,6 +94,50 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 		if !strings.Contains(string(hookData), "az githooks notify") {
 			t.Fatalf("%s content = %q", hookName, string(hookData))
 		}
+	}
+}
+
+func TestGitHooksInstallCommandPreservesCustomHookContent(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".githooks"), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks: %v", err)
+	}
+	cmd := exec.Command("git", "-C", projectDir, "init")
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	preCommitPath := filepath.Join(projectDir, ".githooks", "pre-commit")
+	custom := "#!/usr/bin/env sh\nset -eu\necho custom-pre-commit\n"
+	if err := os.WriteFile(preCommitPath, []byte(custom), 0o755); err != nil {
+		t.Fatalf("seed pre-commit: %v", err)
+	}
+
+	opts, err := ParseGitHooksInstallArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksInstallArgs error: %v", err)
+	}
+	if err := GitHooksInstallCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("GitHooksInstallCommand error: %v", err)
+	}
+	if err := GitHooksInstallCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("GitHooksInstallCommand second run error: %v", err)
+	}
+
+	data, err := os.ReadFile(preCommitPath)
+	if err != nil {
+		t.Fatalf("read pre-commit: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "echo custom-pre-commit") {
+		t.Fatalf("pre-commit lost custom content: %q", content)
+	}
+	if got := strings.Count(content, "az githooks run \"$@\""); got != 1 {
+		t.Fatalf("managed command count = %d, want 1; content = %q", got, content)
+	}
+	if got := strings.Count(content, gitHookManagedBlockStart); got != 1 {
+		t.Fatalf("managed block start count = %d, want 1; content = %q", got, content)
 	}
 }
 

@@ -72,6 +72,15 @@ func runGitHooksCommand(cfg *config.Config, args []string) error {
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.GitHooksInstallCommand(deps, opts)
 		})
+	case "update":
+		opts, err := cli.ParseGitHooksInstallArgs(args[1:])
+		if err != nil {
+			cli.PrintGitHooksUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.GitHooksInstallCommand(deps, opts)
+		})
 	case "run":
 		opts, err := cli.ParseGitHooksRunArgs(args[1:])
 		if err != nil {

@@ -30,6 +30,8 @@ const (
 	hookEventSessionEnd        = "session_end"
 	openCodePluginFilename     = "opencode-az.js"
 	commandDevServerList       = "devserver.list"
+	gitHookManagedBlockStart   = "# >>> azedarach managed githook >>>"
+	gitHookManagedBlockEnd     = "# <<< azedarach managed githook <<<"
 )
 
 var hookEventStatuses = map[string]string{
@@ -179,7 +181,7 @@ func ParseGitHooksInstallArgs(args []string) (GitHooksInstallOptions, error) {
 		return GitHooksInstallOptions{}, err
 	}
 	if fs.NArg() != 0 {
-		return GitHooksInstallOptions{}, fmt.Errorf("usage: az githooks install [--project-dir <dir>] [--verbose]")
+		return GitHooksInstallOptions{}, fmt.Errorf("usage: az githooks install [--project-dir <dir>] [--verbose] (alias: az githooks update)")
 	}
 	return opts, nil
 }
@@ -488,16 +490,35 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 		return fmt.Errorf("create .githooks directory: %w", err)
 	}
 
-	hookScripts := map[string]string{
-		"pre-commit":    "#!/usr/bin/env sh\nset -eu\naz githooks run \"$@\"\n",
-		"post-commit":   "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-commit >/dev/null 2>&1 || true\n",
-		"post-merge":    "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-merge >/dev/null 2>&1 || true\n",
-		"post-checkout": "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-checkout >/dev/null 2>&1 || true\n",
-		"post-rewrite":  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-rewrite >/dev/null 2>&1 || true\n",
+	type gitHookInstallSpec struct {
+		command string
+		legacy  string
 	}
-	for hookName, script := range hookScripts {
+	hookScripts := map[string]gitHookInstallSpec{
+		"pre-commit": {
+			command: "az githooks run \"$@\"",
+			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks run \"$@\"\n",
+		},
+		"post-commit": {
+			command: "az githooks notify --hook post-commit >/dev/null 2>&1 || true",
+			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-commit >/dev/null 2>&1 || true\n",
+		},
+		"post-merge": {
+			command: "az githooks notify --hook post-merge >/dev/null 2>&1 || true",
+			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-merge >/dev/null 2>&1 || true\n",
+		},
+		"post-checkout": {
+			command: "az githooks notify --hook post-checkout >/dev/null 2>&1 || true",
+			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-checkout >/dev/null 2>&1 || true\n",
+		},
+		"post-rewrite": {
+			command: "az githooks notify --hook post-rewrite >/dev/null 2>&1 || true",
+			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-rewrite >/dev/null 2>&1 || true\n",
+		},
+	}
+	for hookName, spec := range hookScripts {
 		hookPath := filepath.Join(hooksDir, hookName)
-		if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
+		if err := upsertManagedGitHookFile(hookPath, spec.command, spec.legacy); err != nil {
 			return fmt.Errorf("write %s hook: %w", hookName, err)
 		}
 	}
@@ -505,11 +526,11 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 		return fmt.Errorf("set git core.hooksPath: %w", err)
 	}
 
-	fmt.Printf("Installed git hooks in %s\n", hooksDir)
+	fmt.Printf("Installed/updated git hooks in %s\n", hooksDir)
 	fmt.Println("Configured git core.hooksPath=.githooks")
 	if opts.Verbose {
-		fmt.Println("pre-commit now delegates to: az githooks run")
-		fmt.Println("post-{commit,merge,checkout,rewrite} now delegate to: az githooks notify")
+		fmt.Println("preserved existing hook scripts and upserted Azedarach-managed blocks")
+		fmt.Println("use az githooks update to refresh managed hook commands after future Azedarach changes")
 	}
 	return nil
 }
@@ -1153,8 +1174,69 @@ func PrintHooksUsage() {
 }
 
 func PrintGitHooksUsage() {
-	fmt.Println("Usage: az githooks <install|run|notify> [--project-dir <dir>] [--verbose]")
+	fmt.Println("Usage: az githooks <install|update|run|notify> [--project-dir <dir>] [--verbose]")
 	fmt.Println("Manage repository git hooks and execute configured hook tasks.")
+}
+
+func upsertManagedGitHookFile(path, managedCommand, legacyScript string) error {
+	info, err := os.Stat(path)
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	content := ""
+	if exists {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		content = string(raw)
+	}
+	normalizedExisting := strings.ReplaceAll(content, "\r\n", "\n")
+	normalizedLegacy := strings.ReplaceAll(legacyScript, "\r\n", "\n")
+	if strings.TrimSpace(normalizedExisting) == strings.TrimSpace(normalizedLegacy) {
+		content = ""
+	}
+
+	managedBlock := fmt.Sprintf("%s\n%s\n%s\n", gitHookManagedBlockStart, managedCommand, gitHookManagedBlockEnd)
+	base := stripManagedGitHookBlocks(content)
+	if strings.TrimSpace(base) == "" {
+		base = "#!/usr/bin/env sh\nset -eu\n\n"
+	} else {
+		if !strings.HasSuffix(base, "\n") {
+			base += "\n"
+		}
+		if !strings.HasSuffix(base, "\n\n") {
+			base += "\n"
+		}
+	}
+
+	mode := os.FileMode(0o755)
+	if exists {
+		mode = info.Mode().Perm() | 0o111
+	}
+	return os.WriteFile(path, []byte(base+managedBlock), mode)
+}
+
+func stripManagedGitHookBlocks(content string) string {
+	out := content
+	for {
+		start := strings.Index(out, gitHookManagedBlockStart)
+		if start < 0 {
+			break
+		}
+		endRel := strings.Index(out[start:], gitHookManagedBlockEnd)
+		if endRel < 0 {
+			break
+		}
+		end := start + endRel + len(gitHookManagedBlockEnd)
+		if end < len(out) && out[end] == '\n' {
+			end++
+		}
+		out = out[:start] + out[end:]
+	}
+	return out
 }
 
 func PrintNotifyUsage() {

@@ -45,7 +45,7 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runGitHooksCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "Usage: az githooks <install|run|notify>") {
+	if !strings.Contains(output, "Usage: az githooks <install|update|run|notify>") {
 		t.Fatalf("help output = %q", output)
 	}
 
@@ -59,7 +59,7 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	output = captureMainStdout(t, func() error {
 		return runGitHooksCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir})
 	})
-	if !strings.Contains(output, "Installed git hooks in") {
+	if !strings.Contains(output, "Installed/updated git hooks in") {
 		t.Fatalf("dispatch output = %q", output)
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, ".githooks", "pre-commit")); err != nil {
@@ -67,6 +67,13 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, ".githooks", "post-commit")); err != nil {
 		t.Fatalf("expected post-commit hook: %v", err)
+	}
+
+	output = captureMainStdout(t, func() error {
+		return runGitHooksCommand(config.DefaultConfig(), []string{"update", "--project-dir", projectDir})
+	})
+	if !strings.Contains(output, "Installed/updated git hooks in") {
+		t.Fatalf("update dispatch output = %q", output)
 	}
 }
 
