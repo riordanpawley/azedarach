@@ -3,6 +3,7 @@ package overlay
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -699,6 +700,75 @@ func TestCreateTaskOverlayCtrlEAppliesEditedTemplate(t *testing.T) {
 	assert.Equal(t, "All fields parse and persist", created.Acceptance)
 	require.NotNil(t, created.Estimate)
 	assert.Equal(t, 13, *created.Estimate)
+}
+
+func TestCreateTaskOverlayCtrlEUsesExecProcessByDefault(t *testing.T) {
+	t.Setenv("EDITOR", "hx")
+	overlay := NewCreateTaskOverlay()
+
+	originalExecProcess := overlayExecProcess
+	t.Cleanup(func() {
+		overlayExecProcess = originalExecProcess
+	})
+
+	var captured *exec.Cmd
+	overlayExecProcess = func(c *exec.Cmd, fn tea.ExecCallback) tea.Cmd {
+		captured = c
+		return func() tea.Msg {
+			edited := strings.Join([]string{
+				"# Edited via Exec",
+				"───────────────────────────────────────────────────",
+				"",
+				"Type:     task        (task | bug | feature | epic | chore)",
+				"Priority: P2          (P0 = highest, P4 = lowest)",
+				"Status:   open        (open | in_progress | blocked | closed)",
+				"Assignee:",
+				"Labels:",
+				"Impl:     default",
+				"Estimate:",
+				"",
+				"## Description",
+				"",
+				"Updated through exec callback",
+				"",
+				"## Design",
+				"",
+				"n/a",
+				"",
+				"## Notes",
+				"",
+				"n/a",
+				"",
+				"## Acceptance Criteria",
+				"",
+				"works",
+			}, "\n")
+			if len(c.Args) < 2 {
+				return taskEditorErrorMsg{err: errors.New("missing temp file arg")}
+			}
+			if err := os.WriteFile(c.Args[1], []byte(edited), 0600); err != nil {
+				return taskEditorErrorMsg{err: err}
+			}
+			return fn(nil)
+		}
+	}
+
+	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	require.NotNil(t, cmd)
+	editorMsg := cmd()
+	model, cmd = model.(*CreateTaskOverlay).Update(editorMsg)
+	require.NotNil(t, cmd)
+	msgs := batchToSlice(cmd())
+	require.Len(t, msgs, 2)
+	created, ok := msgs[0].(TaskCreatedMsg)
+	require.True(t, ok)
+	assert.Equal(t, "Edited via Exec", created.Title)
+	assert.Equal(t, "Updated through exec callback", created.Description)
+	require.NotNil(t, captured)
+	assert.Equal(t, "hx", filepath.Base(captured.Path))
+	if len(captured.Args) >= 2 {
+		assert.Contains(t, filepath.Base(captured.Args[1]), "azedarach-task-")
+	}
 }
 
 func TestParseTaskTemplateFullMetadata(t *testing.T) {
