@@ -28,6 +28,10 @@ case "$EVENT" in
       MESSAGE="Session started"
     fi
     ;;
+  pre_tool_use|post_tool_use)
+    # Avoid notification spam for per-tool hooks.
+    exit 0
+    ;;
   session_end)
     MESSAGE="Session stopped"
     ;;

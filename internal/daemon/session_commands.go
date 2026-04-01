@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"unicode"
 
@@ -192,6 +193,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 			}
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree already exists but could not be loaded: %v", recoverErr)), nil
+		}
+	}
+	if !reusedWorktree {
+		if err := d.runWorktreeInitCommands(ctx, worktree.Path); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
 		}
 	}
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
@@ -627,6 +633,33 @@ func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool,
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
+func (d *Daemon) runWorktreeInitCommands(ctx context.Context, worktreePath string) error {
+	commands := d.cfg.WorktreeInitCommands
+	if len(commands) == 0 {
+		return nil
+	}
+
+	shell := strings.TrimSpace(d.cfg.SessionShell)
+	if shell == "" {
+		shell = appconfig.DefaultSessionShell()
+	}
+
+	for _, initCmd := range commands {
+		trimmed := strings.TrimSpace(initCmd)
+		if trimmed == "" {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, shell, "-lc", trimmed)
+		cmd.Dir = worktreePath
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s: %w (%s)", trimmed, err, strings.TrimSpace(string(output)))
+		}
+	}
+
+	return nil
+}
+
 func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
 	tool := strings.TrimSpace(d.cfg.CLITool)
 	if tool == "" {
@@ -639,10 +672,16 @@ func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, image
 	}
 
 	if strings.EqualFold(tool, "codex") {
-		startCommand := fmt.Sprintf("az notify user_prompt %s %s", issueID, sessionID)
-		stopCommand := fmt.Sprintf("az notify session_end %s %s", issueID, sessionID)
+		sessionStartCommand := "az notify --json session_start"
+		userPromptSubmitCommand := "az notify --json user_prompt_submit"
+		preToolUseCommand := "az notify --json pre_tool_use"
+		postToolUseCommand := "az notify --json post_tool_use"
+		stopCommand := "az notify --json stop"
 		parts = append(parts,
-			buildCodexConfigOverrideArg("hooks.SessionStart", startCommand),
+			buildCodexConfigOverrideArg("hooks.SessionStart", sessionStartCommand),
+			buildCodexConfigOverrideArg("hooks.UserPromptSubmit", userPromptSubmitCommand),
+			buildCodexConfigOverrideArg("hooks.PreToolUse", preToolUseCommand),
+			buildCodexConfigOverrideArg("hooks.PostToolUse", postToolUseCommand),
 			buildCodexConfigOverrideArg("hooks.Stop", stopCommand),
 		)
 		for _, imagePath := range imagePaths {

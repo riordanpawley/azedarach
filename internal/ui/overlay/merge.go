@@ -43,8 +43,9 @@ type MergeSelectOverlay struct {
 
 // MergeTargetSelectedMsg is sent when a merge target is selected
 type MergeTargetSelectedMsg struct {
-	SourceID string
-	TargetID string
+	SourceID                   string
+	TargetID                   string
+	SkipPreflightStatusRefresh bool
 }
 
 // NewMergeSelectOverlay creates a new merge target selection overlay
