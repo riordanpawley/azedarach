@@ -1895,7 +1895,7 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID)()
+	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {

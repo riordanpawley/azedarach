@@ -62,6 +62,9 @@ func TestMergePreflightOverlayViewContainsReasons(t *testing.T) {
 	if !strings.Contains(view, "Source az-1 is not clean") {
 		t.Fatalf("view missing reason: %q", view)
 	}
+	if !strings.Contains(view, "Source worktree: /tmp/az-1") || !strings.Contains(view, "Target worktree: .") {
+		t.Fatalf("view missing worktree paths: %q", view)
+	}
 	if !strings.Contains(view, "source.go") || !strings.Contains(view, "target.go") {
 		t.Fatalf("view missing dirty file lists: %q", view)
 	}

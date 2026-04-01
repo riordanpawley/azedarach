@@ -870,7 +870,10 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 	specs := []codexHookInstallSpec{
 		{eventName: "SessionStart", notifyEvent: hookEventSessionStart, guardEvent: "session-start", matcher: "startup|resume"},
 		{eventName: "UserPromptSubmit", notifyEvent: hookEventUserPromptSubmit, guardEvent: "user-prompt-submit"},
-		{eventName: "PreToolUse", notifyEvent: hookEventPreToolUse, guardEvent: "pre-tool-use"},
+		// {eventName: "PreToolUse", notifyEvent: hookEventPreToolUse, guardEvent: "pre-tool-use"},
+		// Intentionally disabled for now: current Codex clients print very noisy
+		// per-tool hook status lines ("Running PreToolUse hook"), which overwhelms
+		// normal output when multiple tools run in quick succession.
 		{eventName: "PostToolUse", notifyEvent: hookEventPostToolUse, guardEvent: "post-tool-use"},
 		{eventName: "Stop", notifyEvent: hookEventStop, guardEvent: "stop"},
 	}
@@ -879,7 +882,7 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 		legacyGuardCommand := fmt.Sprintf("az codex guard --json %s", spec.guardEvent)
 		combinedCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
 		hooks[spec.eventName] = removeHookCommands(hooks[spec.eventName], legacyNotifyCommand, legacyGuardCommand, combinedCommand)
-		shouldInstall := spec.eventName == "SessionStart" || spec.eventName == "PreToolUse" || spec.eventName == "Stop"
+		shouldInstall := spec.eventName == "SessionStart" || spec.eventName == "Stop"
 		if shouldInstall {
 			mergeCodexHookEntry(spec.eventName, combinedCommand, spec.matcher)
 		} else if len(normalizeAnySlice(hooks[spec.eventName])) == 0 {
@@ -894,7 +897,7 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 
 	fmt.Printf("Installed Codex hooks in %s\n", hooksPath)
 	if opts.Verbose {
-		fmt.Println("  Events: SessionStart, PreToolUse, Stop")
+		fmt.Println("  Events: SessionStart, Stop")
 	}
 	return nil
 }

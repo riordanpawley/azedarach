@@ -1,15 +1,5 @@
 {
 	"hooks": {
-		"PreToolUse": [
-			{
-				"hooks": [
-					{
-						"command": "az codex hook run --json pre-tool-use",
-						"type": "command"
-					}
-				]
-			}
-		],
 		"SessionStart": [
 			{
 				"hooks": [

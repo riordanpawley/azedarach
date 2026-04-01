@@ -181,7 +181,6 @@ func TestCodexInstallCommandWritesHooksConfig(t *testing.T) {
 	content := string(data)
 	for _, want := range []string{
 		"az codex hook run --json session-start",
-		"az codex hook run --json pre-tool-use",
 		"az codex hook run --json stop",
 	} {
 		if !strings.Contains(content, want) {
