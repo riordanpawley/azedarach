@@ -17,18 +17,26 @@ type Position struct {
 type Cursor struct {
 	TaskID         string // Primary state: selected task ID
 	FallbackColumn int    // Column to use when TaskID not found
+	FallbackTask   int    // Row hint to preserve neighbor position when TaskID not found
 }
 
 // FindPosition computes the position of the cursor's task in the given columns
 func (c *Cursor) FindPosition(columns []board.Column) Position {
 	if c.TaskID == "" {
-		// No task selected, use fallback column, first task
+		// No task selected, use fallback column and row hint.
 		col := c.FallbackColumn
 		if col >= len(columns) {
 			col = 0
 		}
 		if col < len(columns) && len(columns[col].Tasks) > 0 {
-			return Position{Column: col, Task: 0, Valid: true}
+			task := c.FallbackTask
+			if task < 0 {
+				task = 0
+			}
+			if task >= len(columns[col].Tasks) {
+				task = len(columns[col].Tasks) - 1
+			}
+			return Position{Column: col, Task: task, Valid: true}
 		}
 		return Position{Column: col, Task: 0, Valid: false}
 	}
@@ -37,26 +45,41 @@ func (c *Cursor) FindPosition(columns []board.Column) Position {
 	for colIdx, col := range columns {
 		for taskIdx, task := range col.Tasks {
 			if task.ID == c.TaskID {
+				c.FallbackColumn = colIdx
+				c.FallbackTask = taskIdx
 				return Position{Column: colIdx, Task: taskIdx, Valid: true}
 			}
 		}
 	}
 
-	// Task not found (filtered out?), use fallback
+	// Task not found (filtered out/deleted?), use fallback location hint.
 	col := c.FallbackColumn
 	if col >= len(columns) {
 		col = 0
 	}
 	if col < len(columns) && len(columns[col].Tasks) > 0 {
-		return Position{Column: col, Task: 0, Valid: true}
+		task := c.FallbackTask
+		if task < 0 {
+			task = 0
+		}
+		if task >= len(columns[col].Tasks) {
+			task = len(columns[col].Tasks) - 1
+		}
+		return Position{Column: col, Task: task, Valid: true}
 	}
 	return Position{Column: col, Task: 0, Valid: false}
 }
 
 // SetTask updates the cursor to point to a specific task
 func (c *Cursor) SetTask(taskID string, column int) {
+	c.SetTaskAt(taskID, column, 0)
+}
+
+// SetTaskAt updates the cursor to point to a specific task and row hint.
+func (c *Cursor) SetTaskAt(taskID string, column int, task int) {
 	c.TaskID = taskID
 	c.FallbackColumn = column
+	c.FallbackTask = task
 }
 
 // MoveVertical moves up or down within a column, returns new task ID
@@ -80,6 +103,7 @@ func (c *Cursor) MoveVertical(columns []board.Column, delta int) string {
 	if newIdx >= 0 && newIdx < len(col.Tasks) {
 		c.TaskID = col.Tasks[newIdx].ID
 		c.FallbackColumn = pos.Column
+		c.FallbackTask = newIdx
 	}
 	return c.TaskID
 }
@@ -121,6 +145,7 @@ func (c *Cursor) MoveHorizontal(columns []board.Column, delta int) string {
 		taskIdx = 0
 	}
 	c.TaskID = columns[targetCol].Tasks[taskIdx].ID
+	c.FallbackTask = taskIdx
 	return c.TaskID
 }
 
@@ -129,6 +154,7 @@ func (c *Cursor) JumpToStart(columns []board.Column) string {
 	pos := c.FindPosition(columns)
 	if pos.Column < len(columns) && len(columns[pos.Column].Tasks) > 0 {
 		c.TaskID = columns[pos.Column].Tasks[0].ID
+		c.FallbackTask = 0
 	}
 	return c.TaskID
 }
@@ -140,6 +166,7 @@ func (c *Cursor) JumpToEnd(columns []board.Column) string {
 		col := columns[pos.Column]
 		if len(col.Tasks) > 0 {
 			c.TaskID = col.Tasks[len(col.Tasks)-1].ID
+			c.FallbackTask = len(col.Tasks) - 1
 		}
 	}
 	return c.TaskID
@@ -164,8 +191,10 @@ func (c *Cursor) JumpToColumn(columns []board.Column, colIdx int) string {
 			taskIdx = len(columns[colIdx].Tasks) - 1
 		}
 		c.TaskID = columns[colIdx].Tasks[taskIdx].ID
+		c.FallbackTask = taskIdx
 	} else {
 		c.TaskID = "" // No task in target column
+		c.FallbackTask = 0
 	}
 	return c.TaskID
 }
@@ -282,9 +311,9 @@ func (s *Service) SelectTask(taskID string, column int) {
 func (s *Service) JumpToTaskByIndex(columns []board.Column, flatIndex int) bool {
 	currentIndex := 0
 	for colIdx, col := range columns {
-		for _, task := range col.Tasks {
+		for taskIdx, task := range col.Tasks {
 			if currentIndex == flatIndex {
-				s.cursor.SetTask(task.ID, colIdx)
+				s.cursor.SetTaskAt(task.ID, colIdx, taskIdx)
 				return true
 			}
 			currentIndex++
@@ -296,9 +325,9 @@ func (s *Service) JumpToTaskByIndex(columns []board.Column, flatIndex int) bool 
 // JumpToTaskByID finds and selects a task by ID
 func (s *Service) JumpToTaskByID(columns []board.Column, taskID string) bool {
 	for colIdx, col := range columns {
-		for _, task := range col.Tasks {
+		for taskIdx, task := range col.Tasks {
 			if task.ID == taskID {
-				s.cursor.SetTask(task.ID, colIdx)
+				s.cursor.SetTaskAt(task.ID, colIdx, taskIdx)
 				return true
 			}
 		}
