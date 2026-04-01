@@ -6,15 +6,15 @@ Commands:
   get-many [--project <project-id>] --id <issue-id> [--id <issue-id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   check [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]  Alias for get
   doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]  Run integrity checks for one issue
-  create [--project <project-id>] <title> --impl <implementation> [--type ...] [--priority ...] [--description ...]  Create an issue
+  create [--project <project-id>] <title> [--impl <implementation>] [--type ...] [--priority ...] [--description ...]  Create an issue
   update [--project <project-id>] [--id <issue-id>] [<issue-id>] [--title ...] [--description ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
   close [--project <project-id>] [--id <issue-id>] [<issue-id>]       Close an issue (sets status=closed)
   delete [--project <project-id>] [--id <issue-id>] [<issue-id>] --confirm  Permanently delete an issue
   dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from]  Add a dependency edge
   dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]  Remove a dependency edge
   dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  bulk-create [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk create operations
-  bulk-update [--project <project-id>] --impl <implementation> --input <path> [--dry-run]  Execute bulk update operations
+  bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk create operations
+  bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk update operations
   fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
   fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics

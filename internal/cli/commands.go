@@ -979,12 +979,9 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> --impl <implementation> [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] <title> [--impl <implementation>] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text]")
 	}
 	opts.Title = fs.Arg(0)
-	if opts.Implementation == "" {
-		return IssueCreateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 
 	taskType, err := parseTaskType(typeRaw)
 	if err != nil {
@@ -1304,9 +1301,6 @@ func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	if fs.NArg() != 0 {
 		return IssueBulkCreateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueBulkCreateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
@@ -1328,14 +1322,55 @@ func ParseIssueBulkUpdateArgs(args []string) (IssueBulkUpdateOptions, error) {
 	if fs.NArg() != 0 {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
-	if opts.Implementation == "" {
-		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --impl")
-	}
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueBulkUpdateOptions{}, fmt.Errorf("missing required flag: --input")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
+}
+
+func configuredIssueImplementations(tasks []domain.Task) []string {
+	seen := make(map[string]struct{})
+	impls := make([]string, 0, 4)
+	for _, task := range tasks {
+		for _, impl := range task.Implementations {
+			trimmed := strings.TrimSpace(impl)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			impls = append(impls, trimmed)
+		}
+	}
+	sort.Strings(impls)
+	return impls
+}
+
+func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, provided string) (string, error) {
+	trimmed := strings.TrimSpace(provided)
+	if trimmed != "" {
+		return trimmed, nil
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		return "", fmt.Errorf("missing required flag: --impl")
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve implementation context: %w", err)
+	}
+	impls := configuredIssueImplementations(snapshot.Tasks)
+	switch len(impls) {
+	case 0:
+		return "default", nil
+	case 1:
+		return impls[0], nil
+	default:
+		return "", fmt.Errorf("missing required flag: --impl (multiple implementations configured: %s)", strings.Join(impls, ", "))
+	}
 }
 
 func ConfigSetCommand(deps *Dependencies, opts ConfigSetOptions) error {
@@ -1860,12 +1895,17 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
+	if err != nil {
+		return err
+	}
 
 	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-		Title:       opts.Title,
-		Description: opts.Description,
-		Type:        opts.Type,
-		Priority:    opts.Priority,
+		Title:           opts.Title,
+		Description:     opts.Description,
+		Type:            opts.Type,
+		Priority:        opts.Priority,
+		Implementations: []string{impl},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create issue: %w", err)
@@ -2152,6 +2192,10 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	impl, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation)
+	if err != nil {
+		return err
+	}
 
 	inputBytes, err := os.ReadFile(opts.InputPath)
 	if err != nil {
@@ -2182,11 +2226,12 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 			return fmt.Errorf("bulk-create item %d: %w", i, err)
 		}
 		body, err := json.Marshal(daemonclient.TaskCreateParams{
-			Title:       item.Title,
-			Description: item.Description,
-			Type:        taskType,
-			Priority:    priority,
-			ParentID:    item.ParentID,
+			Title:           item.Title,
+			Description:     item.Description,
+			Type:            taskType,
+			Priority:        priority,
+			Implementations: []string{impl},
+			ParentID:        item.ParentID,
 		})
 		if err != nil {
 			return fmt.Errorf("marshal bulk-create item %d: %w", i, err)
@@ -2207,6 +2252,9 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if _, err := resolveIssueWriteImplementation(ctx, deps, opts.Implementation); err != nil {
 		return err
 	}
 
