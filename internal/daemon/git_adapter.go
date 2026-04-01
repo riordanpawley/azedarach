@@ -79,6 +79,26 @@ func (a *gitServiceAdapter) AbortMerge(ctx context.Context, projectID, worktree 
 	return nil
 }
 
+func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, sourceWorktree, targetWorktree, targetRef, sourceBranch string) (*git.MergePreflightResult, error) {
+	return a.client.MergePreflight(ctx, sourceWorktree, targetWorktree, targetRef, sourceBranch)
+}
+
+func (a *gitServiceAdapter) DiscardChanges(ctx context.Context, projectID, worktree string) error {
+	if err := a.client.DiscardChanges(ctx, worktree); err != nil {
+		return err
+	}
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
+	return nil
+}
+
+func (a *gitServiceAdapter) CreateCheckpoint(ctx context.Context, projectID, worktree, message string) error {
+	if err := a.client.CreateCheckpoint(ctx, worktree, message); err != nil {
+		return err
+	}
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
+	return nil
+}
+
 func (a *gitServiceAdapter) DiffStat(ctx context.Context, _ string, worktree, baseBranch string) (string, error) {
 	return a.client.DiffStat(ctx, worktree, baseBranch)
 }
