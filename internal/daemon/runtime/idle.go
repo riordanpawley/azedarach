@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -18,6 +19,7 @@ type ShutdownHooks struct {
 	StopIntake     func() error
 	DrainInFlight  func(context.Context) error
 	CloseTransport func() error
+	Logger         *slog.Logger
 }
 
 // IdleSupervisor coordinates idle shutdown and graceful draining.
@@ -109,7 +111,9 @@ func (s *IdleSupervisor) shutdown() {
 	s.mu.Unlock()
 
 	if s.hooks.StopIntake != nil {
-		_ = s.hooks.StopIntake()
+		if err := s.hooks.StopIntake(); err != nil && s.hooks.Logger != nil {
+			s.hooks.Logger.Warn("idle shutdown stop intake failed", "error", err)
+		}
 	}
 
 	s.mu.Lock()
@@ -121,10 +125,14 @@ func (s *IdleSupervisor) shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if s.hooks.DrainInFlight != nil {
-		_ = s.hooks.DrainInFlight(ctx)
+		if err := s.hooks.DrainInFlight(ctx); err != nil && s.hooks.Logger != nil {
+			s.hooks.Logger.Warn("idle shutdown drain in-flight failed", "error", err)
+		}
 	}
 	if s.hooks.CloseTransport != nil {
-		_ = s.hooks.CloseTransport()
+		if err := s.hooks.CloseTransport(); err != nil && s.hooks.Logger != nil {
+			s.hooks.Logger.Warn("idle shutdown close transport failed", "error", err)
+		}
 	}
 
 	s.mu.Lock()

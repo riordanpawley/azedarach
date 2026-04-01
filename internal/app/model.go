@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -2836,7 +2835,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 
 		socketPath := config.DaemonSocketPathFor(project.Path)
 		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
-		launcher := daemonprocess.NewLauncher(project.Path, socketPath)
+		launcher := daemonprocess.NewLauncher(project.Path, socketPath).WithLogger(m.logger)
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -2914,7 +2913,7 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 
 		socketPath := config.DaemonSocketPathFor(targetRepoDir)
 		daemonClient := m.daemonClientForSocket(socketPath, projectID)
-		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath)
+		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath).WithLogger(m.logger)
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}
@@ -3983,11 +3982,15 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 
 func newTUILogger(logPath string) *slog.Logger {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Warn("failed to create tui log directory; falling back to stderr logger", "log_path", logPath, "error", err)
+		return logger
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Warn("failed to open tui log file; falling back to stderr logger", "log_path", logPath, "error", err)
+		return logger
 	}
 	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
