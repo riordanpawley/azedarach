@@ -347,3 +347,229 @@ func TestGitCommandsReturnPendingOperationError(t *testing.T) {
 		t.Fatalf("state = %q, want running", pending.State)
 	}
 }
+
+func TestGitMergePreflightDiscardAndCheckpointCommandsRouteThroughDaemon(t *testing.T) {
+	const wantProjectID = "proj-git"
+	const worktree = "/tmp/az-1"
+
+	t.Run("preflight", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitPreflight {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitPreflight)
+				}
+				var body GitMergePreflightRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Worktree != worktree || body.BaseBranch != "main" || body.Branch != "feature/one" {
+					t.Fatalf("request body = %+v", body)
+				}
+				resultBody, err := json.Marshal(GitMergePreflightResponse{
+					Worktree:   worktree,
+					BaseBranch: "main",
+					Branch:     "feature/one",
+					Result: git.MergeResult{
+						Success:       true,
+						HasConflicts:  true,
+						ConflictFiles: []string{"README.md"},
+						Message:       "merge would conflict",
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal response result: %v", err)
+				}
+				wrappedBody, err := json.Marshal(map[string]any{
+					"operation_id": "op-preflight",
+					"state":        string(protocol.OperationStateDone),
+					"result":       json.RawMessage(resultBody),
+				})
+				if err != nil {
+					t.Fatalf("marshal wrapped response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            wrappedBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		resp, err := client.GitMergePreflight(context.Background(), worktree, "main", "feature/one")
+		if err != nil {
+			t.Fatalf("GitMergePreflight error: %v", err)
+		}
+		if resp.Worktree != worktree || resp.BaseBranch != "main" || resp.Branch != "feature/one" {
+			t.Fatalf("response = %+v", resp)
+		}
+		if !resp.Result.HasConflicts || len(resp.Result.ConflictFiles) != 1 || resp.Result.ConflictFiles[0] != "README.md" {
+			t.Fatalf("result = %+v", resp.Result)
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+
+	t.Run("discard", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitDiscard {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitDiscard)
+				}
+				var body GitDiscardRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Worktree != worktree {
+					t.Fatalf("request body = %+v", body)
+				}
+				respBody, err := json.Marshal(GitDiscardResponse{Worktree: worktree})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				wrappedBody, err := json.Marshal(map[string]any{
+					"operation_id": "op-discard",
+					"state":        string(protocol.OperationStateDone),
+					"result":       json.RawMessage(respBody),
+				})
+				if err != nil {
+					t.Fatalf("marshal wrapped response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            wrappedBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		resp, err := client.GitDiscardChanges(context.Background(), worktree)
+		if err != nil {
+			t.Fatalf("GitDiscardChanges error: %v", err)
+		}
+		if resp.Worktree != worktree {
+			t.Fatalf("response = %+v", resp)
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+
+	t.Run("checkpoint", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandGitCheckpoint {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitCheckpoint)
+				}
+				var body GitCheckpointRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request: %v", err)
+				}
+				if body.Worktree != worktree || body.Message != "chore: pre-merge checkpoint" {
+					t.Fatalf("request body = %+v", body)
+				}
+				respBody, err := json.Marshal(GitCheckpointResponse{Worktree: worktree})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				wrappedBody, err := json.Marshal(map[string]any{
+					"operation_id": "op-checkpoint",
+					"state":        string(protocol.OperationStateDone),
+					"result":       json.RawMessage(respBody),
+				})
+				if err != nil {
+					t.Fatalf("marshal wrapped response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            wrappedBody,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		resp, err := client.GitCheckpointCommit(context.Background(), worktree, "chore: pre-merge checkpoint")
+		if err != nil {
+			t.Fatalf("GitCheckpointCommit error: %v", err)
+		}
+		if resp.Worktree != worktree {
+			t.Fatalf("response = %+v", resp)
+		}
+		if transport.lastReq.Meta.ProjectID != wantProjectID {
+			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+}
+
+func TestGitMergePreflightDiscardAndCheckpointPropagatePendingAndErrors(t *testing.T) {
+	const worktree = "/tmp/az-1"
+
+	t.Run("preflight pending", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := json.Marshal(map[string]any{
+					"operation_id": "op-preflight",
+					"state":        string(protocol.OperationStateRunning),
+				})
+				if err != nil {
+					t.Fatalf("marshal pending response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}
+
+		_, err := New(transport).GitMergePreflight(context.Background(), worktree, "main", "feature/one")
+		var pending *OperationPendingError
+		if !errors.As(err, &pending) {
+			t.Fatalf("GitMergePreflight error = %v, want OperationPendingError", err)
+		}
+		if pending.OperationID != "op-preflight" {
+			t.Fatalf("operation id = %q, want op-preflight", pending.OperationID)
+		}
+		if pending.State != protocol.OperationStateRunning {
+			t.Fatalf("state = %q, want running", pending.State)
+		}
+	})
+
+	t.Run("checkpoint error", func(t *testing.T) {
+		transport := &gitRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              false,
+					Error: &protocol.ErrorEnvelope{
+						Code:      protocol.ErrorCodeConflict,
+						Message:   "checkpoint blocked",
+						Retryable: false,
+					},
+				}, nil
+			},
+		}
+
+		_, err := New(transport).GitCheckpointCommit(context.Background(), worktree, "chore: pre-merge checkpoint")
+		var cmdErr *CommandError
+		if !errors.As(err, &cmdErr) {
+			t.Fatalf("GitCheckpointCommit error = %v, want CommandError", err)
+		}
+		if cmdErr.Code != protocol.ErrorCodeConflict || cmdErr.Message != "checkpoint blocked" {
+			t.Fatalf("command error = %+v", cmdErr)
+		}
+	})
+}

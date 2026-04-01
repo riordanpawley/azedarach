@@ -14,6 +14,9 @@ const (
 	CommandGitDiffStat       = "git.diff_stat"
 	CommandGitStatus         = "git.status"
 	CommandGitRuntimeSignals = "git.runtime_signals"
+	CommandGitPreflight      = "git.preflight"
+	CommandGitDiscard        = "git.discard"
+	CommandGitCheckpoint     = "git.checkpoint"
 )
 
 // GitCommandRequest captures the daemon request body for git workflow commands.
@@ -66,6 +69,42 @@ type GitRuntimeSignalsResult struct {
 type gitRuntimeSignalsBody struct {
 	Signals         []GitRuntimeSignalsResult `json:"signals"`
 	PartialFailures int                       `json:"partial_failures"`
+}
+
+// GitMergePreflightRequest captures the daemon request body for merge preflight prediction.
+type GitMergePreflightRequest struct {
+	Worktree   string `json:"worktree"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+}
+
+// GitMergePreflightResponse captures the daemon response body for merge preflight prediction.
+type GitMergePreflightResponse struct {
+	Worktree   string          `json:"worktree"`
+	BaseBranch string          `json:"base_branch,omitempty"`
+	Branch     string          `json:"branch,omitempty"`
+	Result     git.MergeResult `json:"result"`
+}
+
+// GitDiscardRequest captures the daemon request body for discarding worktree changes.
+type GitDiscardRequest struct {
+	Worktree string `json:"worktree"`
+}
+
+// GitDiscardResponse captures the daemon response body for discarding worktree changes.
+type GitDiscardResponse struct {
+	Worktree string `json:"worktree"`
+}
+
+// GitCheckpointRequest captures the daemon request body for checkpoint commits.
+type GitCheckpointRequest struct {
+	Worktree string `json:"worktree"`
+	Message  string `json:"message,omitempty"`
+}
+
+// GitCheckpointResponse captures the daemon response body for checkpoint commits.
+type GitCheckpointResponse struct {
+	Worktree string `json:"worktree"`
 }
 
 // GitFetch asks the daemon to fetch updates for a worktree from the requested remote.
@@ -166,4 +205,52 @@ func (c *Client) GitRuntimeSignals(ctx context.Context, targets []GitRuntimeSign
 		return nil, 0, err
 	}
 	return resp.Signals, resp.PartialFailures, nil
+}
+
+// GitMergePreflight asks the daemon to predict whether the requested merge would conflict.
+func (c *Client) GitMergePreflight(ctx context.Context, worktree, baseBranch, branch string) (GitMergePreflightResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitPreflight, GitMergePreflightRequest{
+		Worktree:   worktree,
+		BaseBranch: baseBranch,
+		Branch:     branch,
+	})
+	if err != nil {
+		return GitMergePreflightResponse{}, err
+	}
+	var resp GitMergePreflightResponse
+	if err := decodeLongRunningJSON(CommandGitPreflight, raw.Body, &resp); err != nil {
+		return GitMergePreflightResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitDiscardChanges asks the daemon to discard staged and unstaged changes in a worktree.
+func (c *Client) GitDiscardChanges(ctx context.Context, worktree string) (GitDiscardResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitDiscard, GitDiscardRequest{
+		Worktree: worktree,
+	})
+	if err != nil {
+		return GitDiscardResponse{}, err
+	}
+	var resp GitDiscardResponse
+	if err := decodeLongRunningJSON(CommandGitDiscard, raw.Body, &resp); err != nil {
+		return GitDiscardResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitCheckpointCommit asks the daemon to create a checkpoint commit in a worktree.
+func (c *Client) GitCheckpointCommit(ctx context.Context, worktree, message string) (GitCheckpointResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitCheckpoint, GitCheckpointRequest{
+		Worktree: worktree,
+		Message:  message,
+	})
+	if err != nil {
+		return GitCheckpointResponse{}, err
+	}
+	var resp GitCheckpointResponse
+	if err := decodeLongRunningJSON(CommandGitCheckpoint, raw.Body, &resp); err != nil {
+		return GitCheckpointResponse{}, err
+	}
+	return resp, nil
 }
