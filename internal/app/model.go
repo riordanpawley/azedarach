@@ -3707,8 +3707,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Close the overlay first
-	m.overlayStack.Pop()
+	// Keep task workspace open when attaching so users can return to the
+	// full detail/actions panel after attach without reopening it.
+	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+		m.overlayStack.Pop()
+	}
 
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
@@ -3962,6 +3965,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func isTaskWorkspaceOverlay(current overlay.Overlay) bool {
+	if current == nil {
+		return false
+	}
+	_, ok := current.(*overlay.TaskWorkspaceOverlay)
+	return ok
 }
 
 func (m Model) eventLogFilePath() string {
