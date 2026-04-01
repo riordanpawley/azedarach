@@ -1597,6 +1597,33 @@ func TestRenderBoardView_NarrowWidthShowsVisibleColumnWindow(t *testing.T) {
 	}
 }
 
+func TestRenderBoardView_ReallyNarrowWidthUsesSingleColumn(t *testing.T) {
+	m := newTestModel()
+	m.width = 50
+	m.height = 24
+	m.loading = false
+
+	m.nav.SelectTask("az-1", 0)
+	m.ensureCursorVisible(m.buildColumns())
+	view := m.renderBoardView()
+	if !strings.Contains(view, "Open (2)") {
+		t.Fatalf("expected open column header in single-column view")
+	}
+	if strings.Contains(view, "In Progress (1)") {
+		t.Fatalf("expected in progress column to be out of view in single-column mode")
+	}
+
+	m.nav.SelectTask("az-3", 1)
+	m.ensureCursorVisible(m.buildColumns())
+	view = m.renderBoardView()
+	if !strings.Contains(view, "In Progress (1)") {
+		t.Fatalf("expected in progress column header after horizontal shift")
+	}
+	if strings.Contains(view, "Open (2)") {
+		t.Fatalf("expected open column to be out of view after shifting to in progress")
+	}
+}
+
 func TestGotoMode(t *testing.T) {
 	m := newTestModel()
 
