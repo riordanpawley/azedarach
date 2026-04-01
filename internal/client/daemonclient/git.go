@@ -2,6 +2,8 @@ package daemonclient
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -14,7 +16,7 @@ const (
 	CommandGitDiffStat       = "git.diff_stat"
 	CommandGitStatus         = "git.status"
 	CommandGitRuntimeSignals = "git.runtime_signals"
-	CommandGitPreflight      = "git.preflight"
+	CommandGitMergePreflight = "git.merge_preflight"
 	CommandGitDiscard        = "git.discard"
 	CommandGitCheckpoint     = "git.checkpoint"
 )
@@ -73,17 +75,25 @@ type gitRuntimeSignalsBody struct {
 
 // GitMergePreflightRequest captures the daemon request body for merge preflight prediction.
 type GitMergePreflightRequest struct {
-	Worktree   string `json:"worktree"`
-	BaseBranch string `json:"base_branch,omitempty"`
-	Branch     string `json:"branch,omitempty"`
+	SourceID       string `json:"source_id,omitempty"`
+	SourceWorktree string `json:"source_worktree"`
+	TargetID       string `json:"target_id,omitempty"`
+	TargetWorktree string `json:"target_worktree"`
+	TargetRef      string `json:"target_ref,omitempty"`
+	SourceBranch   string `json:"source_branch,omitempty"`
 }
 
 // GitMergePreflightResponse captures the daemon response body for merge preflight prediction.
 type GitMergePreflightResponse struct {
-	Worktree   string          `json:"worktree"`
-	BaseBranch string          `json:"base_branch,omitempty"`
-	Branch     string          `json:"branch,omitempty"`
-	Result     git.MergeResult `json:"result"`
+	SourceID       string   `json:"source_id,omitempty"`
+	SourceWorktree string   `json:"source_worktree"`
+	TargetID       string   `json:"target_id,omitempty"`
+	TargetWorktree string   `json:"target_worktree"`
+	Clean          bool     `json:"clean"`
+	Reasons        []string `json:"reasons,omitempty"`
+	SourceFiles    []string `json:"source_files,omitempty"`
+	TargetFiles    []string `json:"target_files,omitempty"`
+	ConflictFiles  []string `json:"conflict_files,omitempty"`
 }
 
 // GitDiscardRequest captures the daemon request body for discarding worktree changes.
@@ -208,18 +218,21 @@ func (c *Client) GitRuntimeSignals(ctx context.Context, targets []GitRuntimeSign
 }
 
 // GitMergePreflight asks the daemon to predict whether the requested merge would conflict.
-func (c *Client) GitMergePreflight(ctx context.Context, worktree, baseBranch, branch string) (GitMergePreflightResponse, error) {
-	raw, err := c.commandJSONResponse(ctx, CommandGitPreflight, GitMergePreflightRequest{
-		Worktree:   worktree,
-		BaseBranch: baseBranch,
-		Branch:     branch,
+func (c *Client) GitMergePreflight(ctx context.Context, sourceID, sourceWorktree, targetID, targetWorktree, targetRef, sourceBranch string) (GitMergePreflightResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitMergePreflight, GitMergePreflightRequest{
+		SourceID:       sourceID,
+		SourceWorktree: sourceWorktree,
+		TargetID:       targetID,
+		TargetWorktree: targetWorktree,
+		TargetRef:      targetRef,
+		SourceBranch:   sourceBranch,
 	})
 	if err != nil {
 		return GitMergePreflightResponse{}, err
 	}
 	var resp GitMergePreflightResponse
-	if err := decodeLongRunningJSON(CommandGitPreflight, raw.Body, &resp); err != nil {
-		return GitMergePreflightResponse{}, err
+	if err := json.Unmarshal(raw.Body, &resp); err != nil {
+		return GitMergePreflightResponse{}, fmt.Errorf("decode %s response: %w", CommandGitMergePreflight, err)
 	}
 	return resp, nil
 }

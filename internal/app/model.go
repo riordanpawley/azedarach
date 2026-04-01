@@ -6264,16 +6264,22 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	targetRef = strings.TrimSpace(targetRef)
 	sourceBranch = strings.TrimSpace(sourceBranch)
 	if len(reasons) == 0 && targetRef != "" && sourceBranch != "" {
-		output, err := runGitCommandFunc(ctx, targetWorktree, "merge-tree", "--write-tree", targetRef, sourceBranch)
-		if predictsMergeConflicts(output, err) {
-			conflicts := parseMergePreflightConflictFiles(output)
-			if len(conflicts) == 0 && err != nil {
-				conflicts = parseMergePreflightConflictFiles(err.Error())
-			}
-			if len(conflicts) > 0 {
-				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(conflicts), strings.Join(conflicts, ", ")))
+		resp, err := m.daemonClient.GitMergePreflight(ctx, sourceID, sourceWorktree, targetID, targetWorktree, targetRef, sourceBranch)
+		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("Could not predict merge conflicts (%s -> %s): %v", sourceID, targetID, err))
+		} else if !resp.Clean {
+			if len(resp.Reasons) > 0 {
+				reasons = append(reasons, resp.Reasons...)
+			} else if len(resp.ConflictFiles) > 0 {
+				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(resp.ConflictFiles), strings.Join(resp.ConflictFiles, ", ")))
 			} else {
 				reasons = append(reasons, "Merge would conflict; merge and resolve main into the source branch first")
+			}
+			if len(resp.SourceFiles) > 0 {
+				sourceFiles = append(sourceFiles[:0], resp.SourceFiles...)
+			}
+			if len(resp.TargetFiles) > 0 {
+				targetFiles = append(targetFiles[:0], resp.TargetFiles...)
 			}
 		}
 	}
@@ -6317,9 +6323,18 @@ func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		_, err := runGitCommandFunc(ctx, worktree, "restore", "--staged", "--worktree", ".")
-		if err == nil {
-			_, err = runGitCommandFunc(ctx, worktree, "clean", "-fd")
+		if m.daemonClient == nil {
+			return mergePreflightActionResultMsg{
+				action:   "discard",
+				side:     side,
+				worktree: worktree,
+				err:      fmt.Errorf("daemon client unavailable"),
+			}
+		}
+
+		_, err := m.daemonClient.GitDiscardChanges(ctx, worktree)
+		if err != nil {
+			err = daemonCommandMessage(err)
 		}
 		return mergePreflightActionResultMsg{
 			action:   "discard",
@@ -6335,31 +6350,30 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 
-		if m.daemonClient != nil {
-			if status, err := m.daemonClient.GitStatus(ctx, worktree); err == nil && !status.HasChanges {
-				return mergePreflightActionResultMsg{
-					action:   "commit",
-					side:     side,
-					worktree: worktree,
-					err:      fmt.Errorf("no changes to commit"),
-				}
+		if m.daemonClient == nil {
+			return mergePreflightActionResultMsg{
+				action:   "commit",
+				side:     side,
+				worktree: worktree,
+				err:      fmt.Errorf("daemon client unavailable"),
 			}
 		}
 
-		if _, err := runGitCommandFunc(ctx, worktree, "add", "-A"); err != nil {
+		if status, err := m.daemonClient.GitStatus(ctx, worktree); err == nil && !status.HasChanges {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
 				worktree: worktree,
-				err:      err,
+				err:      fmt.Errorf("no changes to commit"),
 			}
 		}
-		if _, err := runGitCommandFunc(ctx, worktree, "commit", "-m", "chore: pre-merge checkpoint"); err != nil {
+
+		if _, err := m.daemonClient.GitCheckpointCommit(ctx, worktree, git.DefaultCheckpointMessage); err != nil {
 			return mergePreflightActionResultMsg{
 				action:   "commit",
 				side:     side,
 				worktree: worktree,
-				err:      err,
+				err:      daemonCommandMessage(err),
 			}
 		}
 		return mergePreflightActionResultMsg{
@@ -6368,6 +6382,17 @@ func (m Model) commitChangesCmd(side, worktree string) tea.Cmd {
 			worktree: worktree,
 		}
 	}
+}
+
+func daemonCommandMessage(err error) error {
+	if err == nil {
+		return nil
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) {
+		return fmt.Errorf("%s", strings.TrimSpace(cmdErr.Message))
+	}
+	return err
 }
 
 func findDaemonWorktree(worktrees []git.Worktree, worktreePath, issueID string) (git.Worktree, bool) {
