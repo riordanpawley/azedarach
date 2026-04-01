@@ -210,7 +210,7 @@ func (d *DiagnosticsPanel) Title() string {
 
 // Size returns the overlay dimensions
 func (d *DiagnosticsPanel) Size() (width, height int) {
-	return d.Clamp(1000, 34)
+	return d.ClampResponsive(100, 34)
 }
 
 // refreshCmd returns a command to refresh diagnostics

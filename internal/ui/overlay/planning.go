@@ -614,7 +614,7 @@ func (p *PlanningOverlay) Size() (width, height int) {
 	case phaseError:
 		desiredHeight = 15
 	}
-	return p.Clamp(desiredWidth, desiredHeight)
+	return p.ClampResponsive(desiredWidth, desiredHeight)
 }
 
 func (p *PlanningOverlay) actionBindings() []keybinds.Binding {

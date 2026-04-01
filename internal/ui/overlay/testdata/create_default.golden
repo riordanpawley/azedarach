@@ -1,32 +1,32 @@
-╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│Create New Task                                                                                                   │
-│──────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
-││ Title: > Add grom renderer for detail view maybe?                          Actions                              │
-││ Description:                                                               ─────────────────────────────────────│
-││ ┃   1 review panel structure and preserve layout                            Tab / Shift+Tab Switch fields       │
-││ ┃                                                                           Ctrl+C Clear focused field          │
-││ ┃                                                                           T/B/F/E/C Set type                  │
-││ ┃                                                                           0/1/2/3/4 Set priority              │
-││ ┃                                                                           h/l or ←/→ Cycle impl combinations  │
-││ ┃                                                                           Ctrl+P Paste image (edit task)      │
-││ ┃                                                                           Ctrl+O Paste image (alias)          │
-││ ┃                                                                           j/k + d Manage attachments          │
-││ ┃                                                                           Enter Create task                   │
-││ ┃                                                                           Ctrl+E Edit in $EDITOR              │
-││ ┃                                                                           Ctrl+K Clear form                   │
-││ ┃                                                                           Esc Cancel                          │
-││ Type: [●T] [ B] [ F] [ E] [ C]                                                                                  │
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                                                              │
-││ Impls: [<] (none) [>]                                                                                           │
-││ Acceptance Criteria:                                                                                            │
-││ ┃   1 Acceptance criteria (optional)...                                                                         │
-││ ┃                                                                                                               │
-││ ┃                                                                                                               │
-││ ┃                                                                                                               │
-││ ┃                                                                                                               │
-││ ┃                                                                                                               │
-││ ┃                                                                                                               │
-││ ┃                                                                                                               │
-││                                                                                                                 │
-││ ────────────────────────────────────────────────────────────────────────                                        │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Create New Task                                                                                                     │
+│────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+││ Title: > Add grom renderer for detail view maybe?                           Actions                               │
+││ Description:                                                                ──────────────────────────────────────│
+││ ┃   1 review panel structure and preserve layout                             Tab / Shift+Tab Switch fields        │
+││ ┃                                                                            Ctrl+C Clear focused field           │
+││ ┃                                                                            T/B/F/E/C Set type                   │
+││ ┃                                                                            0/1/2/3/4 Set priority               │
+││ ┃                                                                            h/l or ←/→ Cycle impl combinations   │
+││ ┃                                                                            Ctrl+P Paste image (edit task)       │
+││ ┃                                                                            Ctrl+O Paste image (alias)           │
+││ ┃                                                                            j/k + d Manage attachments           │
+││ ┃                                                                            Enter Create task                    │
+││ ┃                                                                            Ctrl+E Edit in $EDITOR               │
+││ ┃                                                                            Ctrl+K Clear form                    │
+││ ┃                                                                            Esc Cancel                           │
+││ Type: [●T] [ B] [ F] [ E] [ C]                                                                                    │
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]                                                                                │
+││ Impls: [<] (none) [>]                                                                                             │
+││ Acceptance Criteria:                                                                                              │
+││ ┃   1 Acceptance criteria (optional)...                                                                           │
+││ ┃                                                                                                                 │
+││ ┃                                                                                                                 │
+││ ┃                                                                                                                 │
+││ ┃                                                                                                                 │
+││ ┃                                                                                                                 │
+││ ┃                                                                                                                 │
+││ ┃                                                                                                                 │
+││                                                                                                                   │
+││ ─────────────────────────────────────────────────────────────────────────                                         │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

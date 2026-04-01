@@ -102,7 +102,7 @@ func (m *SpecWorkspaceOverlay) Title() string {
 
 // Size returns the overlay dimensions.
 func (m *SpecWorkspaceOverlay) Size() (width, height int) {
-	return m.Clamp(82, 18)
+	return m.ClampResponsive(82, 18)
 }
 
 func (m *SpecWorkspaceOverlay) renderMainContent() string {

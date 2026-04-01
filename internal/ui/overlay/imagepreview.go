@@ -360,9 +360,9 @@ func (i *ImagePreviewOverlay) Title() string {
 // Size returns the overlay dimensions
 func (i *ImagePreviewOverlay) Size() (width, height int) {
 	if i.confirmDelete {
-		return i.Clamp(72, 22)
+		return i.ClampResponsive(72, 22)
 	}
-	return i.Clamp(82, 28)
+	return i.ClampResponsive(82, 28)
 }
 
 // Commands

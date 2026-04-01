@@ -41,7 +41,10 @@ func (cfg dialogLayoutConfig) hasRightPane() bool {
 
 func clampDialogSize(desiredWidth, desiredHeight, viewportWidth, viewportHeight int) (int, int) {
 	if viewportWidth > 0 && viewportHeight > 0 &&
-		(viewportWidth <= dialogFullscreenWidthThreshold || viewportHeight <= dialogFullscreenHeightThreshold) {
+		(viewportWidth <= dialogFullscreenWidthThreshold ||
+			viewportHeight <= dialogFullscreenHeightThreshold ||
+			desiredWidth >= viewportWidth ||
+			desiredHeight >= viewportHeight) {
 		return max(1, viewportWidth-2), max(1, viewportHeight-2)
 	}
 

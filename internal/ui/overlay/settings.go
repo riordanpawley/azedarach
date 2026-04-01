@@ -318,7 +318,7 @@ func (m *SettingsOverlay) Title() string {
 func (m *SettingsOverlay) Size() (width, height int) {
 	// Width: enough for longest setting line
 	// Height: number of items + footer + padding
-	return m.Clamp(72, len(m.items)+9)
+	return m.ClampResponsive(72, len(m.items)+9)
 }
 
 // moveCursorDown moves the cursor to the next selectable item

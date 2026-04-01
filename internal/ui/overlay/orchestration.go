@@ -164,7 +164,7 @@ func (o *OrchestrationOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (o *OrchestrationOverlay) Size() (width, height int) {
-	return o.Clamp(100, o.viewHeight())
+	return o.ClampResponsive(100, o.viewHeight())
 }
 
 func (o *OrchestrationOverlay) viewHeight() int {
