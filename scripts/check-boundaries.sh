@@ -27,6 +27,21 @@ has_prefix() {
 is_authority_service_import() {
   local pkg="$1"
   case "$pkg" in
+    "$prefix/services/git"|"$prefix/services/git/"*|\
+    "$prefix/services/issues"|"$prefix/services/issues/"*|\
+    "$prefix/services/worktree"|"$prefix/services/worktree/"*|\
+    "$prefix/services/tmux"|"$prefix/services/tmux/"*|\
+    "$prefix/services/devserver"|"$prefix/services/devserver/"*|\
+    "$prefix/services/pr"|"$prefix/services/pr/"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_ui_authority_service_import() {
+  local pkg="$1"
+  case "$pkg" in
     "$prefix/services/worktree"|"$prefix/services/worktree/"*|\
     "$prefix/services/tmux"|"$prefix/services/tmux/"*|\
     "$prefix/services/devserver"|"$prefix/services/devserver/"*|\
@@ -52,8 +67,13 @@ while IFS= read -r line; do
       fail "$importer imports daemon package $imported"
     fi
 
-    if { has_prefix "$importer" "$prefix/cli" || has_prefix "$importer" "$prefix/ui"; } \
+    if { has_prefix "$importer" "$prefix/app" || has_prefix "$importer" "$prefix/cli"; } \
       && is_authority_service_import "$imported"; then
+      fail "$importer imports authority service $imported"
+    fi
+
+    if has_prefix "$importer" "$prefix/ui" \
+      && is_ui_authority_service_import "$imported"; then
       fail "$importer imports authority service $imported"
     fi
 
@@ -63,6 +83,12 @@ while IFS= read -r line; do
     fi
   done
 done < <(go list -f '{{.ImportPath}} -> {{range .Imports}}{{.}} {{end}}' ./internal/...)
+
+if rg -n --no-heading --glob '!**/*_test.go' \
+  'exec\.Command(Context)?\([^)]*"git"|runGitCommand\(|newGitCommand\(' \
+  internal/app internal/cli >/dev/null; then
+  fail "non-test app/cli code contains direct git subprocess usage"
+fi
 
 if ! env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE go test ./internal/app -run '^TestIntegrationBoundaryGuard_NoDirectGitExecInAppOrCli$' -count=1; then
   printf 'Boundary runtime git-exec guard failed\n' >&2
