@@ -729,15 +729,9 @@ func TestParseLogArgs(t *testing.T) {
 		t.Fatalf("ParseLogArgs(nil) sources = %v, want %v", got, want)
 	}
 
-	interspersedOpts, err := ParseLogArgs([]string{"daemon", "tui", "--no-follow", "--lines", "100"})
-	if err != nil {
-		t.Fatalf("ParseLogArgs(interspersed) error = %v", err)
-	}
-	if interspersedOpts.Follow || interspersedOpts.Lines != 100 {
-		t.Fatalf("ParseLogArgs(interspersed) lines/follow = %+v", interspersedOpts)
-	}
-	if got, want := interspersedOpts.Sources, []string{"daemon", "tui"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ParseLogArgs(interspersed) sources = %v, want %v", got, want)
+	_, err = ParseLogArgs([]string{"daemon", "tui", "--no-follow", "--lines", "100"})
+	if err == nil || !strings.Contains(err.Error(), "flags must come before positional sources") {
+		t.Fatalf("ParseLogArgs(interspersed) error = %v, want ordering guidance", err)
 	}
 
 	if _, err := ParseLogArgs([]string{"worker"}); err == nil {
@@ -3467,7 +3461,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
 	}
-	if !strings.Contains(output, "az log daemon tui --no-follow --lines 100") {
+	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
 		t.Fatalf("usage missing log example: %q", output)
 	}
 	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps]") {
