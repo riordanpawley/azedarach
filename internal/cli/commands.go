@@ -709,28 +709,60 @@ func ParseLogArgs(args []string) (LogOptions, error) {
 		Lines:  200,
 		Follow: true,
 	}
-	fs := flag.NewFlagSet("log", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var sourceList string
-	var noFollow bool
-	fs.StringVar(&sourceList, "source", "", "comma-separated log sources: daemon,tui,cli")
-	fs.IntVar(&opts.Lines, "lines", 200, "number of lines to show before streaming")
-	fs.BoolVar(&opts.Follow, "follow", true, "keep streaming logs")
-	fs.BoolVar(&noFollow, "no-follow", false, "print and exit without following")
-	if err := fs.Parse(args); err != nil {
-		return LogOptions{}, err
-	}
-	if noFollow {
-		opts.Follow = false
+
+	requestedSources := make([]string, 0, len(args)+3)
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if arg == "--" {
+			for _, rest := range args[i+1:] {
+				requestedSources = append(requestedSources, splitLogSourceList(rest)...)
+			}
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			requestedSources = append(requestedSources, splitLogSourceList(arg)...)
+			continue
+		}
+
+		switch {
+		case arg == "--source":
+			i++
+			if i >= len(args) {
+				return LogOptions{}, fmt.Errorf("flag needs an argument: --source")
+			}
+			requestedSources = append(requestedSources, splitLogSourceList(args[i])...)
+		case strings.HasPrefix(arg, "--source="):
+			requestedSources = append(requestedSources, splitLogSourceList(strings.TrimPrefix(arg, "--source="))...)
+		case arg == "--lines":
+			i++
+			if i >= len(args) {
+				return LogOptions{}, fmt.Errorf("flag needs an argument: --lines")
+			}
+			lines, err := strconv.Atoi(strings.TrimSpace(args[i]))
+			if err != nil {
+				return LogOptions{}, fmt.Errorf("invalid value %q for flag --lines", args[i])
+			}
+			opts.Lines = lines
+		case strings.HasPrefix(arg, "--lines="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--lines="))
+			lines, err := strconv.Atoi(value)
+			if err != nil {
+				return LogOptions{}, fmt.Errorf("invalid value %q for flag --lines", value)
+			}
+			opts.Lines = lines
+		case arg == "--follow":
+			opts.Follow = true
+		case arg == "--no-follow":
+			opts.Follow = false
+		default:
+			return LogOptions{}, fmt.Errorf("flag provided but not defined: %s", arg)
+		}
 	}
 	if opts.Lines < 1 {
 		return LogOptions{}, fmt.Errorf("--lines must be greater than 0")
-	}
-
-	requestedSources := make([]string, 0, len(fs.Args())+3)
-	requestedSources = append(requestedSources, splitLogSourceList(sourceList)...)
-	for _, arg := range fs.Args() {
-		requestedSources = append(requestedSources, splitLogSourceList(arg)...)
 	}
 
 	if len(requestedSources) == 0 {

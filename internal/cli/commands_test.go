@@ -729,6 +729,17 @@ func TestParseLogArgs(t *testing.T) {
 		t.Fatalf("ParseLogArgs(nil) sources = %v, want %v", got, want)
 	}
 
+	interspersedOpts, err := ParseLogArgs([]string{"daemon", "tui", "--no-follow", "--lines", "100"})
+	if err != nil {
+		t.Fatalf("ParseLogArgs(interspersed) error = %v", err)
+	}
+	if interspersedOpts.Follow || interspersedOpts.Lines != 100 {
+		t.Fatalf("ParseLogArgs(interspersed) lines/follow = %+v", interspersedOpts)
+	}
+	if got, want := interspersedOpts.Sources, []string{"daemon", "tui"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseLogArgs(interspersed) sources = %v, want %v", got, want)
+	}
+
 	if _, err := ParseLogArgs([]string{"worker"}); err == nil {
 		t.Fatal("expected unknown source error")
 	}
