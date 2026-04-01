@@ -141,7 +141,7 @@ func (d *DetailPanel) View() string {
 	b.WriteString("\n")
 
 	if d.mutation != nil {
-		b.WriteString(labelStyle.Render("Mutation:"))
+		b.WriteString(labelStyle.Render("Issue Ops:"))
 		b.WriteString("  ")
 		b.WriteString(valueStyle.Render(d.formatMutationProgress()))
 		b.WriteString("\n")
@@ -190,16 +190,18 @@ func (d *DetailPanel) View() string {
 	b.WriteString(valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
 	b.WriteString("\n")
 
-	// Worktree/session runtime info if present
-	if d.session != nil {
+	// Worktree/session runtime info when available.
+	if d.session != nil || d.hasGitStatusData() {
 		b.WriteString("\n")
 		b.WriteString(headerStyle.Render("Worktree"))
 		b.WriteString("\n")
 
-		b.WriteString(labelStyle.Render("State:"))
-		b.WriteString("  ")
-		b.WriteString(valueStyle.Render(fmt.Sprintf("%s %s", d.session.State.Icon(), string(d.session.State))))
-		b.WriteString("\n")
+		if d.session != nil {
+			b.WriteString(labelStyle.Render("State:"))
+			b.WriteString("  ")
+			b.WriteString(valueStyle.Render(fmt.Sprintf("%s %s", d.session.State.Icon(), string(d.session.State))))
+			b.WriteString("\n")
+		}
 
 		if d.hasGitStatusData() {
 			b.WriteString(labelStyle.Render("Git:"))
@@ -208,7 +210,7 @@ func (d *DetailPanel) View() string {
 			b.WriteString("\n")
 		}
 
-		if d.session.StartedAt != nil {
+		if d.session != nil && d.session.StartedAt != nil {
 			b.WriteString(labelStyle.Render("Created:"))
 			b.WriteString("  ")
 			b.WriteString(valueStyle.Render(d.formatTime(*d.session.StartedAt)))
@@ -221,14 +223,14 @@ func (d *DetailPanel) View() string {
 			b.WriteString("\n")
 		}
 
-		if d.session.Worktree != "" {
+		if d.session != nil && d.session.Worktree != "" {
 			b.WriteString(labelStyle.Render("Path:"))
 			b.WriteString("  ")
 			b.WriteString(valueStyle.Render(d.session.Worktree))
 			b.WriteString("\n")
 		}
 
-		if d.session.DevServer != nil && d.session.DevServer.Running {
+		if d.session != nil && d.session.DevServer != nil && d.session.DevServer.Running {
 			b.WriteString(labelStyle.Render("Dev Server:"))
 			b.WriteString("  ")
 			b.WriteString(valueStyle.Render(fmt.Sprintf(":%d (%s)", d.session.DevServer.Port, d.session.DevServer.Command)))
@@ -425,6 +427,9 @@ func (d *DetailPanel) formatMutationProgress() string {
 			return fmt.Sprintf("%s [operation %s] [%s]", progress, operationID, strings.Join(progressBits, " - "))
 		}
 		return fmt.Sprintf("%s [operation %s]", progress, operationID)
+	}
+	if message := strings.TrimSpace(d.mutation.ProgressMessage); message != "" {
+		return fmt.Sprintf("%s [%s]", progress, message)
 	}
 	return progress
 }

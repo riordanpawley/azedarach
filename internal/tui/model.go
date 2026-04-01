@@ -454,6 +454,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runtimeSignalWorktreeByTask = msg.worktreeByTask
 		m.lastRuntimeRefresh = msg.refreshedAt
 		m.applyRuntimeSignals()
+		m.syncTaskWorkspaceOverlay()
 		return m, nil
 
 	case issuesErrorMsg:
@@ -5863,6 +5864,17 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgress {
 	key := taskIDKey(taskID)
 	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 {
+		if signals, ok := m.runtimeSignalsByTask[taskID]; ok {
+			state := strings.TrimSpace(signals.PendingOperationState)
+			operationID := strings.TrimSpace(signals.PendingOperationID)
+			if operationID != "" || state != "" || signals.PendingOperationPercent > 0 {
+				return &overlay.TaskMutationProgress{
+					OperationID:     operationID,
+					State:           state,
+					ProgressPercent: clampOperationPercent(signals.PendingOperationPercent),
+				}
+			}
+		}
 		return nil
 	}
 	progress := &overlay.TaskMutationProgress{}
@@ -5871,6 +5883,7 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		progress.State = string(pending.state)
 		progress.PreviousStatus = pending.previousStatus
 		progress.TargetStatus = pending.targetStatus
+		progress.ProgressMessage = strings.TrimSpace(pending.action)
 	}
 	if op, ok := m.pendingOpsByTask[key]; ok {
 		if progress.OperationID == "" {
