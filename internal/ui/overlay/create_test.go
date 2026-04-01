@@ -648,6 +648,56 @@ func TestEditTaskOverlayCtrlPAttachesFromClipboard(t *testing.T) {
 	assert.Equal(t, "az-77", addedMsg.attachment.IssueID)
 }
 
+func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
+	task := domain.Task{ID: "az-78", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
+
+	tests := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{
+			name: "ctrl+p type",
+			key:  tea.KeyMsg{Type: tea.KeyCtrlP},
+		},
+		{
+			name: "ctrl+o type",
+			key:  tea.KeyMsg{Type: tea.KeyCtrlO},
+		},
+		{
+			name: "raw control-p rune",
+			key:  tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(0x10)}},
+		},
+		{
+			name: "raw control-o rune",
+			key:  tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(0x0f)}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &createTestAttachmentService{
+				attached: &attachment.Attachment{
+					ID:       "att-variant",
+					IssueID:  task.ID,
+					Filename: "clipboard.png",
+					Size:     1200,
+					Created:  time.Now(),
+				},
+			}
+			overlay := NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, nil, svc)
+
+			_, cmd := overlay.Update(tt.key)
+			require.NotNil(t, cmd)
+
+			msg := cmd()
+			addedMsg, ok := msg.(attachmentAddedMsg)
+			require.True(t, ok)
+			require.NotNil(t, addedMsg.attachment)
+			assert.Equal(t, task.ID, addedMsg.attachment.IssueID)
+		})
+	}
+}
+
 func TestEditTaskOverlayDeleteAttachmentWhenFocused(t *testing.T) {
 	task := domain.Task{ID: "az-88", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
 	svc := &createTestAttachmentService{
