@@ -141,6 +141,46 @@ func TestGitHooksInstallCommandPreservesCustomHookContent(t *testing.T) {
 	}
 }
 
+func TestGitHooksInstallCommandInjectsManagedBlockBeforeEarlyReturn(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, ".githooks"), 0o755); err != nil {
+		t.Fatalf("mkdir .githooks: %v", err)
+	}
+	cmd := exec.Command("git", "-C", projectDir, "init")
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	preCommitPath := filepath.Join(projectDir, ".githooks", "pre-commit")
+	custom := "#!/usr/bin/env sh\nset -eu\nexit 0\necho unreachable\n"
+	if err := os.WriteFile(preCommitPath, []byte(custom), 0o755); err != nil {
+		t.Fatalf("seed pre-commit: %v", err)
+	}
+
+	opts, err := ParseGitHooksInstallArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksInstallArgs error: %v", err)
+	}
+	if err := GitHooksInstallCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("GitHooksInstallCommand error: %v", err)
+	}
+
+	data, err := os.ReadFile(preCommitPath)
+	if err != nil {
+		t.Fatalf("read pre-commit: %v", err)
+	}
+	content := string(data)
+	managedIndex := strings.Index(content, "az githooks run \"$@\"")
+	exitIndex := strings.Index(content, "exit 0")
+	if managedIndex < 0 || exitIndex < 0 {
+		t.Fatalf("expected managed command and exit line in content: %q", content)
+	}
+	if managedIndex > exitIndex {
+		t.Fatalf("managed command appears after early return: %q", content)
+	}
+}
+
 func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	projectDir := t.TempDir()
 	initCmd := exec.Command("git", "-C", projectDir, "init")

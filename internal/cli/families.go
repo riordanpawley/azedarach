@@ -1203,20 +1203,14 @@ func upsertManagedGitHookFile(path, managedCommand, legacyScript string) error {
 	base := stripManagedGitHookBlocks(content)
 	if strings.TrimSpace(base) == "" {
 		base = "#!/usr/bin/env sh\nset -eu\n\n"
-	} else {
-		if !strings.HasSuffix(base, "\n") {
-			base += "\n"
-		}
-		if !strings.HasSuffix(base, "\n\n") {
-			base += "\n"
-		}
 	}
+	final := injectManagedGitHookBlock(base, managedBlock)
 
 	mode := os.FileMode(0o755)
 	if exists {
 		mode = info.Mode().Perm() | 0o111
 	}
-	return os.WriteFile(path, []byte(base+managedBlock), mode)
+	return os.WriteFile(path, []byte(final), mode)
 }
 
 func stripManagedGitHookBlocks(content string) string {
@@ -1237,6 +1231,33 @@ func stripManagedGitHookBlocks(content string) string {
 		out = out[:start] + out[end:]
 	}
 	return out
+}
+
+func injectManagedGitHookBlock(base, managedBlock string) string {
+	normalized := strings.ReplaceAll(base, "\r\n", "\n")
+	if !strings.HasSuffix(normalized, "\n") {
+		normalized += "\n"
+	}
+	if strings.HasPrefix(normalized, "#!") {
+		if lineEnd := strings.IndexByte(normalized, '\n'); lineEnd >= 0 {
+			head := normalized[:lineEnd+1]
+			rest := normalized[lineEnd+1:]
+			if strings.TrimSpace(rest) == "" {
+				return head + managedBlock
+			}
+			if !strings.HasPrefix(rest, "\n") {
+				rest = "\n" + rest
+			}
+			return head + managedBlock + rest
+		}
+	}
+	if strings.TrimSpace(normalized) == "" {
+		return managedBlock
+	}
+	if !strings.HasPrefix(normalized, "\n") {
+		normalized = "\n" + normalized
+	}
+	return managedBlock + normalized
 }
 
 func PrintNotifyUsage() {
