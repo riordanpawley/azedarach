@@ -1794,16 +1794,18 @@ func TestParseIssueCreateArgs(t *testing.T) {
 				AutoParentFromIssueID: ptrToString("az-parent"),
 			},
 		},
-		{
-			name: "interspersed flags after title",
-			args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
-			want: IssueCreateOptions{
-				Implementation: "go-bubbletea",
-				Title:          "Title",
-				Type:           domain.TypeTask,
-				Priority:       domain.P1,
+			{
+				name: "interspersed flags after title",
+				args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
+				want: IssueCreateOptions{
+					Title:                 "Title",
+					Type:                  domain.TypeTask,
+					Priority:              domain.P1,
+					PriorityExplicit:      true,
+					Implementations:       []string{"go-bubbletea"},
+					AutoParentFromIssueID: ptrToString("az-parent"),
+				},
 			},
-		},
 		{
 			name: "deferred defaults priority",
 			args: []string{"--deferred", "Title"},
