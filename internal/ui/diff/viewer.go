@@ -15,6 +15,8 @@ import (
 
 type DiffClient interface {
 	Status(ctx context.Context, worktree string) (*gitservice.GitStatus, error)
+	ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]gitservice.ChangedFile, error)
+	MergeBase(ctx context.Context, worktree, baseBranch string) (string, error)
 }
 
 type PopupOpener func(ctx context.Context, title, command string) error
@@ -71,6 +73,11 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 			return loadChangedFilesMsg{Err: err}
 		}
 		files := statusChangedFiles(status)
+		baseFiles, baseErr := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
+		if baseErr != nil && len(files) == 0 {
+			return loadChangedFilesMsg{Err: baseErr}
+		}
+		files = mergeChangedFileLists(files, baseFiles)
 		return loadChangedFilesMsg{Files: files, Err: err}
 	}
 }
@@ -98,16 +105,22 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 
 		var title string
 		var command string
+		mergeBase, err := d.gitClient.MergeBase(context.Background(), d.worktree, d.effectiveBaseBranch())
+		if err != nil {
+			return popupResultMsg{Err: err}
+		}
 		if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
-				"git diff --stat --color=always -- ':^.azedarach' && echo \"\" && git diff --cached --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff --cached -- ':^.azedarach' | less -RS",
+				"git diff %s --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- ':^.azedarach' | less -RS",
+				shellSingleQuote(mergeBase),
+				shellSingleQuote(mergeBase),
 			)
 		} else {
 			title = " " + filePath + " "
 			command = fmt.Sprintf(
-				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff -- %s && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff --cached -- %s | less -RS",
-				shellSingleQuote(filePath),
+				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s -- %s | less -RS",
+				shellSingleQuote(mergeBase),
 				shellSingleQuote(filePath),
 			)
 		}
@@ -462,6 +475,31 @@ func statusChangedFiles(status *gitservice.GitStatus) []gitservice.ChangedFile {
 
 	out := make([]gitservice.ChangedFile, 0, len(byPath))
 	for _, file := range byPath {
+		out = append(out, file)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+func mergeChangedFileLists(primary, secondary []gitservice.ChangedFile) []gitservice.ChangedFile {
+	merged := make(map[string]gitservice.ChangedFile, len(primary)+len(secondary))
+	for _, file := range secondary {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		merged[file.Path] = file
+	}
+	for _, file := range primary {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		merged[file.Path] = file
+	}
+
+	out := make([]gitservice.ChangedFile, 0, len(merged))
+	for _, file := range merged {
 		out = append(out, file)
 	}
 	sort.Slice(out, func(i, j int) bool {

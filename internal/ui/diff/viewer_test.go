@@ -11,8 +11,12 @@ import (
 )
 
 type fakeDiffClient struct {
-	status    *gitservice.GitStatus
-	statusErr error
+	status      *gitservice.GitStatus
+	statusErr   error
+	changedFiles []gitservice.ChangedFile
+	changedErr   error
+	mergeBase    string
+	mergeBaseErr error
 }
 
 func (f *fakeDiffClient) Status(context.Context, string) (*gitservice.GitStatus, error) {
@@ -26,12 +30,30 @@ func (f *fakeDiffClient) Status(context.Context, string) (*gitservice.GitStatus,
 	return &copied, nil
 }
 
+func (f *fakeDiffClient) ChangedFiles(context.Context, string, string) ([]gitservice.ChangedFile, error) {
+	if f.changedErr != nil {
+		return nil, f.changedErr
+	}
+	return append([]gitservice.ChangedFile(nil), f.changedFiles...), nil
+}
+
+func (f *fakeDiffClient) MergeBase(context.Context, string, string) (string, error) {
+	if f.mergeBaseErr != nil {
+		return "", f.mergeBaseErr
+	}
+	if strings.TrimSpace(f.mergeBase) == "" {
+		return "abc123", nil
+	}
+	return f.mergeBase, nil
+}
+
 func TestDiffViewerInitLoadsChangedFiles(t *testing.T) {
 	client := &fakeDiffClient{
 		status: &gitservice.GitStatus{
 			HasChanges: true,
 			Modified:   []string{"internal/app/model.go"},
 		},
+		mergeBase: "base123",
 	}
 
 	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
@@ -56,6 +78,7 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 			HasChanges: true,
 			Modified:   []string{"internal/app/model.go"},
 		},
+		mergeBase: "base123",
 	}
 
 	var gotTitle string
@@ -82,10 +105,7 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	if gotTitle != " internal/app/model.go " {
 		t.Fatalf("popup title=%q", gotTitle)
 	}
-	if !strings.Contains(gotCommand, "git diff -- 'internal/app/model.go'") {
-		t.Fatalf("popup command=%q", gotCommand)
-	}
-	if !strings.Contains(gotCommand, "git diff --cached -- 'internal/app/model.go'") {
+	if !strings.Contains(gotCommand, "git diff 'base123' -- 'internal/app/model.go'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 	if !strings.Contains(viewer.popupStatus, "Opened diff popup") {
@@ -99,6 +119,7 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 			HasChanges: true,
 			Modified:   []string{"a.go"},
 		},
+		mergeBase: "base456",
 	}
 
 	var gotCommand string
@@ -116,10 +137,7 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 		t.Fatal("expected all-diff popup command")
 	}
 	_ = cmd()
-	if !strings.Contains(gotCommand, "git diff --stat --color=always -- ':^.azedarach'") {
-		t.Fatalf("popup command=%q", gotCommand)
-	}
-	if !strings.Contains(gotCommand, "git diff --cached --stat --color=always -- ':^.azedarach'") {
+	if !strings.Contains(gotCommand, "git diff 'base456' --stat --color=always -- ':^.azedarach'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 }
@@ -296,5 +314,26 @@ func TestStatusChangedFilesDeduplicatesAndSortsWithPriority(t *testing.T) {
 	}
 	if files[4].Path != "z.go" || files[4].Status != gitservice.DiffFileDeleted {
 		t.Fatalf("files[4]=%+v", files[4])
+	}
+}
+
+func TestDiffViewerInitFallsBackToBaseChangedFilesWhenStatusClean(t *testing.T) {
+	client := &fakeDiffClient{
+		status: &gitservice.GitStatus{},
+		changedFiles: []gitservice.ChangedFile{
+			{Path: "internal/app/model.go", Status: gitservice.DiffFileModified},
+		},
+	}
+
+	viewer := NewDiffViewer("/tmp/az-1", "main", client, nil)
+	msg := viewer.Init()()
+	updated, _ := viewer.Update(msg)
+	viewer = updated.(*DiffViewer)
+
+	if len(viewer.files) != 1 {
+		t.Fatalf("files=%d, want 1", len(viewer.files))
+	}
+	if viewer.files[0].Path != "internal/app/model.go" {
+		t.Fatalf("file path=%q, want internal/app/model.go", viewer.files[0].Path)
 	}
 }

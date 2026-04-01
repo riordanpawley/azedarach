@@ -114,7 +114,9 @@ func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 
 func TestGitHooksRunCommandRequiresSpecSyncCommandWhenEnabled(t *testing.T) {
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	initCmd := exec.Command("git", "-C", projectDir, "init")
+	initCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -136,13 +138,19 @@ func TestGitHooksRunCommandRequiresSpecSyncCommandWhenEnabled(t *testing.T) {
 
 func TestGitHooksRunCommandRequiresBoundaryCommandWhenEnabled(t *testing.T) {
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	initCmd := exec.Command("git", "-C", projectDir, "init")
+	initCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	if err := exec.Command("git", "-C", projectDir, "config", "user.name", "Test User").Run(); err != nil {
+	configNameCmd := exec.Command("git", "-C", projectDir, "config", "user.name", "Test User")
+	configNameCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := configNameCmd.Run(); err != nil {
 		t.Fatalf("git config user.name: %v", err)
 	}
-	if err := exec.Command("git", "-C", projectDir, "config", "user.email", "test@example.com").Run(); err != nil {
+	configEmailCmd := exec.Command("git", "-C", projectDir, "config", "user.email", "test@example.com")
+	configEmailCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := configEmailCmd.Run(); err != nil {
 		t.Fatalf("git config user.email: %v", err)
 	}
 	internalDir := filepath.Join(projectDir, "internal")
@@ -152,7 +160,9 @@ func TestGitHooksRunCommandRequiresBoundaryCommandWhenEnabled(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(internalDir, "pkg.go"), []byte("package internal\n"), 0o644); err != nil {
 		t.Fatalf("write staged file: %v", err)
 	}
-	if err := exec.Command("git", "-C", projectDir, "add", "internal/pkg.go").Run(); err != nil {
+	addCmd := exec.Command("git", "-C", projectDir, "add", "internal/pkg.go")
+	addCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := addCmd.Run(); err != nil {
 		t.Fatalf("git add staged boundary path: %v", err)
 	}
 
