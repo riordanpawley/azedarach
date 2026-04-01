@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,11 +24,13 @@ const (
 
 // WorktreeProjection captures cached daemon worktree projection state.
 type WorktreeProjection struct {
-	ProjectID string
-	IssueID   string
-	Path      string
-	Branch    string
-	UpdatedAt time.Time
+	ProjectID        string
+	IssueID          string
+	Path             string
+	Branch           string
+	UpdatedAt        time.Time
+	GitStatusRaw     json.RawMessage
+	GitStatusUpdated *time.Time
 }
 
 // ProjectionStore persists daemon runtime projections in sqlite.
@@ -261,16 +264,13 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM `+projectionWorktreeTable+`
-		WHERE project_id = ?
-	`, projectID); err != nil {
-		return fmt.Errorf("clear worktree projections %s: %w", projectID, err)
-	}
+
+	activeIssues := make(map[string]struct{}, len(projections))
 	for _, projection := range projections {
 		if strings.TrimSpace(projection.IssueID) == "" {
 			continue
 		}
+		activeIssues[projection.IssueID] = struct{}{}
 		updatedAt := projection.UpdatedAt
 		if updatedAt.IsZero() {
 			updatedAt = time.Now().UTC()
@@ -283,6 +283,10 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 				branch,
 				updated_at
 			) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, issue_id) DO UPDATE SET
+				path = excluded.path,
+				branch = excluded.branch,
+				updated_at = excluded.updated_at
 		`,
 			projectID,
 			projection.IssueID,
@@ -290,9 +294,31 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 			projection.Branch,
 			updatedAt.UTC().Format(time.RFC3339Nano),
 		); err != nil {
-			return fmt.Errorf("insert worktree projection %s/%s: %w", projectID, projection.IssueID, err)
+			return fmt.Errorf("upsert worktree projection %s/%s: %w", projectID, projection.IssueID, err)
 		}
 	}
+
+	if len(activeIssues) == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM `+projectionWorktreeTable+`
+			WHERE project_id = ?
+		`, projectID); err != nil {
+			return fmt.Errorf("clear worktree projections %s: %w", projectID, err)
+		}
+	} else {
+		args := make([]any, 0, len(activeIssues)+1)
+		args = append(args, projectID)
+		placeholders := make([]string, 0, len(activeIssues))
+		for issueID := range activeIssues {
+			placeholders = append(placeholders, "?")
+			args = append(args, issueID)
+		}
+		query := `DELETE FROM ` + projectionWorktreeTable + ` WHERE project_id = ? AND issue_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("delete stale worktree projections %s: %w", projectID, err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit replace worktree projections %s: %w", projectID, err)
 	}
@@ -311,7 +337,9 @@ func (s *ProjectionStore) ListWorktrees(ctx context.Context, projectID string) (
 			issue_id,
 			path,
 			branch,
-			updated_at
+			updated_at,
+			COALESCE(git_status_json, ''),
+			COALESCE(git_status_updated_at, '')
 		FROM `+projectionWorktreeTable+`
 		WHERE project_id = ?
 		ORDER BY updated_at DESC, issue_id ASC
@@ -328,26 +356,126 @@ func (s *ProjectionStore) ListWorktrees(ctx context.Context, projectID string) (
 			path      string
 			branch    string
 			updatedAt string
+			statusRaw string
+			statusAt  string
 		)
-		if err := rows.Scan(&issueID, &path, &branch, &updatedAt); err != nil {
+		if err := rows.Scan(&issueID, &path, &branch, &updatedAt, &statusRaw, &statusAt); err != nil {
 			return nil, fmt.Errorf("scan worktree projection row: %w", err)
 		}
 		parsedUpdatedAt, err := parseProjectionTime(updatedAt)
 		if err != nil {
 			return nil, err
 		}
+		var parsedStatusUpdated *time.Time
+		if strings.TrimSpace(statusAt) != "" {
+			parsed, err := parseProjectionTime(statusAt)
+			if err != nil {
+				return nil, err
+			}
+			parsedStatusUpdated = &parsed
+		}
 		projections = append(projections, WorktreeProjection{
-			ProjectID: projectID,
-			IssueID:   issueID,
-			Path:      path,
-			Branch:    branch,
-			UpdatedAt: parsedUpdatedAt,
+			ProjectID:        projectID,
+			IssueID:          issueID,
+			Path:             path,
+			Branch:           branch,
+			UpdatedAt:        parsedUpdatedAt,
+			GitStatusRaw:     json.RawMessage(statusRaw),
+			GitStatusUpdated: parsedStatusUpdated,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate worktree projections: %w", err)
 	}
 	return projections, nil
+}
+
+func (s *ProjectionStore) GetWorktreeByPath(ctx context.Context, projectID, worktreePath string) (WorktreeProjection, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return WorktreeProjection{}, false, err
+	}
+	projectID = normalizedProjectID(projectID)
+	worktreePath = strings.TrimSpace(worktreePath)
+	if worktreePath == "" {
+		return WorktreeProjection{}, false, nil
+	}
+
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			issue_id,
+			path,
+			branch,
+			updated_at,
+			COALESCE(git_status_json, ''),
+			COALESCE(git_status_updated_at, '')
+		FROM `+projectionWorktreeTable+`
+		WHERE project_id = ? AND path = ?
+	`, projectID, worktreePath)
+	var (
+		issueID   string
+		path      string
+		branch    string
+		updatedAt string
+		statusRaw string
+		statusAt  string
+	)
+	if err := row.Scan(&issueID, &path, &branch, &updatedAt, &statusRaw, &statusAt); err != nil {
+		if err == sql.ErrNoRows {
+			return WorktreeProjection{}, false, nil
+		}
+		return WorktreeProjection{}, false, fmt.Errorf("get worktree projection by path %s/%s: %w", projectID, worktreePath, err)
+	}
+	parsedUpdatedAt, err := parseProjectionTime(updatedAt)
+	if err != nil {
+		return WorktreeProjection{}, false, err
+	}
+	var parsedStatusUpdated *time.Time
+	if strings.TrimSpace(statusAt) != "" {
+		parsed, err := parseProjectionTime(statusAt)
+		if err != nil {
+			return WorktreeProjection{}, false, err
+		}
+		parsedStatusUpdated = &parsed
+	}
+	return WorktreeProjection{
+		ProjectID:        projectID,
+		IssueID:          issueID,
+		Path:             path,
+		Branch:           branch,
+		UpdatedAt:        parsedUpdatedAt,
+		GitStatusRaw:     json.RawMessage(statusRaw),
+		GitStatusUpdated: parsedStatusUpdated,
+	}, true, nil
+}
+
+func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
+	db, err := s.dbHandle()
+	if err != nil {
+		return err
+	}
+	projectID = normalizedProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return fmt.Errorf("upsert worktree git status: missing issue id")
+	}
+	if len(statusRaw) == 0 {
+		return fmt.Errorf("upsert worktree git status: missing payload")
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	_, err = db.ExecContext(ctx, `
+		UPDATE `+projectionWorktreeTable+`
+		SET
+			git_status_json = ?,
+			git_status_updated_at = ?
+		WHERE project_id = ? AND issue_id = ?
+	`, string(statusRaw), updatedAt.UTC().Format(time.RFC3339Nano), projectID, issueID)
+	if err != nil {
+		return fmt.Errorf("upsert worktree git status %s/%s: %w", projectID, issueID, err)
+	}
+	return nil
 }
 
 func parseProjectionTime(value string) (time.Time, error) {
@@ -406,6 +534,8 @@ func ensureProjectionSchema(ctx context.Context, db *sql.DB) error {
 			path TEXT NOT NULL,
 			branch TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
+			git_status_json TEXT,
+			git_status_updated_at TEXT,
 			PRIMARY KEY (project_id, issue_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
@@ -415,6 +545,49 @@ func ensureProjectionSchema(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("ensure projection schema: %w", err)
 		}
+	}
+	if err := ensureColumn(ctx, db, projectionWorktreeTable, "git_status_json", "TEXT"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, db, projectionWorktreeTable, "git_status_updated_at", "TEXT"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureColumn(ctx context.Context, db *sql.DB, tableName, columnName, columnDDL string) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+tableName+`)`)
+	if err != nil {
+		return fmt.Errorf("read table info for %s: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	exists := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notnull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table info for %s: %w", tableName, err)
+		}
+		if name == columnName {
+			exists = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table info for %s: %w", tableName, err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE `+tableName+` ADD COLUMN `+columnName+` `+columnDDL); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", tableName, columnName, err)
 	}
 	return nil
 }

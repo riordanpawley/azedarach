@@ -111,10 +111,15 @@ func New(cfg Config) *Daemon {
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
+	projectionStore := daemonstate.NewProjectionStore(cfg.RepoDir, cfg.Logger)
+	gitService := &gitServiceAdapter{
+		client:          gitClient,
+		projectionStore: projectionStore,
+		logger:          cfg.Logger,
+	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
-	projectionStore := daemonstate.NewProjectionStore(cfg.RepoDir, cfg.Logger)
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
@@ -148,7 +153,7 @@ func New(cfg Config) *Daemon {
 	})
 	commandExecutor := operationCommandExecutor{runtime: runtime}
 	sessionExecutor := sessionOperationExecutor{runtime: runtime}
-	gitHandler := daemonhandlers.NewGitHandler(gitClient, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
+	gitHandler := daemonhandlers.NewGitHandler(gitService, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		&worktreeServiceAdapter{
 			manager:         d.worktree,

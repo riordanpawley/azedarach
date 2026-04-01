@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -108,5 +109,54 @@ func TestProjectionStoreWorktreeReplaceAndList(t *testing.T) {
 	}
 	if got, want := len(worktrees), 1; got != want {
 		t.Fatalf("worktrees after delete = %d, want %d", got, want)
+	}
+}
+
+func TestProjectionStoreGitStatusRoundTrip(t *testing.T) {
+	store := NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	rawStatus, err := json.Marshal(map[string]any{
+		"has_changes": true,
+		"modified":    []string{"README.md"},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal status: %v", err)
+	}
+
+	if err := store.UpsertWorktree(context.Background(), WorktreeProjection{
+		ProjectID: "proj-a",
+		IssueID:   "bja",
+		Path:      "/tmp/repo-bja",
+		Branch:    "riordan/bja/task",
+		UpdatedAt: time.Date(2026, time.April, 1, 8, 55, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertWorktree: %v", err)
+	}
+
+	if err := store.UpsertWorktreeGitStatus(
+		context.Background(),
+		"proj-a",
+		"bja",
+		rawStatus,
+		time.Date(2026, time.April, 1, 9, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatalf("UpsertWorktreeGitStatus: %v", err)
+	}
+
+	projection, found, err := store.GetWorktreeByPath(context.Background(), "proj-a", "/tmp/repo-bja")
+	if err != nil {
+		t.Fatalf("GetWorktreeByPath: %v", err)
+	}
+	if !found {
+		t.Fatal("expected worktree projection")
+	}
+	if projection.Path != "/tmp/repo-bja" {
+		t.Fatalf("path = %q, want /tmp/repo-bja", projection.Path)
+	}
+	if len(projection.GitStatusRaw) == 0 {
+		t.Fatal("status payload should not be empty")
 	}
 }

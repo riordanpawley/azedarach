@@ -17,14 +17,16 @@ type runtimeGitService struct{}
 
 type runtimeWorktreeService struct{}
 
-func (runtimeGitService) Fetch(context.Context, string, string) error { return nil }
-func (runtimeGitService) Merge(context.Context, string, string) (*git.MergeResult, error) {
+func (runtimeGitService) Fetch(context.Context, string, string, string) error { return nil }
+func (runtimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: true}, nil
 }
-func (runtimeGitService) Checkout(context.Context, string, string) error           { return nil }
-func (runtimeGitService) AbortMerge(context.Context, string) error                 { return nil }
-func (runtimeGitService) DiffStat(context.Context, string, string) (string, error) { return "", nil }
-func (runtimeGitService) Status(context.Context, string) (*git.GitStatus, error) {
+func (runtimeGitService) Checkout(context.Context, string, string, string) error { return nil }
+func (runtimeGitService) AbortMerge(context.Context, string, string) error       { return nil }
+func (runtimeGitService) DiffStat(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+func (runtimeGitService) Status(context.Context, string, string) (*git.GitStatus, error) {
 	return &git.GitStatus{}, nil
 }
 
