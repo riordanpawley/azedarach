@@ -3205,6 +3205,61 @@ func TestRuntimeSignalsForBoardIncludesPendingMutationState(t *testing.T) {
 	}
 }
 
+func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T) {
+	parentID := "az-parent"
+	childID := "az-child"
+	grandchildID := "az-grandchild"
+	unrelatedID := "az-unrelated"
+
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
+		{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{ID: grandchildID, Title: "Grandchild", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &childID, HasTmuxSession: true},
+		{ID: unrelatedID, Title: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		parentID:     {},
+		childID:      {},
+		grandchildID: {HasTmuxSession: true},
+		unrelatedID:  {},
+	}
+
+	signals := m.runtimeSignalsForBoard()
+	if !signals[parentID].HasDescendantTmuxSession {
+		t.Fatalf("expected parent %q to show descendant session signal", parentID)
+	}
+	if !signals[childID].HasDescendantTmuxSession {
+		t.Fatalf("expected child ancestor %q to show descendant session signal", childID)
+	}
+	if signals[unrelatedID].HasDescendantTmuxSession {
+		t.Fatalf("did not expect unrelated task %q to show descendant session signal", unrelatedID)
+	}
+}
+
+func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *testing.T) {
+	parentID := "az-parent"
+	childID := "az-child"
+	otherID := "az-other"
+
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
+		{ID: childID, Title: "Child", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID, HasTmuxSession: true},
+		{ID: otherID, Title: "Other", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.editor.SetSort(&domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc})
+
+	filtered := m.boardVisibleTasks(m.tasks)
+	sortedOpen := m.sortTasksInColumn(filtered, domain.StatusOpen)
+	if len(sortedOpen) != 2 {
+		t.Fatalf("sorted open tasks len = %d, want 2", len(sortedOpen))
+	}
+	if sortedOpen[0].ID != parentID {
+		t.Fatalf("expected ancestor task %q to sort first, got %q", parentID, sortedOpen[0].ID)
+	}
+}
+
 func TestPendingMutationForTaskBuildsOverlayProgress(t *testing.T) {
 	m := newTestModel()
 	m.pendingStatuses = map[string]pendingTaskStatus{

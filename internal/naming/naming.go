@@ -17,10 +17,16 @@ const (
 var (
 	projectSessionPrefixPattern = regexp.MustCompile(`^[a-z]{2}-`)
 	sessionEscapePattern        = regexp.MustCompile(`_x([0-9a-f]+)_`)
+	projectRouteIDPattern       = regexp.MustCompile(`^[0-9a-f]{12}-(.+)$`)
 )
 
 func ProjectSessionPrefix(projectPath string) string {
 	projectName := strings.ToLower(filepath.Base(strings.TrimSpace(projectPath)))
+	if matches := projectRouteIDPattern.FindStringSubmatch(projectName); len(matches) == 2 {
+		if normalized := strings.TrimSpace(matches[1]); normalized != "" {
+			projectName = normalized
+		}
+	}
 	var b strings.Builder
 	for _, r := range projectName {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {

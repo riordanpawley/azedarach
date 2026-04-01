@@ -9,6 +9,13 @@ func TestCanonicalSessionID(t *testing.T) {
 	}
 }
 
+func TestCanonicalSessionIDRouteProjectIDUsesReadablePrefix(t *testing.T) {
+	got := CanonicalSessionID("b0f4d3c2a1e9-azedarach-bkf", "BKF-123")
+	if got != "az-BKF-123" {
+		t.Fatalf("CanonicalSessionID() = %q, want %q", got, "az-BKF-123")
+	}
+}
+
 func TestParseIssueIDFromSessionName(t *testing.T) {
 	projectPath := "/Users/me/prog/Chefy"
 	issueID, ok := ParseIssueIDFromSessionName("ch-CHE-3002", projectPath)
@@ -21,6 +28,17 @@ func TestParseIssueIDFromSessionName(t *testing.T) {
 
 	if _, ok := ParseIssueIDFromSessionName("az-CHE-3002", projectPath); ok {
 		t.Fatal("expected mismatched project prefix parse to fail")
+	}
+}
+
+func TestParseIssueIDFromSessionNameRouteProjectID(t *testing.T) {
+	projectID := "b0f4d3c2a1e9-azedarach-bkf"
+	issueID, ok := ParseIssueIDFromSessionName("az-BKF-777", projectID)
+	if !ok {
+		t.Fatal("expected parse to succeed for route project id prefix")
+	}
+	if issueID != "BKF-777" {
+		t.Fatalf("issueID = %q, want %q", issueID, "BKF-777")
 	}
 }
 

@@ -3504,6 +3504,18 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 			inColumn = append(inColumn, task)
 		}
 	}
+
+	sortState := m.editor.GetSort()
+	if sortState != nil && sortState.Field == domain.SortBySession {
+		activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
+		if len(activeDescendantSessionByTask) > 0 {
+			for i := range inColumn {
+				if activeDescendantSessionByTask[inColumn[i].ID] {
+					inColumn[i].HasTmuxSession = true
+				}
+			}
+		}
+	}
 	// Apply sort
 	return m.editor.ApplySort(inColumn)
 }
@@ -6600,11 +6612,12 @@ func (m Model) renderBoardView() string {
 }
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
-	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 {
+	activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
+	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(activeDescendantSessionByTask) == 0 {
 		return m.runtimeSignalsByTask
 	}
 
-	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses)+len(m.pendingOpsByTask))
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
 	for taskID, signals := range m.runtimeSignalsByTask {
 		signalsByTask[taskID] = signals
 	}
@@ -6629,8 +6642,86 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 		signals.PendingOperationPercent = pending.percent
 		signalsByTask[task.ID] = signals
 	}
+	for taskID := range activeDescendantSessionByTask {
+		signals := signalsByTask[taskID]
+		signals.HasDescendantTmuxSession = true
+		signalsByTask[taskID] = signals
+	}
 
 	return signalsByTask
+}
+
+func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	parentsByTask := make(map[string][]string, len(tasks))
+	for _, task := range tasks {
+		taskID := strings.TrimSpace(task.ID)
+		if taskID == "" {
+			continue
+		}
+
+		parentSet := make(map[string]struct{}, 2)
+		if task.ParentID != nil {
+			if parentID := strings.TrimSpace(*task.ParentID); parentID != "" {
+				parentSet[parentID] = struct{}{}
+			}
+		}
+		for _, dep := range task.Dependencies {
+			depType := strings.TrimSpace(string(dep.Type))
+			if depType != string(domain.DependencyParentChild) && depType != "parent_child" {
+				continue
+			}
+			if parentID := strings.TrimSpace(dep.ID); parentID != "" {
+				parentSet[parentID] = struct{}{}
+			}
+		}
+
+		if len(parentSet) == 0 {
+			continue
+		}
+		parentIDs := make([]string, 0, len(parentSet))
+		for parentID := range parentSet {
+			parentIDs = append(parentIDs, parentID)
+		}
+		parentsByTask[taskID] = parentIDs
+	}
+
+	activeAncestorSessionByTask := make(map[string]bool)
+	for _, task := range tasks {
+		taskID := strings.TrimSpace(task.ID)
+		if taskID == "" {
+			continue
+		}
+		if task.Session == nil && !task.HasTmuxSession {
+			continue
+		}
+
+		queue := append([]string(nil), parentsByTask[taskID]...)
+		seen := make(map[string]struct{}, len(queue))
+		for len(queue) > 0 {
+			parentID := queue[0]
+			queue = queue[1:]
+			if parentID == "" {
+				continue
+			}
+			if _, ok := seen[parentID]; ok {
+				continue
+			}
+			seen[parentID] = struct{}{}
+			activeAncestorSessionByTask[parentID] = true
+			if grandparents := parentsByTask[parentID]; len(grandparents) > 0 {
+				queue = append(queue, grandparents...)
+			}
+		}
+	}
+
+	if len(activeAncestorSessionByTask) == 0 {
+		return nil
+	}
+	return activeAncestorSessionByTask
 }
 
 // renderCompactView renders the compact list view
