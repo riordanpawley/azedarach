@@ -17,7 +17,7 @@ const (
 	CommandGitStatus         = "git.status"
 	CommandGitRuntimeSignals = "git.runtime_signals"
 	CommandGitMergePreflight = "git.merge_preflight"
-	CommandGitDiscard        = "git.discard"
+	CommandGitDiscard        = "git.discard_changes"
 	CommandGitCheckpoint     = "git.checkpoint"
 )
 
