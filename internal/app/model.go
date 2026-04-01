@@ -6203,7 +6203,7 @@ func predictsMergeConflicts(output string, err error) bool {
 	return strings.Contains(err.Error(), "CONFLICT")
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, refreshStatus bool) *mergePreflightFailureMsg {
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, _ bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
@@ -6211,29 +6211,6 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
-	if !refreshStatus {
-		for i := range m.tasks {
-			task := m.tasks[i]
-			if task.ID == sourceID && task.HasUncommittedChanges {
-				reasons = append(reasons, fmt.Sprintf("Source %s is not clean (cached runtime status)", sourceID))
-			}
-			if task.ID == targetID && task.HasUncommittedChanges {
-				reasons = append(reasons, fmt.Sprintf("Target %s is not clean (cached runtime status)", targetID))
-			}
-		}
-		if len(reasons) == 0 {
-			return nil
-		}
-		return &mergePreflightFailureMsg{
-			sourceID:       sourceID,
-			sourceWorktree: sourceWorktree,
-			targetID:       targetID,
-			targetWorktree: targetWorktree,
-			reasons:        reasons,
-			sourceFiles:    sourceFiles,
-			targetFiles:    targetFiles,
-		}
-	}
 
 	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
 	if sourceErr != nil {
