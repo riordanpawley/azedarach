@@ -66,6 +66,12 @@ type GitHooksRunOptions struct {
 	Verbose    bool
 }
 
+type GitHooksNotifyOptions struct {
+	ProjectDir string
+	Hook       string
+	Verbose    bool
+}
+
 type GateOptions struct {
 	IssueID    string
 	ProjectDir string
@@ -190,6 +196,23 @@ func ParseGitHooksRunArgs(args []string) (GitHooksRunOptions, error) {
 	}
 	if fs.NArg() != 0 {
 		return GitHooksRunOptions{}, fmt.Errorf("usage: az githooks run [--project-dir <dir>] [--verbose]")
+	}
+	return opts, nil
+}
+
+func ParseGitHooksNotifyArgs(args []string) (GitHooksNotifyOptions, error) {
+	opts := GitHooksNotifyOptions{}
+	fs := flag.NewFlagSet("githooks notify", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.StringVar(&opts.Hook, "hook", "", "hook name")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return GitHooksNotifyOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return GitHooksNotifyOptions{}, fmt.Errorf("usage: az githooks notify [--project-dir <dir>] [--hook <name>] [--verbose]")
 	}
 	return opts, nil
 }
@@ -465,10 +488,18 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 		return fmt.Errorf("create .githooks directory: %w", err)
 	}
 
-	preCommitPath := filepath.Join(hooksDir, "pre-commit")
-	const preCommit = "#!/usr/bin/env sh\nset -eu\naz githooks run \"$@\"\n"
-	if err := os.WriteFile(preCommitPath, []byte(preCommit), 0o755); err != nil {
-		return fmt.Errorf("write pre-commit hook: %w", err)
+	hookScripts := map[string]string{
+		"pre-commit":    "#!/usr/bin/env sh\nset -eu\naz githooks run \"$@\"\n",
+		"post-commit":   "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-commit >/dev/null 2>&1 || true\n",
+		"post-merge":    "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-merge >/dev/null 2>&1 || true\n",
+		"post-checkout": "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-checkout >/dev/null 2>&1 || true\n",
+		"post-rewrite":  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-rewrite >/dev/null 2>&1 || true\n",
+	}
+	for hookName, script := range hookScripts {
+		hookPath := filepath.Join(hooksDir, hookName)
+		if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
+			return fmt.Errorf("write %s hook: %w", hookName, err)
+		}
 	}
 	if err := setGitHooksPath(projectDir, ".githooks"); err != nil {
 		return fmt.Errorf("set git core.hooksPath: %w", err)
@@ -478,6 +509,7 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 	fmt.Println("Configured git core.hooksPath=.githooks")
 	if opts.Verbose {
 		fmt.Println("pre-commit now delegates to: az githooks run")
+		fmt.Println("post-{commit,merge,checkout,rewrite} now delegate to: az githooks notify")
 	}
 	return nil
 }
@@ -533,6 +565,40 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 		}
 	}
 
+	return nil
+}
+
+func GitHooksNotifyCommand(deps *Dependencies, opts GitHooksNotifyOptions) error {
+	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	if err != nil {
+		return err
+	}
+	worktreeRoot, err := config.ResolveWorktreeRoot(projectDir)
+	if err != nil {
+		if opts.Verbose {
+			fmt.Fprintf(os.Stderr, "githooks notify: resolve worktree root failed: %v\n", err)
+		}
+		return nil
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := deps.DaemonClient.GitStatus(ctx, worktreeRoot); err != nil {
+		if opts.Verbose {
+			fmt.Fprintf(os.Stderr, "githooks notify: daemon git status refresh failed for %s: %v\n", worktreeRoot, err)
+		}
+		return nil
+	}
+	if opts.Verbose {
+		hookName := strings.TrimSpace(opts.Hook)
+		if hookName == "" {
+			hookName = "unknown"
+		}
+		fmt.Printf("githooks notify: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)
+	}
 	return nil
 }
 
@@ -1087,7 +1153,7 @@ func PrintHooksUsage() {
 }
 
 func PrintGitHooksUsage() {
-	fmt.Println("Usage: az githooks <install|run> [--project-dir <dir>] [--verbose]")
+	fmt.Println("Usage: az githooks <install|run|notify> [--project-dir <dir>] [--verbose]")
 	fmt.Println("Manage repository git hooks and execute configured hook tasks.")
 }
 

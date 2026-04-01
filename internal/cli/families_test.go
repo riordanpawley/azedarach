@@ -25,7 +25,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 	for _, want := range []string{
 		"notify <event> <issue-id>",
 		"hooks install <issue-id>",
-		"githooks <install|run>",
+		"githooks <install|run|notify>",
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
@@ -35,6 +35,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az hooks install az-123",
 		"az githooks install",
 		"az githooks run",
+		"az githooks notify",
 		"az gate az-123",
 		"az dev gate az-123",
 		"az opencode init",
@@ -82,6 +83,65 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "az githooks run") {
 		t.Fatalf("pre-commit content = %q", string(data))
+	}
+	for _, hookName := range []string{"post-commit", "post-merge", "post-checkout", "post-rewrite"} {
+		hookPath := filepath.Join(projectDir, ".githooks", hookName)
+		hookData, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", hookName, err)
+		}
+		if !strings.Contains(string(hookData), "az githooks notify") {
+			t.Fatalf("%s content = %q", hookName, string(hookData))
+		}
+	}
+}
+
+func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
+	projectDir := t.TempDir()
+	initCmd := exec.Command("git", "-C", projectDir, "init")
+	initCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	opts, err := ParseGitHooksNotifyArgs([]string{"--project-dir", projectDir, "--hook", "post-commit"})
+	if err != nil {
+		t.Fatalf("ParseGitHooksNotifyArgs error: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotReq = req
+			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+		},
+	}
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+		RepoDir:      projectDir,
+	}
+
+	if err := GitHooksNotifyCommand(deps, opts); err != nil {
+		t.Fatalf("GitHooksNotifyCommand error: %v", err)
+	}
+	if gotReq.Command != daemonclient.CommandGitStatus {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatus)
+	}
+	var body daemonclient.GitCommandRequest
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
+	if err != nil {
+		gotWorktree = body.Worktree
+	}
+	wantWorktree, err := filepath.EvalSymlinks(projectDir)
+	if err != nil {
+		wantWorktree = projectDir
+	}
+	if gotWorktree != wantWorktree {
+		t.Fatalf("worktree = %q (canon %q), want %q (canon %q)", body.Worktree, gotWorktree, projectDir, wantWorktree)
 	}
 }
 

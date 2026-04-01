@@ -45,7 +45,7 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runGitHooksCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "Usage: az githooks <install|run>") {
+	if !strings.Contains(output, "Usage: az githooks <install|run|notify>") {
 		t.Fatalf("help output = %q", output)
 	}
 
@@ -64,6 +64,9 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, ".githooks", "pre-commit")); err != nil {
 		t.Fatalf("expected pre-commit hook: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".githooks", "post-commit")); err != nil {
+		t.Fatalf("expected post-commit hook: %v", err)
 	}
 }
 

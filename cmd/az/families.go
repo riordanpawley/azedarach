@@ -81,6 +81,15 @@ func runGitHooksCommand(cfg *config.Config, args []string) error {
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.GitHooksRunCommand(deps, opts)
 		})
+	case "notify":
+		opts, err := cli.ParseGitHooksNotifyArgs(args[1:])
+		if err != nil {
+			cli.PrintGitHooksUsage()
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.GitHooksNotifyCommand(deps, opts)
+		})
 	default:
 		return fmt.Errorf("unknown githooks command: %s", args[0])
 	}
