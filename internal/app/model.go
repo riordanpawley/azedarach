@@ -2071,7 +2071,21 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openMergeTargetSelection(task)
 	case "m":
 		return m, m.followOnMergeSelectionCmd(task, session)
-	case "u", "P":
+	case "u":
+		if task == nil {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: "No focused issue to update",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		worktree := ""
+		if session != nil {
+			worktree = session.Worktree
+		}
+		return m, m.updateFromMainCmd(task.ID, worktree, false)
+	case "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
 			Message: "Action unavailable in go-bubbletea action mode; no git operation was started. " +
@@ -3795,16 +3809,13 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Git actions
 	case "u":
-		// Update from main
-		if session == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
+		// Update from main using active session worktree when present, otherwise
+		// resolve the issue worktree from daemon-owned projection state.
+		worktree := ""
+		if session != nil {
+			worktree = session.Worktree
 		}
-		return m, m.fetchAndMergeCmd(session.Worktree, "main", task.ID, false)
+		return m, m.updateFromMainCmd(task.ID, worktree, false)
 
 	case "m":
 		// Follow-on merge from dependency-aware context.
@@ -6089,6 +6100,29 @@ func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 			worktree:      resolvedWorktree,
 			commitsBehind: result.CommitsBehind,
 		}
+	}
+}
+
+func (m Model) updateFromMainCmd(issueID, worktree string, attachAfter bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
+		defer cancel()
+
+		resolvedWorktree := strings.TrimSpace(worktree)
+		if resolvedWorktree == "" {
+			if fallback, err := m.resolveIssueWorktreePath(ctx, issueID); err == nil {
+				resolvedWorktree = strings.TrimSpace(fallback)
+			}
+		}
+		if resolvedWorktree == "" {
+			return fetchAndMergeResultMsg{
+				issueID:     issueID,
+				attachAfter: attachAfter,
+				err:         fmt.Errorf("no active session/worktree - start session first"),
+			}
+		}
+
+		return m.fetchAndMergeCmd(resolvedWorktree, "main", issueID, attachAfter)()
 	}
 }
 
