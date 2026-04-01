@@ -94,7 +94,7 @@ func TestCreateTaskOverlayView(t *testing.T) {
 	assert.Contains(t, view, "Enter")
 	assert.Contains(t, view, "Ctrl+C")
 	assert.Contains(t, view, "Ctrl+P")
-	assert.Contains(t, view, "Ctrl+O")
+	assert.NotContains(t, view, "Ctrl+O")
 	assert.Contains(t, view, "Ctrl+E")
 	assert.Contains(t, view, "Ctrl+K")
 }
@@ -660,16 +660,8 @@ func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
 			key:  tea.KeyMsg{Type: tea.KeyCtrlP},
 		},
 		{
-			name: "ctrl+o type",
-			key:  tea.KeyMsg{Type: tea.KeyCtrlO},
-		},
-		{
 			name: "raw control-p rune",
 			key:  tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(0x10)}},
-		},
-		{
-			name: "raw control-o rune",
-			key:  tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(0x0f)}},
 		},
 	}
 
@@ -696,6 +688,23 @@ func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
 			assert.Equal(t, task.ID, addedMsg.attachment.IssueID)
 		})
 	}
+}
+
+func TestEditTaskOverlayCtrlODoesNotAttachFromClipboard(t *testing.T) {
+	task := domain.Task{ID: "az-79", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
+	svc := &createTestAttachmentService{
+		attached: &attachment.Attachment{
+			ID:       "att-ctrl-o",
+			IssueID:  task.ID,
+			Filename: "clipboard.png",
+			Size:     1200,
+			Created:  time.Now(),
+		},
+	}
+	overlay := NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, nil, svc)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	require.Nil(t, cmd)
 }
 
 func TestEditTaskOverlayDeleteAttachmentWhenFocused(t *testing.T) {

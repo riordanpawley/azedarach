@@ -561,18 +561,18 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func isPasteAttachmentKey(msg tea.KeyMsg) bool {
 	switch msg.Type {
-	case tea.KeyCtrlP, tea.KeyCtrlO:
+	case tea.KeyCtrlP:
 		return true
 	}
 
 	switch strings.ToLower(strings.TrimSpace(msg.String())) {
-	case "ctrl+p", "ctrl+o":
+	case "ctrl+p":
 		return true
 	}
 
 	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
 		switch msg.Runes[0] {
-		case rune(0x10), rune(0x0f): // ^P / ^O
+		case rune(0x10): // ^P
 			return true
 		}
 	}
@@ -605,7 +605,6 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
 				{Key: "Ctrl+P", Description: "Paste image (edit task)"},
-				{Key: "Ctrl+O", Description: "Paste image (alias)"},
 				{Key: "j/k + d", Description: "Manage attachments"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
