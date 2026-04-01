@@ -139,6 +139,7 @@ If any are missing, keep issue state `in_progress` or `blocked`.
 1. When already in target repo/worktree, use plain `git` commands.
 2. Use local-only git flow by default; do not run remote sync/cleanup commands unless explicitly requested.
 3. Never delete untracked files or run `git restore` without explicit permission.
+4. Never finalize merges into `main` with `--no-verify`; resolve failing hooks/checks first (or stop and ask the user).
 
 ## Session Completion Checklist
 

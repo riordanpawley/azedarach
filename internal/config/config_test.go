@@ -57,6 +57,10 @@ func TestDefaultConfig(t *testing.T) {
 	assert.NotNil(t, cfg.Worktree.InitCommands)
 
 	assert.True(t, cfg.Spec.Enabled)
+	assert.False(t, cfg.GitHooks.SpecSync.Enabled)
+	assert.Empty(t, cfg.GitHooks.SpecSync.Command)
+	assert.False(t, cfg.GitHooks.BoundaryCheck.Enabled)
+	assert.Empty(t, cfg.GitHooks.BoundaryCheck.Command)
 }
 
 func TestResolveConfigBaseFindsNearestAncestorConfig(t *testing.T) {
@@ -124,7 +128,8 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	assert.False(t, cfg.Git.FetchEnabled)
 	assert.Equal(t, "bash", cfg.Session.Shell)
 	assert.Equal(t, 60000, cfg.Session.TimeoutMs)
-	assert.Equal(t, []string{"direnv allow", "bun install"}, cfg.Session.InitCommands)
+	assert.Empty(t, cfg.Session.InitCommands)
+	assert.Equal(t, []string{"direnv allow", "bun install"}, cfg.Worktree.InitCommands)
 	assert.False(t, cfg.Spec.Enabled)
 	assert.False(t, cfg.PR.DraftByDefault)
 	assert.False(t, cfg.PR.AutoLink)
@@ -139,6 +144,25 @@ func TestLoadConfigFromDotAzedarachConfigJSON(t *testing.T) {
 	// Defaults still merged for unspecified fields.
 	assert.Equal(t, ".azedarach", cfg.Issues.Path)
 	assert.Equal(t, 300, cfg.Issues.SyncInterval)
+}
+
+func TestLoadConfigKeepsSessionAndWorktreeInitCommandsDistinct(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{
+  "$schema": "./config.schema.json",
+  "$version": 7,
+  "session": {
+    "initCommands": ["session one", "session two"]
+  },
+  "worktree": {
+    "initCommands": ["worktree one"]
+  }
+}`)
+
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"session one", "session two"}, cfg.Session.InitCommands)
+	assert.Equal(t, []string{"worktree one"}, cfg.Worktree.InitCommands)
 }
 
 func TestLoadConfigFromNestedPathUsesWorktreeBaseConfig(t *testing.T) {
@@ -206,7 +230,7 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
-	assert.Equal(t, "./config.schema.json", raw["$schema"])
+	assert.Equal(t, ConfigSchemaURL, raw["$schema"])
 	assert.Equal(t, float64(CurrentConfigVersion), raw["$version"])
 
 	sessionRaw, ok := raw["session"].(map[string]any)
@@ -233,7 +257,7 @@ func TestSaveConfigWritesSchemaAndVersion(t *testing.T) {
 	require.True(t, ok)
 	initRaw, ok := worktreeRaw["initCommands"].([]any)
 	require.True(t, ok)
-	require.Len(t, initRaw, 2)
+	require.Len(t, initRaw, 0)
 }
 
 func TestMergeWithDefaultsPreservesExplicitValues(t *testing.T) {

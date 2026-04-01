@@ -3,6 +3,7 @@ package diff
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,6 +14,7 @@ import (
 )
 
 type DiffClient interface {
+	Status(ctx context.Context, worktree string) (*gitservice.GitStatus, error)
 	ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]gitservice.ChangedFile, error)
 	MergeBase(ctx context.Context, worktree, baseBranch string) (string, error)
 }
@@ -66,7 +68,16 @@ func (d *DiffViewer) loadChangedFilesCmd() tea.Cmd {
 		if d.gitClient == nil {
 			return loadChangedFilesMsg{Err: fmt.Errorf("git client unavailable")}
 		}
-		files, err := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
+		status, err := d.gitClient.Status(context.Background(), d.worktree)
+		if err != nil {
+			return loadChangedFilesMsg{Err: err}
+		}
+		files := statusChangedFiles(status)
+		baseFiles, baseErr := d.gitClient.ChangedFiles(context.Background(), d.worktree, d.effectiveBaseBranch())
+		if baseErr != nil && len(files) == 0 {
+			return loadChangedFilesMsg{Err: baseErr}
+		}
+		files = mergeChangedFileLists(files, baseFiles)
 		return loadChangedFilesMsg{Files: files, Err: err}
 	}
 }
@@ -92,13 +103,12 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 			return popupResultMsg{Err: fmt.Errorf("diff popup unavailable")}
 		}
 
+		var title string
+		var command string
 		mergeBase, err := d.gitClient.MergeBase(context.Background(), d.worktree, d.effectiveBaseBranch())
 		if err != nil {
 			return popupResultMsg{Err: err}
 		}
-
-		var title string
-		var command string
 		if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
@@ -430,6 +440,72 @@ func shellSingleQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func statusChangedFiles(status *gitservice.GitStatus) []gitservice.ChangedFile {
+	if status == nil {
+		return []gitservice.ChangedFile{}
+	}
+
+	byPath := make(map[string]gitservice.ChangedFile)
+	rank := make(map[string]int)
+
+	put := func(paths []string, status gitservice.DiffFileStatus, priority int) {
+		for _, path := range paths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			if currentPriority, exists := rank[path]; exists && currentPriority >= priority {
+				continue
+			}
+			byPath[path] = gitservice.ChangedFile{
+				Path:   path,
+				Status: status,
+			}
+			rank[path] = priority
+		}
+	}
+
+	put(status.Modified, gitservice.DiffFileModified, 1)
+	put(status.Staged, gitservice.DiffFileModified, 1)
+	put(status.Added, gitservice.DiffFileAdded, 2)
+	put(status.Untracked, gitservice.DiffFileAdded, 2)
+	put(status.Deleted, gitservice.DiffFileDeleted, 3)
+
+	out := make([]gitservice.ChangedFile, 0, len(byPath))
+	for _, file := range byPath {
+		out = append(out, file)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+func mergeChangedFileLists(primary, secondary []gitservice.ChangedFile) []gitservice.ChangedFile {
+	merged := make(map[string]gitservice.ChangedFile, len(primary)+len(secondary))
+	for _, file := range secondary {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		merged[file.Path] = file
+	}
+	for _, file := range primary {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		merged[file.Path] = file
+	}
+
+	out := make([]gitservice.ChangedFile, 0, len(merged))
+	for _, file := range merged {
+		out = append(out, file)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
 }
 
 func plural(n int) string {

@@ -1,0 +1,293 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
+  "title": "Azedarach Config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "$version": {
+      "type": "integer",
+      "const": 7
+    },
+    "cliTool": {
+      "type": "string",
+      "enum": ["claude", "opencode", "codex"],
+      "default": "claude"
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "baseBranch": {
+          "type": "string",
+          "default": "main"
+        },
+        "workflowMode": {
+          "type": "string",
+          "enum": ["worktree", "local", "branch", "origin"],
+          "default": "worktree"
+        },
+        "showLineChanges": {
+          "type": "boolean",
+          "default": true
+        },
+        "defaultMergeStrategy": {
+          "type": "string",
+          "default": "merge"
+        },
+        "pushEnabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "fetchEnabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "githooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "specSync": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "command": {
+              "type": "string",
+              "default": "az spec sync --target md"
+            },
+            "autoStageDocs": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "boundaryCheck": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "command": {
+              "type": "string",
+              "default": "just check-boundaries"
+            }
+          }
+        }
+      }
+    },
+    "keyboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jumpLabelChars": {
+          "type": "string",
+          "default": "abcdefghijklmnopqrstuvwxyz"
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dangerouslySkipPermissions": {
+          "type": "boolean",
+          "default": false
+        },
+        "shell": {
+          "type": "string",
+          "default": "zsh"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30000
+        },
+        "logDir": {
+          "type": "string"
+        },
+        "initCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "pr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "draftByDefault": {
+          "type": "boolean",
+          "default": true
+        },
+        "autoLink": {
+          "type": "boolean",
+          "default": true
+        },
+        "notifyAfterCreate": {
+          "type": "boolean",
+          "default": true
+        },
+        "createWithoutMerge": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "merge": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "default": "merge"
+        },
+        "autoMerge": {
+          "type": "boolean",
+          "default": false
+        },
+        "compareWithOrigin": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "completedTask": {
+          "type": "boolean",
+          "default": true
+        },
+        "failedTask": {
+          "type": "boolean",
+          "default": true
+        },
+        "errorThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3
+        }
+      }
+    },
+    "issues": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "default": ".azedarach"
+        },
+        "syncInterval": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "autoDetect": {
+          "type": "boolean",
+          "default": true
+        },
+        "checkInterval": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60
+        },
+        "offlineTimeout": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 300
+        },
+        "retryAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3
+        }
+      }
+    },
+    "devServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "basePort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 3000
+        },
+        "maxPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 3100
+        },
+        "environments": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "basePath": {
+          "type": "string",
+          "default": "../"
+        },
+        "nameFormat": {
+          "type": "string",
+          "default": "{project}-{issueID}"
+        },
+        "autoCleanup": {
+          "type": "boolean",
+          "default": true
+        },
+        "keepDays": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 7
+        },
+        "initCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    }
+  }
+}

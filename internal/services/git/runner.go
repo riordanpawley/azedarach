@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -29,6 +30,7 @@ func NewExecRunner(workDir string) *ExecRunner {
 func (e *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = e.workDir
+	cmd.Env = sanitizedGitEnv(os.Environ())
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -40,4 +42,29 @@ func (e *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+func sanitizedGitEnv(env []string) []string {
+	if len(env) == 0 {
+		return env
+	}
+	blocked := map[string]struct{}{
+		"GIT_DIR":        {},
+		"GIT_WORK_TREE":  {},
+		"GIT_INDEX_FILE": {},
+		"GIT_COMMON_DIR": {},
+	}
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			filtered = append(filtered, entry)
+			continue
+		}
+		if _, shouldDrop := blocked[key]; shouldDrop {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }

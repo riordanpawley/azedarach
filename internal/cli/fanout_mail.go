@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,17 +21,20 @@ import (
 )
 
 type IssueFanoutOptions struct {
+	Project   string
 	InputPath string
 	Apply     bool
 	JSON      bool
 }
 
 type IssueFanoutReadyOptions struct {
+	Project     string
 	RootIssueID string
 	JSON        bool
 }
 
 type IssueFanoutDriftOptions struct {
+	Project   string
 	IssueID   string
 	Worktree  string
 	JSON      bool
@@ -160,6 +162,7 @@ func ParseIssueFanoutArgs(args []string) (IssueFanoutOptions, error) {
 	opts := IssueFanoutOptions{}
 	fs := flag.NewFlagSet("issue fanout", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.InputPath, "input", "", "path to fanout spec JSON")
 	fs.BoolVar(&opts.Apply, "apply", false, "apply planned operations")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
@@ -172,6 +175,7 @@ func ParseIssueFanoutArgs(args []string) (IssueFanoutOptions, error) {
 	if strings.TrimSpace(opts.InputPath) == "" {
 		return IssueFanoutOptions{}, fmt.Errorf("missing required flag: --input")
 	}
+	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
 }
 
@@ -179,6 +183,7 @@ func ParseIssueFanoutReadyArgs(args []string) (IssueFanoutReadyOptions, error) {
 	opts := IssueFanoutReadyOptions{}
 	fs := flag.NewFlagSet("issue fanout ready", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -190,6 +195,7 @@ func ParseIssueFanoutReadyArgs(args []string) (IssueFanoutReadyOptions, error) {
 	if strings.TrimSpace(opts.RootIssueID) == "" {
 		return IssueFanoutReadyOptions{}, fmt.Errorf("missing required flag: --root")
 	}
+	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
 }
 
@@ -197,6 +203,7 @@ func ParseIssueFanoutDriftArgs(args []string) (IssueFanoutDriftOptions, error) {
 	opts := IssueFanoutDriftOptions{}
 	fs := flag.NewFlagSet("issue fanout drift", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.IssueID, "issue", "", "issue id")
 	fs.StringVar(&opts.Worktree, "worktree", "", "worktree path (defaults to cwd)")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
@@ -210,10 +217,14 @@ func ParseIssueFanoutDriftArgs(args []string) (IssueFanoutDriftOptions, error) {
 	if strings.TrimSpace(opts.IssueID) == "" {
 		return IssueFanoutDriftOptions{}, fmt.Errorf("missing required flag: --issue")
 	}
+	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
 }
 
 func IssueFanoutCommand(deps *Dependencies, opts IssueFanoutOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -262,6 +273,9 @@ func IssueFanoutCommand(deps *Dependencies, opts IssueFanoutOptions) error {
 }
 
 func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -302,6 +316,9 @@ func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) e
 }
 
 func IssueFanoutDriftCommand(deps *Dependencies, opts IssueFanoutDriftOptions) error {
+	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	defer restoreProject()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
@@ -907,14 +924,14 @@ func fanoutDesignMetadata(node fanoutFlatNode) string {
 
 func gitChangedFiles(worktree string) ([]string, error) {
 	cmds := [][]string{
-		{"git", "-C", worktree, "diff", "--name-only"},
-		{"git", "-C", worktree, "diff", "--name-only", "--cached"},
-		{"git", "-C", worktree, "ls-files", "--others", "--exclude-standard"},
+		{"diff", "--name-only"},
+		{"diff", "--name-only", "--cached"},
+		{"ls-files", "--others", "--exclude-standard"},
 	}
 	seen := map[string]struct{}{}
 	out := make([]string, 0, 16)
 	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := newGitCommand(worktree, args...)
 		output, err := cmd.Output()
 		if err != nil {
 			return nil, err

@@ -29,6 +29,8 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
+		"codex <install|guard|hook>",
+		"spec <subcommand>",
 		"az notify idle_prompt az-123",
 		"az hooks install az-123",
 		"az githooks install",
@@ -37,6 +39,12 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az dev gate az-123",
 		"az opencode init",
 		"az opencode plugin install",
+		"az codex install",
+		"az codex hook run --json pre-tool-use",
+		"az spec req list --json",
+		"az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh",
+		"az spec link add --issue bgh --req bfs-req-1 --role implements",
+		"az spec sync --target md --check",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage missing %q: %q", want, output)
@@ -49,7 +57,9 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projectDir, ".githooks"), 0o755); err != nil {
 		t.Fatalf("mkdir .githooks: %v", err)
 	}
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	cmd := exec.Command("git", "-C", projectDir, "init")
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -77,7 +87,9 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 
 func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	cmd := exec.Command("git", "-C", projectDir, "init")
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -100,6 +112,92 @@ func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	}
 }
 
+func TestGitHooksRunCommandRequiresSpecSyncCommandWhenEnabled(t *testing.T) {
+	projectDir := t.TempDir()
+	initCmd := exec.Command("git", "-C", projectDir, "init")
+	initCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.GitHooks.SpecSync.Enabled = true
+	cfg.GitHooks.SpecSync.Command = ""
+	cfg.GitHooks.BoundaryCheck.Enabled = false
+
+	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
+	}
+
+	err = GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts)
+	if err == nil || !strings.Contains(err.Error(), "githooks spec sync command is enabled but no command is configured") {
+		t.Fatalf("expected missing spec sync command error, got %v", err)
+	}
+}
+
+func TestGitHooksRunCommandRequiresBoundaryCommandWhenEnabled(t *testing.T) {
+	projectDir := t.TempDir()
+	initCmd := exec.Command("git", "-C", projectDir, "init")
+	initCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	configNameCmd := exec.Command("git", "-C", projectDir, "config", "user.name", "Test User")
+	configNameCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := configNameCmd.Run(); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
+	configEmailCmd := exec.Command("git", "-C", projectDir, "config", "user.email", "test@example.com")
+	configEmailCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := configEmailCmd.Run(); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	internalDir := filepath.Join(projectDir, "internal")
+	if err := os.MkdirAll(internalDir, 0o755); err != nil {
+		t.Fatalf("mkdir internal dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(internalDir, "pkg.go"), []byte("package internal\n"), 0o644); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	addCmd := exec.Command("git", "-C", projectDir, "add", "internal/pkg.go")
+	addCmd.Env = gitExecEnvWithoutRoutingVars()
+	if err := addCmd.Run(); err != nil {
+		t.Fatalf("git add staged boundary path: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.GitHooks.SpecSync.Enabled = false
+	cfg.GitHooks.BoundaryCheck.Enabled = true
+	cfg.GitHooks.BoundaryCheck.Command = ""
+
+	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
+	}
+
+	err = GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts)
+	if err == nil || !strings.Contains(err.Error(), "githooks boundary check is enabled but no command is configured") {
+		t.Fatalf("expected missing boundary command error, got %v", err)
+	}
+}
+
+func runGitCommandIsolated(repoDir string, args ...string) error {
+	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GIT_DIR=") ||
+			strings.HasPrefix(entry, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(entry, "GIT_INDEX_FILE=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	cmd.Env = filtered
+	return cmd.Run()
+}
+
 func TestNotifyCommandParsesAndPrintsStatus(t *testing.T) {
 	opts, err := ParseNotifyArgs([]string{"--verbose", "idle_prompt", "az-123"})
 	if err != nil {
@@ -112,6 +210,282 @@ func TestNotifyCommandParsesAndPrintsStatus(t *testing.T) {
 
 	if !strings.Contains(output, "Hook notification: idle_prompt for az-123 -> waiting") {
 		t.Fatalf("notify output = %q", output)
+	}
+}
+
+func TestNotifyCommandJSONOutput(t *testing.T) {
+	opts, err := ParseNotifyArgs([]string{"--json", "post_tool_use"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return NotifyCommand(&Dependencies{}, opts)
+	})
+
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("notify json output = %q, want {}", output)
+	}
+}
+
+func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
+	opts, err := ParseNotifyArgs([]string{"--json", "idle_prompt", "az-123"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotReq = req
+			return responseWithOutput(req, "ok"), nil
+		},
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+	output := captureStdout(t, func() error {
+		return NotifyCommand(deps, opts)
+	})
+
+	if gotReq.Command != daemonclient.CommandSessionPause {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionPause)
+	}
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("notify json output = %q, want {}", output)
+	}
+}
+
+func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-from-env")
+	opts, err := ParseNotifyArgs([]string{"--json", "session_start"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	var gotReq protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotReq = req
+			return responseWithOutput(req, "ok"), nil
+		},
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+	if err := NotifyCommand(deps, opts); err != nil {
+		t.Fatalf("NotifyCommand error: %v", err)
+	}
+
+	if gotReq.Command != daemonclient.CommandSessionResume {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandSessionResume)
+	}
+
+	var body struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.SessionID != "az-from-env" {
+		t.Fatalf("session_id = %q, want az-from-env", body.SessionID)
+	}
+}
+
+func TestParseNotifyArgsRejectsFlagsAfterPositionals(t *testing.T) {
+	_, err := ParseNotifyArgs([]string{"post_tool_use", "--json"})
+	if err == nil {
+		t.Fatal("expected parse error for flags after positional arguments")
+	}
+	if !strings.Contains(err.Error(), "flags must come before positional arguments") {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+}
+
+func TestCodexInstallCommandWritesHooksConfig(t *testing.T) {
+	projectDir := t.TempDir()
+	opts, err := ParseCodexInstallArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseCodexInstallArgs error: %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return CodexInstallCommand(&Dependencies{RepoDir: projectDir}, opts)
+	})
+	if !strings.Contains(output, "Installed Codex hooks in") {
+		t.Fatalf("codex install output = %q", output)
+	}
+
+	hooksPath := filepath.Join(projectDir, ".codex", "hooks.json")
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"az codex hook run --json session-start",
+		"az codex hook run --json stop",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("hooks config missing %q: %s", want, content)
+		}
+	}
+}
+
+func TestCodexInstallCommandMergesExistingHooks(t *testing.T) {
+	projectDir := t.TempDir()
+	hooksPath := filepath.Join(projectDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	initial := `{"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"echo keep-me"}]}],"CustomEvent":[{"hooks":[{"type":"command","command":"echo custom"}]}]}}`
+	if err := os.WriteFile(hooksPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("seed hooks config: %v", err)
+	}
+
+	opts, err := ParseCodexInstallArgs([]string{"--project-dir", projectDir})
+	if err != nil {
+		t.Fatalf("ParseCodexInstallArgs error: %v", err)
+	}
+	if err := CodexInstallCommand(&Dependencies{RepoDir: projectDir}, opts); err != nil {
+		t.Fatalf("CodexInstallCommand error: %v", err)
+	}
+
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "echo keep-me") {
+		t.Fatalf("existing post-tool hook removed: %s", content)
+	}
+	if !strings.Contains(content, "echo custom") {
+		t.Fatalf("existing custom event hook removed: %s", content)
+	}
+	if strings.Contains(content, "az notify --json post_tool_use") {
+		t.Fatalf("legacy notify hook should be removed: %s", content)
+	}
+	if strings.Contains(content, "az codex guard --json post-tool-use") {
+		t.Fatalf("legacy guard hook should be removed: %s", content)
+	}
+	if strings.Contains(content, "az codex hook run --json post-tool-use") {
+		t.Fatalf("post-tool-use hook should not be installed: %s", content)
+	}
+	if strings.Contains(content, "az codex hook run --json user-prompt-submit") {
+		t.Fatalf("user-prompt-submit hook should not be installed: %s", content)
+	}
+}
+
+func TestCodexGuardRequiresPrimeBeforeOtherCommands(t *testing.T) {
+	projectDir := t.TempDir()
+	deps := &Dependencies{RepoDir: projectDir}
+
+	writePayloadToStdin := func(t *testing.T, payload string) func() {
+		t.Helper()
+		original := os.Stdin
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		if _, err := w.WriteString(payload); err != nil {
+			t.Fatalf("write payload: %v", err)
+		}
+		_ = w.Close()
+		os.Stdin = r
+		return func() {
+			os.Stdin = original
+			_ = r.Close()
+		}
+	}
+
+	restore := writePayloadToStdin(t, `{"thread_id":"t-1"}`)
+	if err := CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true}); err != nil {
+		restore()
+		t.Fatalf("session-start guard error: %v", err)
+	}
+	restore()
+
+	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"pwd"}}`)
+	output := captureStdout(t, func() error {
+		return CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true})
+	})
+	restore()
+	if !strings.Contains(output, `"decision":"block"`) {
+		t.Fatalf("pre-tool-use output = %q, want block decision", output)
+	}
+
+	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"az prime"}}`)
+	if err := CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true}); err != nil {
+		restore()
+		t.Fatalf("pre-tool-use prime guard error: %v", err)
+	}
+	restore()
+
+	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"pwd"}}`)
+	output = captureStdout(t, func() error {
+		return CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true})
+	})
+	restore()
+	if strings.Contains(output, `"decision":"block"`) {
+		t.Fatalf("pre-tool-use output = %q, want allow after az prime", output)
+	}
+}
+
+func TestCodexGuardSessionStartSkipsReminderWhenPromptMentionsPrime(t *testing.T) {
+	projectDir := t.TempDir()
+	deps := &Dependencies{RepoDir: projectDir}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-2","prompt":"run az prime first"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("session-start output = %q, want {}", output)
+	}
+}
+
+func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
+	projectDir := t.TempDir()
+	deps := &Dependencies{RepoDir: projectDir}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-3","tool_input":{"command":"pwd"}}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "pre-tool-use", JSON: true})
+	})
+	if !strings.Contains(output, `"decision":"block"`) {
+		t.Fatalf("hook run output = %q, want block decision", output)
 	}
 }
 

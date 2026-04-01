@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -93,6 +97,147 @@ func (r *testGitRunner) Run(_ context.Context, args ...string) (string, error) {
 		return "worktree " + r.worktreePath + "\nbranch refs/heads/" + r.branchName + "\n\n", nil
 	}
 	return "", nil
+}
+
+type recoveringWorktreeRunner struct {
+	worktreePath string
+	branchName   string
+	listCalls    int
+}
+
+func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) >= 2 && args[0] == "config" && args[1] == "user.name" {
+		return "testuser\n", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		r.listCalls++
+		if r.listCalls == 1 {
+			return "", nil
+		}
+		return "worktree " + r.worktreePath + "\nbranch refs/heads/" + r.branchName + "\n\n", nil
+	}
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+		return "", fmt.Errorf("git worktree add -b failed: exit status 1: hook failed")
+	}
+	return "", nil
+}
+
+type sessionStartTmuxRunner struct {
+	sessions map[string]bool
+}
+
+func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
+	return &sessionStartTmuxRunner{sessions: map[string]bool{}}
+}
+
+func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("missing tmux args")
+	}
+	switch args[0] {
+	case "has-session":
+		if len(args) < 3 {
+			return "", errors.New("missing session name")
+		}
+		if r.sessions[args[2]] {
+			return "", nil
+		}
+		return "", errors.New("missing session")
+	case "new-session":
+		if len(args) < 4 {
+			return "", errors.New("missing session name")
+		}
+		r.sessions[args[3]] = true
+		return "", nil
+	case "send-keys":
+		return "", nil
+	case "list-sessions":
+		names := make([]string, 0, len(r.sessions))
+		for name := range r.sessions {
+			names = append(names, name)
+		}
+		return strings.Join(names, "\n"), nil
+	default:
+		return "", nil
+	}
+}
+
+func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Recover from partial worktree create",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/recover-from-partial-work"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		worktree:     git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-recover",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	if !strings.Contains(payload.Output, "Worktree reused: "+worktreePath) {
+		t.Fatalf("output = %q, want reused worktree path", payload.Output)
+	}
 }
 
 func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
@@ -364,14 +509,32 @@ func TestBuildSessionLaunchCommandIncludesCodexHookOverrides(t *testing.T) {
 	if !strings.Contains(command, "hooks.SessionStart=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex SessionStart hook override", command)
 	}
+	if !strings.Contains(command, "hooks.UserPromptSubmit=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex UserPromptSubmit hook override", command)
+	}
+	if !strings.Contains(command, "hooks.PreToolUse=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex PreToolUse hook override", command)
+	}
+	if !strings.Contains(command, "hooks.PostToolUse=[{hooks=[{command=") {
+		t.Fatalf("command = %q, want codex PostToolUse hook override", command)
+	}
 	if !strings.Contains(command, "hooks.Stop=[{hooks=[{command=") {
 		t.Fatalf("command = %q, want codex Stop hook override", command)
 	}
-	if !strings.Contains(command, "az notify user_prompt axt-123 codex-axt-123") {
-		t.Fatalf("command = %q, want codex user_prompt notify command", command)
+	if !strings.Contains(command, "az notify --json session_start") {
+		t.Fatalf("command = %q, want codex session_start notify command", command)
 	}
-	if !strings.Contains(command, "az notify session_end axt-123 codex-axt-123") {
-		t.Fatalf("command = %q, want codex session_end notify command", command)
+	if !strings.Contains(command, "az notify --json user_prompt_submit") {
+		t.Fatalf("command = %q, want codex user_prompt_submit notify command", command)
+	}
+	if !strings.Contains(command, "az notify --json pre_tool_use") {
+		t.Fatalf("command = %q, want codex pre_tool_use notify command", command)
+	}
+	if !strings.Contains(command, "az notify --json post_tool_use") {
+		t.Fatalf("command = %q, want codex post_tool_use notify command", command)
+	}
+	if !strings.Contains(command, "az notify --json stop") {
+		t.Fatalf("command = %q, want codex stop notify command", command)
 	}
 	if !strings.Contains(command, `--image "/tmp/a.png"`) {
 		t.Fatalf("command = %q, want codex image argument for /tmp/a.png", command)
@@ -448,6 +611,49 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsInYoloMode(t *test
 	command := d.buildSessionLaunchCommand("axt-123", "codex-axt-123", true, nil, "")
 	if !strings.Contains(command, "--dangerously-skip-permissions") {
 		t.Fatalf("command = %q, want yolo skip-permissions flag", command)
+	}
+}
+
+func TestRunWorktreeInitCommandsExecutesInWorktreeDirectory(t *testing.T) {
+	worktree := t.TempDir()
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"printf seeded > .worktree-init-test",
+			},
+		},
+	}
+
+	if err := d.runWorktreeInitCommands(context.Background(), worktree); err != nil {
+		t.Fatalf("runWorktreeInitCommands error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(worktree, ".worktree-init-test"))
+	if err != nil {
+		t.Fatalf("read init marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "seeded" {
+		t.Fatalf("init marker content = %q, want seeded", string(data))
+	}
+}
+
+func TestRunWorktreeInitCommandsReturnsCommandFailure(t *testing.T) {
+	d := &Daemon{
+		cfg: Config{
+			SessionShell: "sh",
+			WorktreeInitCommands: []string{
+				"exit 7",
+			},
+		},
+	}
+
+	err := d.runWorktreeInitCommands(context.Background(), t.TempDir())
+	if err == nil {
+		t.Fatal("runWorktreeInitCommands error = nil, want failure")
+	}
+	if !strings.Contains(err.Error(), "exit 7") {
+		t.Fatalf("error = %q, want failed command context", err.Error())
 	}
 }
 
@@ -533,5 +739,56 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		if body.Session.UpdatedAt.IsZero() {
 			t.Fatal("expected updated_at to be populated")
 		}
+	}
+}
+
+func TestEnrichTasksWithSessionStateSeedsStartedAtFromSnapshot(t *testing.T) {
+	const (
+		projectID = "proj-time"
+		issueID   = "bia"
+	)
+
+	store := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed starting session: %v", err)
+	}
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed attached session: %v", err)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	sessionSnapshot, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing seeded session %q in snapshot", sessionID)
+	}
+	if sessionSnapshot.UpdatedAt.IsZero() {
+		t.Fatal("expected seeded session updated_at")
+	}
+
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[sessionID] = true
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: store,
+	}
+
+	tasks := []domain.Task{
+		{ID: issueID, Title: "session elapsed should render", Type: domain.TypeTask},
+	}
+	enriched := d.enrichTasksWithSessionState(context.Background(), projectID, tasks)
+	if len(enriched) != 1 {
+		t.Fatalf("len(enriched) = %d, want 1", len(enriched))
+	}
+	if enriched[0].Session == nil {
+		t.Fatal("expected session projection to be attached")
+	}
+	if enriched[0].Session.StartedAt == nil {
+		t.Fatal("expected session started_at to be seeded from daemon snapshot")
+	}
+	if !enriched[0].Session.StartedAt.Equal(sessionSnapshot.UpdatedAt.UTC()) {
+		t.Fatalf("started_at = %v, want %v", enriched[0].Session.StartedAt, sessionSnapshot.UpdatedAt.UTC())
 	}
 }

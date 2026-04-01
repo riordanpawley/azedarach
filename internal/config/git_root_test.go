@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,5 +72,30 @@ func TestResolveWorktreeRootReturnsWorktreeTopLevel(t *testing.T) {
 	}
 	if got != worktree {
 		t.Fatalf("ResolveWorktreeRoot() = %q, want %q", got, worktree)
+	}
+}
+
+func TestGitExecEnvStripsAmbientGitRouting(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin:/bin",
+		"GIT_DIR=/tmp/repo/.git",
+		"GIT_WORK_TREE=/tmp/repo",
+		"GIT_COMMON_DIR=/tmp/repo/.git",
+		"GIT_INDEX_FILE=/tmp/repo/.git/index",
+		"GIT_OBJECT_DIRECTORY=/tmp/repo/.git/objects",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=/tmp/objects",
+		"HOME=/tmp/home",
+	}
+	got := gitExecEnv(in)
+
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "GIT_DIR=") ||
+			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(kv, "GIT_COMMON_DIR=") ||
+			strings.HasPrefix(kv, "GIT_INDEX_FILE=") ||
+			strings.HasPrefix(kv, "GIT_OBJECT_DIRECTORY=") ||
+			strings.HasPrefix(kv, "GIT_ALTERNATE_OBJECT_DIRECTORIES=") {
+			t.Fatalf("unexpected git routing var in env: %s", kv)
+		}
 	}
 }

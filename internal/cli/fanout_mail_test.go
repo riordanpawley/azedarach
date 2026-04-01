@@ -491,6 +491,7 @@ func TestMailSendCommandSerializesSequenceNumbers(t *testing.T) {
 func runGitCommand(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitExecEnvWithoutRoutingVars()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, output)

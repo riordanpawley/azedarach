@@ -410,25 +410,21 @@ func TestDiffStatAgainstBaseBranch(t *testing.T) {
 	}
 }
 
-func TestDiffStatAgainstBaseBranchFallsBackToOriginRef(t *testing.T) {
-	expectedStat := "3 files changed, 12 insertions(+), 6 deletions(-)"
+func TestDiffStatAgainstBaseBranchFallsBackToLocalChangesWhenMergeBaseFails(t *testing.T) {
+	unstagedStat := "1 file changed, 3 insertions(+)"
+	stagedStat := "1 file changed, 1 deletion(-)"
+	expectedStat := unstagedStat + "\n" + stagedStat
 
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
 				return "", fmt.Errorf("unknown revision")
 			}
-			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
-				return "def456\n", nil
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat" {
+				return unstagedStat, nil
 			}
-			if len(args) >= 6 &&
-				args[0] == "diff" &&
-				args[1] == "--shortstat" &&
-				args[2] == "def456" &&
-				args[3] == "HEAD" &&
-				args[4] == "--" &&
-				args[5] == ":^.azedarach" {
-				return expectedStat, nil
+			if len(args) >= 3 && args[0] == "diff" && args[1] == "--cached" && args[2] == "--shortstat" {
+				return stagedStat, nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -442,6 +438,29 @@ func TestDiffStatAgainstBaseBranchFallsBackToOriginRef(t *testing.T) {
 	}
 	if stat != expectedStat {
 		t.Errorf("DiffStat() = %v, want %v", stat, expectedStat)
+	}
+}
+
+func TestMergeBaseFallsBackToOriginRef(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("unknown revision")
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/main" && args[2] == "HEAD" {
+				return "def456\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.MergeBase(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("MergeBase() error = %v", err)
+	}
+	if mergeBase != "def456" {
+		t.Fatalf("MergeBase() = %q, want def456", mergeBase)
 	}
 }
 

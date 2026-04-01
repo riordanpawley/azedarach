@@ -71,6 +71,56 @@ func TestClientCommandPassThrough(t *testing.T) {
 	}
 }
 
+func TestClientCommandRetryOnTransientTransportError(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			if attempts < 3 {
+				return protocol.ResponseEnvelope{}, errors.New("dial unix /tmp/daemon.sock: connect: connection refused")
+			}
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 3,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	resp, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: "git.merge"})
+	if err != nil {
+		t.Fatalf("Command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatal("expected OK response after retry")
+	}
+	if attempts != 3 {
+		t.Fatalf("command attempts = %d, want 3", attempts)
+	}
+}
+
+func TestClientCommandDoesNotRetryNonTransientTransportError(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			attempts++
+			return protocol.ResponseEnvelope{}, errors.New("permission denied")
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 5,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	_, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: "task.list"})
+	if err == nil {
+		t.Fatal("expected command transport error")
+	}
+	if attempts != 1 {
+		t.Fatalf("command attempts = %d, want 1", attempts)
+	}
+}
+
 func TestClientSubscribeRetry(t *testing.T) {
 	attempts := 0
 	c := New(&fakeTransport{

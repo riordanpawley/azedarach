@@ -17,14 +17,16 @@ type runtimeGitService struct{}
 
 type runtimeWorktreeService struct{}
 
-func (runtimeGitService) Fetch(context.Context, string, string) error { return nil }
-func (runtimeGitService) Merge(context.Context, string, string) (*git.MergeResult, error) {
+func (runtimeGitService) Fetch(context.Context, string, string, string) error { return nil }
+func (runtimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: true}, nil
 }
-func (runtimeGitService) Checkout(context.Context, string, string) error           { return nil }
-func (runtimeGitService) AbortMerge(context.Context, string) error                 { return nil }
-func (runtimeGitService) DiffStat(context.Context, string, string) (string, error) { return "", nil }
-func (runtimeGitService) Status(context.Context, string) (*git.GitStatus, error) {
+func (runtimeGitService) Checkout(context.Context, string, string, string) error { return nil }
+func (runtimeGitService) AbortMerge(context.Context, string, string) error       { return nil }
+func (runtimeGitService) DiffStat(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+func (runtimeGitService) Status(context.Context, string, string) (*git.GitStatus, error) {
 	return &git.GitStatus{}, nil
 }
 
@@ -32,7 +34,7 @@ func (runtimeWorktreeService) List(context.Context, string) ([]git.Worktree, err
 func (runtimeWorktreeService) Create(context.Context, string, string, string) (*git.Worktree, error) {
 	return &git.Worktree{Path: "/tmp/worktree", Branch: "az/test", IssueID: "AZ-1"}, nil
 }
-func (runtimeWorktreeService) Delete(context.Context, string, string) error { return nil }
+func (runtimeWorktreeService) Delete(context.Context, string, string, bool) error { return nil }
 func (runtimeWorktreeService) CleanupOrphaned(context.Context, string) (*daemonhandlers.CleanupOrphanedResult, error) {
 	return &daemonhandlers.CleanupOrphanedResult{}, nil
 }
@@ -239,6 +241,24 @@ func TestOperationRuntimeWorktreeCleanupPublishesProgressEvents(t *testing.T) {
 	}
 	if queued.Progress.Percent != 0 || running.Progress.Percent != 50 || done.Progress.Percent != 100 {
 		t.Fatalf("progress percents = %d/%d/%d, want 0/50/100", queued.Progress.Percent, running.Progress.Percent, done.Progress.Percent)
+	}
+}
+
+func TestOperationProgressForState_UsesTerminalStateMessage(t *testing.T) {
+	failed := operationProgressForState(daemonops.StateFailed, daemonhandlers.CommandWorktreeRemove)
+	if failed.Message != "failed "+daemonhandlers.CommandWorktreeRemove {
+		t.Fatalf("failed message = %q", failed.Message)
+	}
+	if failed.Percent != 100 {
+		t.Fatalf("failed percent = %d, want 100", failed.Percent)
+	}
+
+	cancelled := operationProgressForState(daemonops.StateCancelled, "session.stop")
+	if cancelled.Message != "cancelled session.stop" {
+		t.Fatalf("cancelled message = %q", cancelled.Message)
+	}
+	if cancelled.Percent != 100 {
+		t.Fatalf("cancelled percent = %d, want 100", cancelled.Percent)
 	}
 }
 

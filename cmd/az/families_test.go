@@ -50,7 +50,9 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 
 	projectDir := t.TempDir()
-	if err := exec.Command("git", "-C", projectDir, "init").Run(); err != nil {
+	gitInit := exec.Command("git", "-C", projectDir, "init")
+	gitInit.Env = cli.GitExecEnvWithoutRoutingVarsForTests()
+	if err := gitInit.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
 
@@ -62,6 +64,26 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, ".githooks", "pre-commit")); err != nil {
 		t.Fatalf("expected pre-commit hook: %v", err)
+	}
+}
+
+func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
+	output := captureMainStdout(t, func() error {
+		return runCodexCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(output, "Usage: az codex <install|guard|hook>") {
+		t.Fatalf("help output = %q", output)
+	}
+
+	projectDir := t.TempDir()
+	output = captureMainStdout(t, func() error {
+		return runCodexCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir})
+	})
+	if !strings.Contains(output, "Installed Codex hooks in") {
+		t.Fatalf("dispatch output = %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("expected codex hooks file: %v", err)
 	}
 }
 
@@ -81,6 +103,43 @@ func TestRunDevHelpAndGateRegression(t *testing.T) {
 	})
 	if !strings.Contains(gateOut, "Running quality gates for: az-123") {
 		t.Fatalf("gate output = %q", gateOut)
+	}
+}
+
+func TestRunSpecCommandHelpAndValidation(t *testing.T) {
+	helpOut := captureMainStdout(t, func() error {
+		return runSpecCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(helpOut, "Usage: az spec <req|link|read|lint|parity|sync> [arguments]") {
+		t.Fatalf("help output = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "az spec req create --id <req-id> --title <text>") {
+		t.Fatalf("help output missing req create grammar = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "az spec link add --issue <issue-id> --req <req-id>") {
+		t.Fatalf("help output missing link add grammar = %q", helpOut)
+	}
+	if !strings.Contains(helpOut, "az spec sync --target md --check") {
+		t.Fatalf("help output missing sync example = %q", helpOut)
+	}
+
+	cfgDisabled := config.DefaultConfig()
+	cfgDisabled.Spec.Enabled = false
+	err := runSpecCommand(cfgDisabled, []string{"req", "list"})
+	if err == nil || !strings.Contains(err.Error(), "spec workflows are disabled for this project") {
+		t.Fatalf("disabled error = %v", err)
+	}
+
+	cfgEnabled := config.DefaultConfig()
+	cfgEnabled.Spec.Enabled = true
+	err = runSpecCommand(cfgEnabled, []string{"unknown"})
+	if err == nil || !strings.Contains(err.Error(), "unknown spec command") {
+		t.Fatalf("unknown command error = %v", err)
+	}
+
+	err = runSpecCommand(cfgEnabled, []string{"sync", "--target", "html"})
+	if err == nil || !strings.Contains(err.Error(), "usage: az spec sync --target md") {
+		t.Fatalf("invalid target error = %v", err)
 	}
 }
 
@@ -224,11 +283,12 @@ func TestRunProjectCommands(t *testing.T) {
 		t.Fatalf("list output missing default marker = %q", listOut)
 	}
 
-	switchOut := captureMainStdout(t, func() error {
-		return runProjectCommand(config.DefaultConfig(), []string{"switch", "azedarach"})
-	})
-	if !strings.Contains(switchOut, "Switched default project to azedarach") {
-		t.Fatalf("switch output = %q", switchOut)
+	err := runProjectCommand(config.DefaultConfig(), []string{"switch", "azedarach"})
+	if err == nil {
+		t.Fatal("expected switch subcommand to be rejected")
+	}
+	if !strings.Contains(err.Error(), "unknown project command: switch") {
+		t.Fatalf("switch error = %v", err)
 	}
 
 	removeOut := captureMainStdout(t, func() error {

@@ -142,6 +142,10 @@ func (m *MergePreflightOverlay) renderDetails(width int) string {
 	title := fmt.Sprintf("Merge blocked: %s -> %s", m.sourceID, m.targetID)
 	b.WriteString(m.styles.MenuKey.Render(title))
 	b.WriteString("\n")
+	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("Source worktree: %s", safeWorktreeLabel(m.sourceWorktree))))
+	b.WriteString("\n")
+	b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("Target worktree: %s", safeWorktreeLabel(m.targetWorktree))))
+	b.WriteString("\n")
 	if len(m.reasons) > 0 {
 		b.WriteString("\n")
 		for _, reason := range m.reasons {
@@ -183,6 +187,14 @@ func (m *MergePreflightOverlay) renderDetails(width int) string {
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func safeWorktreeLabel(worktree string) string {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return "(unavailable)"
+	}
+	return worktree
 }
 
 func (m *MergePreflightOverlay) Title() string {

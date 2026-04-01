@@ -11,8 +11,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 mkdir -p bin
-go build -o bin/az ./cmd/az
-go build -o bin/azd ./cmd/azd
+sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
+go build -ldflags "$ldflags" -o bin/az ./cmd/az
+go build -ldflags "$ldflags" -o bin/azd ./cmd/azd
 
 choose_link_dir() {
   if [ -n "${AZ_LINK_DIR:-}" ]; then
@@ -24,7 +26,8 @@ choose_link_dir() {
   if command -v az >/dev/null 2>&1; then
     local current_dir
     current_dir="$(dirname "$(command -v az)")"
-    if [ -w "$current_dir" ]; then
+    # Skip repo-local bin to avoid "linking" to the same local build path.
+    if [ "$current_dir" != "$repo_root/bin" ] && [ -w "$current_dir" ]; then
       echo "$current_dir"
       return 0
     fi
@@ -60,9 +63,10 @@ link_binary "$repo_root/bin/azd" "$link_dir/azd"
 
 echo "Linked az -> $link_dir/az"
 echo "Linked azd -> $link_dir/azd"
+echo "Global az resolves to: $(command -v az || true)"
 if [[ "$no_run" -eq 1 ]]; then
   echo "Skipping run (--no-run)"
   exit 0
 fi
 echo "Running az..."
-exec "$repo_root/bin/az"
+exec "$link_dir/az"

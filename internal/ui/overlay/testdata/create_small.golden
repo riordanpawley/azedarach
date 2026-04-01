@@ -3,18 +3,18 @@
 │────────────────────────────────────────────────────────────────────│
 ││ Title:                                      Actions               │
 ││ > Add grom renderer for detail view maybe   ──────────────────────│
-││ Description:                                 Tab / Shift+Tab      │
-││ ┃   1 review panel structure and            Switch fields         │
-││ ┃     preserve layout                        Ctrl+C Clear focused │
-││ ┃                                           field                 │
-││ ┃                                            T/B/F/E/C Set type   │
-││ Type: [●T] [ B] [ F] [ E] [ C]               0/1/2/3/4 Set        │
-││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          priority              │
-││ Impls: [<] (none) [>]                        h/l or ←/→ Cycle impl│
-││ Acceptance Criteria:                        combinations          │
-││ ┃   1 Acceptance criteria (optional)...      Ctrl+O Attach image  │
-││ ┃                                           (edit task)           │
-││ ┃                                            Enter Create task    │
-││                                              Ctrl+E Edit in       │
-││ [ Create Task ]                             $EDITOR               │
+││ Add grom renderer for detail view            Tab / Shift+Tab      │
+││ maybe?                                      Switch fields         │
+││ Description:                                 Ctrl+C Clear focused │
+││ ┃   1 review panel structure and            field                 │
+││ ┃     preserve layout                        T/B/F/E/C Set type   │
+││ ┃                                            0/1/2/3/4 Set        │
+││ ┃                                           priority              │
+││ Type: [●T] [ B] [ F] [ E] [ C]               h/l or ←/→ Cycle impl│
+││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          combinations          │
+││ Impls: [<] (none) [>]                        Ctrl+P Paste image   │
+││ Acceptance Criteria:                        (edit task)           │
+││ ┃   1 Acceptance criteria (optional)...      Ctrl+O Paste image   │
+││ ┃                                           (alias)               │
+││ ┃                                            j/k + d Manage       │
 ╰────────────────────────────────────────────────────────────────────╯

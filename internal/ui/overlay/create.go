@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,7 +15,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
 
@@ -76,6 +79,10 @@ type CreateTaskOverlay struct {
 	editorError     string
 	editorFlow      func(string) (string, error)
 	defaults        createTaskDefaults
+	attachmentSvc   ImageAttachmentService
+	attachments     []attachment.Attachment
+	attachmentIndex int
+	attachmentError string
 }
 
 type createTaskDefaults struct {
@@ -100,6 +107,7 @@ const (
 	focusPriority
 	focusImpls
 	focusAcceptance
+	focusAttachments
 	focusSubmit
 	focusCount
 )
@@ -115,10 +123,14 @@ func NewCreateTaskOverlay() *CreateTaskOverlay {
 }
 
 func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
-	return NewEditTaskOverlayWithImplOptions(task, nil)
+	return NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, nil, nil)
 }
 
 func NewEditTaskOverlayWithImplOptions(task domain.Task, implOptions []string) *CreateTaskOverlay {
+	return NewEditTaskOverlayWithImplOptionsAndAttachmentService(task, implOptions, nil)
+}
+
+func NewEditTaskOverlayWithImplOptionsAndAttachmentService(task domain.Task, implOptions []string, attachmentSvc ImageAttachmentService) *CreateTaskOverlay {
 	ti := textinput.New()
 	ti.SetValue(task.Title)
 	ti.Focus()
@@ -158,6 +170,7 @@ func NewEditTaskOverlayWithImplOptions(task domain.Task, implOptions []string) *
 			status:      task.Status,
 			impls:       append([]string(nil), task.Implementations...),
 		},
+		attachmentSvc: attachmentSvc,
 	}
 	overlay.syncImplementationSelection()
 	return overlay
@@ -311,7 +324,11 @@ type taskEditorErrorMsg struct {
 
 // Init initializes the overlay
 func (c *CreateTaskOverlay) Init() tea.Cmd {
-	return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	if strings.TrimSpace(c.id) != "" && c.attachmentSvc != nil {
+		cmds = append(cmds, c.loadAttachments())
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages
@@ -339,10 +356,15 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.editInEditorCmd()
 
 		case "ctrl+o":
-			if strings.TrimSpace(c.id) == "" {
+			if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
 				return c, nil
 			}
-			return c, func() tea.Msg { return OpenTaskImageAttachMsg{IssueID: c.id} }
+			return c, c.pasteAttachment()
+		case "ctrl+p":
+			if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
+				return c, nil
+			}
+			return c, c.pasteAttachment()
 
 		case "ctrl+k":
 			c.clearToDefaults()
@@ -369,6 +391,10 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c.title.Blur()
 				c.description.Blur()
 				c.acceptanceInput.Focus()
+			} else if c.focusIndex == focusAttachments {
+				c.title.Blur()
+				c.description.Blur()
+				c.acceptanceInput.Blur()
 			} else if c.focusIndex == focusImpls {
 				c.title.Blur()
 				c.description.Blur()
@@ -386,7 +412,7 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			// Enter submits from non-description fields so submit does not depend on Ctrl+S.
-			if c.focusIndex == focusSubmit || c.focusIndex == focusTitle || c.focusIndex == focusType || c.focusIndex == focusPriority || c.focusIndex == focusImpls {
+			if c.focusIndex == focusSubmit || c.focusIndex == focusTitle || c.focusIndex == focusType || c.focusIndex == focusPriority || c.focusIndex == focusImpls || c.focusIndex == focusAttachments {
 				return c, c.submit()
 			}
 		case "left", "h":
@@ -398,6 +424,20 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if c.focusIndex == focusImpls {
 				c.cycleImplementationCombo(1)
 				return c, nil
+			}
+		case "j", "down":
+			if c.focusIndex == focusAttachments && len(c.attachments) > 0 {
+				c.attachmentIndex = min(c.attachmentIndex+1, len(c.attachments)-1)
+				return c, nil
+			}
+		case "k", "up":
+			if c.focusIndex == focusAttachments && len(c.attachments) > 0 {
+				c.attachmentIndex = max(0, c.attachmentIndex-1)
+				return c, nil
+			}
+		case "d", "x":
+			if c.focusIndex == focusAttachments && len(c.attachments) > 0 && c.attachmentSvc != nil {
+				return c, c.deleteSelectedAttachment()
 			}
 		}
 
@@ -467,6 +507,45 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskEditorErrorMsg:
 		c.editorError = msg.err.Error()
 		return c, nil
+	case attachmentsLoadedMsg:
+		c.attachments = append([]attachment.Attachment(nil), msg.attachments...)
+		c.attachmentError = ""
+		if c.attachmentIndex >= len(c.attachments) && len(c.attachments) > 0 {
+			c.attachmentIndex = len(c.attachments) - 1
+		}
+		if len(c.attachments) == 0 {
+			c.attachmentIndex = 0
+		}
+		return c, nil
+	case attachmentAddedMsg:
+		c.attachmentError = ""
+		return c, tea.Batch(
+			c.loadAttachments(),
+			func() tea.Msg {
+				return AttachmentActionMsg{
+					Action:     "attached",
+					Attachment: msg.attachment,
+				}
+			},
+		)
+	case attachmentDeletedMsg:
+		c.attachmentError = ""
+		return c, tea.Batch(
+			c.loadAttachments(),
+			func() tea.Msg {
+				return AttachmentActionMsg{
+					Action: "deleted",
+				}
+			},
+		)
+	case errorMsg:
+		c.attachmentError = compactOverlayError(msg.err)
+		return c, func() tea.Msg {
+			return AttachmentActionMsg{
+				Action: "error",
+				Error:  msg.err,
+			}
+		}
 	}
 
 	// Update active field
@@ -509,7 +588,9 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "T/B/F/E/C", Description: "Set type"},
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
-				{Key: "Ctrl+O", Description: "Attach image (edit task)"},
+				{Key: "Ctrl+P", Description: "Paste image (edit task)"},
+				{Key: "Ctrl+O", Description: "Paste image (alias)"},
+				{Key: "j/k + d", Description: "Manage attachments"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
 				{Key: "Ctrl+K", Description: "Clear form"},
@@ -539,6 +620,8 @@ func (c *CreateTaskOverlay) clearToDefaults() {
 	c.title.Focus()
 	c.description.Blur()
 	c.acceptanceInput.Blur()
+	c.attachmentIndex = 0
+	c.attachmentError = ""
 }
 
 func (c *CreateTaskOverlay) clearFocusedField() {
@@ -576,7 +659,8 @@ func (c *CreateTaskOverlay) cycleImplementationCombo(direction int) {
 
 func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	stacked := width < 52
-	titleWidth := max(20, width-6)
+	titleLabelWidth := lipgloss.Width("Title: ")
+	titleWidth := max(20, width-titleLabelWidth-3)
 	if stacked {
 		titleWidth = max(20, width-4)
 	}
@@ -617,6 +701,13 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	} else {
 		b.WriteString(" ")
 		b.WriteString(c.title.View())
+		b.WriteString("\n")
+	}
+	titlePreviewWidth := max(1, titleWidth-2)
+	titlePreviewLines := wrapTitleLines(c.title.Value(), titlePreviewWidth)
+	if c.focusIndex == focusTitle && len(titlePreviewLines) > 1 {
+		titlePreviewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
+		b.WriteString(titlePreviewStyle.Render(strings.Join(titlePreviewLines, "\n")))
 		b.WriteString("\n")
 	}
 
@@ -667,6 +758,16 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	b.WriteString("\n")
 	b.WriteString(c.acceptanceInput.View())
 	b.WriteString("\n")
+	if strings.TrimSpace(c.id) != "" {
+		if c.focusIndex == focusAttachments {
+			b.WriteString(focusStyle.Render("Image Attachments:"))
+		} else {
+			b.WriteString(labelStyle.Render("Image Attachments:"))
+		}
+		b.WriteString("\n")
+		b.WriteString(c.renderAttachmentList())
+		b.WriteString("\n\n")
+	}
 	if !stacked {
 		b.WriteString("\n")
 		b.WriteString(c.styles.Separator.Render(strings.Repeat("─", max(6, width-2))))
@@ -758,6 +859,91 @@ func (c *CreateTaskOverlay) renderImplementationSelector() string {
 		style = c.styles.MenuItemActive
 	}
 	return style.Render(fmt.Sprintf("[<] %s [>]", current))
+}
+
+func (c *CreateTaskOverlay) renderAttachmentList() string {
+	if c.attachmentSvc == nil {
+		return c.styles.Footer.Render("Attachment service unavailable.")
+	}
+	if len(c.attachments) == 0 {
+		empty := "No attachments yet. Ctrl+P to paste from clipboard."
+		if c.attachmentError != "" {
+			return c.styles.Footer.Render(empty + " Error: " + c.attachmentError)
+		}
+		return c.styles.Footer.Render(empty)
+	}
+	lines := make([]string, 0, len(c.attachments)+1)
+	for idx, file := range c.attachments {
+		indicator := "  "
+		style := c.styles.MenuItem
+		if idx == c.attachmentIndex {
+			indicator = "▶ "
+			style = c.styles.MenuItemActive
+		}
+		entry := fmt.Sprintf("%s%-30s %8s", indicator, truncate(file.Filename, 30), formatFileSize(file.Size))
+		lines = append(lines, style.Render(entry))
+	}
+	if c.attachmentError != "" {
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Render("Error: "+c.attachmentError))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (c *CreateTaskOverlay) loadAttachments() tea.Cmd {
+	if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		files, err := c.attachmentSvc.List(context.Background(), c.id)
+		if err != nil {
+			return errorMsg{err: err}
+		}
+		return attachmentsLoadedMsg{attachments: files}
+	}
+}
+
+func (c *CreateTaskOverlay) pasteAttachment() tea.Cmd {
+	if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		attached, err := c.attachmentSvc.AttachFromClipboard(context.Background(), c.id)
+		if err != nil {
+			return errorMsg{err: err}
+		}
+		return attachmentAddedMsg{attachment: attached}
+	}
+}
+
+func (c *CreateTaskOverlay) deleteSelectedAttachment() tea.Cmd {
+	if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil || c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+		return nil
+	}
+	selected := c.attachments[c.attachmentIndex]
+	return func() tea.Msg {
+		if err := c.attachmentSvc.Delete(context.Background(), c.id, selected.ID); err != nil {
+			return errorMsg{err: err}
+		}
+		return attachmentDeletedMsg{}
+	}
+}
+
+func wrapTitleLines(value string, width int) []string {
+	if width < 1 {
+		return strings.Split(value, "\n")
+	}
+	// For titles, wrap on spaces only to avoid splitting tokens like --project.
+	wordWrapped := ansi.Wrap(value, width, " ")
+	lines := strings.Split(wordWrapped, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if ansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+	}
+	return out
 }
 
 // submit creates a TaskCreatedMsg and closes the overlay

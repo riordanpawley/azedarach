@@ -55,7 +55,7 @@ func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.
 		return protocol.HelloAck{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(c.timeout))
+	c.setDeadline(ctx, conn)
 
 	if err := writeFrame(conn, c.codec, rpcFrame{
 		Type:  frameTypeHello,
@@ -82,7 +82,7 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 		return protocol.ResponseEnvelope{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(c.timeout))
+	c.setDeadline(ctx, conn)
 
 	if err := writeFrame(conn, c.codec, rpcFrame{
 		Type:    frameTypeCommand,
@@ -169,4 +169,15 @@ func readFrame(conn net.Conn, c *codec.Codec) (rpcFrame, error) {
 		return rpcFrame{}, err
 	}
 	return frame, nil
+}
+
+func (c *Client) setDeadline(ctx context.Context, conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+		return
+	}
+	_ = conn.SetDeadline(time.Now().Add(c.timeout))
 }

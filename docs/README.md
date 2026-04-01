@@ -19,4 +19,11 @@ This directory primarily contains **developer/internal documentation**.
 - [08-recovery-playbook.md](08-recovery-playbook.md)
 - [09-boundary-hardening-policy.md](09-boundary-hardening-policy.md)
 - [10-go-release-and-homebrew.md](10-go-release-and-homebrew.md)
+- [11-az-spec-v1-contract.md](11-az-spec-v1-contract.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
+
+## Generated Spec Docs
+
+- `az spec sync --target md` generates deterministic Markdown under `docs/spec/`.
+- When `docs/spec/` is present, treat it as the spec source of truth for synced command grammar/status.
+- [spec/README.md](spec/README.md)

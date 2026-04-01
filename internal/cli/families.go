@@ -23,6 +23,10 @@ import (
 const (
 	hookEventIdlePrompt        = "idle_prompt"
 	hookEventPermissionRequest = "permission_request"
+	hookEventSessionStart      = "session_start"
+	hookEventUserPromptSubmit  = "user_prompt_submit"
+	hookEventPreToolUse        = "pre_tool_use"
+	hookEventPostToolUse       = "post_tool_use"
 	hookEventStop              = "stop"
 	hookEventSessionEnd        = "session_end"
 	openCodePluginFilename     = "opencode-az.js"
@@ -32,6 +36,10 @@ const (
 var hookEventStatuses = map[string]string{
 	hookEventIdlePrompt:        "waiting",
 	hookEventPermissionRequest: "waiting",
+	hookEventSessionStart:      "started",
+	hookEventUserPromptSubmit:  "active",
+	hookEventPreToolUse:        "running_tool",
+	hookEventPostToolUse:       "active",
 	hookEventStop:              "stopped",
 	hookEventSessionEnd:        "ended",
 }
@@ -39,6 +47,7 @@ var hookEventStatuses = map[string]string{
 type NotifyOptions struct {
 	Event   string
 	IssueID string
+	JSON    bool
 	Verbose bool
 }
 
@@ -93,20 +102,44 @@ type OpenCodePluginInstallOptions struct {
 	Verbose    bool
 }
 
+type CodexInstallOptions struct {
+	ProjectDir string
+	Verbose    bool
+}
+
+type CodexGuardOptions struct {
+	Event string
+	JSON  bool
+}
+
+type CodexHookRunOptions struct {
+	Event string
+	JSON  bool
+}
+
 func ParseNotifyArgs(args []string) (NotifyOptions, error) {
 	opts := NotifyOptions{}
 	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "hook-json output")
 	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
 
 	if err := fs.Parse(args); err != nil {
 		return NotifyOptions{}, err
 	}
-	if fs.NArg() != 2 {
-		return NotifyOptions{}, fmt.Errorf("usage: az notify <event> <issue-id> [--verbose]")
+	positionals := fs.Args()
+	if len(positionals) < 1 || len(positionals) > 2 {
+		return NotifyOptions{}, fmt.Errorf("usage: az notify [--json] [--verbose] <event> [<issue-id>]")
 	}
-	opts.Event = fs.Arg(0)
-	opts.IssueID = fs.Arg(1)
+	for _, arg := range positionals {
+		if strings.HasPrefix(arg, "-") {
+			return NotifyOptions{}, fmt.Errorf("flags must come before positional arguments")
+		}
+	}
+	opts.Event = positionals[0]
+	if len(positionals) == 2 {
+		opts.IssueID = positionals[1]
+	}
 	if _, ok := hookEventStatuses[opts.Event]; !ok {
 		return NotifyOptions{}, fmt.Errorf("invalid event type: %s", opts.Event)
 	}
@@ -213,19 +246,124 @@ func ParseOpenCodePluginInstallArgs(args []string) (OpenCodePluginInstallOptions
 	return opts, nil
 }
 
-func NotifyCommand(_ *Dependencies, opts NotifyOptions) error {
+func ParseCodexInstallArgs(args []string) (CodexInstallOptions, error) {
+	opts := CodexInstallOptions{}
+	fs := flag.NewFlagSet("codex install", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+
+	if err := fs.Parse(args); err != nil {
+		return CodexInstallOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return CodexInstallOptions{}, fmt.Errorf("usage: az codex install [--project-dir <dir>] [--verbose]")
+	}
+	return opts, nil
+}
+
+func ParseCodexGuardArgs(args []string) (CodexGuardOptions, error) {
+	opts := CodexGuardOptions{}
+	fs := flag.NewFlagSet("codex guard", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "hook-json output")
+	if err := fs.Parse(args); err != nil {
+		return CodexGuardOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return CodexGuardOptions{}, fmt.Errorf("usage: az codex guard [--json] <session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop>")
+	}
+	opts.Event = strings.TrimSpace(fs.Arg(0))
+	if !isCodexGuardEvent(opts.Event) {
+		return CodexGuardOptions{}, fmt.Errorf("unsupported codex guard event: %s", opts.Event)
+	}
+	return opts, nil
+}
+
+func ParseCodexHookRunArgs(args []string) (CodexHookRunOptions, error) {
+	opts := CodexHookRunOptions{}
+	fs := flag.NewFlagSet("codex hook run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.JSON, "json", false, "hook-json output")
+	if err := fs.Parse(args); err != nil {
+		return CodexHookRunOptions{}, err
+	}
+	if fs.NArg() != 1 {
+		return CodexHookRunOptions{}, fmt.Errorf("usage: az codex hook run [--json] <session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop>")
+	}
+	opts.Event = strings.TrimSpace(fs.Arg(0))
+	if !isCodexGuardEvent(opts.Event) {
+		return CodexHookRunOptions{}, fmt.Errorf("unsupported codex hook event: %s", opts.Event)
+	}
+	return opts, nil
+}
+
+func isCodexGuardEvent(event string) bool {
+	switch event {
+	case "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop":
+		return true
+	default:
+		return false
+	}
+}
+
+func NotifyCommand(deps *Dependencies, opts NotifyOptions) error {
+	issueID := strings.TrimSpace(opts.IssueID)
+	if issueID == "" {
+		issueID = strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID"))
+	}
+	if issueID != "" && deps != nil && deps.DaemonClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := notifyDaemonSessionStatus(ctx, deps, issueID, opts.Event); err != nil && opts.Verbose {
+			fmt.Fprintf(os.Stderr, "notify daemon update failed: %v\n", err)
+		}
+	}
+
+	output, err := renderNotifyOutput(opts)
+	if err != nil {
+		return err
+	}
+	fmt.Println(output)
+	return nil
+}
+
+func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
+	switch event {
+	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
+		_, err := deps.DaemonClient.PauseSession(ctx, issueID)
+		return err
+	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
+		_, err := deps.DaemonClient.ResumeSession(ctx, issueID)
+		return err
+	default:
+		return nil
+	}
+}
+
+func renderNotifyOutput(opts NotifyOptions) (string, error) {
 	status, ok := hookEventStatuses[opts.Event]
 	if !ok {
-		return fmt.Errorf("invalid event type: %s", opts.Event)
+		return "", fmt.Errorf("invalid event type: %s", opts.Event)
+	}
+
+	if opts.JSON {
+		// Hook-compatible command output: an empty JSON object is accepted by Codex
+		// hook schemas and avoids text parsing failures.
+		return "{}", nil
 	}
 
 	if opts.Verbose {
-		fmt.Printf("Hook notification: %s for %s -> %s\n", opts.Event, opts.IssueID, status)
-		return nil
+		if strings.TrimSpace(opts.IssueID) != "" {
+			return fmt.Sprintf("Hook notification: %s for %s -> %s", opts.Event, opts.IssueID, status), nil
+		}
+		return fmt.Sprintf("Hook notification: %s -> %s", opts.Event, status), nil
 	}
 
-	fmt.Printf("Hook notification: %s -> %s\n", opts.IssueID, status)
-	return nil
+	if strings.TrimSpace(opts.IssueID) != "" {
+		return fmt.Sprintf("Hook notification: %s -> %s", opts.IssueID, status), nil
+	}
+	return fmt.Sprintf("Hook notification: %s -> %s", opts.Event, status), nil
 }
 
 func HooksInstallCommand(deps *Dependencies, opts HooksInstallOptions) error {
@@ -333,8 +471,7 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 	if err := os.WriteFile(preCommitPath, []byte(preCommit), 0o755); err != nil {
 		return fmt.Errorf("write pre-commit hook: %w", err)
 	}
-
-	cmd := exec.Command("git", "-C", projectDir, "config", "core.hooksPath", ".githooks")
+	cmd := newGitCommand(projectDir, "config", "core.hooksPath", ".githooks")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("set git core.hooksPath: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
@@ -367,7 +504,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 	if specSyncCfg.Enabled {
 		command := strings.TrimSpace(specSyncCfg.Command)
 		if command == "" {
-			command = "az spec sync --target md"
+			return fmt.Errorf("githooks spec sync command is enabled but no command is configured")
 		}
 		if opts.Verbose {
 			fmt.Printf("githooks: spec sync command: %s\n", command)
@@ -378,7 +515,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 
 		if specSyncCfg.AutoStageDocs {
 			if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec")); err == nil {
-				stageCmd := exec.Command("git", "-C", projectDir, "add", "docs/spec")
+				stageCmd := newGitCommand(projectDir, "add", "docs/spec")
 				if output, err := stageCmd.CombinedOutput(); err != nil {
 					return fmt.Errorf("githooks spec sync auto-stage failed: %w (%s)", err, strings.TrimSpace(string(output)))
 				}
@@ -399,7 +536,7 @@ func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
 		if shouldRun {
 			command := strings.TrimSpace(boundaryCfg.Command)
 			if command == "" {
-				command = "just check-boundaries"
+				return fmt.Errorf("githooks boundary check is enabled but no command is configured")
 			}
 			if opts.Verbose {
 				fmt.Printf("githooks: boundary command: %s\n", command)
@@ -712,6 +849,252 @@ func OpenCodePluginInstallCommand(deps *Dependencies, opts OpenCodePluginInstall
 	return nil
 }
 
+func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
+	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
+	if err != nil {
+		return err
+	}
+
+	hooksPath := filepath.Join(projectDir, ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
+		return fmt.Errorf("create codex hooks directory: %w", err)
+	}
+
+	hooksConfig, err := readJSONObject(hooksPath)
+	if err != nil {
+		return fmt.Errorf("read codex hooks config: %w", err)
+	}
+
+	hooks, _ := hooksConfig["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+
+	mergeCodexHookEntry := func(eventName, command, matcher string) {
+		entry := map[string]any{
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": command,
+				},
+			},
+		}
+		if matcher != "" {
+			entry["matcher"] = matcher
+		}
+		hooks[eventName] = mergeHookEntries(hooks[eventName], entry, command)
+	}
+
+	type codexHookInstallSpec struct {
+		eventName   string
+		notifyEvent string
+		guardEvent  string
+		matcher     string
+	}
+	specs := []codexHookInstallSpec{
+		{eventName: "SessionStart", notifyEvent: hookEventSessionStart, guardEvent: "session-start", matcher: "startup|resume"},
+		{eventName: "UserPromptSubmit", notifyEvent: hookEventUserPromptSubmit, guardEvent: "user-prompt-submit"},
+		// {eventName: "PreToolUse", notifyEvent: hookEventPreToolUse, guardEvent: "pre-tool-use"},
+		// Intentionally disabled for now: current Codex clients print very noisy
+		// per-tool hook status lines ("Running PreToolUse hook"), which overwhelms
+		// normal output when multiple tools run in quick succession.
+		{eventName: "PostToolUse", notifyEvent: hookEventPostToolUse, guardEvent: "post-tool-use"},
+		{eventName: "Stop", notifyEvent: hookEventStop, guardEvent: "stop"},
+	}
+	for _, spec := range specs {
+		legacyNotifyCommand := fmt.Sprintf("az notify --json %s", spec.notifyEvent)
+		legacyGuardCommand := fmt.Sprintf("az codex guard --json %s", spec.guardEvent)
+		combinedCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
+		hooks[spec.eventName] = removeHookCommands(hooks[spec.eventName], legacyNotifyCommand, legacyGuardCommand, combinedCommand)
+		shouldInstall := spec.eventName == "SessionStart" || spec.eventName == "Stop"
+		if shouldInstall {
+			mergeCodexHookEntry(spec.eventName, combinedCommand, spec.matcher)
+		} else if len(normalizeAnySlice(hooks[spec.eventName])) == 0 {
+			delete(hooks, spec.eventName)
+		}
+	}
+
+	hooksConfig["hooks"] = hooks
+	if err := writeJSONObject(hooksPath, hooksConfig); err != nil {
+		return fmt.Errorf("write codex hooks config: %w", err)
+	}
+
+	fmt.Printf("Installed Codex hooks in %s\n", hooksPath)
+	if opts.Verbose {
+		fmt.Println("  Events: SessionStart, Stop")
+	}
+	return nil
+}
+
+func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
+	projectDir, err := resolveProjectDir("", deps)
+	if err != nil {
+		return err
+	}
+	payloadMap, err := parseHookPayload(os.Stdin)
+	if err != nil {
+		return err
+	}
+
+	notifyEvent, err := codexNotifyEventForGuardEvent(opts.Event)
+	if err != nil {
+		return err
+	}
+	if !opts.JSON {
+		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: notifyEvent})
+		if err != nil {
+			return err
+		}
+		fmt.Println(notifyOutput)
+	}
+
+	response, err := codexGuardResponse(projectDir, CodexGuardOptions{Event: opts.Event}, payloadMap)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	printCodexGuardResponse(response)
+	return nil
+}
+
+type codexGuardState struct {
+	Threads map[string]codexGuardThreadState `json:"threads"`
+}
+
+type codexGuardThreadState struct {
+	Primed       bool      `json:"primed"`
+	NeedsRefresh bool      `json:"needs_refresh"`
+	LastPrimeAt  time.Time `json:"last_prime_at,omitempty"`
+}
+
+func CodexGuardCommand(deps *Dependencies, opts CodexGuardOptions) error {
+	projectDir, err := resolveProjectDir("", deps)
+	if err != nil {
+		return err
+	}
+	payloadMap, err := parseHookPayload(os.Stdin)
+	if err != nil {
+		return err
+	}
+	response, err := codexGuardResponse(projectDir, opts, payloadMap)
+	if err != nil {
+		return err
+	}
+	if opts.JSON {
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	printCodexGuardResponse(response)
+	return nil
+}
+
+func parseHookPayload(r io.Reader) (map[string]any, error) {
+	payload, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read hook payload: %w", err)
+	}
+	payloadMap := map[string]any{}
+	if len(strings.TrimSpace(string(payload))) > 0 {
+		_ = json.Unmarshal(payload, &payloadMap)
+	}
+	return payloadMap, nil
+}
+
+func codexNotifyEventForGuardEvent(event string) (string, error) {
+	switch event {
+	case "session-start":
+		return hookEventSessionStart, nil
+	case "user-prompt-submit":
+		return hookEventUserPromptSubmit, nil
+	case "pre-tool-use":
+		return hookEventPreToolUse, nil
+	case "post-tool-use":
+		return hookEventPostToolUse, nil
+	case "stop":
+		return hookEventStop, nil
+	default:
+		return "", fmt.Errorf("unsupported codex hook event: %s", event)
+	}
+}
+
+func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap map[string]any) (map[string]any, error) {
+	threadID := codexGuardThreadID(payloadMap)
+	if threadID == "" {
+		threadID = "default"
+	}
+	statePath := filepath.Join(projectDir, ".azedarach", "codex-guard-state.json")
+	state := readCodexGuardState(statePath)
+	threadState := state.Threads[threadID]
+
+	response := map[string]any{}
+	switch opts.Event {
+	case "session-start":
+		threadState = codexGuardThreadState{}
+		state.Threads[threadID] = threadState
+		if !codexGuardPromptMentionsPrime(payloadMap) {
+			response["systemMessage"] = "Run `az prime` now before any other shell commands."
+		}
+	case "user-prompt-submit":
+		if codexGuardCompactionDetected(payloadMap) {
+			threadState.Primed = false
+			threadState.NeedsRefresh = true
+			state.Threads[threadID] = threadState
+			response["systemMessage"] = "Context compaction detected. Run `az prime` to refresh issue context."
+		}
+	case "pre-tool-use":
+		command := codexGuardCommandFromPayload(payloadMap)
+		if codexGuardIsPrimeCommand(command) {
+			// Temporary tradeoff: we mark prime success during PreToolUse to reduce Codex
+			// hook spam by removing PostToolUse hooks. Revert this once hook noise is fixed.
+			threadState.Primed = true
+			threadState.NeedsRefresh = false
+			threadState.LastPrimeAt = time.Now().UTC()
+			state.Threads[threadID] = threadState
+			break
+		}
+		if strings.TrimSpace(command) != "" && (!threadState.Primed || threadState.NeedsRefresh) {
+			response["decision"] = "block"
+			if threadState.NeedsRefresh {
+				response["reason"] = "Run `az prime` before continuing so your context is refreshed after compaction."
+			} else {
+				response["reason"] = "Run `az prime` before any other shell command in this session."
+			}
+		}
+	case "post-tool-use":
+	case "stop":
+		delete(state.Threads, threadID)
+	}
+
+	if err := writeCodexGuardState(statePath, state); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func printCodexGuardResponse(response map[string]any) {
+	if len(response) == 0 {
+		fmt.Println("codex guard: allow")
+		return
+	}
+	if message, ok := response["systemMessage"].(string); ok {
+		fmt.Println(message)
+	}
+	if reason, ok := response["reason"].(string); ok {
+		fmt.Println(reason)
+	}
+}
+
 func PrintHooksUsage() {
 	fmt.Println("Usage: az hooks install <issue-id> [--project-dir <dir>] [--verbose]")
 	fmt.Println("Manage Claude Code hook configuration for session detection.")
@@ -723,7 +1106,7 @@ func PrintGitHooksUsage() {
 }
 
 func PrintNotifyUsage() {
-	fmt.Println("Usage: az notify <event> <issue-id> [--verbose]")
+	fmt.Println("Usage: az notify [--json] [--verbose] <event> [<issue-id>]")
 	fmt.Println("Handle Claude Code hook notifications (internal use).")
 }
 
@@ -754,6 +1137,94 @@ func PrintOpenCodeInitUsage() {
 
 func PrintOpenCodePluginUsage() {
 	fmt.Println("Usage: az opencode plugin install [--global-dir <dir>] [--project-dir <dir>] [--verbose]")
+}
+
+func PrintCodexUsage() {
+	fmt.Println("Usage: az codex <install|guard|hook> [--project-dir <dir>] [--verbose]")
+	fmt.Println("Install Codex hook configuration and run Codex hook/guard commands.")
+}
+
+func PrintSpecUsage() {
+	fmt.Println("Usage: az spec <req|link|read|lint|parity|sync> [arguments]")
+	fmt.Println("  req      Manage spec requirements (list|get|create|update|delete)")
+	fmt.Println("  link     Manage issue/requirement traceability links (list|add|remove)")
+	fmt.Println("  read     Read consolidated spec view")
+	fmt.Println("  lint     Validate spec consistency")
+	fmt.Println("  parity   Report issue/spec drift")
+	fmt.Println("  sync     Sync spec artifacts to Markdown (phase-1 target: md)")
+	fmt.Println("")
+	fmt.Println("Requirement commands:")
+	fmt.Println("  az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec req get --id <req-id> [--json]")
+	fmt.Println("  az spec req create --id <req-id> --title <text> [--description <text>] [--issue <issue-id>] [--json]")
+	fmt.Println("  az spec req update --id <req-id> [--title <text>] [--description <text>] [--status <open|accepted|superseded>] [--json]")
+	fmt.Println("  az spec req delete --id <req-id> --confirm [--json]")
+	fmt.Println("")
+	fmt.Println("Link commands:")
+	fmt.Println("  az spec link list [--json] [--issue <issue-id>] [--req <req-id>] [--id <link-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
+	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
+	fmt.Println("")
+	fmt.Println("Read/lint/parity/sync:")
+	fmt.Println("  az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
+	fmt.Println("  az spec lint [--json] [--strict]")
+	fmt.Println("  az spec parity [--json] [--fail-on-out]")
+	fmt.Println("  az spec sync --target md [--check] [--json]")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  az spec req list --json")
+	fmt.Println("  az spec req get --id bfs-req-1")
+	fmt.Println("  az spec req create --id bfs-req-1 --title \"Restore az spec grammar\" --issue bgh")
+	fmt.Println("  az spec link list --issue az-123")
+	fmt.Println("  az spec link add --issue bgh --req bfs-req-1 --role implements")
+	fmt.Println("  az spec read --issue az-123")
+	fmt.Println("  az spec lint --strict")
+	fmt.Println("  az spec parity --fail-on-out")
+	fmt.Println("  az spec sync --target md --check")
+}
+
+func PrintSpecReqUsage() {
+	fmt.Println("Usage: az spec req <list|get|create|update|delete> [arguments]")
+	fmt.Println("  list    List requirements")
+	fmt.Println("  get     Show a requirement by id")
+	fmt.Println("  create  Create a requirement")
+	fmt.Println("  update  Update a requirement")
+	fmt.Println("  delete  Delete a requirement")
+	fmt.Println("")
+	fmt.Println("Grammar:")
+	fmt.Println("  az spec req list [--json] [--issue <issue-id>] [--status <open|accepted|superseded>] [--id <req-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec req get --id <req-id> [--json]")
+	fmt.Println("  az spec req create --id <req-id> --title <text> [--description <text>] [--issue <issue-id>] [--json]")
+	fmt.Println("  az spec req update --id <req-id> [--title <text>] [--description <text>] [--status <open|accepted|superseded>] [--json]")
+	fmt.Println("  az spec req delete --id <req-id> --confirm [--json]")
+}
+
+func PrintSpecLinkUsage() {
+	fmt.Println("Usage: az spec link <list|add|remove> [arguments]")
+	fmt.Println("  list    List issue/requirement links")
+	fmt.Println("  add     Create a traceability link")
+	fmt.Println("  remove  Remove a traceability link")
+	fmt.Println("")
+	fmt.Println("Grammar:")
+	fmt.Println("  az spec link list [--json] [--issue <issue-id>] [--req <req-id>] [--id <link-id> ...] [--ids a,b,c]")
+	fmt.Println("  az spec link add --issue <issue-id> --req <req-id> [--role <implements|verifies|relates>] [--note <text>] [--json]")
+	fmt.Println("  az spec link remove --issue <issue-id> --req <req-id> [--json]")
+}
+
+func PrintSpecReadUsage() {
+	fmt.Println("Usage: az spec read [--json] [--issue <issue-id>] [--req <req-id>]")
+}
+
+func PrintSpecLintUsage() {
+	fmt.Println("Usage: az spec lint [--json] [--strict]")
+}
+
+func PrintSpecParityUsage() {
+	fmt.Println("Usage: az spec parity [--json] [--fail-on-out]")
+}
+
+func PrintSpecSyncUsage() {
+	fmt.Println("Usage: az spec sync --target md [--check] [--json]")
 }
 
 func readJSONObject(path string) (map[string]any, error) {
@@ -811,6 +1282,55 @@ func hookEntryContainsCommand(entry any, command string) bool {
 		}
 	}
 	return false
+}
+
+func removeHookCommands(existing any, commands ...string) []any {
+	removeSet := map[string]struct{}{}
+	for _, command := range commands {
+		trimmed := strings.TrimSpace(command)
+		if trimmed != "" {
+			removeSet[trimmed] = struct{}{}
+		}
+	}
+	return pruneHookEntries(normalizeAnySlice(existing), removeSet)
+}
+
+func pruneHookEntries(entries []any, removeSet map[string]struct{}) []any {
+	out := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		pruned, keep := pruneHookEntry(entry, removeSet)
+		if keep {
+			out = append(out, pruned)
+		}
+	}
+	return out
+}
+
+func pruneHookEntry(entry any, removeSet map[string]struct{}) (any, bool) {
+	typed, ok := entry.(map[string]any)
+	if !ok {
+		return entry, true
+	}
+	if value, ok := typed["command"].(string); ok {
+		if _, remove := removeSet[strings.TrimSpace(value)]; remove {
+			return nil, false
+		}
+	}
+	if nested, ok := typed["hooks"]; ok {
+		prunedNested := pruneHookEntries(normalizeAnySlice(nested), removeSet)
+		if len(prunedNested) == 0 {
+			delete(typed, "hooks")
+		} else {
+			typed["hooks"] = prunedNested
+		}
+	}
+	if _, hasCommand := typed["command"]; hasCommand {
+		return typed, true
+	}
+	if nested, hasNested := typed["hooks"]; hasNested && len(normalizeAnySlice(nested)) > 0 {
+		return typed, true
+	}
+	return nil, false
 }
 
 func normalizeAnySlice(value any) []any {
@@ -876,16 +1396,121 @@ func resolveProjectDir(projectDir string, deps *Dependencies) (string, error) {
 	return resolved, nil
 }
 
+func readCodexGuardState(path string) codexGuardState {
+	state := codexGuardState{Threads: map[string]codexGuardThreadState{}}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return state
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return codexGuardState{Threads: map[string]codexGuardThreadState{}}
+	}
+	if state.Threads == nil {
+		state.Threads = map[string]codexGuardThreadState{}
+	}
+	return state
+}
+
+func writeCodexGuardState(path string, state codexGuardState) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create codex guard state directory: %w", err)
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode codex guard state: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write codex guard state: %w", err)
+	}
+	return nil
+}
+
+func codexGuardThreadID(payload map[string]any) string {
+	for _, key := range []string{"thread_id", "thread-id", "threadId"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func codexGuardCommandFromPayload(payload map[string]any) string {
+	if toolInput, ok := payload["tool_input"].(map[string]any); ok {
+		if value, ok := toolInput["command"].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	if toolInput, ok := payload["toolInput"].(map[string]any); ok {
+		if value, ok := toolInput["command"].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	if value, ok := payload["command"].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func codexGuardCompactionDetected(payload map[string]any) bool {
+	for _, key := range []string{"last_assistant_message", "last-assistant-message", "lastAssistantMessage"} {
+		if value, ok := payload[key].(string); ok {
+			lower := strings.ToLower(value)
+			if strings.Contains(lower, "context compact") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func codexGuardIsPrimeCommand(command string) bool {
+	normalized := strings.TrimSpace(command)
+	return strings.HasPrefix(normalized, "az prime") ||
+		strings.HasPrefix(normalized, "./bin/az prime") ||
+		strings.HasPrefix(normalized, "go run ./cmd/az prime")
+}
+
+func codexGuardPromptMentionsPrime(payload map[string]any) bool {
+	for _, key := range []string{"prompt", "user_prompt", "user-prompt", "input_messages", "input-messages", "inputMessages"} {
+		if value, ok := payload[key]; ok && codexGuardValueMentionsPrime(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexGuardValueMentionsPrime(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.Contains(strings.ToLower(typed), "az prime")
+	case []any:
+		for _, item := range typed {
+			if codexGuardValueMentionsPrime(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if codexGuardValueMentionsPrime(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func runShellCommand(projectDir, command string) error {
 	cmd := exec.Command("/bin/sh", "-lc", command)
 	cmd.Dir = projectDir
+	cmd.Env = gitExecEnvWithoutRoutingVars()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func hasBoundaryRelevantStagedPaths(projectDir string) (bool, error) {
-	cmd := exec.Command("git", "-C", projectDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	cmd := newGitCommand(projectDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, err
@@ -915,4 +1540,20 @@ func openCodePluginSource() string {
 	return "// Generated by go-bubbletea az opencode plugin install.\n" +
 		"// Pragmatic placeholder until the full OpenCode integration is ported.\n" +
 		"module.exports = {}\n"
+}
+
+func gitCommandWithoutGitDirEnv(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GIT_DIR=") ||
+			strings.HasPrefix(entry, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(entry, "GIT_INDEX_FILE=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	cmd.Env = filtered
+	return cmd
 }

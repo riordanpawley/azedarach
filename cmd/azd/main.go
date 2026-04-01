@@ -29,7 +29,7 @@ func main() {
 	flag.Parse()
 
 	if showVersion || (len(flag.Args()) == 1 && flag.Args()[0] == "version") {
-		fmt.Println(buildinfo.Version)
+		fmt.Println(buildinfo.VersionString())
 		return
 	}
 
@@ -62,13 +62,14 @@ func main() {
 	}
 
 	d := daemon.New(daemon.Config{
-		RepoDir:             repoDir,
-		SocketPath:          socketPath,
-		LockPath:            lockPath,
-		BaseBranch:          cfg.Git.BaseBranch,
-		CLITool:             cfg.CLITool,
-		SessionShell:        cfg.Session.Shell,
-		SessionInitCommands: cfg.Session.InitCommands,
+		RepoDir:              repoDir,
+		SocketPath:           socketPath,
+		LockPath:             lockPath,
+		BaseBranch:           cfg.Git.BaseBranch,
+		CLITool:              cfg.CLITool,
+		SessionShell:         cfg.Session.Shell,
+		SessionInitCommands:  cfg.Session.InitCommands,
+		WorktreeInitCommands: cfg.Worktree.InitCommands,
 	})
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

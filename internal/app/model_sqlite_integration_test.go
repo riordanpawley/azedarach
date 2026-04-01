@@ -31,6 +31,7 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 	defer stop()
 
 	model := newTestModel()
+	model.repoDir = repoDir
 	model.daemonClient = daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
 	msg := model.loadIssuesCmd()()
 
@@ -93,6 +94,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 	defer stop()
 
 	model := newTestModel()
+	model.repoDir = repoDir
 	model.daemonClient = daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
 	msg := model.loadIssuesCmd()()
 	loaded, ok := msg.(issuesLoadedMsg)

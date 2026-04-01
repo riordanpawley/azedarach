@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,6 +149,41 @@ func TestWorktreeManager_CreateWithTitle_UsesDeterministicBranchName(t *testing.
 	mock.AssertCommand(t, "worktree add -b riordanpawley/che-3002/migrate-prep-lists-to-db /home/user/test-repo-CHE-3002 main")
 }
 
+func TestWorktreeManager_CreateWithTitle_ReusesExistingBranchOnRetry(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "bhh"
+	baseBranch := "main"
+	issueTitle := "massive issue with cli"
+	branchName := "testuser/bhh/massive-issue-with-cli"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "config" && args[1] == "user.name" {
+			return "testuser\n", nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return "", nil
+		}
+		if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
+			return "", fmt.Errorf("git worktree add -b %s /home/user/test-repo-bhh main failed: exit status 255: Preparing worktree (new branch '%s')\nfatal: a branch named '%s' already exists", branchName, branchName, branchName)
+		}
+		if len(args) == 4 && args[0] == "worktree" && args[1] == "add" && args[2] == "/home/user/test-repo-bhh" && args[3] == branchName {
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+	worktree, err := manager.CreateWithTitle(ctx, issueID, issueTitle, baseBranch)
+	require.NoError(t, err)
+	require.NotNil(t, worktree)
+	assert.Equal(t, branchName, worktree.Branch)
+
+	mock.AssertCommand(t, "worktree add -b "+branchName+" /home/user/test-repo-bhh main")
+	mock.AssertCommand(t, "worktree add /home/user/test-repo-bhh "+branchName)
+}
+
 func TestWorktreeManager_Delete(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
@@ -182,6 +220,41 @@ branch refs/heads/az/issue-123
 
 	require.NoError(t, err)
 	mock.AssertCommand(t, "worktree remove /home/user/test-repo-issue-123")
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
+func TestWorktreeManager_DeleteWithOptions_UsesForceWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	repoDir := "/home/user/test-repo"
+	issueID := "issue-123"
+
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return `worktree /home/user/test-repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/user/test-repo-issue-123
+HEAD def456
+branch refs/heads/az/issue-123
+`, nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+
+	err := manager.DeleteWithOptions(ctx, issueID, true)
+
+	require.NoError(t, err)
+	mock.AssertCommand(t, "worktree remove --force /home/user/test-repo-issue-123")
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
@@ -607,6 +680,34 @@ func TestExecRunner_WorkDir(t *testing.T) {
 	runner := NewExecRunner(workDir)
 
 	assert.Equal(t, workDir, runner.workDir)
+}
+
+func TestExecRunner_IgnoresConflictingGitEnv(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	repoDir := t.TempDir()
+	ctx := context.Background()
+
+	initCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "init")
+	initCmd.Env = sanitizedGitEnv(os.Environ())
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v: %s", err, string(out))
+	}
+
+	badGitDir := filepath.Join(repoDir, "bad-git-dir-marker")
+	require.NoError(t, os.WriteFile(badGitDir, []byte("not-a-dir"), 0o644))
+
+	t.Setenv("GIT_DIR", badGitDir)
+	t.Setenv("GIT_WORK_TREE", filepath.Join(repoDir, "bad-worktree"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(repoDir, "bad-index"))
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(repoDir, "bad-common-dir"))
+
+	runner := NewExecRunner(repoDir)
+	output, err := runner.Run(ctx, "rev-parse", "--git-dir")
+	require.NoError(t, err)
+	assert.Equal(t, ".git", strings.TrimSpace(output))
 }
 
 func BenchmarkParseWorktreeList(b *testing.B) {

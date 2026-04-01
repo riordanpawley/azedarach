@@ -14,6 +14,8 @@ import (
 const (
 	CommandSessionStart    = "session.start"
 	CommandSessionAttach   = "session.attach"
+	CommandSessionPause    = "session.pause"
+	CommandSessionResume   = "session.resume"
 	CommandSessionStop     = "session.stop"
 	CommandSessionStatus   = "session.status"
 	CommandDevServerStart  = "devserver.start"
@@ -72,6 +74,7 @@ type worktreePayload struct {
 type worktreeCommandBody struct {
 	ProjectID string `json:"project_id"`
 	IssueID   string `json:"issue_id,omitempty"`
+	Force     bool   `json:"force,omitempty"`
 }
 
 type longRunningResultEnvelope struct {
@@ -134,6 +137,22 @@ func (c *Client) StopSession(ctx context.Context, issueID string) (string, error
 // AttachSession asks the daemon to attach to one session for issue/task id.
 func (c *Client) AttachSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionAttach, sessionCommandBody{
+		ProjectID: c.projectID,
+		SessionID: issueID,
+	})
+}
+
+// PauseSession marks one issue/session as paused in daemon lifecycle state.
+func (c *Client) PauseSession(ctx context.Context, issueID string) (string, error) {
+	return c.commandOutput(ctx, CommandSessionPause, sessionCommandBody{
+		ProjectID: c.projectID,
+		SessionID: issueID,
+	})
+}
+
+// ResumeSession marks one issue/session as attached (active) in daemon lifecycle state.
+func (c *Client) ResumeSession(ctx context.Context, issueID string) (string, error) {
+	return c.commandOutput(ctx, CommandSessionResume, sessionCommandBody{
 		ProjectID: c.projectID,
 		SessionID: issueID,
 	})
@@ -233,9 +252,15 @@ func (c *Client) ListWorktrees(ctx context.Context) ([]git.Worktree, error) {
 
 // RemoveWorktree asks the daemon to remove one worktree for an issue in the current project route.
 func (c *Client) RemoveWorktree(ctx context.Context, issueID string) error {
+	return c.RemoveWorktreeWithOptions(ctx, issueID, false)
+}
+
+// RemoveWorktreeWithOptions asks the daemon to remove one worktree for an issue in the current project route.
+func (c *Client) RemoveWorktreeWithOptions(ctx context.Context, issueID string, force bool) error {
 	return c.commandJSON(ctx, CommandWorktreeRemove, worktreeCommandBody{
 		ProjectID: c.projectRoute(),
 		IssueID:   issueID,
+		Force:     force,
 	}, nil)
 }
 

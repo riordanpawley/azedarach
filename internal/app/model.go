@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -131,6 +130,7 @@ type Model struct {
 	pendingStatuses  map[string]pendingTaskStatus
 	operationTaskID  map[string]string
 	pendingOpsByTask map[string]pendingOperationProgress
+	pendingCleanup   *pendingWorktreeCleanupConfirmation
 
 	// Navigation (using NavigationService)
 	nav *navigation.Service
@@ -178,16 +178,21 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading        bool
-	spinner        spinner.Model
-	lastRefresh    time.Time
-	hasRefreshLoop bool
+	loading               bool
+	boardRefreshing       bool
+	issueRefreshSeq       uint64
+	projectSwitchSeq      uint64
+	projectSwitchInFlight bool
+	spinner               spinner.Model
+	lastRefresh           time.Time
+	hasRefreshLoop        bool
 
 	// Shared daemon client for task-domain operations
-	daemonClient     *daemonclient.Client
-	daemonSocketPath string
-	daemonEvents     <-chan protocol.EventEnvelope
-	daemonRevision   uint64
+	daemonClient              *daemonclient.Client
+	daemonSocketPath          string
+	daemonEvents              <-chan protocol.EventEnvelope
+	daemonRevision            uint64
+	lastDaemonReattachAttempt time.Time
 
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
@@ -214,6 +219,8 @@ type Model struct {
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
 }
+
+const daemonReattachRetryInterval = 5 * time.Second
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
@@ -360,6 +367,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesLoadedMsg:
+		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
@@ -372,6 +382,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasLoading := m.loading
 		if msg.stale {
 			m.loading = false
+			m.boardRefreshing = false
 			if wasLoading && msg.freshnessHint != "" {
 				m.addToast(Toast{
 					Level:   ToastWarning,
@@ -404,7 +415,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}
+		m.lastDaemonReattachAttempt = time.Time{}
 		m.loading = false
+		m.boardRefreshing = false
 		m.lastRefresh = time.Now()
 		// Show success toast on first load
 		if wasLoading {
@@ -445,21 +458,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case issuesErrorMsg:
+		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
 			return m, nil
 		}
+		now := time.Now()
 		m.addToast(Toast{
 			Level:   ToastError,
 			Message: msg.err.Error(),
-			Expires: time.Now().Add(8 * time.Second),
+			Expires: now.Add(8 * time.Second),
 		})
 		m.loading = false
-		// Still schedule a refresh to retry
-		return m, tickEvery(5 * time.Second)
+		m.boardRefreshing = false
+		cmds := []tea.Cmd{tickEvery(5 * time.Second)}
+		if shouldQueueDaemonReattach(m.lastDaemonReattachAttempt, now, msg.err) {
+			m.lastDaemonReattachAttempt = now
+			cmds = append(cmds, m.attachDaemonCmd())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// Expire old toasts and refresh issues
 		m.expireToasts()
+		m.boardRefreshing = true
+		m.issueRefreshSeq++
 		return m, tea.Batch(
 			m.loadIssuesCmd(),
 			m.gitSyncService.FetchAndCheck(),
@@ -547,10 +571,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
+		if projectID := strings.TrimSpace(msg.event.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+			return m, m.waitForDaemonEventCmd()
+		}
 		m.recordRuntimeEvent(msg.event)
 		m.applyOperationProgressEvent(msg.event)
 		if msg.event.Event == protocol.EventSessionUpdated {
 			m.applySessionProjectionEvent(msg.event)
+		}
+		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
+			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
+			m.daemonRevision = cursor.Advance(msg.event).Revision
+			cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
+			if !m.runtimeSignalsBusy && m.shouldRefreshRuntimeSignals() {
+				m.runtimeSignalsBusy = true
+				cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
@@ -690,9 +727,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.targetID == "main" {
-			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID)
+			return m, m.mergeToMainCmd(msg.sourceWorktree, msg.sourceID, msg.refreshStatus)
 		}
-		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState)
+		return m, m.followOnMergeIntoTargetCmd(msg.sourceWorktree, msg.targetWorktree, msg.sourceID, msg.targetID, msg.targetState, msg.refreshStatus)
 
 	case fetchAndMergeResultMsg:
 		if msg.operationID != "" && !operationStateTerminal(msg.state) {
@@ -786,12 +823,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.ProjectSelectedMsg:
 		// Close overlay
 		m.overlayStack.Pop()
+		m.loading = false
+		m.boardRefreshing = true
+		m.projectSwitchInFlight = true
+		m.issueRefreshSeq++
+		m.projectSwitchSeq++
 
 		// Switch project runtime context and reload issues.
 		return m, m.switchProjectCmd(msg.Project)
 
 	case projectSwitchResultMsg:
+		if msg.switchSeq != 0 && msg.switchSeq != m.projectSwitchSeq {
+			return m, nil
+		}
 		if msg.err != nil {
+			m.loading = false
+			m.boardRefreshing = false
+			m.projectSwitchInFlight = false
 			m.addToast(Toast{
 				Level:   ToastError,
 				Message: fmt.Sprintf("Project switch failed: %v", msg.err),
@@ -821,6 +869,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonRevision = msg.revision
 		}
 		m.loading = false
+		m.boardRefreshing = false
+		m.projectSwitchInFlight = false
 		m.lastRefresh = time.Now()
 		m.daemonEvents = msg.events
 
@@ -1069,6 +1119,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadIssuesCmd()
 
 	case worktreeCleanupResultMsg:
+		if msg.needsForce {
+			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
+				taskID:      msg.taskID,
+				deletedTask: msg.deletedTask,
+			}
+			action := "cleanup worktree"
+			if msg.deletedTask {
+				action = "delete task and cleanup worktree"
+			}
+			confirm := overlay.NewConfirmDialog(
+				"Force worktree cleanup?",
+				fmt.Sprintf("Worktree has local changes.\n\nAction: %s\nTask: %s\n\nDetails: %s\n\nForce removal will discard modified/untracked files.\nProceed?", action, msg.taskID, msg.reason),
+			)
+			return m, m.openOverlay(confirm)
+		}
+		m.pendingCleanup = nil
 		if msg.err != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -1231,7 +1297,9 @@ func (m Model) View() string {
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
-	if m.runtimeSignalsBusy {
+	if m.boardRefreshing {
+		sb.SetModeSuffix(m.spinner.View())
+	} else if m.runtimeSignalsBusy {
 		sb.SetLoadingIndicator("Loading runtime status...")
 	}
 	if current := m.overlayStack.Current(); current != nil {
@@ -1679,7 +1747,7 @@ func isChildOfParent(task domain.Task, parentID string) bool {
 
 // handleKey processes keyboard input based on current mode
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Global keys (work in any mode)
+	// Always-available global keys.
 	switch msg.String() {
 	case "ctrl+c":
 		// Cleanup before quitting
@@ -1688,8 +1756,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		// Force redraw
 		return m, tea.ClearScreen
+	}
+
+	// Freeze board interactions while switching project contexts.
+	if m.projectSwitchInFlight {
+		return m, nil
+	}
+
+	// Remaining global keys (work in any mode)
+	switch msg.String() {
 	case "r":
 		if m.editor.GetMode() != ModeAction {
+			m.boardRefreshing = true
+			m.issueRefreshSeq++
 			return m, tea.Batch(m.loadIssuesCmd(), m.gitSyncService.FetchAndCheck())
 		}
 	}
@@ -1730,7 +1809,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-
 	// Mode-specific handling
 	switch m.editor.GetMode() {
 	case ModeNormal:
@@ -2127,6 +2205,7 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Message types for async operations
 
 type issuesLoadedMsg struct {
+	refreshSeq    uint64
 	projectID     string
 	tasks         []domain.Task
 	revision      uint64
@@ -2138,11 +2217,13 @@ type issuesLoadedMsg struct {
 }
 
 type issuesErrorMsg struct {
-	projectID string
-	err       error
+	refreshSeq uint64
+	projectID  string
+	err        error
 }
 
 type projectSwitchResultMsg struct {
+	switchSeq     uint64
 	project       config.Project
 	projectConfig *config.Config
 	tasks         []domain.Task
@@ -2374,17 +2455,59 @@ type runtimeSignalsLoadedMsg struct {
 	partialFailureCount int
 }
 
+func shouldAttemptDaemonReattach(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "daemon socket unavailable") {
+		return true
+	}
+	if !strings.Contains(message, "daemon command transport") {
+		return false
+	}
+	return strings.Contains(message, "dial unix") ||
+		strings.Contains(message, "connect: no such file or directory") ||
+		strings.Contains(message, "connection refused")
+}
+
+func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
+	if !shouldAttemptDaemonReattach(err) {
+		return false
+	}
+	if lastAttempt.IsZero() {
+		return true
+	}
+	return now.Sub(lastAttempt) >= daemonReattachRetryInterval
+}
+
 // Commands
 
 // loadIssuesCmd returns a command that fetches issues from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
+	refreshSeq := m.issueRefreshSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		if m.daemonClient == nil {
-			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ack, diag := m.daemonClient.Handshake(ctx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      "tui",
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if diag != nil {
+			if diag.Message != "" {
+				return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake: %s", diag.Message)}
+			}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake failed")}
+		}
+		if !ack.Accepted {
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
 
 		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
@@ -2392,17 +2515,19 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
 				return issuesLoadedMsg{
+					refreshSeq:    refreshSeq,
 					projectID:     projectID,
 					stale:         true,
 					freshnessHint: timeoutErr.Hint,
 				}
 			}
-			return issuesErrorMsg{projectID: projectID, err: err}
+			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			projectID: projectID,
-			tasks:     snapshot.Tasks,
-			revision:  snapshot.Revision,
+			refreshSeq: refreshSeq,
+			projectID:  projectID,
+			tasks:      snapshot.Tasks,
+			revision:   snapshot.Revision,
 		}
 	}
 }
@@ -2531,7 +2656,7 @@ func (m Model) refreshRuntimeSignalsCmd(tasks []domain.Task) tea.Cmd {
 				refreshSucceeded = false
 			}
 
-			if m.isOnline {
+			if m.shouldCompareAgainstRemote() {
 				behind, behindErr := m.daemonClient.CheckBranchBehind(ctx, daemonclient.BranchBehindCheckParams{
 					Worktree:   worktreePath,
 					BaseBranch: baseBranch,
@@ -2582,6 +2707,10 @@ func hasActiveTmuxSession(task domain.Task) bool {
 		return true
 	}
 	return task.HasTmuxSession
+}
+
+func (m Model) shouldCompareAgainstRemote() bool {
+	return m.isOnline && strings.EqualFold(strings.TrimSpace(m.config.Git.WorkflowMode), "origin")
 }
 
 func (m Model) shouldUseCachedRuntimeSignals(task domain.Task, worktreePath string, now time.Time) bool {
@@ -2686,24 +2815,28 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 }
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
+	switchSeq := m.projectSwitchSeq
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("daemon client unavailable"),
+				switchSeq: switchSeq,
+				project:   project,
+				err:       fmt.Errorf("daemon client unavailable"),
 			}
 		}
 		if strings.TrimSpace(project.Path) == "" {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("project %q has empty path", project.Name),
+				switchSeq: switchSeq,
+				project:   project,
+				err:       fmt.Errorf("project %q has empty path", project.Name),
 			}
 		}
 		projectConfig, err := config.LoadConfig(project.Path)
 		if err != nil {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("load config for project %q: %w", project.Name, err),
+				switchSeq: switchSeq,
+				project:   project,
+				err:       fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2712,14 +2845,15 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 
 		socketPath := config.DaemonSocketPathFor(project.Path)
 		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
-		launcher := daemonprocess.NewLauncher(project.Path, socketPath)
+		launcher := daemonprocess.NewLauncher(project.Path, socketPath).WithLogger(m.logger)
 		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
 			launcher.BinPath = bin
 		}
 		if err := launcher.Replace(ctx); err != nil {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
+				switchSeq: switchSeq,
+				project:   project,
+				err:       fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
 			}
 		}
 
@@ -2733,33 +2867,38 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		ack, err := orch.EnsureAttached(ctx, hello)
 		if err != nil {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
+				switchSeq: switchSeq,
+				project:   project,
+				err:       fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
 			}
 		}
 		if !ack.Accepted {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
+				switchSeq: switchSeq,
+				project:   project,
+				err:       fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
 			}
 		}
 
 		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
 		if err != nil {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     err,
+				switchSeq: switchSeq,
+				project:   project,
+				err:       err,
 			}
 		}
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
 			return projectSwitchResultMsg{
-				project: project,
-				err:     err,
+				switchSeq: switchSeq,
+				project:   project,
+				err:       err,
 			}
 		}
 
 		return projectSwitchResultMsg{
+			switchSeq:     switchSeq,
 			project:       project,
 			projectConfig: projectConfig,
 			tasks:         snapshot.Tasks,
@@ -2784,20 +2923,14 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 
 		socketPath := config.DaemonSocketPathFor(targetRepoDir)
 		daemonClient := m.daemonClientForSocket(socketPath, projectID)
-		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath)
+		launcher := daemonprocess.NewLauncher(targetRepoDir, socketPath).WithLogger(m.logger)
 		if bin := resolveDaemonBinaryForRepo(targetRepoDir); bin != "" {
 			launcher.BinPath = bin
 		}
 
-		// Startup should bind daemon authority to the active project context
-		// when we have an explicit daemon binary path to execute.
-		// If no explicit binary is resolved (for example in isolated tests),
-		// fall back to attach-only behavior.
-		if launcher.BinPath != "" {
-			if err := launcher.Replace(ctx); err != nil {
-				return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon restart: %w", err)}
-			}
-		}
+		// Avoid unconditional daemon replacement on every reattach attempt.
+		// EnsureAttached will start or replace only when protocol handshake
+		// indicates it is required.
 
 		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
 		ack, err := orch.EnsureAttached(ctx, protocol.Hello{
@@ -2835,12 +2968,15 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 }
 
 func (m Model) activeProjectPath() string {
+	if strings.TrimSpace(m.repoDir) != "" {
+		return m.repoDir
+	}
 	if m.projectRegistry != nil && m.currentProject != "" {
 		if project, err := m.projectRegistry.Get(m.currentProject); err == nil && strings.TrimSpace(project.Path) != "" {
 			return project.Path
 		}
 	}
-	return m.repoDir
+	return "."
 }
 
 func (m *Model) rebindProjectContext(project config.Project, projectConfig *config.Config) {
@@ -2895,6 +3031,9 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 		}
 		return
 	}
+	if projectID := strings.TrimSpace(body.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+		return
+	}
 
 	issueID := strings.TrimSpace(body.Session.IssueID)
 	if issueID == "" {
@@ -2939,6 +3078,10 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
+	switch evt.Event {
+	case protocol.EventWorktreeProjectionUpdated, protocol.EventGitStatusUpdated:
+		return daemonEventIgnore
+	}
 	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 	switch cursor.Decide(evt) {
 	case protocol.StreamProjectionDecisionIgnore:
@@ -2963,6 +3106,18 @@ func (m Model) daemonProjectID() string {
 		return filepath.Base(cwd)
 	}
 	return "default"
+}
+
+func daemonProjectIDForPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	projectID, err := config.ProjectIDForRoot(trimmed)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(projectID)
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {
@@ -3552,8 +3707,27 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Close the overlay first
-	m.overlayStack.Pop()
+	// Keep task workspace open when attaching so users can return to the
+	// full detail/actions panel after attach without reopening it.
+	if !(msg.Key == "a" && isTaskWorkspaceOverlay(m.overlayStack.Current())) {
+		m.overlayStack.Pop()
+	}
+
+	if msg.Key == "yes" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		m.pendingCleanup = nil
+		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, true)
+	}
+	if msg.Key == "no" && m.pendingCleanup != nil {
+		pending := m.pendingCleanup
+		m.pendingCleanup = nil
+		m.addToast(Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Cancelled forced cleanup for %s", pending.taskID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
 
 	task, session := m.getCurrentTaskAndSession()
 	if task == nil {
@@ -3709,10 +3883,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
-		return m, m.cleanupWorktreeCmd(task.ID, false)
+		return m, m.cleanupWorktreeCmd(task.ID, false, false)
 	case "W":
 		// Delete task and cleanup worktree.
-		return m, m.cleanupWorktreeCmd(task.ID, true)
+		return m, m.cleanupWorktreeCmd(task.ID, true, false)
 
 	case "i":
 		// Image attachments
@@ -3780,7 +3954,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		m.applyOptimisticTaskStatus(task.ID, newStatus)
 		return m, m.moveTaskStatusCmd(task.ID, task.Status, newStatus)
 	case "e":
-		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptions(*task, m.availableTaskImplementations()))
+		return m, m.openOverlay(overlay.NewEditTaskOverlayWithImplOptionsAndAttachmentService(*task, m.availableTaskImplementations(), m.attachmentService))
 	case "T":
 		return m, m.deleteTaskCmd(task.ID)
 	case "d":
@@ -3791,6 +3965,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func isTaskWorkspaceOverlay(current overlay.Overlay) bool {
+	if current == nil {
+		return false
+	}
+	_, ok := current.(*overlay.TaskWorkspaceOverlay)
+	return ok
 }
 
 func (m Model) eventLogFilePath() string {
@@ -3825,11 +4007,15 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 
 func newTUILogger(logPath string) *slog.Logger {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Warn("failed to create tui log directory; falling back to stderr logger", "log_path", logPath, "error", err)
+		return logger
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Warn("failed to open tui log file; falling back to stderr logger", "log_path", logPath, "error", err)
+		return logger
 	}
 	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
@@ -4014,7 +4200,15 @@ type taskDeletedResultMsg struct {
 type worktreeCleanupResultMsg struct {
 	taskID      string
 	deletedTask bool
+	force       bool
+	needsForce  bool
+	reason      string
 	err         error
+}
+
+type pendingWorktreeCleanupConfirmation struct {
+	taskID      string
+	deletedTask bool
 }
 
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
@@ -4031,34 +4225,72 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 	}
 }
 
-func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool) tea.Cmd {
+func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if m.daemonClient == nil {
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: fmt.Errorf("daemon client unavailable")}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
 		if session := m.sessionForIssue(taskID); session != nil {
 			m.sessionMonitor.Stop(taskID)
 			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
+				if force && isSessionAlreadyStoppedError(err) {
+					// Force-retry path may re-enter before projections clear the stale session.
+					// If daemon already stopped it, continue to worktree removal.
+				} else {
+					return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
+				}
 			}
 		}
 
-		if err := m.daemonClient.RemoveWorktree(ctx, taskID); err != nil {
-			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, err: err}
+		if err := m.daemonClient.RemoveWorktreeWithOptions(ctx, taskID, force); err != nil {
+			if !force && isDirtyWorktreeRemovalError(err) {
+				return worktreeCleanupResultMsg{
+					taskID:      taskID,
+					deletedTask: deleteTask,
+					force:       force,
+					needsForce:  true,
+					reason:      strings.TrimSpace(err.Error()),
+				}
+			}
+			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
 		}
 
 		if deleteTask {
 			if err := m.daemonClient.DeleteTask(ctx, taskID); err != nil {
-				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, err: err}
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: true, force: force, err: err}
 			}
 		}
 
-		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask}
+		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force}
 	}
+}
+
+func isDirtyWorktreeRemovalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "contains modified or untracked files") ||
+		strings.Contains(message, "use --force to delete it")
+}
+
+func isSessionAlreadyStoppedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) && cmdErr.Code == protocol.ErrorCodeInvalidRequest {
+		message := strings.ToLower(strings.TrimSpace(cmdErr.Message))
+		return strings.Contains(message, "no active session found") ||
+			strings.Contains(message, "session not found")
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "no active session found") ||
+		strings.Contains(message, "session not found")
 }
 
 // NOTE: clampTaskIndex and clampTaskIndexForColumn have been removed.
@@ -4394,6 +4626,10 @@ func humanizeRuntimeEventName(eventName string) string {
 		return "Session started"
 	case "session.stopped":
 		return "Session stopped"
+	case protocol.EventWorktreeProjectionUpdated:
+		return "Worktree projection updated"
+	case protocol.EventGitStatusUpdated:
+		return "Git status updated"
 	}
 
 	tokens := strings.FieldsFunc(strings.ToLower(eventName), func(r rune) bool {
@@ -4719,10 +4955,10 @@ func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (t
 	if targetSession := m.sessionForIssue(msg.TargetID); targetSession != nil {
 		targetState = targetSession.State
 	}
-	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState)
+	return m, m.resolveMergeTargetSelectionCmd(msg.SourceID, msg.TargetID, targetState, !msg.SkipPreflightStatusRefresh)
 }
 
-func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetState domain.SessionState) tea.Cmd {
+func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -4730,10 +4966,11 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 		sourceWorktree, err := m.resolveIssueWorktreePath(ctx, sourceID)
 		if err != nil || sourceWorktree == "" {
 			return mergeTargetSelectionResolvedMsg{
-				sourceID:    sourceID,
-				targetID:    targetID,
-				targetState: targetState,
-				err:         fmt.Errorf("source session worktree not found"),
+				sourceID:      sourceID,
+				targetID:      targetID,
+				targetState:   targetState,
+				refreshStatus: refreshStatus,
+				err:           fmt.Errorf("source session worktree not found"),
 			}
 		}
 
@@ -4744,6 +4981,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 				sourceWorktree: sourceWorktree,
 				targetWorktree: m.activeProjectPath(),
 				targetState:    targetState,
+				refreshStatus:  refreshStatus,
 			}
 		}
 
@@ -4754,6 +4992,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 				targetID:       targetID,
 				sourceWorktree: sourceWorktree,
 				targetState:    targetState,
+				refreshStatus:  refreshStatus,
 				err:            fmt.Errorf("target session worktree not found"),
 			}
 		}
@@ -4763,6 +5002,7 @@ func (m Model) resolveMergeTargetSelectionCmd(sourceID, targetID string, targetS
 			sourceWorktree: sourceWorktree,
 			targetWorktree: targetWorktree,
 			targetState:    targetState,
+			refreshStatus:  refreshStatus,
 		}
 	}
 }
@@ -4800,10 +5040,11 @@ type mergeTargetSelectionResolvedMsg struct {
 	sourceWorktree string
 	targetWorktree string
 	targetState    domain.SessionState
+	refreshStatus  bool
 	err            error
 }
 
-func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
+func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		baseBranch := m.resolveBaseBranch()
@@ -4827,7 +5068,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, "main", sourceWorktree, mainWorktree, baseBranch, branch, refreshStatus); preflight != nil {
 			return *preflight
 		}
 
@@ -4871,7 +5112,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
 	}
 }
 
-func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID string) tea.Cmd {
+func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -4891,7 +5132,7 @@ func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, source
 			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree); preflight != nil {
+		if preflight := m.checkMergePreflight(ctx, sourceID, targetID, sourceWorktree, targetWorktree, "HEAD", sourceBranch, refreshStatus); preflight != nil {
 			return *preflight
 		}
 
@@ -4913,7 +5154,7 @@ func shouldStopBeforeFollowOnMerge(state domain.SessionState) bool {
 	return state == domain.SessionBusy || state == domain.SessionWaiting
 }
 
-func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState) tea.Cmd {
+func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID string, targetState domain.SessionState, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		if shouldStopBeforeFollowOnMerge(targetState) {
 			ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
@@ -4939,11 +5180,11 @@ func (m Model) followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, source
 				}
 			}
 		}
-		return m.mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID)()
+		return m.mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID, refreshStatus)()
 	}
 }
 
-func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
+func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Session) tea.Cmd {
 	if task == nil {
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -4957,7 +5198,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
 		if task.ParentID == nil {
-			return m.resolveMergeToMainCmd(task.ID)
+			return m.resolveMergeToMainCmd(task.ID, true)
 		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -4973,7 +5214,7 @@ func (m Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Sess
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
-		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID, targetState, targetStateKnown)
+		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID, targetState, targetStateKnown, true)
 	}
 
 	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
@@ -4994,7 +5235,7 @@ func projectedSessionState(primary, fallback *domain.Session) (domain.SessionSta
 	return domain.SessionIdle, false
 }
 
-func (m Model) resolveMergeToMainCmd(sourceID string) tea.Cmd {
+func (m Model) resolveMergeToMainCmd(sourceID string, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -5007,11 +5248,11 @@ func (m Model) resolveMergeToMainCmd(sourceID string) tea.Cmd {
 				err:      fmt.Errorf("no active session/worktree - start session first"),
 			}
 		}
-		return m.mergeToMainCmd(sourceWorktree, sourceID)()
+		return m.mergeToMainCmd(sourceWorktree, sourceID, refreshStatus)()
 	}
 }
 
-func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState domain.SessionState, targetStateKnown bool) tea.Cmd {
+func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState domain.SessionState, targetStateKnown bool, refreshStatus bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
@@ -5054,7 +5295,7 @@ func (m Model) resolveFollowOnMergeCmd(sourceID, targetID string, targetState do
 			resolvedTargetState = state
 		}
 
-		return m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID, resolvedTargetState)()
+		return m.followOnMergeIntoTargetCmd(sourceWorktree, targetWorktree, sourceID, targetID, resolvedTargetState, refreshStatus)()
 	}
 }
 
@@ -5125,14 +5366,14 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			if task.ID != taskID {
 				continue
 			}
-			if !isEligibleUpstreamSource(task, relation) {
-				return
-			}
 			hasWorktree := false
 			if task.Session != nil && task.Session.Worktree != "" {
 				hasWorktree = true
 			} else if task.HasWorktree {
 				hasWorktree = true
+			}
+			if !isEligibleUpstreamSource(task, relation, hasWorktree) {
+				return
 			}
 			candidates = append(candidates, followOnMergeCandidate{
 				target: overlay.MergeTarget{
@@ -5176,10 +5417,10 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 	return candidates
 }
 
-func isEligibleUpstreamSource(task domain.Task, relation string) bool {
+func isEligibleUpstreamSource(task domain.Task, relation string, hasWorktree bool) bool {
 	switch relation {
 	case string(domain.DependencyParentChild), string(domain.DependencyBlocks):
-		return task.Status == domain.StatusInProgress || task.Status == domain.StatusDone
+		return hasWorktree && (task.Status == domain.StatusInProgress || task.Status == domain.StatusDone)
 	default:
 		return false
 	}
@@ -5952,7 +6193,49 @@ func dirtyFilesFromStatus(status git.GitStatus) []string {
 	return out
 }
 
-func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree string) *mergePreflightFailureMsg {
+func parseMergePreflightConflictFiles(output string) []string {
+	conflicts := make([]string, 0)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if !strings.Contains(line, "CONFLICT") {
+			continue
+		}
+		if strings.Contains(line, "Merge conflict in ") {
+			parts := strings.Split(line, "Merge conflict in ")
+			if len(parts) >= 2 {
+				if file := strings.TrimSpace(parts[1]); file != "" {
+					conflicts = append(conflicts, file)
+				}
+			}
+			continue
+		}
+		if idx := strings.Index(line, "): "); idx != -1 {
+			rest := line[idx+3:]
+			var file string
+			if idx2 := strings.Index(rest, " deleted in "); idx2 != -1 {
+				file = strings.TrimSpace(rest[:idx2])
+			} else if idx2 := strings.Index(rest, " modified in "); idx2 != -1 {
+				file = strings.TrimSpace(rest[:idx2])
+			}
+			if file != "" {
+				conflicts = append(conflicts, file)
+			}
+		}
+	}
+	return conflicts
+}
+
+func predictsMergeConflicts(output string, err error) bool {
+	if strings.Contains(output, "CONFLICT") {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "CONFLICT")
+}
+
+func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sourceWorktree, targetWorktree, targetRef, sourceBranch string, _ bool) *mergePreflightFailureMsg {
 	if m.daemonClient == nil {
 		return nil
 	}
@@ -5960,6 +6243,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	reasons := make([]string, 0, 2)
 	sourceFiles := make([]string, 0, 8)
 	targetFiles := make([]string, 0, 8)
+
 	sourceStatus, sourceErr := m.daemonClient.GitStatus(ctx, sourceWorktree)
 	if sourceErr != nil {
 		reasons = append(reasons, fmt.Sprintf("Could not read source status (%s): %v", sourceID, sourceErr))
@@ -5974,6 +6258,23 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 	} else if targetStatus.HasChanges {
 		reasons = append(reasons, fmt.Sprintf("Target %s is not clean: %s", targetID, summarizeStatusChangeCounts(targetStatus)))
 		targetFiles = dirtyFilesFromStatus(targetStatus)
+	}
+
+	targetRef = strings.TrimSpace(targetRef)
+	sourceBranch = strings.TrimSpace(sourceBranch)
+	if len(reasons) == 0 && targetRef != "" && sourceBranch != "" {
+		output, err := runGitCommandFunc(ctx, targetWorktree, "merge-tree", "--write-tree", targetRef, sourceBranch)
+		if predictsMergeConflicts(output, err) {
+			conflicts := parseMergePreflightConflictFiles(output)
+			if len(conflicts) == 0 && err != nil {
+				conflicts = parseMergePreflightConflictFiles(err.Error())
+			}
+			if len(conflicts) > 0 {
+				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(conflicts), strings.Join(conflicts, ", ")))
+			} else {
+				reasons = append(reasons, "Merge would conflict; merge and resolve main into the source branch first")
+			}
+		}
 	}
 
 	if len(reasons) == 0 {
@@ -6222,9 +6523,9 @@ func (m Model) renderBoardView() string {
 	if m.isDrillDownActive() {
 		toolbar = m.renderDrillDownToolbar()
 		contentHeight -= lipgloss.Height(toolbar) + 1
-		if contentHeight < 6 {
-			contentHeight = 6
-		}
+	}
+	if contentHeight < 6 {
+		contentHeight = 6
 	}
 
 	boardView := board.Render(
@@ -6243,7 +6544,12 @@ func (m Model) renderBoardView() string {
 	if toolbar == "" {
 		return boardView
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, toolbar, boardView)
+	parts := make([]string, 0, 2)
+	if toolbar != "" {
+		parts = append(parts, toolbar)
+	}
+	parts = append(parts, boardView)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {

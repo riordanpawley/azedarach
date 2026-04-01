@@ -13,6 +13,7 @@ type Dispatcher struct {
 	session   *SessionHandler
 	git       *GitHandler
 	pr        *PRHandler
+	spec      *SpecHandler
 	operation OperationHandler
 	worktree  *WorktreeHandler
 	devserver *DevServerHandler
@@ -36,6 +37,8 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 			d.git = h
 		case *PRHandler:
 			d.pr = h
+		case *SpecHandler:
+			d.spec = h
 		case *WorktreeHandler:
 			d.worktree = h
 		case *DevServerHandler:
@@ -46,6 +49,7 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 		session:   d.session,
 		git:       d.git,
 		pr:        d.pr,
+		spec:      d.spec,
 		operation: d.operation,
 		worktree:  d.worktree,
 		devserver: d.devserver,
@@ -63,6 +67,8 @@ func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) p
 		return d.pr.Handle(ctx, req)
 	case d.pr != nil && strings.HasPrefix(req.Command, "pr."):
 		return d.pr.Handle(ctx, req)
+	case d.spec != nil && strings.HasPrefix(req.Command, "spec."):
+		return d.spec.Handle(ctx, req)
 	case d.git != nil && strings.HasPrefix(req.Command, "git."):
 		return d.git.Handle(ctx, req)
 	case d.worktree != nil && strings.HasPrefix(req.Command, "worktree."):
