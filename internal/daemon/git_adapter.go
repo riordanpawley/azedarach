@@ -28,7 +28,7 @@ func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remo
 	if err := a.client.Fetch(ctx, worktree, remote); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true)
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
 	return nil
 }
 
@@ -37,7 +37,9 @@ func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, bran
 	if err != nil {
 		return nil, err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true)
+	// Merge completion should always trigger an update notification so clients
+	// refresh runtime git signals even when porcelain status stays clean.
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
 	return result, nil
 }
 
@@ -45,7 +47,7 @@ func (a *gitServiceAdapter) Checkout(ctx context.Context, projectID, worktree, b
 	if err := a.client.Checkout(ctx, worktree, branch); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true)
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
 	return nil
 }
 
@@ -53,7 +55,7 @@ func (a *gitServiceAdapter) AbortMerge(ctx context.Context, projectID, worktree 
 	if err := a.client.AbortMerge(ctx, worktree); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true)
+	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
 	return nil
 }
 
@@ -87,7 +89,7 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 	return status, nil
 }
 
-func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, projectID, worktree string, publishOnChange bool) {
+func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) {
 	status, err := a.client.Status(ctx, worktree)
 	if err != nil {
 		if a.logger != nil {
@@ -96,7 +98,7 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 		return
 	}
 	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
-	if publishOnChange && changed && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
+	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
 		a.onStatusUpdate(normalizeProjectID(projectID), issueID, worktree)
 	}
 }
@@ -127,7 +129,7 @@ func (a *gitServiceAdapter) refreshGitStatusAsync(projectID, worktree string) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true)
+		a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
 	}()
 }
 
@@ -183,7 +185,7 @@ func (a *gitServiceAdapter) ensureStatusPoller(projectID, worktree string) {
 				return
 			case <-ticker.C:
 				pollCtx, pollCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				a.refreshGitStatusWriteThrough(pollCtx, projectID, worktree, true)
+				a.refreshGitStatusWriteThrough(pollCtx, projectID, worktree, true, false)
 				pollCancel()
 			}
 		}
