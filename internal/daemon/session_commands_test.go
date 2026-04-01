@@ -327,6 +327,128 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	store := daemonstate.NewStore()
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"project_id": projectID,
+		"session_id": issueID,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-missing",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body:            body,
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+	}
+
+	resp, err := daemon.handleSessionStopDirect(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("stop response not OK: %+v", resp)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	got, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing session %q in snapshot", sessionID)
+	}
+	if got.State != daemonstate.SessionStateStopped {
+		t.Fatalf("session state = %s, want %s", got.State, daemonstate.SessionStateStopped)
+	}
+}
+
+func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T) {
+	const projectID = "proj"
+
+	sessionStore := daemonstate.NewStore()
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	defer func() {
+		if err := projectionStore.Close(); err != nil {
+			t.Fatalf("close projection store: %v", err)
+		}
+	}()
+
+	staleIssueID := "az-stale"
+	liveIssueID := "az-live"
+	staleSessionID := naming.CanonicalSessionID(projectID, staleIssueID)
+	liveSessionID := naming.CanonicalSessionID(projectID, liveIssueID)
+
+	ctx := context.Background()
+	if err := projectionStore.UpsertSession(ctx, projectID, daemonstate.Session{
+		ID:        staleSessionID,
+		IssueID:   staleIssueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale projection session: %v", err)
+	}
+	if err := projectionStore.UpsertSession(ctx, projectID, daemonstate.Session{
+		ID:        liveSessionID,
+		IssueID:   liveIssueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed live projection session: %v", err)
+	}
+
+	if _, err := sessionStore.UpsertSession(projectID, liveSessionID, liveIssueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store live session: %v", err)
+	}
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		sessionStore:    sessionStore,
+		projectionStore: projectionStore,
+	}
+
+	if err := daemon.persistTmuxSessionProjectionSnapshot(ctx, projectID, []string{liveSessionID}); err != nil {
+		t.Fatalf("persistTmuxSessionProjectionSnapshot: %v", err)
+	}
+
+	rows, err := projectionStore.ListSessions(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list projection sessions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("projection sessions count = %d, want 1", len(rows))
+	}
+	if rows[0].ID != liveSessionID {
+		t.Fatalf("remaining projection session = %s, want %s", rows[0].ID, liveSessionID)
+	}
+}
+
 func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	const (
 		projectID = "proj"

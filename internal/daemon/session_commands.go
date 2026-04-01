@@ -349,13 +349,12 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	if !exists {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found: %s", cmd.SessionID)), nil
-	}
-	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
-	defer clearStopPending()
-	if err := d.tmux.KillSession(ctx, cmd.SessionID); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	if exists {
+		clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
+		defer clearStopPending()
+		if err := d.tmux.KillSession(ctx, cmd.SessionID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
@@ -367,12 +366,18 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
 	}
-	output := strings.Join([]string{
+	outputLines := []string{
 		fmt.Sprintf("Killing session: %s", cmd.IssueID),
 		fmt.Sprintf("✓ Session killed: %s", cmd.IssueID),
+	}
+	if !exists {
+		outputLines[0] = fmt.Sprintf("Session not found in tmux: %s", cmd.IssueID)
+		outputLines[1] = fmt.Sprintf("✓ Session marked stopped: %s", cmd.IssueID)
+	}
+	output := strings.Join(append(outputLines,
 		"  Note: Worktree is preserved. Use 'git worktree remove' to clean up.",
 		"",
-	}, "\n")
+	), "\n")
 	return d.commandOutput(req, output), nil
 }
 
@@ -798,7 +803,13 @@ func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, proje
 		byIssueKey[key] = session
 	}
 
+	activeSessionIDs := make(map[string]struct{}, len(tmuxSessions))
 	for _, name := range tmuxSessions {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		activeSessionIDs[name] = struct{}{}
 		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			issueID = name
@@ -820,6 +831,22 @@ func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, proje
 			}
 		}
 		if err := d.projectionStore.UpsertSession(ctx, projectID, row); err != nil {
+			return err
+		}
+	}
+	existingRows, err := d.projectionStore.ListSessions(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	for _, row := range existingRows {
+		sessionID := strings.TrimSpace(row.ID)
+		if sessionID == "" {
+			continue
+		}
+		if _, ok := activeSessionIDs[sessionID]; ok {
+			continue
+		}
+		if err := d.projectionStore.DeleteSession(ctx, projectID, sessionID); err != nil {
 			return err
 		}
 	}
