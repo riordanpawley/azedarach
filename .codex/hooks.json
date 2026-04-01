@@ -1,23 +1,32 @@
 {
   "hooks": {
-    "SessionStart": [
+    "PreToolUse": [
       {
-        "matcher": "startup|resume",
         "hooks": [
           {
-            "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" user_prompt \"tc\" \"az-tc\"'",
-            "statusMessage": "Sending startup notification"
+            "command": "az codex hook run --json pre-tool-use",
+            "type": "command"
           }
         ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "az codex hook run --json session-start",
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume"
       }
     ],
     "Stop": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "/usr/bin/env bash -lc '\"$(git rev-parse --show-toplevel)/scripts/codex-notify-hook.sh\" session_end \"tc\" \"az-tc\"'"
+            "command": "az codex hook run --json stop",
+            "type": "command"
           }
         ]
       }
