@@ -27,6 +27,10 @@ type fakeDaemonTransport struct {
 	commandFn   func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 }
 
+func ptrToString(v string) *string {
+	return &v
+}
+
 func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -1607,6 +1611,7 @@ func TestParseIssueGetManyArgs(t *testing.T) {
 }
 
 func TestParseIssueCreateArgs(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
 	tests := []struct {
 		name        string
 		args        []string
@@ -1615,39 +1620,47 @@ func TestParseIssueCreateArgs(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			args: []string{"--impl", "go-bubbletea", "Title"},
+			args: []string{"Title"},
 			want: IssueCreateOptions{
-				Implementation: "go-bubbletea",
-				Title:          "Title",
-				Type:           domain.TypeTask,
-				Priority:       domain.P2,
+				Title:                 "Title",
+				Type:                  domain.TypeTask,
+				Priority:              domain.P2,
+				AutoParentFromIssueID: ptrToString("az-parent"),
 			},
 		},
 		{
 			name: "explicit options",
 			args: []string{"--impl", "go-bubbletea", "--type", "bug", "--priority", "P0", "--description", "details", "Title"},
 			want: IssueCreateOptions{
-				Implementation: "go-bubbletea",
-				Title:          "Title",
-				Description:    "details",
-				Type:           domain.TypeBug,
-				Priority:       domain.P0,
+				Title:                 "Title",
+				Description:           "details",
+				Type:                  domain.TypeBug,
+				Priority:              domain.P0,
+				PriorityExplicit:      true,
+				Implementations:       []string{"go-bubbletea"},
+				AutoParentFromIssueID: ptrToString("az-parent"),
 			},
 		},
 		{
-			name:        "missing impl",
-			args:        []string{"Title"},
-			errContains: "missing required flag: --impl",
+			name: "deferred defaults priority",
+			args: []string{"--deferred", "Title"},
+			want: IssueCreateOptions{
+				Title:                 "Title",
+				Type:                  domain.TypeTask,
+				Priority:              domain.P4,
+				Deferred:              true,
+				AutoParentFromIssueID: ptrToString("az-parent"),
+			},
 		},
 		{
 			name:        "invalid priority",
-			args:        []string{"--impl", "go-bubbletea", "--priority", "high", "Title"},
+			args:        []string{"--priority", "high", "Title"},
 			errContains: "invalid priority: high",
 		},
 		{
 			name:        "missing title",
 			args:        []string{},
-			errContains: "usage: az issue create [--project <project-id>] <title>",
+			errContains: "usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]",
 		},
 	}
 
@@ -1663,77 +1676,10 @@ func TestParseIssueCreateArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueCreateArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseIssueCreateArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestParseIssueChildArgs(t *testing.T) {
-	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
-	tests := []struct {
-		name        string
-		args        []string
-		want        IssueChildOptions
-		errContains string
-	}{
-		{
-			name: "defaults with env parent",
-			args: []string{"Child title"},
-			want: IssueChildOptions{
-				ParentID: "az-parent",
-				Title:    "Child title",
-				Type:     domain.TypeTask,
-				Priority: domain.P2,
-			},
-		},
-		{
-			name: "explicit options",
-			args: []string{"--parent", "az-root", "--impl", "go-bubbletea", "--impl", "go-bubbletea", "--type", "bug", "--priority", "P0", "--description", "details", "Child title"},
-			want: IssueChildOptions{
-				ParentID:        "az-root",
-				Title:           "Child title",
-				Description:     "details",
-				Type:            domain.TypeBug,
-				Priority:        domain.P0,
-				Implementations: []string{"go-bubbletea"},
-			},
-		},
-		{
-			name:        "invalid priority",
-			args:        []string{"--priority", "high", "Child title"},
-			errContains: "invalid priority: high",
-		},
-		{
-			name:        "missing title",
-			args:        []string{},
-			errContains: "usage: az issue child [--project <project-id>] [--parent <issue-id>]",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseIssueChildArgs(tt.args)
-			if tt.errContains != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.errContains) {
-					t.Fatalf("error = %v, want substring %q", err, tt.errContains)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ParseIssueChildArgs() error = %v", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("ParseIssueChildArgs() = %+v, want %+v", got, tt.want)
-			}
-		})
-	}
-
-	t.Setenv("AZEDARACH_ISSUE_ID", "")
-	_, err := ParseIssueChildArgs([]string{"Child title"})
-	if err == nil || !strings.Contains(err.Error(), "missing parent issue context") {
-		t.Fatalf("expected missing parent context error, got %v", err)
 	}
 }
 
@@ -2807,11 +2753,11 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 			name: "create",
 			run: func(deps *Dependencies) error {
 				return IssueCreateCommand(deps, IssueCreateOptions{
-					Implementation: "go-bubbletea",
-					Title:          "New issue",
-					Description:    "Context",
-					Type:           domain.TypeFeature,
-					Priority:       domain.P1,
+					Implementations: []string{"go-bubbletea"},
+					Title:           "New issue",
+					Description:     "Context",
+					Type:            domain.TypeFeature,
+					Priority:        domain.P1,
 				})
 			},
 			wantCommand: daemonclient.CommandTaskCreate,
@@ -2875,6 +2821,9 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 				if createReq.Title != "New issue" || createReq.Description != "Context" || createReq.Type != domain.TypeFeature || createReq.Priority != domain.P1 {
 					t.Fatalf("create body = %+v", createReq)
 				}
+				if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
+					t.Fatalf("create implementations = %+v", createReq.Implementations)
+				}
 			case "close":
 				var statusReq daemonclient.TaskStatusRequest
 				if err := json.Unmarshal(gotReq.Body, &statusReq); err != nil {
@@ -2891,7 +2840,7 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
-func TestIssueChildCommandCreatesChildUnderParent(t *testing.T) {
+func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing.T) {
 	var requests []protocol.RequestEnvelope
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -2938,11 +2887,13 @@ func TestIssueChildCommandCreatesChildUnderParent(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueChildCommand(deps, IssueChildOptions{
-			ParentID: "az-parent",
-			Title:    "Child issue",
-			Type:     domain.TypeTask,
-			Priority: domain.P2,
+		parentID := "az-parent"
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Title:                 "Child issue",
+			Type:                  domain.TypeTask,
+			Priority:              domain.P4,
+			Deferred:              true,
+			AutoParentFromIssueID: &parentID,
 		})
 	})
 
@@ -2966,11 +2917,14 @@ func TestIssueChildCommandCreatesChildUnderParent(t *testing.T) {
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want [go-bubbletea]", createReq.Implementations)
 	}
-	if createReq.Title != "Child issue" || createReq.Type != domain.TypeTask || createReq.Priority != domain.P2 {
+	if createReq.Title != "Child issue" || createReq.Type != domain.TypeTask {
 		t.Fatalf("create body = %+v", createReq)
 	}
-	if !strings.Contains(output, "Created child issue: az-child (parent: az-parent)") {
-		t.Fatalf("output missing child create message: %q", output)
+	if createReq.Priority != domain.P4 {
+		t.Fatalf("create priority = %s, want P4", createReq.Priority.String())
+	}
+	if !strings.Contains(output, "Created issue: az-child (parent: az-parent, auto-parent from AZEDARACH_ISSUE_ID) [deferred]") {
+		t.Fatalf("output missing auto-parent/deferred message: %q", output)
 	}
 }
 
@@ -3551,11 +3505,11 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue doctor command: %q", output)
 	}
-	if !strings.Contains(output, "issue create [--project <project-id>] <title>") {
+	if !strings.Contains(output, "issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]") {
 		t.Fatalf("usage missing issue create command: %q", output)
 	}
-	if !strings.Contains(output, "issue child [--project <project-id>] [--parent <issue-id>]") {
-		t.Fatalf("usage missing issue child command: %q", output)
+	if strings.Contains(output, "issue child ") {
+		t.Fatalf("usage should not include issue child command: %q", output)
 	}
 	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [<id>]") {
 		t.Fatalf("usage missing issue update command: %q", output)
@@ -3777,7 +3731,7 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 	if !strings.Contains(output, "Active issue `az-closed` is currently `closed`") {
 		t.Fatalf("prime output missing closed-issue warning: %q", output)
 	}
-	if !strings.Contains(output, "`az issue child \"Next task\"`") {
+	if !strings.Contains(output, "`az issue create \"Next task\" --deferred`") {
 		t.Fatalf("prime output missing closed-issue next-step guidance: %q", output)
 	}
 }
