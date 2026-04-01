@@ -217,6 +217,40 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 	}
 }
 
+func TestEventLogOverlay_RenderBodyLines_DoesNotTruncateLongLine(t *testing.T) {
+	overlay := NewEventLogOverlay(nil)
+	body := []byte(strings.Repeat("x", 140))
+
+	lines := overlay.renderBodyLines(body)
+	if len(lines) != 1 {
+		t.Fatalf("line count = %d, want 1", len(lines))
+	}
+	if got := lines[0]; got != string(body) {
+		t.Fatalf("line mismatch: len(got)=%d len(want)=%d", len(got), len(body))
+	}
+	if strings.Contains(lines[0], "...") {
+		t.Fatalf("line should not be truncated: %q", lines[0])
+	}
+}
+
+func TestEventLogOverlay_RenderBodyLines_PrettyPrintsJSON(t *testing.T) {
+	overlay := NewEventLogOverlay(nil)
+	body := []byte(`{"operation":{"id":"20260401134847.225250000","state":"running"},"project_id":"azedarach","progress":"step1"}`)
+
+	lines := overlay.renderBodyLines(body)
+	rendered := strings.Join(lines, "\n")
+
+	if len(lines) < 3 {
+		t.Fatalf("expected multiline pretty JSON, got %d lines: %q", len(lines), rendered)
+	}
+	if !strings.Contains(rendered, "\n  \"operation\": {") {
+		t.Fatalf("missing pretty-printed nested object: %q", rendered)
+	}
+	if !strings.Contains(rendered, "\n  \"project_id\": \"azedarach\"") {
+		t.Fatalf("missing pretty-printed field: %q", rendered)
+	}
+}
+
 func testEvent(revision uint64, event string) protocol.EventEnvelope {
 	return protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
