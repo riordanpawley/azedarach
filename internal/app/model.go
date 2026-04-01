@@ -75,7 +75,6 @@ var executablePath = os.Executable
 var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
-var runGitCommandFunc = runGitCommand
 var execProcess = tea.ExecProcess
 
 // Re-export Toast type and constants for convenience
@@ -6296,26 +6295,6 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 		sourceFiles:    sourceFiles,
 		targetFiles:    targetFiles,
 	}
-}
-
-func runGitCommand(ctx context.Context, worktree string, args ...string) (string, error) {
-	worktree = strings.TrimSpace(worktree)
-	if worktree == "" {
-		return "", fmt.Errorf("worktree is required")
-	}
-	fullArgs := make([]string, 0, len(args)+2)
-	fullArgs = append(fullArgs, "-C", worktree)
-	fullArgs = append(fullArgs, args...)
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		trimmed := strings.TrimSpace(string(output))
-		if trimmed == "" {
-			return "", err
-		}
-		return "", fmt.Errorf("%w: %s", err, trimmed)
-	}
-	return strings.TrimSpace(string(output)), nil
 }
 
 func (m Model) discardChangesCmd(side, worktree string) tea.Cmd {
