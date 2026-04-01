@@ -182,7 +182,7 @@ type Model struct {
 	loading         bool
 	boardRefreshing bool
 	issueRefreshSeq uint64
-	projectSwitchSeq uint64
+	projectSwitchSeq      uint64
 	projectSwitchInFlight bool
 	spinner         spinner.Model
 	lastRefresh     time.Time
@@ -2944,12 +2944,15 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 }
 
 func (m Model) activeProjectPath() string {
+	if strings.TrimSpace(m.repoDir) != "" {
+		return m.repoDir
+	}
 	if m.projectRegistry != nil && m.currentProject != "" {
 		if project, err := m.projectRegistry.Get(m.currentProject); err == nil && strings.TrimSpace(project.Path) != "" {
 			return project.Path
 		}
 	}
-	return m.repoDir
+	return "."
 }
 
 func (m *Model) rebindProjectContext(project config.Project, projectConfig *config.Config) {

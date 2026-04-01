@@ -99,14 +99,14 @@ func TestActiveProjectPath(t *testing.T) {
 		},
 	}
 
-	t.Run("uses current project path when available", func(t *testing.T) {
+	t.Run("uses pinned repoDir when available", func(t *testing.T) {
 		m := Model{
 			currentProject:  "beta",
 			projectRegistry: registry,
 			repoDir:         "/work/alpha",
 		}
-		if got := m.activeProjectPath(); got != "/work/beta" {
-			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/beta")
+		if got := m.activeProjectPath(); got != "/work/alpha" {
+			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/alpha")
 		}
 	})
 
@@ -118,6 +118,16 @@ func TestActiveProjectPath(t *testing.T) {
 		}
 		if got := m.activeProjectPath(); got != "/work/alpha" {
 			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/alpha")
+		}
+	})
+
+	t.Run("falls back to registry path when repoDir is empty", func(t *testing.T) {
+		m := Model{
+			currentProject:  "beta",
+			projectRegistry: registry,
+		}
+		if got := m.activeProjectPath(); got != "/work/beta" {
+			t.Fatalf("activeProjectPath() = %q, want %q", got, "/work/beta")
 		}
 	})
 }
