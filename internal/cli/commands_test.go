@@ -709,6 +709,34 @@ func TestOperationCommandsParseAndRender(t *testing.T) {
 	}
 }
 
+func TestParseLogArgs(t *testing.T) {
+	opts, err := ParseLogArgs([]string{"--source", "daemon,tui", "--lines", "50", "--no-follow", "cli"})
+	if err != nil {
+		t.Fatalf("ParseLogArgs() error = %v", err)
+	}
+	if opts.Lines != 50 || opts.Follow {
+		t.Fatalf("ParseLogArgs() lines/follow = %+v", opts)
+	}
+	if got, want := opts.Sources, []string{"daemon", "tui", "cli"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseLogArgs() sources = %v, want %v", got, want)
+	}
+
+	defaultOpts, err := ParseLogArgs(nil)
+	if err != nil {
+		t.Fatalf("ParseLogArgs(nil) error = %v", err)
+	}
+	if got, want := defaultOpts.Sources, []string{"daemon", "tui", "cli"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseLogArgs(nil) sources = %v, want %v", got, want)
+	}
+
+	if _, err := ParseLogArgs([]string{"worker"}); err == nil {
+		t.Fatal("expected unknown source error")
+	}
+	if _, err := ParseLogArgs([]string{"--lines", "0"}); err == nil {
+		t.Fatal("expected lines validation error")
+	}
+}
+
 func TestOperationCommandsUseDaemonClient(t *testing.T) {
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -779,6 +807,45 @@ func TestOperationCommandsUseDaemonClient(t *testing.T) {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("output = %q, want %q", output, needle)
 		}
+	}
+}
+
+func TestLogCommandBuildsTailInvocation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	deps := &Dependencies{
+		Config:  cfg,
+		RepoDir: "/tmp/repo",
+	}
+
+	var gotArgs []string
+	origTail := runLogTailCommand
+	runLogTailCommand = func(args []string) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	t.Cleanup(func() {
+		runLogTailCommand = origTail
+	})
+
+	err := LogCommand(deps, LogOptions{
+		Sources: []string{"daemon", "tui", "cli"},
+		Lines:   25,
+		Follow:  true,
+	})
+	if err != nil {
+		t.Fatalf("LogCommand() error = %v", err)
+	}
+
+	want := []string{
+		"-n", "25",
+		"-F",
+		filepath.Join("/tmp/repo", ".azedarach", "daemon.log"),
+		filepath.Join(cfg.Session.LogDir, "az.log"),
+		filepath.Join(cfg.Session.LogDir, "az-cli.log"),
+	}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("tail args = %v, want %v", gotArgs, want)
 	}
 }
 
@@ -3383,8 +3450,14 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "export") {
 		t.Fatalf("usage missing export command: %q", output)
 	}
+	if !strings.Contains(output, "log [sources]") {
+		t.Fatalf("usage missing log command: %q", output)
+	}
 	if !strings.Contains(output, "az export --format json --out snapshot.json") {
 		t.Fatalf("usage missing export example: %q", output)
+	}
+	if !strings.Contains(output, "az log daemon tui --no-follow --lines 100") {
+		t.Fatalf("usage missing log example: %q", output)
 	}
 	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps]") {
 		t.Fatalf("usage missing issue list command: %q", output)

@@ -10,8 +10,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -74,6 +76,12 @@ type ConfigSetOptions struct {
 type SyncOptions struct {
 	All        bool
 	ProjectDir string
+}
+
+type LogOptions struct {
+	Sources []string
+	Lines   int
+	Follow  bool
 }
 
 type ImplDeleteOptions struct {
@@ -694,6 +702,71 @@ func ParseSyncArgs(args []string) (SyncOptions, error) {
 		return SyncOptions{}, fmt.Errorf("usage: az sync [--all] [<directory>] [--project-dir <dir>]")
 	}
 	return opts, nil
+}
+
+func ParseLogArgs(args []string) (LogOptions, error) {
+	opts := LogOptions{
+		Lines:  200,
+		Follow: true,
+	}
+	fs := flag.NewFlagSet("log", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var sourceList string
+	var noFollow bool
+	fs.StringVar(&sourceList, "source", "", "comma-separated log sources: daemon,tui,cli")
+	fs.IntVar(&opts.Lines, "lines", 200, "number of lines to show before streaming")
+	fs.BoolVar(&opts.Follow, "follow", true, "keep streaming logs")
+	fs.BoolVar(&noFollow, "no-follow", false, "print and exit without following")
+	if err := fs.Parse(args); err != nil {
+		return LogOptions{}, err
+	}
+	if noFollow {
+		opts.Follow = false
+	}
+	if opts.Lines < 1 {
+		return LogOptions{}, fmt.Errorf("--lines must be greater than 0")
+	}
+
+	requestedSources := make([]string, 0, len(fs.Args())+3)
+	requestedSources = append(requestedSources, splitLogSourceList(sourceList)...)
+	for _, arg := range fs.Args() {
+		requestedSources = append(requestedSources, splitLogSourceList(arg)...)
+	}
+
+	if len(requestedSources) == 0 {
+		opts.Sources = []string{"daemon", "tui", "cli"}
+		return opts, nil
+	}
+
+	seen := make(map[string]struct{}, len(requestedSources))
+	opts.Sources = make([]string, 0, len(requestedSources))
+	for _, source := range requestedSources {
+		normalized := strings.ToLower(strings.TrimSpace(source))
+		switch normalized {
+		case "daemon", "tui", "cli":
+		default:
+			return LogOptions{}, fmt.Errorf("unknown log source %q (expected daemon, tui, or cli)", source)
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		opts.Sources = append(opts.Sources, normalized)
+	}
+	return opts, nil
+}
+
+func splitLogSourceList(value string) []string {
+	raw := strings.Split(strings.TrimSpace(value), ",")
+	out := make([]string, 0, len(raw))
+	for _, source := range raw {
+		trimmed := strings.TrimSpace(source)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
@@ -3086,6 +3159,78 @@ type applyExecutionSummaryBody struct {
 	Total     int `json:"total"`
 	Succeeded int `json:"succeeded"`
 	Failed    int `json:"failed"`
+}
+
+var runLogTailCommand = func(args []string) error {
+	cmd := exec.Command("tail", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func LogCommand(deps *Dependencies, opts LogOptions) error {
+	if deps == nil {
+		return fmt.Errorf("dependencies are required")
+	}
+	if len(opts.Sources) == 0 {
+		opts.Sources = []string{"daemon", "tui", "cli"}
+	}
+	if opts.Lines < 1 {
+		return fmt.Errorf("--lines must be greater than 0")
+	}
+
+	repoDir := strings.TrimSpace(deps.RepoDir)
+	if repoDir == "" {
+		repoDir = "."
+	}
+	sessionLogDir := resolveSessionLogDir(deps.Config)
+	logPaths := make([]string, 0, len(opts.Sources))
+	seen := make(map[string]struct{}, len(opts.Sources))
+	for _, source := range opts.Sources {
+		var logPath string
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "daemon":
+			logPath = filepath.Join(repoDir, ".azedarach", "daemon.log")
+		case "tui":
+			logPath = filepath.Join(sessionLogDir, "az.log")
+		case "cli":
+			logPath = filepath.Join(sessionLogDir, "az-cli.log")
+		default:
+			return fmt.Errorf("unknown log source %q", source)
+		}
+		if _, ok := seen[logPath]; ok {
+			continue
+		}
+		seen[logPath] = struct{}{}
+		logPaths = append(logPaths, logPath)
+	}
+	if len(logPaths) == 0 {
+		return fmt.Errorf("no log files selected")
+	}
+
+	tailArgs := make([]string, 0, len(logPaths)+3)
+	tailArgs = append(tailArgs, "-n", strconv.Itoa(opts.Lines))
+	if opts.Follow {
+		tailArgs = append(tailArgs, "-F")
+	}
+	tailArgs = append(tailArgs, logPaths...)
+
+	return runLogTailCommand(tailArgs)
+}
+
+func resolveSessionLogDir(cfg *config.Config) string {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	logDir := strings.TrimSpace(cfg.Session.LogDir)
+	if logDir != "" {
+		return logDir
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		return filepath.Join(homeDir, ".azedarach", "logs")
+	}
+	return filepath.Join(".", ".azedarach", "logs")
 }
 
 func newSessionRequest(command, projectID, sessionID, baseBranch string) protocol.RequestEnvelope {

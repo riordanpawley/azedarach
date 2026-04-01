@@ -180,6 +180,20 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "log":
+		logOpts, err := cli.ParseLogArgs(commandArgs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Usage: az log [--source daemon,tui,cli] [--lines N] [--follow|--no-follow] [daemon|tui|cli ...]\n")
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.LogCommand(deps, logOpts)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "config":
 		if len(commandArgs) == 0 {
 			fmt.Fprintf(os.Stderr, "Usage: az config set spec.enabled <true|false> [--project-dir <dir>]\n")
