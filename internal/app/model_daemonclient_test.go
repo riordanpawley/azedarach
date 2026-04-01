@@ -1953,7 +1953,7 @@ func TestMergeToMainPreflightBlocksDirtySourceOrTarget(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID)()
+	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {
@@ -2035,7 +2035,7 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 		if expectedWorktree != "" && worktree != expectedWorktree {
 			t.Fatalf("merge-tree worktree = %q, want %s", worktree, expectedWorktree)
 		}
-		if len(args) != 4 || args[0] != "merge-tree" || args[1] != "--write-tree" || args[2] != "HEAD" || args[3] != "az/az-source" {
+		if len(args) != 4 || args[0] != "merge-tree" || args[1] != "--write-tree" || args[2] != "main" || args[3] != "az/az-source" {
 			t.Fatalf("merge-tree args = %v", args)
 		}
 		return "CONFLICT (content): Merge conflict in cmd/az/main.go", errors.New("merge-tree conflict")
@@ -2047,7 +2047,7 @@ func TestMergeToMainPreflightBlocksPredictedConflicts(t *testing.T) {
 	m := newTestModel()
 	expectedWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
-	msg := m.mergeToMainCmd("/tmp/az-source", sourceID)()
+	msg := m.mergeToMainCmd("/tmp/az-source", sourceID, true)()
 
 	preflight, ok := msg.(mergePreflightFailureMsg)
 	if !ok {

@@ -1,81 +1,79 @@
 {
-  "$schema": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
-  "$version": 7,
-  "cliTool": "codex",
-  "devServer": {
-    "basePort": 3000,
-    "environments": {},
-    "maxPort": 3100
-  },
-  "git": {
-    "baseBranch": "main",
-    "defaultMergeStrategy": "merge",
-    "fetchEnabled": true,
-    "pushEnabled": true,
-    "showLineChanges": true,
-    "workflowMode": "local"
-  },
-  "githooks": {
-    "boundaryCheck": {
-      "command": "",
-      "enabled": false
-    },
-    "specSync": {
-      "autoStageDocs": true,
-      "command": "",
-      "enabled": false
-    }
-  },
-  "issues": {
-    "path": ".azedarach",
-    "syncInterval": 300
-  },
-  "keyboard": {
-    "jumpLabelChars": "cieahtsn"
-  },
-  "merge": {
-    "autoMerge": false,
-    "compareWithOrigin": true,
-    "strategy": "merge"
-  },
-  "network": {
-    "autoDetect": true,
-    "checkInterval": 60,
-    "offlineTimeout": 300,
-    "retryAttempts": 3
-  },
-  "notifications": {
-    "completedTask": true,
-    "errorThreshold": 3,
-    "failedTask": true
-  },
-  "pr": {
-    "autoLink": true,
-    "createWithoutMerge": false,
-    "draftByDefault": true,
-    "notifyAfterCreate": true
-  },
-  "session": {
-    "dangerouslySkipPermissions": false,
-    "initCommands": [
-      "direnv allow",
-      "cd go-bubbletea"
-    ],
-    "logDir": "/Users/riordan/.azedarach/logs",
-    "shell": "zsh",
-    "timeoutMs": 30000
-  },
-  "spec": {
-    "enabled": false
-  },
-  "worktree": {
-    "autoCleanup": true,
-    "basePath": "../",
-    "initCommands": [
-      "direnv allow",
-      "cd go-bubbletea"
-    ],
-    "keepDays": 7,
-    "nameFormat": "{project}-{issueID}"
-  }
+	"$schema": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
+	"$version": 7,
+	"cliTool": "codex",
+	"devServer": {
+		"basePort": 3000,
+		"environments": {},
+		"maxPort": 3100
+	},
+	"git": {
+		"baseBranch": "main",
+		"defaultMergeStrategy": "merge",
+		"fetchEnabled": true,
+		"pushEnabled": true,
+		"showLineChanges": true,
+		"workflowMode": "local"
+	},
+	"githooks": {
+		"boundaryCheck": {
+			"command": "",
+			"enabled": false
+		},
+		"specSync": {
+			"autoStageDocs": true,
+			"command": "",
+			"enabled": false
+		}
+	},
+	"issues": {
+		"path": ".azedarach",
+		"syncInterval": 300
+	},
+	"keyboard": {
+		"jumpLabelChars": "cieahtsn"
+	},
+	"merge": {
+		"autoMerge": false,
+		"compareWithOrigin": true,
+		"strategy": "merge"
+	},
+	"network": {
+		"autoDetect": true,
+		"checkInterval": 60,
+		"offlineTimeout": 300,
+		"retryAttempts": 3
+	},
+	"notifications": {
+		"completedTask": true,
+		"errorThreshold": 3,
+		"failedTask": true
+	},
+	"pr": {
+		"autoLink": true,
+		"createWithoutMerge": false,
+		"draftByDefault": true,
+		"notifyAfterCreate": true
+	},
+	"session": {
+		"dangerouslySkipPermissions": false,
+		"initCommands": [],
+		"logDir": "/Users/riordan/.azedarach/logs",
+		"shell": "zsh",
+		"timeoutMs": 30000
+	},
+	"spec": {
+		"enabled": false
+	},
+	"worktree": {
+		"autoCleanup": true,
+		"basePath": "../",
+		"initCommands": [
+			"mkdir -p .gocache .gopath",
+			"base_repo=$(dirname \"$(dirname \"$(dirname \"$(git rev-parse --git-dir)\")\")\") && cp -R \"$base_repo/.gocache\" \"$base_repo/.gopath\" . 2>/dev/null || true",
+			"direnv allow"
+		],
+		"keepDays": 7,
+		"nameFormat": "{project}-{issueID}"
+	}
 }

@@ -65,6 +65,26 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	}
 }
 
+func TestRunCodexCommandHelpAndDispatch(t *testing.T) {
+	output := captureMainStdout(t, func() error {
+		return runCodexCommand(config.DefaultConfig(), []string{"--help"})
+	})
+	if !strings.Contains(output, "Usage: az codex <install|guard|hook>") {
+		t.Fatalf("help output = %q", output)
+	}
+
+	projectDir := t.TempDir()
+	output = captureMainStdout(t, func() error {
+		return runCodexCommand(config.DefaultConfig(), []string{"install", "--project-dir", projectDir})
+	})
+	if !strings.Contains(output, "Installed Codex hooks in") {
+		t.Fatalf("dispatch output = %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("expected codex hooks file: %v", err)
+	}
+}
+
 func TestRunDevHelpAndGateRegression(t *testing.T) {
 	helpOut := captureMainStdout(t, func() error {
 		return runDevCommand(config.DefaultConfig(), []string{"--help"})
