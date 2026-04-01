@@ -190,10 +190,10 @@ func (d *DetailPanel) View() string {
 	b.WriteString(valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
 	b.WriteString("\n")
 
-	// Session info if present
+	// Worktree/session runtime info if present
 	if d.session != nil {
 		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Session"))
+		b.WriteString(headerStyle.Render("Worktree"))
 		b.WriteString("\n")
 
 		b.WriteString(labelStyle.Render("State:"))
@@ -201,22 +201,28 @@ func (d *DetailPanel) View() string {
 		b.WriteString(valueStyle.Render(fmt.Sprintf("%s %s", d.session.State.Icon(), string(d.session.State))))
 		b.WriteString("\n")
 
+		if d.hasGitStatusData() {
+			b.WriteString(labelStyle.Render("Git:"))
+			b.WriteString("  ")
+			b.WriteString(valueStyle.Render(d.formatGitStatus()))
+			b.WriteString("\n")
+		}
+
 		if d.session.StartedAt != nil {
-			b.WriteString(labelStyle.Render("Started:"))
+			b.WriteString(labelStyle.Render("Created:"))
 			b.WriteString("  ")
 			b.WriteString(valueStyle.Render(d.formatTime(*d.session.StartedAt)))
 			b.WriteString("\n")
 
-			// Calculate elapsed time
-			elapsed := time.Since(*d.session.StartedAt)
-			b.WriteString(labelStyle.Render("Elapsed:"))
+			age := time.Since(*d.session.StartedAt)
+			b.WriteString(labelStyle.Render("Age:"))
 			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.formatDuration(elapsed)))
+			b.WriteString(valueStyle.Render(d.formatDuration(age)))
 			b.WriteString("\n")
 		}
 
 		if d.session.Worktree != "" {
-			b.WriteString(labelStyle.Render("Worktree:"))
+			b.WriteString(labelStyle.Render("Path:"))
 			b.WriteString("  ")
 			b.WriteString(valueStyle.Render(d.session.Worktree))
 			b.WriteString("\n")
@@ -446,6 +452,50 @@ func (d *DetailPanel) halfPageStep() int {
 		return 1
 	}
 	return step
+}
+
+func (d *DetailPanel) hasGitStatusData() bool {
+	if d.task.HasWorktree {
+		return true
+	}
+	if d.session != nil && strings.TrimSpace(d.session.Worktree) != "" {
+		return true
+	}
+	return d.hasGitTelemetrySignal()
+}
+
+func (d *DetailPanel) hasGitTelemetrySignal() bool {
+	if d.task.HasUncommittedChanges {
+		return true
+	}
+	return d.task.GitAheadCount > 0 ||
+		d.task.GitBehindCount > 0 ||
+		d.task.GitAdditions > 0 ||
+		d.task.GitDeletions > 0
+}
+
+func (d *DetailPanel) formatGitStatus() string {
+	if !d.hasGitTelemetrySignal() {
+		return "unknown"
+	}
+
+	status := "clean"
+	if d.task.HasUncommittedChanges || d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
+		status = "dirty"
+	}
+
+	details := make([]string, 0, 2)
+	if d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
+		details = append(details, fmt.Sprintf("+%d/-%d", d.task.GitAdditions, d.task.GitDeletions))
+	}
+	if d.task.GitAheadCount > 0 || d.task.GitBehindCount > 0 {
+		details = append(details, fmt.Sprintf("up %d, down %d", d.task.GitAheadCount, d.task.GitBehindCount))
+	}
+
+	if len(details) == 0 {
+		return status
+	}
+	return fmt.Sprintf("%s (%s)", status, strings.Join(details, "; "))
 }
 
 func wrapDescriptionLines(description string, width int) []string {

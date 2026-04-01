@@ -73,9 +73,14 @@ func TestDetailPanelView(t *testing.T) {
 func TestDetailPanelViewWithSession(t *testing.T) {
 	startTime := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	task := domain.Task{
-		ID:     "az-456",
-		Title:  "Task with session",
-		Status: domain.StatusInProgress,
+		ID:                    "az-456",
+		Title:                 "Task with session",
+		Status:                domain.StatusInProgress,
+		HasUncommittedChanges: true,
+		GitAdditions:          9,
+		GitDeletions:          2,
+		GitAheadCount:         1,
+		GitBehindCount:        3,
 	}
 
 	session := &domain.Session{
@@ -93,12 +98,37 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	panel := NewDetailPanel(task, session)
 	view := panel.View()
 
-	// Check session info is present
-	assert.Contains(t, view, "Session")
+	// Check worktree/runtime info is present
+	assert.Contains(t, view, "Worktree")
 	assert.Contains(t, view, "busy")
+	assert.Contains(t, view, "Created:")
+	assert.Contains(t, view, "Git:")
+	assert.Contains(t, view, "dirty")
+	assert.Contains(t, view, "+9/-2")
+	assert.Contains(t, view, "up 1, down 3")
 	assert.Contains(t, view, "/path/to/worktree")
 	assert.Contains(t, view, ":3000")
 	assert.Contains(t, view, "npm run dev")
+}
+
+func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
+	task := domain.Task{
+		ID:         "az-789",
+		Title:      "Task with unavailable git telemetry",
+		Status:     domain.StatusInProgress,
+		HasWorktree: true,
+	}
+	session := &domain.Session{
+		IssueID:  "az-789",
+		State:    domain.SessionIdle,
+		Worktree: "/tmp/az-789",
+	}
+
+	panel := NewDetailPanel(task, session)
+	view := panel.View()
+
+	assert.Contains(t, view, "Git:")
+	assert.Contains(t, view, "unknown")
 }
 
 func TestDetailPanelViewWithParent(t *testing.T) {
