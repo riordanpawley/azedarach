@@ -40,13 +40,13 @@ func repoRootFromTestFile() (string, error) {
 	if !ok {
 		return "", os.ErrInvalid
 	}
-	// This file lives in internal/app, so two parents up is the repo root.
+	// This file lives in internal/tui, so two parents up is the repo root.
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..")), nil
 }
 
 func findDirectGitExecViolations(repoRoot string) ([]string, error) {
 	targetRoots := []string{
-		filepath.Join(repoRoot, "internal", "app"),
+		filepath.Join(repoRoot, "internal", "tui"),
 		filepath.Join(repoRoot, "internal", "cli"),
 	}
 
@@ -149,13 +149,5 @@ func stringLiteral(expr ast.Expr) (string, bool) {
 }
 
 var allowedGitExec = map[string]map[string]struct{}{
-	"internal/app/model.go": {
-		"runGitCommand": {},
-	},
-	"internal/cli/families.go": {
-		"gitCommandWithoutGitDirEnv": {},
-	},
-	"internal/cli/git_exec.go": {
-		"newGitCommand": {},
-	},
+	// Intentionally empty: runtime app/cli should not shell out to git directly.
 }

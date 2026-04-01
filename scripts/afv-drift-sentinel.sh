@@ -60,12 +60,12 @@ strict_app_scan() {
   shift 2
 
   if rg -n -P \
-    --glob 'internal/app/**' \
+    --glob 'internal/tui/**' \
     --glob '!**/*_test.go' \
     "$pattern" "$@" >/dev/null; then
     fail "$description"
     rg -n -P \
-      --glob 'internal/app/**' \
+      --glob 'internal/tui/**' \
       --glob '!**/*_test.go' \
       "$pattern" "$@" >&2 || true
     printf '      Move authority ownership back to daemon snapshot projection paths.\n' >&2
@@ -95,19 +95,19 @@ forbidden_scan \
   'github.com/riordanpawley/azedarach/internal/services/pr'
 
 strict_app_scan \
-  'no internal/app/model.go local session monitor starts' \
+  'no internal/tui/model.go local session monitor starts' \
   'sessionMonitor\.Start\(' \
-  internal/app/model.go
+  internal/tui/model.go
 
 strict_app_scan \
-  'no internal/app/model.go direct session projection writes' \
+  'no internal/tui/model.go direct session projection writes' \
   '^\s*m\.sessions\[[^]]+\]\s*=' \
-  internal/app/model.go
+  internal/tui/model.go
 
 strict_app_scan \
-  'no internal/app/model.go direct session projection deletes' \
+  'no internal/tui/model.go direct session projection deletes' \
   'delete\(m\.sessions,' \
-  internal/app/model.go
+  internal/tui/model.go
 
 if (( failures > 0 )); then
   printf 'Drift sentinel failed: %d check(s) failed.\n' "$failures" >&2

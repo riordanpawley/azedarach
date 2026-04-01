@@ -87,7 +87,7 @@ azd --help
 ```mermaid
 flowchart LR
   subgraph FE["Frontend"]
-    APP[internal/app]
+    APP[internal/tui]
     CLI[internal/cli]
   end
 
