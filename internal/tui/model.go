@@ -954,6 +954,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, m.appendAttachmentNoteCmd(msg.Attachment)
+		} else if msg.Action == "deleted" {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: "Image attachment deleted",
+				Expires: time.Now().Add(3 * time.Second),
+			})
 		} else if msg.Action == "error" && msg.Error != nil {
 			m.addToast(Toast{
 				Level:   ToastError,
@@ -1350,10 +1356,7 @@ func (m Model) View() string {
 					Height(overlayHeight).
 					Render(overlayView)
 			} else {
-				overlayView = lipgloss.NewStyle().
-					Width(overlayWidth).
-					Height(overlayHeight).
-					Render(overlayView)
+				overlayView = lipgloss.NewStyle().Render(overlayView)
 			}
 			overlayWidth, overlayHeight = renderedBlockSize(overlayView)
 
