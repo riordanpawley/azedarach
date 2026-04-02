@@ -206,7 +206,7 @@ func TestTaskWorkspaceOverlay_View_ShowsMutationProgress(t *testing.T) {
 	}, 120, 30)
 
 	view := overlay.View()
-	if !strings.Contains(view, "Mutation:") {
+	if !strings.Contains(view, "Issue Ops:") {
 		t.Fatalf("expected mutation row in detail panel, got: %q", view)
 	}
 	if !strings.Contains(view, "queued") || !strings.Contains(view, "op-status") {
