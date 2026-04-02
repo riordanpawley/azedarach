@@ -1735,7 +1735,7 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 		t.Fatalf("ParseIssueDoctorArgs() interspersed named id = %+v", doctor)
 	}
 	_, err = ParseIssueDoctorArgs([]string{})
-	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]") {
 		t.Fatalf("expected doctor usage error, got %v", err)
 	}
 }
@@ -1868,12 +1868,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [<issue-id>]",
+			errContains: "usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]",
 		},
 		{
 			name: "named id",
@@ -3974,7 +3974,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "issue check [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue check command: %q", output)
 	}
-	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [<id>]") {
+	if !strings.Contains(output, "issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue doctor command: %q", output)
 	}
 	if !strings.Contains(output, "issue create [--project <project-id>] [--impl <implementation> ...] [--deferred]") {
@@ -3983,31 +3983,31 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if strings.Contains(output, "issue child ") {
 		t.Fatalf("usage should not include issue child command: %q", output)
 	}
-	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [<id>]") {
+	if !strings.Contains(output, "issue update [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue update command: %q", output)
 	}
 	if strings.Contains(output, "issue status --impl <implementation>") {
 		t.Fatalf("usage should not include issue status command: %q", output)
 	}
-	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>] [<id>]") {
+	if !strings.Contains(output, "issue close [--project <project-id>] [--id <id>] [--json] [<id>]") {
 		t.Fatalf("usage missing issue close command: %q", output)
 	}
-	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [<id>] --confirm") {
+	if !strings.Contains(output, "issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm") {
 		t.Fatalf("usage missing issue delete command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id>") {
+	if !strings.Contains(output, "issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--json]") {
 		t.Fatalf("usage missing issue dep add command: %q", output)
 	}
-	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id>") {
+	if !strings.Contains(output, "issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--json]") {
 		t.Fatalf("usage missing issue dep remove command: %q", output)
 	}
 	if !strings.Contains(output, "issue dep bulk apply [--project <project-id>] --input <path>") {
 		t.Fatalf("usage missing issue dep bulk apply command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path>") {
+	if !strings.Contains(output, "issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
 		t.Fatalf("usage missing issue bulk-create command: %q", output)
 	}
-	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path>") {
+	if !strings.Contains(output, "issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]") {
 		t.Fatalf("usage missing issue bulk-update command: %q", output)
 	}
 	if !strings.Contains(output, "config set spec.enabled <true|false> [--project-dir <dir>]") {
