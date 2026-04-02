@@ -769,7 +769,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("board view after git event = %q, should hide ahead token when line changes exist", view)
 				}
 				workspaceView := workspace(model).View()
-				if !strings.Contains(workspaceView, "Git/Worktree") || !strings.Contains(workspaceView, "dirty (+3/-1; up 2, down 1)") {
+				if !strings.Contains(workspaceView, "Runtime") || !strings.Contains(workspaceView, "dirty (+3/-1; ↑2/↓1)") {
 					t.Fatalf("workspace view after git event = %q, missing projected git summary", workspaceView)
 				}
 			},
@@ -803,7 +803,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("board view after worktree event = %q, missing refreshed worktree/diff tokens", view)
 				}
 				workspaceView := workspace(model).View()
-				if !strings.Contains(workspaceView, "dirty (+5/-2; up 2, down 1)") {
+				if !strings.Contains(workspaceView, "dirty (+5/-2; ↑2/↓1)") {
 					t.Fatalf("workspace view after worktree event = %q, missing refreshed git summary", workspaceView)
 				}
 			},
