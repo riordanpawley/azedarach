@@ -189,15 +189,11 @@ func (d *DetailPanel) viewStandard() string {
 	// Runtime info
 	if d.showRuntimeSections() {
 		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Session"))
+		b.WriteString(headerStyle.Render("Runtime"))
 		b.WriteString("\n")
 		b.WriteString(labelStyle.Render("Session:"))
 		b.WriteString("  ")
 		b.WriteString(d.formatSessionSummary())
-		b.WriteString("\n")
-
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Git/Worktree"))
 		b.WriteString("\n")
 		b.WriteString(labelStyle.Render("Worktree:"))
 		b.WriteString("  ")
@@ -282,11 +278,8 @@ func (d *DetailPanel) viewCompact() string {
 
 	if d.showRuntimeSections() {
 		addLine("")
-		addLine(headerStyle.Render("Session"))
+		addLine(headerStyle.Render("Runtime"))
 		addLine(labelStyle.Render("Session:") + "  " + d.formatSessionSummary())
-
-		addLine("")
-		addLine(headerStyle.Render("Git/Worktree"))
 		addLine(labelStyle.Render("Worktree:") + "  " + valueStyle.Render(d.formatGitWorktreeSummary()))
 	}
 
