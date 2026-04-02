@@ -337,6 +337,30 @@ func TestUpdate_OpenTaskImageAttachMsgPushesAttachOverlay(t *testing.T) {
 	}
 }
 
+func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(overlay.AttachmentActionMsg{Action: "deleted"})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if len(next.toasts) == 0 {
+		t.Fatal("expected toast to be recorded")
+	}
+	last := next.toasts[len(next.toasts)-1]
+	if !strings.Contains(last.Message, "Image attachment deleted") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+	if len(next.runtimeEvents) == 0 {
+		t.Fatal("expected runtime event for toast")
+	}
+	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
+		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()

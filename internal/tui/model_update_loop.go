@@ -687,6 +687,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, m.appendAttachmentNoteCmd(msg.Attachment)
+		} else if msg.Action == "deleted" {
+			m.addToast(Toast{
+				Level:   ToastSuccess,
+				Message: "Image attachment deleted",
+				Expires: time.Now().Add(3 * time.Second),
+			})
 		} else if msg.Action == "error" && msg.Error != nil {
 			m.addToast(Toast{
 				Level:   ToastError,

@@ -102,10 +102,7 @@ func (m Model) View() string {
 					Height(overlayHeight).
 					Render(overlayView)
 			} else {
-				overlayView = lipgloss.NewStyle().
-					Width(overlayWidth).
-					Height(overlayHeight).
-					Render(overlayView)
+				overlayView = lipgloss.NewStyle().Render(overlayView)
 			}
 			overlayWidth, overlayHeight = renderedBlockSize(overlayView)
 

@@ -335,6 +335,43 @@ func TestImageAttachOverlay_AttachmentsLoadedMsg(t *testing.T) {
 	}
 }
 
+func TestImageAttachOverlay_AttachmentDeletedMsgEmitsActionMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := attachment.NewService(tmpDir, logger)
+
+	overlay := NewImageAttachOverlay("az-123", service)
+	_, cmd := overlay.Update(attachmentDeletedMsg{})
+	if cmd == nil {
+		t.Fatal("expected command for attachmentDeletedMsg")
+	}
+
+	msg := cmd()
+	switch batch := msg.(type) {
+	case tea.BatchMsg:
+		found := false
+		for _, innerCmd := range batch {
+			if innerCmd == nil {
+				continue
+			}
+			innerMsg := innerCmd()
+			action, ok := innerMsg.(AttachmentActionMsg)
+			if !ok {
+				continue
+			}
+			if action.Action != "deleted" {
+				t.Fatalf("action = %q, want %q", action.Action, "deleted")
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("expected AttachmentActionMsg in tea.BatchMsg, got %#v", msg)
+		}
+	default:
+		t.Fatalf("expected tea.BatchMsg, got %T", msg)
+	}
+}
+
 func TestImageAttachOverlay_ErrorMsg(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))

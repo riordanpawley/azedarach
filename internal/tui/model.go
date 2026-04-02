@@ -512,7 +512,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionCreateTask: // Create task
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentAndImplOptions(nil, m.availableTaskImplementations())
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, m.availableTaskImplementations(), m.attachmentService)
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 
