@@ -50,6 +50,10 @@ type Client struct {
 	db *sql.DB
 }
 
+type sqlIssueExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 // NewClient creates a SQLite-backed issue store client rooted at the repository.
 func NewClient(repoDir string, logger *slog.Logger) *Client {
 	dbPath, err := resolveDBPath(repoDir)
@@ -482,12 +486,16 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 	}
 
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
+		parentID := strings.TrimSpace(*params.ParentID)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
 			VALUES (?, ?, ?, NULL)
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
-		`, issueID, strings.TrimSpace(*params.ParentID), string(domain.DependencyParentChild)); err != nil {
+		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
+		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, parentID); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
 	}
@@ -563,7 +571,38 @@ func (c *Client) AddDependency(ctx context.Context, issueID, dependsOnID, depend
 	`, issueID, dependsOnID, canonicalType); err != nil {
 		return c.wrapError("add-dependency", issueID, err)
 	}
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := c.reopenClosedParentForActiveChild(ctx, db, issueID, dependsOnID); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
 
+	return nil
+}
+
+func (c *Client) reopenClosedParentForActiveChild(ctx context.Context, execer sqlIssueExecer, childID, parentID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := execer.ExecContext(ctx, `
+		UPDATE issues
+		SET
+			status = ?,
+			updated_at = ?,
+			closed_at = NULL
+		WHERE
+			id = ?
+			AND deleted_at IS NULL
+			AND status = ?
+			AND EXISTS (
+				SELECT 1
+				FROM issues child
+				WHERE
+					child.id = ?
+					AND child.deleted_at IS NULL
+					AND child.status != ?
+			)
+	`, string(domain.StatusInProgress), now, parentID, string(domain.StatusDone), childID, string(domain.StatusDone)); err != nil {
+		return err
+	}
 	return nil
 }
 
