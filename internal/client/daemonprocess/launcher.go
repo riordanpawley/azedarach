@@ -33,8 +33,14 @@ type Launcher struct {
 
 // NewLauncher returns a daemon process launcher for repoDir.
 func NewLauncher(repoDir, socketPath string) *Launcher {
-	if normalizedRepoDir, err := config.ResolveProjectRoot(repoDir); err == nil {
-		repoDir = normalizedRepoDir
+	if scopedDaemonRuntimeEnabled() {
+		if normalizedRepoDir, err := config.ResolveWorktreeRoot(repoDir); err == nil {
+			repoDir = normalizedRepoDir
+		}
+	} else {
+		if normalizedRepoDir, err := config.ResolveProjectRoot(repoDir); err == nil {
+			repoDir = normalizedRepoDir
+		}
 	}
 	lockPath := config.GlobalDaemonLockPath()
 	if strings.TrimSpace(socketPath) != "" {
@@ -49,6 +55,13 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		waitForReady: waitForDaemonReady,
 		sleepFn:      time.Sleep,
 	}
+}
+
+func scopedDaemonRuntimeEnabled() bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
+	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
+	return modeEnabled && source == "just-run"
 }
 
 // WithLogger overrides launcher logging sink for lifecycle warnings.

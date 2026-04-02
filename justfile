@@ -15,13 +15,17 @@ build:
 
 run:
     just build
+    DAEMON_BIN="$(pwd)/bin/azd"; \
     if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then \
-        AZEDARACH_DAEMON_SCOPE=worktree ./bin/az daemon restart; \
-        AZEDARACH_DAEMON_SCOPE=worktree ./bin/az; \
+        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run ./bin/az daemon restart; \
+        AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run ./bin/az; \
     else \
-        ./bin/az daemon restart; \
+        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" ./bin/az daemon restart; \
         ./bin/az; \
     fi
+
+bench-git-runtime *ARGS:
+    go run ./cmd/bench-git-runtime {{ARGS}}
 
 test:
     go test -v ./...

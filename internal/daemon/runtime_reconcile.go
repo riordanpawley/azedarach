@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -16,6 +18,7 @@ import (
 const (
 	defaultRuntimeReconcileInterval = 30 * time.Second
 	defaultRuntimeReconcileTimeout  = 5 * time.Second
+	scopedRuntimeReconcileTimeout   = 20 * time.Second
 )
 
 type runtimeReconciler interface {
@@ -77,6 +80,9 @@ func (d *Daemon) runtimeReconcileInterval() time.Duration {
 func (d *Daemon) runtimeReconcileTimeout() time.Duration {
 	if d.cfg.RuntimeReconcileTimeout > 0 {
 		return d.cfg.RuntimeReconcileTimeout
+	}
+	if isScopedDaemonModeEnv(os.Getenv("AZEDARACH_DAEMON_SCOPE"), os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) {
+		return scopedRuntimeReconcileTimeout
 	}
 	return defaultRuntimeReconcileTimeout
 }
@@ -232,13 +238,18 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 		return []string{protocol.DefaultProjectID}, nil
 	}
 	repoDir := strings.TrimSpace(d.cfg.RepoDir)
+	scopedMode := isScopedDaemonModeEnv(os.Getenv("AZEDARACH_DAEMON_SCOPE"), os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE"))
+	repoProjectID := ""
+	repoNameProjectID := ""
 	if repoDir != "" {
+		repoNameProjectID = protocol.NormalizeProjectID(filepath.Base(repoDir))
 		projectID, err := appconfig.ProjectIDForRoot(repoDir)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("resolve runtime reconcile seed project id failed", "repo_dir", repoDir, "error", err)
 			}
 		} else {
+			repoProjectID = protocol.NormalizeProjectID(projectID)
 			add(projectID)
 		}
 	}
@@ -276,8 +287,60 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 	if len(projectIDs) == 0 {
 		add(protocol.DefaultProjectID)
 	}
-	slices.Sort(projectIDs)
+	if scopedMode {
+		projectIDs = prioritizeProjectIDs(projectIDs, []string{repoNameProjectID, repoProjectID})
+	} else {
+		slices.Sort(projectIDs)
+	}
 	return projectIDs, nil
+}
+
+func isScopedDaemonModeEnv(mode, source string) bool {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	source = strings.TrimSpace(strings.ToLower(source))
+	switch mode {
+	case "worktree", "scoped", "local":
+		return source == "just-run"
+	default:
+		return false
+	}
+}
+
+func prioritizeProjectIDs(projectIDs []string, preferred []string) []string {
+	if len(projectIDs) == 0 {
+		return projectIDs
+	}
+	ordered := append([]string(nil), projectIDs...)
+	rest := make([]string, 0, len(ordered))
+	seenPreferred := make(map[string]struct{}, len(preferred))
+	prioritized := make([]string, 0, len(preferred))
+	for _, id := range preferred {
+		norm := protocol.NormalizeProjectID(id)
+		if norm == "" {
+			continue
+		}
+		if _, exists := seenPreferred[norm]; exists {
+			continue
+		}
+		seenPreferred[norm] = struct{}{}
+		prioritized = append(prioritized, norm)
+	}
+	found := make(map[string]struct{}, len(prioritized))
+	for _, projectID := range ordered {
+		if _, preferred := seenPreferred[projectID]; preferred {
+			found[projectID] = struct{}{}
+		} else {
+			rest = append(rest, projectID)
+		}
+	}
+	slices.Sort(rest)
+	result := make([]string, 0, len(ordered))
+	for _, projectID := range prioritized {
+		if _, ok := found[projectID]; ok {
+			result = append(result, projectID)
+		}
+	}
+	return append(result, rest...)
 }
 
 func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseBody) protocol.RuntimeReconcileResponseBody {

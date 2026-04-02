@@ -109,6 +109,7 @@ func TestDaemonPathsDefaultToGlobal(t *testing.T) {
 
 func TestDaemonPathsUseScopedWhenEnabled(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	start := filepath.Join(t.TempDir(), "repo")
 	if got := DaemonSocketPathFor(start); got != ScopedDaemonSocketPath(start) {
 		t.Fatalf("DaemonSocketPathFor() = %q, want %q", got, ScopedDaemonSocketPath(start))
