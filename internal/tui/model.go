@@ -1134,13 +1134,13 @@ func (m *Model) applyRuntimeSignals() {
 		if !ok {
 			continue
 		}
-		m.tasks[i].HasTmuxSession = signals.HasTmuxSession
 		m.tasks[i].HasWorktree = signals.HasWorktree
 		m.tasks[i].GitAheadCount = signals.GitAheadCount
 		m.tasks[i].GitBehindCount = signals.GitBehindCount
 		m.tasks[i].HasUncommittedChanges = signals.HasUncommittedChanges
 		m.tasks[i].GitAdditions = signals.GitAdditions
 		m.tasks[i].GitDeletions = signals.GitDeletions
+		m.tasks[i].HasTmuxSession = m.tasks[i].Session != nil
 	}
 }
 
@@ -1651,7 +1651,7 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 			next.StartedAt = &startedAt
 		}
 		m.tasks[i].Session = next
-		m.tasks[i].HasTmuxSession = true
+		m.tasks[i].HasTmuxSession = m.tasks[i].Session != nil
 		m.reconcilePendingStatuses()
 		m.syncTaskWorkspaceOverlay()
 		return

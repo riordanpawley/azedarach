@@ -129,7 +129,7 @@ func TestSort_Apply_Session(t *testing.T) {
 		{ID: "az-4", Session: &Session{State: SessionError}},
 		{ID: "az-5", Session: &Session{State: SessionPaused}},
 		{ID: "az-6", Session: &Session{State: SessionIdle}},
-		{ID: "az-7", Session: nil, HasTmuxSession: true},
+		{ID: "az-7", Session: nil, HasWorktree: true},
 		{ID: "az-8", Session: nil},
 	}
 
@@ -137,8 +137,8 @@ func TestSort_Apply_Session(t *testing.T) {
 		s := Sort{Field: SortBySession, Order: SortAsc}
 		result := s.Apply(tasks)
 
-		// Waiting > Busy/HasTmux > Paused > Error > Done > Idle > nil
-		want := []string{"az-3", "az-1", "az-7", "az-5", "az-4", "az-2", "az-6", "az-8"}
+		// Waiting > Busy > Paused > Error > Done > Idle/Worktree-only > nil
+		want := []string{"az-3", "az-1", "az-5", "az-4", "az-2", "az-6", "az-7", "az-8"}
 		for i, task := range result {
 			if task.ID != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
@@ -150,8 +150,8 @@ func TestSort_Apply_Session(t *testing.T) {
 		s := Sort{Field: SortBySession, Order: SortDesc}
 		result := s.Apply(tasks)
 
-		// nil > Idle > Done > Error > Paused > Busy/HasTmux > Waiting
-		want := []string{"az-8", "az-6", "az-2", "az-4", "az-5", "az-1", "az-7", "az-3"}
+		// nil > Idle/Worktree-only > Done > Error > Paused > Busy > Waiting
+		want := []string{"az-8", "az-6", "az-7", "az-2", "az-4", "az-5", "az-1", "az-3"}
 		for i, task := range result {
 			if task.ID != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])

@@ -2645,6 +2645,12 @@ func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 
 func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	m := newTestModel()
+	startedAt := time.Now().Add(-3 * time.Minute)
+	m.tasks[0].Session = &domain.Session{
+		IssueID:   m.tasks[0].ID,
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+	}
 	m.tasks[0].HasTmuxSession = true
 	m.tasks[0].HasWorktree = true
 	m.tasks[0].GitAheadCount = 2
