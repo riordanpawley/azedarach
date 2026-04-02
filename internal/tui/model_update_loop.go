@@ -313,7 +313,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 			m.daemonRevision = cursor.Advance(msg.event).Revision
 			cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
-			if !m.runtimeSignalsBusy && m.shouldRefreshRuntimeSignals() {
+			// Daemon git/worktree projection updates are authoritative state changes.
+			// Always refresh rendered runtime signals immediately so visible git
+			// indicators stay in sync across all rendered surfaces.
+			if !m.runtimeSignalsBusy {
 				m.runtimeSignalsBusy = true
 				cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
 			}
