@@ -95,13 +95,13 @@ func (m *ActionMenu) buildActions() []Action {
 	}
 	mergeLabel := "Follow-on merge"
 	if m.task.ParentID == nil && len(m.relatedTasks) > 0 && !m.hasEligibleUpstreamSource() {
-		mergeLabel = "Merge into main"
+		mergeLabel = "Merge into base branch"
 	}
 	// Cleanup can route by issue id through the daemon even when worktree
 	// metadata is stale in the current projection.
 	hasCleanupTarget := hasWorktree || hasTmuxSession
 	actions = append(actions,
-		Action{Key: "u", Label: "Update from main", Enabled: hasWorktree},
+		Action{Key: "u", Label: "Update from base branch", Enabled: hasWorktree},
 		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree},
 		Action{Key: "b", Label: "Merge into...", Enabled: true},
 		Action{Key: "P", Label: "Create PR", Enabled: hasWorktree},

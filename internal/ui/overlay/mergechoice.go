@@ -74,7 +74,7 @@ func (m *MergeChoiceOverlay) View() string {
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
 			var b strings.Builder
-			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("%d commits behind %s. Merge latest?", m.commitsBehind, m.baseBranch)))
+			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("%d commits behind base branch (%s). Merge latest?", m.commitsBehind, m.baseBranch)))
 			b.WriteString("\n\n")
 			b.WriteString(m.styles.MenuItem.Render("[M] Merge & Attach"))
 			b.WriteString("\n")

@@ -766,7 +766,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Successful merge
 		m.addToast(Toast{
 			Level:   ToastSuccess,
-			Message: "Updated from main successfully",
+			Message: "Updated from base branch successfully",
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		if msg.attachAfter {
@@ -3781,7 +3781,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		// Attach to session
 		if session != nil {
-			// Check if branch is behind main
+			// Check if branch is behind the base branch
 			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
 		} else if task.HasTmuxSession {
 			// We still have tmux presence, so attempt direct attach even when
@@ -5070,7 +5070,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
-		m.logger.Info("merging upstream source into main",
+		m.logger.Info("merging upstream source into base branch",
 			"sourceID", sourceID,
 			"sourceBranch", branch,
 			"targetBranch", baseBranch,
@@ -6339,7 +6339,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 			} else if len(resp.ConflictFiles) > 0 {
 				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(resp.ConflictFiles), strings.Join(resp.ConflictFiles, ", ")))
 			} else {
-				reasons = append(reasons, "Merge would conflict; merge and resolve main into the source branch first")
+				reasons = append(reasons, "Merge would conflict; merge and resolve base branch into the source branch first")
 			}
 			if len(resp.SourceFiles) > 0 {
 				sourceFiles = append(sourceFiles[:0], resp.SourceFiles...)
@@ -6531,7 +6531,7 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 	candidates := []overlay.MergeTarget{
 		{
 			ID:     "main",
-			Label:  "main branch",
+			Label:  "base branch",
 			IsMain: true,
 		},
 	}

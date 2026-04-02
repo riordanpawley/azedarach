@@ -3495,7 +3495,7 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 		t.Fatalf("candidates = %+v, want base branch plus one upstream source", candidates)
 	}
 	if candidates[0].ID != baseBranch || candidates[0].Label != baseBranch || !candidates[0].IsMain {
-		t.Fatalf("base candidate = %+v, want main branch %q", candidates[0], baseBranch)
+		t.Fatalf("base candidate = %+v, want base branch %q", candidates[0], baseBranch)
 	}
 	if candidates[1].ID != parentID || candidates[1].Status != domain.StatusDone || !candidates[1].HasWorktree {
 		t.Fatalf("upstream candidate = %+v, want upstream issue %q with worktree", candidates[1], parentID)
