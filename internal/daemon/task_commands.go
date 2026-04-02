@@ -52,6 +52,9 @@ type taskSnapshotExportSession struct {
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
+	}
 	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, ""); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("session reconciliation during task list failed", "project_id", projectID, "error", err)
 	}
@@ -66,11 +69,15 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	}
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(tasks), "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		Title           string          `json:"title"`
 		Description     string          `json:"description"`
@@ -88,6 +95,15 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task create requested",
+			"project_id", projectID,
+			"title", cmd.Title,
+			"type", cmd.Type,
+			"priority", cmd.Priority,
+			"parent_id", cmd.ParentID,
+		)
 	}
 	taskID, err := d.issues.Create(ctx, issues.CreateTaskParams{
 		Title:           cmd.Title,
@@ -111,12 +127,16 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		TaskID string `json:"task_id"`
 	}{TaskID: taskID})
 	resp.Body = body
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.created", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task create completed", "project_id", projectID, "task_id", taskID, "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID string        `json:"task_id"`
 		Status domain.Status `json:"status"`
@@ -124,16 +144,23 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
+	}
 	if err := d.issues.Update(ctx, cmd.TaskID, cmd.Status); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task status update completed", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status, "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID          string          `json:"task_id"`
 		Title           string          `json:"title"`
@@ -145,6 +172,9 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task details update requested", "project_id", projectID, "task_id", cmd.TaskID)
+	}
 	if err := d.issues.UpdateDetails(ctx, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
@@ -155,12 +185,16 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task details update completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID string `json:"task_id"`
 		Line   string `json:"line"`
@@ -168,48 +202,69 @@ func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.Request
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task append notes requested", "project_id", projectID, "task_id", cmd.TaskID, "line_bytes", len(cmd.Line))
+	}
 	if err := d.issues.AppendNotes(ctx, cmd.TaskID, cmd.Line); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task append notes completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID string `json:"task_id"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task delete requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
 	if err := d.issues.Delete(ctx, cmd.TaskID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.deleted", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task delete completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID string `json:"task_id"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task archive requested", "project_id", projectID, "task_id", cmd.TaskID)
+	}
 	if err := d.issues.Archive(ctx, cmd.TaskID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.archived", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task archive completed", "project_id", projectID, "task_id", cmd.TaskID, "revision", resp.Revision)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID         string `json:"task_id"`
 		DependsOnID    string `json:"depends_on_id"`
@@ -218,16 +273,34 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task dependency add requested",
+			"project_id", projectID,
+			"task_id", cmd.TaskID,
+			"depends_on_id", cmd.DependsOnID,
+			"dependency_type", cmd.DependencyType,
+		)
+	}
 	if err := d.issues.AddDependency(ctx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task dependency add completed",
+			"project_id", projectID,
+			"task_id", cmd.TaskID,
+			"depends_on_id", cmd.DependsOnID,
+			"dependency_type", cmd.DependencyType,
+			"revision", resp.Revision,
+		)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
 	var cmd struct {
 		TaskID         string `json:"task_id"`
 		DependsOnID    string `json:"depends_on_id"`
@@ -237,6 +310,15 @@ func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.Re
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task dependency remove requested",
+			"project_id", projectID,
+			"task_id", cmd.TaskID,
+			"depends_on_id", cmd.DependsOnID,
+			"dependency_type", cmd.DependencyType,
+			"confirm", cmd.Confirm,
+		)
+	}
 	callCtx := ctx
 	if cmd.Confirm {
 		callCtx = issues.WithDependencyRemovalConfirmation(callCtx)
@@ -245,13 +327,25 @@ func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.Re
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
-	resp.Revision = d.nextRevision(d.projectID(req.Meta))
+	resp.Revision = d.nextRevision(projectID)
 	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task dependency remove completed",
+			"project_id", projectID,
+			"task_id", cmd.TaskID,
+			"depends_on_id", cmd.DependsOnID,
+			"dependency_type", cmd.DependencyType,
+			"revision", resp.Revision,
+		)
+	}
 	return resp, nil
 }
 
 func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task snapshot export requested", "project_id", projectID)
+	}
 	tasks, err := d.issues.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -270,6 +364,14 @@ func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.Requ
 	resp := d.successResponse(req)
 	resp.Revision = body.SnapshotRevision
 	resp.Body = payload
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon task snapshot export completed",
+			"project_id", projectID,
+			"task_count", body.TaskCount,
+			"session_count", body.SessionCount,
+			"snapshot_revision", body.SnapshotRevision,
+		)
+	}
 	return resp, nil
 }
 
