@@ -503,8 +503,11 @@ func TestCodexGuardSessionStartBlocksWhenPromptMissingPrime(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	if !strings.Contains(output, `"decision":"block"`) {
-		t.Fatalf("session-start output = %q, want block decision", output)
+	if !strings.Contains(output, `"continue":false`) {
+		t.Fatalf("session-start output = %q, want continue:false", output)
+	}
+	if !strings.Contains(output, "\"stopReason\":\"Run `az prime` now before any other shell commands.\"") {
+		t.Fatalf("session-start output = %q, want stopReason", output)
 	}
 	if !strings.Contains(output, "Run `az prime` now before any other shell commands.") {
 		t.Fatalf("session-start output = %q, want az-prime reason", output)
@@ -560,8 +563,8 @@ func TestCodexGuardSessionStartBlocksWhenOnlyPrimeCommandMentioned(t *testing.T)
 	output := captureStdout(t, func() error {
 		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	if !strings.Contains(output, `"decision":"block"`) {
-		t.Fatalf("session-start output = %q, want block decision", output)
+	if !strings.Contains(output, `"continue":false`) {
+		t.Fatalf("session-start output = %q, want continue:false", output)
 	}
 }
 
@@ -587,8 +590,8 @@ func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "session-start", JSON: true})
 	})
-	if !strings.Contains(output, `"decision":"block"`) {
-		t.Fatalf("hook run output = %q, want block decision", output)
+	if !strings.Contains(output, `"continue":false`) {
+		t.Fatalf("hook run output = %q, want continue:false", output)
 	}
 }
 
