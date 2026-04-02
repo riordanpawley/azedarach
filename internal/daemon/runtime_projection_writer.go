@@ -22,7 +22,7 @@ type runtimeProjectionWriter interface {
 	PersistWorktreeProjectionAndPublish(context.Context, string, string, string, string) uint64
 	DeleteWorktreeProjectionAndPublish(context.Context, string, string) uint64
 	PublishWorktreeProjectionEvent(context.Context, string, string, string) uint64
-	ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeProjection) error
+	ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeState) error
 
 	PersistGitStatusProjectionAndPublish(context.Context, string, string, string, *git.GitStatus, bool, bool) uint64
 	PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) uint64
@@ -133,7 +133,7 @@ func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx conte
 	return rev
 }
 
-func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx context.Context, projectID string, rows []daemonstate.WorktreeProjection) error {
+func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx context.Context, projectID string, rows []daemonstate.WorktreeState) error {
 	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore() == nil {
 		return nil
 	}
@@ -161,7 +161,7 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 		return 0
 	}
 	var (
-		projection daemonstate.WorktreeProjection
+		projection daemonstate.WorktreeState
 		found      bool
 		err        error
 	)

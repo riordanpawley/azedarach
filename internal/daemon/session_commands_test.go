@@ -390,9 +390,9 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 	const projectID = "proj"
 
 	sessionStore := daemonstate.NewStore()
-	projectionStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
 	defer func() {
-		if err := projectionStore.Close(); err != nil {
+		if err := runtimeStateStore.Close(); err != nil {
 			t.Fatalf("close projection store: %v", err)
 		}
 	}()
@@ -403,7 +403,7 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 	liveSessionID := naming.CanonicalSessionID(projectID, liveIssueID)
 
 	ctx := context.Background()
-	if err := projectionStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
 		ID:        staleSessionID,
 		IssueID:   staleIssueID,
 		State:     daemonstate.SessionStateAttached,
@@ -411,7 +411,7 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 	}); err != nil {
 		t.Fatalf("seed stale projection session: %v", err)
 	}
-	if err := projectionStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
 		ID:        liveSessionID,
 		IssueID:   liveIssueID,
 		State:     daemonstate.SessionStateAttached,
@@ -429,15 +429,15 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 			RepoDir: ".",
 			Logger:  slog.Default(),
 		},
-		sessionStore:    sessionStore,
-		projectionStore: projectionStore,
+		sessionStore:      sessionStore,
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	if err := daemon.persistTmuxSessionRuntimeState(ctx, projectID, []string{liveSessionID}); err != nil {
 		t.Fatalf("persistTmuxSessionRuntimeState: %v", err)
 	}
 
-	rows, err := projectionStore.ListSessionStates(ctx, projectID)
+	rows, err := runtimeStateStore.ListSessionStates(ctx, projectID)
 	if err != nil {
 		t.Fatalf("list projection sessions: %v", err)
 	}
@@ -456,9 +456,9 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 	)
 
 	store := daemonstate.NewStore()
-	projectionStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
 	defer func() {
-		if err := projectionStore.Close(); err != nil {
+		if err := runtimeStateStore.Close(); err != nil {
 			t.Fatalf("close projection store: %v", err)
 		}
 	}()
@@ -470,13 +470,13 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 			RepoDir: ".",
 			Logger:  slog.Default(),
 		},
-		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
-		session:         daemonhandlers.NewSessionHandler(store),
-		sessionStore:    store,
-		projectionStore: projectionStore,
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
+		runtimeStateStore: runtimeStateStore,
 	}
 
-	if err := projectionStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -507,7 +507,7 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 
 	<-tmuxRunner.killEntered
 
-	rows, err := projectionStore.ListSessionStates(context.Background(), projectID)
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 	if err != nil {
 		t.Fatalf("list projection sessions: %v", err)
 	}
@@ -534,15 +534,15 @@ func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 		issueID   = "az-1"
 	)
 
-	projectionStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
 	defer func() {
-		if err := projectionStore.Close(); err != nil {
+		if err := runtimeStateStore.Close(); err != nil {
 			t.Fatalf("close projection store: %v", err)
 		}
 	}()
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
-	if err := projectionStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -557,9 +557,9 @@ func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 		killRelease: make(chan struct{}),
 	}
 	daemon := &Daemon{
-		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
-		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
-		projectionStore: projectionStore,
+		cfg:               Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	clearStopPending := daemon.markSessionStopPending(projectID, issueID)
@@ -712,9 +712,9 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 func TestListTmuxSessionsCacheFirstDoesNotPersistProjectionSnapshot(t *testing.T) {
 	const projectID = "proj-no-write-query"
 
-	projectionStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
 	t.Cleanup(func() {
-		_ = projectionStore.Close()
+		_ = runtimeStateStore.Close()
 	})
 
 	sessionID := naming.CanonicalSessionID(projectID, "az-1")
@@ -726,9 +726,9 @@ func TestListTmuxSessionsCacheFirstDoesNotPersistProjectionSnapshot(t *testing.T
 		killRelease: make(chan struct{}),
 	}
 	d := &Daemon{
-		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
-		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
-		projectionStore: projectionStore,
+		cfg:               Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	sessions, err := d.listTmuxSessionsCacheFirst(context.Background(), projectID)
@@ -739,7 +739,7 @@ func TestListTmuxSessionsCacheFirstDoesNotPersistProjectionSnapshot(t *testing.T
 		t.Fatalf("sessions = %v, want [%s]", sessions, sessionID)
 	}
 
-	rows, err := projectionStore.ListSessionStates(context.Background(), projectID)
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 	if err != nil {
 		t.Fatalf("ListSessions returned error: %v", err)
 	}
@@ -1113,14 +1113,14 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	)
 
 	store := daemonstate.NewStore()
-	projectionStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
-		_ = projectionStore.Close()
+		_ = runtimeStateStore.Close()
 	})
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	cachedStartedAt := time.Date(2026, time.April, 1, 10, 0, 0, 0, time.UTC)
-	if err := projectionStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -1133,10 +1133,10 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	tmuxRunner.sessions[sessionID] = true
 
 	d := &Daemon{
-		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
-		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
-		sessionStore:    store,
-		projectionStore: projectionStore,
+		cfg:               Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore:      store,
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	tasks := []domain.Task{
@@ -1164,14 +1164,14 @@ func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing
 	)
 
 	store := daemonstate.NewStore()
-	projectionStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
-		_ = projectionStore.Close()
+		_ = runtimeStateStore.Close()
 	})
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	cachedStartedAt := time.Date(2026, time.April, 1, 11, 0, 0, 0, time.UTC)
-	if err := projectionStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     daemonstate.SessionStateAttached,
@@ -1181,16 +1181,16 @@ func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing
 	}
 
 	d := &Daemon{
-		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
-		sessionStore:    store,
-		projectionStore: projectionStore,
+		cfg:               Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore:      store,
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []string{sessionID}); err != nil {
 		t.Fatalf("persist tmux session runtime state: %v", err)
 	}
 
-	sessions, err := projectionStore.ListSessionStates(context.Background(), projectID)
+	sessions, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 	if err != nil {
 		t.Fatalf("list projection sessions: %v", err)
 	}

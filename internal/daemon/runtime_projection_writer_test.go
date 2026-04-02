@@ -74,7 +74,7 @@ func (r *recordingRuntimeProjectionWriter) PublishWorktreeProjectionEvent(contex
 	return 5
 }
 
-func (r *recordingRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeProjection) error {
+func (r *recordingRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeState) error {
 	r.record("worktree.snapshot.replace")
 	return nil
 }
@@ -104,8 +104,8 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sessionStore := daemonstate.NewStore()
-	projectionStore := newRuntimeProjectionStore(t)
-	t.Cleanup(func() { _ = projectionStore.Close() })
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	const (
 		projectID = "proj-writer"
@@ -117,7 +117,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
 		t.Fatalf("seed session store: %v", err)
 	}
-	if err := projectionStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   issueID,
 		Path:      worktree,
@@ -131,7 +131,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	d := &Daemon{
 		cfg:                     Config{Logger: logger},
 		sessionStore:            sessionStore,
-		projectionStore:         projectionStore,
+		runtimeStateStore:       runtimeStateStore,
 		runtimeProjectionWriter: writer,
 	}
 
@@ -145,14 +145,14 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 
 	wa := &worktreeServiceAdapter{
 		runtimeProjectionWriter: writer,
-		projectionStore:         projectionStore,
+		runtimeStateStore:       runtimeStateStore,
 		logger:                  logger,
 	}
 	wa.writeWorktreeProjectionSnapshot(ctx, projectID, []git.Worktree{{IssueID: issueID, Path: worktree, Branch: branch}})
 
 	ga := &gitServiceAdapter{
 		client:                  git.NewClient(statusRunner{status: " M README.md\n"}, logger),
-		projectionStore:         projectionStore,
+		runtimeStateStore:       runtimeStateStore,
 		runtimeProjectionWriter: writer,
 		logger:                  logger,
 	}
@@ -176,8 +176,8 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sessionStore := daemonstate.NewStore()
-	projectionStore := newRuntimeProjectionStore(t)
-	t.Cleanup(func() { _ = projectionStore.Close() })
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	const (
 		projectID = "proj-session"
@@ -195,10 +195,10 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 
 	d := &Daemon{
-		cfg:             Config{Logger: logger},
-		hub:             publish.NewHub(8, 4, logger),
-		sessionStore:    sessionStore,
-		projectionStore: projectionStore,
+		cfg:               Config{Logger: logger},
+		hub:               publish.NewHub(8, 4, logger),
+		sessionStore:      sessionStore,
+		runtimeStateStore: runtimeStateStore,
 	}
 	writer := newRuntimeProjectionWriter(d)
 
@@ -226,7 +226,7 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 		t.Fatal("timed out waiting for session projection event")
 	}
 
-	sessions, err := projectionStore.ListSessionStates(ctx, projectID)
+	sessions, err := runtimeStateStore.ListSessionStates(ctx, projectID)
 	if err != nil {
 		t.Fatalf("ListSessionStates: %v", err)
 	}

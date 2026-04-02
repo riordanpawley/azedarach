@@ -10,7 +10,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
-func buildRuntimeProjection(projectID string, session *daemonstate.Session, worktree *daemonstate.WorktreeProjection) protocol.RuntimeProjection {
+func buildRuntimeProjection(projectID string, session *daemonstate.Session, worktree *daemonstate.WorktreeState) protocol.RuntimeProjection {
 	projection := protocol.RuntimeProjection{
 		ProjectID: normalizeRuntimeProjectionProjectID(projectID),
 	}

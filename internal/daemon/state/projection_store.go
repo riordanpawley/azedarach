@@ -34,10 +34,6 @@ type WorktreeState struct {
 	GitStatusUpdated *time.Time
 }
 
-// WorktreeProjection remains as a compatibility alias while active paths move to
-// explicit session/worktree store terminology.
-type WorktreeProjection = WorktreeState
-
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
 type RuntimeStateStore struct {
 	dbPath string
@@ -46,10 +42,6 @@ type RuntimeStateStore struct {
 	mu sync.Mutex
 	db *sql.DB
 }
-
-// ProjectionStore remains as a compatibility alias while active paths move to
-// explicit runtime-state store terminology.
-type ProjectionStore = RuntimeStateStore
 
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
@@ -118,16 +110,6 @@ func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStat
 	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
 }
 
-// NewProjectionStore preserves the previous constructor while callers migrate.
-func NewProjectionStore(repoDir string, logger *slog.Logger) *RuntimeStateStore {
-	return NewRuntimeStateStore(repoDir, logger)
-}
-
-// NewProjectionStoreAtPath preserves the previous constructor while callers migrate.
-func NewProjectionStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStateStore {
-	return NewRuntimeStateStoreAtPath(dbPath, logger)
-}
-
 func resolveRuntimeStateDBPath(repoDir string) (string, error) {
 	if override := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); override != "" {
 		return override, nil
@@ -190,10 +172,6 @@ func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID st
 	return nil
 }
 
-func (s *RuntimeStateStore) UpsertSession(ctx context.Context, projectID string, session Session) error {
-	return s.UpsertSessionState(ctx, projectID, session)
-}
-
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -211,10 +189,6 @@ func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, s
 		return fmt.Errorf("delete session state %s/%s: %w", projectID, sessionID, err)
 	}
 	return nil
-}
-
-func (s *RuntimeStateStore) DeleteSession(ctx context.Context, projectID, sessionID string) error {
-	return s.DeleteSessionState(ctx, projectID, sessionID)
 }
 
 func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
@@ -295,10 +269,6 @@ func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID 
 	return nil
 }
 
-func (s *RuntimeStateStore) ReplaceSessions(ctx context.Context, projectID string, sessions []Session) error {
-	return s.ReplaceSessionStates(ctx, projectID, sessions)
-}
-
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -346,10 +316,6 @@ func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID str
 		return nil, fmt.Errorf("iterate session state rows: %w", err)
 	}
 	return sessions, nil
-}
-
-func (s *RuntimeStateStore) ListSessions(ctx context.Context, projectID string) ([]Session, error) {
-	return s.ListSessionStates(ctx, projectID)
 }
 
 func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sessionID string) (Session, bool, error) {
@@ -516,10 +482,6 @@ func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeSta
 	return nil
 }
 
-func (s *RuntimeStateStore) UpsertWorktree(ctx context.Context, worktreeState WorktreeState) error {
-	return s.UpsertWorktreeState(ctx, worktreeState)
-}
-
 func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, issueID string) error {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -537,10 +499,6 @@ func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, 
 		return fmt.Errorf("delete worktree state %s/%s: %w", projectID, issueID, err)
 	}
 	return nil
-}
-
-func (s *RuntimeStateStore) DeleteWorktree(ctx context.Context, projectID, issueID string) error {
-	return s.DeleteWorktreeState(ctx, projectID, issueID)
 }
 
 func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
@@ -620,10 +578,6 @@ func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID
 	return nil
 }
 
-func (s *RuntimeStateStore) ReplaceWorktrees(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
-	return s.ReplaceWorktreeStates(ctx, projectID, worktreeStates)
-}
-
 func (s *RuntimeStateStore) ListWorktreeStates(ctx context.Context, projectID string) ([]WorktreeState, error) {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -688,10 +642,6 @@ func (s *RuntimeStateStore) ListWorktreeStates(ctx context.Context, projectID st
 	return worktreeStates, nil
 }
 
-func (s *RuntimeStateStore) ListWorktrees(ctx context.Context, projectID string) ([]WorktreeState, error) {
-	return s.ListWorktreeStates(ctx, projectID)
-}
-
 func (s *RuntimeStateStore) GetWorktreeStateByPath(ctx context.Context, projectID, worktreePath string) (WorktreeState, bool, error) {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -749,10 +699,6 @@ func (s *RuntimeStateStore) GetWorktreeStateByPath(ctx context.Context, projectI
 		GitStatusRaw:     json.RawMessage(statusRaw),
 		GitStatusUpdated: parsedStatusUpdated,
 	}, true, nil
-}
-
-func (s *RuntimeStateStore) GetWorktreeByPath(ctx context.Context, projectID, worktreePath string) (WorktreeState, bool, error) {
-	return s.GetWorktreeStateByPath(ctx, projectID, worktreePath)
 }
 
 func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, projectID, issueID string) (WorktreeState, bool, error) {
@@ -814,10 +760,6 @@ func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, proje
 	}, true, nil
 }
 
-func (s *RuntimeStateStore) GetWorktreeByIssueID(ctx context.Context, projectID, issueID string) (WorktreeState, bool, error) {
-	return s.GetWorktreeStateByIssueID(ctx, projectID, issueID)
-}
-
 func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -848,10 +790,6 @@ func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, pr
 		return err
 	}
 	return nil
-}
-
-func (s *RuntimeStateStore) UpsertWorktreeGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
-	return s.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, statusRaw, updatedAt)
 }
 
 func requireAffectedRows(result sql.Result, want int64, action, projectID, rowID string) error {

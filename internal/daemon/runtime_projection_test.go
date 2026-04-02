@@ -30,7 +30,7 @@ func TestBuildRuntimeProjectionPopulatesSessionAndWorktreeSignals(t *testing.T) 
 		IssueID:   "az-7",
 		State:     daemonstate.SessionStateAttached,
 		UpdatedAt: sessionUpdatedAt,
-	}, &daemonstate.WorktreeProjection{
+	}, &daemonstate.WorktreeState{
 		ProjectID:        "proj-runtime",
 		IssueID:          "az-7",
 		Path:             "/tmp/repo-az-7",
@@ -104,7 +104,7 @@ func TestBuildRuntimeProjectionSnapshotAndEventBodyAreDeterministic(t *testing.T
 		IssueID:   "az-x",
 		State:     daemonstate.SessionStateStarting,
 		UpdatedAt: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC),
-	}, &daemonstate.WorktreeProjection{
+	}, &daemonstate.WorktreeState{
 		ProjectID: "proj-x",
 		IssueID:   "az-x",
 		Path:      "/tmp/repo-az-x",
@@ -129,8 +129,8 @@ func TestBuildRuntimeProjectionSnapshotAndEventBodyAreDeterministic(t *testing.T
 func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := daemonstate.NewStore()
-	projectionStore := newRuntimeProjectionStore(t)
-	t.Cleanup(func() { _ = projectionStore.Close() })
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	const (
 		projectID = "proj-runtime"
@@ -144,7 +144,7 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
 		t.Fatalf("seed session store: %v", err)
 	}
-	if err := projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   issueID,
 		Path:      worktree,
@@ -167,8 +167,8 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 				return "", nil
 			}
 		}}, slog.Default()),
-		sessionStore:    sessionStore,
-		projectionStore: projectionStore,
+		sessionStore:      sessionStore,
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -212,8 +212,8 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := daemonstate.NewStore()
-	projectionStore := newRuntimeProjectionStore(t)
-	t.Cleanup(func() { _ = projectionStore.Close() })
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	const (
 		projectID = "proj-runtime"
@@ -225,7 +225,7 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
 		t.Fatalf("seed session store: %v", err)
 	}
-	if err := projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   issueID,
 		Path:      worktree,
@@ -241,7 +241,7 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal git status: %v", err)
 	}
-	if err := projectionStore.UpsertWorktreeGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 1, 14, 5, 0, 0, time.UTC)); err != nil {
+	if err := runtimeStateStore.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 1, 14, 5, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("seed git status projection: %v", err)
 	}
 
@@ -258,8 +258,8 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 				return "", nil
 			}
 		}}, slog.Default()),
-		sessionStore:    sessionStore,
-		projectionStore: projectionStore,
+		sessionStore:      sessionStore,
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -301,8 +301,8 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	ctx := context.Background()
 	sessionStore := daemonstate.NewStore()
-	projectionStore := newRuntimeProjectionStore(t)
-	t.Cleanup(func() { _ = projectionStore.Close() })
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	const (
 		projectID = "proj-runtime"
@@ -314,7 +314,7 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStatePaused); err != nil {
 		t.Fatalf("seed session store: %v", err)
 	}
-	if err := projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   issueID,
 		Path:      worktree,
@@ -337,15 +337,15 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal git status: %v", err)
 	}
-	if err := projectionStore.UpsertWorktreeGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 1, 15, 5, 0, 0, time.UTC)); err != nil {
+	if err := runtimeStateStore.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 1, 15, 5, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("seed git status projection: %v", err)
 	}
 
 	daemon := &Daemon{
-		cfg:             Config{Logger: slog.Default()},
-		hub:             publish.NewHub(32, 16, slog.Default()),
-		sessionStore:    sessionStore,
-		projectionStore: projectionStore,
+		cfg:               Config{Logger: slog.Default()},
+		hub:               publish.NewHub(32, 16, slog.Default()),
+		sessionStore:      sessionStore,
+		runtimeStateStore: runtimeStateStore,
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -387,9 +387,9 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 }
 
-func newRuntimeProjectionStore(t *testing.T) *daemonstate.ProjectionStore {
+func newRuntimeProjectionStore(t *testing.T) *daemonstate.RuntimeStateStore {
 	t.Helper()
-	store := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
 	return store
 }
 

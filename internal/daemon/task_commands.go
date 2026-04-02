@@ -105,7 +105,7 @@ func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projec
 
 	projectionByKey := map[string]daemonstate.Session{}
 	if d.sessionRuntimeStateStore() != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore().ListSessions(ctx, projectID)
+		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("failed to load cached session projections while enriching read-only tasks", "project_id", projectID, "error", err)
@@ -192,7 +192,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			}
 			return len(rows), err
 		}
-	} else if err := d.worktreeRuntimeStateStore().ReplaceWorktrees(ctx, projectID, rows); err != nil {
+	} else if err := d.worktreeRuntimeStateStore().ReplaceWorktreeStates(ctx, projectID, rows); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("replace worktree projections failed", "project_id", projectID, "error", err)
 		}
@@ -207,7 +207,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			}
 			continue
 		}
-		if err := d.worktreeRuntimeStateStore().UpsertWorktreeGitStatus(ctx, projectID, issueID, rawStatus, now); err != nil {
+		if err := d.worktreeRuntimeStateStore().UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, now); err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("persist refreshed worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "error", err)
 			}
@@ -223,7 +223,7 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	worktreeRows, err := d.worktreeRuntimeStateStore().ListWorktrees(ctx, projectID)
+	worktreeRows, err := d.worktreeRuntimeStateStore().ListWorktreeStates(ctx, projectID)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load worktree projections for task enrichment failed", "project_id", projectID, "error", err)
@@ -312,7 +312,7 @@ func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issu
 	if err != nil {
 		return nil
 	}
-	if err := d.worktreeRuntimeStateStore().UpsertWorktreeGitStatus(timeoutCtx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
+	if err := d.worktreeRuntimeStateStore().UpsertWorktreeStateGitStatus(timeoutCtx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("persist git status projection failed", "project_id", projectID, "issue_id", issueID, "worktree", worktree, "error", err)
 		}

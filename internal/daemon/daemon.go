@@ -62,7 +62,7 @@ type Daemon struct {
 	sessionStore            *daemonstate.Store
 	sessionRuntimeStore     *daemonstate.RuntimeStateStore
 	worktreeRuntimeStore    *daemonstate.RuntimeStateStore
-	projectionStore         *daemonstate.ProjectionStore
+	runtimeStateStore       *daemonstate.RuntimeStateStore
 	runtimeProjectionWriter runtimeProjectionWriter
 	sessionLongRunning      SessionLongRunningExecutor
 	runtimeReconciler       runtimeReconciler
@@ -120,10 +120,10 @@ func New(cfg Config) *Daemon {
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
 	runtimeStateStore := daemonstate.NewRuntimeStateStore(cfg.RepoDir, cfg.Logger)
 	gitService := &gitServiceAdapter{
-		client:          gitClient,
-		projectionStore: runtimeStateStore,
-		logger:          cfg.Logger,
-		baseBranch:      cfg.BaseBranch,
+		client:            gitClient,
+		runtimeStateStore: runtimeStateStore,
+		logger:            cfg.Logger,
+		baseBranch:        cfg.BaseBranch,
 	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
@@ -146,7 +146,7 @@ func New(cfg Config) *Daemon {
 		sessionStore:            sessionStore,
 		sessionRuntimeStore:     runtimeStateStore,
 		worktreeRuntimeStore:    runtimeStateStore,
-		projectionStore:         runtimeStateStore,
+		runtimeStateStore:       runtimeStateStore,
 		sessionStopPending:      map[string]int{},
 		sessionStateRefreshing:  map[string]bool{},
 		sessionStateLastRefresh: map[string]time.Time{},
@@ -176,7 +176,7 @@ func New(cfg Config) *Daemon {
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		&worktreeServiceAdapter{
 			manager:                 d.worktree,
-			projectionStore:         d.worktreeRuntimeStateStore(),
+			runtimeStateStore:       d.worktreeRuntimeStateStore(),
 			runtimeProjectionWriter: d.runtimeProjectionWriter,
 			logger:                  cfg.Logger,
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
@@ -546,7 +546,7 @@ func (d *Daemon) sessionRuntimeStateStore() *daemonstate.RuntimeStateStore {
 	if d.sessionRuntimeStore != nil {
 		return d.sessionRuntimeStore
 	}
-	return d.projectionStore
+	return d.runtimeStateStore
 }
 
 func (d *Daemon) worktreeRuntimeStateStore() *daemonstate.RuntimeStateStore {
@@ -556,7 +556,7 @@ func (d *Daemon) worktreeRuntimeStateStore() *daemonstate.RuntimeStateStore {
 	if d.worktreeRuntimeStore != nil {
 		return d.worktreeRuntimeStore
 	}
-	return d.projectionStore
+	return d.runtimeStateStore
 }
 
 func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) {
@@ -565,7 +565,7 @@ func (d *Daemon) persistSessionState(projectID string, session daemonstate.Sessi
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := d.sessionRuntimeStateStore().UpsertSession(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+	if err := d.sessionRuntimeStateStore().UpsertSessionState(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn(
 			"persist session runtime state failed",
 			"project_id", projectID,
@@ -628,7 +628,7 @@ func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, p
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := d.worktreeRuntimeStateStore().UpsertWorktree(ctx, daemonstate.WorktreeState{
+	if err := d.worktreeRuntimeStateStore().UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: strings.TrimSpace(projectID),
 		IssueID:   strings.TrimSpace(issueID),
 		Path:      strings.TrimSpace(path),
@@ -846,13 +846,13 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	var projectionWorktree *daemonstate.WorktreeState
 	if d.worktreeRuntimeStateStore() != nil {
 		if issueID != "" {
-			if loaded, found, err := d.worktreeRuntimeStateStore().GetWorktreeByIssueID(ctx, projectID, issueID); err == nil && found {
+			if loaded, found, err := d.worktreeRuntimeStateStore().GetWorktreeStateByIssueID(ctx, projectID, issueID); err == nil && found {
 				copy := loaded
 				projectionWorktree = &copy
 			}
 		}
 		if projectionWorktree == nil && worktree != "" {
-			if loaded, found, err := d.worktreeRuntimeStateStore().GetWorktreeByPath(ctx, projectID, worktree); err == nil && found {
+			if loaded, found, err := d.worktreeRuntimeStateStore().GetWorktreeStateByPath(ctx, projectID, worktree); err == nil && found {
 				copy := loaded
 				projectionWorktree = &copy
 			}

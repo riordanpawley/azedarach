@@ -26,7 +26,7 @@ const runtimeSignalProjectionTTL = 15 * time.Second
 
 type gitServiceAdapter struct {
 	client                  *git.Client
-	projectionStore         *daemonstate.ProjectionStore
+	runtimeStateStore       *daemonstate.RuntimeStateStore
 	runtimeProjectionWriter runtimeProjectionWriter
 	logger                  *slog.Logger
 	pollInterval            time.Duration
@@ -206,8 +206,8 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 	if worktree == "" {
 		return a.client.Status(ctx, worktree)
 	}
-	if a.projectionStore != nil {
-		if projection, found, err := a.projectionStore.GetWorktreeByPath(ctx, projectID, worktree); err == nil && found && len(projection.GitStatusRaw) > 0 {
+	if a.runtimeStateStore != nil {
+		if projection, found, err := a.runtimeStateStore.GetWorktreeStateByPath(ctx, projectID, worktree); err == nil && found && len(projection.GitStatusRaw) > 0 {
 			var cached git.GitStatus
 			if unmarshalErr := json.Unmarshal(projection.GitStatusRaw, &cached); unmarshalErr == nil {
 				a.refreshGitStatusAsync(projectID, worktree)
@@ -277,10 +277,10 @@ func (a *gitServiceAdapter) refreshGitStatusAsync(projectID, worktree string) {
 }
 
 func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID, worktree string, status *git.GitStatus) (bool, string) {
-	if a.projectionStore == nil || status == nil {
+	if a.runtimeStateStore == nil || status == nil {
 		return false, ""
 	}
-	projection, found, err := a.projectionStore.GetWorktreeByPath(ctx, projectID, worktree)
+	projection, found, err := a.runtimeStateStore.GetWorktreeStateByPath(ctx, projectID, worktree)
 	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
 		return false, ""
 	}
@@ -289,7 +289,7 @@ func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID
 		return false, ""
 	}
 	changed := string(rawStatus) != string(projection.GitStatusRaw)
-	if err := a.projectionStore.UpsertWorktreeGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil && a.logger != nil {
+	if err := a.runtimeStateStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil && a.logger != nil {
 		a.logger.Debug("persist git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
 		return false, ""
 	}

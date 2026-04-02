@@ -212,8 +212,8 @@ func TestRunStartupRuntimeReconcileUsesRepoScopedProjectID(t *testing.T) {
 	}
 	d := &Daemon{
 		cfg: Config{
-			Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
-			RepoDir:                repoDir,
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RepoDir:                 repoDir,
 			RuntimeReconcileTimeout: 25 * time.Millisecond,
 		},
 		runtimeReconciler: recorder,
@@ -275,8 +275,8 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 	}
 	d := &Daemon{
 		cfg: Config{
-			Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
-			RepoDir:                repoDir,
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RepoDir:                 repoDir,
 			RuntimeReconcileTimeout: 25 * time.Millisecond,
 		},
 		runtimeReconciler: recorder,
@@ -303,9 +303,9 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	if _, err := sessionStore.UpsertSession("proj-session", "sess-1", "az-1", daemonstate.SessionStateStarting); err != nil {
 		t.Fatalf("UpsertSession: %v", err)
 	}
-	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
-	t.Cleanup(func() { _ = projectionStore.Close() })
-	if err := projectionStore.UpsertWorktree(context.Background(), daemonstate.WorktreeProjection{
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
 		ProjectID: "proj-projection",
 		IssueID:   "az-2",
 		Path:      "/tmp/repo-az-2",
@@ -316,10 +316,10 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:             Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
-		sessionStore:    sessionStore,
-		projectionStore: projectionStore,
-		revision:        map[string]uint64{"proj-revision": 3},
+		cfg:               Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore:      sessionStore,
+		runtimeStateStore: runtimeStateStore,
+		revision:          map[string]uint64{"proj-revision": 3},
 	}
 
 	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
