@@ -26,7 +26,12 @@ trap cleanup EXIT INT TERM HUP
 
 run_tests() {
 	echo "[gate] running test check (go test ./...)"
-	go test ./... 2>&1 | tee "$test_log"
+	if go test ./... >"$test_log" 2>&1; then
+		cat "$test_log"
+		return 0
+	fi
+	cat "$test_log"
+	return 1
 }
 
 run_tests || {
@@ -39,7 +44,8 @@ run_tests || {
 		refreshed=1
 	fi
 
-	if grep -Eq 'FAIL[[:space:]].*internal/ui/board' "$test_log"; then
+	if grep -Eq 'FAIL[[:space:]].*internal/ui/board' "$test_log" &&
+		grep -Eq 'Render\(\) output mismatch|RenderCard\(\) output mismatch' "$test_log"; then
 		echo "[gate] detected board golden drift candidate; refreshing fixtures"
 		go test ./internal/ui/board -update
 		git add internal/ui/board/testdata/*.golden
