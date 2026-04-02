@@ -147,3 +147,44 @@ func TestLauncherStart_SkipsSpawnWhenLockOwnerAlive(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil (skip spawn when daemon lock owner alive)", err)
 	}
 }
+
+func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	tracker := &trackingWriteCloser{}
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+
+	readyCalls := 0
+	launcher.waitForReady = func(context.Context, string) error {
+		readyCalls++
+		if readyCalls == 1 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if readyCalls != 2 {
+		t.Fatalf("waitForReady call count = %d, want 2", readyCalls)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("daemon log file was not closed after Start() returned")
+	}
+}
