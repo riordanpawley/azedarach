@@ -225,6 +225,14 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
+	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID)
+	if r.logger != nil {
+		r.logger.Info("daemon operation submit requested",
+			"project_id", projectID,
+			"kind", body.Kind,
+			"issue_id", strings.TrimSpace(body.IssueID),
+		)
+	}
 	submitReq, err := r.buildSubmitRequest(body.Kind, coalesceProjectID(body.ProjectID, req.Meta.ProjectID), body.Payload, operationSubmitOverrides{
 		IssueID:      body.IssueID,
 		DedupeKey:    body.DedupeKey,
@@ -275,6 +283,15 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation submit response: %v", err))
 	}
 	resp.Body = encoded
+	if r.logger != nil {
+		r.logger.Info("daemon operation submit completed",
+			"project_id", projectID,
+			"kind", body.Kind,
+			"operation_id", record.OperationID,
+			"created", !submitResult.Deduped,
+			"state", record.State,
+		)
+	}
 	return resp
 }
 
@@ -282,6 +299,9 @@ func (r *operationRuntime) handleOperationGet(ctx context.Context, req protocol.
 	var body protocol.OperationGetRequestBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
+	}
+	if r.logger != nil {
+		r.logger.Info("daemon operation get requested", "operation_id", strings.TrimSpace(body.OperationID))
 	}
 	record, err := r.manager.Get(ctx, strings.TrimSpace(body.OperationID))
 	if err != nil {
@@ -293,6 +313,14 @@ func (r *operationRuntime) handleOperationGet(ctx context.Context, req protocol.
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation get response: %v", err))
 	}
 	resp.Body = encoded
+	if r.logger != nil {
+		r.logger.Info("daemon operation get completed",
+			"operation_id", record.ID,
+			"kind", record.Kind,
+			"state", record.State,
+			"project_id", record.ProjectID,
+		)
+	}
 	return resp
 }
 
@@ -302,6 +330,14 @@ func (r *operationRuntime) handleOperationList(ctx context.Context, req protocol
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
 	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID)
+	if r.logger != nil {
+		r.logger.Info("daemon operation list requested",
+			"project_id", projectID,
+			"issue_id", strings.TrimSpace(body.IssueID),
+			"kind", strings.TrimSpace(body.Kind),
+			"limit", body.Limit,
+		)
+	}
 	records, err := r.manager.List(ctx, daemonops.Query{
 		ProjectID: projectID,
 		IssueID:   strings.TrimSpace(body.IssueID),
@@ -325,6 +361,9 @@ func (r *operationRuntime) handleOperationList(ctx context.Context, req protocol
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation list response: %v", err))
 	}
 	resp.Body = encoded
+	if r.logger != nil {
+		r.logger.Info("daemon operation list completed", "project_id", projectID, "result_count", len(operations))
+	}
 	return resp
 }
 
@@ -332,6 +371,9 @@ func (r *operationRuntime) handleOperationCancel(ctx context.Context, req protoc
 	var body protocol.OperationCancelRequestBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
+	}
+	if r.logger != nil {
+		r.logger.Info("daemon operation cancel requested", "operation_id", strings.TrimSpace(body.OperationID), "reason", strings.TrimSpace(body.Reason))
 	}
 	record, err := r.manager.Cancel(ctx, strings.TrimSpace(body.OperationID), strings.TrimSpace(body.Reason))
 	if err != nil {
@@ -350,6 +392,14 @@ func (r *operationRuntime) handleOperationCancel(ctx context.Context, req protoc
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation cancel response: %v", err))
 	}
 	resp.Body = encoded
+	if r.logger != nil {
+		r.logger.Info("daemon operation cancel completed",
+			"operation_id", record.ID,
+			"kind", record.Kind,
+			"state", record.State,
+			"project_id", record.ProjectID,
+		)
+	}
 	return resp
 }
 

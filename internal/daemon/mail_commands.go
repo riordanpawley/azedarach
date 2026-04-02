@@ -39,6 +39,15 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	if repoDir == "" || parentIssue == "" || eventType == "" || strings.TrimSpace(cmd.Body) == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: repo_dir/parent_issue/type/body"), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon mail send requested",
+			"repo_dir", repoDir,
+			"parent_issue", parentIssue,
+			"issue_id", strings.TrimSpace(cmd.IssueID),
+			"type", eventType,
+			"body_bytes", len(cmd.Body),
+		)
+	}
 	unlock, err := lockMailbox(repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("lock mailbox: %v", err)), nil
@@ -74,6 +83,15 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	}
 	resp := d.successResponse(req)
 	resp.Body = out
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon mail send completed",
+			"repo_dir", repoDir,
+			"parent_issue", parentIssue,
+			"issue_id", event.IssueID,
+			"type", event.Type,
+			"seq", event.Seq,
+		)
+	}
 	return resp, nil
 }
 
@@ -87,6 +105,14 @@ func (d *Daemon) handleMailList(_ context.Context, req protocol.RequestEnvelope)
 	if repoDir == "" || parentIssue == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: repo_dir/parent_issue"), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon mail list requested",
+			"repo_dir", repoDir,
+			"parent_issue", parentIssue,
+			"since_seq", cmd.SinceSeq,
+			"limit", cmd.Limit,
+		)
+	}
 	events, err := readMailboxEvents(repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -98,6 +124,13 @@ func (d *Daemon) handleMailList(_ context.Context, req protocol.RequestEnvelope)
 	}
 	resp := d.successResponse(req)
 	resp.Body = body
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon mail list completed",
+			"repo_dir", repoDir,
+			"parent_issue", parentIssue,
+			"result_count", len(filtered),
+		)
+	}
 	return resp, nil
 }
 
@@ -111,6 +144,13 @@ func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope
 	if repoDir == "" || parentIssue == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: repo_dir/parent_issue"), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon mail watch requested",
+			"repo_dir", repoDir,
+			"parent_issue", parentIssue,
+			"since_seq", cmd.SinceSeq,
+		)
+	}
 	events, err := readMailboxEvents(repoDir, parentIssue)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -122,6 +162,13 @@ func (d *Daemon) handleMailWatch(_ context.Context, req protocol.RequestEnvelope
 	}
 	resp := d.successResponse(req)
 	resp.Body = body
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon mail watch completed",
+			"repo_dir", repoDir,
+			"parent_issue", parentIssue,
+			"result_count", len(filtered),
+		)
+	}
 	return resp, nil
 }
 

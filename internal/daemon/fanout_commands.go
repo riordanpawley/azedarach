@@ -46,6 +46,9 @@ func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnve
 	if repoDir == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: repo_dir"), nil
 	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon fanout requested", "repo_dir", repoDir, "apply", cmd.Apply)
+	}
 	spec, err := parseFanoutSpec(cmd.Spec)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
@@ -70,6 +73,14 @@ func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnve
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		resp.Body = body
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("daemon fanout plan completed",
+				"repo_dir", repoDir,
+				"parent_issue", parentIssue,
+				"node_count", len(flat),
+				"warning_count", len(warnings),
+			)
+		}
 		return resp, nil
 	}
 
@@ -84,6 +95,15 @@ func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnve
 	resp.Body = body
 	resp.Revision = d.nextRevision(d.projectID(req.Meta))
 	d.publishTaskEvent(req, "task.updated", resp.Revision)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon fanout apply completed",
+			"repo_dir", repoDir,
+			"parent_issue", result.ParentIssue,
+			"created_count", len(result.Created),
+			"blocks_added", result.BlocksAdded,
+			"revision", resp.Revision,
+		)
+	}
 	return resp, nil
 }
 
@@ -99,6 +119,9 @@ func (d *Daemon) handleIssueFanoutDrift(_ context.Context, req protocol.RequestE
 	issueID := strings.TrimSpace(cmd.IssueID)
 	if issueID == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: issue_id"), nil
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon fanout drift requested", "repo_dir", repoDir, "issue_id", issueID, "worktree", strings.TrimSpace(cmd.Worktree))
 	}
 	registry, err := loadFanoutRegistry(repoDir)
 	if err != nil {
@@ -130,6 +153,14 @@ func (d *Daemon) handleIssueFanoutDrift(_ context.Context, req protocol.RequestE
 	}
 	resp := d.successResponse(req)
 	resp.Body = body
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("daemon fanout drift completed",
+			"repo_dir", repoDir,
+			"issue_id", issueID,
+			"changed_count", len(changed),
+			"out_of_budget_count", len(result.OutOfBudget),
+		)
+	}
 	return resp, nil
 }
 
