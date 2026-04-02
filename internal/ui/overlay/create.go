@@ -340,6 +340,12 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.ApplyWindowSize(msg)
 		return c, nil
 	case tea.KeyMsg:
+		if isPasteAttachmentKey(msg) {
+			if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
+				return c, nil
+			}
+			return c, c.pasteAttachment()
+		}
 		switch msg.String() {
 		case "esc":
 			return c, func() tea.Msg { return CloseOverlayMsg{} }
@@ -354,17 +360,6 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+e":
 			return c, c.editInEditorCmd()
-
-		case "ctrl+o":
-			if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
-				return c, nil
-			}
-			return c, c.pasteAttachment()
-		case "ctrl+p":
-			if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
-				return c, nil
-			}
-			return c, c.pasteAttachment()
 
 		case "ctrl+k":
 			c.clearToDefaults()
@@ -564,6 +559,27 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return c, tea.Batch(cmds...)
 }
 
+func isPasteAttachmentKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyCtrlP:
+		return true
+	}
+
+	switch strings.ToLower(strings.TrimSpace(msg.String())) {
+	case "ctrl+p":
+		return true
+	}
+
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+		switch msg.Runes[0] {
+		case rune(0x10): // ^P
+			return true
+		}
+	}
+
+	return false
+}
+
 // View renders the form
 func (c *CreateTaskOverlay) View() string {
 	width, height := c.ClampResponsive(createTaskOverlayWidth, createTaskOverlayHeight)
@@ -589,7 +605,6 @@ func (c *CreateTaskOverlay) View() string {
 				{Key: "0/1/2/3/4", Description: "Set priority"},
 				{Key: "h/l or ←/→", Description: "Cycle impl combinations"},
 				{Key: "Ctrl+P", Description: "Paste image (edit task)"},
-				{Key: "Ctrl+O", Description: "Paste image (alias)"},
 				{Key: "j/k + d", Description: "Manage attachments"},
 				{Key: "Enter", Description: "Create task"},
 				{Key: "Ctrl+E", Description: "Edit in $EDITOR"},
