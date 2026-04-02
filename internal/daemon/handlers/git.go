@@ -20,6 +20,7 @@ const (
 	CommandGitDiffStat       = "git.diff_stat"
 	CommandGitStatus         = "git.status"
 	CommandGitRuntimeSignals = "git.runtime_signals"
+	CommandGitStatusSync     = "git.status_sync"
 	CommandGitMergePreflight = "git.merge_preflight"
 	CommandGitDiscardChanges = "git.discard_changes"
 	CommandGitCheckpoint     = "git.checkpoint"
@@ -33,6 +34,7 @@ type GitService interface {
 	AbortMerge(ctx context.Context, projectID, worktree string) error
 	DiffStat(ctx context.Context, projectID, worktree, baseBranch string) (string, error)
 	Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
+	StatusSync(ctx context.Context, projectID, worktree string, status git.GitStatus, forcePublish bool) error
 	RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]GitRuntimeSignalsResult, int, error)
 }
 
@@ -157,6 +159,12 @@ type gitStatusResultBody struct {
 	Status   git.GitStatus `json:"status"`
 }
 
+type gitStatusSyncBody struct {
+	Worktree     string        `json:"worktree"`
+	Status       git.GitStatus `json:"status"`
+	ForcePublish bool          `json:"force_publish,omitempty"`
+}
+
 type gitMergeResultBody struct {
 	Worktree string          `json:"worktree"`
 	Branch   string          `json:"branch"`
@@ -231,6 +239,8 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 			return resp
 		}
 		return h.handleRuntimeSignals(ctx, resp, cmd)
+	case CommandGitStatusSync:
+		return h.handleStatusSync(ctx, resp, req)
 	case CommandGitMergePreflight:
 		return h.handleMergePreflight(ctx, resp, req)
 	case CommandGitDiscardChanges:
@@ -513,6 +523,43 @@ func (h *GitHandler) handleStatus(ctx context.Context, resp protocol.ResponseEnv
 	}
 
 	resp.OK = true
+	resp.Body = body
+	return resp
+}
+
+func (h *GitHandler) handleStatusSync(ctx context.Context, resp protocol.ResponseEnvelope, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	var cmd gitStatusSyncBody
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   fmt.Sprintf("invalid git status sync body: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
+	cmd.Worktree = strings.TrimSpace(cmd.Worktree)
+	if cmd.Worktree == "" {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInvalidRequest,
+			Message:   "worktree is required",
+			Retryable: false,
+		}
+		return resp
+	}
+	projectID := resolveProjectID("", req.Meta)
+	if err := h.service.StatusSync(ctx, projectID, cmd.Worktree, cmd.Status, cmd.ForcePublish); err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+	body, err := json.Marshal(gitStatusResultBody{Worktree: cmd.Worktree, Status: cmd.Status})
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeInternal,
+			Message:   fmt.Sprintf("failed to marshal git status sync result: %v", err),
+			Retryable: false,
+		}
+		return resp
+	}
 	resp.Body = body
 	return resp
 }

@@ -25,7 +25,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 	for _, want := range []string{
 		"notify <event> <issue-id>",
 		"hooks install <issue-id>",
-		"githooks <install|update|run|notify>",
+		"githooks <install|update|run|notify|hook>",
 		"gate <issue-id>",
 		"dev gate <issue-id>",
 		"opencode <init|plugin>",
@@ -37,6 +37,7 @@ func TestPrintUsageIncludesNewCommandFamilies(t *testing.T) {
 		"az githooks update",
 		"az githooks run",
 		"az githooks notify",
+		"az githooks hook --hook pre-commit",
 		"az gate az-123",
 		"az dev gate az-123",
 		"az opencode init",
@@ -82,7 +83,7 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read pre-commit: %v", err)
 	}
-	if !strings.Contains(string(data), "az githooks run") {
+	if !strings.Contains(string(data), "az githooks hook --hook pre-commit") {
 		t.Fatalf("pre-commit content = %q", string(data))
 	}
 	for _, hookName := range []string{"post-commit", "post-merge", "post-checkout", "post-rewrite"} {
@@ -91,7 +92,7 @@ func TestGitHooksInstallCommandWritesPreCommitHook(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", hookName, err)
 		}
-		if !strings.Contains(string(hookData), "az githooks notify") {
+		if !strings.Contains(string(hookData), "az githooks hook --hook "+hookName) {
 			t.Fatalf("%s content = %q", hookName, string(hookData))
 		}
 	}
@@ -133,7 +134,7 @@ func TestGitHooksInstallCommandPreservesCustomHookContent(t *testing.T) {
 	if !strings.Contains(content, "echo custom-pre-commit") {
 		t.Fatalf("pre-commit lost custom content: %q", content)
 	}
-	if got := strings.Count(content, "az githooks run \"$@\""); got != 1 {
+	if got := strings.Count(content, "az githooks hook --hook pre-commit \"$@\""); got != 1 {
 		t.Fatalf("managed command count = %d, want 1; content = %q", got, content)
 	}
 	if got := strings.Count(content, gitHookManagedBlockStart); got != 1 {
@@ -171,7 +172,7 @@ func TestGitHooksInstallCommandInjectsManagedBlockBeforeEarlyReturn(t *testing.T
 		t.Fatalf("read pre-commit: %v", err)
 	}
 	content := string(data)
-	managedIndex := strings.Index(content, "az githooks run \"$@\"")
+	managedIndex := strings.Index(content, "az githooks hook --hook pre-commit \"$@\"")
 	exitIndex := strings.Index(content, "exit 0")
 	if managedIndex < 0 || exitIndex < 0 {
 		t.Fatalf("expected managed command and exit line in content: %q", content)
@@ -181,7 +182,7 @@ func TestGitHooksInstallCommandInjectsManagedBlockBeforeEarlyReturn(t *testing.T
 	}
 }
 
-func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
+func TestGitHooksNotifyCommandSyncsDaemonGitStatus(t *testing.T) {
 	projectDir := t.TempDir()
 	initCmd := exec.Command("git", "-C", projectDir, "init")
 	initCmd.Env = gitExecEnvWithoutRoutingVars()
@@ -210,8 +211,8 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if err := GitHooksNotifyCommand(deps, opts); err != nil {
 		t.Fatalf("GitHooksNotifyCommand error: %v", err)
 	}
-	if gotReq.Command != daemonclient.CommandGitStatus {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatus)
+	if gotReq.Command != daemonclient.CommandGitStatusSync {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatusSync)
 	}
 	var body daemonclient.GitCommandRequest
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
@@ -230,7 +231,7 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	}
 }
 
-func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
+func TestGitHooksRunCommandExecutesConfiguredPreCommitCommands(t *testing.T) {
 	projectDir := t.TempDir()
 	cmd := exec.Command("git", "-C", projectDir, "init")
 	cmd.Env = gitExecEnvWithoutRoutingVars()
@@ -239,10 +240,7 @@ func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.GitHooks.SpecSync.Enabled = true
-	cfg.GitHooks.SpecSync.Command = "mkdir -p docs/spec && printf 'ok\\n' > docs/spec/.spec-sync-ran"
-	cfg.GitHooks.SpecSync.AutoStageDocs = false
-	cfg.GitHooks.BoundaryCheck.Enabled = false
+	cfg.GitHooks.Commands["pre-commit"] = []string{"mkdir -p docs/spec && printf 'ok\\n' > docs/spec/.spec-sync-ran"}
 
 	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
 	if err != nil {
@@ -253,11 +251,11 @@ func TestGitHooksRunCommandExecutesConfiguredSpecSync(t *testing.T) {
 		t.Fatalf("GitHooksRunCommand error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", ".spec-sync-ran")); err != nil {
-		t.Fatalf("expected spec sync marker: %v", err)
+		t.Fatalf("expected pre-commit command marker: %v", err)
 	}
 }
 
-func TestGitHooksRunCommandRequiresSpecSyncCommandWhenEnabled(t *testing.T) {
+func TestGitHooksRunCommandBestEffortContinuesOnFailures(t *testing.T) {
 	projectDir := t.TempDir()
 	initCmd := exec.Command("git", "-C", projectDir, "init")
 	initCmd.Env = gitExecEnvWithoutRoutingVars()
@@ -266,64 +264,18 @@ func TestGitHooksRunCommandRequiresSpecSyncCommandWhenEnabled(t *testing.T) {
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.GitHooks.SpecSync.Enabled = true
-	cfg.GitHooks.SpecSync.Command = ""
-	cfg.GitHooks.BoundaryCheck.Enabled = false
+	cfg.GitHooks.Commands["pre-commit"] = []string{"exit 7", "mkdir -p docs/spec && printf 'ok\\n' > docs/spec/.best-effort-ran"}
 
 	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
 	if err != nil {
 		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
 	}
 
-	err = GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts)
-	if err == nil || !strings.Contains(err.Error(), "githooks spec sync command is enabled but no command is configured") {
-		t.Fatalf("expected missing spec sync command error, got %v", err)
+	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts); err != nil {
+		t.Fatalf("expected best-effort success, got %v", err)
 	}
-}
-
-func TestGitHooksRunCommandRequiresBoundaryCommandWhenEnabled(t *testing.T) {
-	projectDir := t.TempDir()
-	initCmd := exec.Command("git", "-C", projectDir, "init")
-	initCmd.Env = gitExecEnvWithoutRoutingVars()
-	if err := initCmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	configNameCmd := exec.Command("git", "-C", projectDir, "config", "user.name", "Test User")
-	configNameCmd.Env = gitExecEnvWithoutRoutingVars()
-	if err := configNameCmd.Run(); err != nil {
-		t.Fatalf("git config user.name: %v", err)
-	}
-	configEmailCmd := exec.Command("git", "-C", projectDir, "config", "user.email", "test@example.com")
-	configEmailCmd.Env = gitExecEnvWithoutRoutingVars()
-	if err := configEmailCmd.Run(); err != nil {
-		t.Fatalf("git config user.email: %v", err)
-	}
-	internalDir := filepath.Join(projectDir, "internal")
-	if err := os.MkdirAll(internalDir, 0o755); err != nil {
-		t.Fatalf("mkdir internal dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(internalDir, "pkg.go"), []byte("package internal\n"), 0o644); err != nil {
-		t.Fatalf("write staged file: %v", err)
-	}
-	addCmd := exec.Command("git", "-C", projectDir, "add", "internal/pkg.go")
-	addCmd.Env = gitExecEnvWithoutRoutingVars()
-	if err := addCmd.Run(); err != nil {
-		t.Fatalf("git add staged boundary path: %v", err)
-	}
-
-	cfg := config.DefaultConfig()
-	cfg.GitHooks.SpecSync.Enabled = false
-	cfg.GitHooks.BoundaryCheck.Enabled = true
-	cfg.GitHooks.BoundaryCheck.Command = ""
-
-	opts, err := ParseGitHooksRunArgs([]string{"--project-dir", projectDir})
-	if err != nil {
-		t.Fatalf("ParseGitHooksRunArgs error: %v", err)
-	}
-
-	err = GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, opts)
-	if err == nil || !strings.Contains(err.Error(), "githooks boundary check is enabled but no command is configured") {
-		t.Fatalf("expected missing boundary command error, got %v", err)
+	if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", ".best-effort-ran")); err != nil {
+		t.Fatalf("expected post-failure command marker: %v", err)
 	}
 }
 

@@ -224,6 +224,22 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 	return status, nil
 }
 
+func (a *gitServiceAdapter) StatusSync(ctx context.Context, projectID, worktree string, status git.GitStatus, forcePublish bool) error {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return fmt.Errorf("worktree is required")
+	}
+	snapshot := status
+	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, &snapshot)
+	a.invalidateRuntimeSignalCache(projectID, worktree)
+	a.ensureStatusPoller(projectID, worktree)
+	if (forcePublish || changed) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
+		a.onStatusUpdate(projectID, issueID, worktree)
+	}
+	return nil
+}
+
 func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) {
 	status, err := a.client.Status(ctx, worktree)
 	if err != nil {

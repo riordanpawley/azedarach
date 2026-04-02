@@ -17,6 +17,7 @@ type fakeGitService struct {
 	abortMergeFn     func(context.Context, string, string) error
 	diffStatFn       func(context.Context, string, string, string) (string, error)
 	statusFn         func(context.Context, string, string) (*git.GitStatus, error)
+	statusSyncFn     func(context.Context, string, string, git.GitStatus, bool) error
 	runtimeSignalsFn func(context.Context, string, []GitRuntimeSignalsTarget, string, bool, string) ([]GitRuntimeSignalsResult, int, error)
 	preflightFn      func(context.Context, string, GitMergePreflightRequest) (*GitMergePreflightResult, error)
 	discardFn        func(context.Context, string, string) (*GitDiscardChangesResult, error)
@@ -79,6 +80,13 @@ func (f *fakeGitService) RuntimeSignals(ctx context.Context, projectID string, t
 		return f.runtimeSignalsFn(ctx, projectID, targets, baseBranch, compareRemote, remote)
 	}
 	return nil, 0, nil
+}
+
+func (f *fakeGitService) StatusSync(ctx context.Context, projectID, worktree string, status git.GitStatus, forcePublish bool) error {
+	if f.statusSyncFn != nil {
+		return f.statusSyncFn(ctx, projectID, worktree, status, forcePublish)
+	}
+	return nil
 }
 
 func (f *fakeGitService) MergePreflight(ctx context.Context, projectID string, req GitMergePreflightRequest) (*GitMergePreflightResult, error) {

@@ -45,7 +45,7 @@ func TestRunGitHooksCommandHelpAndDispatch(t *testing.T) {
 	output := captureMainStdout(t, func() error {
 		return runGitHooksCommand(config.DefaultConfig(), []string{"--help"})
 	})
-	if !strings.Contains(output, "Usage: az githooks <install|update|run|notify>") {
+	if !strings.Contains(output, "Usage: az githooks <install|update|run|notify|hook>") {
 		t.Fatalf("help output = %q", output)
 	}
 

@@ -52,8 +52,42 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "commands": {
+          "type": "object",
+          "description": "Shell commands keyed by git hook name (for example pre-commit, post-commit).",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {}
+        },
+        "bestEffort": {
+          "type": "boolean",
+          "description": "Run hook pipeline in best-effort mode (errors are logged but do not fail the hook process).",
+          "default": true
+        },
+        "restage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          }
+        },
         "specSync": {
           "type": "object",
+          "description": "Deprecated compatibility field; prefer githooks.commands.pre-commit.",
           "additionalProperties": false,
           "properties": {
             "enabled": {
@@ -72,6 +106,7 @@
         },
         "boundaryCheck": {
           "type": "object",
+          "description": "Deprecated compatibility field; prefer githooks.commands.pre-commit.",
           "additionalProperties": false,
           "properties": {
             "enabled": {

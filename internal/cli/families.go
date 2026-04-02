@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
@@ -66,12 +67,21 @@ type GitHooksInstallOptions struct {
 type GitHooksRunOptions struct {
 	ProjectDir string
 	Verbose    bool
+	HookArgs   []string
 }
 
 type GitHooksNotifyOptions struct {
 	ProjectDir string
 	Hook       string
 	Verbose    bool
+	HookArgs   []string
+}
+
+type GitHooksHookOptions struct {
+	ProjectDir string
+	Hook       string
+	Verbose    bool
+	HookArgs   []string
 }
 
 type GateOptions struct {
@@ -196,9 +206,7 @@ func ParseGitHooksRunArgs(args []string) (GitHooksRunOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return GitHooksRunOptions{}, err
 	}
-	if fs.NArg() != 0 {
-		return GitHooksRunOptions{}, fmt.Errorf("usage: az githooks run [--project-dir <dir>] [--verbose]")
-	}
+	opts.HookArgs = append([]string(nil), fs.Args()...)
 	return opts, nil
 }
 
@@ -213,9 +221,25 @@ func ParseGitHooksNotifyArgs(args []string) (GitHooksNotifyOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		return GitHooksNotifyOptions{}, err
 	}
-	if fs.NArg() != 0 {
-		return GitHooksNotifyOptions{}, fmt.Errorf("usage: az githooks notify [--project-dir <dir>] [--hook <name>] [--verbose]")
+	opts.HookArgs = append([]string(nil), fs.Args()...)
+	return opts, nil
+}
+
+func ParseGitHooksHookArgs(args []string) (GitHooksHookOptions, error) {
+	opts := GitHooksHookOptions{}
+	fs := flag.NewFlagSet("githooks hook", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.ProjectDir, "project-dir", "", "project directory")
+	fs.StringVar(&opts.Hook, "hook", "", "hook name")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "verbose output")
+	if err := fs.Parse(args); err != nil {
+		return GitHooksHookOptions{}, err
 	}
+	opts.Hook = strings.TrimSpace(opts.Hook)
+	if opts.Hook == "" {
+		return GitHooksHookOptions{}, fmt.Errorf("usage: az githooks hook --hook <name> [--project-dir <dir>] [--verbose] [hook-args...]")
+	}
+	opts.HookArgs = append([]string(nil), fs.Args()...)
 	return opts, nil
 }
 
@@ -496,23 +520,23 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 	}
 	hookScripts := map[string]gitHookInstallSpec{
 		"pre-commit": {
-			command: "az githooks run \"$@\"",
+			command: "az githooks hook --hook pre-commit \"$@\" >/dev/null 2>&1 || true",
 			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks run \"$@\"\n",
 		},
 		"post-commit": {
-			command: "az githooks notify --hook post-commit >/dev/null 2>&1 || true",
+			command: "az githooks hook --hook post-commit \"$@\" >/dev/null 2>&1 || true",
 			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-commit >/dev/null 2>&1 || true\n",
 		},
 		"post-merge": {
-			command: "az githooks notify --hook post-merge >/dev/null 2>&1 || true",
+			command: "az githooks hook --hook post-merge \"$@\" >/dev/null 2>&1 || true",
 			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-merge >/dev/null 2>&1 || true\n",
 		},
 		"post-checkout": {
-			command: "az githooks notify --hook post-checkout >/dev/null 2>&1 || true",
+			command: "az githooks hook --hook post-checkout \"$@\" >/dev/null 2>&1 || true",
 			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-checkout >/dev/null 2>&1 || true\n",
 		},
 		"post-rewrite": {
-			command: "az githooks notify --hook post-rewrite >/dev/null 2>&1 || true",
+			command: "az githooks hook --hook post-rewrite \"$@\" >/dev/null 2>&1 || true",
 			legacy:  "#!/usr/bin/env sh\nset -eu\naz githooks notify --hook post-rewrite >/dev/null 2>&1 || true\n",
 		},
 	}
@@ -536,67 +560,117 @@ func GitHooksInstallCommand(deps *Dependencies, opts GitHooksInstallOptions) err
 }
 
 func GitHooksRunCommand(deps *Dependencies, opts GitHooksRunOptions) error {
-	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
-	if err != nil {
-		return err
-	}
-
-	cfg := (*config.Config)(nil)
-	if deps != nil && deps.Config != nil {
-		cfg = deps.Config
-	} else {
-		cfg, err = config.LoadConfig(projectDir)
-		if err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-	}
-
-	specSyncCfg := cfg.GitHooks.SpecSync
-	if specSyncCfg.Enabled {
-		command := strings.TrimSpace(specSyncCfg.Command)
-		if command == "" {
-			return fmt.Errorf("githooks spec sync command is enabled but no command is configured")
-		}
-		if opts.Verbose {
-			fmt.Printf("githooks: spec sync command: %s\n", command)
-		}
-		if err := runShellCommand(projectDir, command); err != nil {
-			return fmt.Errorf("githooks spec sync failed: %w", err)
-		}
-		if specSyncCfg.AutoStageDocs && opts.Verbose {
-			fmt.Println("githooks: docs/spec auto-stage skipped (thin-client mode); stage manually if needed")
-		}
-	}
-
-	boundaryCfg := cfg.GitHooks.BoundaryCheck
-	if boundaryCfg.Enabled {
-		if os.Getenv("AZEDARACH_SKIP_BOUNDARY_CHECK") == "1" {
-			fmt.Println("githooks: boundary checks skipped (AZEDARACH_SKIP_BOUNDARY_CHECK=1)")
-			return nil
-		}
-		command := strings.TrimSpace(boundaryCfg.Command)
-		if command == "" {
-			return fmt.Errorf("githooks boundary check is enabled but no command is configured")
-		}
-		if opts.Verbose {
-			fmt.Printf("githooks: boundary command: %s\n", command)
-		}
-		if err := runShellCommand(projectDir, command); err != nil {
-			return fmt.Errorf("githooks boundary check failed: %w", err)
-		}
-	}
-
-	return nil
+	return GitHooksHookCommand(deps, GitHooksHookOptions{
+		ProjectDir: opts.ProjectDir,
+		Hook:       "pre-commit",
+		Verbose:    opts.Verbose,
+		HookArgs:   append([]string(nil), opts.HookArgs...),
+	})
 }
 
 func GitHooksNotifyCommand(deps *Dependencies, opts GitHooksNotifyOptions) error {
+	return GitHooksHookCommand(deps, GitHooksHookOptions{
+		ProjectDir: opts.ProjectDir,
+		Hook:       strings.TrimSpace(opts.Hook),
+		Verbose:    opts.Verbose,
+		HookArgs:   append([]string(nil), opts.HookArgs...),
+	})
+}
+
+func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 	projectDir, err := resolveProjectDir(opts.ProjectDir, deps)
 	if err != nil {
 		return err
 	}
-	worktreeRoot, err := config.ResolveWorktreeRoot(projectDir)
+	cfg, err := loadConfigForHook(projectDir, deps)
 	if err != nil {
 		if opts.Verbose {
+			fmt.Fprintf(os.Stderr, "githooks hook: load config failed: %v\n", err)
+		}
+		return nil
+	}
+	hookName := strings.TrimSpace(opts.Hook)
+	if hookName == "" {
+		if opts.Verbose {
+			fmt.Fprintln(os.Stderr, "githooks hook: hook name is required")
+		}
+		return nil
+	}
+
+	for _, command := range configuredCommandsForHook(cfg, hookName) {
+		if opts.Verbose {
+			fmt.Printf("githooks %s: %s\n", hookName, command)
+		}
+		if runErr := runShellCommand(projectDir, command); runErr != nil {
+			if !cfg.GitHooks.BestEffort {
+				return fmt.Errorf("githooks %s command failed: %w", hookName, runErr)
+			}
+			if opts.Verbose {
+				fmt.Fprintf(os.Stderr, "githooks %s command failed: %v\n", hookName, runErr)
+			}
+		}
+	}
+	if cfg.GitHooks.Restage.Enabled {
+		if err := restageHookChanges(projectDir, cfg.GitHooks.Restage.Paths); err != nil {
+			if !cfg.GitHooks.BestEffort {
+				return fmt.Errorf("githooks %s restage failed: %w", hookName, err)
+			}
+			if opts.Verbose {
+				fmt.Fprintf(os.Stderr, "githooks %s restage failed: %v\n", hookName, err)
+			}
+		}
+	}
+
+	return reconcileDaemonGitState(projectDir, deps, hookName, opts.Verbose)
+}
+
+func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, error) {
+	if deps != nil && deps.Config != nil {
+		return deps.Config, nil
+	}
+	cfg, err := config.LoadConfig(projectDir)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	return cfg, nil
+}
+
+func configuredCommandsForHook(cfg *config.Config, hookName string) []string {
+	commands := make([]string, 0)
+	if cfg != nil && cfg.GitHooks.Commands != nil {
+		for _, command := range cfg.GitHooks.Commands[hookName] {
+			command = strings.TrimSpace(command)
+			if command != "" {
+				commands = append(commands, command)
+			}
+		}
+	}
+	return commands
+}
+
+func restageHookChanges(projectDir string, paths []string) error {
+	cleaned := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			cleaned = append(cleaned, path)
+		}
+	}
+	if len(cleaned) == 0 {
+		return runShellCommand(projectDir, "git add -A")
+	}
+	for _, path := range cleaned {
+		if err := runShellCommand(projectDir, "git add -A -- "+shellSingleQuote(path)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName string, verbose bool) error {
+	worktreeRoot, err := config.ResolveWorktreeRoot(projectDir)
+	if err != nil {
+		if verbose {
 			fmt.Fprintf(os.Stderr, "githooks notify: resolve worktree root failed: %v\n", err)
 		}
 		return nil
@@ -607,20 +681,70 @@ func GitHooksNotifyCommand(deps *Dependencies, opts GitHooksNotifyOptions) error
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	if knownStatus, ok := localGitStatusSnapshot(worktreeRoot); ok {
+		if err := deps.DaemonClient.GitStatusSync(ctx, worktreeRoot, knownStatus, true); err == nil {
+			if verbose {
+				fmt.Printf("githooks hook: synced daemon git state for %s (%s)\n", worktreeRoot, hookName)
+			}
+			return nil
+		}
+	}
 	if _, err := deps.DaemonClient.GitStatus(ctx, worktreeRoot); err != nil {
-		if opts.Verbose {
-			fmt.Fprintf(os.Stderr, "githooks notify: daemon git status refresh failed for %s: %v\n", worktreeRoot, err)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "githooks hook: daemon git status refresh failed for %s: %v\n", worktreeRoot, err)
 		}
 		return nil
 	}
-	if opts.Verbose {
-		hookName := strings.TrimSpace(opts.Hook)
-		if hookName == "" {
-			hookName = "unknown"
-		}
-		fmt.Printf("githooks notify: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)
+	if verbose {
+		fmt.Printf("githooks hook: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)
 	}
 	return nil
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func localGitStatusSnapshot(worktreeRoot string) (daemonclient.GitStatus, bool) {
+	output, err := runShellCommandOutput(worktreeRoot, "git status --porcelain")
+	if err != nil {
+		return daemonclient.GitStatus{}, false
+	}
+	status := daemonclient.GitStatus{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || len(line) < 3 {
+			continue
+		}
+		indexStatus := line[0]
+		worktreeStatus := line[1]
+		path := strings.TrimSpace(line[2:])
+		if path == "" {
+			continue
+		}
+		if indexStatus == '?' && worktreeStatus == '?' {
+			status.Untracked = append(status.Untracked, path)
+			continue
+		}
+		switch indexStatus {
+		case 'A', 'C':
+			status.Added = append(status.Added, path)
+			status.Staged = append(status.Staged, path)
+		case 'M', 'R':
+			status.Staged = append(status.Staged, path)
+		case 'D':
+			status.Deleted = append(status.Deleted, path)
+			status.Staged = append(status.Staged, path)
+		}
+		switch worktreeStatus {
+		case 'M':
+			status.Modified = append(status.Modified, path)
+		case 'D':
+			status.Deleted = append(status.Deleted, path)
+		}
+	}
+	status.HasChanges = len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Staged) > 0
+	return status, true
 }
 
 func GateCommand(_ *Dependencies, opts GateOptions) error {
@@ -1174,7 +1298,7 @@ func PrintHooksUsage() {
 }
 
 func PrintGitHooksUsage() {
-	fmt.Println("Usage: az githooks <install|update|run|notify> [--project-dir <dir>] [--verbose]")
+	fmt.Println("Usage: az githooks <install|update|run|notify|hook> [--project-dir <dir>] [--verbose]")
 	fmt.Println("Manage repository git hooks and execute configured hook tasks.")
 }
 
@@ -1662,6 +1786,17 @@ func runShellCommand(projectDir, command string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func runShellCommandOutput(projectDir, command string) (string, error) {
+	cmd := exec.Command("/bin/sh", "-lc", command)
+	cmd.Dir = projectDir
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }
 
 func setGitHooksPath(projectDir, hooksPath string) error {
