@@ -23,6 +23,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/appdeps"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -206,8 +207,6 @@ type Model struct {
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
 }
-
-const daemonReattachRetryInterval = 5 * time.Second
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
@@ -1022,32 +1021,6 @@ func (m Model) lookupTaskIDByWorktree(worktree string) string {
 	return ""
 }
 
-func shouldAttemptDaemonReattach(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "daemon socket unavailable") {
-		return true
-	}
-	if !strings.Contains(message, "daemon command transport") {
-		return false
-	}
-	return strings.Contains(message, "dial unix") ||
-		strings.Contains(message, "connect: no such file or directory") ||
-		strings.Contains(message, "connection refused")
-}
-
-func shouldQueueDaemonReattach(lastAttempt, now time.Time, err error) bool {
-	if !shouldAttemptDaemonReattach(err) {
-		return false
-	}
-	if lastAttempt.IsZero() {
-		return true
-	}
-	return now.Sub(lastAttempt) >= daemonReattachRetryInterval
-}
-
 // Commands
 
 // loadIssuesCmd returns a command that fetches issues from the CLI
@@ -1410,15 +1383,11 @@ func (m *Model) applySessionProjectionEvent(evt protocol.EventEnvelope) {
 }
 
 func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision {
-	switch evt.Event {
-	case protocol.EventWorktreeProjectionUpdated, protocol.EventGitStatusUpdated:
-		return daemonEventIgnore
-	}
 	cursor := protocol.StreamCursor{Revision: m.daemonRevision}
-	switch cursor.Decide(evt) {
-	case protocol.StreamProjectionDecisionIgnore:
+	switch reconnect.DecideProjectionAction(cursor, evt) {
+	case reconnect.ProjectionReconciliationIgnore:
 		return daemonEventIgnore
-	case protocol.StreamProjectionDecisionResync:
+	case reconnect.ProjectionReconciliationRehydrate:
 		return daemonEventRehydrate
 	default:
 		return daemonEventRefreshSnapshot

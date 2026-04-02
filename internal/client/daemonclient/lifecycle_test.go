@@ -602,7 +602,7 @@ func TestSubscribeRetriesUseProjectFallbackAndFromRevision(t *testing.T) {
 	transport := &lifecycleRecordingTransport{}
 	transport.subscribeFn = func(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
 		if transport.subscribeCalls < 3 {
-			return nil, errors.New("not ready")
+			return nil, errors.New("dial unix /tmp/daemon.sock: connect: connection refused")
 		}
 		ch := make(chan protocol.EventEnvelope, 1)
 		ch <- protocol.EventEnvelope{
@@ -639,5 +639,28 @@ func TestSubscribeRetriesUseProjectFallbackAndFromRevision(t *testing.T) {
 	}
 	if transport.lastSubscribeFromRevision != 17 {
 		t.Fatalf("subscribe from_revision = %d, want 17", transport.lastSubscribeFromRevision)
+	}
+}
+
+func TestSubscribeDoesNotRetryPermanentTransportErrors(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		subscribeFn: func(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
+			return nil, errors.New("permission denied")
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a").WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 3,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := client.Subscribe(ctx, "", 17); err == nil {
+		t.Fatal("expected subscribe error")
+	}
+	if transport.subscribeCalls != 1 {
+		t.Fatalf("subscribe calls = %d, want 1", transport.subscribeCalls)
 	}
 }

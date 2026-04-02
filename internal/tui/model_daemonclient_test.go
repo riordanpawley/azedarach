@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -872,21 +873,21 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 func TestShouldAttemptDaemonReattach(t *testing.T) {
 	t.Run("socket missing transport error", func(t *testing.T) {
 		err := errors.New("daemon command transport: dial unix /Users/riordan/.azedarach/run/daemon.sock: connect: no such file or directory")
-		if !shouldAttemptDaemonReattach(err) {
+		if !reconnect.IsTransientTransportError(err) {
 			t.Fatal("expected daemon reattach for missing socket transport error")
 		}
 	})
 
 	t.Run("daemon socket unavailable", func(t *testing.T) {
 		err := errors.New("daemon socket unavailable: stat /tmp/azedarach/daemon.sock: no such file or directory")
-		if !shouldAttemptDaemonReattach(err) {
+		if !reconnect.IsTransientTransportError(err) {
 			t.Fatal("expected daemon reattach for unavailable socket error")
 		}
 	})
 
 	t.Run("command validation failure", func(t *testing.T) {
 		err := errors.New("failed to update task: invalid request: status transition blocked")
-		if shouldAttemptDaemonReattach(err) {
+		if reconnect.IsTransientTransportError(err) {
 			t.Fatal("did not expect daemon reattach for non-transport daemon error")
 		}
 	})
@@ -895,30 +896,31 @@ func TestShouldAttemptDaemonReattach(t *testing.T) {
 func TestShouldQueueDaemonReattach(t *testing.T) {
 	now := time.Now()
 	socketErr := errors.New("daemon command transport: dial unix /Users/riordan/.azedarach/run/daemon.sock: connect: no such file or directory")
+	policy := reconnect.DefaultReconciliationPolicy()
 
 	t.Run("first transport failure", func(t *testing.T) {
-		if !shouldQueueDaemonReattach(time.Time{}, now, socketErr) {
+		if !policy.ShouldQueueReattach(time.Time{}, now, socketErr) {
 			t.Fatal("expected first transport error to queue reattach")
 		}
 	})
 
 	t.Run("within retry interval", func(t *testing.T) {
-		last := now.Add(-daemonReattachRetryInterval + time.Second)
-		if shouldQueueDaemonReattach(last, now, socketErr) {
+		last := now.Add(-policy.ReattachRetryInterval + time.Second)
+		if policy.ShouldQueueReattach(last, now, socketErr) {
 			t.Fatal("did not expect reattach within retry interval")
 		}
 	})
 
 	t.Run("after retry interval", func(t *testing.T) {
-		last := now.Add(-daemonReattachRetryInterval - time.Second)
-		if !shouldQueueDaemonReattach(last, now, socketErr) {
+		last := now.Add(-policy.ReattachRetryInterval - time.Second)
+		if !policy.ShouldQueueReattach(last, now, socketErr) {
 			t.Fatal("expected reattach after retry interval")
 		}
 	})
 
 	t.Run("non transport error", func(t *testing.T) {
 		err := errors.New("failed to update task: invalid request")
-		if shouldQueueDaemonReattach(time.Time{}, now, err) {
+		if policy.ShouldQueueReattach(time.Time{}, now, err) {
 			t.Fatal("did not expect reattach for non-transport error")
 		}
 	})

@@ -130,7 +130,7 @@ func TestClientSubscribeRetry(t *testing.T) {
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
 			attempts++
 			if attempts < 3 {
-				return nil, errors.New("not ready")
+				return nil, errors.New("dial unix /tmp/daemon.sock: connect: connection refused")
 			}
 			ch := make(chan protocol.EventEnvelope, 1)
 			ch <- protocol.EventEnvelope{Revision: 7, Event: "ok"}
@@ -151,6 +151,32 @@ func TestClientSubscribeRetry(t *testing.T) {
 	evt := <-ch
 	if evt.Revision != 7 {
 		t.Fatalf("event revision = %d, want 7", evt.Revision)
+	}
+	if attempts != 3 {
+		t.Fatalf("subscribe attempts = %d, want 3", attempts)
+	}
+}
+
+func TestClientSubscribeDoesNotRetryPermanentTransportError(t *testing.T) {
+	attempts := 0
+	c := New(&fakeTransport{
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			attempts++
+			return nil, errors.New("permission denied")
+		},
+	}).WithReconnectPolicy(reconnect.Policy{
+		MaxAttempts: 5,
+		BaseBackoff: 0,
+		MaxBackoff:  0,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := c.Subscribe(ctx, "proj", 0); err == nil {
+		t.Fatal("expected permanent subscribe error")
+	}
+	if attempts != 1 {
+		t.Fatalf("subscribe attempts = %d, want 1", attempts)
 	}
 }
 

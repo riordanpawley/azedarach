@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
@@ -187,7 +188,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.boardRefreshing = false
 		cmds := []tea.Cmd{tickEvery(5 * time.Second)}
-		if shouldQueueDaemonReattach(m.lastDaemonReattachAttempt, now, msg.err) {
+		if reconnect.DefaultReconciliationPolicy().ShouldQueueReattach(m.lastDaemonReattachAttempt, now, msg.err) {
 			m.lastDaemonReattachAttempt = now
 			cmds = append(cmds, m.attachDaemonCmd())
 		}
