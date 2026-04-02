@@ -705,15 +705,28 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			HasUncommittedChanges:    true,
 			GitAdditions:             10,
 			GitDeletions:             3,
+			GitBehindCount:           4,
 			PendingOperationState:    "running",
 			PendingOperationPercent:  50,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, "W") || !strings.Contains(got, "M:R50") || !strings.Contains(got, "G*") {
+		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, "W") || !strings.Contains(got, "M:R50") || !strings.Contains(got, "G*↓4") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
 		}
 		if strings.Contains(got, "+10/-3") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, should omit verbose line-change token", got)
+		}
+	})
+
+	t.Run("shows directional pairing without line changes", func(t *testing.T) {
+		signals := &RuntimeSignals{
+			HasWorktree:    true,
+			GitAheadCount:  2,
+			GitBehindCount: 3,
+		}
+		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
+		if !strings.Contains(got, "G↑2/↓3") {
+			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing directional ahead/behind pairing", got)
 		}
 	})
 }
