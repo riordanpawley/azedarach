@@ -324,11 +324,15 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 		t.Fatalf("seed worktree projection: %v", err)
 	}
 	rawStatus, err := json.Marshal(git.GitStatus{
-		Added:      []string{"new.go"},
-		Modified:   []string{"changed.go"},
-		Staged:     []string{"staged.go"},
-		Deleted:    []string{"removed.go"},
-		HasChanges: true,
+		Added:          []string{"new.go"},
+		Modified:       []string{"changed.go"},
+		Staged:         []string{"staged.go"},
+		Deleted:        []string{"removed.go"},
+		HasChanges:     true,
+		GitAdditions:   3,
+		GitDeletions:   1,
+		GitAheadCount:  2,
+		GitBehindCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("marshal git status: %v", err)
@@ -377,6 +381,9 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 	if body.Runtime.Projection.Git.GitAdditions != 3 || body.Runtime.Projection.Git.GitDeletions != 1 {
 		t.Fatalf("runtime git stats = %+v, want additions/deletions 3/1", body.Runtime.Projection.Git)
+	}
+	if body.Runtime.Projection.Git.GitAheadCount != 2 || body.Runtime.Projection.Git.GitBehindCount != 1 {
+		t.Fatalf("runtime git ahead/behind = %+v, want 2/1", body.Runtime.Projection.Git)
 	}
 }
 

@@ -97,6 +97,21 @@ func newDaemonTestModel(transport *recordingDaemonTransport) Model {
 	return m
 }
 
+func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version, revision uint64, projectID string, tasks []domain.Task) []byte {
+	t.Helper()
+	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
+		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+		ProtocolVersion:  protocolVersion,
+		SnapshotRevision: revision,
+		ProjectID:        projectID,
+		Tasks:            tasks,
+	})
+	if err != nil {
+		t.Fatalf("marshal task list snapshot: %v", err)
+	}
+	return body
+}
+
 func setTaskSession(t *testing.T, m *Model, issueID string, session *domain.Session) {
 	t.Helper()
 	for i := range m.tasks {
@@ -117,16 +132,12 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 				if req.Command != daemonclient.CommandTaskList {
 					t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
 				}
-				body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
-				if err != nil {
-					t.Fatalf("marshal response: %v", err)
-				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            body,
+					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 				}, nil
 			},
 		}
@@ -456,17 +467,13 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 			if req.Command != daemonclient.CommandTaskList {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
 			}
-			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            body,
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -587,17 +594,13 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					Type:     domain.TypeTask,
 				},
 			}
-			body, err := json.Marshal(tasks)
-			if err != nil {
-				t.Fatalf("marshal snapshot: %v", err)
-			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        7,
 				OK:              true,
-				Body:            body,
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 7, req.Meta.ProjectID, tasks),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -932,17 +935,13 @@ func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
 			if req.Command != daemonclient.CommandTaskList {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
 			}
-			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            body,
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -998,17 +997,13 @@ func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
 			if req.Command != daemonclient.CommandTaskList {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
 			}
-			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        12,
 				OK:              true,
-				Body:            body,
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 12, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1074,17 +1069,13 @@ func TestDaemonStreamClosedRehydratesCurrentStreamAndIgnoresStaleClose(t *testin
 			if req.Command != daemonclient.CommandTaskList {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
 			}
-			body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
 			return protocol.ResponseEnvelope{
 				ProtocolVersion: req.ProtocolVersion,
 				RequestID:       req.RequestID,
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            body,
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1755,16 +1746,12 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 						Session: &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"},
 					},
 				}
-				respBody, err := json.Marshal(tasks)
-				if err != nil {
-					t.Fatalf("marshal task list response: %v", err)
-				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            respBody,
+					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID, tasks),
 				}, nil
 			case daemonclient.CommandSessionStop:
 				var body struct {

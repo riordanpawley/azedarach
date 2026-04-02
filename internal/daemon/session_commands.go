@@ -243,7 +243,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if d.runtimeProjectionWriter != nil {
 		d.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	} else {
-		if err := d.persistWorktreeProjection(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch); err == nil {
+		if err := d.persistWorktreeState(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch); err == nil {
 			d.publishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path)
 		}
 	}
@@ -505,7 +505,7 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 }
 
 func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
-	if d.projectionStore == nil {
+	if d.sessionRuntimeStateStore() == nil {
 		return
 	}
 
@@ -543,8 +543,8 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		}
 		return
 	}
-	if err := d.projectionStore.UpsertSession(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("write-through stop session projection failed",
+	if err := d.sessionRuntimeStateStore().UpsertSessionState(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("write-through stop session runtime state failed",
 			"project_id", projectID,
 			"session_id", sessionID,
 			"issue_id", issueID,
@@ -673,7 +673,7 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 		d.runtimeProjectionWriter.PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
 		return nil
 	}
-	d.persistSessionProjection(projectID, event.Session)
+	d.persistSessionState(projectID, event.Session)
 	d.publishSessionProjectionEvent(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
 	return nil
 }
@@ -927,11 +927,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	snapshotByKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	projectionByKey := map[string]daemonstate.Session{}
-	if d.projectionStore != nil {
-		cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+	if d.sessionRuntimeStateStore() != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("failed to load cached session projections while enriching tasks", "project_id", projectID, "error", err)
+				d.cfg.Logger.Debug("failed to load cached session runtime state while enriching tasks", "project_id", projectID, "error", err)
 			}
 		} else {
 			projectionByKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
@@ -978,8 +978,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	if d.projectionStore != nil {
-		cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+	if d.sessionRuntimeStateStore() != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
 		if err == nil && len(cachedSessions) > 0 {
 			cachedActive := make([]string, 0, len(cachedSessions))
 			for _, session := range cachedSessions {
@@ -1012,19 +1012,19 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 	return tmuxSessions, nil
 }
 
-func (d *Daemon) refreshSessionProjectionCache(ctx context.Context, projectID string) error {
-	if d == nil || d.tmux == nil || d.projectionStore == nil || d.sessionStore == nil {
+func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID string) error {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStore() == nil || d.sessionStore == nil {
 		return nil
 	}
 	tmuxSessions, err := d.tmux.ListSessions(ctx)
 	if err != nil {
 		return err
 	}
-	return d.persistTmuxSessionProjectionSnapshot(ctx, projectID, tmuxSessions)
+	return d.persistTmuxSessionRuntimeState(ctx, projectID, tmuxSessions)
 }
 
-func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, projectID string, tmuxSessions []string) error {
-	if d.projectionStore == nil || d.sessionStore == nil {
+func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []string) error {
+	if d.sessionRuntimeStateStore() == nil || d.sessionStore == nil {
 		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
@@ -1038,10 +1038,10 @@ func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, proje
 	byIssueKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	cachedByIssueKey := map[string]daemonstate.Session{}
-	cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+	cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
 	if err != nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("load cached session projection snapshot failed", "project_id", projectID, "error", err)
+			d.cfg.Logger.Debug("load cached session runtime-state snapshot failed", "project_id", projectID, "error", err)
 		}
 	} else {
 		cachedByIssueKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
@@ -1086,7 +1086,7 @@ func (d *Daemon) persistTmuxSessionProjectionSnapshot(ctx context.Context, proje
 	if d.runtimeProjectionWriter != nil {
 		return d.runtimeProjectionWriter.ReplaceSessionProjectionSnapshot(ctx, projectID, rows)
 	}
-	return d.projectionStore.ReplaceSessions(ctx, projectID, rows)
+	return d.sessionRuntimeStateStore().ReplaceSessionStates(ctx, projectID, rows)
 }
 
 func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {

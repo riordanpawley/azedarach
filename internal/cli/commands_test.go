@@ -31,6 +31,15 @@ func ptrToString(v string) *string {
 	return &v
 }
 
+func marshalTaskListBody(tasks []domain.Task) ([]byte, error) {
+	return json.Marshal(protocol.TaskListSnapshotPayload{
+		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+		ProtocolVersion:  protocol.CurrentVersion,
+		SnapshotRevision: 0,
+		Tasks:            tasks,
+	})
+}
+
 func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -1376,7 +1385,7 @@ func TestSyncCommandAllUsesDaemonWorktreeTargetsAndDaemonSnapshot(t *testing.T) 
 		{ID: "az-1", Title: "Sync task one", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		{ID: "az-2", Title: "Sync task two", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
 	}
-	payload, err := json.Marshal(tasks)
+	payload, err := marshalTaskListBody(tasks)
 	if err != nil {
 		t.Fatalf("marshal tasks: %v", err)
 	}
@@ -1481,7 +1490,7 @@ func TestImplDeleteCommandRemovesAssignmentsAcrossIssues(t *testing.T) {
 		{ID: "az-2", Title: "Two", Description: "desc", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug, Implementations: []string{"ts-opentui"}},
 		{ID: "az-3", Title: "Three", Description: "desc", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeFeature, Implementations: []string{"go-bubbletea"}},
 	}
-	payload, err := json.Marshal(tasks)
+	payload, err := marshalTaskListBody(tasks)
 	if err != nil {
 		t.Fatalf("marshal tasks: %v", err)
 	}
@@ -1794,18 +1803,18 @@ func TestParseIssueCreateArgs(t *testing.T) {
 				AutoParentFromIssueID: ptrToString("az-parent"),
 			},
 		},
-			{
-				name: "interspersed flags after title",
-				args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
-				want: IssueCreateOptions{
-					Title:                 "Title",
-					Type:                  domain.TypeTask,
-					Priority:              domain.P1,
-					PriorityExplicit:      true,
-					Implementations:       []string{"go-bubbletea"},
-					AutoParentFromIssueID: ptrToString("az-parent"),
-				},
+		{
+			name: "interspersed flags after title",
+			args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
+			want: IssueCreateOptions{
+				Title:                 "Title",
+				Type:                  domain.TypeTask,
+				Priority:              domain.P1,
+				PriorityExplicit:      true,
+				Implementations:       []string{"go-bubbletea"},
+				AutoParentFromIssueID: ptrToString("az-parent"),
 			},
+		},
 		{
 			name: "deferred defaults priority",
 			args: []string{"--deferred", "Title"},
@@ -2154,7 +2163,7 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 					if req.Command != daemonclient.CommandTaskList {
 						t.Fatalf("unexpected command %q", req.Command)
 					}
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
 					})
 					if err != nil {
@@ -2190,7 +2199,7 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 					if req.Command != daemonclient.CommandTaskList {
 						t.Fatalf("unexpected command %q", req.Command)
 					}
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{ID: "az-1"},
 					})
 					if err != nil {
@@ -2226,7 +2235,7 @@ func TestResolveIssueWriteImplementation(t *testing.T) {
 					if req.Command != daemonclient.CommandTaskList {
 						t.Fatalf("unexpected command %q", req.Command)
 					}
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
 						{ID: "az-2", Implementations: []string{"default"}},
 					})
@@ -2282,7 +2291,7 @@ func TestIssueListCommandUsesDaemonTaskList(t *testing.T) {
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				gotReq = req
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2340,7 +2349,7 @@ func TestIssueListCommandDepsProjection(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2398,7 +2407,7 @@ func TestIssueListCommand_IncludesListWindowMetadata(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2441,7 +2450,7 @@ func TestIssueListCommand_IDSetFilter(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2513,7 +2522,7 @@ func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2573,7 +2582,7 @@ func TestIssueGetCommandJSON(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2606,6 +2615,10 @@ func TestIssueGetCommandNotFound(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody([]domain.Task{})
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
@@ -2614,7 +2627,7 @@ func TestIssueGetCommandNotFound(t *testing.T) {
 					OK:              true,
 					CompletedAt:     req.SentAt,
 					Revision:        1,
-					Body:            []byte(`[]`),
+					Body:            body,
 				}, nil
 			},
 		}),
@@ -2651,7 +2664,7 @@ func TestIssueGetCommandDepsProjection(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2707,7 +2720,7 @@ func TestIssueGetCommandDepsProjectionCanonicalTypes(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2786,7 +2799,7 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2831,7 +2844,7 @@ func TestIssueGetManyCommand_JSONStableOrderWithPartialMisses(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2900,7 +2913,7 @@ func TestIssueDependencyBulkApplyCommand_DryRunOutcomes(t *testing.T) {
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				body, err := json.Marshal(tasks)
+				body, err := marshalTaskListBody(tasks)
 				if err != nil {
 					t.Fatalf("marshal tasks: %v", err)
 				}
@@ -2979,7 +2992,7 @@ func TestIssueDependencyBulkApplyCommand_IdempotentReplayNoOp(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal(tasks)
+					body, err := marshalTaskListBody(tasks)
 					if err != nil {
 						t.Fatalf("marshal tasks: %v", err)
 					}
@@ -3180,7 +3193,7 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 				body := []byte{}
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					tasks, err := json.Marshal([]domain.Task{
+					tasks, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:              "az-parent",
 							Title:           "Parent",
@@ -3266,7 +3279,7 @@ func TestIssueCreateCommandAutoDefaultsImplWhenSingleConfigured(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
 					})
 					if err != nil {
@@ -3337,7 +3350,7 @@ func TestIssueCreateCommandRequiresImplWhenMultipleConfigured(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{ID: "az-1", Implementations: []string{"go-bubbletea"}},
 						{ID: "az-2", Implementations: []string{"default"}},
 					})
@@ -3403,7 +3416,7 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:          "az-1",
 							Title:       "Check target",
@@ -3491,7 +3504,7 @@ func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:          "az-1",
 							Title:       "Old",
@@ -3565,7 +3578,7 @@ func TestIssueUpdateCommandAppendsNotesWhenRequested(t *testing.T) {
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{
+					body, err := marshalTaskListBody([]domain.Task{
 						{
 							ID:          "az-1",
 							Title:       "Old",
@@ -3721,7 +3734,7 @@ func TestIssueBulkCommandsUseApplyCommand(t *testing.T) {
 				commands = append(commands, req)
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{{
+					body, err := marshalTaskListBody([]domain.Task{{
 						ID:          "az-1",
 						Title:       "Old",
 						Description: "Desc",
@@ -3839,7 +3852,7 @@ func TestIssueBulkUpdateCommand_DependencyRetargetBuildsApplyOps(t *testing.T) {
 				commands = append(commands, req)
 				switch req.Command {
 				case daemonclient.CommandTaskList:
-					body, err := json.Marshal([]domain.Task{{
+					body, err := marshalTaskListBody([]domain.Task{{
 						ID:          "az-1",
 						Title:       "Existing",
 						Description: "Desc",
@@ -4110,7 +4123,7 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 						CompletedAt:     req.SentAt,
 					}, nil
 				}
-				body, err := json.Marshal([]domain.Task{{
+				body, err := marshalTaskListBody([]domain.Task{{
 					ID:              "az-1",
 					Title:           "Prime issue",
 					Status:          domain.StatusOpen,
@@ -4172,7 +4185,7 @@ func TestPrimeCommandWarnsWhenActiveIssueClosed(t *testing.T) {
 						CompletedAt:     req.SentAt,
 					}, nil
 				}
-				body, err := json.Marshal([]domain.Task{{
+				body, err := marshalTaskListBody([]domain.Task{{
 					ID:              "az-closed",
 					Title:           "Closed issue",
 					Status:          domain.StatusDone,

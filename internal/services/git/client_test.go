@@ -441,6 +441,118 @@ func TestDiffStatAgainstBaseBranchFallsBackToLocalChangesWhenMergeBaseFails(t *t
 	}
 }
 
+func TestDiffStatTotals(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 2 && args[0] == "diff" && args[1] == "--shortstat" {
+				return "2 files changed, 10 insertions(+), 4 deletions(-)", nil
+			}
+			if len(args) >= 3 && args[0] == "diff" && args[1] == "--cached" && args[2] == "--shortstat" {
+				return "", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	additions, deletions, err := client.DiffStatTotals(context.Background(), "/fake/worktree", "")
+	if err != nil {
+		t.Fatalf("DiffStatTotals() error = %v", err)
+	}
+	if additions != 10 || deletions != 4 {
+		t.Fatalf("DiffStatTotals() = %d/%d, want 10/4", additions, deletions)
+	}
+}
+
+func TestBranchAheadBehind(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..main" {
+				return "3\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "main..HEAD" {
+				return "2\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	ahead, behind, err := client.BranchAheadBehind(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("BranchAheadBehind() error = %v", err)
+	}
+	if ahead != 2 || behind != 3 {
+		t.Fatalf("BranchAheadBehind() = %d/%d, want 2/3", ahead, behind)
+	}
+}
+
+func TestBranchAheadBehindFallsBackToOriginRef(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..main" {
+				return "", fmt.Errorf("unknown revision")
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..origin/main" {
+				return "1\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "origin/main..HEAD" {
+				return "4\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	ahead, behind, err := client.BranchAheadBehind(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("BranchAheadBehind() error = %v", err)
+	}
+	if ahead != 4 || behind != 1 {
+		t.Fatalf("BranchAheadBehind() = %d/%d, want 4/1", ahead, behind)
+	}
+}
+
+func TestRuntimeStatus(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			switch {
+			case len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain":
+				return " M changed.go\n?? new.go", nil
+			case len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD":
+				return "abc123\n", nil
+			case len(args) >= 6 &&
+				args[0] == "diff" &&
+				args[1] == "--shortstat" &&
+				args[2] == "abc123" &&
+				args[3] == "HEAD":
+				return " 2 files changed, 7 insertions(+), 3 deletions(-)\n", nil
+			case len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..main":
+				return "5\n", nil
+			case len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "main..HEAD":
+				return "2\n", nil
+			default:
+				return "", fmt.Errorf("unexpected command: %v", args)
+			}
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	status, err := client.RuntimeStatus(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("RuntimeStatus() error = %v", err)
+	}
+	if !status.HasChanges {
+		t.Fatal("RuntimeStatus() should mark repository dirty")
+	}
+	if status.GitAdditions != 7 || status.GitDeletions != 3 {
+		t.Fatalf("RuntimeStatus() diff totals = %d/%d, want 7/3", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 2 || status.GitBehindCount != 5 {
+		t.Fatalf("RuntimeStatus() ahead/behind = %d/%d, want 2/5", status.GitAheadCount, status.GitBehindCount)
+	}
+}
+
 func TestMergeBaseFallsBackToOriginRef(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {

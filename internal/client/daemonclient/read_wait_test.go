@@ -27,7 +27,13 @@ func (t *readWaitDeadlineTransport) Command(ctx context.Context, req protocol.Re
 	}
 	t.deadlines = append(t.deadlines, deadline)
 
-	body, err := json.Marshal([]domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}})
+	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
+		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+		ProtocolVersion:  req.ProtocolVersion,
+		SnapshotRevision: 0,
+		ProjectID:        req.Meta.ProjectID,
+		Tasks:            []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}},
+	})
 	if err != nil {
 		return protocol.ResponseEnvelope{}, err
 	}

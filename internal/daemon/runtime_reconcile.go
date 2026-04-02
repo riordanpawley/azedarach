@@ -42,13 +42,13 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if d == nil {
 		return result, nil
 	}
-	if d.worktree == nil || d.tmux == nil || d.sessionStore == nil || d.projectionStore == nil {
+	if d.worktree == nil || d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStore() == nil || d.worktreeRuntimeStateStore() == nil {
 		return result, nil
 	}
 
 	var errs []error
-	if worktreeCount, err := d.refreshWorktreeProjectionCache(ctx, result.ProjectID); err != nil {
-		errs = append(errs, fmt.Errorf("refresh worktree projections: %w", err))
+	if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID); err != nil {
+		errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
 	} else {
 		result.WorktreesRefreshed = worktreeCount
 	}
@@ -60,8 +60,8 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		result.AlignedDaemonSessions = sessionResult.AlignedDaemonSessions
 	}
 
-	if err := d.refreshSessionProjectionCache(ctx, result.ProjectID); err != nil {
-		errs = append(errs, fmt.Errorf("refresh session projections: %w", err))
+	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID); err != nil {
+		errs = append(errs, fmt.Errorf("refresh session runtime state: %w", err))
 	}
 
 	return result, errors.Join(errs...)
@@ -249,13 +249,21 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 		}
 	}
 
-	if d.projectionStore != nil {
-		known, err := d.projectionStore.ListProjectIDs(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("list projection project ids: %w", err)
+	addRuntimeStateProjects := func(store interface {
+		ListProjectIDs(context.Context) ([]string, error)
+	}) error { known, err := store.ListProjectIDs(ctx); if err != nil {
+		return fmt.Errorf("list runtime-state project ids: %w", err)
+	}; for _, projectID := range known {
+		add(projectID)
+	}; return nil }
+	if sessionStore := d.sessionRuntimeStateStore(); sessionStore != nil {
+		if err := addRuntimeStateProjects(sessionStore); err != nil {
+			return nil, err
 		}
-		for _, projectID := range known {
-			add(projectID)
+	}
+	if worktreeStore := d.worktreeRuntimeStateStore(); worktreeStore != nil && worktreeStore != d.sessionRuntimeStateStore() {
+		if err := addRuntimeStateProjects(worktreeStore); err != nil {
+			return nil, err
 		}
 	}
 

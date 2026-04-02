@@ -164,11 +164,15 @@ func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
 	}
 
 	rawStatus, err := json.Marshal(git.GitStatus{
-		Added:      []string{"new.go"},
-		Modified:   []string{"changed.go"},
-		Staged:     []string{"staged.go"},
-		Deleted:    []string{"removed.go"},
-		HasChanges: true,
+		Added:          []string{"new.go"},
+		Modified:       []string{"changed.go"},
+		Staged:         []string{"staged.go"},
+		Deleted:        []string{"removed.go"},
+		HasChanges:     true,
+		GitAdditions:   11,
+		GitDeletions:   4,
+		GitAheadCount:  2,
+		GitBehindCount: 3,
 	})
 	if err != nil {
 		t.Fatalf("marshal git status: %v", err)
@@ -208,8 +212,11 @@ func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
 	if !got[0].HasUncommittedChanges {
 		t.Fatal("task[0].HasUncommittedChanges = false, want true")
 	}
-	if got[0].GitAdditions != 3 || got[0].GitDeletions != 1 {
-		t.Fatalf("task[0] git counters = +%d/-%d, want +3/-1", got[0].GitAdditions, got[0].GitDeletions)
+	if got[0].GitAdditions != 11 || got[0].GitDeletions != 4 {
+		t.Fatalf("task[0] git counters = +%d/-%d, want +11/-4", got[0].GitAdditions, got[0].GitDeletions)
+	}
+	if got[0].GitAheadCount != 2 || got[0].GitBehindCount != 3 {
+		t.Fatalf("task[0] ahead/behind = %d/%d, want 2/3", got[0].GitAheadCount, got[0].GitBehindCount)
 	}
 	if got[1].HasWorktree || got[1].HasUncommittedChanges || got[1].GitAdditions != 0 || got[1].GitDeletions != 0 {
 		t.Fatalf("task[1] should remain unchanged, got %+v", got[1])
@@ -264,11 +271,15 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 
 	rawStatus, err := json.Marshal(git.GitStatus{
-		Added:      []string{"new.go"},
-		Modified:   []string{"changed.go"},
-		Staged:     []string{"staged.go"},
-		Deleted:    []string{"removed.go"},
-		HasChanges: true,
+		Added:          []string{"new.go"},
+		Modified:       []string{"changed.go"},
+		Staged:         []string{"staged.go"},
+		Deleted:        []string{"removed.go"},
+		HasChanges:     true,
+		GitAdditions:   9,
+		GitDeletions:   2,
+		GitAheadCount:  4,
+		GitBehindCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("marshal git status: %v", err)
@@ -320,10 +331,20 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 		t.Fatalf("daemon revision = %d, want %d", got, want)
 	}
 
-	var tasks []domain.Task
-	if err := json.Unmarshal(resp.Body, &tasks); err != nil {
+	var payload protocol.TaskListSnapshotPayload
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal task list body: %v", err)
 	}
+	if got, want := payload.SchemaVersion, protocol.TaskListSnapshotSchemaVersion; got != want {
+		t.Fatalf("payload.SchemaVersion = %d, want %d", got, want)
+	}
+	if got, want := payload.ProjectID, projectID; got != want {
+		t.Fatalf("payload.ProjectID = %q, want %q", got, want)
+	}
+	if got, want := payload.SnapshotRevision, uint64(7); got != want {
+		t.Fatalf("payload.SnapshotRevision = %d, want %d", got, want)
+	}
+	tasks := payload.Tasks
 	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
 	}
@@ -353,11 +374,17 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if !task.HasUncommittedChanges {
 		t.Fatal("task.HasUncommittedChanges = false, want true")
 	}
-	if got, want := task.GitAdditions, 3; got != want {
+	if got, want := task.GitAdditions, 9; got != want {
 		t.Fatalf("task.GitAdditions = %d, want %d", got, want)
 	}
-	if got, want := task.GitDeletions, 1; got != want {
+	if got, want := task.GitDeletions, 2; got != want {
 		t.Fatalf("task.GitDeletions = %d, want %d", got, want)
+	}
+	if got, want := task.GitAheadCount, 4; got != want {
+		t.Fatalf("task.GitAheadCount = %d, want %d", got, want)
+	}
+	if got, want := task.GitBehindCount, 1; got != want {
+		t.Fatalf("task.GitBehindCount = %d, want %d", got, want)
 	}
 
 	sessions, err := projectionStore.ListSessions(ctx, projectID)
@@ -449,5 +476,69 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("projection rows = %d, want 0 (task.list read path must not persist)", len(rows))
+	}
+}
+
+func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-refresh-worktrees"
+	worktreePath := "/tmp/repo-az-1"
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain":
+			return "worktree /tmp/repo-root\nbranch refs/heads/main\n\nworktree /tmp/repo-az-1\nbranch refs/heads/az/az-1\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktreePath && args[2] == "status" && args[3] == "--porcelain":
+			return " M changed.go\n?? new.go\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktreePath && args[2] == "merge-base" && args[3] == "main" && args[4] == "HEAD":
+			return "abc123\n", nil
+		case len(args) >= 8 && args[0] == "-C" && args[1] == worktreePath && args[2] == "diff" && args[3] == "--shortstat" && args[4] == "abc123" && args[5] == "HEAD":
+			return " 2 files changed, 7 insertions(+), 3 deletions(-)\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktreePath && args[2] == "rev-list" && args[3] == "--count" && args[4] == "HEAD..main":
+			return "5\n", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == worktreePath && args[2] == "rev-list" && args[3] == "--count" && args[4] == "main..HEAD":
+			return "2\n", nil
+		default:
+			return "", nil
+		}
+	}}
+
+	store := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	d := &Daemon{
+		cfg:                  Config{BaseBranch: "main", Logger: slog.Default()},
+		git:                  git.NewClient(runner, slog.Default()),
+		worktree:             git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		worktreeRuntimeStore: store,
+	}
+
+	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)
+	if err != nil {
+		t.Fatalf("refreshWorktreeRuntimeState error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("refreshWorktreeRuntimeState count = %d, want 1", count)
+	}
+
+	worktrees, err := store.ListWorktrees(ctx, projectID)
+	if err != nil {
+		t.Fatalf("ListWorktrees error: %v", err)
+	}
+	if len(worktrees) != 1 {
+		t.Fatalf("ListWorktrees len = %d, want 1", len(worktrees))
+	}
+
+	var status git.GitStatus
+	if err := json.Unmarshal(worktrees[0].GitStatusRaw, &status); err != nil {
+		t.Fatalf("unmarshal persisted git status: %v", err)
+	}
+	if !status.HasChanges {
+		t.Fatal("persisted git status should be dirty")
+	}
+	if status.GitAdditions != 7 || status.GitDeletions != 3 {
+		t.Fatalf("persisted git diff totals = %d/%d, want 7/3", status.GitAdditions, status.GitDeletions)
+	}
+	if status.GitAheadCount != 2 || status.GitBehindCount != 5 {
+		t.Fatalf("persisted git ahead/behind = %d/%d, want 2/5", status.GitAheadCount, status.GitBehindCount)
 	}
 }

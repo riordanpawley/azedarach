@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -44,6 +45,21 @@ func (t *taskRecordingTransport) Subscribe(context.Context, string, uint64) (<-c
 	return nil, errors.New("not implemented")
 }
 
+func mustMarshalTaskSnapshotPayload(t *testing.T, protocolVersion protocol.Version, projectID string, revision uint64, tasks []domain.Task) []byte {
+	t.Helper()
+	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
+		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+		ProtocolVersion:  protocolVersion,
+		SnapshotRevision: revision,
+		ProjectID:        projectID,
+		Tasks:            tasks,
+	})
+	if err != nil {
+		t.Fatalf("marshal snapshot payload: %v", err)
+	}
+	return body
+}
+
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	const wantProjectID = "proj-task"
 
@@ -54,17 +70,12 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if req.Command != CommandTaskList {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
 				}
-				tasks := []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}
-				body, err := json.Marshal(tasks)
-				if err != nil {
-					t.Fatalf("marshal response: %v", err)
-				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            body,
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 0, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 				}, nil
 			},
 		}
@@ -86,18 +97,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				if req.Command != CommandTaskList {
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskList)
 				}
-				tasks := []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusBlocked}}
-				body, err := json.Marshal(tasks)
-				if err != nil {
-					t.Fatalf("marshal response: %v", err)
-				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        17,
 					OK:              true,
-					Body:            body,
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 17, []domain.Task{{ID: "az-9", Title: "Task 9", Status: domain.StatusBlocked}}),
 				}, nil
 			},
 		}
@@ -112,6 +118,35 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
 			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+		}
+	})
+
+	t.Run("list snapshot rejects legacy raw task array", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				body, err := json.Marshal([]domain.Task{{ID: "az-legacy", Title: "Legacy Task", Status: domain.StatusOpen}})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        23,
+					OK:              true,
+					Body:            body,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.ListTasksSnapshot(context.Background())
+		if err == nil {
+			t.Fatal("expected decode error for legacy raw task array response")
+		}
+		if got := err.Error(); !strings.Contains(got, "decode task.list response") {
+			t.Fatalf("error = %q, want decode task.list response", got)
 		}
 	})
 

@@ -52,24 +52,26 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues                       *issues.Client
-	tmux                         *tmux.Client
-	git                          *git.Client
-	worktree                     *git.WorktreeManager
-	gitHandler                   *daemonhandlers.GitHandler
-	worktreeHandler              *daemonhandlers.WorktreeHandler
-	session                      *daemonhandlers.SessionHandler
-	sessionStore                 *daemonstate.Store
-	projectionStore              *daemonstate.ProjectionStore
-	runtimeProjectionWriter      runtimeProjectionWriter
-	sessionLongRunning           SessionLongRunningExecutor
-	runtimeReconciler            runtimeReconciler
-	operationRuntime             *operationRuntime
-	sessionStopMu                sync.Mutex
-	sessionStopPending           map[string]int
-	projectionRefreshMu          sync.Mutex
-	sessionProjectionRefreshing  map[string]bool
-	sessionProjectionLastRefresh map[string]time.Time
+	issues                  *issues.Client
+	tmux                    *tmux.Client
+	git                     *git.Client
+	worktree                *git.WorktreeManager
+	gitHandler              *daemonhandlers.GitHandler
+	worktreeHandler         *daemonhandlers.WorktreeHandler
+	session                 *daemonhandlers.SessionHandler
+	sessionStore            *daemonstate.Store
+	sessionRuntimeStore     *daemonstate.RuntimeStateStore
+	worktreeRuntimeStore    *daemonstate.RuntimeStateStore
+	projectionStore         *daemonstate.ProjectionStore
+	runtimeProjectionWriter runtimeProjectionWriter
+	sessionLongRunning      SessionLongRunningExecutor
+	runtimeReconciler       runtimeReconciler
+	operationRuntime        *operationRuntime
+	sessionStopMu           sync.Mutex
+	sessionStopPending      map[string]int
+	sessionStateRefreshMu   sync.Mutex
+	sessionStateRefreshing  map[string]bool
+	sessionStateLastRefresh map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -116,10 +118,10 @@ func New(cfg Config) *Daemon {
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
-	projectionStore := daemonstate.NewProjectionStore(cfg.RepoDir, cfg.Logger)
+	runtimeStateStore := daemonstate.NewRuntimeStateStore(cfg.RepoDir, cfg.Logger)
 	gitService := &gitServiceAdapter{
 		client:          gitClient,
-		projectionStore: projectionStore,
+		projectionStore: runtimeStateStore,
 		logger:          cfg.Logger,
 		baseBranch:      cfg.BaseBranch,
 	}
@@ -133,20 +135,22 @@ func New(cfg Config) *Daemon {
 	specHandler := daemonhandlers.NewSpecHandler(issueSpecService{client: issuesClient})
 
 	d := &Daemon{
-		cfg:                          cfg,
-		lock:                         lifecycle.NewLockManager(cfg.LockPath),
-		hub:                          publish.NewHub(512, 64, cfg.Logger),
-		issues:                       issuesClient,
-		tmux:                         tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:                          gitClient,
-		worktree:                     git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
-		session:                      sessionHandler,
-		sessionStore:                 sessionStore,
-		projectionStore:              projectionStore,
-		sessionStopPending:           map[string]int{},
-		sessionProjectionRefreshing:  map[string]bool{},
-		sessionProjectionLastRefresh: map[string]time.Time{},
-		revision:                     map[string]uint64{},
+		cfg:                     cfg,
+		lock:                    lifecycle.NewLockManager(cfg.LockPath),
+		hub:                     publish.NewHub(512, 64, cfg.Logger),
+		issues:                  issuesClient,
+		tmux:                    tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:                     gitClient,
+		worktree:                git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
+		session:                 sessionHandler,
+		sessionStore:            sessionStore,
+		sessionRuntimeStore:     runtimeStateStore,
+		worktreeRuntimeStore:    runtimeStateStore,
+		projectionStore:         runtimeStateStore,
+		sessionStopPending:      map[string]int{},
+		sessionStateRefreshing:  map[string]bool{},
+		sessionStateLastRefresh: map[string]time.Time{},
+		revision:                map[string]uint64{},
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
@@ -172,7 +176,7 @@ func New(cfg Config) *Daemon {
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		&worktreeServiceAdapter{
 			manager:                 d.worktree,
-			projectionStore:         d.projectionStore,
+			projectionStore:         d.worktreeRuntimeStateStore(),
 			runtimeProjectionWriter: d.runtimeProjectionWriter,
 			logger:                  cfg.Logger,
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
@@ -255,9 +259,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
 			}
 		}
-		if d.projectionStore != nil {
-			if closeErr := d.projectionStore.Close(); closeErr != nil {
-				d.cfg.Logger.Warn("failed to close projection store", "error", closeErr)
+		if d.sessionRuntimeStateStore() != nil {
+			if closeErr := d.sessionRuntimeStateStore().Close(); closeErr != nil {
+				d.cfg.Logger.Warn("failed to close runtime state store", "error", closeErr)
 			}
 		}
 		_ = lease.Release()
@@ -524,7 +528,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 		if d.runtimeProjectionWriter != nil {
 			d.runtimeProjectionWriter.PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
 		} else {
-			d.persistSessionProjection(projectID, session)
+			d.persistSessionState(projectID, session)
 			d.publishSessionProjectionEvent(ctx, projectID, req.Meta, session)
 		}
 		return nil
@@ -535,15 +539,35 @@ func (d *Daemon) applySessionLifecycleTransition(
 	return errors.New("session lifecycle transition failed")
 }
 
-func (d *Daemon) persistSessionProjection(projectID string, session daemonstate.Session) {
-	if d.projectionStore == nil {
+func (d *Daemon) sessionRuntimeStateStore() *daemonstate.RuntimeStateStore {
+	if d == nil {
+		return nil
+	}
+	if d.sessionRuntimeStore != nil {
+		return d.sessionRuntimeStore
+	}
+	return d.projectionStore
+}
+
+func (d *Daemon) worktreeRuntimeStateStore() *daemonstate.RuntimeStateStore {
+	if d == nil {
+		return nil
+	}
+	if d.worktreeRuntimeStore != nil {
+		return d.worktreeRuntimeStore
+	}
+	return d.projectionStore
+}
+
+func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) {
+	if d.sessionRuntimeStateStore() == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := d.projectionStore.UpsertSession(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+	if err := d.sessionRuntimeStateStore().UpsertSession(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn(
-			"persist session projection failed",
+			"persist session runtime state failed",
 			"project_id", projectID,
 			"session_id", session.ID,
 			"issue_id", session.IssueID,
@@ -553,8 +577,8 @@ func (d *Daemon) persistSessionProjection(projectID string, session daemonstate.
 	}
 }
 
-func (d *Daemon) triggerSessionProjectionRefresh(projectID string, refreshFn func(context.Context, string) error) {
-	if d.projectionStore == nil || refreshFn == nil {
+func (d *Daemon) triggerSessionStateRefresh(projectID string, refreshFn func(context.Context, string) error) {
+	if d.sessionRuntimeStateStore() == nil || refreshFn == nil {
 		return
 	}
 	projectID = strings.TrimSpace(projectID)
@@ -565,46 +589,46 @@ func (d *Daemon) triggerSessionProjectionRefresh(projectID string, refreshFn fun
 	const minRefreshInterval = 3 * time.Second
 	now := time.Now()
 
-	d.projectionRefreshMu.Lock()
-	if d.sessionProjectionRefreshing == nil {
-		d.sessionProjectionRefreshing = map[string]bool{}
+	d.sessionStateRefreshMu.Lock()
+	if d.sessionStateRefreshing == nil {
+		d.sessionStateRefreshing = map[string]bool{}
 	}
-	if d.sessionProjectionLastRefresh == nil {
-		d.sessionProjectionLastRefresh = map[string]time.Time{}
+	if d.sessionStateLastRefresh == nil {
+		d.sessionStateLastRefresh = map[string]time.Time{}
 	}
-	if d.sessionProjectionRefreshing[projectID] {
-		d.projectionRefreshMu.Unlock()
+	if d.sessionStateRefreshing[projectID] {
+		d.sessionStateRefreshMu.Unlock()
 		return
 	}
-	if last := d.sessionProjectionLastRefresh[projectID]; !last.IsZero() && now.Sub(last) < minRefreshInterval {
-		d.projectionRefreshMu.Unlock()
+	if last := d.sessionStateLastRefresh[projectID]; !last.IsZero() && now.Sub(last) < minRefreshInterval {
+		d.sessionStateRefreshMu.Unlock()
 		return
 	}
-	d.sessionProjectionRefreshing[projectID] = true
-	d.sessionProjectionLastRefresh[projectID] = now
-	d.projectionRefreshMu.Unlock()
+	d.sessionStateRefreshing[projectID] = true
+	d.sessionStateLastRefresh[projectID] = now
+	d.sessionStateRefreshMu.Unlock()
 
 	go func() {
 		defer func() {
-			d.projectionRefreshMu.Lock()
-			d.sessionProjectionRefreshing[projectID] = false
-			d.projectionRefreshMu.Unlock()
+			d.sessionStateRefreshMu.Lock()
+			d.sessionStateRefreshing[projectID] = false
+			d.sessionStateRefreshMu.Unlock()
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := refreshFn(ctx, projectID); err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("session projection refresh failed", "project_id", projectID, "error", err)
+			d.cfg.Logger.Debug("session runtime-state refresh failed", "project_id", projectID, "error", err)
 		}
 	}()
 }
 
-func (d *Daemon) persistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) error {
-	if d.projectionStore == nil {
+func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {
+	if d.worktreeRuntimeStateStore() == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := d.projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+	if err := d.worktreeRuntimeStateStore().UpsertWorktree(ctx, daemonstate.WorktreeState{
 		ProjectID: strings.TrimSpace(projectID),
 		IssueID:   strings.TrimSpace(issueID),
 		Path:      strings.TrimSpace(path),
@@ -612,7 +636,7 @@ func (d *Daemon) persistWorktreeProjection(ctx context.Context, projectID, issue
 		UpdatedAt: time.Now().UTC(),
 	}); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn(
-			"persist worktree projection failed",
+			"persist worktree runtime state failed",
 			"project_id", projectID,
 			"issue_id", issueID,
 			"path", path,
@@ -819,16 +843,16 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 		}
 	}
 
-	var projectionWorktree *daemonstate.WorktreeProjection
-	if d.projectionStore != nil {
+	var projectionWorktree *daemonstate.WorktreeState
+	if d.worktreeRuntimeStateStore() != nil {
 		if issueID != "" {
-			if loaded, found, err := d.projectionStore.GetWorktreeByIssueID(ctx, projectID, issueID); err == nil && found {
+			if loaded, found, err := d.worktreeRuntimeStateStore().GetWorktreeByIssueID(ctx, projectID, issueID); err == nil && found {
 				copy := loaded
 				projectionWorktree = &copy
 			}
 		}
 		if projectionWorktree == nil && worktree != "" {
-			if loaded, found, err := d.projectionStore.GetWorktreeByPath(ctx, projectID, worktree); err == nil && found {
+			if loaded, found, err := d.worktreeRuntimeStateStore().GetWorktreeByPath(ctx, projectID, worktree); err == nil && found {
 				copy := loaded
 				projectionWorktree = &copy
 			}
@@ -842,9 +866,6 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	if session != nil && projection.Session.Worktree == "" && projection.Worktree.Path != "" {
 		projection.Session.Worktree = projection.Worktree.Path
 	}
-	if status != nil {
-		projection.Git.HasUncommittedChanges = status.HasChanges
-	}
 	fallbackStatus := status
 	if fallbackStatus == nil && projectionWorktree != nil && len(projectionWorktree.GitStatusRaw) > 0 {
 		var projectedStatus git.GitStatus
@@ -852,16 +873,43 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 			fallbackStatus = &projectedStatus
 		}
 	}
-	if status != nil && worktree != "" && d.git != nil {
-		if diffStat, err := d.git.DiffStat(ctx, worktree, d.cfg.BaseBranch); err == nil {
-			projection.Git.GitAdditions, projection.Git.GitDeletions = parseDiffStatTotalsDaemon(diffStat)
+
+	if worktree != "" && d.git != nil {
+		switch {
+		case status == nil:
+			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, d.cfg.BaseBranch); err == nil {
+				status = liveStatus
+			}
+		case status.GitAdditions == 0 && status.GitDeletions == 0 && status.GitAheadCount == 0 && status.GitBehindCount == 0:
+			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, d.cfg.BaseBranch); err == nil {
+				status.GitAdditions = liveStatus.GitAdditions
+				status.GitDeletions = liveStatus.GitDeletions
+				status.GitAheadCount = liveStatus.GitAheadCount
+				status.GitBehindCount = liveStatus.GitBehindCount
+			}
 		}
 	}
+
+	if status != nil {
+		projection.Git.HasUncommittedChanges = status.HasChanges
+		projection.Git.GitAdditions = status.GitAdditions
+		projection.Git.GitDeletions = status.GitDeletions
+		projection.Git.GitAheadCount = status.GitAheadCount
+		projection.Git.GitBehindCount = status.GitBehindCount
+		fallbackStatus = status
+	}
+
 	if projection.Git.GitAdditions == 0 && fallbackStatus != nil {
 		projection.Git.GitAdditions = len(fallbackStatus.Added) + len(fallbackStatus.Modified) + len(fallbackStatus.Staged)
 	}
 	if projection.Git.GitDeletions == 0 && fallbackStatus != nil {
 		projection.Git.GitDeletions = len(fallbackStatus.Deleted)
+	}
+	if projection.Git.GitAheadCount == 0 && fallbackStatus != nil {
+		projection.Git.GitAheadCount = fallbackStatus.GitAheadCount
+	}
+	if projection.Git.GitBehindCount == 0 && fallbackStatus != nil {
+		projection.Git.GitBehindCount = fallbackStatus.GitBehindCount
 	}
 	return projection
 }

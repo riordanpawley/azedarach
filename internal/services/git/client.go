@@ -4,7 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
+)
+
+var (
+	diffStatInsertionsPattern = regexp.MustCompile(`(\d+)\s+insertion(?:s)?\(\+\)`)
+	diffStatDeletionsPattern  = regexp.MustCompile(`(\d+)\s+deletion(?:s)?\(-\)`)
 )
 
 // Client provides high-level git operations.
@@ -15,12 +22,16 @@ type Client struct {
 
 // GitStatus represents the status of a git repository.
 type GitStatus struct {
-	Modified   []string
-	Added      []string
-	Deleted    []string
-	Untracked  []string
-	Staged     []string
-	HasChanges bool
+	Modified       []string `json:"modified"`
+	Added          []string `json:"added"`
+	Deleted        []string `json:"deleted"`
+	Untracked      []string `json:"untracked"`
+	Staged         []string `json:"staged"`
+	HasChanges     bool     `json:"has_changes"`
+	GitAdditions   int      `json:"git_additions,omitempty"`
+	GitDeletions   int      `json:"git_deletions,omitempty"`
+	GitAheadCount  int      `json:"git_ahead_count,omitempty"`
+	GitBehindCount int      `json:"git_behind_count,omitempty"`
 }
 
 // MergeResult represents the result of a git merge operation.
@@ -78,6 +89,27 @@ func (c *Client) Status(ctx context.Context, worktree string) (*GitStatus, error
 		"untracked", len(status.Untracked),
 		"staged", len(status.Staged),
 	)
+
+	return status, nil
+}
+
+// RuntimeStatus returns porcelain status plus base-relative diff and branch counts.
+// Metric failures are treated as best-effort so callers still receive dirty/clean state.
+func (c *Client) RuntimeStatus(ctx context.Context, worktree, baseBranch string) (*GitStatus, error) {
+	status, err := c.Status(ctx, worktree)
+	if err != nil {
+		return nil, err
+	}
+
+	if additions, deletions, err := c.DiffStatTotals(ctx, worktree, baseBranch); err == nil {
+		status.GitAdditions = additions
+		status.GitDeletions = deletions
+	}
+
+	if ahead, behind, err := c.BranchAheadBehind(ctx, worktree, baseBranch); err == nil {
+		status.GitAheadCount = ahead
+		status.GitBehindCount = behind
+	}
 
 	return status, nil
 }
@@ -237,6 +269,16 @@ func (c *Client) DiffStat(ctx context.Context, worktree, baseBranch string) (str
 	}
 }
 
+// DiffStatTotals parses additions and deletions from DiffStat output.
+func (c *Client) DiffStatTotals(ctx context.Context, worktree, baseBranch string) (int, int, error) {
+	diffStat, err := c.DiffStat(ctx, worktree, baseBranch)
+	if err != nil {
+		return 0, 0, err
+	}
+	additions, deletions := parseDiffStatTotals(diffStat)
+	return additions, deletions, nil
+}
+
 // MergeBase resolves the merge base between base branch and HEAD.
 func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (string, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
@@ -341,6 +383,40 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 	}
 
 	return count, nil
+}
+
+// BranchAheadBehind reports commit deltas for HEAD relative to the base branch.
+// It tries the local base branch first, then falls back to origin/<base>.
+func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch string) (int, int, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return 0, 0, fmt.Errorf("base branch is empty")
+	}
+
+	candidates := []string{baseBranch}
+	if !strings.Contains(baseBranch, "/") {
+		candidates = append(candidates, "origin/"+baseBranch)
+	}
+
+	var lastErr error
+	for _, candidate := range candidates {
+		behind, err := c.RevListCount(ctx, worktree, "HEAD.."+candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		ahead, err := c.RevListCount(ctx, worktree, candidate+"..HEAD")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return ahead, behind, nil
+	}
+
+	if lastErr != nil {
+		return 0, 0, fmt.Errorf("failed to resolve branch delta for %s: %w", baseBranch, lastErr)
+	}
+	return 0, 0, fmt.Errorf("failed to resolve branch delta for %s", baseBranch)
 }
 
 func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...string) (string, error) {
@@ -533,4 +609,28 @@ func parseChangedFilesOutput(output string) []ChangedFile {
 	}
 
 	return changed
+}
+
+func parseDiffStatTotals(diffStat string) (int, int) {
+	insertions := 0
+	for _, match := range diffStatInsertionsPattern.FindAllStringSubmatch(diffStat, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		if value, err := strconv.Atoi(match[1]); err == nil {
+			insertions += value
+		}
+	}
+
+	deletions := 0
+	for _, match := range diffStatDeletionsPattern.FindAllStringSubmatch(diffStat, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		if value, err := strconv.Atoi(match[1]); err == nil {
+			deletions += value
+		}
+	}
+
+	return insertions, deletions
 }

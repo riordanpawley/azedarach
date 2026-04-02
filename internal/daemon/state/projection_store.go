@@ -19,12 +19,12 @@ import (
 )
 
 const (
-	projectionSessionTable  = "daemon_session_projections"
-	projectionWorktreeTable = "daemon_worktree_projections"
+	sessionStateTable  = "daemon_session_projections"
+	worktreeStateTable = "daemon_worktree_projections"
 )
 
-// WorktreeProjection captures cached daemon worktree projection state.
-type WorktreeProjection struct {
+// WorktreeState captures durable daemon worktree state stored in sqlite.
+type WorktreeState struct {
 	ProjectID        string
 	IssueID          string
 	Path             string
@@ -34,8 +34,12 @@ type WorktreeProjection struct {
 	GitStatusUpdated *time.Time
 }
 
-// ProjectionStore persists daemon runtime projections in sqlite.
-type ProjectionStore struct {
+// WorktreeProjection remains as a compatibility alias while active paths move to
+// explicit session/worktree store terminology.
+type WorktreeProjection = WorktreeState
+
+// RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
+type RuntimeStateStore struct {
 	dbPath string
 	logger *slog.Logger
 
@@ -43,28 +47,88 @@ type ProjectionStore struct {
 	db *sql.DB
 }
 
-// NewProjectionStore returns a sqlite-backed projection store rooted at the repo db path.
-func NewProjectionStore(repoDir string, logger *slog.Logger) *ProjectionStore {
+// ProjectionStore remains as a compatibility alias while active paths move to
+// explicit runtime-state store terminology.
+type ProjectionStore = RuntimeStateStore
+
+// SessionStateReader loads persisted session state rows for a project.
+type SessionStateReader interface {
+	ListSessionStates(context.Context, string) ([]Session, error)
+	GetSessionState(context.Context, string, string) (Session, bool, error)
+	GetSessionStateByIssueID(context.Context, string, string) (Session, bool, error)
+}
+
+// SessionStateWriter mutates persisted session state rows for a project.
+type SessionStateWriter interface {
+	UpsertSessionState(context.Context, string, Session) error
+	DeleteSessionState(context.Context, string, string) error
+	ReplaceSessionStates(context.Context, string, []Session) error
+}
+
+// SessionStateStore groups the durable session-state read/write contract.
+type SessionStateStore interface {
+	SessionStateReader
+	SessionStateWriter
+}
+
+// WorktreeStateReader loads persisted worktree state rows for a project.
+type WorktreeStateReader interface {
+	ListWorktreeStates(context.Context, string) ([]WorktreeState, error)
+	GetWorktreeStateByPath(context.Context, string, string) (WorktreeState, bool, error)
+	GetWorktreeStateByIssueID(context.Context, string, string) (WorktreeState, bool, error)
+}
+
+// WorktreeStateWriter mutates persisted worktree state rows for a project.
+type WorktreeStateWriter interface {
+	UpsertWorktreeState(context.Context, WorktreeState) error
+	DeleteWorktreeState(context.Context, string, string) error
+	ReplaceWorktreeStates(context.Context, string, []WorktreeState) error
+	UpsertWorktreeStateGitStatus(context.Context, string, string, json.RawMessage, time.Time) error
+}
+
+// WorktreeStateStore groups the durable worktree-state read/write contract.
+type WorktreeStateStore interface {
+	WorktreeStateReader
+	WorktreeStateWriter
+}
+
+var (
+	_ SessionStateStore  = (*RuntimeStateStore)(nil)
+	_ WorktreeStateStore = (*RuntimeStateStore)(nil)
+)
+
+// NewRuntimeStateStore returns a sqlite-backed daemon runtime-state store rooted at the repo db path.
+func NewRuntimeStateStore(repoDir string, logger *slog.Logger) *RuntimeStateStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	dbPath, err := resolveProjectionDBPath(repoDir)
+	dbPath, err := resolveRuntimeStateDBPath(repoDir)
 	if err != nil {
-		logger.Warn("failed to resolve projection db path", "repo_dir", repoDir, "error", err)
+		logger.Warn("failed to resolve runtime state db path", "repo_dir", repoDir, "error", err)
 		dbPath = filepath.Join(repoDir, ".azedarach", "azedarach.db")
 	}
-	return &ProjectionStore{dbPath: dbPath, logger: logger}
+	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
 }
 
-// NewProjectionStoreAtPath returns a sqlite-backed projection store at dbPath.
-func NewProjectionStoreAtPath(dbPath string, logger *slog.Logger) *ProjectionStore {
+// NewRuntimeStateStoreAtPath returns a sqlite-backed daemon runtime-state store at dbPath.
+func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStateStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ProjectionStore{dbPath: dbPath, logger: logger}
+	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
 }
 
-func resolveProjectionDBPath(repoDir string) (string, error) {
+// NewProjectionStore preserves the previous constructor while callers migrate.
+func NewProjectionStore(repoDir string, logger *slog.Logger) *RuntimeStateStore {
+	return NewRuntimeStateStore(repoDir, logger)
+}
+
+// NewProjectionStoreAtPath preserves the previous constructor while callers migrate.
+func NewProjectionStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStateStore {
+	return NewRuntimeStateStoreAtPath(dbPath, logger)
+}
+
+func resolveRuntimeStateDBPath(repoDir string) (string, error) {
 	if override := strings.TrimSpace(os.Getenv("AZEDARACH_DB_PATH")); override != "" {
 		return override, nil
 	}
@@ -78,7 +142,7 @@ func resolveProjectionDBPath(repoDir string) (string, error) {
 	return filepath.Join(baseRoot, ".azedarach", "azedarach.db"), nil
 }
 
-func (s *ProjectionStore) Close() error {
+func (s *RuntimeStateStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
@@ -89,20 +153,20 @@ func (s *ProjectionStore) Close() error {
 	return err
 }
 
-func (s *ProjectionStore) UpsertSession(ctx context.Context, projectID string, session Session) error {
+func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
 	}
 	projectID = normalizedProjectID(projectID)
 	if strings.TrimSpace(session.ID) == "" {
-		return fmt.Errorf("upsert session projection: missing session id")
+		return fmt.Errorf("upsert session state: missing session id")
 	}
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = time.Now().UTC()
 	}
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO `+projectionSessionTable+` (
+		INSERT INTO `+sessionStateTable+` (
 			project_id,
 			session_id,
 			issue_id,
@@ -121,12 +185,16 @@ func (s *ProjectionStore) UpsertSession(ctx context.Context, projectID string, s
 		session.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
-		return fmt.Errorf("upsert session projection %s/%s: %w", projectID, session.ID, err)
+		return fmt.Errorf("upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
 	return nil
 }
 
-func (s *ProjectionStore) DeleteSession(ctx context.Context, projectID, sessionID string) error {
+func (s *RuntimeStateStore) UpsertSession(ctx context.Context, projectID string, session Session) error {
+	return s.UpsertSessionState(ctx, projectID, session)
+}
+
+func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -137,15 +205,19 @@ func (s *ProjectionStore) DeleteSession(ctx context.Context, projectID, sessionI
 		return nil
 	}
 	if _, err := db.ExecContext(ctx, `
-		DELETE FROM `+projectionSessionTable+`
+		DELETE FROM `+sessionStateTable+`
 		WHERE project_id = ? AND session_id = ?
 	`, projectID, sessionID); err != nil {
-		return fmt.Errorf("delete session projection %s/%s: %w", projectID, sessionID, err)
+		return fmt.Errorf("delete session state %s/%s: %w", projectID, sessionID, err)
 	}
 	return nil
 }
 
-func (s *ProjectionStore) ReplaceSessions(ctx context.Context, projectID string, sessions []Session) error {
+func (s *RuntimeStateStore) DeleteSession(ctx context.Context, projectID, sessionID string) error {
+	return s.DeleteSessionState(ctx, projectID, sessionID)
+}
+
+func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -153,7 +225,7 @@ func (s *ProjectionStore) ReplaceSessions(ctx context.Context, projectID string,
 	projectID = normalizedProjectID(projectID)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin replace session projections: %w", err)
+		return fmt.Errorf("begin replace session state rows: %w", err)
 	}
 	defer func() {
 		if tx != nil {
@@ -173,7 +245,7 @@ func (s *ProjectionStore) ReplaceSessions(ctx context.Context, projectID string,
 			updatedAt = time.Now().UTC()
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO `+projectionSessionTable+` (
+			INSERT INTO `+sessionStateTable+` (
 				project_id,
 				session_id,
 				issue_id,
@@ -191,16 +263,16 @@ func (s *ProjectionStore) ReplaceSessions(ctx context.Context, projectID string,
 			string(session.State),
 			updatedAt.UTC().Format(time.RFC3339Nano),
 		); err != nil {
-			return fmt.Errorf("upsert session projection %s/%s: %w", projectID, sessionID, err)
+			return fmt.Errorf("upsert session state %s/%s: %w", projectID, sessionID, err)
 		}
 	}
 
 	if len(activeSessions) == 0 {
 		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM `+projectionSessionTable+`
+			DELETE FROM `+sessionStateTable+`
 			WHERE project_id = ?
 		`, projectID); err != nil {
-			return fmt.Errorf("clear session projections %s: %w", projectID, err)
+			return fmt.Errorf("clear session state rows %s: %w", projectID, err)
 		}
 	} else {
 		args := make([]any, 0, len(activeSessions)+1)
@@ -210,20 +282,24 @@ func (s *ProjectionStore) ReplaceSessions(ctx context.Context, projectID string,
 			placeholders = append(placeholders, "?")
 			args = append(args, sessionID)
 		}
-		query := `DELETE FROM ` + projectionSessionTable + ` WHERE project_id = ? AND session_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		query := `DELETE FROM ` + sessionStateTable + ` WHERE project_id = ? AND session_id NOT IN (` + strings.Join(placeholders, ",") + `)`
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("delete stale session projections %s: %w", projectID, err)
+			return fmt.Errorf("delete stale session state rows %s: %w", projectID, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit replace session projections %s: %w", projectID, err)
+		return fmt.Errorf("commit replace session state rows %s: %w", projectID, err)
 	}
 	tx = nil
 	return nil
 }
 
-func (s *ProjectionStore) ListSessions(ctx context.Context, projectID string) ([]Session, error) {
+func (s *RuntimeStateStore) ReplaceSessions(ctx context.Context, projectID string, sessions []Session) error {
+	return s.ReplaceSessionStates(ctx, projectID, sessions)
+}
+
+func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
@@ -235,12 +311,12 @@ func (s *ProjectionStore) ListSessions(ctx context.Context, projectID string) ([
 			issue_id,
 			state,
 			updated_at
-		FROM `+projectionSessionTable+`
+		FROM `+sessionStateTable+`
 		WHERE project_id = ?
 		ORDER BY updated_at DESC, session_id ASC
 	`, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("list session projections %s: %w", projectID, err)
+		return nil, fmt.Errorf("list session state rows %s: %w", projectID, err)
 	}
 	defer rows.Close()
 
@@ -253,9 +329,9 @@ func (s *ProjectionStore) ListSessions(ctx context.Context, projectID string) ([
 			updatedAt string
 		)
 		if err := rows.Scan(&sessionID, &issueID, &stateRaw, &updatedAt); err != nil {
-			return nil, fmt.Errorf("scan session projection row: %w", err)
+			return nil, fmt.Errorf("scan session state row: %w", err)
 		}
-		parsedUpdatedAt, err := parseProjectionTime(updatedAt)
+		parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -267,24 +343,118 @@ func (s *ProjectionStore) ListSessions(ctx context.Context, projectID string) ([
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate session projections: %w", err)
+		return nil, fmt.Errorf("iterate session state rows: %w", err)
 	}
 	return sessions, nil
 }
 
-// ListProjectIDs returns all distinct project IDs referenced by projection rows.
-func (s *ProjectionStore) ListProjectIDs(ctx context.Context) ([]string, error) {
+func (s *RuntimeStateStore) ListSessions(ctx context.Context, projectID string) ([]Session, error) {
+	return s.ListSessionStates(ctx, projectID)
+}
+
+func (s *RuntimeStateStore) GetSessionState(ctx context.Context, projectID, sessionID string) (Session, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return Session{}, false, err
+	}
+	projectID = normalizedProjectID(projectID)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return Session{}, false, nil
+	}
+
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			session_id,
+			issue_id,
+			state,
+			updated_at
+		FROM `+sessionStateTable+`
+		WHERE project_id = ? AND session_id = ?
+	`, projectID, sessionID)
+	var (
+		rowSessionID string
+		issueID      string
+		stateRaw     string
+		updatedAt    string
+	)
+	if err := row.Scan(&rowSessionID, &issueID, &stateRaw, &updatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return Session{}, false, nil
+		}
+		return Session{}, false, fmt.Errorf("get session state %s/%s: %w", projectID, sessionID, err)
+	}
+	parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
+	if err != nil {
+		return Session{}, false, err
+	}
+	return Session{
+		ID:        rowSessionID,
+		IssueID:   issueID,
+		State:     SessionState(stateRaw),
+		UpdatedAt: parsedUpdatedAt,
+	}, true, nil
+}
+
+func (s *RuntimeStateStore) GetSessionStateByIssueID(ctx context.Context, projectID, issueID string) (Session, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return Session{}, false, err
+	}
+	projectID = normalizedProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return Session{}, false, nil
+	}
+
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			session_id,
+			issue_id,
+			state,
+			updated_at
+		FROM `+sessionStateTable+`
+		WHERE project_id = ? AND issue_id = ?
+		ORDER BY updated_at DESC, session_id ASC
+		LIMIT 1
+	`, projectID, issueID)
+	var (
+		sessionID string
+		rowIssue  string
+		stateRaw  string
+		updatedAt string
+	)
+	if err := row.Scan(&sessionID, &rowIssue, &stateRaw, &updatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return Session{}, false, nil
+		}
+		return Session{}, false, fmt.Errorf("get session state by issue %s/%s: %w", projectID, issueID, err)
+	}
+	parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
+	if err != nil {
+		return Session{}, false, err
+	}
+	return Session{
+		ID:        sessionID,
+		IssueID:   rowIssue,
+		State:     SessionState(stateRaw),
+		UpdatedAt: parsedUpdatedAt,
+	}, true, nil
+}
+
+// ListProjectIDs returns all distinct project IDs referenced by persisted runtime-state rows.
+func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT project_id FROM `+projectionSessionTable+`
+		SELECT project_id FROM `+sessionStateTable+`
 		UNION
-		SELECT project_id FROM `+projectionWorktreeTable+`
+		SELECT project_id FROM `+worktreeStateTable+`
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("list projection project ids: %w", err)
+		return nil, fmt.Errorf("list runtime-state project ids: %w", err)
 	}
 	defer rows.Close()
 
@@ -293,7 +463,7 @@ func (s *ProjectionStore) ListProjectIDs(ctx context.Context) ([]string, error) 
 	for rows.Next() {
 		var raw string
 		if err := rows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("scan projection project id: %w", err)
+			return nil, fmt.Errorf("scan runtime-state project id: %w", err)
 		}
 		projectID := normalizedProjectID(raw)
 		if _, exists := seen[projectID]; exists {
@@ -303,26 +473,26 @@ func (s *ProjectionStore) ListProjectIDs(ctx context.Context) ([]string, error) 
 		projectIDs = append(projectIDs, projectID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate projection project ids: %w", err)
+		return nil, fmt.Errorf("iterate runtime-state project ids: %w", err)
 	}
 	slices.Sort(projectIDs)
 	return projectIDs, nil
 }
 
-func (s *ProjectionStore) UpsertWorktree(ctx context.Context, projection WorktreeProjection) error {
+func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
 	}
-	projection.ProjectID = normalizedProjectID(projection.ProjectID)
-	if strings.TrimSpace(projection.IssueID) == "" {
-		return fmt.Errorf("upsert worktree projection: missing issue id")
+	worktreeState.ProjectID = normalizedProjectID(worktreeState.ProjectID)
+	if strings.TrimSpace(worktreeState.IssueID) == "" {
+		return fmt.Errorf("upsert worktree state: missing issue id")
 	}
-	if projection.UpdatedAt.IsZero() {
-		projection.UpdatedAt = time.Now().UTC()
+	if worktreeState.UpdatedAt.IsZero() {
+		worktreeState.UpdatedAt = time.Now().UTC()
 	}
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO `+projectionWorktreeTable+` (
+		INSERT INTO `+worktreeStateTable+` (
 			project_id,
 			issue_id,
 			path,
@@ -334,19 +504,23 @@ func (s *ProjectionStore) UpsertWorktree(ctx context.Context, projection Worktre
 			branch = excluded.branch,
 			updated_at = excluded.updated_at
 	`,
-		projection.ProjectID,
-		projection.IssueID,
-		projection.Path,
-		projection.Branch,
-		projection.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		worktreeState.ProjectID,
+		worktreeState.IssueID,
+		worktreeState.Path,
+		worktreeState.Branch,
+		worktreeState.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
-		return fmt.Errorf("upsert worktree projection %s/%s: %w", projection.ProjectID, projection.IssueID, err)
+		return fmt.Errorf("upsert worktree state %s/%s: %w", worktreeState.ProjectID, worktreeState.IssueID, err)
 	}
 	return nil
 }
 
-func (s *ProjectionStore) DeleteWorktree(ctx context.Context, projectID, issueID string) error {
+func (s *RuntimeStateStore) UpsertWorktree(ctx context.Context, worktreeState WorktreeState) error {
+	return s.UpsertWorktreeState(ctx, worktreeState)
+}
+
+func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, issueID string) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -357,15 +531,19 @@ func (s *ProjectionStore) DeleteWorktree(ctx context.Context, projectID, issueID
 		return nil
 	}
 	if _, err := db.ExecContext(ctx, `
-		DELETE FROM `+projectionWorktreeTable+`
+		DELETE FROM `+worktreeStateTable+`
 		WHERE project_id = ? AND issue_id = ?
 	`, projectID, issueID); err != nil {
-		return fmt.Errorf("delete worktree projection %s/%s: %w", projectID, issueID, err)
+		return fmt.Errorf("delete worktree state %s/%s: %w", projectID, issueID, err)
 	}
 	return nil
 }
 
-func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string, projections []WorktreeProjection) error {
+func (s *RuntimeStateStore) DeleteWorktree(ctx context.Context, projectID, issueID string) error {
+	return s.DeleteWorktreeState(ctx, projectID, issueID)
+}
+
+func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -373,7 +551,7 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 	projectID = normalizedProjectID(projectID)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin replace worktree projections: %w", err)
+		return fmt.Errorf("begin replace worktree state rows: %w", err)
 	}
 	defer func() {
 		if tx != nil {
@@ -381,18 +559,18 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 		}
 	}()
 
-	activeIssues := make(map[string]struct{}, len(projections))
-	for _, projection := range projections {
-		if strings.TrimSpace(projection.IssueID) == "" {
+	activeIssues := make(map[string]struct{}, len(worktreeStates))
+	for _, worktreeState := range worktreeStates {
+		if strings.TrimSpace(worktreeState.IssueID) == "" {
 			continue
 		}
-		activeIssues[projection.IssueID] = struct{}{}
-		updatedAt := projection.UpdatedAt
+		activeIssues[worktreeState.IssueID] = struct{}{}
+		updatedAt := worktreeState.UpdatedAt
 		if updatedAt.IsZero() {
 			updatedAt = time.Now().UTC()
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO `+projectionWorktreeTable+` (
+			INSERT INTO `+worktreeStateTable+` (
 				project_id,
 				issue_id,
 				path,
@@ -405,21 +583,21 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 				updated_at = excluded.updated_at
 		`,
 			projectID,
-			projection.IssueID,
-			projection.Path,
-			projection.Branch,
+			worktreeState.IssueID,
+			worktreeState.Path,
+			worktreeState.Branch,
 			updatedAt.UTC().Format(time.RFC3339Nano),
 		); err != nil {
-			return fmt.Errorf("upsert worktree projection %s/%s: %w", projectID, projection.IssueID, err)
+			return fmt.Errorf("upsert worktree state %s/%s: %w", projectID, worktreeState.IssueID, err)
 		}
 	}
 
 	if len(activeIssues) == 0 {
 		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM `+projectionWorktreeTable+`
+			DELETE FROM `+worktreeStateTable+`
 			WHERE project_id = ?
 		`, projectID); err != nil {
-			return fmt.Errorf("clear worktree projections %s: %w", projectID, err)
+			return fmt.Errorf("clear worktree state rows %s: %w", projectID, err)
 		}
 	} else {
 		args := make([]any, 0, len(activeIssues)+1)
@@ -429,20 +607,24 @@ func (s *ProjectionStore) ReplaceWorktrees(ctx context.Context, projectID string
 			placeholders = append(placeholders, "?")
 			args = append(args, issueID)
 		}
-		query := `DELETE FROM ` + projectionWorktreeTable + ` WHERE project_id = ? AND issue_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		query := `DELETE FROM ` + worktreeStateTable + ` WHERE project_id = ? AND issue_id NOT IN (` + strings.Join(placeholders, ",") + `)`
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("delete stale worktree projections %s: %w", projectID, err)
+			return fmt.Errorf("delete stale worktree state rows %s: %w", projectID, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit replace worktree projections %s: %w", projectID, err)
+		return fmt.Errorf("commit replace worktree state rows %s: %w", projectID, err)
 	}
 	tx = nil
 	return nil
 }
 
-func (s *ProjectionStore) ListWorktrees(ctx context.Context, projectID string) ([]WorktreeProjection, error) {
+func (s *RuntimeStateStore) ReplaceWorktrees(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
+	return s.ReplaceWorktreeStates(ctx, projectID, worktreeStates)
+}
+
+func (s *RuntimeStateStore) ListWorktreeStates(ctx context.Context, projectID string) ([]WorktreeState, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
@@ -456,16 +638,16 @@ func (s *ProjectionStore) ListWorktrees(ctx context.Context, projectID string) (
 			updated_at,
 			COALESCE(git_status_json, ''),
 			COALESCE(git_status_updated_at, '')
-		FROM `+projectionWorktreeTable+`
+		FROM `+worktreeStateTable+`
 		WHERE project_id = ?
 		ORDER BY updated_at DESC, issue_id ASC
 	`, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("list worktree projections %s: %w", projectID, err)
+		return nil, fmt.Errorf("list worktree state rows %s: %w", projectID, err)
 	}
 	defer rows.Close()
 
-	projections := make([]WorktreeProjection, 0)
+	worktreeStates := make([]WorktreeState, 0)
 	for rows.Next() {
 		var (
 			issueID   string
@@ -476,21 +658,21 @@ func (s *ProjectionStore) ListWorktrees(ctx context.Context, projectID string) (
 			statusAt  string
 		)
 		if err := rows.Scan(&issueID, &path, &branch, &updatedAt, &statusRaw, &statusAt); err != nil {
-			return nil, fmt.Errorf("scan worktree projection row: %w", err)
+			return nil, fmt.Errorf("scan worktree state row: %w", err)
 		}
-		parsedUpdatedAt, err := parseProjectionTime(updatedAt)
+		parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
 		if err != nil {
 			return nil, err
 		}
 		var parsedStatusUpdated *time.Time
 		if strings.TrimSpace(statusAt) != "" {
-			parsed, err := parseProjectionTime(statusAt)
+			parsed, err := parseRuntimeStateTime(statusAt)
 			if err != nil {
 				return nil, err
 			}
 			parsedStatusUpdated = &parsed
 		}
-		projections = append(projections, WorktreeProjection{
+		worktreeStates = append(worktreeStates, WorktreeState{
 			ProjectID:        projectID,
 			IssueID:          issueID,
 			Path:             path,
@@ -501,20 +683,24 @@ func (s *ProjectionStore) ListWorktrees(ctx context.Context, projectID string) (
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate worktree projections: %w", err)
+		return nil, fmt.Errorf("iterate worktree state rows: %w", err)
 	}
-	return projections, nil
+	return worktreeStates, nil
 }
 
-func (s *ProjectionStore) GetWorktreeByPath(ctx context.Context, projectID, worktreePath string) (WorktreeProjection, bool, error) {
+func (s *RuntimeStateStore) ListWorktrees(ctx context.Context, projectID string) ([]WorktreeState, error) {
+	return s.ListWorktreeStates(ctx, projectID)
+}
+
+func (s *RuntimeStateStore) GetWorktreeStateByPath(ctx context.Context, projectID, worktreePath string) (WorktreeState, bool, error) {
 	db, err := s.dbHandle()
 	if err != nil {
-		return WorktreeProjection{}, false, err
+		return WorktreeState{}, false, err
 	}
 	projectID = normalizedProjectID(projectID)
 	worktreePath = strings.TrimSpace(worktreePath)
 	if worktreePath == "" {
-		return WorktreeProjection{}, false, nil
+		return WorktreeState{}, false, nil
 	}
 
 	row := db.QueryRowContext(ctx, `
@@ -525,7 +711,7 @@ func (s *ProjectionStore) GetWorktreeByPath(ctx context.Context, projectID, work
 			updated_at,
 			COALESCE(git_status_json, ''),
 			COALESCE(git_status_updated_at, '')
-		FROM `+projectionWorktreeTable+`
+		FROM `+worktreeStateTable+`
 		WHERE project_id = ? AND path = ?
 	`, projectID, worktreePath)
 	var (
@@ -538,23 +724,23 @@ func (s *ProjectionStore) GetWorktreeByPath(ctx context.Context, projectID, work
 	)
 	if err := row.Scan(&issueID, &path, &branch, &updatedAt, &statusRaw, &statusAt); err != nil {
 		if err == sql.ErrNoRows {
-			return WorktreeProjection{}, false, nil
+			return WorktreeState{}, false, nil
 		}
-		return WorktreeProjection{}, false, fmt.Errorf("get worktree projection by path %s/%s: %w", projectID, worktreePath, err)
+		return WorktreeState{}, false, fmt.Errorf("get worktree state by path %s/%s: %w", projectID, worktreePath, err)
 	}
-	parsedUpdatedAt, err := parseProjectionTime(updatedAt)
+	parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
 	if err != nil {
-		return WorktreeProjection{}, false, err
+		return WorktreeState{}, false, err
 	}
 	var parsedStatusUpdated *time.Time
 	if strings.TrimSpace(statusAt) != "" {
-		parsed, err := parseProjectionTime(statusAt)
+		parsed, err := parseRuntimeStateTime(statusAt)
 		if err != nil {
-			return WorktreeProjection{}, false, err
+			return WorktreeState{}, false, err
 		}
 		parsedStatusUpdated = &parsed
 	}
-	return WorktreeProjection{
+	return WorktreeState{
 		ProjectID:        projectID,
 		IssueID:          issueID,
 		Path:             path,
@@ -565,15 +751,19 @@ func (s *ProjectionStore) GetWorktreeByPath(ctx context.Context, projectID, work
 	}, true, nil
 }
 
-func (s *ProjectionStore) GetWorktreeByIssueID(ctx context.Context, projectID, issueID string) (WorktreeProjection, bool, error) {
+func (s *RuntimeStateStore) GetWorktreeByPath(ctx context.Context, projectID, worktreePath string) (WorktreeState, bool, error) {
+	return s.GetWorktreeStateByPath(ctx, projectID, worktreePath)
+}
+
+func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, projectID, issueID string) (WorktreeState, bool, error) {
 	db, err := s.dbHandle()
 	if err != nil {
-		return WorktreeProjection{}, false, err
+		return WorktreeState{}, false, err
 	}
 	projectID = normalizedProjectID(projectID)
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return WorktreeProjection{}, false, nil
+		return WorktreeState{}, false, nil
 	}
 
 	row := db.QueryRowContext(ctx, `
@@ -584,7 +774,7 @@ func (s *ProjectionStore) GetWorktreeByIssueID(ctx context.Context, projectID, i
 			updated_at,
 			COALESCE(git_status_json, ''),
 			COALESCE(git_status_updated_at, '')
-		FROM `+projectionWorktreeTable+`
+		FROM `+worktreeStateTable+`
 		WHERE project_id = ? AND issue_id = ?
 	`, projectID, issueID)
 	var (
@@ -597,23 +787,23 @@ func (s *ProjectionStore) GetWorktreeByIssueID(ctx context.Context, projectID, i
 	)
 	if err := row.Scan(&rowIssueID, &path, &branch, &updatedAt, &statusRaw, &statusAt); err != nil {
 		if err == sql.ErrNoRows {
-			return WorktreeProjection{}, false, nil
+			return WorktreeState{}, false, nil
 		}
-		return WorktreeProjection{}, false, fmt.Errorf("get worktree projection by issue %s/%s: %w", projectID, issueID, err)
+		return WorktreeState{}, false, fmt.Errorf("get worktree state by issue %s/%s: %w", projectID, issueID, err)
 	}
-	parsedUpdatedAt, err := parseProjectionTime(updatedAt)
+	parsedUpdatedAt, err := parseRuntimeStateTime(updatedAt)
 	if err != nil {
-		return WorktreeProjection{}, false, err
+		return WorktreeState{}, false, err
 	}
 	var parsedStatusUpdated *time.Time
 	if strings.TrimSpace(statusAt) != "" {
-		parsed, err := parseProjectionTime(statusAt)
+		parsed, err := parseRuntimeStateTime(statusAt)
 		if err != nil {
-			return WorktreeProjection{}, false, err
+			return WorktreeState{}, false, err
 		}
 		parsedStatusUpdated = &parsed
 	}
-	return WorktreeProjection{
+	return WorktreeState{
 		ProjectID:        projectID,
 		IssueID:          rowIssueID,
 		Path:             path,
@@ -624,7 +814,11 @@ func (s *ProjectionStore) GetWorktreeByIssueID(ctx context.Context, projectID, i
 	}, true, nil
 }
 
-func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
+func (s *RuntimeStateStore) GetWorktreeByIssueID(ctx context.Context, projectID, issueID string) (WorktreeState, bool, error) {
+	return s.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+}
+
+func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
 	db, err := s.dbHandle()
 	if err != nil {
 		return err
@@ -641,7 +835,7 @@ func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID
 		updatedAt = time.Now().UTC()
 	}
 	result, err := db.ExecContext(ctx, `
-		UPDATE `+projectionWorktreeTable+`
+		UPDATE `+worktreeStateTable+`
 		SET
 			git_status_json = ?,
 			git_status_updated_at = ?
@@ -654,6 +848,10 @@ func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID
 		return err
 	}
 	return nil
+}
+
+func (s *RuntimeStateStore) UpsertWorktreeGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
+	return s.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, statusRaw, updatedAt)
 }
 
 func requireAffectedRows(result sql.Result, want int64, action, projectID, rowID string) error {
@@ -670,10 +868,10 @@ func requireAffectedRows(result sql.Result, want int64, action, projectID, rowID
 	return nil
 }
 
-func parseProjectionTime(value string) (time.Time, error) {
+func parseRuntimeStateTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse projection timestamp %q: %w", value, err)
+		return time.Time{}, fmt.Errorf("parse runtime-state timestamp %q: %w", value, err)
 	}
 	return parsed.UTC(), nil
 }
@@ -686,7 +884,7 @@ func normalizedProjectID(projectID string) string {
 	return projectID
 }
 
-func (s *ProjectionStore) dbHandle() (*sql.DB, error) {
+func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db != nil {
@@ -700,7 +898,7 @@ func (s *ProjectionStore) dbHandle() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
-	if err := ensureProjectionSchema(context.Background(), db); err != nil {
+	if err := ensureRuntimeStateSchema(context.Background(), db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -708,9 +906,9 @@ func (s *ProjectionStore) dbHandle() (*sql.DB, error) {
 	return s.db, nil
 }
 
-func ensureProjectionSchema(ctx context.Context, db *sql.DB) error {
+func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS ` + projectionSessionTable + ` (
+		`CREATE TABLE IF NOT EXISTS ` + sessionStateTable + ` (
 			project_id TEXT NOT NULL,
 			session_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
@@ -719,8 +917,8 @@ func ensureProjectionSchema(ctx context.Context, db *sql.DB) error {
 			PRIMARY KEY (project_id, session_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
-			ON ` + projectionSessionTable + ` (project_id, issue_id)`,
-		`CREATE TABLE IF NOT EXISTS ` + projectionWorktreeTable + ` (
+			ON ` + sessionStateTable + ` (project_id, issue_id)`,
+		`CREATE TABLE IF NOT EXISTS ` + worktreeStateTable + ` (
 			project_id TEXT NOT NULL,
 			issue_id TEXT NOT NULL,
 			path TEXT NOT NULL,
@@ -731,17 +929,17 @@ func ensureProjectionSchema(ctx context.Context, db *sql.DB) error {
 			PRIMARY KEY (project_id, issue_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
-			ON ` + projectionWorktreeTable + ` (project_id, path)`,
+			ON ` + worktreeStateTable + ` (project_id, path)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("ensure projection schema: %w", err)
+			return fmt.Errorf("ensure runtime-state schema: %w", err)
 		}
 	}
-	if err := ensureColumn(ctx, db, projectionWorktreeTable, "git_status_json", "TEXT"); err != nil {
+	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_json", "TEXT"); err != nil {
 		return err
 	}
-	if err := ensureColumn(ctx, db, projectionWorktreeTable, "git_status_updated_at", "TEXT"); err != nil {
+	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
 	}
 	return nil

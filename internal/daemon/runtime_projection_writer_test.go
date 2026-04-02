@@ -117,14 +117,14 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
 		t.Fatalf("seed session store: %v", err)
 	}
-	if err := projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+	if err := projectionStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
 		IssueID:   issueID,
 		Path:      worktree,
 		Branch:    branch,
 		UpdatedAt: time.Date(2026, time.April, 2, 11, 0, 0, 0, time.UTC),
 	}); err != nil {
-		t.Fatalf("seed worktree projection: %v", err)
+		t.Fatalf("seed worktree state: %v", err)
 	}
 
 	writer := &recordingRuntimeProjectionWriter{}
@@ -139,8 +139,8 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		t.Fatalf("upsertSessionAndPublish: %v", err)
 	}
 	d.writeSessionStopProjection(projectID, sessionID, issueID)
-	if err := d.persistTmuxSessionProjectionSnapshot(ctx, projectID, []string{sessionID}); err != nil {
-		t.Fatalf("persistTmuxSessionProjectionSnapshot: %v", err)
+	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []string{sessionID}); err != nil {
+		t.Fatalf("persistTmuxSessionRuntimeState: %v", err)
 	}
 
 	wa := &worktreeServiceAdapter{
@@ -226,9 +226,9 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 		t.Fatal("timed out waiting for session projection event")
 	}
 
-	sessions, err := projectionStore.ListSessions(ctx, projectID)
+	sessions, err := projectionStore.ListSessionStates(ctx, projectID)
 	if err != nil {
-		t.Fatalf("ListSessions: %v", err)
+		t.Fatalf("ListSessionStates: %v", err)
 	}
 	if got, want := len(sessions), 1; got != want {
 		t.Fatalf("session row count = %d, want %d", got, want)

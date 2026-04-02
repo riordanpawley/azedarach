@@ -195,16 +195,24 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 		return TaskSnapshot{}, err
 	}
 
-	var tasks []domain.Task
-	if len(resp.Body) > 0 {
-		if err := json.Unmarshal(resp.Body, &tasks); err != nil {
-			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w", CommandTaskList, err)
-		}
+	if len(resp.Body) == 0 {
+		return TaskSnapshot{Revision: resp.Revision}, nil
 	}
 
+	var payload protocol.TaskListSnapshotPayload
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w", CommandTaskList, err)
+	}
+	if payload.SchemaVersion != protocol.TaskListSnapshotSchemaVersion {
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: unsupported schema version %d", CommandTaskList, payload.SchemaVersion)
+	}
+	revision := payload.SnapshotRevision
+	if revision == 0 {
+		revision = resp.Revision
+	}
 	return TaskSnapshot{
-		Tasks:    tasks,
-		Revision: resp.Revision,
+		Tasks:    payload.Tasks,
+		Revision: revision,
 	}, nil
 }
 
