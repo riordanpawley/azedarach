@@ -510,7 +510,34 @@ func TestCodexGuardSessionStartBlocksWhenPromptMissingPrime(t *testing.T) {
 	}
 }
 
-func TestCodexGuardSessionStartSkipsReminderWhenPromptMentionsPrime(t *testing.T) {
+func TestCodexGuardSessionStartAllowsWhenPrimeEvidenceKeyPresent(t *testing.T) {
+	projectDir := t.TempDir()
+	deps := &Dependencies{RepoDir: projectDir}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-2","last_assistant_message":"Azedarach Session Primer\nPrimer evidence key: AZEDARACH_PRIMER_KEY:azedarach-prime-v1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("session-start output = %q, want {}", output)
+	}
+}
+
+func TestCodexGuardSessionStartBlocksWhenOnlyPrimeCommandMentioned(t *testing.T) {
 	projectDir := t.TempDir()
 	deps := &Dependencies{RepoDir: projectDir}
 
@@ -532,8 +559,8 @@ func TestCodexGuardSessionStartSkipsReminderWhenPromptMentionsPrime(t *testing.T
 	output := captureStdout(t, func() error {
 		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("session-start output = %q, want {}", output)
+	if !strings.Contains(output, `"decision":"block"`) {
+		t.Fatalf("session-start output = %q, want block decision", output)
 	}
 }
 

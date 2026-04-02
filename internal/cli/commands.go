@@ -3150,6 +3150,7 @@ func RestartDaemonCommand(deps *Dependencies) error {
 type primeTemplateData struct {
 	ActiveIssueID            string
 	SpecEnabled              bool
+	PrimeEvidenceKey         string
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -3202,6 +3203,7 @@ func PrimeCommand(deps *Dependencies) error {
 	output, err := clitext.Render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
 		SpecEnabled:              deps.Config != nil && deps.Config.Spec.Enabled,
+		PrimeEvidenceKey:         primeEvidenceKey,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,
