@@ -1949,7 +1949,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionCreateTask: // Create task
 		if m.createTaskOverlay == nil {
-			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentAndImplOptions(nil, m.availableTaskImplementations())
+			m.createTaskOverlay = overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, m.availableTaskImplementations(), m.attachmentService)
 		}
 		return m, m.openOverlay(m.createTaskOverlay)
 
@@ -3987,7 +3987,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.deleteTaskCmd(task.ID)
 	case "c":
 		parentID := task.ID
-		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParentAndImplOptions(&parentID, m.availableTaskImplementations()))
+		return m, m.openOverlay(overlay.NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(&parentID, m.availableTaskImplementations(), m.attachmentService))
 	}
 
 	return m, nil
