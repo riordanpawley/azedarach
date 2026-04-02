@@ -159,9 +159,15 @@ func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
 			case daemonclient.CommandTaskList:
-				return jsonResponse(req, []domain.Task{
-					{ID: "az-123", Title: "Server 123"},
-					{ID: "az-999", Title: "Server 999"},
+				return jsonResponse(req, protocol.TaskListSnapshotPayload{
+					SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+					ProtocolVersion:  protocol.CurrentVersion,
+					SnapshotRevision: 1,
+					ProjectID:        "proj-dev",
+					Tasks: []domain.Task{
+						{ID: "az-123", Title: "Server 123"},
+						{ID: "az-999", Title: "Server 999"},
+					},
 				})
 			case daemonclient.CommandDevServerStart:
 				return devServerResponse(req, "az-123", devserver.Server{
