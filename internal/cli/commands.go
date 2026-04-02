@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,6 +26,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/logging"
+	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -2266,9 +2266,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":      opts.IssueID,
-			"updated":       true,
-			"status_set":    opts.Status != nil,
+			"issue_id":       opts.IssueID,
+			"updated":        true,
+			"status_set":     opts.Status != nil,
 			"notes_appended": opts.AppendNotes != "",
 		})
 	}
@@ -2295,11 +2295,11 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"action":         "add",
-			"issue_id":       opts.IssueID,
-			"depends_on_id":  opts.DependsOnID,
+			"action":          "add",
+			"issue_id":        opts.IssueID,
+			"depends_on_id":   opts.DependsOnID,
 			"dependency_type": opts.Type,
-			"updated":        true,
+			"updated":         true,
 		})
 	}
 	fmt.Printf("Added dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
@@ -3453,7 +3453,7 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 		repoDir = "."
 	}
 	sessionLogDir := resolveSessionLogDir(deps.Config)
-	logSources := make([]logSourceSpec, 0, len(opts.Sources))
+	logSources := make([]logstream.SourceSpec, 0, len(opts.Sources))
 	seen := make(map[string]struct{}, len(opts.Sources))
 	for _, source := range opts.Sources {
 		var logPath string
@@ -3472,7 +3472,7 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 			continue
 		}
 		seen[normalizedSource] = struct{}{}
-		logSources = append(logSources, logSourceSpec{
+		logSources = append(logSources, logstream.SourceSpec{
 			Name: normalizedSource,
 			Path: logPath,
 		})
@@ -3480,7 +3480,7 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 	if len(logSources) == 0 {
 		return fmt.Errorf("no log files selected")
 	}
-	availableLogSources := make([]logSourceSpec, 0, len(logSources))
+	availableLogSources := make([]logstream.SourceSpec, 0, len(logSources))
 	for _, source := range logSources {
 		if _, err := os.Stat(source.Path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -3495,14 +3495,12 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 		return fmt.Errorf("none of the selected log files exist yet")
 	}
 
-	for _, source := range availableLogSources {
-		lines, err := readLastLogLines(source.Path, opts.Lines)
-		if err != nil {
-			return fmt.Errorf("read log file %s: %w", source.Path, err)
-		}
-		for _, line := range lines {
-			fmt.Fprintln(os.Stdout, formatLogStreamLine(source.Name, line))
-		}
+	entries, err := logstream.ReadLastMerged(availableLogSources, opts.Lines)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		fmt.Fprintln(os.Stdout, logstream.FormatLine(entry.Source, entry.RawLine, time.Local))
 	}
 	if !opts.Follow {
 		return nil
@@ -3510,170 +3508,12 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	return followLogSources(ctx, availableLogSources, os.Stdout)
-}
-
-type logSourceSpec struct {
-	Name string
-	Path string
-}
-
-type logFollowState struct {
-	Source logSourceSpec
-	Offset int64
-	Carry  string
-}
-
-func readLastLogLines(path string, maxLines int) ([]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	lines := make([]string, 0, maxLines)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-		if len(lines) > maxLines {
-			lines = lines[1:]
+	return logstream.Follow(ctx, availableLogSources, 250*time.Millisecond, func(entry logstream.Entry) error {
+		if _, err := fmt.Fprintln(os.Stdout, logstream.FormatLine(entry.Source, entry.RawLine, time.Local)); err != nil {
+			return fmt.Errorf("write log output: %w", err)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return lines, nil
-}
-
-func followLogSources(ctx context.Context, sources []logSourceSpec, out io.Writer) error {
-	states := make([]*logFollowState, 0, len(sources))
-	for _, source := range sources {
-		info, err := os.Stat(source.Path)
-		if err != nil {
-			return fmt.Errorf("inspect log file %s: %w", source.Path, err)
-		}
-		states = append(states, &logFollowState{
-			Source: source,
-			Offset: info.Size(),
-		})
-	}
-
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			for _, state := range states {
-				if err := flushNewLogData(state, out); err != nil {
-					return err
-				}
-			}
-		}
-	}
-}
-
-func flushNewLogData(state *logFollowState, out io.Writer) error {
-	info, err := os.Stat(state.Source.Path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			state.Offset = 0
-			state.Carry = ""
-			return nil
-		}
-		return fmt.Errorf("inspect log file %s: %w", state.Source.Path, err)
-	}
-	if info.Size() < state.Offset {
-		state.Offset = 0
-		state.Carry = ""
-	}
-	if info.Size() == state.Offset {
 		return nil
-	}
-
-	file, err := os.Open(state.Source.Path)
-	if err != nil {
-		return fmt.Errorf("open log file %s: %w", state.Source.Path, err)
-	}
-	defer file.Close()
-	if _, err := file.Seek(state.Offset, io.SeekStart); err != nil {
-		return fmt.Errorf("seek log file %s: %w", state.Source.Path, err)
-	}
-
-	reader := bufio.NewReader(file)
-	for {
-		line, readErr := reader.ReadString('\n')
-		if strings.HasSuffix(line, "\n") {
-			fullLine := state.Carry + strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-			state.Carry = ""
-			if _, err := fmt.Fprintln(out, formatLogStreamLine(state.Source.Name, fullLine)); err != nil {
-				return fmt.Errorf("write log output: %w", err)
-			}
-		} else {
-			state.Carry += line
-		}
-		if readErr == nil {
-			continue
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		return fmt.Errorf("read log file %s: %w", state.Source.Path, readErr)
-	}
-
-	state.Offset = info.Size()
-	return nil
-}
-
-var logTimeLayouts = []string{
-	time.RFC3339Nano,
-	time.RFC3339,
-	"2006/01/02 15:04:05",
-}
-
-var daemonTimePrefixLayout = "2006/01/02 15:04:05"
-
-func formatLogStreamLine(source, rawLine string) string {
-	line := strings.TrimRight(rawLine, "\r")
-	if ts, rest, ok := extractLogTimestamp(line); ok {
-		displayTime := ts.In(time.Local).Format("2006-01-02 15:04:05 MST")
-		if strings.TrimSpace(rest) == "" {
-			return fmt.Sprintf("[%s] %s", source, displayTime)
-		}
-		return fmt.Sprintf("[%s] %s %s", source, displayTime, rest)
-	}
-	return fmt.Sprintf("[%s] %s", source, line)
-}
-
-func extractLogTimestamp(line string) (time.Time, string, bool) {
-	if len(line) >= len(daemonTimePrefixLayout) {
-		prefix := line[:len(daemonTimePrefixLayout)]
-		if ts, err := time.ParseInLocation(daemonTimePrefixLayout, prefix, time.Local); err == nil {
-			rest := strings.TrimSpace(line[len(daemonTimePrefixLayout):])
-			return ts, rest, true
-		}
-	}
-
-	if !strings.HasPrefix(line, "time=") {
-		return time.Time{}, "", false
-	}
-	spaceIdx := strings.IndexByte(line, ' ')
-	timeField := line
-	rest := ""
-	if spaceIdx >= 0 {
-		timeField = line[:spaceIdx]
-		rest = strings.TrimSpace(line[spaceIdx+1:])
-	}
-	rawTS := strings.TrimPrefix(timeField, "time=")
-	for _, layout := range logTimeLayouts {
-		ts, err := time.Parse(layout, rawTS)
-		if err == nil {
-			return ts, rest, true
-		}
-	}
-	return time.Time{}, "", false
+	})
 }
 
 func resolveSessionLogDir(cfg *config.Config) string {

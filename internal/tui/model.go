@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -28,6 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/logging"
+	"github.com/riordanpawley/azedarach/internal/logstream"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
@@ -2218,13 +2220,15 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 			}
 		}
 
-		sources := inferLogSourcesFromPaths(availablePaths)
+		sourceSpecs := inferLogSourceSpecsFromPaths(availablePaths)
+		sources := make([]string, 0, len(sourceSpecs))
+		for _, source := range sourceSpecs {
+			sources = append(sources, source.Name)
+		}
 		if len(sources) > 0 {
 			sourceList := strings.Join(sources, ",")
 			// Keep a short history buffer before follow mode starts so the stream
 			// opens with context while preserving per-line source prefixes.
-			args := []string{"log", "--lines", "200", "--source", sourceList}
-			cmd := exec.Command("az", args...)
 			if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
 				popupCommand := fmt.Sprintf("az log --lines 200 --source %s", shellSingleQuote(sourceList))
 				if err := m.tmuxClient.DisplayPopup(context.Background(), "az.logs", "90%", "90%", popupCommand); err != nil {
@@ -2235,10 +2239,22 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 				}
 				return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 			}
-			cmd.Stdin = os.Stdin
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
+			entries, err := logstream.ReadLastMerged(sourceSpecs, 200)
+			if err != nil {
+				return overlay.SelectionMsg{
+					Key:   "event-log-error",
+					Value: fmt.Errorf("read log stream history: %w", err),
+				}
+			}
+			for _, entry := range entries {
+				fmt.Fprintln(os.Stdout, logstream.FormatLine(entry.Source, entry.RawLine, time.Local))
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stop()
+			if err := logstream.Follow(ctx, sourceSpecs, 250*time.Millisecond, func(entry logstream.Entry) error {
+				_, writeErr := fmt.Fprintln(os.Stdout, logstream.FormatLine(entry.Source, entry.RawLine, time.Local))
+				return writeErr
+			}); err != nil {
 				return overlay.SelectionMsg{
 					Key:   "event-log-error",
 					Value: fmt.Errorf("stream logs: %w", err),
@@ -2280,10 +2296,19 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 }
 
 func inferLogSourcesFromPaths(paths []string) []string {
+	specs := inferLogSourceSpecsFromPaths(paths)
+	sources := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		sources = append(sources, spec.Name)
+	}
+	return sources
+}
+
+func inferLogSourceSpecsFromPaths(paths []string) []logstream.SourceSpec {
 	if len(paths) == 0 {
 		return nil
 	}
-	sources := make([]string, 0, len(paths))
+	sources := make([]logstream.SourceSpec, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		base := strings.ToLower(strings.TrimSpace(filepath.Base(path)))
@@ -2303,7 +2328,10 @@ func inferLogSourcesFromPaths(paths []string) []string {
 			continue
 		}
 		seen[source] = struct{}{}
-		sources = append(sources, source)
+		sources = append(sources, logstream.SourceSpec{
+			Name: source,
+			Path: path,
+		})
 	}
 	return sources
 }

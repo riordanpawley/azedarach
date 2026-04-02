@@ -3423,17 +3423,17 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionAsBaseline(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{
-			ID:         "az-1",
-			Title:      "Projection task",
-			Status:     domain.StatusOpen,
-			Priority:   domain.P2,
-			Type:       domain.TypeTask,
-			HasWorktree: true,
-			GitAheadCount: 2,
-			GitBehindCount: 3,
+			ID:                    "az-1",
+			Title:                 "Projection task",
+			Status:                domain.StatusOpen,
+			Priority:              domain.P2,
+			Type:                  domain.TypeTask,
+			HasWorktree:           true,
+			GitAheadCount:         2,
+			GitBehindCount:        3,
 			HasUncommittedChanges: true,
-			GitAdditions: 5,
-			GitDeletions: 1,
+			GitAdditions:          5,
+			GitDeletions:          1,
 			Session: &domain.Session{
 				IssueID:   "az-1",
 				State:     domain.SessionBusy,
