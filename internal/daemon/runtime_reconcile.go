@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
@@ -133,7 +134,7 @@ func (d *Daemon) runStartupRuntimeReconcile(ctx context.Context) (protocol.Runti
 	}
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return d.ensureRuntimeReconciler().Reconcile(reconcileCtx, protocol.DefaultProjectID)
+	return d.ensureRuntimeReconciler().Reconcile(reconcileCtx, d.runtimeReconcileDaemonProjectID())
 }
 
 func (d *Daemon) startRuntimeReconcileWorker(ctx context.Context) {
@@ -169,7 +170,7 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	result, err := d.ensureRuntimeReconciler().Reconcile(reconcileCtx, protocol.DefaultProjectID)
+	result, err := d.ensureRuntimeReconciler().Reconcile(reconcileCtx, d.runtimeReconcileDaemonProjectID())
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("daemon runtime reconcile cycle failed",
@@ -187,4 +188,22 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 			"aligned_daemon_sessions", result.AlignedDaemonSessions,
 		)
 	}
+}
+
+func (d *Daemon) runtimeReconcileDaemonProjectID() string {
+	if d == nil {
+		return protocol.DefaultProjectID
+	}
+	repoDir := strings.TrimSpace(d.cfg.RepoDir)
+	if repoDir == "" {
+		return protocol.DefaultProjectID
+	}
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("resolve runtime reconcile project id failed", "repo_dir", repoDir, "error", err)
+		}
+		return protocol.DefaultProjectID
+	}
+	return protocol.NormalizeProjectID(projectID)
 }

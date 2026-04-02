@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -198,6 +199,37 @@ func TestRunInvokesStartupRuntimeReconcileWithBoundedTimeout(t *testing.T) {
 	}
 }
 
+func TestRunStartupRuntimeReconcileUsesRepoScopedProjectID(t *testing.T) {
+	repoDir := t.TempDir()
+	wantProjectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	recorder := &runtimeReconcileRecorder{
+		result: protocol.RuntimeReconcileResponseBody{ProjectID: wantProjectID},
+	}
+	d := &Daemon{
+		cfg: Config{
+			Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RepoDir:                repoDir,
+			RuntimeReconcileTimeout: 25 * time.Millisecond,
+		},
+		runtimeReconciler: recorder,
+	}
+
+	if _, err := d.runStartupRuntimeReconcile(context.Background()); err != nil {
+		t.Fatalf("runStartupRuntimeReconcile: %v", err)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 1 {
+		t.Fatalf("startup reconcile calls = %d, want 1", calls)
+	}
+	if len(projectIDs) != 1 || projectIDs[0] != wantProjectID {
+		t.Fatalf("startup reconcile project ids = %v, want [%s]", projectIDs, wantProjectID)
+	}
+}
+
 func TestRuntimeReconcileWorkerInvokesUntilCanceled(t *testing.T) {
 	recorder := &runtimeReconcileRecorder{
 		started: make(chan struct{}, 4),
@@ -227,6 +259,35 @@ func TestRuntimeReconcileWorkerInvokesUntilCanceled(t *testing.T) {
 	calls, _ := recorder.snapshot()
 	if calls != 1 {
 		t.Fatalf("periodic reconcile calls = %d, want 1 after cancellation", calls)
+	}
+}
+
+func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
+	repoDir := t.TempDir()
+	wantProjectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	recorder := &runtimeReconcileRecorder{
+		result: protocol.RuntimeReconcileResponseBody{ProjectID: wantProjectID},
+	}
+	d := &Daemon{
+		cfg: Config{
+			Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RepoDir:                repoDir,
+			RuntimeReconcileTimeout: 25 * time.Millisecond,
+		},
+		runtimeReconciler: recorder,
+	}
+
+	d.runRuntimeReconcileCycle(context.Background())
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", calls)
+	}
+	if len(projectIDs) != 1 || projectIDs[0] != wantProjectID {
+		t.Fatalf("reconcile project ids = %v, want [%s]", projectIDs, wantProjectID)
 	}
 }
 
