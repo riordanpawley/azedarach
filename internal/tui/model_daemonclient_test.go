@@ -2985,6 +2985,112 @@ func TestHandleSelectionUpdateFromMainResolvesWorktreeWithoutSession(t *testing.
 	}
 }
 
+func TestHandleSelectionUpdateFromMainUsesLocalBaseBranchInLocalWorkflowMode(t *testing.T) {
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "default",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{
+						{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitFetch:
+				respBody, err := json.Marshal(daemonclient.GitCommandResponse{
+					Worktree: "/tmp/az-1",
+					Remote:   "origin",
+				})
+				if err != nil {
+					t.Fatalf("marshal fetch response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitMerge:
+				var body daemonclient.GitCommandRequest
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal merge request: %v", err)
+				}
+				if body.Worktree != "/tmp/az-1" || body.Branch != "main" {
+					t.Fatalf("merge body = %+v", body)
+				}
+				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
+					Worktree: body.Worktree,
+					Branch:   body.Branch,
+					Result:   git.MergeResult{Success: true},
+				})
+				if err != nil {
+					t.Fatalf("marshal merge response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.WorkflowMode = "local"
+	m.tasks = []domain.Task{{
+		ID:          "az-1",
+		Title:       "Task 1",
+		Status:      domain.StatusInProgress,
+		Type:        domain.TypeTask,
+		HasWorktree: true,
+	}}
+	m.nav.SelectTask("az-1", 1)
+
+	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "u"})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected update-from-main command")
+	}
+
+	msg := cmd()
+	result, ok := msg.(fetchAndMergeResultMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want fetchAndMergeResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("fetch-and-merge err = %v", result.err)
+	}
+}
+
 func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
