@@ -61,6 +61,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, ""); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("session reconciliation during task list failed", "project_id", projectID, "error", err)
 	}
+	d.refreshWorktreeProjectionCache(ctx, projectID)
 	tasks, err := d.issues.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -77,6 +78,43 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 		d.cfg.Logger.Info("daemon task list completed", "project_id", projectID, "task_count", len(tasks), "revision", resp.Revision)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) refreshWorktreeProjectionCache(ctx context.Context, projectID string) {
+	if d == nil || d.worktree == nil || d.projectionStore == nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	worktrees, err := d.worktree.List(ctx)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("refresh worktree projection cache failed", "project_id", projectID, "error", err)
+		}
+		return
+	}
+
+	rows := make([]daemonstate.WorktreeProjection, 0, len(worktrees))
+	now := time.Now().UTC()
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		rows = append(rows, daemonstate.WorktreeProjection{
+			ProjectID: projectID,
+			IssueID:   issueID,
+			Path:      strings.TrimSpace(wt.Path),
+			Branch:    strings.TrimSpace(wt.Branch),
+			UpdatedAt: now,
+		})
+	}
+	if err := d.projectionStore.ReplaceWorktrees(ctx, projectID, rows); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("replace worktree projections during task list failed", "project_id", projectID, "error", err)
+	}
 }
 
 func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
@@ -122,6 +160,13 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 		}
 
 		statusRaw := row.GitStatusRaw
+		if len(statusRaw) == 0 && worktreePath != "" {
+			if status := d.hydrateGitStatusProjection(ctx, projectID, row.IssueID, worktreePath); status != nil {
+				tasks[i].HasUncommittedChanges = status.HasChanges
+				tasks[i].GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
+				tasks[i].GitDeletions = len(status.Deleted)
+			}
+		}
 		if len(statusRaw) == 0 {
 			continue
 		}
@@ -136,6 +181,42 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 	}
 
 	return tasks
+}
+
+func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issueID, worktree string) *git.GitStatus {
+	if d == nil || d.git == nil || d.projectionStore == nil {
+		return nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+	if issueID == "" || worktree == "" {
+		return nil
+	}
+
+	timeoutCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeoutCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+	}
+	defer cancel()
+
+	status, err := d.git.Status(timeoutCtx, worktree)
+	if err != nil || status == nil {
+		return nil
+	}
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		return nil
+	}
+	if err := d.projectionStore.UpsertWorktreeGitStatus(timeoutCtx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
+		return nil
+	}
+	d.publishGitStatusProjectionEvent(timeoutCtx, projectID, issueID, worktree, status)
+	return status
 }
 
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
