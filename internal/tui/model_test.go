@@ -3331,12 +3331,25 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 	childID := "az-child"
 	grandchildID := "az-grandchild"
 	unrelatedID := "az-unrelated"
+	startedAt := time.Now().Add(-2 * time.Minute)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
 		{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
-		{ID: grandchildID, Title: "Grandchild", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &childID, HasTmuxSession: true},
+		{
+			ID:       grandchildID,
+			Title:    "Grandchild",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			ParentID: &childID,
+			Session: &domain.Session{
+				IssueID:   grandchildID,
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
+		},
 		{ID: unrelatedID, Title: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
@@ -3359,21 +3372,26 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 }
 
 func TestRuntimeSignalsForBoardUsesTaskProjectionAsBaseline(t *testing.T) {
+	startedAt := time.Now().Add(-5 * time.Minute)
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{
-			ID:                    "az-1",
-			Title:                 "Projection task",
-			Status:                domain.StatusOpen,
-			Priority:              domain.P2,
-			Type:                  domain.TypeTask,
-			HasTmuxSession:        true,
-			HasWorktree:           true,
-			GitAheadCount:         2,
-			GitBehindCount:        3,
+			ID:         "az-1",
+			Title:      "Projection task",
+			Status:     domain.StatusOpen,
+			Priority:   domain.P2,
+			Type:       domain.TypeTask,
+			HasWorktree: true,
+			GitAheadCount: 2,
+			GitBehindCount: 3,
 			HasUncommittedChanges: true,
-			GitAdditions:          5,
-			GitDeletions:          1,
+			GitAdditions: 5,
+			GitDeletions: 1,
+			Session: &domain.Session{
+				IssueID:   "az-1",
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
 		},
 	}
 	// Simulate stale runtime map values that disagree with hydrated task projection.
@@ -3384,7 +3402,7 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionAsBaseline(t *testing.T) {
 	signals := m.runtimeSignalsForBoard()
 	got := signals["az-1"]
 	if !got.HasTmuxSession {
-		t.Fatal("expected HasTmuxSession from task projection baseline")
+		t.Fatal("expected HasTmuxSession from task session baseline")
 	}
 	if !got.HasWorktree {
 		t.Fatal("expected HasWorktree from task projection baseline")
@@ -3401,11 +3419,24 @@ func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *tes
 	parentID := "az-parent"
 	childID := "az-child"
 	otherID := "az-other"
+	startedAt := time.Now().Add(-2 * time.Minute)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
-		{ID: childID, Title: "Child", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID, HasTmuxSession: true},
+		{
+			ID:       childID,
+			Title:    "Child",
+			Status:   domain.StatusInProgress,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+			Session: &domain.Session{
+				IssueID:   childID,
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
+		},
 		{ID: otherID, Title: "Other", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 	m.editor.SetSort(&domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc})

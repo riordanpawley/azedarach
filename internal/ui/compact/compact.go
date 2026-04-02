@@ -199,7 +199,7 @@ func (cv *CompactView) renderRow(index int, task domain.Task) string {
 		cv.renderStatusCell(task.Status, widths.status),
 		cv.renderPriorityCell(task.Priority, widths.priority),
 		cv.renderTypeCell(task.Type, widths.type_),
-		cv.renderSessionCell(task, widths.session),
+		cv.renderSessionCell(task.Session, widths.session),
 	}
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, cells...)
@@ -310,13 +310,9 @@ func (cv *CompactView) renderTypeCell(taskType domain.TaskType, width int) strin
 }
 
 // renderSessionCell renders the session state icon.
-func (cv *CompactView) renderSessionCell(task domain.Task, width int) string {
-	session := task.Session
+func (cv *CompactView) renderSessionCell(session *domain.Session, width int) string {
 	if session == nil {
-		if !task.HasTmuxSession {
-			return cv.styles.ColSession.Width(width).Render(" ")
-		}
-		return cv.styles.StatusOpen.Width(width).Align(lipgloss.Center).Render("◉")
+		return cv.styles.ColSession.Width(width).Render(" ")
 	}
 
 	var style lipgloss.Style

@@ -566,7 +566,7 @@ func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
 	for _, task := range m.tasks {
 		signalsByTask[task.ID] = board.RuntimeSignals{
-			HasTmuxSession:        task.HasTmuxSession || task.Session != nil,
+			HasTmuxSession:        task.Session != nil,
 			HasWorktree:           task.HasWorktree,
 			GitAheadCount:         task.GitAheadCount,
 			GitBehindCount:        task.GitBehindCount,
@@ -650,7 +650,7 @@ func buildActiveDescendantSessionByTask(tasks []domain.Task) map[string]bool {
 		if taskID == "" {
 			continue
 		}
-		if task.Session == nil && !task.HasTmuxSession {
+		if task.Session == nil {
 			continue
 		}
 

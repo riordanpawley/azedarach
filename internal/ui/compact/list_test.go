@@ -339,26 +339,6 @@ func TestRenderSessionIcon(t *testing.T) {
 	}
 }
 
-func TestRenderProjectedSessionSignalWithoutSessionState(t *testing.T) {
-	task := domain.Task{
-		ID:             "az-signal",
-		Title:          "Signal-only session",
-		Status:         domain.StatusOpen,
-		Priority:       domain.P2,
-		Type:           domain.TypeTask,
-		HasTmuxSession: true,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
-
-	lv := NewCompactView([]domain.Task{task}, 80, 20)
-	output := lv.Render()
-
-	if !strings.Contains(output, "◉") {
-		t.Fatalf("expected projected session indicator for signal-only task, got %q", output)
-	}
-}
-
 // Helper functions
 
 func createTestTasks(count int) []domain.Task {
