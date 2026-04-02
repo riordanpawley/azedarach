@@ -64,8 +64,8 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	overlay := NewEventLogOverlay([]protocol.EventEnvelope{older, newer})
 	overlay.viewHeight = 20
 
-	if got := overlay.events[0].Revision; got != newer.Revision {
-		t.Fatalf("events[0].Revision = %d, want newest revision %d", got, newer.Revision)
+	if got := overlay.events[len(overlay.events)-1].Revision; got != newer.Revision {
+		t.Fatalf("events[last].Revision = %d, want newest revision %d", got, newer.Revision)
 	}
 
 	view := overlay.View()
@@ -287,6 +287,23 @@ func TestEventLogOverlay_ContentCacheInvalidation(t *testing.T) {
 	overlay.AddEvent(testEvent(3, "daemon.event.three"))
 	if !overlay.contentDirty {
 		t.Fatal("expected cache invalidation after AddEvent")
+	}
+}
+
+func TestEventLogOverlay_EventCapAndChronologicalAppend(t *testing.T) {
+	overlay := NewEventLogOverlay(nil)
+	for i := 1; i <= eventLogMaxRetainedEvents+25; i++ {
+		overlay.AddEvent(testEvent(uint64(i), "daemon.event.cap"))
+	}
+
+	if len(overlay.events) != eventLogMaxRetainedEvents {
+		t.Fatalf("retained events = %d, want %d", len(overlay.events), eventLogMaxRetainedEvents)
+	}
+	if got := overlay.events[0].Revision; got != 26 {
+		t.Fatalf("oldest retained revision = %d, want 26", got)
+	}
+	if got := overlay.events[len(overlay.events)-1].Revision; got != eventLogMaxRetainedEvents+25 {
+		t.Fatalf("newest retained revision = %d, want %d", got, eventLogMaxRetainedEvents+25)
 	}
 }
 

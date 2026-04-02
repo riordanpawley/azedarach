@@ -29,11 +29,19 @@ type EventLogOverlay struct {
 	events            []protocol.EventEnvelope
 	cachedContentLines []string
 	contentDirty       bool
+	cachedPrettyStart  int
+	cachedPrettyEnd    int
 	scroll            int
 	maxScroll         int
 	viewHeight        int
 	styles            *Styles
 }
+
+const (
+	eventLogMaxRetainedEvents   = 2000
+	eventLogApproxLinesPerEvent = 4
+	eventLogPrettyWindowPadding = 2
+)
 
 // NewEventLogOverlay creates an event log overlay from chronologically ordered events.
 func NewEventLogOverlay(events []protocol.EventEnvelope) *EventLogOverlay {
@@ -51,6 +59,8 @@ func NewEventLogOverlayWithLogFiles(events []protocol.EventEnvelope, tuiLogFileP
 		tuiLogFilePath:    strings.TrimSpace(tuiLogFilePath),
 		daemonLogFilePath: strings.TrimSpace(daemonLogFilePath),
 		contentDirty:      true,
+		cachedPrettyStart: -1,
+		cachedPrettyEnd:   -1,
 		scroll:            0,
 		viewHeight:        18,
 		styles:            New(),
@@ -59,17 +69,23 @@ func NewEventLogOverlayWithLogFiles(events []protocol.EventEnvelope, tuiLogFileP
 	return overlay
 }
 
-// SetEvents replaces the event list and normalizes it to newest-first order.
+// SetEvents replaces the event list in chronological order.
 func (o *EventLogOverlay) SetEvents(events []protocol.EventEnvelope) {
-	o.events = reverseEvents(events)
+	o.events = append([]protocol.EventEnvelope(nil), events...)
+	o.trimEventsToCap()
 	o.contentDirty = true
+	o.cachedPrettyStart = -1
+	o.cachedPrettyEnd = -1
 	o.clampScroll()
 }
 
-// AddEvent prepends a single event so the newest event stays at the top.
+// AddEvent appends a single event while preserving chronological order.
 func (o *EventLogOverlay) AddEvent(evt protocol.EventEnvelope) {
-	o.events = append([]protocol.EventEnvelope{evt}, o.events...)
+	o.events = append(o.events, evt)
+	o.trimEventsToCap()
 	o.contentDirty = true
+	o.cachedPrettyStart = -1
+	o.cachedPrettyEnd = -1
 	o.clampScroll()
 }
 
@@ -209,19 +225,25 @@ func (o *EventLogOverlay) renderContentLines() []string {
 		return lines
 	}
 
-	for _, evt := range o.events {
-		lines = append(lines, o.renderEvent(evt)...)
+	prettyStart, prettyEnd := o.prettyWindowForCurrentScroll()
+	for displayIndex := 0; displayIndex < len(o.events); displayIndex++ {
+		eventIndex := len(o.events) - 1 - displayIndex
+		prettyBody := displayIndex >= prettyStart && displayIndex <= prettyEnd
+		lines = append(lines, o.renderEvent(o.events[eventIndex], prettyBody)...)
 	}
 
 	return lines
 }
 
 func (o *EventLogOverlay) contentLines() []string {
-	if !o.contentDirty {
+	prettyStart, prettyEnd := o.prettyWindowForCurrentScroll()
+	if !o.contentDirty && o.cachedPrettyStart == prettyStart && o.cachedPrettyEnd == prettyEnd {
 		return o.cachedContentLines
 	}
 	o.cachedContentLines = o.renderContentLines()
 	o.contentDirty = false
+	o.cachedPrettyStart = prettyStart
+	o.cachedPrettyEnd = prettyEnd
 	return o.cachedContentLines
 }
 
@@ -229,7 +251,7 @@ func (o *EventLogOverlay) footerLine(scrollable bool) string {
 	return o.styles.Footer.Render(keybinds.RenderPlain(o.actionBindings(scrollable), " • "))
 }
 
-func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope) []string {
+func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope, prettyBody bool) []string {
 	lines := make([]string, 0, 3)
 
 	headerParts := []string{
@@ -260,7 +282,7 @@ func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope) []string {
 		lines = append(lines, o.styles.MenuItem.Render("  "+strings.Join(metaParts, "  ")))
 	}
 
-	for _, bodyLine := range o.renderBodyLines(evt.Body) {
+	for _, bodyLine := range o.renderBodyLinesWithPretty(evt.Body, prettyBody) {
 		lines = append(lines, o.styles.MenuItem.Render("  "+bodyLine))
 	}
 	return lines
@@ -274,16 +296,41 @@ func (o *EventLogOverlay) renderTimestamp(ts time.Time) string {
 }
 
 func (o *EventLogOverlay) renderBodyLines(body []byte) []string {
+	return o.renderBodyLinesWithPretty(body, true)
+}
+
+func (o *EventLogOverlay) renderBodyLinesWithPretty(body []byte, pretty bool) []string {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
 		return nil
 	}
 
-	if formatted, ok := formatJSONLogBody([]byte(text)); ok {
-		text = formatted
+	if pretty {
+		if formatted, ok := formatJSONLogBody([]byte(text)); ok {
+			text = formatted
+		}
 	}
 
 	return strings.Split(text, "\n")
+}
+
+func (o *EventLogOverlay) trimEventsToCap() {
+	if len(o.events) <= eventLogMaxRetainedEvents {
+		return
+	}
+	o.events = append([]protocol.EventEnvelope(nil), o.events[len(o.events)-eventLogMaxRetainedEvents:]...)
+}
+
+func (o *EventLogOverlay) prettyWindowForCurrentScroll() (start, end int) {
+	if len(o.events) == 0 {
+		return -1, -1
+	}
+
+	approxContentHeight := max(1, o.viewHeight-1)
+	windowStart := max(0, o.scroll/eventLogApproxLinesPerEvent-eventLogPrettyWindowPadding)
+	windowSpan := max(6, approxContentHeight/eventLogApproxLinesPerEvent+eventLogPrettyWindowPadding*2)
+	windowEnd := min(len(o.events)-1, windowStart+windowSpan-1)
+	return windowStart, windowEnd
 }
 
 func (o *EventLogOverlay) clampScroll() {
@@ -293,18 +340,6 @@ func (o *EventLogOverlay) clampScroll() {
 	if o.scroll > o.maxScroll {
 		o.scroll = o.maxScroll
 	}
-}
-
-func reverseEvents(events []protocol.EventEnvelope) []protocol.EventEnvelope {
-	if len(events) == 0 {
-		return nil
-	}
-
-	out := make([]protocol.EventEnvelope, len(events))
-	for i := range events {
-		out[len(events)-1-i] = events[i]
-	}
-	return out
 }
 
 func (o *EventLogOverlay) renderScrollableContent(contentHeight int) string {
