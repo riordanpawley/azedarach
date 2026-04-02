@@ -23,6 +23,7 @@ Adopt a daemon-authoritative architecture with explicit ownership boundaries:
 - session/worktree/devserver mutation authority
 - background orchestration and lifecycle transitions
 - revision sequencing and event publication
+- runtime projection persistence and publish flow through one daemon-owned writer
 
 Drift sentinel markers:
 - `worktree.cleanup_orphaned`
@@ -59,3 +60,4 @@ Tradeoffs:
 - `internal/daemon/*` and `internal/client/*` are the core split packages.
 - `internal/contracts/*` remains transport-agnostic and versioned.
 - Frontend command paths must migrate to daemon RPC calls only.
+- Runtime projection writes must flow through `internal/daemon/runtime_projection_writer.go` so persist, revision, and publish stay ordered in one place.
