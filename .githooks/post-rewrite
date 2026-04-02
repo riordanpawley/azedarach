@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# >>> azedarach managed githook >>>
+az githooks hook --hook post-rewrite "$@" >/dev/null 2>&1 || true
+# <<< azedarach managed githook <<<
+
+set -eu
+

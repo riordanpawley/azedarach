@@ -1,4 +1,8 @@
 #!/usr/bin/env sh
+# >>> azedarach managed githook >>>
+az githooks hook --hook pre-commit "$@" >/dev/null 2>&1 || true
+# <<< azedarach managed githook <<<
+
 set -eu
 
 # Keep spec markdown docs in sync and auto-stage generated files when configured.
