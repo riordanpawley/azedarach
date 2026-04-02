@@ -648,6 +648,28 @@ func TestEditTaskOverlayCtrlPAttachesFromClipboard(t *testing.T) {
 	assert.Equal(t, "az-77", addedMsg.attachment.IssueID)
 }
 
+func TestCreateTaskOverlayCtrlPWithoutIDReturnsError(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+
+	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	require.NotNil(t, cmd)
+
+	msg := cmd()
+	errMsg, ok := msg.(errorMsg)
+	require.True(t, ok)
+	assert.Contains(t, errMsg.err.Error(), "save the task before adding image attachments")
+}
+
+func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
+	svc := &createTestAttachmentService{}
+	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
+
+	view := overlay.View()
+	assert.Contains(t, view, "Image Attachments:")
+	assert.Contains(t, view, "Save task first, then press Ctrl+P")
+}
+
 func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
 	task := domain.Task{ID: "az-78", Title: "Edit me", Type: domain.TypeTask, Priority: domain.P2}
 

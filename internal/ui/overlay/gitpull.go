@@ -72,7 +72,7 @@ func (g *GitPullOverlay) View() string {
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
 			var b strings.Builder
-			message := fmt.Sprintf("Your local main branch is behind by %d commits.", g.commitsBehind)
+			message := fmt.Sprintf("Your local base branch is behind by %d commits.", g.commitsBehind)
 			b.WriteString(g.styles.MenuItem.Render(message))
 			b.WriteString("\n\n")
 			pullStyle := g.styles.MenuItem

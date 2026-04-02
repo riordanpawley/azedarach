@@ -98,3 +98,63 @@ func TestStoreSessionByIssueIDReturnsMostRecent(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreUpsertSession_PreservesStartTimestampAcrossLifecycle(t *testing.T) {
+	s := NewStore()
+	base := time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC)
+	current := base
+	s.nowFn = func() time.Time { return current }
+
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStateStarting); err != nil {
+		t.Fatalf("starting transition: %v", err)
+	}
+	current = current.Add(2 * time.Minute)
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStateAttached); err != nil {
+		t.Fatalf("attached transition: %v", err)
+	}
+	current = current.Add(2 * time.Minute)
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStatePaused); err != nil {
+		t.Fatalf("paused transition: %v", err)
+	}
+
+	session, err := s.Session("proj", "s1")
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	if !session.UpdatedAt.Equal(base) {
+		t.Fatalf("updated_at = %v, want preserved start time %v", session.UpdatedAt, base)
+	}
+}
+
+func TestStoreUpsertSession_ResetsStartTimestampAfterRestart(t *testing.T) {
+	s := NewStore()
+	base := time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC)
+	current := base
+	s.nowFn = func() time.Time { return current }
+
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStateStarting); err != nil {
+		t.Fatalf("starting transition: %v", err)
+	}
+	current = current.Add(2 * time.Minute)
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStateAttached); err != nil {
+		t.Fatalf("attached transition: %v", err)
+	}
+	current = current.Add(1 * time.Minute)
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStateStopped); err != nil {
+		t.Fatalf("stopped transition: %v", err)
+	}
+
+	restartAt := current.Add(5 * time.Minute)
+	current = restartAt
+	if _, err := s.UpsertSession("proj", "s1", "blx", SessionStateStarting); err != nil {
+		t.Fatalf("restart starting transition: %v", err)
+	}
+
+	session, err := s.Session("proj", "s1")
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	if !session.UpdatedAt.Equal(restartAt) {
+		t.Fatalf("updated_at = %v, want restart time %v", session.UpdatedAt, restartAt)
+	}
+}

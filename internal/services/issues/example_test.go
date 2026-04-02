@@ -13,11 +13,12 @@ import (
 func Example() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	repoDir, err := os.Getwd()
+	repoDir, err := os.MkdirTemp("", "azedarach-issues-example-*")
 	if err != nil {
-		logger.Error("failed to determine working directory", "error", err)
+		logger.Error("failed to create temporary repo directory", "error", err)
 		return
 	}
+	defer os.RemoveAll(repoDir)
 
 	_ = filepath.Join(repoDir, ".azedarach", "azedarach.db")
 	client := issues.NewClient(repoDir, logger)

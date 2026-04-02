@@ -32,6 +32,7 @@ const (
 	commandDevServerList       = "devserver.list"
 	gitHookManagedBlockStart   = "# >>> azedarach managed githook >>>"
 	gitHookManagedBlockEnd     = "# <<< azedarach managed githook <<<"
+	primeEvidenceKey           = "AZEDARACH_PRIMER_KEY:azedarach-prime-v1"
 )
 
 var hookEventStatuses = map[string]string{
@@ -1188,8 +1189,11 @@ func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap ma
 	case "session-start":
 		threadState = codexGuardThreadState{}
 		state.Threads[threadID] = threadState
-		if !codexGuardPromptMentionsPrime(payloadMap) {
-			response["systemMessage"] = "Run `az prime` now before any other shell commands."
+		if !codexGuardPayloadHasPrimeEvidence(payloadMap) {
+			reason := "Run `az prime` now before any other shell commands."
+			response["decision"] = "block"
+			response["reason"] = reason
+			response["systemMessage"] = reason
 		}
 	case "user-prompt-submit":
 		if codexGuardCompactionDetected(payloadMap) {
@@ -1699,28 +1703,28 @@ func codexGuardIsPrimeCommand(command string) bool {
 		strings.HasPrefix(normalized, "go run ./cmd/az prime")
 }
 
-func codexGuardPromptMentionsPrime(payload map[string]any) bool {
-	for _, key := range []string{"prompt", "user_prompt", "user-prompt", "input_messages", "input-messages", "inputMessages"} {
-		if value, ok := payload[key]; ok && codexGuardValueMentionsPrime(value) {
+func codexGuardPayloadHasPrimeEvidence(payload map[string]any) bool {
+	for _, value := range payload {
+		if codexGuardValueHasPrimeEvidence(value) {
 			return true
 		}
 	}
 	return false
 }
 
-func codexGuardValueMentionsPrime(value any) bool {
+func codexGuardValueHasPrimeEvidence(value any) bool {
 	switch typed := value.(type) {
 	case string:
-		return strings.Contains(strings.ToLower(typed), "az prime")
+		return strings.Contains(typed, primeEvidenceKey)
 	case []any:
 		for _, item := range typed {
-			if codexGuardValueMentionsPrime(item) {
+			if codexGuardValueHasPrimeEvidence(item) {
 				return true
 			}
 		}
 	case map[string]any:
 		for _, item := range typed {
-			if codexGuardValueMentionsPrime(item) {
+			if codexGuardValueHasPrimeEvidence(item) {
 				return true
 			}
 		}

@@ -125,6 +125,7 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	hasCleanup := false
 	hasDeleteAndCleanup := false
 	worktreeOnlyActionsEnabled := []string{}
+	updateFromBaseEnabled := false
 	for _, action := range menu.actions {
 		if action.Key == "a" && action.Enabled {
 			hasAttach = true
@@ -134,6 +135,9 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 		}
 		if action.Key == "W" && action.Enabled {
 			hasDeleteAndCleanup = true
+		}
+		if action.Key == "u" && action.Enabled {
+			updateFromBaseEnabled = true
 		}
 		if (action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "f") && action.Enabled {
 			worktreeOnlyActionsEnabled = append(worktreeOnlyActionsEnabled, action.Key)
@@ -145,7 +149,16 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	if !hasCleanup || !hasDeleteAndCleanup {
 		t.Fatal("expected cleanup actions to remain enabled when tmux session is present")
 	}
-	if len(worktreeOnlyActionsEnabled) > 0 {
+	if !updateFromBaseEnabled {
+		t.Fatal("expected update-from-base action enabled when tmux session is present")
+	}
+	for _, key := range worktreeOnlyActionsEnabled {
+		if key == "u" {
+			continue
+		}
+		t.Fatalf("expected worktree-path actions to stay disabled without projected worktree, got enabled: %v", worktreeOnlyActionsEnabled)
+	}
+	if len(worktreeOnlyActionsEnabled) > 1 {
 		t.Fatalf("expected worktree-path actions to stay disabled without projected worktree, got enabled: %v", worktreeOnlyActionsEnabled)
 	}
 }
@@ -367,8 +380,8 @@ func TestActionMenu_MergeLabelTopLevelUsesMainWhenNoEligibleUpstream(t *testing.
 	menu := NewActionMenu(topLevelTask, nil).WithRelatedTasks(related)
 	for _, action := range menu.actions {
 		if action.Key == "m" {
-			if action.Label != "Merge into main" {
-				t.Fatalf("merge label = %q, want %q", action.Label, "Merge into main")
+			if action.Label != "Merge into base branch" {
+				t.Fatalf("merge label = %q, want %q", action.Label, "Merge into base branch")
 			}
 			return
 		}
@@ -629,12 +642,12 @@ func TestActionMenu_SelectByKey_Disabled(t *testing.T) {
 	session := &domain.Session{
 		IssueID: "az-123",
 		State:   domain.SessionBusy,
-		// No worktree, so git actions disabled
+		// No worktree, so worktree-only actions remain disabled.
 	}
 	menu := NewActionMenu(task, session)
 
-	// Try to select a disabled git action
-	cmd := menu.selectByKey("u")
+	// Try to select a disabled worktree-only git action.
+	cmd := menu.selectByKey("m")
 
 	if cmd != nil {
 		t.Error("expected nil command when selecting disabled action")

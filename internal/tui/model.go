@@ -1604,6 +1604,22 @@ func (m Model) resolveBaseBranch() string {
 	return baseBranch
 }
 
+func (m Model) taskAndSessionByID(issueID string) (*domain.Task, *domain.Session, bool) {
+	targetID := taskIDKey(issueID)
+	if targetID == "" {
+		return nil, nil, false
+	}
+
+	for i := range m.tasks {
+		if taskIDKey(m.tasks[i].ID) != targetID {
+			continue
+		}
+		task := &m.tasks[i]
+		return task, cloneSession(task.Session), true
+	}
+	return nil, nil, false
+}
+
 func (m Model) originBranchForSelection(selectedID string) string {
 	baseBranch := m.resolveBaseBranch()
 	if selectedID == "" || selectedID == baseBranch {

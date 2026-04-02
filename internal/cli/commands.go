@@ -458,7 +458,7 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source d
 	}
 	targetStatus, err := deps.DaemonClient.GitStatus(ctx, targetWorktree)
 	if err != nil {
-		return fmt.Errorf("read target status for main: %w", err)
+		return fmt.Errorf("read target status for base branch: %w", err)
 	}
 	sourceDirtyFiles := dirtyFilesFromGitStatus(sourceStatus)
 	targetDirtyFiles := dirtyFilesFromGitStatus(targetStatus)
@@ -468,7 +468,7 @@ func checkMergeToMainPreflight(ctx context.Context, deps *Dependencies, source d
 		reasons = append(reasons, fmt.Sprintf("source %s is not clean: %s", source.IssueID, summarizeGitStatusCounts(sourceStatus)))
 	}
 	if len(targetDirtyFiles) > 0 {
-		reasons = append(reasons, fmt.Sprintf("target main is not clean: %s", summarizeGitStatusCounts(targetStatus)))
+		reasons = append(reasons, fmt.Sprintf("target base branch is not clean: %s", summarizeGitStatusCounts(targetStatus)))
 	}
 	if len(reasons) == 0 {
 		return nil
@@ -3150,6 +3150,7 @@ func RestartDaemonCommand(deps *Dependencies) error {
 type primeTemplateData struct {
 	ActiveIssueID            string
 	SpecEnabled              bool
+	PrimeEvidenceKey         string
 	IssueSection             string
 	ActiveIssueClosedWarning string
 	ContextGuardrail         string
@@ -3202,6 +3203,7 @@ func PrimeCommand(deps *Dependencies) error {
 	output, err := clitext.Render("prime_output", primeTemplateData{
 		ActiveIssueID:            issueID,
 		SpecEnabled:              deps.Config != nil && deps.Config.Spec.Enabled,
+		PrimeEvidenceKey:         primeEvidenceKey,
 		IssueSection:             issueSection,
 		ActiveIssueClosedWarning: activeIssueClosedWarning,
 		ContextGuardrail:         guardrail,

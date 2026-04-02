@@ -119,7 +119,7 @@ func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, req da
 		if len(result.ConflictFiles) > 0 {
 			resp.Reasons = append(resp.Reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(result.ConflictFiles), strings.Join(result.ConflictFiles, ", ")))
 		} else {
-			resp.Reasons = append(resp.Reasons, "Merge would conflict; merge and resolve main into the source branch first")
+			resp.Reasons = append(resp.Reasons, "Merge would conflict; merge and resolve base branch into the source branch first")
 		}
 	}
 

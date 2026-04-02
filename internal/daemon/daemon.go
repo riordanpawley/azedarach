@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -197,6 +198,9 @@ func New(cfg Config) *Daemon {
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
 	startedAt := time.Now()
+	if err := d.validateCommandPolicyConfiguration(); err != nil {
+		return err
+	}
 	lease, err := d.lock.Acquire()
 	if err != nil {
 		return err
@@ -254,6 +258,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
+func (d *Daemon) validateCommandPolicyConfiguration() error {
+	if err := daemonhandlers.ValidateCommandSpecs(); err != nil {
+		return fmt.Errorf("daemon command-spec registry validation failed: %w", err)
+	}
+	if d.router != nil {
+		if err := daemonhandlers.ValidateDispatcherWiring(d.router); err != nil {
+			return fmt.Errorf("daemon command-spec wiring validation failed: %w", err)
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
 	return protocol.NegotiateHello(hello, daemonVersion), nil
 }
@@ -300,7 +316,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	if resp, handled := d.guardSyncDependentCommand(req); handled {
 		return resp, nil
 	}
-	if commandRequiresExplicitProjectID(req.Command) && strings.TrimSpace(req.Meta.ProjectID) == "" {
+	if daemonhandlers.CommandRequiresProjectID(req.Command) && strings.TrimSpace(req.Meta.ProjectID) == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required metadata: project_id"), nil
 	}
 	if err := d.beginCommand(); err != nil {
@@ -308,7 +324,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	defer d.endCommand()
 
-	if strings.HasPrefix(req.Command, "git.") || strings.HasPrefix(req.Command, "pr.") || strings.HasPrefix(req.Command, "worktree.") || strings.HasPrefix(req.Command, "devserver.") || strings.HasPrefix(req.Command, "operation.") || strings.HasPrefix(req.Command, "spec.") {
+	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 		}
@@ -363,30 +379,6 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionRecover(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
-	}
-}
-
-func commandRequiresExplicitProjectID(command string) bool {
-	switch {
-	case strings.HasPrefix(command, "git."),
-		strings.HasPrefix(command, "pr."),
-		strings.HasPrefix(command, "worktree."),
-		strings.HasPrefix(command, "devserver."),
-		strings.HasPrefix(command, "operation."),
-		strings.HasPrefix(command, "task."),
-		strings.HasPrefix(command, "session."):
-		return true
-	}
-
-	switch command {
-	case protocol.CommandIssueFanout,
-		protocol.CommandIssueFanoutDrift,
-		protocol.CommandMailSend,
-		protocol.CommandMailList,
-		protocol.CommandMailWatch:
-		return true
-	default:
-		return false
 	}
 }
 

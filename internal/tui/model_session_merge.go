@@ -54,8 +54,14 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			}
 		}
 
-		// Merge origin/branch through the daemon command surface.
-		result, err := m.daemonClient.GitMerge(ctx, worktree, "origin/"+branch)
+		mergeRef := branch
+		if !strings.EqualFold(strings.TrimSpace(m.config.Git.WorkflowMode), "local") {
+			mergeRef = "origin/" + branch
+		}
+
+		// Merge configured base branch reference through the daemon command
+		// surface; in non-local modes this uses origin/<base>.
+		result, err := m.daemonClient.GitMerge(ctx, worktree, mergeRef)
 		if pending, ok := pendingOperationDetails(err); ok {
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,

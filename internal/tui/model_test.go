@@ -334,6 +334,30 @@ func TestUpdate_OpenTaskImageAttachMsgPushesAttachOverlay(t *testing.T) {
 	}
 }
 
+func TestUpdate_AttachmentActionDeletedAddsToast(t *testing.T) {
+	m := newTestModel()
+
+	updated, _ := m.Update(overlay.AttachmentActionMsg{Action: "deleted"})
+
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model return type, got %T", updated)
+	}
+	if len(next.toasts) == 0 {
+		t.Fatal("expected toast to be recorded")
+	}
+	last := next.toasts[len(next.toasts)-1]
+	if !strings.Contains(last.Message, "Image attachment deleted") {
+		t.Fatalf("unexpected toast message: %q", last.Message)
+	}
+	if len(next.runtimeEvents) == 0 {
+		t.Fatal("expected runtime event for toast")
+	}
+	if got := next.runtimeEvents[len(next.runtimeEvents)-1].Event; got != "ui.toast" {
+		t.Fatalf("last runtime event = %q, want %q", got, "ui.toast")
+	}
+}
+
 func TestResolveDaemonBinaryForRepo(t *testing.T) {
 	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
 		repoDir := t.TempDir()
@@ -2664,6 +2688,12 @@ func TestIssuesLoadedPreservesSnapshotSessionTaskState(t *testing.T) {
 
 func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	m := newTestModel()
+	startedAt := time.Now().Add(-3 * time.Minute)
+	m.tasks[0].Session = &domain.Session{
+		IssueID:   m.tasks[0].ID,
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+	}
 	m.tasks[0].HasTmuxSession = true
 	m.tasks[0].HasWorktree = true
 	m.tasks[0].GitAheadCount = 2
@@ -3471,12 +3501,25 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 	childID := "az-child"
 	grandchildID := "az-grandchild"
 	unrelatedID := "az-unrelated"
+	startedAt := time.Now().Add(-2 * time.Minute)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
 		{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
-		{ID: grandchildID, Title: "Grandchild", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &childID, HasTmuxSession: true},
+		{
+			ID:       grandchildID,
+			Title:    "Grandchild",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			ParentID: &childID,
+			Session: &domain.Session{
+				IssueID:   grandchildID,
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
+		},
 		{ID: unrelatedID, Title: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
@@ -3498,15 +3541,72 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 	}
 }
 
+func TestRuntimeSignalsForBoardUsesTaskProjectionAsBaseline(t *testing.T) {
+	startedAt := time.Now().Add(-5 * time.Minute)
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{
+			ID:         "az-1",
+			Title:      "Projection task",
+			Status:     domain.StatusOpen,
+			Priority:   domain.P2,
+			Type:       domain.TypeTask,
+			HasWorktree: true,
+			GitAheadCount: 2,
+			GitBehindCount: 3,
+			HasUncommittedChanges: true,
+			GitAdditions: 5,
+			GitDeletions: 1,
+			Session: &domain.Session{
+				IssueID:   "az-1",
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
+		},
+	}
+	// Simulate stale runtime map values that disagree with hydrated task projection.
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {},
+	}
+
+	signals := m.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if !got.HasTmuxSession {
+		t.Fatal("expected HasTmuxSession from task session baseline")
+	}
+	if !got.HasWorktree {
+		t.Fatal("expected HasWorktree from task projection baseline")
+	}
+	if got.GitAheadCount != 2 || got.GitBehindCount != 3 {
+		t.Fatalf("git ahead/behind = %d/%d, want 2/3", got.GitAheadCount, got.GitBehindCount)
+	}
+	if !got.HasUncommittedChanges || got.GitAdditions != 5 || got.GitDeletions != 1 {
+		t.Fatalf("git change projection mismatch: %+v", got)
+	}
+}
+
 func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
 	otherID := "az-other"
+	startedAt := time.Now().Add(-2 * time.Minute)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
-		{ID: childID, Title: "Child", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID, HasTmuxSession: true},
+		{
+			ID:       childID,
+			Title:    "Child",
+			Status:   domain.StatusInProgress,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+			ParentID: &parentID,
+			Session: &domain.Session{
+				IssueID:   childID,
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
+		},
 		{ID: otherID, Title: "Other", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 	m.editor.SetSort(&domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc})

@@ -475,64 +475,69 @@ func TestCodexInstallCommandMergesExistingHooks(t *testing.T) {
 	if strings.Contains(content, "az codex hook run --json user-prompt-submit") {
 		t.Fatalf("user-prompt-submit hook should not be installed: %s", content)
 	}
+	if strings.Contains(content, "az codex hook run --json pre-tool-use") {
+		t.Fatalf("pre-tool-use hook should not be installed: %s", content)
+	}
 }
 
-func TestCodexGuardRequiresPrimeBeforeOtherCommands(t *testing.T) {
+func TestCodexGuardSessionStartBlocksWhenPromptMissingPrime(t *testing.T) {
 	projectDir := t.TempDir()
 	deps := &Dependencies{RepoDir: projectDir}
 
-	writePayloadToStdin := func(t *testing.T, payload string) func() {
-		t.Helper()
-		original := os.Stdin
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("pipe: %v", err)
-		}
-		if _, err := w.WriteString(payload); err != nil {
-			t.Fatalf("write payload: %v", err)
-		}
-		_ = w.Close()
-		os.Stdin = r
-		return func() {
-			os.Stdin = original
-			_ = r.Close()
-		}
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
 	}
-
-	restore := writePayloadToStdin(t, `{"thread_id":"t-1"}`)
-	if err := CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true}); err != nil {
-		restore()
-		t.Fatalf("session-start guard error: %v", err)
+	if _, err := w.WriteString(`{"thread_id":"t-1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
 	}
-	restore()
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
 
-	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"pwd"}}`)
 	output := captureStdout(t, func() error {
-		return CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true})
+		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	restore()
 	if !strings.Contains(output, `"decision":"block"`) {
-		t.Fatalf("pre-tool-use output = %q, want block decision", output)
+		t.Fatalf("session-start output = %q, want block decision", output)
 	}
-
-	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"az prime"}}`)
-	if err := CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true}); err != nil {
-		restore()
-		t.Fatalf("pre-tool-use prime guard error: %v", err)
-	}
-	restore()
-
-	restore = writePayloadToStdin(t, `{"thread_id":"t-1","tool_input":{"command":"pwd"}}`)
-	output = captureStdout(t, func() error {
-		return CodexGuardCommand(deps, CodexGuardOptions{Event: "pre-tool-use", JSON: true})
-	})
-	restore()
-	if strings.Contains(output, `"decision":"block"`) {
-		t.Fatalf("pre-tool-use output = %q, want allow after az prime", output)
+	if !strings.Contains(output, "Run `az prime` now before any other shell commands.") {
+		t.Fatalf("session-start output = %q, want az-prime reason", output)
 	}
 }
 
-func TestCodexGuardSessionStartSkipsReminderWhenPromptMentionsPrime(t *testing.T) {
+func TestCodexGuardSessionStartAllowsWhenPrimeEvidenceKeyPresent(t *testing.T) {
+	projectDir := t.TempDir()
+	deps := &Dependencies{RepoDir: projectDir}
+
+	original := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if _, err := w.WriteString(`{"thread_id":"t-2","last_assistant_message":"Azedarach Session Primer\nPrimer evidence key: AZEDARACH_PRIMER_KEY:azedarach-prime-v1"}`); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() {
+		os.Stdin = original
+		_ = r.Close()
+	}()
+
+	output := captureStdout(t, func() error {
+		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
+	})
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("session-start output = %q, want {}", output)
+	}
+}
+
+func TestCodexGuardSessionStartBlocksWhenOnlyPrimeCommandMentioned(t *testing.T) {
 	projectDir := t.TempDir()
 	deps := &Dependencies{RepoDir: projectDir}
 
@@ -554,8 +559,8 @@ func TestCodexGuardSessionStartSkipsReminderWhenPromptMentionsPrime(t *testing.T
 	output := captureStdout(t, func() error {
 		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	if strings.TrimSpace(output) != "{}" {
-		t.Fatalf("session-start output = %q, want {}", output)
+	if !strings.Contains(output, `"decision":"block"`) {
+		t.Fatalf("session-start output = %q, want block decision", output)
 	}
 }
 
@@ -579,7 +584,7 @@ func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
 	}()
 
 	output := captureStdout(t, func() error {
-		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "pre-tool-use", JSON: true})
+		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "session-start", JSON: true})
 	})
 	if !strings.Contains(output, `"decision":"block"`) {
 		t.Fatalf("hook run output = %q, want block decision", output)

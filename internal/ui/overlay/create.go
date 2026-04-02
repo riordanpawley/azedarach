@@ -181,6 +181,10 @@ func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 }
 
 func NewCreateTaskOverlayWithParentAndImplOptions(parentID *string, implOptions []string) *CreateTaskOverlay {
+	return NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(parentID, implOptions, nil)
+}
+
+func NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(parentID *string, implOptions []string, attachmentSvc ImageAttachmentService) *CreateTaskOverlay {
 	// Initialize title input
 	ti := textinput.New()
 	ti.Placeholder = "Task title..."
@@ -217,6 +221,7 @@ func NewCreateTaskOverlayWithParentAndImplOptions(parentID *string, implOptions 
 			priority: domain.P2,
 			status:   domain.StatusOpen,
 		},
+		attachmentSvc: attachmentSvc,
 	}
 	overlay.syncImplementationSelection()
 	overlay.defaults.impls = append([]string(nil), overlay.impls...)
@@ -341,8 +346,15 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 	case tea.KeyMsg:
 		if isPasteAttachmentKey(msg) {
-			if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
-				return c, nil
+			if c.attachmentSvc == nil {
+				return c, func() tea.Msg {
+					return errorMsg{err: fmt.Errorf("image attachment service unavailable")}
+				}
+			}
+			if strings.TrimSpace(c.id) == "" {
+				return c, func() tea.Msg {
+					return errorMsg{err: fmt.Errorf("save the task before adding image attachments")}
+				}
 			}
 			return c, c.pasteAttachment()
 		}
@@ -773,7 +785,7 @@ func (c *CreateTaskOverlay) renderFormContent(width, height int) string {
 	b.WriteString("\n")
 	b.WriteString(c.acceptanceInput.View())
 	b.WriteString("\n")
-	if strings.TrimSpace(c.id) != "" {
+	if strings.TrimSpace(c.id) != "" || c.attachmentSvc != nil {
 		if c.focusIndex == focusAttachments {
 			b.WriteString(focusStyle.Render("Image Attachments:"))
 		} else {
@@ -879,6 +891,9 @@ func (c *CreateTaskOverlay) renderImplementationSelector() string {
 func (c *CreateTaskOverlay) renderAttachmentList() string {
 	if c.attachmentSvc == nil {
 		return c.styles.Footer.Render("Attachment service unavailable.")
+	}
+	if strings.TrimSpace(c.id) == "" {
+		return c.styles.Footer.Render("Save task first, then press Ctrl+P to paste from clipboard.")
 	}
 	if len(c.attachments) == 0 {
 		empty := "No attachments yet. Ctrl+P to paste from clipboard."

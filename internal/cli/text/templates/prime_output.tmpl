@@ -1,5 +1,7 @@
 Azedarach Session Primer
 
+Primer evidence key: `{{ .PrimeEvidenceKey }}`
+
 - First 3 commands for this session:
   - {{ if .ActiveIssueID }}`az issue get {{ .ActiveIssueID }}`{{ else }}`az issue get <issue-id>`{{ end }}
   - {{ if .SpecEnabled }}`az spec` (inspect linked requirements before behavior changes){{ else }}Spec workflows are disabled for this project (skip spec checks).{{ end }}

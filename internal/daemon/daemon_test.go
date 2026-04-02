@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 )
 
 func TestDrainInFlightCommandsWaitsForCompletionAndRejectsNewIntake(t *testing.T) {
@@ -86,5 +87,15 @@ func TestCommandLogsFailure(t *testing.T) {
 	}
 	if !strings.Contains(output, "request_id=req-1") {
 		t.Fatalf("expected request_id field in logs, got %q", output)
+	}
+}
+
+func TestValidateCommandPolicyConfigurationFailsForIncompleteDispatcher(t *testing.T) {
+	d := &Daemon{
+		router: daemonhandlers.NewDispatcher(nil),
+	}
+
+	if err := d.validateCommandPolicyConfiguration(); err == nil {
+		t.Fatal("expected command policy validation to fail for incomplete dispatcher wiring")
 	}
 }

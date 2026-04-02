@@ -2,13 +2,13 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 )
 
@@ -116,30 +116,5 @@ func (d *Daemon) guardSyncDependentCommand(req protocol.RequestEnvelope) (protoc
 }
 
 func (d *Daemon) shouldGuardSyncDependentCommand(req protocol.RequestEnvelope) bool {
-	switch {
-	case strings.HasPrefix(req.Command, "task."):
-		return true
-	case strings.HasPrefix(req.Command, "session."):
-		return true
-	case req.Command == protocol.CommandOperationSubmit:
-		var body protocol.OperationSubmitRequestBody
-		if err := json.Unmarshal(req.Body, &body); err != nil {
-			return false
-		}
-		return isSyncDependentOperationKind(body.Kind)
-	default:
-		return false
-	}
-}
-
-func isSyncDependentOperationKind(kind string) bool {
-	kind = strings.TrimSpace(kind)
-	switch {
-	case strings.HasPrefix(kind, "task."):
-		return true
-	case strings.HasPrefix(kind, "session."):
-		return true
-	default:
-		return false
-	}
+	return daemonhandlers.CommandRequiresSyncBootstrap(req)
 }

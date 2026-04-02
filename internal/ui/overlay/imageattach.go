@@ -176,7 +176,14 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachmentDeletedMsg:
 		i.error = ""
 		// Reload attachments
-		return i, i.loadAttachments()
+		return i, tea.Batch(
+			i.loadAttachments(),
+			func() tea.Msg {
+				return AttachmentActionMsg{
+					Action: "deleted",
+				}
+			},
+		)
 
 	case errorMsg:
 		i.error = compactOverlayError(msg.err)

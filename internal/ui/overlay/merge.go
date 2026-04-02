@@ -13,10 +13,10 @@ import (
 
 // MergeTarget represents a target that can be merged into
 type MergeTarget struct {
-	ID          string        // "main" or task ID
+	ID          string        // "main" sentinel or task ID
 	Label       string        // Display label
-	IsMain      bool          // Whether this is the main branch
-	Status      domain.Status // Task status (if not main)
+	IsMain      bool          // Whether this is the base branch target
+	Status      domain.Status // Task status (if not base branch target)
 	HasWorktree bool          // Whether this target has a worktree
 }
 
@@ -33,7 +33,7 @@ type MergeSelectOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
 	source        *domain.Task  // The issue being merged FROM
-	candidates    []MergeTarget // Issues that can be merged INTO (including main)
+	candidates    []MergeTarget // Issues that can be merged INTO (including base branch)
 	cursor        int
 	onMerge       func(targetID string) tea.Cmd
 	onCancel      func() tea.Cmd
@@ -187,7 +187,7 @@ func (m *MergeSelectOverlay) renderCandidate(target MergeTarget, isActive bool) 
 	if target.IsMain {
 		label := target.Label
 		if label == "" {
-			label = "main"
+			label = "base branch"
 		}
 		if isActive {
 			label = m.overlayStyles.MenuItemActive.Render(label)

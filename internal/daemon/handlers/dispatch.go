@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -58,35 +57,63 @@ func NewDispatcher(session *SessionHandler, handlers ...any) *Dispatcher {
 
 // Handle routes one request to the matching handler module.
 func (d *Dispatcher) Handle(ctx context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
-	switch {
-	case d.session != nil && strings.HasPrefix(req.Command, "session."):
+	target, ok := DispatcherTarget(req.Command)
+	if !ok {
+		return unsupportedCommandResponse(req)
+	}
+
+	switch target {
+	case CommandDispatchSession:
+		if d.session == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.session.Handle(ctx, req)
-	case d.operation != nil && strings.HasPrefix(req.Command, "operation."):
+	case CommandDispatchOperation:
+		if d.operation == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.operation.Handle(ctx, req)
-	case d.pr != nil && req.Command == CommandGitBranchBehind:
+	case CommandDispatchPR:
+		if d.pr == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.pr.Handle(ctx, req)
-	case d.pr != nil && strings.HasPrefix(req.Command, "pr."):
-		return d.pr.Handle(ctx, req)
-	case d.spec != nil && strings.HasPrefix(req.Command, "spec."):
+	case CommandDispatchSpec:
+		if d.spec == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.spec.Handle(ctx, req)
-	case d.git != nil && strings.HasPrefix(req.Command, "git."):
+	case CommandDispatchGit:
+		if d.git == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.git.Handle(ctx, req)
-	case d.worktree != nil && strings.HasPrefix(req.Command, "worktree."):
+	case CommandDispatchWorktree:
+		if d.worktree == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.worktree.Handle(ctx, req)
-	case d.devserver != nil && strings.HasPrefix(req.Command, "devserver."):
+	case CommandDispatchDevServer:
+		if d.devserver == nil {
+			return unsupportedCommandResponse(req)
+		}
 		return d.devserver.Handle(ctx, req)
 	default:
-		return protocol.ResponseEnvelope{
-			ProtocolVersion: req.ProtocolVersion,
-			RequestID:       req.RequestID,
-			Kind:            protocol.EnvelopeKindResponse,
-			Meta:            req.Meta,
-			CompletedAt:     time.Now().UTC(),
-			Error: &protocol.ErrorEnvelope{
-				Code:      protocol.ErrorCodeUnsupportedCommand,
-				Message:   "unsupported command",
-				Retryable: false,
-			},
-		}
+		return unsupportedCommandResponse(req)
+	}
+}
+
+func unsupportedCommandResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+	return protocol.ResponseEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		RequestID:       req.RequestID,
+		Kind:            protocol.EnvelopeKindResponse,
+		Meta:            req.Meta,
+		CompletedAt:     time.Now().UTC(),
+		Error: &protocol.ErrorEnvelope{
+			Code:      protocol.ErrorCodeUnsupportedCommand,
+			Message:   "unsupported command",
+			Retryable: false,
+		},
 	}
 }

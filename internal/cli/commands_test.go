@@ -4064,6 +4064,9 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Azedarach Session Primer") {
 		t.Fatalf("prime output missing header: %q", output)
 	}
+	if !strings.Contains(output, "AZEDARACH_PRIMER_KEY:azedarach-prime-v1") {
+		t.Fatalf("prime output missing evidence key: %q", output)
+	}
 	if !strings.Contains(output, "No active issue is preselected") {
 		t.Fatalf("prime output missing no-issue guardrail: %q", output)
 	}

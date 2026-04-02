@@ -7,6 +7,22 @@ cd "$ROOT_DIR"
 GOCACHE="${GOCACHE:-$ROOT_DIR/.gocache}"
 GOPATH="${GOPATH:-$ROOT_DIR/.gopath}"
 
+TEST_ENV_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$TEST_ENV_DIR"
+}
+trap cleanup EXIT
+
+export HOME="$TEST_ENV_DIR/home"
+mkdir -p "$HOME" "$TEST_ENV_DIR/db"
+export AZEDARACH_DB_PATH="$TEST_ENV_DIR/db/azedarach.db"
+
+REAL_DB_PATH="$ROOT_DIR/.azedarach/azedarach.db"
+real_db_before_state="missing"
+if [[ -f "$REAL_DB_PATH" ]]; then
+  real_db_before_state="$(cksum "$REAL_DB_PATH")"
+fi
+
 echo "[smoke] building go CLI binary"
 GOCACHE="$GOCACHE" GOPATH="$GOPATH" go build -o ./bin/az ./cmd/az
 
@@ -61,5 +77,14 @@ run_expect_failure_contains "impl delete confirm guard" "Usage: az impl delete -
 run_expect_failure_contains "issue get usage guard" "Usage: az issue get [--id <issue-id>] [--json] [--deps] [<issue-id>]" ./bin/az issue get
 run_expect_failure_contains "issue delete confirm guard" "Usage: az issue delete --confirm [--id <issue-id>] [<issue-id>]" ./bin/az issue delete az-1 --impl go-bubbletea
 run_expect_failure_contains "issue bulk-create usage guard" "Usage: az issue bulk-create --impl <implementation> --input <path> [--dry-run]" ./bin/az issue bulk-create
+
+real_db_after_state="missing"
+if [[ -f "$REAL_DB_PATH" ]]; then
+  real_db_after_state="$(cksum "$REAL_DB_PATH")"
+fi
+if [[ "$real_db_before_state" != "$real_db_after_state" ]]; then
+  echo "[smoke] real repository DB was modified: $REAL_DB_PATH" >&2
+  exit 1
+fi
 
 echo "[smoke] completed"
