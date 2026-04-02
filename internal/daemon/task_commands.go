@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -60,6 +63,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	tasks = d.enrichTasksWithRuntimeProjectionCache(ctx, projectID, tasks)
 	body, err := json.Marshal(tasks)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -67,6 +71,64 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	resp.Body = body
 	resp.Revision = d.currentRevision(projectID)
 	return resp, nil
+}
+
+func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
+	if len(tasks) == 0 || d.projectionStore == nil {
+		return tasks
+	}
+
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+
+	worktreeRows, err := d.projectionStore.ListWorktrees(ctx, projectID)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("load worktree projections for task enrichment failed", "project_id", projectID, "error", err)
+		}
+		return tasks
+	}
+	if len(worktreeRows) == 0 {
+		return tasks
+	}
+
+	worktreeByIssue := make(map[string]daemonstate.WorktreeProjection, len(worktreeRows))
+	for _, row := range worktreeRows {
+		issueID := strings.TrimSpace(row.IssueID)
+		if issueID == "" {
+			continue
+		}
+		worktreeByIssue[issueID] = row
+	}
+
+	for i := range tasks {
+		row, ok := worktreeByIssue[strings.TrimSpace(tasks[i].ID)]
+		if !ok {
+			continue
+		}
+
+		worktreePath := strings.TrimSpace(row.Path)
+		tasks[i].HasWorktree = worktreePath != ""
+		if tasks[i].Session != nil && tasks[i].Session.Worktree == "" && worktreePath != "" {
+			tasks[i].Session.Worktree = worktreePath
+		}
+
+		if len(row.GitStatusRaw) == 0 {
+			continue
+		}
+
+		var status git.GitStatus
+		if err := json.Unmarshal(row.GitStatusRaw, &status); err != nil {
+			continue
+		}
+		tasks[i].HasUncommittedChanges = status.HasChanges
+		tasks[i].GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
+		tasks[i].GitDeletions = len(status.Deleted)
+	}
+
+	return tasks
 }
 
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
