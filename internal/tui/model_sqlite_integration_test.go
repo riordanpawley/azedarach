@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -15,7 +16,10 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/daemon"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
@@ -117,6 +121,91 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 	}
 	if _, ok := openIDs["az-child"]; ok {
 		t.Fatalf("expected parent-child issue to be hidden from board open column: %+v", columns[domain.StatusOpen.Column()].Tasks)
+	}
+}
+
+func TestIssueSnapshotParityAcrossCLIAndTUIBoard(t *testing.T) {
+	repoDir := t.TempDir()
+	parentID := "az-parent"
+	childID := "az-child"
+	dependentID := "az-dependent"
+	seedModelIssueStore(t, repoDir, parentID, "Parent issue", "open", 2, "epic")
+	seedModelIssueStore(t, repoDir, childID, "Child issue", "open", 1, "task")
+	seedModelIssueStore(t, repoDir, dependentID, "Blocked issue", "open", 0, "bug")
+	seedModelIssueDependency(t, repoDir, childID, parentID, "parent-child")
+	seedModelIssueDependency(t, repoDir, dependentID, parentID, "blocks")
+
+	socketPath, lockPath := newModelTestRuntimePaths(t)
+	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
+	defer stop()
+
+	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	cliDeps := &cli.Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: client,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj-model",
+		RepoDir:      repoDir,
+	}
+
+	listOut := captureStdoutForParity(t, func() error {
+		return cli.IssueListCommand(cliDeps, cli.IssueListOptions{Deps: true})
+	})
+	for _, want := range []string{
+		"Top-level issues:",
+		"Dependency links (listed issues):",
+		"- az-child -> az-parent (parent-child)",
+		"- az-dependent -> az-parent (blocks)",
+	} {
+		if !strings.Contains(listOut, want) {
+			t.Fatalf("issue list output missing %q: %q", want, listOut)
+		}
+	}
+
+	getOut := captureStdoutForParity(t, func() error {
+		return cli.IssueGetCommand(cliDeps, cli.IssueGetOptions{IssueID: parentID})
+	})
+	for _, want := range []string{
+		"ID: az-parent",
+		"Title: Parent issue",
+		"Status: open",
+		"Priority: P2",
+		"Type: epic",
+		"Dependents:",
+		"- az-child (parent-child, status=open)",
+		"- az-dependent (blocks, status=open)",
+	} {
+		if !strings.Contains(getOut, want) {
+			t.Fatalf("issue get output missing %q: %q", want, getOut)
+		}
+	}
+
+	model := newTestModel()
+	model.repoDir = repoDir
+	model.daemonClient = client
+	model.loading = false
+	msg := model.loadIssuesCmd()()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("loadIssuesCmd message type = %T, want issuesLoadedMsg", msg)
+	}
+	model.tasks = loaded.tasks
+	rendered := ansi.Strip(model.View())
+
+	for _, want := range []string{
+		"Parent issue",
+		"Blocked issue",
+		"az-parent",
+		"P2",
+		"E",
+		"B",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("tui board render missing %q: %q", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "Child issue") {
+		t.Fatalf("tui board should hide parent-child child task, got: %q", rendered)
 	}
 }
 
@@ -251,6 +340,35 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}
+}
+
+func captureStdoutForParity(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	origStdout := os.Stdout
+	defer func() {
+		os.Stdout = origStdout
+	}()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+	err = fn()
+	_ = w.Close()
+	<-done
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("captured command error: %v", err)
+	}
+	return buf.String()
 }
 
 func newModelTestRuntimePaths(t *testing.T) (string, string) {
