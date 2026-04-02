@@ -858,6 +858,7 @@ func TestBranchBehindMsgAttachesWhenCaughtUp(t *testing.T) {
 
 func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 	t.Setenv("TMUX", "")
+	mergeCalls := 0
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -885,7 +886,12 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/az-1" || body.Branch != "origin/main" {
+				mergeCalls++
+				expectedBranch := "main"
+				if mergeCalls == 2 {
+					expectedBranch = "origin/main"
+				}
+				if body.Worktree != "/tmp/az-1" || body.Branch != expectedBranch {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -975,7 +981,7 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 	if attachedMsg.issueID != "az-1" {
 		t.Fatalf("attached issue = %q, want az-1", attachedMsg.issueID)
 	}
-	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandGitFetch || got[1] != daemonclient.CommandGitMerge || got[2] != daemonclient.CommandSessionAttach {
+	if got := transport.requests; len(got) != 4 || got[0] != daemonclient.CommandGitFetch || got[1] != daemonclient.CommandGitMerge || got[2] != daemonclient.CommandGitMerge || got[3] != daemonclient.CommandSessionAttach {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -2867,6 +2873,7 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 }
 
 func TestHandleSelectionUpdateFromMainResolvesWorktreeWithoutSession(t *testing.T) {
+	mergeCalls := 0
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -2925,7 +2932,12 @@ func TestHandleSelectionUpdateFromMainResolvesWorktreeWithoutSession(t *testing.
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/az-1" || body.Branch != "origin/main" {
+				mergeCalls++
+				expectedBranch := "main"
+				if mergeCalls == 2 {
+					expectedBranch = "origin/main"
+				}
+				if body.Worktree != "/tmp/az-1" || body.Branch != expectedBranch {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -2977,15 +2989,17 @@ func TestHandleSelectionUpdateFromMainResolvesWorktreeWithoutSession(t *testing.
 		t.Fatalf("fetch-and-merge err = %v", result.err)
 	}
 
-	if got := transport.requests; len(got) != 3 ||
+	if got := transport.requests; len(got) != 4 ||
 		got[0] != daemonclient.CommandWorktreeList ||
 		got[1] != daemonclient.CommandGitFetch ||
-		got[2] != daemonclient.CommandGitMerge {
+		got[2] != daemonclient.CommandGitMerge ||
+		got[3] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
 
 func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable(t *testing.T) {
+	mergeCalls := 0
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 			switch req.Command {
@@ -3044,7 +3058,12 @@ func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/az-1" || body.Branch != "origin/main" {
+				mergeCalls++
+				expectedBranch := "main"
+				if mergeCalls == 2 {
+					expectedBranch = "origin/main"
+				}
+				if body.Worktree != "/tmp/az-1" || body.Branch != expectedBranch {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -3097,10 +3116,11 @@ func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable
 		t.Fatalf("fetch-and-merge err = %v", result.err)
 	}
 
-	if got := transport.requests; len(got) != 3 ||
+	if got := transport.requests; len(got) != 4 ||
 		got[0] != daemonclient.CommandWorktreeList ||
 		got[1] != daemonclient.CommandGitFetch ||
-		got[2] != daemonclient.CommandGitMerge {
+		got[2] != daemonclient.CommandGitMerge ||
+		got[3] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
