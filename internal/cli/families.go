@@ -1051,8 +1051,15 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 	for _, spec := range specs {
 		legacyNotifyCommand := fmt.Sprintf("az notify --json %s", spec.notifyEvent)
 		legacyGuardCommand := fmt.Sprintf("az codex guard --json %s", spec.guardEvent)
-		combinedCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
-		hooks[spec.eventName] = removeHookCommands(hooks[spec.eventName], legacyNotifyCommand, legacyGuardCommand, combinedCommand)
+		legacyCombinedCommand := fmt.Sprintf("az codex hook run --json %s", spec.guardEvent)
+		combinedCommand := buildCodexHookJSONCommand(spec.guardEvent)
+		hooks[spec.eventName] = removeHookCommands(
+			hooks[spec.eventName],
+			legacyNotifyCommand,
+			legacyGuardCommand,
+			legacyCombinedCommand,
+			combinedCommand,
+		)
 		shouldInstall := spec.eventName == "SessionStart" || spec.eventName == "Stop"
 		if shouldInstall {
 			mergeCodexHookEntry(spec.eventName, combinedCommand, spec.matcher)
@@ -1071,6 +1078,14 @@ func CodexInstallCommand(deps *Dependencies, opts CodexInstallOptions) error {
 		fmt.Println("  Events: SessionStart, Stop")
 	}
 	return nil
+}
+
+func buildCodexHookJSONCommand(event string) string {
+	event = strings.TrimSpace(event)
+	return fmt.Sprintf(
+		`/bin/sh -c 'out="$(az codex hook run --json %s 2>/dev/null | tail -n 1)"; [ -n "$out" ] && printf "%%s\n" "$out" || printf "{}\n"'`,
+		event,
+	)
 }
 
 func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {

@@ -1,25 +1,25 @@
 {
-	"hooks": {
-		"SessionStart": [
-			{
-				"hooks": [
-					{
-						"command": "/bin/sh -c 'out=\"$(az codex hook run --json session-start 2>/dev/null | tail -n 1)\"; [ -n \"$out\" ] && printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
-						"type": "command"
-					}
-				],
-				"matcher": "startup|resume"
-			}
-		],
-		"Stop": [
-			{
-				"hooks": [
-					{
-						"command": "/bin/sh -c 'out=\"$(az codex hook run --json stop 2>/dev/null | tail -n 1)\"; [ -n \"$out\" ] && printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
-						"type": "command"
-					}
-				]
-			}
-		]
-	}
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az codex hook run --json session-start 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/bin/sh -c 'out=\"$(az codex hook run --json stop 2\u003e/dev/null | tail -n 1)\"; [ -n \"$out\" ] \u0026\u0026 printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
 }
