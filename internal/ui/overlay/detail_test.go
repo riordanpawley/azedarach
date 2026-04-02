@@ -100,8 +100,7 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	view := panel.View()
 
 	// Check runtime sections are present
-	assert.Contains(t, view, "Session")
-	assert.Contains(t, view, "Git/Worktree")
+	assert.Contains(t, view, "Runtime")
 	assert.Contains(t, view, "Session:")
 	assert.Contains(t, view, "Worktree:")
 	assert.Contains(t, view, "busy")
@@ -166,9 +165,8 @@ func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
 	panel := NewDetailPanel(task)
 	view := panel.View()
 
-	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "Runtime")
 	assert.Contains(t, view, "none")
-	assert.Contains(t, view, "Git/Worktree")
 	assert.Contains(t, view, "Age N/A")
 }
 
