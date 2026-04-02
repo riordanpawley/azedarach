@@ -709,6 +709,45 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 	}
 }
 
+func TestListTmuxSessionsCacheFirstDoesNotPersistProjectionSnapshot(t *testing.T) {
+	const projectID = "proj-no-write-query"
+
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = projectionStore.Close()
+	})
+
+	sessionID := naming.CanonicalSessionID(projectID, "az-1")
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			sessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
+		projectionStore: projectionStore,
+	}
+
+	sessions, err := d.listTmuxSessionsCacheFirst(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("listTmuxSessionsCacheFirst returned error: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0] != sessionID {
+		t.Fatalf("sessions = %v, want [%s]", sessions, sessionID)
+	}
+
+	rows, err := projectionStore.ListSessions(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("projection rows = %d, want 0 (read path must not persist)", len(rows))
+	}
+}
+
 func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
 	t.Helper()
 	events := make([]protocol.EventEnvelope, 0, count)

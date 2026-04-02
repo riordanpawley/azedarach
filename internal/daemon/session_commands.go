@@ -1000,7 +1000,6 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 				cachedActive = append(cachedActive, session.ID)
 			}
 			if len(cachedActive) > 0 {
-				d.triggerSessionProjectionRefresh(projectID, d.refreshSessionProjectionCache)
 				return cachedActive, nil
 			}
 		}
@@ -1009,9 +1008,6 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 	tmuxSessions, err := d.tmux.ListSessions(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if err := d.persistTmuxSessionProjectionSnapshot(ctx, projectID, tmuxSessions); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("persist tmux session projection snapshot failed", "project_id", projectID, "error", err)
 	}
 	return tmuxSessions, nil
 }

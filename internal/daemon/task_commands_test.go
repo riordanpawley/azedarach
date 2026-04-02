@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
@@ -384,5 +386,68 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 	if !bytes.Equal(worktrees[0].GitStatusRaw, rawStatus) {
 		t.Fatalf("projected worktree git status was mutated")
+	}
+}
+
+func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "task list no projection writes",
+		Type:  domain.TypeTask,
+	}); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = projectionStore.Close() })
+
+	projectID := "proj-tasklist-no-write"
+	sessionID := naming.CanonicalSessionID(projectID, "az-1")
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			sessionID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+
+	d := &Daemon{
+		cfg:             Config{RepoDir: repoDir, Logger: slog.Default()},
+		issues:          issuesClient,
+		sessionStore:    daemonstate.NewStore(),
+		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
+		projectionStore: projectionStore,
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list-no-write",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+	}
+	resp, err := d.handleTaskList(ctx, req)
+	if err != nil {
+		t.Fatalf("handleTaskList returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response not OK: %+v", resp)
+	}
+
+	rows, err := projectionStore.ListSessions(ctx, projectID)
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("projection rows = %d, want 0 (task.list read path must not persist)", len(rows))
 	}
 }
