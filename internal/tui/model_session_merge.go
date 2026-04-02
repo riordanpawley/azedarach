@@ -54,39 +54,14 @@ func (m Model) fetchAndMergeCmd(worktree, branch, issueID string, attachAfter bo
 			}
 		}
 
-		// Merge local base branch first so follow-on merge preflight against
-		// local main reflects the same ancestry after Space+u.
-		result, err := m.daemonClient.GitMerge(ctx, worktree, branch)
-		if pending, ok := pendingOperationDetails(err); ok {
-			return fetchAndMergeResultMsg{
-				worktree:    worktree,
-				issueID:     issueID,
-				attachAfter: attachAfter,
-				stage:       "merge",
-				operationID: pending.OperationID,
-				state:       pending.State,
-			}
-		}
-		if err != nil {
-			return fetchAndMergeResultMsg{
-				worktree:    worktree,
-				issueID:     issueID,
-				attachAfter: attachAfter,
-				err:         err,
-			}
-		}
-		if result.Result.HasConflicts {
-			return fetchAndMergeResultMsg{
-				worktree:    worktree,
-				issueID:     issueID,
-				attachAfter: attachAfter,
-				stage:       "merge",
-				result:      &result.Result,
-			}
+		mergeRef := branch
+		if !strings.EqualFold(strings.TrimSpace(m.config.Git.WorkflowMode), "local") {
+			mergeRef = "origin/" + branch
 		}
 
-		// Then merge origin/branch to include any newer remote commits.
-		result, err = m.daemonClient.GitMerge(ctx, worktree, "origin/"+branch)
+		// Merge configured base branch reference through the daemon command
+		// surface; in non-local modes this uses origin/<base>.
+		result, err := m.daemonClient.GitMerge(ctx, worktree, mergeRef)
 		if pending, ok := pendingOperationDetails(err); ok {
 			return fetchAndMergeResultMsg{
 				worktree:    worktree,
