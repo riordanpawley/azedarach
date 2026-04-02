@@ -1189,7 +1189,10 @@ func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap ma
 		threadState = codexGuardThreadState{}
 		state.Threads[threadID] = threadState
 		if !codexGuardPromptMentionsPrime(payloadMap) {
-			response["systemMessage"] = "Run `az prime` now before any other shell commands."
+			reason := "Run `az prime` now before any other shell commands."
+			response["decision"] = "block"
+			response["reason"] = reason
+			response["systemMessage"] = reason
 		}
 	case "user-prompt-submit":
 		if codexGuardCompactionDetected(payloadMap) {
