@@ -66,7 +66,7 @@ func TestDetailPanelView(t *testing.T) {
 	assert.Contains(t, view, "Implement feature")
 	assert.Contains(t, view, "In Progress")
 	assert.Contains(t, view, "P1")
-	assert.Contains(t, view, "feature")
+	assert.Contains(t, view, "F")
 	assert.Contains(t, view, "This is a test description")
 }
 

@@ -3,14 +3,14 @@
 │──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
 ││ [bal] add grom renderer for detail view maybe?                               Actions                                │
 ││                                                                              ───────────────────────────────────────│
-││      Status:  Open                                                           [s] Start session                      │
-││    Priority:  P2                                                             [S] Start session + work               │
-││        Type:  task                                                           [!] Start session (yolo)               │
-││     Created:  0001-01-01 00:00:00                                            ───────────────────                    │
-││     Updated:  0001-01-01 00:00:00                                            [u] Update from main                   │
-││                                                                              [m] Follow-on merge                    │
-││ Description                                                                  [b] Merge into...                      │
-││ review panel structure and preserve layout                                   [P] Create PR                          │
+││       Issue:   P2   T  Open                                                  [s] Start session                      │
+││     Created:  0001-01-01 00:00:00                                            [S] Start session + work               │
+││     Updated:  0001-01-01 00:00:00                                            [!] Start session (yolo)               │
+││                                                                              ───────────────────                    │
+││ Description                                                                  [u] Update from main                   │
+││ review panel structure and preserve layout                                   [m] Follow-on merge                    │
+││                                                                              [b] Merge into...                      │
+││                                                                              [P] Create PR                          │
 ││                                                                              [O] Open PR                            │
 ││                                                                              [M] Abort merge                        │
 ││                                                                              [H] Open Helix                         │

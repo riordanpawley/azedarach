@@ -142,10 +142,10 @@ func (d *DetailPanel) viewStandard() string {
 	b.WriteString(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
 	b.WriteString("\n\n")
 
-	// Status, Priority, Type
-	b.WriteString(labelStyle.Render("Status:"))
+	// Card-like issue summary (priority/type/status on one line).
+	b.WriteString(labelStyle.Render("Issue:"))
 	b.WriteString("  ")
-	b.WriteString(valueStyle.Render(d.formatStatus(d.task.Status)))
+	b.WriteString(d.formatIssueCardSummary())
 	b.WriteString("\n")
 
 	if d.mutation != nil {
@@ -154,16 +154,6 @@ func (d *DetailPanel) viewStandard() string {
 		b.WriteString(valueStyle.Render(d.formatMutationProgress()))
 		b.WriteString("\n")
 	}
-
-	b.WriteString(labelStyle.Render("Priority:"))
-	b.WriteString("  ")
-	b.WriteString(valueStyle.Render(d.task.Priority.String()))
-	b.WriteString("\n")
-
-	b.WriteString(labelStyle.Render("Type:"))
-	b.WriteString("  ")
-	b.WriteString(valueStyle.Render(string(d.task.Type)))
-	b.WriteString("\n")
 
 	// Parent ID if present
 	if d.task.ParentID != nil {
@@ -271,12 +261,10 @@ func (d *DetailPanel) viewCompact() string {
 
 	addLine(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
 	addLine("")
-	addLine(labelStyle.Render("Status:") + "  " + valueStyle.Render(d.formatStatus(d.task.Status)))
+	addLine(labelStyle.Render("Issue:") + "  " + d.formatIssueCardSummary())
 	if d.mutation != nil {
 		addLine(labelStyle.Render("Issue Ops:") + "  " + valueStyle.Render(d.formatMutationProgress()))
 	}
-	addLine(labelStyle.Render("Priority:") + "  " + valueStyle.Render(d.task.Priority.String()))
-	addLine(labelStyle.Render("Type:") + "  " + valueStyle.Render(string(d.task.Type)))
 	if d.task.ParentID != nil {
 		addLine(labelStyle.Render("Parent:") + "  " + valueStyle.Render(*d.task.ParentID))
 	}
@@ -565,6 +553,53 @@ func (d *DetailPanel) formatWorktreeSummary() string {
 		return "Age " + d.formatDuration(time.Since(*d.session.StartedAt))
 	}
 	return "Age N/A"
+}
+
+func (d *DetailPanel) formatIssueCardSummary() string {
+	priority := d.task.Priority
+	if priority < 0 {
+		priority = 0
+	}
+	if int(priority) >= len(uistyles.PriorityColors) {
+		priority = domain.P4
+	}
+	priorityBadge := lipgloss.NewStyle().
+		Foreground(uistyles.Base).
+		Background(uistyles.PriorityColors[int(priority)]).
+		Bold(true).
+		Padding(0, 1).
+		Render(d.task.Priority.String())
+
+	typeColor := uistyles.Surface1
+	switch d.task.Type {
+	case domain.TypeEpic:
+		typeColor = uistyles.Mauve
+	case domain.TypeFeature:
+		typeColor = uistyles.Green
+	case domain.TypeBug:
+		typeColor = uistyles.Red
+	case domain.TypeTask:
+		typeColor = uistyles.Blue
+	case domain.TypeChore:
+		typeColor = uistyles.Yellow
+	}
+	typeBadge := lipgloss.NewStyle().
+		Foreground(uistyles.Base).
+		Background(typeColor).
+		Bold(true).
+		Padding(0, 1).
+		Render(d.task.Type.Short())
+
+	statusColor, ok := uistyles.StatusColors[string(d.task.Status)]
+	if !ok {
+		statusColor = uistyles.Subtext0
+	}
+	status := lipgloss.NewStyle().
+		Foreground(statusColor).
+		Bold(true).
+		Render(d.formatStatus(d.task.Status))
+
+	return strings.Join([]string{priorityBadge, typeBadge, status}, " ")
 }
 
 func (d *DetailPanel) formatSessionSummary() string {
