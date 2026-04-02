@@ -7,7 +7,7 @@
 ││     Created:  0001-01-01 00:00:00                                            [S] Start session + work               │
 ││     Updated:  0001-01-01 00:00:00                                            [!] Start session (yolo)               │
 ││                                                                              ───────────────────                    │
-││ Description                                                                  [u] Update from main                   │
+││ Description                                                                  [u] Update from base branch            │
 ││ review panel structure and preserve layout                                   [m] Follow-on merge                    │
 ││                                                                              [b] Merge into...                      │
 ││                                                                              [P] Create PR                          │

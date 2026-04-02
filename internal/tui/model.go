@@ -3709,7 +3709,7 @@ func (m Model) checkMergePreflight(ctx context.Context, sourceID, targetID, sour
 			} else if len(resp.ConflictFiles) > 0 {
 				reasons = append(reasons, fmt.Sprintf("Merge would conflict in %d files: %s", len(resp.ConflictFiles), strings.Join(resp.ConflictFiles, ", ")))
 			} else {
-				reasons = append(reasons, "Merge would conflict; merge and resolve main into the source branch first")
+				reasons = append(reasons, "Merge would conflict; merge and resolve base branch into the source branch first")
 			}
 			if len(resp.SourceFiles) > 0 {
 				sourceFiles = append(sourceFiles[:0], resp.SourceFiles...)
@@ -3901,7 +3901,7 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 	candidates := []overlay.MergeTarget{
 		{
 			ID:     "main",
-			Label:  "main branch",
+			Label:  "base branch",
 			IsMain: true,
 		},
 	}

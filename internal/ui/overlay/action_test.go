@@ -380,8 +380,8 @@ func TestActionMenu_MergeLabelTopLevelUsesMainWhenNoEligibleUpstream(t *testing.
 	menu := NewActionMenu(topLevelTask, nil).WithRelatedTasks(related)
 	for _, action := range menu.actions {
 		if action.Key == "m" {
-			if action.Label != "Merge into main" {
-				t.Fatalf("merge label = %q, want %q", action.Label, "Merge into main")
+			if action.Label != "Merge into base branch" {
+				t.Fatalf("merge label = %q, want %q", action.Label, "Merge into base branch")
 			}
 			return
 		}

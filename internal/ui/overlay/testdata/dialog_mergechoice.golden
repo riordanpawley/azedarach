@@ -1,7 +1,7 @@
 ╭──────────────────────────────────────────────────────────────╮
 │MERGE CHOICE                                                  │
 │──────────────────────────────────────────────────────────────│
-│3 commits behind main. Merge latest?                          │
+│3 commits behind base branch (main). Merge latest?            │
 │                                                              │
 │[M] Merge & Attach                                            │
 │[S] Skip & Attach                                             │
