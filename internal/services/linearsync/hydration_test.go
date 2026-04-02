@@ -2,25 +2,31 @@ package linearsync
 
 import (
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *testing.T) {
+	startedAt := time.Date(2026, 4, 2, 3, 15, 0, 0, time.UTC)
 	current := []domain.Task{
 		{
-			ID:                    "az-1",
-			HasTmuxSession:        true,
-			HasWorktree:           true,
-			GitAheadCount:         1,
-			GitBehindCount:        3,
+			ID:          "az-1",
+			HasWorktree: true,
+			GitAheadCount: 1,
+			GitBehindCount: 3,
 			HasUncommittedChanges: true,
-			GitAdditions:          8,
-			GitDeletions:          2,
+			GitAdditions: 8,
+			GitDeletions: 2,
+			Session: &domain.Session{
+				IssueID:   "az-1",
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+			},
 		},
 		{
 			ID:             "az-stale",
-			HasTmuxSession: true,
+			HasTmuxSession: false,
 		},
 	}
 	hydrated := []domain.Task{
@@ -36,6 +42,9 @@ func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *
 	if got[0].ID != "az-1" || got[0].Title != "Refreshed" || got[0].Status != domain.StatusInProgress {
 		t.Fatalf("merged task = %+v", got[0])
 	}
+	if got[0].Session == nil || got[0].Session.State != domain.SessionBusy {
+		t.Fatalf("session projection not preserved: %+v", got[0].Session)
+	}
 	if !got[0].HasTmuxSession || !got[0].HasWorktree || got[0].GitAheadCount != 1 || got[0].GitBehindCount != 3 || !got[0].HasUncommittedChanges || got[0].GitAdditions != 8 || got[0].GitDeletions != 2 {
 		t.Fatalf("overlay fields were not preserved: %+v", got[0])
 	}
@@ -46,7 +55,7 @@ func TestReconcileHydratedTasks_PreservesLocalRuntimeOverlayForMatchingTasks(t *
 
 func TestReconcileHydratedTasks_DropsStaleLocalTasks(t *testing.T) {
 	current := []domain.Task{
-		{ID: "az-local", HasTmuxSession: true},
+		{ID: "az-local", HasTmuxSession: true, Session: &domain.Session{IssueID: "az-local", State: domain.SessionBusy}},
 	}
 
 	got := ReconcileHydratedTasks(current, nil)

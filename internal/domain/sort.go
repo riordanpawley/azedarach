@@ -98,11 +98,6 @@ func sessionPriority(t Task) int {
 	if t.Session != nil {
 		return sessionStatePriority(t.Session.State)
 	}
-	// Runtime tmux signal should still sort as active even when state projection
-	// has not been hydrated yet.
-	if t.HasTmuxSession {
-		return sessionStatePriority(SessionBusy)
-	}
 	// Worktree-only should be above fully idle/no-session tasks.
 	if t.HasWorktree {
 		return 1

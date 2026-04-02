@@ -309,7 +309,7 @@ func (cv *CompactView) renderTypeCell(taskType domain.TaskType, width int) strin
 	return style.Width(width).Align(lipgloss.Center).Render(taskType.Short())
 }
 
-// renderSessionCell renders the session state icon
+// renderSessionCell renders the session state icon.
 func (cv *CompactView) renderSessionCell(session *domain.Session, width int) string {
 	if session == nil {
 		return cv.styles.ColSession.Width(width).Render(" ")
