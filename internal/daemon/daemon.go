@@ -167,6 +167,9 @@ func New(cfg Config) *Daemon {
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 				d.publishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 			},
+			onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
+				gitService.refreshGitStatusAsync(projectID, path)
+			},
 		},
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
 	)

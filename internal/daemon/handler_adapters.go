@@ -288,6 +288,7 @@ type worktreeServiceAdapter struct {
 	logger             *slog.Logger
 	pollInterval       time.Duration
 	onProjectionUpdate func(ctx context.Context, projectID, issueID, path string)
+	onWorktreeObserved func(ctx context.Context, projectID, issueID, path string)
 
 	mu      sync.Mutex
 	pollers map[string]context.CancelFunc
@@ -296,13 +297,19 @@ type worktreeServiceAdapter struct {
 func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]git.Worktree, error) {
 	projectID = normalizedProjectID(projectID)
 	if a.projectionStore == nil {
-		return a.manager.List(ctx)
+		worktrees, err := a.manager.List(ctx)
+		if err == nil {
+			a.observeWorktrees(ctx, projectID, worktrees)
+		}
+		return worktrees, err
 	}
 
 	cached, err := a.projectionStore.ListWorktrees(ctx, projectID)
 	if err == nil && len(cached) > 0 {
+		worktrees := mapProjectionWorktrees(cached)
+		a.observeWorktrees(ctx, projectID, worktrees)
 		a.ensureBackgroundPoller(projectID)
-		return mapProjectionWorktrees(cached), nil
+		return worktrees, nil
 	}
 
 	worktrees, listErr := a.manager.List(ctx)
@@ -313,6 +320,7 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 		return nil, listErr
 	}
 	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
+	a.observeWorktrees(ctx, projectID, worktrees)
 	a.ensureBackgroundPoller(projectID)
 	return worktrees, nil
 }
@@ -335,6 +343,7 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 		if a.onProjectionUpdate != nil {
 			a.onProjectionUpdate(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path)
 		}
+		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree})
 	}
 	return worktree, nil
 }
@@ -442,8 +451,36 @@ func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, pr
 		return
 	}
 	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
+	a.observeWorktrees(ctx, projectID, worktrees)
 	if a.onProjectionUpdate != nil {
 		publishWorktreeProjectionDelta(ctx, a.onProjectionUpdate, projectID, previous, worktrees)
+	}
+}
+
+func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID string, worktrees []git.Worktree) {
+	if a.onWorktreeObserved == nil || len(worktrees) == 0 {
+		return
+	}
+	projectID = normalizedProjectID(projectID)
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		path := strings.TrimSpace(wt.Path)
+		if issueID == "" || path == "" {
+			continue
+		}
+		if a.projectionStore != nil {
+			row, found, err := a.projectionStore.GetWorktreeByIssueID(ctx, projectID, issueID)
+			if err != nil {
+				if a.logger != nil {
+					a.logger.Debug("worktree observation lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
+				}
+				continue
+			}
+			if found && len(row.GitStatusRaw) > 0 {
+				continue
+			}
+		}
+		a.onWorktreeObserved(ctx, projectID, issueID, path)
 	}
 }
 

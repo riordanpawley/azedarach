@@ -121,12 +121,13 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 			tasks[i].Session.Worktree = worktreePath
 		}
 
-		if len(row.GitStatusRaw) == 0 {
+		statusRaw := row.GitStatusRaw
+		if len(statusRaw) == 0 {
 			continue
 		}
 
 		var status git.GitStatus
-		if err := json.Unmarshal(row.GitStatusRaw, &status); err != nil {
+		if err := json.Unmarshal(statusRaw, &status); err != nil {
 			continue
 		}
 		tasks[i].HasUncommittedChanges = status.HasChanges
