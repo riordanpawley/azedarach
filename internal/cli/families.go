@@ -1206,8 +1206,9 @@ func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap ma
 		state.Threads[threadID] = threadState
 		if !codexGuardPayloadHasPrimeEvidence(payloadMap) {
 			reason := "Run `az prime` now before any other shell commands."
-			response["decision"] = "block"
-			response["reason"] = reason
+			// SessionStart hooks use continue/stopReason; decision/reason is for tool hooks.
+			response["continue"] = false
+			response["stopReason"] = reason
 			response["systemMessage"] = reason
 		}
 	case "user-prompt-submit":

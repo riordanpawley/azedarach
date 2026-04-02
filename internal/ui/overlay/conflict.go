@@ -157,10 +157,10 @@ func (c *ConflictOverlay) Title() string {
 // Size returns the overlay dimensions
 func (c *ConflictOverlay) Size() (width, height int) {
 	fileLines := len(c.files)
-	if fileLines > 10 {
-		fileLines = 10
+	if fileLines > 12 {
+		fileLines = 12
 	}
-	return c.ClampResponsive(84, 12+fileLines)
+	return c.ClampResponsive(100, 14+fileLines)
 }
 
 func (c *ConflictOverlay) renderConflictList(width int) string {
@@ -193,4 +193,15 @@ func (c *ConflictOverlay) renderConflictList(width int) string {
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// StatusBindings returns footer key hints while the overlay is open.
+func (c *ConflictOverlay) StatusBindings() []keybinds.Binding {
+	return []keybinds.Binding{
+		{Key: "j/k/↑/↓", Description: "navigate"},
+		{Key: "c", Description: "ai resolve"},
+		{Key: "o", Description: "open"},
+		{Key: "a", Description: "abort"},
+		{Key: "Esc/q", Description: "close"},
+	}
 }
