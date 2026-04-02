@@ -2218,6 +2218,36 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 			}
 		}
 
+		sources := inferLogSourcesFromPaths(availablePaths)
+		if len(sources) > 0 {
+			sourceList := strings.Join(sources, ",")
+			// Keep a short history buffer before follow mode starts so the stream
+			// opens with context while preserving per-line source prefixes.
+			args := []string{"log", "--lines", "200", "--source", sourceList}
+			cmd := exec.Command("az", args...)
+			if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
+				popupCommand := fmt.Sprintf("az log --lines 200 --source %s", shellSingleQuote(sourceList))
+				if err := m.tmuxClient.DisplayPopup(context.Background(), "az.logs", "90%", "90%", popupCommand); err != nil {
+					return overlay.SelectionMsg{
+						Key:   "event-log-error",
+						Value: fmt.Errorf("stream logs in tmux popup: %w", err),
+					}
+				}
+				return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
+			}
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return overlay.SelectionMsg{
+					Key:   "event-log-error",
+					Value: fmt.Errorf("stream logs: %w", err),
+				}
+			}
+			return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
+		}
+
+		// Fallback for unknown/custom paths where source labels cannot be inferred.
 		args := make([]string, 0, len(availablePaths)+3)
 		args = append(args, "-n", "+1", "-F")
 		args = append(args, availablePaths...)
@@ -2247,6 +2277,35 @@ func (m Model) openLogStreamCmd(logPaths ...string) tea.Cmd {
 		}
 		return overlay.SelectionMsg{Key: "event-log-opened", Value: strings.Join(availablePaths, ", ")}
 	}
+}
+
+func inferLogSourcesFromPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	sources := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		base := strings.ToLower(strings.TrimSpace(filepath.Base(path)))
+		source := ""
+		switch base {
+		case "daemon.log":
+			source = "daemon"
+		case "az.log":
+			source = "tui"
+		case "az-cli.log":
+			source = "cli"
+		}
+		if source == "" {
+			continue
+		}
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		sources = append(sources, source)
+	}
+	return sources
 }
 
 func shellSingleQuote(value string) string {

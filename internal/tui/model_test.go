@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -273,11 +274,27 @@ func TestOpenLogStreamCmd_SkipsMissingPathsWhenAnotherLogExists(t *testing.T) {
 	if got, ok := selection.Value.(string); !ok || got != tuiLog {
 		t.Fatalf("opened value = %#v, want %q", selection.Value, tuiLog)
 	}
-	if !strings.Contains(popupCommand, shellSingleQuote(tuiLog)) {
-		t.Fatalf("popup command = %q, want tui log path", popupCommand)
+	if !strings.Contains(popupCommand, "az log --lines 200 --source 'tui'") {
+		t.Fatalf("popup command = %q, want az log tui source stream", popupCommand)
 	}
-	if strings.Contains(popupCommand, shellSingleQuote(missingDaemonLog)) {
-		t.Fatalf("popup command unexpectedly included missing path: %q", popupCommand)
+	if strings.Contains(popupCommand, "tail -n +1 -F") {
+		t.Fatalf("popup command unexpectedly used tail fallback: %q", popupCommand)
+	}
+}
+
+func TestInferLogSourcesFromPaths(t *testing.T) {
+	paths := []string{
+		"/tmp/project/.azedarach/daemon.log",
+		"/tmp/user/.azedarach/logs/az.log",
+		"/tmp/user/.azedarach/logs/az-cli.log",
+		"/tmp/user/.azedarach/logs/az.log",
+		"/tmp/custom/debug.log",
+	}
+
+	got := inferLogSourcesFromPaths(paths)
+	want := []string{"daemon", "tui", "cli"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("inferLogSourcesFromPaths() = %v, want %v", got, want)
 	}
 }
 
