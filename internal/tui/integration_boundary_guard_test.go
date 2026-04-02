@@ -35,6 +35,27 @@ func TestIntegrationBoundaryGuard_NoDirectGitExecInAppOrCli(t *testing.T) {
 	t.Fatalf("runtime app/cli code must route direct git subprocesses through sanctioned helpers; found violations at %v", violations)
 }
 
+func TestIntegrationBoundaryGuard_NoAuthorityServiceOrDaemonImportsInAppOrCli(t *testing.T) {
+	t.Helper()
+
+	repoRoot, err := repoRootFromTestFile()
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+
+	violations, err := findAuthorityBoundaryImportViolations(repoRoot)
+	if err != nil {
+		t.Fatalf("scan runtime source: %v", err)
+	}
+
+	if len(violations) == 0 {
+		return
+	}
+
+	sort.Strings(violations)
+	t.Fatalf("runtime app/cli code must route writes through daemon command paths; found forbidden imports at %v", violations)
+}
+
 func repoRootFromTestFile() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -109,6 +130,75 @@ func findDirectGitExecViolations(repoRoot string) ([]string, error) {
 	}
 
 	return violations, nil
+}
+
+func findAuthorityBoundaryImportViolations(repoRoot string) ([]string, error) {
+	targetRoots := []string{
+		filepath.Join(repoRoot, "internal", "tui"),
+		filepath.Join(repoRoot, "internal", "cli"),
+	}
+
+	fset := token.NewFileSet()
+	violations := make([]string, 0, 8)
+	for _, root := range targetRoots {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+
+			relPath, err := filepath.Rel(repoRoot, path)
+			if err != nil {
+				return err
+			}
+			relPath = filepath.ToSlash(relPath)
+
+			file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+			if err != nil {
+				return err
+			}
+
+			for _, imp := range file.Imports {
+				imported, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					return err
+				}
+				if !isForbiddenAuthorityImport(imported) {
+					continue
+				}
+
+				violations = append(violations, relPath+":"+imported)
+			}
+
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return violations, nil
+}
+
+func isForbiddenAuthorityImport(imported string) bool {
+	switch imported {
+	case "github.com/riordanpawley/azedarach/internal/daemon":
+		return true
+	case "github.com/riordanpawley/azedarach/internal/services/git",
+		"github.com/riordanpawley/azedarach/internal/services/issues",
+		"github.com/riordanpawley/azedarach/internal/services/worktree",
+		"github.com/riordanpawley/azedarach/internal/services/tmux",
+		"github.com/riordanpawley/azedarach/internal/services/devserver",
+		"github.com/riordanpawley/azedarach/internal/services/pr":
+		return true
+	default:
+		return false
+	}
 }
 
 func isAllowedGitExec(path, function string) bool {
