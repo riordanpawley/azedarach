@@ -233,3 +233,65 @@ func TestClientProjectRouting(t *testing.T) {
 		t.Fatalf("explicit subscribe project_id = %q, want proj-b", gotSubscribeProjectID)
 	}
 }
+
+func TestClientProjectRoutingCanonicalization(t *testing.T) {
+	t.Run("trims whitespace and preserves explicit project route", func(t *testing.T) {
+		var gotCommandProjectID string
+		var gotSubscribeProjectID string
+
+		c := New(&fakeTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotCommandProjectID = req.Meta.ProjectID
+				return protocol.ResponseEnvelope{OK: true}, nil
+			},
+			subscribeFn: func(_ context.Context, projectID string, _ uint64) (<-chan protocol.EventEnvelope, error) {
+				gotSubscribeProjectID = projectID
+				return make(chan protocol.EventEnvelope), nil
+			},
+		}).WithProjectID("  proj-a  ")
+
+		if _, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: "task.list"}); err != nil {
+			t.Fatalf("Command error: %v", err)
+		}
+		if gotCommandProjectID != "proj-a" {
+			t.Fatalf("command project_id = %q, want proj-a", gotCommandProjectID)
+		}
+
+		if _, err := c.Subscribe(context.Background(), "  ", 0); err != nil {
+			t.Fatalf("Subscribe error: %v", err)
+		}
+		if gotSubscribeProjectID != "proj-a" {
+			t.Fatalf("subscribe project_id = %q, want proj-a", gotSubscribeProjectID)
+		}
+	})
+
+	t.Run("defaults blank project routes", func(t *testing.T) {
+		var gotCommandProjectID string
+		var gotSubscribeProjectID string
+
+		c := New(&fakeTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				gotCommandProjectID = req.Meta.ProjectID
+				return protocol.ResponseEnvelope{OK: true}, nil
+			},
+			subscribeFn: func(_ context.Context, projectID string, _ uint64) (<-chan protocol.EventEnvelope, error) {
+				gotSubscribeProjectID = projectID
+				return make(chan protocol.EventEnvelope), nil
+			},
+		}).WithProjectID("   ")
+
+		if _, err := c.Command(context.Background(), protocol.RequestEnvelope{Command: "task.list"}); err != nil {
+			t.Fatalf("Command error: %v", err)
+		}
+		if gotCommandProjectID != protocol.DefaultProjectID {
+			t.Fatalf("command project_id = %q, want %q", gotCommandProjectID, protocol.DefaultProjectID)
+		}
+
+		if _, err := c.Subscribe(context.Background(), "", 0); err != nil {
+			t.Fatalf("Subscribe error: %v", err)
+		}
+		if gotSubscribeProjectID != protocol.DefaultProjectID {
+			t.Fatalf("subscribe project_id = %q, want %q", gotSubscribeProjectID, protocol.DefaultProjectID)
+		}
+	})
+}

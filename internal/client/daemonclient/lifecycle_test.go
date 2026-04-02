@@ -244,6 +244,51 @@ func TestSessionAttachPauseResumeAndStatusCommandsRouteThroughDaemon(t *testing.
 	}
 }
 
+func TestReconcileRuntimeRoutesThroughDaemon(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(protocol.RuntimeReconcileResponseBody{
+				ProjectID:             "proj-a",
+				WorktreesRefreshed:    3,
+				RecreatedTmuxSessions: 2,
+				AlignedDaemonSessions: 1,
+			})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	out, err := client.ReconcileRuntime(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileRuntime error: %v", err)
+	}
+	if out.ProjectID != "proj-a" {
+		t.Fatalf("project id = %q, want proj-a", out.ProjectID)
+	}
+	if out.WorktreesRefreshed != 3 || out.RecreatedTmuxSessions != 2 || out.AlignedDaemonSessions != 1 {
+		t.Fatalf("reconcile result = %+v", out)
+	}
+	if transport.lastReq.Command != CommandRuntimeReconcile {
+		t.Fatalf("command = %q, want %q", transport.lastReq.Command, CommandRuntimeReconcile)
+	}
+	var body protocol.RuntimeReconcileRequestBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body.ProjectID != "proj-a" {
+		t.Fatalf("project_id = %q, want proj-a", body.ProjectID)
+	}
+}
+
 func TestSessionLifecycleCommandsDecodeNestedOperationResult(t *testing.T) {
 	transport := &lifecycleRecordingTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

@@ -58,14 +58,11 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
 	}
-	if _, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, ""); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("session reconciliation during task list failed", "project_id", projectID, "error", err)
-	}
 	tasks, err := d.issues.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
+	tasks = d.enrichTasksWithSessionStateReadOnly(ctx, projectID, tasks)
 	tasks = d.enrichTasksWithRuntimeProjectionCache(ctx, projectID, tasks)
 	body, err := json.Marshal(tasks)
 	if err != nil {
@@ -79,15 +76,116 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	return resp, nil
 }
 
+func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
+
+	namingScope := d.sessionNamingScope(projectID)
+	snapshotByKey := map[string]daemonstate.Session{}
+	if d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		snapshotSessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+		for _, session := range snapshot.Sessions {
+			snapshotSessions = append(snapshotSessions, session)
+		}
+		snapshotByKey = sessionProjectionByIssueKey(snapshotSessions, namingScope)
+	}
+
+	projectionByKey := map[string]daemonstate.Session{}
+	if d.projectionStore != nil {
+		cachedSessions, err := d.projectionStore.ListSessions(ctx, projectID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("failed to load cached session projections while enriching read-only tasks", "project_id", projectID, "error", err)
+			}
+		} else {
+			projectionByKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
+		}
+	}
+
+	for i := range tasks {
+		taskKey := sessionKey(tasks[i].ID)
+		session, ok := snapshotByKey[taskKey]
+		if !ok {
+			session, ok = projectionByKey[taskKey]
+		}
+		if !ok || session.State == daemonstate.SessionStateStopped {
+			continue
+		}
+
+		state := domain.SessionBusy
+		if session.State == daemonstate.SessionStatePaused {
+			state = domain.SessionPaused
+		}
+		var startedAt *time.Time
+		if !session.UpdatedAt.IsZero() {
+			started := session.UpdatedAt.UTC()
+			startedAt = &started
+		}
+		tasks[i].Session = &domain.Session{
+			IssueID:   tasks[i].ID,
+			State:     state,
+			StartedAt: startedAt,
+		}
+	}
+
+	return tasks
+}
+
+func (d *Daemon) refreshWorktreeProjectionCache(ctx context.Context, projectID string) (int, error) {
+	if d == nil || d.worktree == nil || d.projectionStore == nil {
+		return 0, nil
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+
+	worktrees, err := d.worktree.List(ctx)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("refresh worktree projection cache failed", "project_id", projectID, "error", err)
+		}
+		return 0, err
+	}
+
+	rows := make([]daemonstate.WorktreeProjection, 0, len(worktrees))
+	now := time.Now().UTC()
+	for _, wt := range worktrees {
+		issueID := strings.TrimSpace(wt.IssueID)
+		if issueID == "" {
+			continue
+		}
+		rows = append(rows, daemonstate.WorktreeProjection{
+			ProjectID: projectID,
+			IssueID:   issueID,
+			Path:      strings.TrimSpace(wt.Path),
+			Branch:    strings.TrimSpace(wt.Branch),
+			UpdatedAt: now,
+		})
+	}
+	if d.runtimeProjectionWriter != nil {
+		if err := d.runtimeProjectionWriter.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("replace worktree projections failed", "project_id", projectID, "error", err)
+			}
+			return len(rows), err
+		}
+		return len(rows), nil
+	}
+	if err := d.projectionStore.ReplaceWorktrees(ctx, projectID, rows); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("replace worktree projections failed", "project_id", projectID, "error", err)
+		}
+		return len(rows), err
+	}
+	return len(rows), nil
+}
+
 func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
 	if len(tasks) == 0 || d.projectionStore == nil {
 		return tasks
 	}
 
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		projectID = "default"
-	}
+	projectID = protocol.NormalizeProjectID(projectID)
 
 	worktreeRows, err := d.projectionStore.ListWorktrees(ctx, projectID)
 	if err != nil {
@@ -121,12 +219,13 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 			tasks[i].Session.Worktree = worktreePath
 		}
 
-		if len(row.GitStatusRaw) == 0 {
+		statusRaw := row.GitStatusRaw
+		if len(statusRaw) == 0 {
 			continue
 		}
 
 		var status git.GitStatus
-		if err := json.Unmarshal(row.GitStatusRaw, &status); err != nil {
+		if err := json.Unmarshal(statusRaw, &status); err != nil {
 			continue
 		}
 		tasks[i].HasUncommittedChanges = status.HasChanges
@@ -135,6 +234,48 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 	}
 
 	return tasks
+}
+
+func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issueID, worktree string) *git.GitStatus {
+	if d == nil || d.git == nil || d.projectionStore == nil {
+		return nil
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+	if issueID == "" || worktree == "" {
+		return nil
+	}
+
+	timeoutCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeoutCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+	}
+	defer cancel()
+
+	status, err := d.git.Status(timeoutCtx, worktree)
+	if err != nil || status == nil {
+		return nil
+	}
+	if d.runtimeProjectionWriter != nil {
+		if rev := d.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(timeoutCtx, projectID, issueID, worktree, status, true, true); rev == 0 {
+			return status
+		}
+		return status
+	}
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		return nil
+	}
+	if err := d.projectionStore.UpsertWorktreeGitStatus(timeoutCtx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("persist git status projection failed", "project_id", projectID, "issue_id", issueID, "worktree", worktree, "error", err)
+		}
+		return nil
+	}
+	d.publishGitStatusProjectionEvent(timeoutCtx, projectID, issueID, worktree, status)
+	return status
 }
 
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

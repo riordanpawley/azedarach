@@ -144,6 +144,84 @@ func (s *ProjectionStore) DeleteSession(ctx context.Context, projectID, sessionI
 	return nil
 }
 
+func (s *ProjectionStore) ReplaceSessions(ctx context.Context, projectID string, sessions []Session) error {
+	db, err := s.dbHandle()
+	if err != nil {
+		return err
+	}
+	projectID = normalizedProjectID(projectID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace session projections: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	activeSessions := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		activeSessions[sessionID] = struct{}{}
+		updatedAt := session.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = time.Now().UTC()
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO `+projectionSessionTable+` (
+				project_id,
+				session_id,
+				issue_id,
+				state,
+				updated_at
+			) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, session_id) DO UPDATE SET
+				issue_id = excluded.issue_id,
+				state = excluded.state,
+				updated_at = excluded.updated_at
+		`,
+			projectID,
+			sessionID,
+			session.IssueID,
+			string(session.State),
+			updatedAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return fmt.Errorf("upsert session projection %s/%s: %w", projectID, sessionID, err)
+		}
+	}
+
+	if len(activeSessions) == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM `+projectionSessionTable+`
+			WHERE project_id = ?
+		`, projectID); err != nil {
+			return fmt.Errorf("clear session projections %s: %w", projectID, err)
+		}
+	} else {
+		args := make([]any, 0, len(activeSessions)+1)
+		args = append(args, projectID)
+		placeholders := make([]string, 0, len(activeSessions))
+		for sessionID := range activeSessions {
+			placeholders = append(placeholders, "?")
+			args = append(args, sessionID)
+		}
+		query := `DELETE FROM ` + projectionSessionTable + ` WHERE project_id = ? AND session_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("delete stale session projections %s: %w", projectID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace session projections %s: %w", projectID, err)
+	}
+	tx = nil
+	return nil
+}
+
 func (s *ProjectionStore) ListSessions(ctx context.Context, projectID string) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -524,7 +602,7 @@ func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID
 	if updatedAt.IsZero() {
 		updatedAt = time.Now().UTC()
 	}
-	_, err = db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		UPDATE `+projectionWorktreeTable+`
 		SET
 			git_status_json = ?,
@@ -533,6 +611,23 @@ func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID
 	`, string(statusRaw), updatedAt.UTC().Format(time.RFC3339Nano), projectID, issueID)
 	if err != nil {
 		return fmt.Errorf("upsert worktree git status %s/%s: %w", projectID, issueID, err)
+	}
+	if err := requireAffectedRows(result, 1, "upsert worktree git status", projectID, issueID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func requireAffectedRows(result sql.Result, want int64, action, projectID, rowID string) error {
+	if result == nil {
+		return fmt.Errorf("%s %s/%s: missing exec result", action, projectID, rowID)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s %s/%s: read affected rows: %w", action, projectID, rowID, err)
+	}
+	if affected != want {
+		return fmt.Errorf("%s %s/%s: expected %d affected row(s), got %d", action, projectID, rowID, want, affected)
 	}
 	return nil
 }

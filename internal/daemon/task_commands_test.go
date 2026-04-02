@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -8,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
@@ -207,5 +211,178 @@ func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
 	}
 	if got[1].HasWorktree || got[1].HasUncommittedChanges || got[1].GitAdditions != 0 || got[1].GitDeletions != 0 {
 		t.Fatalf("task[1] should remain unchanged, got %+v", got[1])
+	}
+}
+
+func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+
+	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	projectID := "proj-read-only"
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Read-only task list",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	sessionStore := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	if _, err := sessionStore.UpsertSession(projectID, sessionID, taskID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store: %v", err)
+	}
+	sessionSnapshot := sessionStore.ReadSnapshot(projectID)
+	storedSession, ok := sessionSnapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing seeded session %q in snapshot", sessionID)
+	}
+
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = projectionStore.Close() })
+
+	sessionUpdatedAt := time.Date(2026, time.April, 2, 11, 0, 0, 0, time.UTC)
+	if err := projectionStore.UpsertSession(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: sessionUpdatedAt,
+	}); err != nil {
+		t.Fatalf("seed projected session: %v", err)
+	}
+
+	rawStatus, err := json.Marshal(git.GitStatus{
+		Added:      []string{"new.go"},
+		Modified:   []string{"changed.go"},
+		Staged:     []string{"staged.go"},
+		Deleted:    []string{"removed.go"},
+		HasChanges: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal git status: %v", err)
+	}
+	worktreePath := "/tmp/proj-read-only-" + taskID
+	if err := projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
+		ProjectID: projectID,
+		IssueID:   taskID,
+		Path:      worktreePath,
+		Branch:    "riordan/" + taskID + "/read-only",
+		UpdatedAt: time.Date(2026, time.April, 2, 11, 1, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed projected worktree: %v", err)
+	}
+	if err := projectionStore.UpsertWorktreeGitStatus(ctx, projectID, taskID, rawStatus, time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed projected worktree status: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			Logger: logger,
+		},
+		issues:          issuesClient,
+		sessionStore:    sessionStore,
+		projectionStore: projectionStore,
+		revision:        map[string]uint64{projectID: 7},
+		tmux:            nil,
+		worktree:        &git.WorktreeManager{},
+		git:             &git.Client{},
+	}
+
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-list",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Command:         "task.list",
+	})
+	if err != nil {
+		t.Fatalf("handleTaskList error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.list response = %+v", resp.Error)
+	}
+	if got, want := resp.Revision, uint64(7); got != want {
+		t.Fatalf("response revision = %d, want %d", got, want)
+	}
+	if got, want := d.currentRevision(projectID), uint64(7); got != want {
+		t.Fatalf("daemon revision = %d, want %d", got, want)
+	}
+
+	var tasks []domain.Task
+	if err := json.Unmarshal(resp.Body, &tasks); err != nil {
+		t.Fatalf("unmarshal task list body: %v", err)
+	}
+	if got, want := len(tasks), 1; got != want {
+		t.Fatalf("task count = %d, want %d", got, want)
+	}
+
+	task := tasks[0]
+	if task.ID != taskID {
+		t.Fatalf("task.ID = %q, want %q", task.ID, taskID)
+	}
+	if task.Title != "Read-only task list" {
+		t.Fatalf("task.Title = %q, want %q", task.Title, "Read-only task list")
+	}
+	if task.Session == nil {
+		t.Fatal("expected task session projection")
+	}
+	if task.Session.State != domain.SessionBusy {
+		t.Fatalf("task.Session.State = %q, want %q", task.Session.State, domain.SessionBusy)
+	}
+	if task.Session.StartedAt == nil || !task.Session.StartedAt.Equal(storedSession.UpdatedAt.UTC()) {
+		t.Fatalf("task.Session.StartedAt = %v, want %v", task.Session.StartedAt, storedSession.UpdatedAt.UTC())
+	}
+	if task.Session.Worktree != worktreePath {
+		t.Fatalf("task.Session.Worktree = %q, want %q", task.Session.Worktree, worktreePath)
+	}
+	if !task.HasWorktree {
+		t.Fatal("task.HasWorktree = false, want true")
+	}
+	if !task.HasUncommittedChanges {
+		t.Fatal("task.HasUncommittedChanges = false, want true")
+	}
+	if got, want := task.GitAdditions, 3; got != want {
+		t.Fatalf("task.GitAdditions = %d, want %d", got, want)
+	}
+	if got, want := task.GitDeletions, 1; got != want {
+		t.Fatalf("task.GitDeletions = %d, want %d", got, want)
+	}
+
+	sessions, err := projectionStore.ListSessions(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list projected sessions: %v", err)
+	}
+	if got, want := len(sessions), 1; got != want {
+		t.Fatalf("projected session count = %d, want %d", got, want)
+	}
+	if sessions[0].State != daemonstate.SessionStateAttached {
+		t.Fatalf("projected session state = %q, want %q", sessions[0].State, daemonstate.SessionStateAttached)
+	}
+	if !sessions[0].UpdatedAt.Equal(sessionUpdatedAt) {
+		t.Fatalf("projected session updated_at = %v, want %v", sessions[0].UpdatedAt, sessionUpdatedAt)
+	}
+
+	worktrees, err := projectionStore.ListWorktrees(ctx, projectID)
+	if err != nil {
+		t.Fatalf("list projected worktrees: %v", err)
+	}
+	if got, want := len(worktrees), 1; got != want {
+		t.Fatalf("projected worktree count = %d, want %d", got, want)
+	}
+	if worktrees[0].IssueID != taskID {
+		t.Fatalf("projected worktree issue_id = %q, want %q", worktrees[0].IssueID, taskID)
+	}
+	if !bytes.Equal(worktrees[0].GitStatusRaw, rawStatus) {
+		t.Fatalf("projected worktree git status was mutated")
 	}
 }

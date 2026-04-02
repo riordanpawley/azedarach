@@ -1017,11 +1017,11 @@ func normalizeOperationResourceKeys(keys []string) []string {
 
 func coalesceProjectID(values ...string) string {
 	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
+		if trimmed := protocol.TrimProjectID(value); trimmed != "" {
 			return trimmed
 		}
 	}
-	return defaultOperationProjectID
+	return protocol.NormalizeProjectID("")
 }
 
 func isOperationTerminal(state daemonops.State) bool {

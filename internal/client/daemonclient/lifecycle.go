@@ -12,18 +12,19 @@ import (
 )
 
 const (
-	CommandSessionStart    = "session.start"
-	CommandSessionAttach   = "session.attach"
-	CommandSessionPause    = "session.pause"
-	CommandSessionResume   = "session.resume"
-	CommandSessionStop     = "session.stop"
-	CommandSessionStatus   = "session.status"
-	CommandDevServerStart  = "devserver.start"
-	CommandDevServerStop   = "devserver.stop"
-	CommandDevServerStatus = "devserver.status"
-	CommandDevServerList   = "devserver.list"
-	CommandWorktreeList    = "worktree.list"
-	CommandWorktreeRemove  = "worktree.remove"
+	CommandSessionStart     = "session.start"
+	CommandSessionAttach    = "session.attach"
+	CommandSessionPause     = "session.pause"
+	CommandSessionResume    = "session.resume"
+	CommandSessionStop      = "session.stop"
+	CommandSessionStatus    = "session.status"
+	CommandRuntimeReconcile = "runtime.reconcile"
+	CommandDevServerStart   = "devserver.start"
+	CommandDevServerStop    = "devserver.stop"
+	CommandDevServerStatus  = "devserver.status"
+	CommandDevServerList    = "devserver.list"
+	CommandWorktreeList     = "worktree.list"
+	CommandWorktreeRemove   = "worktree.remove"
 )
 
 type sessionCommandBody struct {
@@ -77,6 +78,14 @@ type worktreeCommandBody struct {
 	Force     bool   `json:"force,omitempty"`
 }
 
+// RuntimeReconcileResult captures the runtime repair summary returned by the daemon.
+type RuntimeReconcileResult struct {
+	ProjectID             string `json:"project_id"`
+	WorktreesRefreshed    int    `json:"worktrees_refreshed"`
+	RecreatedTmuxSessions int    `json:"recreated_tmux_sessions"`
+	AlignedDaemonSessions int    `json:"aligned_daemon_sessions"`
+}
+
 type longRunningResultEnvelope struct {
 	OperationID *string         `json:"operation_id,omitempty"`
 	State       *string         `json:"state,omitempty"`
@@ -109,16 +118,13 @@ func (c *Client) commandOutput(ctx context.Context, command string, body any) (s
 }
 
 func (c *Client) projectRoute() string {
-	if c.projectID != "" {
-		return c.projectID
-	}
-	return "default"
+	return protocol.NormalizeProjectID(c.projectID)
 }
 
 // StartSession asks the daemon to start one session for issue/task id.
 func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStart, sessionCommandBody{
-		ProjectID:  c.projectID,
+		ProjectID:  c.projectRoute(),
 		SessionID:  params.IssueID,
 		BaseBranch: params.BaseBranch,
 		Yolo:       params.Yolo,
@@ -129,7 +135,7 @@ func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (s
 // StopSession asks the daemon to stop one session for issue/task id.
 func (c *Client) StopSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStop, sessionCommandBody{
-		ProjectID: c.projectID,
+		ProjectID: c.projectRoute(),
 		SessionID: issueID,
 	})
 }
@@ -137,7 +143,7 @@ func (c *Client) StopSession(ctx context.Context, issueID string) (string, error
 // AttachSession asks the daemon to attach to one session for issue/task id.
 func (c *Client) AttachSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionAttach, sessionCommandBody{
-		ProjectID: c.projectID,
+		ProjectID: c.projectRoute(),
 		SessionID: issueID,
 	})
 }
@@ -145,7 +151,7 @@ func (c *Client) AttachSession(ctx context.Context, issueID string) (string, err
 // PauseSession marks one issue/session as paused in daemon lifecycle state.
 func (c *Client) PauseSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionPause, sessionCommandBody{
-		ProjectID: c.projectID,
+		ProjectID: c.projectRoute(),
 		SessionID: issueID,
 	})
 }
@@ -153,7 +159,7 @@ func (c *Client) PauseSession(ctx context.Context, issueID string) (string, erro
 // ResumeSession marks one issue/session as attached (active) in daemon lifecycle state.
 func (c *Client) ResumeSession(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionResume, sessionCommandBody{
-		ProjectID: c.projectID,
+		ProjectID: c.projectRoute(),
 		SessionID: issueID,
 	})
 }
@@ -161,9 +167,20 @@ func (c *Client) ResumeSession(ctx context.Context, issueID string) (string, err
 // SessionStatus asks the daemon for the current session status view.
 func (c *Client) SessionStatus(ctx context.Context, issueID string) (string, error) {
 	return c.commandOutput(ctx, CommandSessionStatus, sessionCommandBody{
-		ProjectID: c.projectID,
+		ProjectID: c.projectRoute(),
 		SessionID: issueID,
 	})
+}
+
+// ReconcileRuntime asks the daemon to repair runtime, session, and worktree consistency for the current project route.
+func (c *Client) ReconcileRuntime(ctx context.Context) (RuntimeReconcileResult, error) {
+	var out RuntimeReconcileResult
+	if err := c.commandJSON(ctx, CommandRuntimeReconcile, protocol.RuntimeReconcileRequestBody{
+		ProjectID: c.projectRoute(),
+	}, &out); err != nil {
+		return RuntimeReconcileResult{}, err
+	}
+	return out, nil
 }
 
 // DevServerStatus returns daemon-owned devserver status for one issue.

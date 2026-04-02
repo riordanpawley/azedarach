@@ -3,13 +3,18 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestDrainInFlightCommandsWaitsForCompletionAndRejectsNewIntake(t *testing.T) {
@@ -98,4 +103,200 @@ func TestValidateCommandPolicyConfigurationFailsForIncompleteDispatcher(t *testi
 	if err := d.validateCommandPolicyConfiguration(); err == nil {
 		t.Fatal("expected command policy validation to fail for incomplete dispatcher wiring")
 	}
+}
+
+func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	d := &Daemon{
+		cfg: Config{
+			Logger: logger,
+		},
+		issues: issuesClient,
+		hub:    publish.NewHub(32, 16, logger),
+	}
+	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
+		t.Fatalf("bootstrap sync orchestrator: %v", err)
+	}
+
+	events, cancel := d.hub.Subscribe("bmd", 0)
+	defer cancel()
+
+	mkReq := func(command string, projectID string, body any) protocol.RequestEnvelope {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal %s body: %v", command, err)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       command + "-req",
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: projectID},
+			Command:         command,
+			SentAt:          time.Now().UTC(),
+			Body:            payload,
+		}
+	}
+
+	createResp, err := d.command(ctx, mkReq("task.create", " bmd ", struct {
+		Title       string          `json:"title"`
+		Description string          `json:"description"`
+		Type        domain.TaskType `json:"type"`
+		Priority    domain.Priority `json:"priority"`
+	}{
+		Title:       "Normalize project IDs",
+		Description: "ensure canonical project routing",
+		Type:        domain.TypeTask,
+		Priority:    domain.P1,
+	}))
+	if err != nil {
+		t.Fatalf("task.create command error: %v", err)
+	}
+	if !createResp.OK {
+		t.Fatalf("task.create response = %+v", createResp.Error)
+	}
+	if got, want := createResp.Meta.ProjectID, "bmd"; got != want {
+		t.Fatalf("task.create response meta project_id = %q, want %q", got, want)
+	}
+	if got, want := createResp.Revision, uint64(1); got != want {
+		t.Fatalf("task.create revision = %d, want %d", got, want)
+	}
+	var createBody struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(createResp.Body, &createBody); err != nil {
+		t.Fatalf("unmarshal task.create body: %v", err)
+	}
+	if createBody.TaskID == "" {
+		t.Fatal("task.create returned empty task id")
+	}
+
+	createEvt := waitForDaemonEvent(t, events)
+	if createEvt.ProjectID != "bmd" {
+		t.Fatalf("task.create event project_id = %q, want bmd", createEvt.ProjectID)
+	}
+	if createEvt.Meta.ProjectID != "bmd" {
+		t.Fatalf("task.create event meta project_id = %q, want bmd", createEvt.Meta.ProjectID)
+	}
+
+	updateResp, err := d.command(ctx, mkReq("task.update_status", "bmd", struct {
+		TaskID string        `json:"task_id"`
+		Status domain.Status `json:"status"`
+	}{
+		TaskID: createBody.TaskID,
+		Status: domain.StatusInProgress,
+	}))
+	if err != nil {
+		t.Fatalf("task.update_status command error: %v", err)
+	}
+	if !updateResp.OK {
+		t.Fatalf("task.update_status response = %+v", updateResp.Error)
+	}
+	if got, want := updateResp.Meta.ProjectID, "bmd"; got != want {
+		t.Fatalf("task.update_status response meta project_id = %q, want %q", got, want)
+	}
+	if got, want := updateResp.Revision, uint64(2); got != want {
+		t.Fatalf("task.update_status revision = %d, want %d", got, want)
+	}
+
+	updateEvt := waitForDaemonEvent(t, events)
+	if updateEvt.ProjectID != "bmd" {
+		t.Fatalf("task.update_status event project_id = %q, want bmd", updateEvt.ProjectID)
+	}
+	if updateEvt.Meta.ProjectID != "bmd" {
+		t.Fatalf("task.update_status event meta project_id = %q, want bmd", updateEvt.Meta.ProjectID)
+	}
+}
+
+func TestCommandDefaultsBlankProjectID(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := issues.NewClientAtPath(dbPath, logger)
+	t.Cleanup(func() {
+		if err := issuesClient.CloseDB(); err != nil {
+			t.Fatalf("close issues db: %v", err)
+		}
+	})
+
+	d := &Daemon{
+		cfg: Config{
+			Logger: logger,
+		},
+		issues: issuesClient,
+		hub:    publish.NewHub(16, 8, logger),
+	}
+	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
+		t.Fatalf("bootstrap sync orchestrator: %v", err)
+	}
+
+	events, cancel := d.hub.Subscribe(protocol.DefaultProjectID, 0)
+	defer cancel()
+
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "task.create-default-req",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: "   "},
+		Command:         "task.create",
+		SentAt:          time.Now().UTC(),
+		Body: mustJSONBody(t, struct {
+			Title       string          `json:"title"`
+			Description string          `json:"description"`
+			Type        domain.TaskType `json:"type"`
+			Priority    domain.Priority `json:"priority"`
+		}{
+			Title:       "Default project",
+			Description: "blank project should route to default",
+			Type:        domain.TypeTask,
+			Priority:    domain.P1,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("task.create command error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.create response = %+v", resp.Error)
+	}
+	if got, want := resp.Meta.ProjectID, protocol.DefaultProjectID; got != want {
+		t.Fatalf("task.create response meta project_id = %q, want %q", got, want)
+	}
+	if got, want := resp.Revision, uint64(1); got != want {
+		t.Fatalf("task.create revision = %d, want %d", got, want)
+	}
+	evt := waitForDaemonEvent(t, events)
+	if evt.ProjectID != protocol.DefaultProjectID {
+		t.Fatalf("event project_id = %q, want default", evt.ProjectID)
+	}
+	if evt.Meta.ProjectID != protocol.DefaultProjectID {
+		t.Fatalf("event meta project_id = %q, want default", evt.Meta.ProjectID)
+	}
+}
+
+func waitForDaemonEvent(t *testing.T, ch <-chan protocol.EventEnvelope) protocol.EventEnvelope {
+	t.Helper()
+	select {
+	case evt := <-ch:
+		return evt
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for daemon event")
+		return protocol.EventEnvelope{}
+	}
+}
+
+func mustJSONBody(t *testing.T, v any) []byte {
+	t.Helper()
+	payload, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return payload
 }

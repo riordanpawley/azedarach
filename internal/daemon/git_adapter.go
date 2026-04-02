@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -24,12 +25,13 @@ var (
 const runtimeSignalProjectionTTL = 15 * time.Second
 
 type gitServiceAdapter struct {
-	client          *git.Client
-	projectionStore *daemonstate.ProjectionStore
-	logger          *slog.Logger
-	pollInterval    time.Duration
-	onStatusUpdate  func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
-	baseBranch      string
+	client                  *git.Client
+	projectionStore         *daemonstate.ProjectionStore
+	runtimeProjectionWriter runtimeProjectionWriter
+	logger                  *slog.Logger
+	pollInterval            time.Duration
+	onStatusUpdate          func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
+	baseBranch              string
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -232,6 +234,11 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 		}
 		return
 	}
+	if a.runtimeProjectionWriter != nil {
+		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, "", worktree, status, publishOnChange, forcePublish)
+		a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
+		return
+	}
 	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
 	a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
 	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
@@ -353,11 +360,7 @@ func gitStatusFiles(status git.GitStatus) []string {
 }
 
 func normalizeProjectID(projectID string) string {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		return "default"
-	}
-	return projectID
+	return protocol.NormalizeProjectID(projectID)
 }
 
 func (a *gitServiceAdapter) computeRuntimeSignal(ctx context.Context, issueID, worktree, baseBranch string, compareRemote bool, remote string) (daemonhandlers.GitRuntimeSignalsResult, error) {
