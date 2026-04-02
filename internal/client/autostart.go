@@ -37,6 +37,8 @@ type AutostartOrchestrator struct {
 	starter    Starter
 	replacer   Replacer
 	group      singleflight.Group
+	preStartRetries int
+	preStartBackoff func(attempt int) time.Duration
 	maxRetries int
 	backoffFn  func(attempt int) time.Duration
 	sleepFn    func(time.Duration)
@@ -58,6 +60,9 @@ func NewAutostartOrchestrator(handshaker Handshaker, starter Starter) *Autostart
 		handshaker: handshaker,
 		starter:    starter,
 		replacer:   replacer,
+		// Avoid unnecessary daemon spawn when handshake has a short transient blip.
+		preStartRetries: 3,
+		preStartBackoff: func(_ int) time.Duration { return 100 * time.Millisecond },
 		// Daemon boot can take >300ms on cold starts; allow a wider attach window.
 		maxRetries: 20,
 		backoffFn: func(attempt int) time.Duration {
@@ -74,6 +79,18 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 	ack, err := o.handshaker.Handshake(ctx, hello)
 	if err == nil && ack.Accepted {
 		return ack, nil
+	}
+	if err != nil {
+		for attempt := 0; attempt < o.preStartRetries; attempt++ {
+			if ctx.Err() != nil {
+				break
+			}
+			o.sleepFn(o.preStartBackoff(attempt))
+			ack, err = o.handshaker.Handshake(ctx, hello)
+			if err == nil && ack.Accepted {
+				return ack, nil
+			}
+		}
 	}
 	if err == nil && ack.ErrorCode.IsCompatibilityFailure() && !ack.RetryAfterRestart {
 		return ack, ErrUpgradeRequired
