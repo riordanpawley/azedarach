@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,17 +32,17 @@ func TestConflictDialog_Size(t *testing.T) {
 		{
 			name:           "no files",
 			files:          []string{},
-			expectedHeight: 12,
+			expectedHeight: 14,
 		},
 		{
 			name:           "few files",
 			files:          []string{"file1.go", "file2.go", "file3.go"},
-			expectedHeight: 15,
+			expectedHeight: 17,
 		},
 		{
-			name:           "many files capped at 10",
+			name:           "many files capped at 12",
 			files:          make([]string, 20),
-			expectedHeight: 22,
+			expectedHeight: 26,
 		},
 	}
 
@@ -50,7 +51,7 @@ func TestConflictDialog_Size(t *testing.T) {
 			dialog := NewConflictDialog(tt.files)
 			width, height := dialog.Size()
 
-			assert.Equal(t, 84, width)
+			assert.Equal(t, 100, width)
 			assert.Equal(t, tt.expectedHeight, height)
 		})
 	}
@@ -176,4 +177,13 @@ func TestConflictDialog_Init(t *testing.T) {
 	dialog := NewConflictDialog([]string{})
 	cmd := dialog.Init()
 	assert.Nil(t, cmd)
+}
+
+func TestConflictDialog_StatusBindings(t *testing.T) {
+	dialog := NewConflictDialog([]string{"file1.go"})
+	bindings := dialog.StatusBindings()
+
+	assert.Contains(t, bindings, keybinds.Binding{Key: "c", Description: "ai resolve"})
+	assert.Contains(t, bindings, keybinds.Binding{Key: "a", Description: "abort"})
+	assert.Contains(t, bindings, keybinds.Binding{Key: "Esc/q", Description: "close"})
 }
