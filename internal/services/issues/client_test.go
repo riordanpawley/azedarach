@@ -131,6 +131,32 @@ func TestClient_CreateWithParentDependency(t *testing.T) {
 	assert.Equal(t, parentID, *tasks[0].ParentID)
 }
 
+func TestClient_CreateWithOpenChildReopensClosedParent(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent issue",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
+
+	_, err = client.Create(ctx, CreateTaskParams{
+		Title:    "Open child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+		ParentID: &parentID,
+	})
+	require.NoError(t, err)
+
+	parentTasks, err := client.Search(ctx, parentID)
+	require.NoError(t, err)
+	require.Len(t, parentTasks, 1)
+	assert.Equal(t, domain.StatusInProgress, parentTasks[0].Status)
+}
+
 func TestClient_UpdatePreventsClosingParentWithOpenChildren(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
@@ -384,6 +410,61 @@ func TestClient_AddDependencyPreventsDuplicateEdges(t *testing.T) {
 	require.Len(t, blockedTask.Dependencies, 1)
 	assert.Equal(t, sourceID, blockedTask.Dependencies[0].ID)
 	assert.Equal(t, domain.DependencyBlocks, blockedTask.Dependencies[0].Type)
+}
+
+func TestClient_AddParentChildDependencyReopensClosedParentForOpenChild(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
+
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+
+	parentTasks, err := client.Search(ctx, parentID)
+	require.NoError(t, err)
+	require.Len(t, parentTasks, 1)
+	assert.Equal(t, domain.StatusInProgress, parentTasks[0].Status)
+}
+
+func TestClient_AddParentChildDependencyKeepsClosedParentWhenChildClosed(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	parentID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Parent",
+		Type:     domain.TypeEpic,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusDone))
+
+	childID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Child",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.Update(ctx, childID, domain.StatusDone))
+
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, "parent-child"))
+
+	parentTasks, err := client.Search(ctx, parentID)
+	require.NoError(t, err)
+	require.Len(t, parentTasks, 1)
+	assert.Equal(t, domain.StatusDone, parentTasks[0].Status)
 }
 
 func TestClient_ListHydratesParentChildAfterTaskSliceGrowth(t *testing.T) {
