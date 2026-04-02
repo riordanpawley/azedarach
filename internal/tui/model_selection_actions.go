@@ -59,6 +59,11 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 
 // handleSelection handles overlay selection messages
 func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
+	selectionTaskID := ""
+	if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+		selectionTaskID = strings.TrimSpace(workspace.TaskID())
+	}
+
 	// Handle special overlay-specific messages first (before popping overlay)
 	switch msg.Key {
 	case "abort", "claude", "manual":
@@ -223,6 +228,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	task, session := m.getCurrentTaskAndSession()
+	if selectionTaskID != "" {
+		if selectedTask, selectedSession, ok := m.taskAndSessionByID(selectionTaskID); ok {
+			task, session = selectedTask, selectedSession
+		}
+	}
 	if task == nil {
 		return m, nil
 	}

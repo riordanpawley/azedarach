@@ -2112,6 +2112,25 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	return nil, nil
 }
 
+func (m Model) taskAndSessionByID(issueID string) (*domain.Task, *domain.Session, bool) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, nil, false
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID != issueID {
+			continue
+		}
+		task := m.tasks[i]
+		session := task.Session
+		if session == nil {
+			session = m.sessionForIssue(issueID)
+		}
+		return &task, session, true
+	}
+	return nil, nil, false
+}
+
 // handleBulkAction handles bulk action menu selections
 func isTaskWorkspaceOverlay(current overlay.Overlay) bool {
 	if current == nil {
