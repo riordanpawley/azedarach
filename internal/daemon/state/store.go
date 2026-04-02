@@ -169,6 +169,28 @@ func (s *Store) SessionByIssueID(projectID, issueID string) (Session, bool) {
 	return newest, found
 }
 
+// ProjectIDs returns the known project IDs currently present in the store.
+func (s *Store) ProjectIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[string]struct{}, len(s.projects))
+	ids := make([]string, 0, len(s.projects))
+	for projectID := range s.projects {
+		normalized := strings.TrimSpace(projectID)
+		if normalized == "" {
+			normalized = "default"
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		ids = append(ids, normalized)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
 func (s *Store) ensureProjectLocked(projectID string) *projectState {
 	ps, ok := s.projects[projectID]
 	if !ok {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -288,6 +290,45 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 	}
 	if len(projectIDs) != 1 || projectIDs[0] != wantProjectID {
 		t.Fatalf("reconcile project ids = %v, want [%s]", projectIDs, wantProjectID)
+	}
+}
+
+func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
+	repoDir := t.TempDir()
+	repoProjectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession("proj-session", "sess-1", "az-1", daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession: %v", err)
+	}
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = projectionStore.Close() })
+	if err := projectionStore.UpsertWorktree(context.Background(), daemonstate.WorktreeProjection{
+		ProjectID: "proj-projection",
+		IssueID:   "az-2",
+		Path:      "/tmp/repo-az-2",
+		Branch:    "riordan/az-2/task",
+		UpdatedAt: time.Date(2026, time.April, 2, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertWorktree: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:             Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore:    sessionStore,
+		projectionStore: projectionStore,
+		revision:        map[string]uint64{"proj-revision": 3},
+	}
+
+	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
+	if err != nil {
+		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
+	}
+	want := []string{repoProjectID, "proj-projection", "proj-revision", "proj-session"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("project ids = %v, want %v", got, want)
 	}
 }
 

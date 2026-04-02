@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -134,7 +135,8 @@ func (d *Daemon) runStartupRuntimeReconcile(ctx context.Context) (protocol.Runti
 	}
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return d.ensureRuntimeReconciler().Reconcile(reconcileCtx, d.runtimeReconcileDaemonProjectID())
+	results, err := d.runRuntimeReconcileSweep(reconcileCtx)
+	return summarizeRuntimeReconcileSweep(results), err
 }
 
 func (d *Daemon) startRuntimeReconcileWorker(ctx context.Context) {
@@ -170,11 +172,17 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	result, err := d.ensureRuntimeReconciler().Reconcile(reconcileCtx, d.runtimeReconcileDaemonProjectID())
+	results, err := d.runRuntimeReconcileSweep(reconcileCtx)
+	result := summarizeRuntimeReconcileSweep(results)
+	projectCount := len(results)
+	if projectCount == 0 {
+		projectCount = 1
+	}
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("daemon runtime reconcile cycle failed",
 				"project_id", result.ProjectID,
+				"project_count", projectCount,
 				"error", err,
 			)
 		}
@@ -183,6 +191,7 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("daemon runtime reconcile cycle completed",
 			"project_id", result.ProjectID,
+			"project_count", projectCount,
 			"worktrees_refreshed", result.WorktreesRefreshed,
 			"recreated_tmux_sessions", result.RecreatedTmuxSessions,
 			"aligned_daemon_sessions", result.AlignedDaemonSessions,
@@ -190,20 +199,93 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) runtimeReconcileDaemonProjectID() string {
+func (d *Daemon) runRuntimeReconcileSweep(ctx context.Context) ([]protocol.RuntimeReconcileResponseBody, error) {
+	projectIDs, err := d.runtimeReconcileKnownProjectIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]protocol.RuntimeReconcileResponseBody, 0, len(projectIDs))
+	var errs []error
+	for _, projectID := range projectIDs {
+		result, reconcileErr := d.ensureRuntimeReconciler().Reconcile(ctx, projectID)
+		results = append(results, result)
+		if reconcileErr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", projectID, reconcileErr))
+		}
+	}
+	return results, errors.Join(errs...)
+}
+
+func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string, error) {
+	seen := map[string]struct{}{}
+	projectIDs := make([]string, 0, 8)
+	add := func(projectID string) {
+		normalized := protocol.NormalizeProjectID(projectID)
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+		seen[normalized] = struct{}{}
+		projectIDs = append(projectIDs, normalized)
+	}
+
 	if d == nil {
-		return protocol.DefaultProjectID
+		return []string{protocol.DefaultProjectID}, nil
 	}
 	repoDir := strings.TrimSpace(d.cfg.RepoDir)
-	if repoDir == "" {
-		return protocol.DefaultProjectID
-	}
-	projectID, err := appconfig.ProjectIDForRoot(repoDir)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("resolve runtime reconcile project id failed", "repo_dir", repoDir, "error", err)
+	if repoDir != "" {
+		projectID, err := appconfig.ProjectIDForRoot(repoDir)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("resolve runtime reconcile seed project id failed", "repo_dir", repoDir, "error", err)
+			}
+		} else {
+			add(projectID)
 		}
-		return protocol.DefaultProjectID
 	}
-	return protocol.NormalizeProjectID(projectID)
+
+	if d.sessionStore != nil {
+		for _, projectID := range d.sessionStore.ProjectIDs() {
+			add(projectID)
+		}
+	}
+
+	if d.projectionStore != nil {
+		known, err := d.projectionStore.ListProjectIDs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list projection project ids: %w", err)
+		}
+		for _, projectID := range known {
+			add(projectID)
+		}
+	}
+
+	d.revMu.Lock()
+	for projectID := range d.revision {
+		add(projectID)
+	}
+	d.revMu.Unlock()
+
+	if len(projectIDs) == 0 {
+		add(protocol.DefaultProjectID)
+	}
+	slices.Sort(projectIDs)
+	return projectIDs, nil
+}
+
+func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseBody) protocol.RuntimeReconcileResponseBody {
+	if len(results) == 0 {
+		return protocol.RuntimeReconcileResponseBody{ProjectID: protocol.DefaultProjectID}
+	}
+	summary := protocol.RuntimeReconcileResponseBody{
+		ProjectID: results[0].ProjectID,
+	}
+	if len(results) > 1 {
+		summary.ProjectID = "multi"
+	}
+	for _, result := range results {
+		summary.WorktreesRefreshed += result.WorktreesRefreshed
+		summary.RecreatedTmuxSessions += result.RecreatedTmuxSessions
+		summary.AlignedDaemonSessions += result.AlignedDaemonSessions
+	}
+	return summary
 }

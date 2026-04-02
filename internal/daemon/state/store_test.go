@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -156,5 +157,24 @@ func TestStoreUpsertSession_ResetsStartTimestampAfterRestart(t *testing.T) {
 	}
 	if !session.UpdatedAt.Equal(restartAt) {
 		t.Fatalf("updated_at = %v, want restart time %v", session.UpdatedAt, restartAt)
+	}
+}
+
+func TestStoreProjectIDs(t *testing.T) {
+	s := NewStore()
+	if _, err := s.UpsertSession("proj-b", "s1", "az-1", SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession proj-b: %v", err)
+	}
+	if _, err := s.UpsertSession(" proj-a ", "s2", "az-2", SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession proj-a: %v", err)
+	}
+	if _, err := s.UpsertSession("", "s3", "az-3", SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession default: %v", err)
+	}
+
+	got := s.ProjectIDs()
+	want := []string{"default", "proj-a", "proj-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ProjectIDs() = %v, want %v", got, want)
 	}
 }

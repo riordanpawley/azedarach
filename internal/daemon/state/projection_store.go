@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -269,6 +270,43 @@ func (s *ProjectionStore) ListSessions(ctx context.Context, projectID string) ([
 		return nil, fmt.Errorf("iterate session projections: %w", err)
 	}
 	return sessions, nil
+}
+
+// ListProjectIDs returns all distinct project IDs referenced by projection rows.
+func (s *ProjectionStore) ListProjectIDs(ctx context.Context) ([]string, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT project_id FROM `+projectionSessionTable+`
+		UNION
+		SELECT project_id FROM `+projectionWorktreeTable+`
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list projection project ids: %w", err)
+	}
+	defer rows.Close()
+
+	seen := map[string]struct{}{}
+	projectIDs := make([]string, 0)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("scan projection project id: %w", err)
+		}
+		projectID := normalizedProjectID(raw)
+		if _, exists := seen[projectID]; exists {
+			continue
+		}
+		seen[projectID] = struct{}{}
+		projectIDs = append(projectIDs, projectID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate projection project ids: %w", err)
+	}
+	slices.Sort(projectIDs)
+	return projectIDs, nil
 }
 
 func (s *ProjectionStore) UpsertWorktree(ctx context.Context, projection WorktreeProjection) error {

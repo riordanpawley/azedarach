@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -248,5 +249,40 @@ func TestProjectionStoreGitStatusRoundTrip(t *testing.T) {
 	}
 	if len(projection.GitStatusRaw) == 0 {
 		t.Fatal("status payload should not be empty")
+	}
+}
+
+func TestProjectionStoreListProjectIDs(t *testing.T) {
+	store := NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	ctx := context.Background()
+	if err := store.UpsertSession(ctx, "proj-b", Session{
+		ID:        "sess-b",
+		IssueID:   "az-b",
+		State:     SessionStateAttached,
+		UpdatedAt: time.Date(2026, time.April, 2, 8, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertSession proj-b: %v", err)
+	}
+	if err := store.UpsertWorktree(ctx, WorktreeProjection{
+		ProjectID: " proj-a ",
+		IssueID:   "az-a",
+		Path:      "/tmp/repo-az-a",
+		Branch:    "riordan/az-a/task",
+		UpdatedAt: time.Date(2026, time.April, 2, 8, 1, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertWorktree proj-a: %v", err)
+	}
+
+	got, err := store.ListProjectIDs(ctx)
+	if err != nil {
+		t.Fatalf("ListProjectIDs: %v", err)
+	}
+	want := []string{"proj-a", "proj-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListProjectIDs() = %v, want %v", got, want)
 	}
 }
