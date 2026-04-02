@@ -3202,6 +3202,30 @@ func TestDaemonStreamEventMsg_IgnoresDifferentProject(t *testing.T) {
 	}
 }
 
+func TestDaemonStreamEventMsg_GitStatusEventForcesRuntimeSignalRefresh(t *testing.T) {
+	m := newTestModel()
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		m.tasks[0].ID: {HasWorktree: true},
+	}
+	m.lastRuntimeRefresh = time.Now()
+
+	if m.shouldRefreshRuntimeSignals() {
+		t.Fatal("expected runtime signal refresh TTL gate to be closed before event")
+	}
+
+	next, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			Revision: 11,
+			Event:    protocol.EventGitStatusUpdated,
+		},
+	})
+	updated := next.(Model)
+
+	if !updated.runtimeSignalsBusy {
+		t.Fatal("expected git status event to force runtime signal refresh")
+	}
+}
+
 func TestRuntimeSignalsForBoardIncludesPendingMutationState(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
