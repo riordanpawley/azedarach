@@ -3294,8 +3294,8 @@ func TestRuntimeSignalsLoadedSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 		t.Fatalf("expected TaskWorkspaceOverlay on stack, got %T", current)
 	}
 	view := workspace.View()
-	if !strings.Contains(view, "Git:") {
-		t.Fatalf("expected git row in detail panel after runtime refresh, got: %q", view)
+	if !strings.Contains(view, "Worktree:") {
+		t.Fatalf("expected worktree summary row in detail panel after runtime refresh, got: %q", view)
 	}
 	if !strings.Contains(view, "dirty (+3/-1)") {
 		t.Fatalf("expected refreshed git status in detail panel, got: %q", view)

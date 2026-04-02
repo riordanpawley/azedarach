@@ -98,24 +98,29 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	panel := NewDetailPanel(task, session)
 	view := panel.View()
 
-	// Check worktree/runtime info is present
-	assert.Contains(t, view, "Worktree")
+	// Check runtime sections are present
+	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "Git/Worktree")
+	assert.Contains(t, view, "Session:")
+	assert.Contains(t, view, "Worktree:")
 	assert.Contains(t, view, "busy")
-	assert.Contains(t, view, "Created:")
-	assert.Contains(t, view, "Git:")
+	assert.Contains(t, view, "Age")
 	assert.Contains(t, view, "dirty")
 	assert.Contains(t, view, "+9/-2")
 	assert.Contains(t, view, "up 1, down 3")
-	assert.Contains(t, view, "/path/to/worktree")
+	assert.Contains(t, view, "|")
+	assert.Contains(t, view, "Age")
+	assert.NotContains(t, view, "available")
+	assert.NotContains(t, view, "Attached:")
 	assert.Contains(t, view, ":3000")
-	assert.Contains(t, view, "npm run dev")
+	assert.Contains(t, view, "Dev :3000")
 }
 
 func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
 	task := domain.Task{
-		ID:         "az-789",
-		Title:      "Task with unavailable git telemetry",
-		Status:     domain.StatusInProgress,
+		ID:          "az-789",
+		Title:       "Task with unavailable git telemetry",
+		Status:      domain.StatusInProgress,
 		HasWorktree: true,
 	}
 	session := &domain.Session{
@@ -127,8 +132,25 @@ func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *test
 	panel := NewDetailPanel(task, session)
 	view := panel.View()
 
-	assert.Contains(t, view, "Git:")
+	assert.Contains(t, view, "Worktree:")
 	assert.Contains(t, view, "unknown")
+}
+
+func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
+	task := domain.Task{
+		ID:          "az-791",
+		Title:       "Task with git data but no session",
+		Status:      domain.StatusInProgress,
+		HasWorktree: true,
+	}
+
+	panel := NewDetailPanel(task, nil)
+	view := panel.View()
+
+	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "none")
+	assert.Contains(t, view, "Git/Worktree")
+	assert.Contains(t, view, "Age N/A")
 }
 
 func TestDetailPanelViewWithParent(t *testing.T) {
@@ -278,6 +300,31 @@ func TestDetailPanelScrollAccountsForWrappedLines(t *testing.T) {
 	_ = panel.View()
 
 	assert.Greater(t, panel.maxScroll(), 0, "expected wrapped description to become scrollable")
+}
+
+func TestDetailPanelCompactModeScrollsEntirePanel(t *testing.T) {
+	task := domain.Task{
+		ID:          "az-compact",
+		Title:       "Unique Compact Header",
+		Status:      domain.StatusInProgress,
+		Description: strings.Repeat("line\n", 120),
+		CreatedAt:   time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+		UpdatedAt:   time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC),
+	}
+
+	panel := NewDetailPanel(task, nil)
+	panel.viewHeight = 8
+	panel.wrapWidth = 24
+
+	initialView := panel.View()
+	assert.Contains(t, initialView, "Unique Compact Header")
+	assert.Greater(t, panel.maxScroll(), 0)
+
+	m, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	panel = m.(*DetailPanel)
+	scrolledView := panel.View()
+
+	assert.NotContains(t, scrolledView, "Unique Compact Header")
 }
 
 func TestWrapDescriptionLines_HardWrapFallbackForLongToken(t *testing.T) {

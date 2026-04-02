@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 // DetailPanel displays full task details with scrollable description
@@ -116,6 +117,13 @@ func (d *DetailPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the detail panel
 func (d *DetailPanel) View() string {
+	if d.useCompactScrollMode() {
+		return d.viewCompact()
+	}
+	return d.viewStandard()
+}
+
+func (d *DetailPanel) viewStandard() string {
 	var b strings.Builder
 
 	// Section style for headers
@@ -190,52 +198,23 @@ func (d *DetailPanel) View() string {
 	b.WriteString(valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
 	b.WriteString("\n")
 
-	// Worktree/session runtime info when available.
-	if d.session != nil || d.hasGitStatusData() {
+	// Runtime info
+	if d.showRuntimeSections() {
 		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Worktree"))
+		b.WriteString(headerStyle.Render("Session"))
+		b.WriteString("\n")
+		b.WriteString(labelStyle.Render("Session:"))
+		b.WriteString("  ")
+		b.WriteString(d.formatSessionSummary())
 		b.WriteString("\n")
 
-		if d.session != nil {
-			b.WriteString(labelStyle.Render("State:"))
-			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(fmt.Sprintf("%s %s", d.session.State.Icon(), string(d.session.State))))
-			b.WriteString("\n")
-		}
-
-		if d.hasGitStatusData() {
-			b.WriteString(labelStyle.Render("Git:"))
-			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.formatGitStatus()))
-			b.WriteString("\n")
-		}
-
-		if d.session != nil && d.session.StartedAt != nil {
-			b.WriteString(labelStyle.Render("Created:"))
-			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.formatTime(*d.session.StartedAt)))
-			b.WriteString("\n")
-
-			age := time.Since(*d.session.StartedAt)
-			b.WriteString(labelStyle.Render("Age:"))
-			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.formatDuration(age)))
-			b.WriteString("\n")
-		}
-
-		if d.session != nil && d.session.Worktree != "" {
-			b.WriteString(labelStyle.Render("Path:"))
-			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(d.session.Worktree))
-			b.WriteString("\n")
-		}
-
-		if d.session != nil && d.session.DevServer != nil && d.session.DevServer.Running {
-			b.WriteString(labelStyle.Render("Dev Server:"))
-			b.WriteString("  ")
-			b.WriteString(valueStyle.Render(fmt.Sprintf(":%d (%s)", d.session.DevServer.Port, d.session.DevServer.Command)))
-			b.WriteString("\n")
-		}
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render("Git/Worktree"))
+		b.WriteString("\n")
+		b.WriteString(labelStyle.Render("Worktree:"))
+		b.WriteString("  ")
+		b.WriteString(valueStyle.Render(d.formatGitWorktreeSummary()))
+		b.WriteString("\n")
 	}
 
 	// Description section with scrolling
@@ -270,6 +249,95 @@ func (d *DetailPanel) View() string {
 			b.WriteString("\n")
 			b.WriteString(scrollInfo)
 		}
+	}
+
+	return b.String()
+}
+
+func (d *DetailPanel) viewCompact() string {
+	var lines []string
+	addLine := func(line string) {
+		lines = append(lines, line)
+	}
+
+	headerStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#89b4fa")).
+		Bold(true)
+	labelStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#94e2d5")).
+		Width(12).
+		Align(lipgloss.Right)
+	valueStyle := d.styles.MenuItem
+
+	addLine(headerStyle.Render(fmt.Sprintf("[%s] %s", d.task.ID, d.task.Title)))
+	addLine("")
+	addLine(labelStyle.Render("Status:") + "  " + valueStyle.Render(d.formatStatus(d.task.Status)))
+	if d.mutation != nil {
+		addLine(labelStyle.Render("Issue Ops:") + "  " + valueStyle.Render(d.formatMutationProgress()))
+	}
+	addLine(labelStyle.Render("Priority:") + "  " + valueStyle.Render(d.task.Priority.String()))
+	addLine(labelStyle.Render("Type:") + "  " + valueStyle.Render(string(d.task.Type)))
+	if d.task.ParentID != nil {
+		addLine(labelStyle.Render("Parent:") + "  " + valueStyle.Render(*d.task.ParentID))
+	}
+	if total, done := d.childProgress(); total > 0 {
+		addLine(labelStyle.Render("Children:") + "  " + valueStyle.Render(fmt.Sprintf("%d total (%d done)", total, done)))
+	}
+	if deps := d.renderDependencies(); deps != "" {
+		addLine("")
+		addLine(headerStyle.Render("Dependencies"))
+		for _, line := range strings.Split(deps, "\n") {
+			addLine(line)
+		}
+	}
+	addLine("")
+	addLine(labelStyle.Render("Created:") + "  " + valueStyle.Render(d.formatTime(d.task.CreatedAt)))
+	addLine(labelStyle.Render("Updated:") + "  " + valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
+
+	if d.showRuntimeSections() {
+		addLine("")
+		addLine(headerStyle.Render("Session"))
+		addLine(labelStyle.Render("Session:") + "  " + d.formatSessionSummary())
+
+		addLine("")
+		addLine(headerStyle.Render("Git/Worktree"))
+		addLine(labelStyle.Render("Worktree:") + "  " + valueStyle.Render(d.formatGitWorktreeSummary()))
+	}
+
+	if d.task.Description != "" {
+		addLine("")
+		addLine(headerStyle.Render("Description"))
+		wrapWidth := d.wrapWidth
+		if wrapWidth < 10 {
+			wrapWidth = 10
+		}
+		descLines := wrapDescriptionLines(d.task.Description, wrapWidth)
+		for _, line := range descLines {
+			addLine(valueStyle.Render(line))
+		}
+	}
+
+	visible := max(1, d.viewHeight)
+	d.descViewHeight = visible
+	d.contentHeight = len(lines)
+	if d.scrollY > d.maxScroll() {
+		d.scrollY = d.maxScroll()
+	}
+	start := d.scrollY
+	end := min(len(lines), start+visible)
+
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		b.WriteString(lines[i])
+		if i < end-1 {
+			b.WriteString("\n")
+		}
+	}
+	if d.maxScroll() > 0 {
+		b.WriteString("\n")
+		b.WriteString(d.styles.Footer.Render(
+			fmt.Sprintf("[j/k or ctrl+u/d to scroll, g/G to jump] (line %d/%d)", d.scrollY+1, d.contentHeight),
+		))
 	}
 
 	return b.String()
@@ -457,6 +525,66 @@ func (d *DetailPanel) halfPageStep() int {
 		return 1
 	}
 	return step
+}
+
+func (d *DetailPanel) useCompactScrollMode() bool {
+	return d.viewHeight <= 12
+}
+
+func (d *DetailPanel) showRuntimeSections() bool {
+	return d.session != nil || d.hasGitStatusData()
+}
+
+func (d *DetailPanel) formatSessionState() string {
+	if d.session == nil {
+		return d.styles.MenuItem.Render("none")
+	}
+	stateLabel := fmt.Sprintf("%s %s", d.session.State.Icon(), string(d.session.State))
+	return d.sessionStateStyle(d.session.State).Render(stateLabel)
+}
+
+func (d *DetailPanel) sessionStateStyle(state domain.SessionState) lipgloss.Style {
+	switch state {
+	case domain.SessionBusy:
+		return lipgloss.NewStyle().Foreground(uistyles.Blue).Bold(true)
+	case domain.SessionWaiting:
+		return lipgloss.NewStyle().Foreground(uistyles.Yellow).Bold(true)
+	case domain.SessionDone:
+		return lipgloss.NewStyle().Foreground(uistyles.Green).Bold(true)
+	case domain.SessionError:
+		return lipgloss.NewStyle().Foreground(uistyles.Red).Bold(true)
+	case domain.SessionPaused:
+		return lipgloss.NewStyle().Foreground(uistyles.Overlay0).Bold(true)
+	default:
+		return lipgloss.NewStyle().Foreground(uistyles.Subtext0).Bold(true)
+	}
+}
+
+func (d *DetailPanel) formatWorktreeSummary() string {
+	if d.session != nil && d.session.StartedAt != nil {
+		return "Age " + d.formatDuration(time.Since(*d.session.StartedAt))
+	}
+	return "Age N/A"
+}
+
+func (d *DetailPanel) formatSessionSummary() string {
+	if d.session == nil {
+		return d.styles.MenuItem.Render("none")
+	}
+	parts := []string{d.formatSessionState()}
+	if d.session.StartedAt != nil {
+		parts = append(parts, "Age "+d.formatDuration(time.Since(*d.session.StartedAt)))
+	} else {
+		parts = append(parts, "Age N/A")
+	}
+	if d.session.DevServer != nil && d.session.DevServer.Running {
+		parts = append(parts, fmt.Sprintf("Dev :%d", d.session.DevServer.Port))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func (d *DetailPanel) formatGitWorktreeSummary() string {
+	return d.formatGitStatus() + " | " + d.formatWorktreeSummary()
 }
 
 func (d *DetailPanel) hasGitStatusData() bool {
