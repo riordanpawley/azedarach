@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -133,6 +134,25 @@ func (s *Store) Session(projectID, sessionID string) (Session, error) {
 		return Session{}, ErrSessionNotFound
 	}
 	return session, nil
+}
+
+// SessionByIssueID returns the most recent session whose issue ID matches the given issue.
+func (s *Store) SessionByIssueID(projectID, issueID string) (Session, bool) {
+	projectID = strings.TrimSpace(projectID)
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return Session{}, false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ps := s.ensureProjectLocked(projectID)
+	for _, session := range ps.sessions {
+		if strings.TrimSpace(session.IssueID) == issueID {
+			return session, true
+		}
+	}
+	return Session{}, false
 }
 
 func (s *Store) ensureProjectLocked(projectID string) *projectState {

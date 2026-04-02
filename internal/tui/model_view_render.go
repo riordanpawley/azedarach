@@ -51,8 +51,6 @@ func (m Model) View() string {
 	sb.SetSortSummary(m.sortSummary())
 	if m.boardRefreshing {
 		sb.SetModeSuffix(m.spinner.View())
-	} else if m.runtimeSignalsBusy {
-		sb.SetLoadingIndicator("Loading runtime status...")
 	}
 	if current := m.overlayStack.Current(); current != nil {
 		if hintOverlay, ok := current.(interface {
@@ -563,25 +561,39 @@ func (m Model) renderBoardView() string {
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 	activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
-	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(activeDescendantSessionByTask) == 0 {
-		return m.runtimeSignalsByTask
+	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(activeDescendantSessionByTask) == 0 && len(m.tasks) == 0 {
+		return nil
 	}
 
-	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
-	for taskID, signals := range m.runtimeSignalsByTask {
-		signalsByTask[taskID] = signals
-	}
-	for _, task := range m.tasks {
-		pending, ok := m.pendingStatuses[taskIDKey(task.ID)]
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
+	for i := range m.tasks {
+		task := m.tasks[i]
+		signals := board.RuntimeSignals{
+			HasTmuxSession:        task.Session != nil || task.HasTmuxSession,
+			HasWorktree:           task.HasWorktree,
+			GitAheadCount:         task.GitAheadCount,
+			GitBehindCount:        task.GitBehindCount,
+			HasUncommittedChanges: task.HasUncommittedChanges,
+			GitAdditions:          task.GitAdditions,
+			GitDeletions:          task.GitDeletions,
+		}
+		if runtime, ok := m.runtimeSignalsByTask[task.ID]; ok {
+			signals.PendingOperationState = runtime.PendingOperationState
+			signals.PendingOperationID = runtime.PendingOperationID
+			signals.PendingOperationPercent = runtime.PendingOperationPercent
+		}
+		taskID := taskIDKey(task.ID)
+		pending, ok := m.pendingStatuses[taskID]
 		if !ok {
+			signalsByTask[task.ID] = signals
 			continue
 		}
-		signals := signalsByTask[task.ID]
 		signals.PendingOperationState = string(pending.state)
 		signals.PendingOperationID = pending.operationID
 		signalsByTask[task.ID] = signals
 	}
-	for _, task := range m.tasks {
+	for i := range m.tasks {
+		task := m.tasks[i]
 		pending, ok := m.pendingOpsByTask[taskIDKey(task.ID)]
 		if !ok {
 			continue

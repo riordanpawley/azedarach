@@ -224,7 +224,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
 		}
 	}
-	d.persistWorktreeProjection(cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
+	d.persistWorktreeProjection(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -552,7 +552,7 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 		return err
 	}
 	d.persistSessionProjection(projectID, event.Session)
-	d.publishSessionProjectionEvent(projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
+	d.publishSessionProjectionEvent(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
 	return nil
 }
 

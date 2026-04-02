@@ -144,8 +144,8 @@ func New(cfg Config) *Daemon {
 		revision:                     map[string]uint64{},
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
-	gitService.onStatusUpdate = func(projectID, issueID, worktree string) {
-		d.publishGitStatusProjectionEvent(projectID, issueID, worktree)
+	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
+		d.publishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      cfg.RepoDir,
@@ -163,8 +163,8 @@ func New(cfg Config) *Daemon {
 			manager:         d.worktree,
 			projectionStore: d.projectionStore,
 			logger:          cfg.Logger,
-			onProjectionUpdate: func(projectID, issueID, path string) {
-				d.publishWorktreeProjectionEvent(projectID, issueID, path)
+			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
+				d.publishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 			},
 		},
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
@@ -498,7 +498,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 			return err
 		}
 		d.persistSessionProjection(projectID, session)
-		d.publishSessionProjectionEvent(projectID, req.Meta, session)
+		d.publishSessionProjectionEvent(ctx, projectID, req.Meta, session)
 		return nil
 	}
 	if resp.Error != nil {
@@ -570,11 +570,11 @@ func (d *Daemon) triggerSessionProjectionRefresh(projectID string, refreshFn fun
 	}()
 }
 
-func (d *Daemon) persistWorktreeProjection(projectID, issueID, path, branch string) {
+func (d *Daemon) persistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) {
 	if d.projectionStore == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := d.projectionStore.UpsertWorktree(ctx, daemonstate.WorktreeProjection{
 		ProjectID: strings.TrimSpace(projectID),
@@ -593,7 +593,7 @@ func (d *Daemon) persistWorktreeProjection(projectID, issueID, path, branch stri
 		)
 		return
 	}
-	d.publishWorktreeProjectionEvent(projectID, issueID, path)
+	d.publishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 }
 
 func (d *Daemon) successResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
@@ -657,7 +657,7 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 	})
 }
 
-func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
+func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		projectID = "default"
@@ -666,6 +666,8 @@ func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.M
 	if d.hub == nil {
 		return rev
 	}
+	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
+	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: projectID,
 		Revision:  rev,
@@ -675,6 +677,7 @@ func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.M
 			State:     protocol.SessionLifecycleState(session.State),
 			UpdatedAt: session.UpdatedAt,
 		},
+		Runtime: &runtimeBody,
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {
@@ -698,7 +701,7 @@ func (d *Daemon) publishSessionProjectionEvent(projectID string, meta protocol.M
 	return rev
 }
 
-func (d *Daemon) publishWorktreeProjectionEvent(projectID, issueID, worktree string) uint64 {
+func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		projectID = "default"
@@ -707,11 +710,14 @@ func (d *Daemon) publishWorktreeProjectionEvent(projectID, issueID, worktree str
 	if d.hub == nil {
 		return rev
 	}
+	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, nil)
+	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: projectID,
 		IssueID:   strings.TrimSpace(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
+		Runtime:   &runtimeBody,
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {
@@ -732,7 +738,7 @@ func (d *Daemon) publishWorktreeProjectionEvent(projectID, issueID, worktree str
 	return rev
 }
 
-func (d *Daemon) publishGitStatusProjectionEvent(projectID, issueID, worktree string) uint64 {
+func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) uint64 {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		projectID = "default"
@@ -741,11 +747,14 @@ func (d *Daemon) publishGitStatusProjectionEvent(projectID, issueID, worktree st
 	if d.hub == nil {
 		return rev
 	}
+	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, status)
+	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: projectID,
 		IssueID:   strings.TrimSpace(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
+		Runtime:   &runtimeBody,
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {
@@ -764,6 +773,59 @@ func (d *Daemon) publishGitStatusProjectionEvent(projectID, issueID, worktree st
 		Body:            body,
 	})
 	return rev
+}
+
+func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) protocol.RuntimeProjection {
+	projectID = normalizeRuntimeProjectionProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+
+	var session *daemonstate.Session
+	if d.sessionStore != nil && issueID != "" {
+		if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
+			copy := loaded
+			session = &copy
+		}
+	}
+
+	var projectionWorktree *daemonstate.WorktreeProjection
+	if d.projectionStore != nil {
+		if issueID != "" {
+			if loaded, found, err := d.projectionStore.GetWorktreeByIssueID(ctx, projectID, issueID); err == nil && found {
+				copy := loaded
+				projectionWorktree = &copy
+			}
+		}
+		if projectionWorktree == nil && worktree != "" {
+			if loaded, found, err := d.projectionStore.GetWorktreeByPath(ctx, projectID, worktree); err == nil && found {
+				copy := loaded
+				projectionWorktree = &copy
+			}
+		}
+	}
+
+	projection := buildRuntimeProjection(projectID, session, projectionWorktree)
+	if projection.IssueID == "" {
+		projection.IssueID = issueID
+	}
+	if session != nil && projection.Session.Worktree == "" && projection.Worktree.Path != "" {
+		projection.Session.Worktree = projection.Worktree.Path
+	}
+	if status != nil {
+		projection.Git.HasUncommittedChanges = status.HasChanges
+	}
+	if status != nil && worktree != "" && d.git != nil {
+		if diffStat, err := d.git.DiffStat(ctx, worktree, d.cfg.BaseBranch); err == nil {
+			projection.Git.GitAdditions, projection.Git.GitDeletions = parseDiffStatTotalsDaemon(diffStat)
+		}
+	}
+	if projection.Git.GitAdditions == 0 && status != nil {
+		projection.Git.GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
+	}
+	if projection.Git.GitDeletions == 0 && status != nil {
+		projection.Git.GitDeletions = len(status.Deleted)
+	}
+	return projection
 }
 
 func (d *Daemon) commandOutput(req protocol.RequestEnvelope, output string) protocol.ResponseEnvelope {

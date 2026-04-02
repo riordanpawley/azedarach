@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
+	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 type recordingDaemonTransport struct {
@@ -511,6 +512,360 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 	}
 	if evt.event.Revision != 9 || evt.event.Event != "task.updated" {
 		t.Fatalf("event = %+v", evt.event)
+	}
+}
+
+func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndAgent(t *testing.T) {
+	const projectID = "proj-runtime"
+
+	initialStartedAt := time.Date(2026, time.April, 1, 10, 0, 0, 0, time.UTC)
+	gitUpdatedAt := time.Date(2026, time.April, 1, 10, 5, 0, 0, time.UTC)
+	worktreeUpdatedAt := time.Date(2026, time.April, 1, 10, 10, 0, 0, time.UTC)
+	sessionUpdatedAt := time.Date(2026, time.April, 1, 10, 15, 0, 0, time.UTC)
+
+	makeProjectionBody := func(revision uint64, issueID, worktreePath string, gitAdditions, gitDeletions, gitAhead, gitBehind int, sessionState protocol.SessionLifecycleState, agentStatus string, updatedAt time.Time, activeOperation *protocol.RuntimeOperationProjection) []byte {
+		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+			ProjectID: projectID,
+			IssueID:   issueID,
+			Worktree:  worktreePath,
+			UpdatedAt: updatedAt,
+			Runtime: &protocol.RuntimeProjectionEventBody{
+				ProjectID: projectID,
+				Revision:  revision,
+				Projection: protocol.RuntimeProjection{
+					ProjectID: projectID,
+					IssueID:   issueID,
+					Worktree: protocol.RuntimeWorktreeProjection{
+						Exists:             worktreePath != "",
+						Path:               worktreePath,
+						Branch:             "riordan/az-1/task",
+						Healthy:            worktreePath != "",
+						GitStatusUpdatedAt: &updatedAt,
+					},
+					Git: protocol.RuntimeGitProjection{
+						HasUncommittedChanges: gitAdditions > 0 || gitDeletions > 0,
+						GitAdditions:          gitAdditions,
+						GitDeletions:          gitDeletions,
+						GitAheadCount:         gitAhead,
+						GitBehindCount:        gitBehind,
+						ActiveOperation:       activeOperation,
+					},
+					Session: protocol.RuntimeSessionProjection{
+						HasSession: true,
+						SessionID:  "sess-1",
+						State:      sessionState,
+						StartedAt:  &initialStartedAt,
+						UpdatedAt:  &updatedAt,
+						Worktree:   worktreePath,
+					},
+					Agent: protocol.RuntimeAgentProjection{
+						Status:    agentStatus,
+						SessionID: "sess-1",
+						UpdatedAt: &updatedAt,
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal runtime projection event: %v", err)
+		}
+		return body
+	}
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandTaskList {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskList)
+			}
+			tasks := []domain.Task{
+				{
+					ID:       "az-1",
+					Title:    "RT",
+					Status:   domain.StatusOpen,
+					Priority: domain.P2,
+					Type:     domain.TypeTask,
+				},
+			}
+			body, err := json.Marshal(tasks)
+			if err != nil {
+				t.Fatalf("marshal snapshot: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        7,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+			ch := make(chan protocol.EventEnvelope, 3)
+			ch <- protocol.EventEnvelope{
+				Revision: 8,
+				Event:    protocol.EventGitStatusUpdated,
+				Body: makeProjectionBody(8, "az-1", "/tmp/repo-az-1", 3, 1, 2, 1, protocol.SessionLifecycleStateAttached, "attached", gitUpdatedAt, &protocol.RuntimeOperationProjection{
+					OperationID:     "op-git",
+					State:           protocol.OperationStateRunning,
+					ProgressPercent: 40,
+					Message:         "git status sync",
+				}),
+			}
+			ch <- protocol.EventEnvelope{
+				Revision: 9,
+				Event:    protocol.EventWorktreeProjectionUpdated,
+				Body: makeProjectionBody(9, "az-1", "/tmp/repo-az-1-alt", 5, 2, 2, 1, protocol.SessionLifecycleStateAttached, "syncing", worktreeUpdatedAt, &protocol.RuntimeOperationProjection{
+					OperationID:     "op-worktree",
+					State:           protocol.OperationStateRunning,
+					ProgressPercent: 75,
+					Message:         "worktree update",
+				}),
+			}
+			sessionBody, err := json.Marshal(protocol.SessionProjectionEventBody{
+				ProjectID: projectID,
+				Revision:  10,
+				Session: protocol.SessionProjection{
+					SessionID: "sess-1",
+					IssueID:   "az-1",
+					State:     protocol.SessionLifecycleStatePaused,
+					UpdatedAt: sessionUpdatedAt,
+				},
+				Runtime: &protocol.RuntimeProjectionEventBody{
+					ProjectID: projectID,
+					Revision:  10,
+					Projection: protocol.RuntimeProjection{
+						ProjectID: projectID,
+						IssueID:   "az-1",
+						Worktree: protocol.RuntimeWorktreeProjection{
+							Exists:             true,
+							Path:               "/tmp/repo-az-1-alt",
+							Branch:             "riordan/az-1/task",
+							Healthy:            true,
+							GitStatusUpdatedAt: &sessionUpdatedAt,
+						},
+						Git: protocol.RuntimeGitProjection{
+							HasUncommittedChanges: false,
+							GitAheadCount:         0,
+							GitBehindCount:        0,
+						},
+						Session: protocol.RuntimeSessionProjection{
+							HasSession: true,
+							SessionID:  "sess-1",
+							State:      protocol.SessionLifecycleStatePaused,
+							StartedAt:  &initialStartedAt,
+							UpdatedAt:  &sessionUpdatedAt,
+							Worktree:   "/tmp/repo-az-1-alt",
+						},
+						Agent: protocol.RuntimeAgentProjection{
+							Status:    "paused",
+							SessionID: "sess-1",
+							UpdatedAt: &sessionUpdatedAt,
+						},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal session projection event: %v", err)
+			}
+			ch <- protocol.EventEnvelope{
+				Revision: 10,
+				Event:    protocol.EventSessionUpdated,
+				Body:     sessionBody,
+			}
+			close(ch)
+			return ch, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.currentProject = projectID
+
+	loadedMsg := m.attachDaemonCmd()()
+	loaded, ok := loadedMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("message type = %T, want issuesLoadedMsg", loadedMsg)
+	}
+	if loaded.revision != 7 {
+		t.Fatalf("snapshot revision = %d, want 7", loaded.revision)
+	}
+	if loaded.events == nil {
+		t.Fatal("expected daemon stream subscription")
+	}
+	if transport.subscribeProject != projectID {
+		t.Fatalf("subscribe project = %q, want %q", transport.subscribeProject, projectID)
+	}
+	if transport.subscribeFrom != 7 {
+		t.Fatalf("subscribe from revision = %d, want 7", transport.subscribeFrom)
+	}
+
+	updatedAny, _ := m.Update(loaded)
+	model, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if model.daemonRevision != 7 {
+		t.Fatalf("daemon revision after snapshot = %d, want 7", model.daemonRevision)
+	}
+	model.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(model.tasks[0], model.tasks, nil, 120, 30))
+
+	workspace := func(model Model) *overlay.TaskWorkspaceOverlay {
+		current := model.overlayStack.Current()
+		got, ok := current.(*overlay.TaskWorkspaceOverlay)
+		if !ok {
+			t.Fatalf("expected TaskWorkspaceOverlay, got %T", current)
+		}
+		return got
+	}
+	boardView := func(model Model) string {
+		task := model.tasks[0]
+		columns := []board.Column{{Title: "Open", Tasks: []domain.Task{task}}}
+		return board.Render(
+			columns,
+			board.Cursor{Column: 0, Task: 0},
+			map[string]bool{},
+			model.runtimeSignalsForBoard(),
+			board.BuildChildProgress([]domain.Task{task}),
+			nil,
+			false,
+			0,
+			styles.New(),
+			120,
+			20,
+		)
+	}
+
+	eventChecks := []struct {
+		name     string
+		event    string
+		assertFn func(t *testing.T, model Model, evt protocol.EventEnvelope)
+	}{
+		{
+			name:  "git",
+			event: protocol.EventGitStatusUpdated,
+			assertFn: func(t *testing.T, model Model, evt protocol.EventEnvelope) {
+				var body protocol.ProjectionUpdateEventBody
+				if err := json.Unmarshal(evt.Body, &body); err != nil {
+					t.Fatalf("unmarshal git projection body: %v", err)
+				}
+				if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "attached" {
+					t.Fatalf("git runtime agent = %+v, want attached", body.Runtime)
+				}
+				if model.daemonRevision != 8 {
+					t.Fatalf("daemon revision after git event = %d, want 8", model.daemonRevision)
+				}
+				runtime := model.runtimeSignalsForBoard()["az-1"]
+				if !runtime.HasTmuxSession || !runtime.HasWorktree || !runtime.HasUncommittedChanges {
+					t.Fatalf("runtime signals after git event = %+v, want session/worktree/dirty", runtime)
+				}
+				if runtime.PendingOperationID != "op-git" || runtime.PendingOperationState != string(protocol.OperationStateRunning) || runtime.PendingOperationPercent != 40 {
+					t.Fatalf("runtime pending op after git event = %+v, want running op-git 40%%", runtime)
+				}
+				view := boardView(model)
+				if !strings.Contains(view, "T:Y") || !strings.Contains(view, "W:Y") || !strings.Contains(view, "G:↓1") || !strings.Contains(view, "G:✎") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
+					t.Fatalf("board view after git event = %q, missing projected runtime tokens", view)
+				}
+				if strings.Contains(view, "G:↑2") {
+					t.Fatalf("board view after git event = %q, should hide ahead token when line changes exist", view)
+				}
+				workspaceView := workspace(model).View()
+				if !strings.Contains(workspaceView, "Git/Worktree") || !strings.Contains(workspaceView, "dirty (+3/-1; up 2, down 1)") {
+					t.Fatalf("workspace view after git event = %q, missing projected git summary", workspaceView)
+				}
+			},
+		},
+		{
+			name:  "worktree",
+			event: protocol.EventWorktreeProjectionUpdated,
+			assertFn: func(t *testing.T, model Model, evt protocol.EventEnvelope) {
+				var body protocol.ProjectionUpdateEventBody
+				if err := json.Unmarshal(evt.Body, &body); err != nil {
+					t.Fatalf("unmarshal worktree projection body: %v", err)
+				}
+				if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "syncing" {
+					t.Fatalf("worktree runtime agent = %+v, want syncing", body.Runtime)
+				}
+				if model.daemonRevision != 9 {
+					t.Fatalf("daemon revision after worktree event = %d, want 9", model.daemonRevision)
+				}
+				if got := strings.TrimSpace(model.runtimeSignalWorktreeByTask["az-1"]); got != "/tmp/repo-az-1-alt" {
+					t.Fatalf("runtime worktree map = %q, want /tmp/repo-az-1-alt", got)
+				}
+				if got := model.resolveOperationTaskID("/tmp/repo-az-1-alt", nil); got != "az-1" {
+					t.Fatalf("resolveOperationTaskID(worktree path) = %q, want az-1", got)
+				}
+				runtime := model.runtimeSignalsForBoard()["az-1"]
+				if !runtime.HasWorktree || runtime.GitAdditions != 5 || runtime.GitDeletions != 2 {
+					t.Fatalf("runtime signals after worktree event = %+v, want worktree and refreshed diff stat", runtime)
+				}
+				view := boardView(model)
+				if !strings.Contains(view, "W:Y") || !strings.Contains(view, "+5/-2") {
+					t.Fatalf("board view after worktree event = %q, missing refreshed worktree/diff tokens", view)
+				}
+				workspaceView := workspace(model).View()
+				if !strings.Contains(workspaceView, "dirty (+5/-2; up 2, down 1)") {
+					t.Fatalf("workspace view after worktree event = %q, missing refreshed git summary", workspaceView)
+				}
+			},
+		},
+		{
+			name:  "session",
+			event: protocol.EventSessionUpdated,
+			assertFn: func(t *testing.T, model Model, evt protocol.EventEnvelope) {
+				var body protocol.SessionProjectionEventBody
+				if err := json.Unmarshal(evt.Body, &body); err != nil {
+					t.Fatalf("unmarshal session projection body: %v", err)
+				}
+				if body.Runtime == nil || body.Runtime.Projection.Agent.Status != "paused" {
+					t.Fatalf("session runtime agent = %+v, want paused", body.Runtime)
+				}
+				if model.daemonRevision != 10 {
+					t.Fatalf("daemon revision after session event = %d, want 10", model.daemonRevision)
+				}
+				task := model.tasks[0]
+				if task.Session == nil || task.Session.State != domain.SessionPaused {
+					t.Fatalf("task session after session event = %+v, want paused", task.Session)
+				}
+				runtime := model.runtimeSignalsForBoard()["az-1"]
+				if !runtime.HasTmuxSession {
+					t.Fatalf("runtime signals after session event = %+v, want tmux session", runtime)
+				}
+				view := boardView(model)
+				if !strings.Contains(view, "PAUSED") {
+					t.Fatalf("board view after session event = %q, missing paused session state", view)
+				}
+				workspaceView := workspace(model).View()
+				if !strings.Contains(workspaceView, "paused") {
+					t.Fatalf("workspace view after session event = %q, missing paused session state", workspaceView)
+				}
+			},
+		},
+	}
+
+	nextMsg := model.waitForDaemonEventCmd()()
+	for i, tt := range eventChecks {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := nextMsg
+			evt, ok := msg.(daemonStreamEventMsg)
+			if !ok {
+				t.Fatalf("stream message type = %T, want daemonStreamEventMsg", msg)
+			}
+			if evt.event.Event != tt.event {
+				t.Fatalf("event name = %q, want %q", evt.event.Event, tt.event)
+			}
+			updatedAny, nextCmd := model.Update(evt)
+			nextModel, ok := updatedAny.(Model)
+			if !ok {
+				t.Fatalf("updated model type = %T, want Model", updatedAny)
+			}
+			tt.assertFn(t, nextModel, evt.event)
+			model = nextModel
+			if i < len(eventChecks)-1 {
+				nextMsg = model.waitForDaemonEventCmd()()
+				if nextCmd == nil {
+					t.Fatal("expected next wait command")
+				}
+			}
+		})
 	}
 }
 
@@ -4260,530 +4615,5 @@ func TestBulkDeleteReportsSkippedDriftedIDs(t *testing.T) {
 	gotToast := updatedModel.toasts[len(updatedModel.toasts)-1].Message
 	if !strings.Contains(gotToast, "az-2: task not found") {
 		t.Fatalf("toast = %q, want issue reason", gotToast)
-	}
-}
-
-func TestRefreshRuntimeSignalsCmdPrioritizesActiveTmuxSessionsForDiffStat(t *testing.T) {
-	var requestedWorktrees []string
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				body, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/active", Branch: "az/az-active", IssueID: "az-active"},
-						{Path: "/tmp/inactive", Branch: "az/az-inactive", IssueID: "az-inactive"},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal worktree list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitRuntimeSignals:
-				var body daemonclient.GitCommandRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal runtime signals body: %v", err)
-				}
-				for _, target := range body.Targets {
-					requestedWorktrees = append(requestedWorktrees, target.Worktree)
-				}
-				respBody, err := json.Marshal(struct {
-					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
-				}{
-					Signals: []daemonclient.GitRuntimeSignalsResult{
-						{IssueID: "az-active", Worktree: "/tmp/active", HasUncommittedChanges: true, GitAdditions: 2, GitDeletions: 1},
-						{IssueID: "az-inactive", Worktree: "/tmp/inactive", HasUncommittedChanges: true, GitAdditions: 2, GitDeletions: 1},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal runtime signals response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.isOnline = false
-	tasks := []domain.Task{
-		{ID: "az-inactive", Title: "inactive", Status: domain.StatusInProgress},
-		{
-			ID:      "az-active",
-			Title:   "active",
-			Status:  domain.StatusInProgress,
-			Session: &domain.Session{IssueID: "az-active", State: domain.SessionBusy},
-		},
-	}
-
-	msg := m.refreshRuntimeSignalsCmd(tasks)()
-	loaded, ok := msg.(runtimeSignalsLoadedMsg)
-	if !ok {
-		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
-	}
-	if len(loaded.signalsByTask) != 2 {
-		t.Fatalf("signalsByTask len = %d, want 2", len(loaded.signalsByTask))
-	}
-	if len(requestedWorktrees) != 2 {
-		t.Fatalf("runtime targets = %d, want 2", len(requestedWorktrees))
-	}
-	if requestedWorktrees[0] != "/tmp/active" {
-		t.Fatalf("first runtime target = %q, want active session worktree", requestedWorktrees[0])
-	}
-}
-
-func TestRefreshRuntimeSignalsCmdUsesCacheForNonActiveSessions(t *testing.T) {
-	var requestedWorktrees []string
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				body, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/active", Branch: "az/az-active", IssueID: "az-active"},
-						{Path: "/tmp/inactive", Branch: "az/az-inactive", IssueID: "az-inactive"},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal worktree list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitRuntimeSignals:
-				var body daemonclient.GitCommandRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal runtime signals body: %v", err)
-				}
-				respBody, err := json.Marshal(struct {
-					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
-				}{
-					Signals: []daemonclient.GitRuntimeSignalsResult{
-						{IssueID: "az-active", Worktree: "/tmp/active", HasUncommittedChanges: true, GitAdditions: 5, GitDeletions: 2},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal runtime signals response: %v", err)
-				}
-				for _, target := range body.Targets {
-					requestedWorktrees = append(requestedWorktrees, target.Worktree)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.isOnline = false
-	cachedAt := time.Now().Add(-10 * time.Second)
-	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
-		"az-inactive": {
-			HasWorktree:           true,
-			HasUncommittedChanges: true,
-			GitAdditions:          9,
-			GitDeletions:          4,
-			HasTmuxSession:        false,
-			GitAheadCount:         0,
-			GitBehindCount:        0,
-		},
-		"az-active": {
-			HasWorktree:    true,
-			HasTmuxSession: true,
-			GitAdditions:   1,
-			GitDeletions:   1,
-		},
-	}
-	m.runtimeSignalRefreshedAtByTask = map[string]time.Time{
-		"az-inactive": cachedAt,
-		"az-active":   cachedAt,
-	}
-	m.runtimeSignalWorktreeByTask = map[string]string{
-		"az-inactive": "/tmp/inactive",
-		"az-active":   "/tmp/active",
-	}
-
-	tasks := []domain.Task{
-		{ID: "az-inactive", Title: "inactive", Status: domain.StatusInProgress},
-		{
-			ID:      "az-active",
-			Title:   "active",
-			Status:  domain.StatusInProgress,
-			Session: &domain.Session{IssueID: "az-active", State: domain.SessionBusy},
-		},
-	}
-
-	msg := m.refreshRuntimeSignalsCmd(tasks)()
-	loaded, ok := msg.(runtimeSignalsLoadedMsg)
-	if !ok {
-		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
-	}
-	if len(requestedWorktrees) != 1 || requestedWorktrees[0] != "/tmp/active" {
-		t.Fatalf("runtime targets = %v, want only active session worktree", requestedWorktrees)
-	}
-	if loaded.signalsByTask["az-inactive"].GitAdditions != 9 || loaded.signalsByTask["az-inactive"].GitDeletions != 4 {
-		t.Fatalf("inactive cached signals = %+v, want cached additions/deletions", loaded.signalsByTask["az-inactive"])
-	}
-	if !loaded.refreshedAtByTask["az-inactive"].Equal(cachedAt) {
-		t.Fatalf("inactive refreshedAt = %v, want cached %v", loaded.refreshedAtByTask["az-inactive"], cachedAt)
-	}
-}
-
-func TestRefreshRuntimeSignalsCmdBypassesCacheWhenWorktreePathChanges(t *testing.T) {
-	var requestedWorktrees []string
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				body, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/new-inactive", Branch: "az/az-inactive", IssueID: "az-inactive"},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal worktree list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitRuntimeSignals:
-				var body daemonclient.GitCommandRequest
-				if err := json.Unmarshal(req.Body, &body); err != nil {
-					t.Fatalf("unmarshal runtime signals body: %v", err)
-				}
-				respBody, err := json.Marshal(struct {
-					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
-				}{
-					Signals: []daemonclient.GitRuntimeSignalsResult{
-						{IssueID: "az-inactive", Worktree: "/tmp/new-inactive", HasUncommittedChanges: true, GitAdditions: 7, GitDeletions: 3},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal runtime signals response: %v", err)
-				}
-				for _, target := range body.Targets {
-					requestedWorktrees = append(requestedWorktrees, target.Worktree)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.isOnline = false
-	cachedAt := time.Now().Add(-10 * time.Second)
-	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
-		"az-inactive": {
-			HasWorktree:           true,
-			HasUncommittedChanges: true,
-			GitAdditions:          9,
-			GitDeletions:          4,
-		},
-	}
-	m.runtimeSignalRefreshedAtByTask = map[string]time.Time{
-		"az-inactive": cachedAt,
-	}
-	m.runtimeSignalWorktreeByTask = map[string]string{
-		"az-inactive": "/tmp/old-inactive",
-	}
-
-	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
-		{ID: "az-inactive", Title: "inactive", Status: domain.StatusInProgress},
-	})()
-	loaded, ok := msg.(runtimeSignalsLoadedMsg)
-	if !ok {
-		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
-	}
-	if len(requestedWorktrees) != 1 || requestedWorktrees[0] != "/tmp/new-inactive" {
-		t.Fatalf("runtime targets = %v, want fresh call for new worktree path", requestedWorktrees)
-	}
-	if loaded.worktreeByTask["az-inactive"] != "/tmp/new-inactive" {
-		t.Fatalf("cached worktree = %q, want %q", loaded.worktreeByTask["az-inactive"], "/tmp/new-inactive")
-	}
-}
-
-func TestRefreshRuntimeSignalsCmdDoesNotMarkFailedRefreshAsFresh(t *testing.T) {
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				body, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal worktree list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitRuntimeSignals:
-				respBody, err := json.Marshal(struct {
-					Signals         []daemonclient.GitRuntimeSignalsResult `json:"signals"`
-					PartialFailures int                                    `json:"partial_failures"`
-				}{
-					Signals:         nil,
-					PartialFailures: 1,
-				})
-				if err != nil {
-					t.Fatalf("marshal runtime signals response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            respBody,
-				}, nil
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.isOnline = false
-	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
-		"az-1": {HasWorktree: true, GitAdditions: 5},
-	}
-	m.runtimeSignalRefreshedAtByTask = map[string]time.Time{
-		"az-1": time.Now().Add(-1 * time.Minute),
-	}
-	m.runtimeSignalWorktreeByTask = map[string]string{
-		"az-1": "/tmp/az-1",
-	}
-
-	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
-		{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
-	})()
-	loaded, ok := msg.(runtimeSignalsLoadedMsg)
-	if !ok {
-		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
-	}
-	if _, ok := loaded.refreshedAtByTask["az-1"]; ok {
-		t.Fatal("expected no refreshedAt entry for failed refresh")
-	}
-}
-
-func TestRefreshRuntimeSignalsCmdSkipsRemoteBehindCheckInLocalWorkflowMode(t *testing.T) {
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				body, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "",
-					Worktrees: []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					}{
-						{Path: "/tmp/az-1", Branch: "az/az-1", IssueID: "az-1"},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal worktree list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitRuntimeSignals:
-				var reqBody daemonclient.GitCommandRequest
-				if err := json.Unmarshal(req.Body, &reqBody); err != nil {
-					t.Fatalf("unmarshal runtime signals request: %v", err)
-				}
-				if reqBody.CompareRemote {
-					t.Fatalf("compare_remote = true, want false in local workflow mode")
-				}
-				body, err := json.Marshal(struct {
-					Signals []daemonclient.GitRuntimeSignalsResult `json:"signals"`
-				}{
-					Signals: []daemonclient.GitRuntimeSignalsResult{
-						{IssueID: "az-1", Worktree: "/tmp/az-1"},
-					},
-				})
-				if err != nil {
-					t.Fatalf("marshal runtime signals response: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			case daemonclient.CommandGitBranchBehind:
-				t.Fatal("unexpected remote branch-behind request in local workflow mode")
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.isOnline = true
-	m.config.Git.WorkflowMode = "local"
-	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
-		{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
-	})()
-	if _, ok := msg.(runtimeSignalsLoadedMsg); !ok {
-		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
-	}
-}
-
-func TestRefreshRuntimeSignalsCmdClearsStaleTmuxSessionFlag(t *testing.T) {
-	transport := &recordingDaemonTransport{
-		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			switch req.Command {
-			case daemonclient.CommandWorktreeList:
-				body, err := json.Marshal(struct {
-					ProjectID string `json:"project_id"`
-					Worktrees []struct {
-						Path    string `json:"path"`
-						Branch  string `json:"branch"`
-						IssueID string `json:"issue_id"`
-					} `json:"worktrees"`
-				}{
-					ProjectID: "",
-					Worktrees: nil,
-				})
-				if err != nil {
-					t.Fatalf("marshal worktree list: %v", err)
-				}
-				return protocol.ResponseEnvelope{
-					ProtocolVersion: req.ProtocolVersion,
-					RequestID:       req.RequestID,
-					Kind:            protocol.EnvelopeKindResponse,
-					OK:              true,
-					Body:            body,
-				}, nil
-			default:
-				t.Fatalf("unexpected command: %s", req.Command)
-			}
-			return protocol.ResponseEnvelope{}, nil
-		},
-	}
-
-	m := newDaemonTestModel(transport)
-	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
-		"az-1": {HasTmuxSession: true},
-	}
-	m.runtimeSignalRefreshedAtByTask = map[string]time.Time{
-		"az-1": time.Now().Add(-5 * time.Second),
-	}
-
-	msg := m.refreshRuntimeSignalsCmd([]domain.Task{
-		{ID: "az-1", Title: "task", Status: domain.StatusInProgress},
-	})()
-	loaded, ok := msg.(runtimeSignalsLoadedMsg)
-	if !ok {
-		t.Fatalf("message type = %T, want runtimeSignalsLoadedMsg", msg)
-	}
-	if loaded.signalsByTask["az-1"].HasTmuxSession {
-		t.Fatalf("HasTmuxSession = true, want false when current task has no session")
 	}
 }

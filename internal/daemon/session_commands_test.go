@@ -624,6 +624,15 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	if body.Session.State != protocol.SessionLifecycleStateStarting {
 		t.Fatalf("session state = %s, want %s", body.Session.State, protocol.SessionLifecycleStateStarting)
 	}
+	if body.Runtime == nil {
+		t.Fatal("expected runtime projection delta")
+	}
+	if body.Runtime.ProjectID != projectID || body.Runtime.Revision != evt.Revision {
+		t.Fatalf("runtime envelope = %+v, want project/revision %s/%d", body.Runtime, projectID, evt.Revision)
+	}
+	if body.Runtime.Projection.IssueID != issueID || body.Runtime.Projection.Session.SessionID != sessionID {
+		t.Fatalf("runtime projection = %+v, want issue/session %s/%s", body.Runtime.Projection, issueID, sessionID)
+	}
 }
 
 func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
@@ -687,6 +696,15 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		}
 		if body.Revision != evt.Revision {
 			t.Fatalf("event[%d] body revision = %d, want envelope revision %d", i, body.Revision, evt.Revision)
+		}
+		if body.Runtime == nil {
+			t.Fatalf("event[%d] expected runtime projection delta", i)
+		}
+		if body.Runtime.ProjectID != projectID || body.Runtime.Revision != evt.Revision {
+			t.Fatalf("event[%d] runtime envelope = %+v, want project/revision %s/%d", i, body.Runtime, projectID, evt.Revision)
+		}
+		if body.Runtime.Projection.IssueID != issueID {
+			t.Fatalf("event[%d] runtime issue = %s, want %s", i, body.Runtime.Projection.IssueID, issueID)
 		}
 	}
 }
@@ -985,6 +1003,15 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		}
 		if body.Session.UpdatedAt.IsZero() {
 			t.Fatal("expected updated_at to be populated")
+		}
+		if body.Runtime == nil {
+			t.Fatalf("event[%d] expected runtime projection delta", i)
+		}
+		if body.Runtime.ProjectID != projectID || body.Runtime.Revision != event.Revision {
+			t.Fatalf("body runtime envelope = %+v, want project/revision %s/%d", body.Runtime, projectID, event.Revision)
+		}
+		if body.Runtime.Projection.IssueID != issueID || body.Runtime.Projection.Session.SessionID != sessionID {
+			t.Fatalf("body runtime projection = %+v, want issue/session %s/%s", body.Runtime.Projection, issueID, sessionID)
 		}
 	}
 }

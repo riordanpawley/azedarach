@@ -96,7 +96,7 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 	adapter := &gitServiceAdapter{
 		client:          git.NewClient(runner, slog.Default()),
 		projectionStore: store,
-		onStatusUpdate: func(gotProjectID, gotIssueID, gotWorktree string) {
+		onStatusUpdate: func(_ context.Context, gotProjectID, gotIssueID, gotWorktree string, status *git.GitStatus) {
 			updates++
 			if gotProjectID != projectID {
 				t.Fatalf("project id = %q, want %q", gotProjectID, projectID)
@@ -106,6 +106,9 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 			}
 			if gotWorktree != worktree {
 				t.Fatalf("worktree = %q, want %q", gotWorktree, worktree)
+			}
+			if status == nil {
+				t.Fatal("expected git status to be forwarded")
 			}
 		},
 	}
@@ -192,7 +195,7 @@ func TestGitServiceAdapterDiscardChangesPublishesOnStatusChange(t *testing.T) {
 	adapter := &gitServiceAdapter{
 		client:          git.NewClient(runner, slog.Default()),
 		projectionStore: store,
-		onStatusUpdate: func(_, gotIssueID, gotWorktree string) {
+		onStatusUpdate: func(_ context.Context, _, gotIssueID, gotWorktree string, _ *git.GitStatus) {
 			updates++
 			if gotIssueID != issueID || gotWorktree != worktree {
 				t.Fatalf("status update = (%s, %s), want (%s, %s)", gotIssueID, gotWorktree, issueID, worktree)
@@ -243,7 +246,7 @@ func TestGitServiceAdapterDiscardChangesSkipsPublishWhenStatusUnchanged(t *testi
 	adapter := &gitServiceAdapter{
 		client:          git.NewClient(runner, slog.Default()),
 		projectionStore: store,
-		onStatusUpdate:  func(_, _, _ string) { updates++ },
+		onStatusUpdate:  func(_ context.Context, _, _, _ string, _ *git.GitStatus) { updates++ },
 	}
 	cacheKey := runtimeSignalCacheKey(projectID, issueID, worktree, "main", false, "origin")
 	adapter.storeRuntimeSignal(cacheKey, daemonhandlers.GitRuntimeSignalsResult{IssueID: issueID, Worktree: worktree}, time.Now())
@@ -295,7 +298,7 @@ func TestGitServiceAdapterCreateCheckpointPublishesOnStatusChange(t *testing.T) 
 	adapter := &gitServiceAdapter{
 		client:          git.NewClient(runner, slog.Default()),
 		projectionStore: store,
-		onStatusUpdate:  func(_, _, _ string) { updates++ },
+		onStatusUpdate:  func(_ context.Context, _, _, _ string, _ *git.GitStatus) { updates++ },
 	}
 
 	result, err := adapter.Checkpoint(ctx, projectID, daemonhandlers.GitCheckpointRequest{
@@ -331,7 +334,7 @@ func TestGitServiceAdapterCreateCheckpointReturnsNoChangesWithoutPublishing(t *t
 	updates := 0
 	adapter := &gitServiceAdapter{
 		client:         git.NewClient(runner, slog.Default()),
-		onStatusUpdate: func(_, _, _ string) { updates++ },
+		onStatusUpdate: func(_ context.Context, _, _, _ string, _ *git.GitStatus) { updates++ },
 	}
 
 	_, err := adapter.Checkpoint(ctx, projectID, daemonhandlers.GitCheckpointRequest{

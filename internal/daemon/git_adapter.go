@@ -28,7 +28,7 @@ type gitServiceAdapter struct {
 	projectionStore *daemonstate.ProjectionStore
 	logger          *slog.Logger
 	pollInterval    time.Duration
-	onStatusUpdate  func(projectID, issueID, worktree string)
+	onStatusUpdate  func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
 	baseBranch      string
 
 	refreshMu      sync.Mutex
@@ -235,7 +235,7 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, pr
 	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
 	a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
 	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
-		a.onStatusUpdate(normalizeProjectID(projectID), issueID, worktree)
+		a.onStatusUpdate(ctx, normalizeProjectID(projectID), issueID, worktree, status)
 	}
 }
 

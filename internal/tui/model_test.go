@@ -577,14 +577,36 @@ func TestView_ShowsHiddenSelectionCount(t *testing.T) {
 	}
 }
 
-func TestView_ShowsRuntimeSignalLoadingIndicator(t *testing.T) {
-	m := newTestModel()
-	m.loading = false
-	m.runtimeSignalsBusy = true
-
-	view := m.View()
-	if !strings.Contains(view, "Loading runtime status...") {
-		t.Fatalf("view = %q, want runtime loading indicator in status bar", view)
+func TestNoLegacyRuntimeRefreshAuthorityPathsRemain(t *testing.T) {
+	forbiddenTokens := []string{
+		"runtimeSignalRefreshedAtByTask",
+		"runtimeSignalsBusy",
+		"lastRuntimeRefresh",
+		"runtimeSignalsLoadedMsg",
+		"shouldRefreshRuntimeSignals",
+		"applyRuntimeSignals",
+		"refreshRuntimeSignalsCmd",
+		"prioritizeRuntimeSignalTasks",
+		"shouldUseCachedRuntimeSignals",
+		"Loading runtime status...",
+	}
+	files := []string{
+		"model.go",
+		"model_update_loop.go",
+		"model_view_render.go",
+		"model_daemonclient_test.go",
+	}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		source := string(data)
+		for _, token := range forbiddenTokens {
+			if strings.Contains(source, token) {
+				t.Fatalf("%s still contains legacy runtime-refresh token %q", file, token)
+			}
+		}
 	}
 }
 
@@ -3202,27 +3224,120 @@ func TestDaemonStreamEventMsg_IgnoresDifferentProject(t *testing.T) {
 	}
 }
 
-func TestDaemonStreamEventMsg_GitStatusEventForcesRuntimeSignalRefresh(t *testing.T) {
+func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *testing.T) {
 	m := newTestModel()
-	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
-		m.tasks[0].ID: {HasWorktree: true},
-	}
-	m.lastRuntimeRefresh = time.Now()
-
-	if m.shouldRefreshRuntimeSignals() {
-		t.Fatal("expected runtime signal refresh TTL gate to be closed before event")
+	task := m.tasks[0]
+	startedAt := time.Date(2026, time.April, 1, 13, 0, 0, 0, time.UTC)
+	updatedAt := startedAt.Add(5 * time.Minute)
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: m.daemonProjectID(),
+		IssueID:   task.ID,
+		Worktree:  "/tmp/az-1",
+		UpdatedAt: updatedAt,
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: m.daemonProjectID(),
+			Revision:  1,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: m.daemonProjectID(),
+				IssueID:   task.ID,
+				Worktree: protocol.RuntimeWorktreeProjection{
+					Exists:             true,
+					Path:               "/tmp/az-1",
+					Branch:             "riordan/az-1/task",
+					Healthy:            true,
+					GitStatusUpdatedAt: &updatedAt,
+				},
+				Git: protocol.RuntimeGitProjection{
+					HasUncommittedChanges: true,
+					GitAdditions:          3,
+					GitDeletions:          1,
+					GitAheadCount:         2,
+					GitBehindCount:        1,
+					ActiveOperation: &protocol.RuntimeOperationProjection{
+						OperationID:     "op-az-1",
+						State:           protocol.OperationStateRunning,
+						ProgressPercent: 40,
+					},
+				},
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: true,
+					SessionID:  "sess-az-1",
+					State:      protocol.SessionLifecycleStateAttached,
+					StartedAt:  &startedAt,
+					UpdatedAt:  &updatedAt,
+					Worktree:   "/tmp/az-1",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal runtime projection event: %v", err)
 	}
 
 	next, _ := m.Update(daemonStreamEventMsg{
 		event: protocol.EventEnvelope{
-			Revision: 11,
-			Event:    protocol.EventGitStatusUpdated,
+			ProjectID: m.daemonProjectID(),
+			Revision:  1,
+			Event:     protocol.EventGitStatusUpdated,
+			Body:      body,
 		},
 	})
 	updated := next.(Model)
 
-	if !updated.runtimeSignalsBusy {
-		t.Fatal("expected git status event to force runtime signal refresh")
+	got := updated.tasks[0]
+	if !got.HasWorktree || got.GitAheadCount != 2 || got.GitBehindCount != 1 {
+		t.Fatalf("task runtime projection = %+v, want worktree+ahead/behind", got)
+	}
+	if !got.HasUncommittedChanges || got.GitAdditions != 3 || got.GitDeletions != 1 {
+		t.Fatalf("task git runtime = %+v, want dirty diff stat", got)
+	}
+	if got.Session == nil || got.Session.Worktree != "/tmp/az-1" || got.Session.State != domain.SessionBusy {
+		t.Fatalf("task session = %+v, want busy session with runtime worktree", got.Session)
+	}
+	if session := updated.sessions[got.ID]; session == nil || session.Worktree != "/tmp/az-1" {
+		t.Fatalf("projected session index = %+v, want /tmp/az-1", session)
+	}
+	if updated.daemonRevision != 1 {
+		t.Fatalf("daemonRevision = %d, want 1", updated.daemonRevision)
+	}
+}
+
+func TestRuntimeSignalsForBoardUsesTaskProjectionFields(t *testing.T) {
+	m := newTestModel()
+	startedAt := time.Date(2026, time.April, 1, 14, 0, 0, 0, time.UTC)
+	m.tasks = []domain.Task{
+		{
+			ID:                    "az-1",
+			Title:                 "Task",
+			Status:                domain.StatusOpen,
+			Priority:              domain.P2,
+			Type:                  domain.TypeTask,
+			HasTmuxSession:        true,
+			HasWorktree:           true,
+			GitAheadCount:         4,
+			GitBehindCount:        1,
+			HasUncommittedChanges: true,
+			GitAdditions:          9,
+			GitDeletions:          2,
+			Session: &domain.Session{
+				IssueID:   "az-1",
+				State:     domain.SessionBusy,
+				StartedAt: &startedAt,
+				Worktree:  "/tmp/az-1",
+			},
+		},
+	}
+
+	signals := m.runtimeSignalsForBoard()
+	got, ok := signals["az-1"]
+	if !ok {
+		t.Fatal("expected runtime signals for az-1")
+	}
+	if !got.HasTmuxSession || !got.HasWorktree || got.GitAheadCount != 4 || got.GitBehindCount != 1 {
+		t.Fatalf("runtime signals = %+v, want task-projection fields", got)
+	}
+	if !got.HasUncommittedChanges || got.GitAdditions != 9 || got.GitDeletions != 2 {
+		t.Fatalf("runtime signals = %+v, want git projection fields", got)
 	}
 }
 
@@ -3281,7 +3396,7 @@ func TestPendingMutationForTaskFallsBackToRuntimeSignals(t *testing.T) {
 	}
 }
 
-func TestRuntimeSignalsLoadedSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
+func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	m := newTestModel()
 	task := m.tasks[0]
 	task.HasWorktree = false
@@ -3292,23 +3407,51 @@ func TestRuntimeSignalsLoadedSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	m.nav.SelectTask(task.ID, 0)
 	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
 
-	updatedAny, _ := m.Update(runtimeSignalsLoadedMsg{
-		projectID: m.daemonProjectID(),
-		signalsByTask: map[string]board.RuntimeSignals{
-			task.ID: {
-				HasWorktree:           true,
-				HasUncommittedChanges: true,
-				GitAdditions:          3,
-				GitDeletions:          1,
+	updatedAt := time.Date(2026, time.April, 1, 15, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
+		ProjectID: m.daemonProjectID(),
+		IssueID:   task.ID,
+		Worktree:  "/tmp/wt-az-1",
+		UpdatedAt: updatedAt,
+		Runtime: &protocol.RuntimeProjectionEventBody{
+			ProjectID: m.daemonProjectID(),
+			Revision:  2,
+			Projection: protocol.RuntimeProjection{
+				ProjectID: m.daemonProjectID(),
+				IssueID:   task.ID,
+				Worktree: protocol.RuntimeWorktreeProjection{
+					Exists:             true,
+					Path:               "/tmp/wt-az-1",
+					Branch:             "riordan/az-1/task",
+					Healthy:            true,
+					GitStatusUpdatedAt: &updatedAt,
+				},
+				Git: protocol.RuntimeGitProjection{
+					HasUncommittedChanges: true,
+					GitAdditions:          3,
+					GitDeletions:          1,
+				},
+				Session: protocol.RuntimeSessionProjection{
+					HasSession: true,
+					SessionID:  "sess-az-1",
+					State:      protocol.SessionLifecycleStateAttached,
+					UpdatedAt:  &updatedAt,
+					Worktree:   "/tmp/wt-az-1",
+				},
 			},
 		},
-		refreshedAtByTask: map[string]time.Time{
-			task.ID: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("marshal runtime projection event: %v", err)
+	}
+
+	updatedAny, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			ProjectID: m.daemonProjectID(),
+			Revision:  2,
+			Event:     protocol.EventWorktreeProjectionUpdated,
+			Body:      body,
 		},
-		worktreeByTask: map[string]string{
-			task.ID: "/tmp/wt-az-1",
-		},
-		refreshedAt: time.Now(),
 	})
 	updated := updatedAny.(Model)
 
@@ -3319,10 +3462,10 @@ func TestRuntimeSignalsLoadedSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	}
 	view := workspace.View()
 	if !strings.Contains(view, "Worktree:") {
-		t.Fatalf("expected worktree summary row in detail panel after runtime refresh, got: %q", view)
+		t.Fatalf("expected worktree summary row in detail panel after runtime projection, got: %q", view)
 	}
 	if !strings.Contains(view, "dirty (+3/-1)") {
-		t.Fatalf("expected refreshed git status in detail panel, got: %q", view)
+		t.Fatalf("expected projected git status in detail panel, got: %q", view)
 	}
 }
 

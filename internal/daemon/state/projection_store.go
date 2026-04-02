@@ -449,6 +449,65 @@ func (s *ProjectionStore) GetWorktreeByPath(ctx context.Context, projectID, work
 	}, true, nil
 }
 
+func (s *ProjectionStore) GetWorktreeByIssueID(ctx context.Context, projectID, issueID string) (WorktreeProjection, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return WorktreeProjection{}, false, err
+	}
+	projectID = normalizedProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return WorktreeProjection{}, false, nil
+	}
+
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			issue_id,
+			path,
+			branch,
+			updated_at,
+			COALESCE(git_status_json, ''),
+			COALESCE(git_status_updated_at, '')
+		FROM `+projectionWorktreeTable+`
+		WHERE project_id = ? AND issue_id = ?
+	`, projectID, issueID)
+	var (
+		rowIssueID string
+		path       string
+		branch     string
+		updatedAt  string
+		statusRaw  string
+		statusAt   string
+	)
+	if err := row.Scan(&rowIssueID, &path, &branch, &updatedAt, &statusRaw, &statusAt); err != nil {
+		if err == sql.ErrNoRows {
+			return WorktreeProjection{}, false, nil
+		}
+		return WorktreeProjection{}, false, fmt.Errorf("get worktree projection by issue %s/%s: %w", projectID, issueID, err)
+	}
+	parsedUpdatedAt, err := parseProjectionTime(updatedAt)
+	if err != nil {
+		return WorktreeProjection{}, false, err
+	}
+	var parsedStatusUpdated *time.Time
+	if strings.TrimSpace(statusAt) != "" {
+		parsed, err := parseProjectionTime(statusAt)
+		if err != nil {
+			return WorktreeProjection{}, false, err
+		}
+		parsedStatusUpdated = &parsed
+	}
+	return WorktreeProjection{
+		ProjectID:        projectID,
+		IssueID:          rowIssueID,
+		Path:             path,
+		Branch:           branch,
+		UpdatedAt:        parsedUpdatedAt,
+		GitStatusRaw:     json.RawMessage(statusRaw),
+		GitStatusUpdated: parsedStatusUpdated,
+	}, true, nil
+}
+
 func (s *ProjectionStore) UpsertWorktreeGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
 	db, err := s.dbHandle()
 	if err != nil {

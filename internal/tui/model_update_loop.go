@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -134,8 +135,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
+		m.syncProjectionIndexesFromTasks()
 		m.applyPendingStatusOverlays()
-		m.applyRuntimeSignals()
 		m.reconcilePendingStatuses()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
@@ -165,27 +166,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.daemonEvents = msg.events
 			cmds = append(cmds, m.waitForDaemonEventCmd())
 		}
-		if m.shouldRefreshRuntimeSignals() {
-			m.runtimeSignalsBusy = true
-			cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
-		}
 		if len(cmds) == 0 {
 			return m, nil
 		}
 		return m, tea.Batch(cmds...)
-
-	case runtimeSignalsLoadedMsg:
-		if msg.projectID != "" && msg.projectID != m.daemonProjectID() {
-			return m, nil
-		}
-		m.runtimeSignalsBusy = false
-		m.runtimeSignalsByTask = msg.signalsByTask
-		m.runtimeSignalRefreshedAtByTask = msg.refreshedAtByTask
-		m.runtimeSignalWorktreeByTask = msg.worktreeByTask
-		m.lastRuntimeRefresh = msg.refreshedAt
-		m.applyRuntimeSignals()
-		m.syncTaskWorkspaceOverlay()
-		return m, nil
 
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
@@ -310,17 +294,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.applySessionProjectionEvent(msg.event)
 		}
 		if msg.event.Event == protocol.EventWorktreeProjectionUpdated || msg.event.Event == protocol.EventGitStatusUpdated {
+			var body protocol.ProjectionUpdateEventBody
+			if err := json.Unmarshal(msg.event.Body, &body); err == nil && body.Runtime != nil {
+				m.applyRuntimeProjection(body.Runtime.Projection)
+			}
 			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 			m.daemonRevision = cursor.Advance(msg.event).Revision
-			cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
-			// Daemon git/worktree projection updates are authoritative state changes.
-			// Always refresh rendered runtime signals immediately so visible git
-			// indicators stay in sync across all rendered surfaces.
-			if !m.runtimeSignalsBusy {
-				m.runtimeSignalsBusy = true
-				cmds = append(cmds, m.refreshRuntimeSignalsCmd(m.runtimeSignalRefreshTasks()))
-			}
-			return m, tea.Batch(cmds...)
+			return m, m.waitForDaemonEventCmd()
 		}
 		switch m.reduceDaemonEvent(msg.event) {
 		case daemonEventIgnore:
@@ -595,6 +575,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
 		}
+		m.syncProjectionIndexesFromTasks()
 		m.editor.ReconcileSelection(tasks)
 		m.applyPendingCreatedTaskSelection()
 		m.reconcileCursorAfterIssuesRefresh()
@@ -841,8 +822,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.suppressTaskHydration(msg.taskID)
 		m.tasks = removeTaskByID(m.tasks, msg.taskID)
+		m.syncProjectionIndexesFromTasks()
 		m.editor.ReconcileSelection(m.tasks)
-		m.applyRuntimeSignals()
 		m.reconcileCursorAfterIssuesRefresh()
 		m.addToast(Toast{
 			Level:   ToastSuccess,
