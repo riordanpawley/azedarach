@@ -449,6 +449,131 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 	}
 }
 
+func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	store := daemonstate.NewStore()
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	defer func() {
+		if err := projectionStore.Close(); err != nil {
+			t.Fatalf("close projection store: %v", err)
+		}
+	}()
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
+		session:         daemonhandlers.NewSessionHandler(store),
+		sessionStore:    store,
+		projectionStore: projectionStore,
+	}
+
+	if err := projectionStore.UpsertSession(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-write-through",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := daemon.handleSessionStopDirect(context.Background(), req)
+		done <- err
+	}()
+
+	<-tmuxRunner.killEntered
+
+	rows, err := projectionStore.ListSessions(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list projection sessions: %v", err)
+	}
+	foundStopped := false
+	for _, row := range rows {
+		if row.ID == sessionID && row.State == daemonstate.SessionStateStopped {
+			foundStopped = true
+			break
+		}
+	}
+	if !foundStopped {
+		t.Fatalf("expected write-through stopped projection for %s before kill completes; rows=%+v", sessionID, rows)
+	}
+
+	close(tmuxRunner.killRelease)
+	if err := <-done; err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+}
+
+func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+
+	projectionStore := daemonstate.NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	defer func() {
+		if err := projectionStore.Close(); err != nil {
+			t.Fatalf("close projection store: %v", err)
+		}
+	}()
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if err := projectionStore.UpsertSession(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	daemon := &Daemon{
+		cfg:             Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:            tmux.NewClient(tmuxRunner, slog.Default()),
+		projectionStore: projectionStore,
+	}
+
+	clearStopPending := daemon.markSessionStopPending(projectID, issueID)
+	defer clearStopPending()
+
+	sessions, err := daemon.listTmuxSessionsCacheFirst(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("listTmuxSessionsCacheFirst: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions = %v, want empty while session stop is pending", sessions)
+	}
+}
+
 func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	const (
 		projectID = "proj"
