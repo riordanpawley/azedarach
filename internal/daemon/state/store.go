@@ -147,12 +147,17 @@ func (s *Store) SessionByIssueID(projectID, issueID string) (Session, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	ps := s.ensureProjectLocked(projectID)
+	var newest Session
+	found := false
 	for _, session := range ps.sessions {
 		if strings.TrimSpace(session.IssueID) == issueID {
-			return session, true
+			if !found || session.UpdatedAt.After(newest.UpdatedAt) {
+				newest = session
+				found = true
+			}
 		}
 	}
-	return Session{}, false
+	return newest, found
 }
 
 func (s *Store) ensureProjectLocked(projectID string) *projectState {

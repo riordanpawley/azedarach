@@ -65,3 +65,36 @@ func TestStoreInvalidTransitionDoesNotAdvanceRevision(t *testing.T) {
 		t.Fatalf("revision after rejected transition = %d, want 1", got)
 	}
 }
+
+func TestStoreSessionByIssueIDReturnsMostRecent(t *testing.T) {
+	s := NewStore()
+	ts := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	s.nowFn = func() time.Time {
+		current := ts
+		ts = ts.Add(1 * time.Minute)
+		return current
+	}
+
+	if _, err := s.UpsertSession("proj", "s-older", "az-123", SessionStateStopped); err != nil {
+		t.Fatalf("UpsertSession older: %v", err)
+	}
+	if _, err := s.UpsertSession("proj", "s-other", "az-999", SessionStateAttached); err != nil {
+		t.Fatalf("UpsertSession other issue: %v", err)
+	}
+	if _, err := s.UpsertSession("proj", "s-newest", "az-123", SessionStateAttached); err != nil {
+		t.Fatalf("UpsertSession newest: %v", err)
+	}
+
+	for i := 0; i < 32; i++ {
+		got, ok := s.SessionByIssueID("proj", "az-123")
+		if !ok {
+			t.Fatalf("SessionByIssueID returned !ok on iteration %d", i)
+		}
+		if got.ID != "s-newest" {
+			t.Fatalf("SessionByIssueID ID = %s, want s-newest (iteration %d)", got.ID, i)
+		}
+		if got.State != SessionStateAttached {
+			t.Fatalf("SessionByIssueID state = %s, want %s", got.State, SessionStateAttached)
+		}
+	}
+}

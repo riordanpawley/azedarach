@@ -81,9 +81,6 @@ func newTestModel() Model {
 	cfg := &config.Config{CLITool: "claude"}
 	m := New(cfg)
 
-	// Disable placeholder data for tests so we can control the tasks
-	m.usePlaceholder = false
-
 	// Add some test tasks
 	// Open column: az-1 (index 0), az-2 (index 1)
 	// InProgress column: az-3 (index 0)

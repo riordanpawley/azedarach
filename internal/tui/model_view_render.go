@@ -328,11 +328,6 @@ func renderedBlockSize(view string) (width, height int) {
 
 // buildColumns converts tasks into board columns, applying filter and sort
 func (m Model) buildColumns() []board.Column {
-	// For Phase 1, use placeholder data
-	if m.usePlaceholder {
-		return board.CreatePlaceholderData()
-	}
-
 	// Apply filter to tasks and enforce board-level child hiding semantics.
 	filteredTasks := m.boardVisibleTasks(m.tasks)
 

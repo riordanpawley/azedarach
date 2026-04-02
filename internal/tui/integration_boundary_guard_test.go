@@ -66,10 +66,7 @@ func repoRootFromTestFile() (string, error) {
 }
 
 func findDirectGitExecViolations(repoRoot string) ([]string, error) {
-	targetRoots := []string{
-		filepath.Join(repoRoot, "internal", "tui"),
-		filepath.Join(repoRoot, "internal", "cli"),
-	}
+	targetRoots := runtimeBoundaryRoots(repoRoot)
 
 	fset := token.NewFileSet()
 	violations := make([]string, 0, 4)
@@ -133,10 +130,7 @@ func findDirectGitExecViolations(repoRoot string) ([]string, error) {
 }
 
 func findAuthorityBoundaryImportViolations(repoRoot string) ([]string, error) {
-	targetRoots := []string{
-		filepath.Join(repoRoot, "internal", "tui"),
-		filepath.Join(repoRoot, "internal", "cli"),
-	}
+	targetRoots := runtimeBoundaryRoots(repoRoot)
 
 	fset := token.NewFileSet()
 	violations := make([]string, 0, 8)
@@ -171,6 +165,9 @@ func findAuthorityBoundaryImportViolations(repoRoot string) ([]string, error) {
 				if !isForbiddenAuthorityImport(imported) {
 					continue
 				}
+				if isAllowedAuthorityImport(relPath, imported) {
+					continue
+				}
 
 				violations = append(violations, relPath+":"+imported)
 			}
@@ -183,6 +180,14 @@ func findAuthorityBoundaryImportViolations(repoRoot string) ([]string, error) {
 	}
 
 	return violations, nil
+}
+
+func runtimeBoundaryRoots(repoRoot string) []string {
+	return []string{
+		filepath.Join(repoRoot, "internal", "tui"),
+		filepath.Join(repoRoot, "internal", "cli"),
+		filepath.Join(repoRoot, "cmd", "az"),
+	}
 }
 
 func isForbiddenAuthorityImport(imported string) bool {
@@ -207,6 +212,15 @@ func isAllowedGitExec(path, function string) bool {
 		return false
 	}
 	_, ok = allowedFunctions[function]
+	return ok
+}
+
+func isAllowedAuthorityImport(path, imported string) bool {
+	importsByPath, ok := allowedAuthorityImports[path]
+	if !ok {
+		return false
+	}
+	_, ok = importsByPath[imported]
 	return ok
 }
 
@@ -240,4 +254,11 @@ func stringLiteral(expr ast.Expr) (string, bool) {
 
 var allowedGitExec = map[string]map[string]struct{}{
 	// Intentionally empty: runtime app/cli should not shell out to git directly.
+}
+
+var allowedAuthorityImports = map[string]map[string]struct{}{
+	// Runtime CLI command families read development server state directly.
+	"cmd/az/families.go": {
+		"github.com/riordanpawley/azedarach/internal/services/devserver": {},
+	},
 }

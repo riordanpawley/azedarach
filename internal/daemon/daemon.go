@@ -814,16 +814,23 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	if status != nil {
 		projection.Git.HasUncommittedChanges = status.HasChanges
 	}
+	fallbackStatus := status
+	if fallbackStatus == nil && projectionWorktree != nil && len(projectionWorktree.GitStatusRaw) > 0 {
+		var projectedStatus git.GitStatus
+		if err := json.Unmarshal(projectionWorktree.GitStatusRaw, &projectedStatus); err == nil {
+			fallbackStatus = &projectedStatus
+		}
+	}
 	if status != nil && worktree != "" && d.git != nil {
 		if diffStat, err := d.git.DiffStat(ctx, worktree, d.cfg.BaseBranch); err == nil {
 			projection.Git.GitAdditions, projection.Git.GitDeletions = parseDiffStatTotalsDaemon(diffStat)
 		}
 	}
-	if projection.Git.GitAdditions == 0 && status != nil {
-		projection.Git.GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
+	if projection.Git.GitAdditions == 0 && fallbackStatus != nil {
+		projection.Git.GitAdditions = len(fallbackStatus.Added) + len(fallbackStatus.Modified) + len(fallbackStatus.Staged)
 	}
-	if projection.Git.GitDeletions == 0 && status != nil {
-		projection.Git.GitDeletions = len(status.Deleted)
+	if projection.Git.GitDeletions == 0 && fallbackStatus != nil {
+		projection.Git.GitDeletions = len(fallbackStatus.Deleted)
 	}
 	return projection
 }

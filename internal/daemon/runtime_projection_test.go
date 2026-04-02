@@ -323,6 +323,19 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed worktree projection: %v", err)
 	}
+	rawStatus, err := json.Marshal(git.GitStatus{
+		Added:      []string{"new.go"},
+		Modified:   []string{"changed.go"},
+		Staged:     []string{"staged.go"},
+		Deleted:    []string{"removed.go"},
+		HasChanges: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal git status: %v", err)
+	}
+	if err := projectionStore.UpsertWorktreeGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 1, 15, 5, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed git status projection: %v", err)
+	}
 
 	daemon := &Daemon{
 		cfg:             Config{Logger: slog.Default()},
@@ -361,6 +374,9 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 	if body.Runtime.Projection.Session.SessionID != sessionID {
 		t.Fatalf("runtime session = %+v, want session %s", body.Runtime.Projection.Session, sessionID)
+	}
+	if body.Runtime.Projection.Git.GitAdditions != 3 || body.Runtime.Projection.Git.GitDeletions != 1 {
+		t.Fatalf("runtime git stats = %+v, want additions/deletions 3/1", body.Runtime.Projection.Git)
 	}
 }
 

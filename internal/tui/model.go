@@ -57,7 +57,6 @@ const (
 	eventTickerCapacity      = 64
 	eventLogCapacity         = 256
 	eventSummaryMaxRunes     = 140
-	runtimeSignalCacheTTL    = 45 * time.Second
 )
 
 var ansiEscapeLinePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -203,9 +202,6 @@ type Model struct {
 
 	// Logger
 	logger *slog.Logger
-
-	// Use placeholder data in Phase 1
-	usePlaceholder bool
 }
 
 // New creates a new application model with the given config
@@ -261,7 +257,6 @@ func New(cfg *config.Config) Model {
 		attachmentService:           deps.AttachmentService,
 		diagnosticsService:          deps.DiagnosticsService,
 		logger:                      logger,
-		usePlaceholder:              false, // Use real data from local issue store
 		tmuxAvailable:               deps.TmuxAvailable,
 		tmuxClient:                  deps.TmuxClient,
 		repoDir:                     repoDir,

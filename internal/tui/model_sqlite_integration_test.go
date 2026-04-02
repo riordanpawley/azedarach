@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -206,6 +207,83 @@ func TestIssueSnapshotParityAcrossCLIAndTUIBoard(t *testing.T) {
 	}
 	if strings.Contains(rendered, "Child issue") {
 		t.Fatalf("tui board should hide parent-child child task, got: %q", rendered)
+	}
+}
+
+func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
+	repoDir := t.TempDir()
+	parentID := "az-parent-json"
+	childID := "az-child-json"
+	doneID := "az-done-json"
+	blockedID := "az-blocked-json"
+
+	seedModelIssueStore(t, repoDir, parentID, "Parent JSON", "open", 2, "epic")
+	seedModelIssueStore(t, repoDir, childID, "Child JSON", "in_progress", 1, "task")
+	seedModelIssueStore(t, repoDir, doneID, "Done JSON", "closed", 3, "feature")
+	seedModelIssueStore(t, repoDir, blockedID, "Blocked JSON", "blocked", 0, "bug")
+	seedModelIssueDependency(t, repoDir, childID, parentID, "parent-child")
+	seedModelIssueDependency(t, repoDir, blockedID, parentID, "blocks")
+
+	socketPath, lockPath := newModelTestRuntimePaths(t)
+	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
+	defer stop()
+
+	client := daemonclient.New(transport.NewClient(socketPath)).WithProjectID("proj-model")
+	cliDeps := &cli.Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: client,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj-model",
+		RepoDir:      repoDir,
+	}
+
+	jsonOut := captureStdoutForParity(t, func() error {
+		return cli.IssueListCommand(cliDeps, cli.IssueListOptions{
+			JSON:  true,
+			IDs:   []string{parentID, childID, doneID, blockedID},
+			Limit: 10,
+		})
+	})
+
+	var cliTasks []domain.Task
+	if err := json.Unmarshal([]byte(jsonOut), &cliTasks); err != nil {
+		t.Fatalf("unmarshal CLI issue list JSON: %v\noutput=%q", err, jsonOut)
+	}
+
+	model := newTestModel()
+	model.repoDir = repoDir
+	model.daemonClient = client
+	msg := model.loadIssuesCmd()()
+	loaded, ok := msg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("loadIssuesCmd message type = %T, want issuesLoadedMsg", msg)
+	}
+
+	tuiByID := make(map[string]domain.Task, len(loaded.tasks))
+	for _, task := range loaded.tasks {
+		tuiByID[task.ID] = task
+	}
+
+	for _, cliTask := range cliTasks {
+		tuiTask, ok := tuiByID[cliTask.ID]
+		if !ok {
+			t.Fatalf("task %q exists in CLI snapshot but missing from TUI snapshot", cliTask.ID)
+		}
+		if tuiTask.Title != cliTask.Title {
+			t.Fatalf("title mismatch for %s: tui=%q cli=%q", cliTask.ID, tuiTask.Title, cliTask.Title)
+		}
+		if tuiTask.Status != cliTask.Status {
+			t.Fatalf("status mismatch for %s: tui=%q cli=%q", cliTask.ID, tuiTask.Status, cliTask.Status)
+		}
+		if tuiTask.Priority != cliTask.Priority {
+			t.Fatalf("priority mismatch for %s: tui=%q cli=%q", cliTask.ID, tuiTask.Priority, cliTask.Priority)
+		}
+		if tuiTask.Type != cliTask.Type {
+			t.Fatalf("type mismatch for %s: tui=%q cli=%q", cliTask.ID, tuiTask.Type, cliTask.Type)
+		}
+		if len(tuiTask.Dependencies) != len(cliTask.Dependencies) {
+			t.Fatalf("dependency count mismatch for %s: tui=%d cli=%d", cliTask.ID, len(tuiTask.Dependencies), len(cliTask.Dependencies))
+		}
 	}
 }
 
