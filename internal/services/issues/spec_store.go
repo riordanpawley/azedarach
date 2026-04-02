@@ -128,13 +128,13 @@ type SpecAuditFilter struct {
 }
 
 type specRequirementRecord struct {
-	rowID int64
+	rowID string
 	Requirement
 }
 
 type specLinkRecord struct {
-	rowID         int64
-	requirementPK int64
+	rowID         string
+	requirementPK string
 	SpecLink
 }
 
@@ -888,7 +888,7 @@ func (c *Client) lookupRequirementBySelector(ctx context.Context, queryer sqlReq
 	return matches[0], nil
 }
 
-func (c *Client) lookupLinkByIssueAndRequirement(ctx context.Context, queryer sqlRequirementQueryer, issueID string, requirementPK int64, includeDeleted bool) (specLinkRecord, error) {
+func (c *Client) lookupLinkByIssueAndRequirement(ctx context.Context, queryer sqlRequirementQueryer, issueID string, requirementPK string, includeDeleted bool) (specLinkRecord, error) {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
 		return specLinkRecord{}, errors.New("issue id is required")
@@ -925,7 +925,7 @@ func (c *Client) lookupLinkByIssueAndRequirement(ctx context.Context, queryer sq
 	return record, nil
 }
 
-func (c *Client) listLinksForRequirementRow(ctx context.Context, queryer sqlRequirementQueryer, requirementPK int64, includeDeleted bool) ([]specLinkRecord, error) {
+func (c *Client) listLinksForRequirementRow(ctx context.Context, queryer sqlRequirementQueryer, requirementPK string, includeDeleted bool) ([]specLinkRecord, error) {
 	query := `
 		SELECT
 			l.id,
@@ -973,17 +973,19 @@ func scanRequirementRecord(scanner interface {
 	Scan(dest ...any) error
 }) (specRequirementRecord, error) {
 	var record specRequirementRecord
+	var rowID any
 	var externalCode sql.NullString
 	var issueID sql.NullString
 	var createdRaw string
 	var updatedRaw string
 	var deletedRaw sql.NullString
-	if err := scanner.Scan(&record.rowID, &record.LocalID, &externalCode, &record.Title, &record.Description, &issueID, &record.Status, &createdRaw, &updatedRaw, &deletedRaw); err != nil {
+	if err := scanner.Scan(&rowID, &record.LocalID, &externalCode, &record.Title, &record.Description, &issueID, &record.Status, &createdRaw, &updatedRaw, &deletedRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return specRequirementRecord{}, domain.ErrNotFound
 		}
 		return specRequirementRecord{}, err
 	}
+	record.rowID = normalizeDBID(rowID)
 	record.ExternalCode = nullStringPointer(externalCode)
 	record.IssueID = nullStringPointer(issueID)
 	record.CreatedAt = parseTimestamp(createdRaw)
@@ -996,6 +998,8 @@ func scanSpecLinkRecord(scanner interface {
 	Scan(dest ...any) error
 }) (specLinkRecord, error) {
 	var record specLinkRecord
+	var rowID any
+	var requirementPK any
 	var roleRaw string
 	var note sql.NullString
 	var implementationsRaw string
@@ -1005,12 +1009,14 @@ func scanSpecLinkRecord(scanner interface {
 	var updatedRaw string
 	var deletedRaw sql.NullString
 
-	if err := scanner.Scan(&record.rowID, &record.requirementPK, &record.IssueID, &record.RequirementID, &roleRaw, &note, &implementationsRaw, &fulfillmentStatus, &fulfilledAt, &createdRaw, &updatedRaw, &deletedRaw); err != nil {
+	if err := scanner.Scan(&rowID, &requirementPK, &record.IssueID, &record.RequirementID, &roleRaw, &note, &implementationsRaw, &fulfillmentStatus, &fulfilledAt, &createdRaw, &updatedRaw, &deletedRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return specLinkRecord{}, domain.ErrNotFound
 		}
 		return specLinkRecord{}, err
 	}
+	record.rowID = normalizeDBID(rowID)
+	record.requirementPK = normalizeDBID(requirementPK)
 
 	record.ID = specLinkID(record.IssueID, record.RequirementID)
 	record.Role = LinkRole(roleRaw)
@@ -1280,6 +1286,19 @@ func timeStringPointer(value string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+func normalizeDBID(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
 }
 
 func specLinkID(issueID, requirementID string) string {
