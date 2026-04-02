@@ -36,7 +36,7 @@ func New(transport TransportClient) *Client {
 
 // WithProjectID sets the default project route used for command metadata and fallback subscriptions.
 func (c *Client) WithProjectID(projectID string) *Client {
-	c.projectID = projectID
+	c.projectID = protocol.NormalizeProjectID(projectID)
 	return c
 }
 
@@ -66,8 +66,10 @@ func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.
 
 // Command executes one daemon command envelope.
 func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	if req.Meta.ProjectID == "" && c.projectID != "" {
-		req.Meta.ProjectID = c.projectID
+	if metaProjectID := protocol.TrimProjectID(req.Meta.ProjectID); metaProjectID != "" {
+		req.Meta.ProjectID = metaProjectID
+	} else {
+		req.Meta.ProjectID = c.projectRoute()
 	}
 
 	var lastErr error
@@ -91,8 +93,8 @@ func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (pro
 
 // Subscribe opens a daemon event stream with reconnect attempts.
 func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, error) {
-	if projectID == "" {
-		projectID = c.projectID
+	if projectID = protocol.TrimProjectID(projectID); projectID == "" {
+		projectID = c.projectRoute()
 	}
 	var lastErr error
 	for attempt := 0; c.policy.ShouldRetry(attempt); attempt++ {

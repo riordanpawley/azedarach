@@ -125,6 +125,30 @@ func TestSessionHandlerUnsupportedCommand(t *testing.T) {
 }
 
 func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
+	t.Run("trims body project id", func(t *testing.T) {
+		store := daemonstate.NewStore()
+		h := NewSessionHandler(store)
+		body, _ := json.Marshal(map[string]string{
+			"project_id": "  proj-body  ",
+			"session_id": "s-body",
+			"issue_id":   "aey",
+		})
+
+		resp := h.Handle(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-body",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         CommandSessionStart,
+			Body:            body,
+		})
+		if !resp.OK {
+			t.Fatalf("response = %+v", resp.Error)
+		}
+		if got := store.ReadSnapshot("proj-body"); got.Sessions["s-body"].State != daemonstate.SessionStateStarting {
+			t.Fatalf("store state = %+v, want started in proj-body", got.Sessions["s-body"])
+		}
+	})
+
 	t.Run("uses metadata project id when body is empty", func(t *testing.T) {
 		store := daemonstate.NewStore()
 		h := NewSessionHandler(store)
@@ -138,7 +162,7 @@ func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
 			RequestID:       "req-meta",
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         CommandSessionStart,
-			Meta:            protocol.Metadata{ProjectID: "proj-meta"},
+			Meta:            protocol.Metadata{ProjectID: "  proj-meta  "},
 			Body:            body,
 		})
 		if !resp.OK {
@@ -149,7 +173,7 @@ func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects when project id is missing from body and metadata", func(t *testing.T) {
+	t.Run("defaults when project id is missing from body and metadata", func(t *testing.T) {
 		store := daemonstate.NewStore()
 		h := NewSessionHandler(store)
 		body, _ := json.Marshal(map[string]string{
@@ -164,11 +188,11 @@ func TestSessionHandlerProjectIDFallbacks(t *testing.T) {
 			Command:         CommandSessionStart,
 			Body:            body,
 		})
-		if resp.OK {
-			t.Fatalf("expected invalid request for missing project route")
+		if !resp.OK {
+			t.Fatalf("response = %+v", resp.Error)
 		}
-		if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
-			t.Fatalf("error = %+v, want invalid_request", resp.Error)
+		if got := store.ReadSnapshot(protocol.DefaultProjectID); got.Sessions["s-default"].State != daemonstate.SessionStateStarting {
+			t.Fatalf("store state = %+v, want started in default project", got.Sessions["s-default"])
 		}
 	})
 }

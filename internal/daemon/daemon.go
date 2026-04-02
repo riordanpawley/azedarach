@@ -29,16 +29,18 @@ const daemonVersion = "dev"
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir              string
-	SocketPath           string
-	LockPath             string
-	BaseBranch           string
-	CLITool              string
-	SessionShell         string
-	SessionInitCommands  []string
-	WorktreeInitCommands []string
-	Logger               *slog.Logger
-	IdleTimeout          time.Duration
+	RepoDir                  string
+	SocketPath               string
+	LockPath                 string
+	BaseBranch               string
+	CLITool                  string
+	SessionShell             string
+	SessionInitCommands      []string
+	WorktreeInitCommands     []string
+	Logger                   *slog.Logger
+	IdleTimeout              time.Duration
+	RuntimeReconcileInterval time.Duration
+	RuntimeReconcileTimeout  time.Duration
 }
 
 // Daemon is the daemon runtime root.
@@ -59,7 +61,9 @@ type Daemon struct {
 	session                      *daemonhandlers.SessionHandler
 	sessionStore                 *daemonstate.Store
 	projectionStore              *daemonstate.ProjectionStore
+	runtimeProjectionWriter      runtimeProjectionWriter
 	sessionLongRunning           SessionLongRunningExecutor
+	runtimeReconciler            runtimeReconciler
 	operationRuntime             *operationRuntime
 	sessionStopMu                sync.Mutex
 	sessionStopPending           map[string]int
@@ -145,7 +149,13 @@ func New(cfg Config) *Daemon {
 		revision:                     map[string]uint64{},
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	gitService.runtimeProjectionWriter = d.runtimeProjectionWriter
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
+		if d.runtimeProjectionWriter != nil {
+			d.runtimeProjectionWriter.PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
+			return
+		}
 		d.publishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
@@ -161,10 +171,15 @@ func New(cfg Config) *Daemon {
 	gitHandler := daemonhandlers.NewGitHandler(gitService, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		&worktreeServiceAdapter{
-			manager:         d.worktree,
-			projectionStore: d.projectionStore,
-			logger:          cfg.Logger,
+			manager:                 d.worktree,
+			projectionStore:         d.projectionStore,
+			runtimeProjectionWriter: d.runtimeProjectionWriter,
+			logger:                  cfg.Logger,
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
+				if d.runtimeProjectionWriter != nil {
+					d.runtimeProjectionWriter.PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+					return
+				}
 				d.publishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 			},
 			onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
@@ -179,6 +194,7 @@ func New(cfg Config) *Daemon {
 	d.worktreeHandler = worktreeHandler
 	d.operationRuntime = runtime
 	d.sessionLongRunning = sessionExecutor
+	d.runtimeReconciler = newRuntimeReconcileService(d)
 	d.router = daemonhandlers.NewDispatcher(
 		sessionHandler,
 		gitHandler,
@@ -253,6 +269,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	d.cfg.Logger.Info("daemon startup phase", "phase", "sync_bootstrap", "duration_ms", time.Since(bootstrapStartedAt).Milliseconds())
+	reconcileStartedAt := time.Now()
+	if result, err := d.runStartupRuntimeReconcile(ctx); err != nil {
+		d.cfg.Logger.Warn("daemon startup reconcile failed",
+			"phase", "runtime_reconcile",
+			"project_id", result.ProjectID,
+			"duration_ms", time.Since(reconcileStartedAt).Milliseconds(),
+			"error", err,
+		)
+	} else {
+		d.cfg.Logger.Info("daemon startup phase", "phase", "runtime_reconcile", "project_id", result.ProjectID, "duration_ms", time.Since(reconcileStartedAt).Milliseconds())
+	}
+	d.startRuntimeReconcileWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = d.serve.Serve(serveCtx)
 	if ctx.Err() != nil {
@@ -278,13 +306,15 @@ func (d *Daemon) handshake(_ context.Context, hello protocol.Hello) (protocol.He
 }
 
 func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uint64) (<-chan protocol.EventEnvelope, func(), error) {
+	projectID = protocol.NormalizeProjectID(projectID)
 	ch, cancel := d.hub.Subscribe(projectID, fromRevision)
 	return ch, cancel, nil
 }
 
 func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (resp protocol.ResponseEnvelope, err error) {
 	startedAt := time.Now()
-	projectID := strings.TrimSpace(req.Meta.ProjectID)
+	projectID := d.projectID(req.Meta)
+	req.Meta.ProjectID = projectID
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
 			"daemon command received",
@@ -318,9 +348,6 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 
 	if resp, handled := d.guardSyncDependentCommand(req); handled {
 		return resp, nil
-	}
-	if daemonhandlers.CommandRequiresProjectID(req.Command) && strings.TrimSpace(req.Meta.ProjectID) == "" {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required metadata: project_id"), nil
 	}
 	if err := d.beginCommand(); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
@@ -380,6 +407,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleSessionStatus(ctx, req)
 	case "session.recover":
 		return d.handleSessionRecover(ctx, req)
+	case protocol.CommandRuntimeReconcile:
+		return d.handleRuntimeReconcile(ctx, req)
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
 	}
@@ -492,8 +521,12 @@ func (d *Daemon) applySessionLifecycleTransition(
 		if err != nil {
 			return err
 		}
-		d.persistSessionProjection(projectID, session)
-		d.publishSessionProjectionEvent(ctx, projectID, req.Meta, session)
+		if d.runtimeProjectionWriter != nil {
+			d.runtimeProjectionWriter.PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
+		} else {
+			d.persistSessionProjection(projectID, session)
+			d.publishSessionProjectionEvent(ctx, projectID, req.Meta, session)
+		}
 		return nil
 	}
 	if resp.Error != nil {
@@ -565,9 +598,9 @@ func (d *Daemon) triggerSessionProjectionRefresh(projectID string, refreshFn fun
 	}()
 }
 
-func (d *Daemon) persistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) {
+func (d *Daemon) persistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) error {
 	if d.projectionStore == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -586,9 +619,9 @@ func (d *Daemon) persistWorktreeProjection(ctx context.Context, projectID, issue
 			"branch", branch,
 			"error", err,
 		)
-		return
+		return err
 	}
-	d.publishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+	return nil
 }
 
 func (d *Daemon) successResponse(req protocol.RequestEnvelope) protocol.ResponseEnvelope {
@@ -614,10 +647,7 @@ func (d *Daemon) errorResponse(req protocol.RequestEnvelope, code protocol.Error
 }
 
 func (d *Daemon) projectID(meta protocol.Metadata) string {
-	if meta.ProjectID != "" {
-		return meta.ProjectID
-	}
-	return "default"
+	return protocol.NormalizeProjectID(meta.ProjectID)
 }
 
 func (d *Daemon) nextRevision(projectID string) uint64 {
@@ -653,13 +683,30 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 }
 
 func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		projectID = "default"
-	}
+	projectID = protocol.NormalizeProjectID(projectID)
 	rev := d.nextRevision(projectID)
+	d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
+	return rev
+}
+
+func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
+	projectID = protocol.NormalizeProjectID(projectID)
+	rev := d.nextRevision(projectID)
+	d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, worktree, rev)
+	return rev
+}
+
+func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) uint64 {
+	projectID = protocol.NormalizeProjectID(projectID)
+	rev := d.nextRevision(projectID)
+	d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
+	return rev
+}
+
+func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64) {
+	projectID = protocol.NormalizeProjectID(projectID)
 	if d.hub == nil {
-		return rev
+		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
@@ -678,7 +725,7 @@ func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID st
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("marshal session projection event body failed", "project_id", projectID, "session_id", session.ID, "error", err)
 		}
-		return rev
+		return
 	}
 	if meta.ProjectID == "" {
 		meta.ProjectID = projectID
@@ -693,17 +740,12 @@ func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID st
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,
 	})
-	return rev
 }
 
-func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		projectID = "default"
-	}
-	rev := d.nextRevision(projectID)
+func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, projectID, issueID, worktree string, rev uint64) {
+	projectID = protocol.NormalizeProjectID(projectID)
 	if d.hub == nil {
-		return rev
+		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, nil)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
@@ -718,7 +760,7 @@ func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, 
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("marshal worktree projection event body failed", "project_id", projectID, "issue_id", issueID, "error", err)
 		}
-		return rev
+		return
 	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -730,17 +772,12 @@ func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, 
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,
 	})
-	return rev
 }
 
-func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) uint64 {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		projectID = "default"
-	}
-	rev := d.nextRevision(projectID)
+func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus, rev uint64) {
+	projectID = protocol.NormalizeProjectID(projectID)
 	if d.hub == nil {
-		return rev
+		return
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, issueID, worktree, status)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
@@ -755,7 +792,7 @@ func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID,
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("marshal git status projection event body failed", "project_id", projectID, "issue_id", issueID, "error", err)
 		}
-		return rev
+		return
 	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -767,7 +804,6 @@ func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID,
 		EmittedAt:       time.Now().UTC(),
 		Body:            body,
 	})
-	return rev
 }
 
 func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) protocol.RuntimeProjection {

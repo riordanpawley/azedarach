@@ -16,6 +16,7 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		{command: CommandGitFetch, want: true},
 		{command: protocol.CommandOperationList, want: true},
 		{command: CommandSessionStart, want: true},
+		{command: protocol.CommandRuntimeReconcile, want: true},
 		{command: protocol.CommandIssueFanout, want: true},
 		{command: protocol.CommandSpecRead, want: false},
 		{command: "unknown.command", want: false},
@@ -85,6 +86,7 @@ func TestCommandSpecRegistryDispatcherTargets(t *testing.T) {
 		{command: CommandGitCheckpoint, want: CommandDispatchGit, ok: true},
 		{command: CommandWorktreeRemove, want: CommandDispatchWorktree, ok: true},
 		{command: CommandDevServerList, want: CommandDispatchDevServer, ok: true},
+		{command: protocol.CommandRuntimeReconcile, want: CommandDispatchNone, ok: false},
 		{command: "task.list", want: CommandDispatchNone, ok: false},
 		{command: "unknown.command", want: CommandDispatchNone, ok: false},
 	}
@@ -126,6 +128,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		CommandSessionStop,
 		commandSessionStatus,
 		commandSessionRecover,
+		commandRuntimeReconcile,
 		protocol.CommandOperationSubmit,
 		protocol.CommandOperationGet,
 		protocol.CommandOperationList,

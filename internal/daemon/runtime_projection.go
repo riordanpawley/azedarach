@@ -82,11 +82,7 @@ func buildRuntimeProjectionEventBody(projectID string, revision uint64, projecti
 }
 
 func normalizeRuntimeProjectionProjectID(projectID string) string {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		return "default"
-	}
-	return projectID
+	return protocol.NormalizeProjectID(projectID)
 }
 
 func timePtr(t time.Time) *time.Time {

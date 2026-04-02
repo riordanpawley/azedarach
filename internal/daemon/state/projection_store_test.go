@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,6 +49,49 @@ func TestProjectionStoreSessionRoundTrip(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Fatalf("sessions after delete = %d, want 0", len(sessions))
+	}
+}
+
+func TestProjectionStoreSessionReplaceAndList(t *testing.T) {
+	store := NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Date(2026, time.April, 1, 8, 15, 0, 0, time.UTC)
+	if err := store.ReplaceSessions(context.Background(), "proj-a", []Session{
+		{ID: "sess-1", IssueID: "bja", State: SessionStateAttached, UpdatedAt: now},
+		{ID: "sess-2", IssueID: "bjb", State: SessionStatePaused, UpdatedAt: now},
+	}); err != nil {
+		t.Fatalf("ReplaceSessions: %v", err)
+	}
+
+	sessions, err := store.ListSessions(context.Background(), "proj-a")
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if got, want := len(sessions), 2; got != want {
+		t.Fatalf("sessions count = %d, want %d", got, want)
+	}
+
+	if err := store.ReplaceSessions(context.Background(), "proj-a", []Session{
+		{ID: "sess-2", IssueID: "bjb", State: SessionStateAttached, UpdatedAt: now.Add(1 * time.Minute)},
+	}); err != nil {
+		t.Fatalf("ReplaceSessions second pass: %v", err)
+	}
+
+	sessions, err = store.ListSessions(context.Background(), "proj-a")
+	if err != nil {
+		t.Fatalf("ListSessions after replace: %v", err)
+	}
+	if got, want := len(sessions), 1; got != want {
+		t.Fatalf("sessions after replace = %d, want %d", got, want)
+	}
+	if sessions[0].ID != "sess-2" || sessions[0].IssueID != "bjb" {
+		t.Fatalf("session row after replace = %+v", sessions[0])
+	}
+	if sessions[0].State != SessionStateAttached {
+		t.Fatalf("session state after replace = %s, want %s", sessions[0].State, SessionStateAttached)
 	}
 }
 
@@ -109,6 +153,52 @@ func TestProjectionStoreWorktreeReplaceAndList(t *testing.T) {
 	}
 	if got, want := len(worktrees), 1; got != want {
 		t.Fatalf("worktrees after delete = %d, want %d", got, want)
+	}
+}
+
+func TestProjectionStoreWorktreeGitStatusUpdateGuardrail(t *testing.T) {
+	store := NewProjectionStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	createdAt := time.Date(2026, time.April, 1, 9, 5, 0, 0, time.UTC)
+	if err := store.UpsertWorktree(context.Background(), WorktreeProjection{
+		ProjectID: "proj-a",
+		IssueID:   "bja",
+		Path:      "/tmp/repo-bja",
+		Branch:    "riordan/bja/task",
+		UpdatedAt: createdAt,
+	}); err != nil {
+		t.Fatalf("UpsertWorktree: %v", err)
+	}
+
+	statusAt := time.Date(2026, time.April, 1, 9, 10, 0, 0, time.UTC)
+	rawStatus := json.RawMessage(`{"clean":false,"modified":["README.md"]}`)
+	if err := store.UpsertWorktreeGitStatus(context.Background(), "proj-a", "bja", rawStatus, statusAt); err != nil {
+		t.Fatalf("UpsertWorktreeGitStatus existing row: %v", err)
+	}
+
+	projection, found, err := store.GetWorktreeByIssueID(context.Background(), "proj-a", "bja")
+	if err != nil {
+		t.Fatalf("GetWorktreeByIssueID: %v", err)
+	}
+	if !found {
+		t.Fatal("expected worktree projection")
+	}
+	if got, want := string(projection.GitStatusRaw), string(rawStatus); got != want {
+		t.Fatalf("git status payload = %s, want %s", got, want)
+	}
+	if projection.GitStatusUpdated == nil || !projection.GitStatusUpdated.Equal(statusAt) {
+		t.Fatalf("git status updated at = %v, want %v", projection.GitStatusUpdated, statusAt)
+	}
+
+	err = store.UpsertWorktreeGitStatus(context.Background(), "proj-a", "missing", json.RawMessage(`{"clean":true}`), statusAt)
+	if err == nil {
+		t.Fatal("UpsertWorktreeGitStatus missing row: expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, "expected 1 affected row(s), got 0") {
+		t.Fatalf("UpsertWorktreeGitStatus missing row error = %q, want affected-row guardrail", got)
 	}
 }
 

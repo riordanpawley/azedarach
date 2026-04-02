@@ -118,7 +118,7 @@ func (c *Client) commandJSONResponse(ctx context.Context, command string, body a
 		RequestID:       fmt.Sprintf("%s-%d", command, time.Now().UTC().UnixNano()),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: c.projectID,
+			ProjectID: c.projectRoute(),
 		},
 		Command: command,
 		SentAt:  time.Now().UTC(),
