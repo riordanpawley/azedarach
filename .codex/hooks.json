@@ -4,7 +4,7 @@
 			{
 				"hooks": [
 					{
-						"command": "az codex hook run --json session-start",
+						"command": "/bin/sh -c 'out=\"$(az codex hook run --json session-start 2>/dev/null | tail -n 1)\"; [ -n \"$out\" ] && printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
 						"type": "command"
 					}
 				],
@@ -15,7 +15,7 @@
 			{
 				"hooks": [
 					{
-						"command": "az codex hook run --json stop",
+						"command": "/bin/sh -c 'out=\"$(az codex hook run --json stop 2>/dev/null | tail -n 1)\"; [ -n \"$out\" ] && printf \"%s\\n\" \"$out\" || printf \"{}\\n\"'",
 						"type": "command"
 					}
 				]
