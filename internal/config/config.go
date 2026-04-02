@@ -37,8 +37,18 @@ type GitConfig struct {
 
 // GitHooksConfig controls az-managed git hook behavior.
 type GitHooksConfig struct {
-	SpecSync      GitHookSpecSyncConfig `json:"specSync"`
-	BoundaryCheck GitHookTaskConfig     `json:"boundaryCheck"`
+	Commands   map[string][]string   `json:"commands"`
+	BestEffort bool                  `json:"bestEffort"`
+	Restage    GitHooksRestageConfig `json:"restage"`
+	// Deprecated: use Commands["pre-commit"] and Restage instead.
+	SpecSync GitHookSpecSyncConfig `json:"specSync"`
+	// Deprecated: use Commands["pre-commit"] instead.
+	BoundaryCheck GitHookTaskConfig `json:"boundaryCheck"`
+}
+
+type GitHooksRestageConfig struct {
+	Enabled bool     `json:"enabled"`
+	Paths   []string `json:"paths"`
 }
 
 type GitHookSpecSyncConfig struct {
@@ -137,6 +147,12 @@ func DefaultConfig() *Config {
 			FetchEnabled:         true,
 		},
 		GitHooks: GitHooksConfig{
+			Commands:   map[string][]string{},
+			BestEffort: true,
+			Restage: GitHooksRestageConfig{
+				Enabled: false,
+				Paths:   []string{},
+			},
 			SpecSync: GitHookSpecSyncConfig{
 				Enabled:       false,
 				Command:       "",
@@ -410,6 +426,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 	// Merge Notifications config
 	if cfg.Notifications.ErrorThreshold == 0 {
 		cfg.Notifications.ErrorThreshold = defaults.Notifications.ErrorThreshold
+	}
+	if cfg.GitHooks.Commands == nil {
+		cfg.GitHooks.Commands = defaults.GitHooks.Commands
+	}
+	if cfg.GitHooks.Restage.Paths == nil {
+		cfg.GitHooks.Restage.Paths = defaults.GitHooks.Restage.Paths
 	}
 
 	return cfg

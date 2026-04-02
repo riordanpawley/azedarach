@@ -388,3 +388,71 @@ func TestCursor_TaskNotFound(t *testing.T) {
 		t.Errorf("Expected fallback to column 2, got %d", pos.Column)
 	}
 }
+
+func TestCursor_TaskRemovedFallsToNextTaskInColumn(t *testing.T) {
+	svc := NewService()
+	before := []board.Column{
+		{
+			Title: "Open",
+			Tasks: []domain.Task{
+				{ID: "az-1", Status: domain.StatusOpen},
+				{ID: "az-2", Status: domain.StatusOpen},
+				{ID: "az-3", Status: domain.StatusOpen},
+			},
+		},
+	}
+	after := []board.Column{
+		{
+			Title: "Open",
+			Tasks: []domain.Task{
+				{ID: "az-1", Status: domain.StatusOpen},
+				{ID: "az-3", Status: domain.StatusOpen},
+			},
+		},
+	}
+
+	svc.SelectTask("az-2", 0)
+	_ = svc.GetPosition(before)
+	pos := svc.GetPosition(after)
+
+	if !pos.Valid {
+		t.Fatal("expected valid position after selected task removal")
+	}
+	if pos.Column != 0 || pos.Task != 1 {
+		t.Fatalf("expected cursor to move to next task at (0,1), got (%d,%d)", pos.Column, pos.Task)
+	}
+}
+
+func TestCursor_TaskRemovedFallsToPreviousWhenNoNext(t *testing.T) {
+	svc := NewService()
+	before := []board.Column{
+		{
+			Title: "Open",
+			Tasks: []domain.Task{
+				{ID: "az-1", Status: domain.StatusOpen},
+				{ID: "az-2", Status: domain.StatusOpen},
+				{ID: "az-3", Status: domain.StatusOpen},
+			},
+		},
+	}
+	after := []board.Column{
+		{
+			Title: "Open",
+			Tasks: []domain.Task{
+				{ID: "az-1", Status: domain.StatusOpen},
+				{ID: "az-2", Status: domain.StatusOpen},
+			},
+		},
+	}
+
+	svc.SelectTask("az-3", 0)
+	_ = svc.GetPosition(before)
+	pos := svc.GetPosition(after)
+
+	if !pos.Valid {
+		t.Fatal("expected valid position after selected task removal")
+	}
+	if pos.Column != 0 || pos.Task != 1 {
+		t.Fatalf("expected cursor to move to previous task at (0,1), got (%d,%d)", pos.Column, pos.Task)
+	}
+}

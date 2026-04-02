@@ -3218,9 +3218,6 @@ func (m *Model) clearPendingTaskStatus(taskID string) {
 
 func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgress {
 	key := taskIDKey(taskID)
-	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 {
-		return nil
-	}
 	progress := &overlay.TaskMutationProgress{}
 	if pending, ok := m.pendingStatuses[key]; ok {
 		progress.OperationID = pending.operationID
@@ -3235,6 +3232,17 @@ func (m Model) pendingMutationForTask(taskID string) *overlay.TaskMutationProgre
 		progress.State = string(op.state)
 		progress.ProgressPercent = op.percent
 		progress.ProgressMessage = op.message
+	}
+	if runtime, ok := m.runtimeSignalsByTask[key]; ok {
+		if progress.OperationID == "" {
+			progress.OperationID = strings.TrimSpace(runtime.PendingOperationID)
+		}
+		if strings.TrimSpace(progress.State) == "" {
+			progress.State = strings.TrimSpace(runtime.PendingOperationState)
+		}
+		if progress.ProgressPercent == 0 {
+			progress.ProgressPercent = runtime.PendingOperationPercent
+		}
 	}
 	if progress.OperationID == "" && strings.TrimSpace(progress.State) == "" {
 		return nil

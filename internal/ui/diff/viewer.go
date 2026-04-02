@@ -103,24 +103,23 @@ func (d *DiffViewer) openPopupCmd(filePath string, all bool) tea.Cmd {
 			return popupResultMsg{Err: fmt.Errorf("diff popup unavailable")}
 		}
 
+		baseBranch := shellSingleQuote(d.effectiveBaseBranch())
+		resolveBaseRef := fmt.Sprintf("BASE_BRANCH=%s; BASE_REF=\"$BASE_BRANCH\"; git rev-parse --verify \"$BASE_REF\" >/dev/null 2>&1 || BASE_REF=\"origin/$BASE_BRANCH\";", baseBranch)
+
 		var title string
 		var command string
-		mergeBase, err := d.gitClient.MergeBase(context.Background(), d.worktree, d.effectiveBaseBranch())
-		if err != nil {
-			return popupResultMsg{Err: err}
-		}
 		if all {
 			title = " All Changes "
 			command = fmt.Sprintf(
-				"git diff %s HEAD --stat --color=always -- ':^.azedarach' && echo \"\" && DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s HEAD -- ':^.azedarach' | less -RS",
-				shellSingleQuote(mergeBase),
-				shellSingleQuote(mergeBase),
+				"%s git diff \"$BASE_REF\"...HEAD --stat --color=always -- ':^.azedarach' && echo \"\" && ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\"...HEAD -- ':^.azedarach'; else git diff \"$BASE_REF\"...HEAD --color=always -- ':^.azedarach'; fi ) | less -RS",
+				resolveBaseRef,
 			)
 		} else {
 			title = " " + filePath + " "
 			command = fmt.Sprintf(
-				"DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff %s HEAD -- %s | less -RS",
-				shellSingleQuote(mergeBase),
+				"%s ( if command -v difft >/dev/null 2>&1; then DFT_COLOR=always GIT_EXTERNAL_DIFF=\"difft --display=side-by-side\" git diff \"$BASE_REF\"...HEAD -- %s; else git diff \"$BASE_REF\"...HEAD --color=always -- %s; fi ) | less -RS",
+				resolveBaseRef,
+				shellSingleQuote(filePath),
 				shellSingleQuote(filePath),
 			)
 		}

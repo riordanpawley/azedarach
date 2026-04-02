@@ -1,4 +1,8 @@
 #!/usr/bin/env sh
+# >>> azedarach managed githook >>>
+az githooks hook --hook post-merge "$@" >/dev/null 2>&1 || true
+# <<< azedarach managed githook <<<
+
 set -eu
 # Auto-generation was removed after migration to native Codex context files.
 # Keep this hook as a no-op placeholder for compatibility.

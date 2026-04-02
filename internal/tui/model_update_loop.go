@@ -184,6 +184,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runtimeSignalWorktreeByTask = msg.worktreeByTask
 		m.lastRuntimeRefresh = msg.refreshedAt
 		m.applyRuntimeSignals()
+		m.syncTaskWorkspaceOverlay()
 		return m, nil
 
 	case issuesErrorMsg:

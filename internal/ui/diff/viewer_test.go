@@ -105,7 +105,10 @@ func TestDiffViewerEnterOpensSelectedFilePopup(t *testing.T) {
 	if gotTitle != " internal/tui/model.go " {
 		t.Fatalf("popup title=%q", gotTitle)
 	}
-	if !strings.Contains(gotCommand, "git diff 'base123' HEAD -- 'internal/tui/model.go'") {
+	if !strings.Contains(gotCommand, "BASE_BRANCH='main'; BASE_REF=\"$BASE_BRANCH\";") {
+		t.Fatalf("popup command=%q", gotCommand)
+	}
+	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\"...HEAD -- 'internal/tui/model.go'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 	if !strings.Contains(viewer.popupStatus, "Opened diff popup") {
@@ -137,7 +140,7 @@ func TestDiffViewerAllDiffPopup(t *testing.T) {
 		t.Fatal("expected all-diff popup command")
 	}
 	_ = cmd()
-	if !strings.Contains(gotCommand, "git diff 'base456' HEAD --stat --color=always -- ':^.azedarach'") {
+	if !strings.Contains(gotCommand, "git diff \"$BASE_REF\"...HEAD --stat --color=always -- ':^.azedarach'") {
 		t.Fatalf("popup command=%q", gotCommand)
 	}
 }
