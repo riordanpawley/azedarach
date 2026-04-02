@@ -518,7 +518,7 @@ func (d *DetailPanel) useCompactScrollMode() bool {
 }
 
 func (d *DetailPanel) showRuntimeSections() bool {
-	return d.task.Session != nil || d.hasGitStatusData()
+	return d.task.Session != nil || d.task.HasTmuxSession || d.hasGitStatusData()
 }
 
 func (d *DetailPanel) formatSessionState() string {
@@ -602,6 +602,9 @@ func (d *DetailPanel) formatIssueCardSummary() string {
 
 func (d *DetailPanel) formatSessionSummary() string {
 	if d.task.Session == nil {
+		if d.task.HasTmuxSession {
+			return d.styles.MenuItem.Render("active (projection)")
+		}
 		return d.styles.MenuItem.Render("none")
 	}
 	parts := []string{d.formatSessionState()}

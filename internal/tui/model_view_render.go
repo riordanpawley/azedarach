@@ -563,14 +563,19 @@ func (m Model) renderBoardView() string {
 
 func (m Model) runtimeSignalsForBoard() map[string]board.RuntimeSignals {
 	activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
-	if len(m.pendingStatuses) == 0 && len(m.pendingOpsByTask) == 0 && len(activeDescendantSessionByTask) == 0 {
-		return m.runtimeSignalsByTask
+	signalsByTask := make(map[string]board.RuntimeSignals, len(m.tasks)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
+	for _, task := range m.tasks {
+		signalsByTask[task.ID] = board.RuntimeSignals{
+			HasTmuxSession:        task.HasTmuxSession || task.Session != nil,
+			HasWorktree:           task.HasWorktree,
+			GitAheadCount:         task.GitAheadCount,
+			GitBehindCount:        task.GitBehindCount,
+			HasUncommittedChanges: task.HasUncommittedChanges,
+			GitAdditions:          task.GitAdditions,
+			GitDeletions:          task.GitDeletions,
+		}
 	}
 
-	signalsByTask := make(map[string]board.RuntimeSignals, len(m.runtimeSignalsByTask)+len(m.pendingStatuses)+len(m.pendingOpsByTask)+len(activeDescendantSessionByTask))
-	for taskID, signals := range m.runtimeSignalsByTask {
-		signalsByTask[taskID] = signals
-	}
 	for _, task := range m.tasks {
 		pending, ok := m.pendingStatuses[taskIDKey(task.ID)]
 		if !ok {

@@ -156,6 +156,21 @@ func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
 	assert.Contains(t, view, "Age N/A")
 }
 
+func TestDetailPanelViewWithProjectedSessionSignalShowsActiveSession(t *testing.T) {
+	task := domain.Task{
+		ID:             "az-792",
+		Title:          "Task with projected session signal",
+		Status:         domain.StatusInProgress,
+		HasTmuxSession: true,
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "active (projection)")
+}
+
 func TestDetailPanelViewWithParent(t *testing.T) {
 	parentID := "az-parent"
 	task := domain.Task{

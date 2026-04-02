@@ -3358,6 +3358,45 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 	}
 }
 
+func TestRuntimeSignalsForBoardUsesTaskProjectionAsBaseline(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{
+			ID:                    "az-1",
+			Title:                 "Projection task",
+			Status:                domain.StatusOpen,
+			Priority:              domain.P2,
+			Type:                  domain.TypeTask,
+			HasTmuxSession:        true,
+			HasWorktree:           true,
+			GitAheadCount:         2,
+			GitBehindCount:        3,
+			HasUncommittedChanges: true,
+			GitAdditions:          5,
+			GitDeletions:          1,
+		},
+	}
+	// Simulate stale runtime map values that disagree with hydrated task projection.
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {},
+	}
+
+	signals := m.runtimeSignalsForBoard()
+	got := signals["az-1"]
+	if !got.HasTmuxSession {
+		t.Fatal("expected HasTmuxSession from task projection baseline")
+	}
+	if !got.HasWorktree {
+		t.Fatal("expected HasWorktree from task projection baseline")
+	}
+	if got.GitAheadCount != 2 || got.GitBehindCount != 3 {
+		t.Fatalf("git ahead/behind = %d/%d, want 2/3", got.GitAheadCount, got.GitBehindCount)
+	}
+	if !got.HasUncommittedChanges || got.GitAdditions != 5 || got.GitDeletions != 1 {
+		t.Fatalf("git change projection mismatch: %+v", got)
+	}
+}
+
 func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
