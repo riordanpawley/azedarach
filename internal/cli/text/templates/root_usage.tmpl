@@ -29,16 +29,16 @@ Commands:
   issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
-  issue doctor [--project <project-id>] [--id <id>] [<id>]  Run integrity checks for one issue
-  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] <title>  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
-  issue update [--project <project-id>] [--id <id>] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
-  issue close [--project <project-id>] [--id <id>] [<id>]      Close an issue (sets status=closed)
-  issue delete [--project <project-id>] [--id <id>] [<id>] --confirm  Permanently delete an issue
-  issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...]  Add a dependency edge
-  issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm]  Remove a dependency edge
+  issue doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one issue
+  issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an issue (auto-parent when AZEDARACH_ISSUE_ID is set)
+  issue update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--append-notes ...] [--status ...] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update issue fields
+  issue close [--project <project-id>] [--id <id>] [--json] [<id>]      Close an issue (sets status=closed)
+  issue delete [--project <project-id>] [--id <id>] [--json] [<id>] --confirm  Permanently delete an issue
+  issue dep add [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--json]  Add a dependency edge
+  issue dep remove [--project <project-id>] --issue-id <issue-id> --depends-on-id <depends-on-id> [--type ...] [--confirm] [--json]  Remove a dependency edge
   issue dep bulk apply [--project <project-id>] --input <path> [--dry-run] [--json]  Apply dependency edge mutations
-  issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk create operations
-  issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run]  Execute bulk update operations
+  issue bulk-create [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk create operations
+  issue bulk-update [--project <project-id>] [--impl <implementation>] --input <path> [--dry-run] [--json]  Execute bulk update operations
   issue fanout [--project <project-id>] --input <path> [--apply] [--json]  Plan/apply nested issue fanout
   issue fanout ready [--project <project-id>] --root <issue-id> [--json]  List runnable leaf issues under a fanout root
   issue fanout drift [--project <project-id>] --issue <issue-id> [--worktree <path>] [--json] [--fail-on-out]  Advisory ownership drift diagnostics

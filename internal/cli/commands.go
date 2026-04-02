@@ -117,6 +117,7 @@ type IssueCheckOptions struct {
 
 type IssueCreateOptions struct {
 	Project               string
+	JSON                  bool
 	Title                 string
 	Description           string
 	Type                  domain.TaskType
@@ -130,11 +131,13 @@ type IssueCreateOptions struct {
 type IssueCloseOptions struct {
 	Project string
 	IssueID string
+	JSON    bool
 }
 
 type IssueUpdateOptions struct {
 	Project     string
 	IssueID     string
+	JSON        bool
 	Title       string
 	Description string
 	AppendNotes string
@@ -147,12 +150,14 @@ type IssueUpdateOptions struct {
 type IssueDoctorOptions struct {
 	Project string
 	IssueID string
+	JSON    bool
 }
 
 type IssueDeleteOptions struct {
 	Project string
 	IssueID string
 	Confirm bool
+	JSON    bool
 }
 
 type IssueDependencyAddOptions struct {
@@ -160,6 +165,7 @@ type IssueDependencyAddOptions struct {
 	IssueID     string
 	DependsOnID string
 	Type        string
+	JSON        bool
 }
 
 type IssueDependencyRemoveOptions struct {
@@ -168,6 +174,7 @@ type IssueDependencyRemoveOptions struct {
 	DependsOnID string
 	Type        string
 	Confirm     bool
+	JSON        bool
 }
 
 type IssueDependencyBulkApplyOptions struct {
@@ -182,6 +189,7 @@ type IssueBulkCreateOptions struct {
 	Implementation string
 	InputPath      string
 	DryRun         bool
+	JSON           bool
 }
 
 type IssueBulkUpdateOptions struct {
@@ -189,6 +197,7 @@ type IssueBulkUpdateOptions struct {
 	Implementation string
 	InputPath      string
 	DryRun         bool
+	JSON           bool
 }
 
 type SessionCommandOptions struct {
@@ -1135,12 +1144,13 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	fs.StringVar(&opts.Description, "description", "", "issue description")
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
 	fs.BoolVar(&opts.Deferred, "deferred", false, "mark follow-up as deferred (defaults priority to P4 unless --priority provided)")
+	fs.BoolVar(&opts.JSON, "json", false, "output issue create result as JSON")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] <title>")
+		return IssueCreateOptions{}, fmt.Errorf("usage: az issue create [--project <project-id>] [--impl <implementation> ...] [--deferred] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	}
 	opts.Title = fs.Arg(0)
 
@@ -1188,11 +1198,12 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output issue doctor result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDoctorOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	issueID := ""
 	if fs.NArg() == 1 {
@@ -1202,7 +1213,7 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 		issueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(issueID) == "" {
-		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]")
+		return IssueDoctorOptions{}, fmt.Errorf("usage: az issue doctor [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.IssueID = issueID
@@ -1218,11 +1229,12 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -1234,7 +1246,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>] [<issue-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az issue close [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -1250,11 +1262,12 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm permanent issue deletion")
+	fs.BoolVar(&opts.JSON, "json", false, "output issue delete result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDeleteOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDeleteOptions{}, fmt.Errorf("--impl is not supported for issue delete; issue implementations are already assigned")
@@ -1269,7 +1282,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [<issue-id>]")
+		return IssueDeleteOptions{}, fmt.Errorf("usage: az issue delete [--project <project-id>] --confirm [--id <issue-id>] [--json] [<issue-id>]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -1291,6 +1304,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	fs.StringVar(&opts.Description, "description", "", "updated issue description")
 	fs.StringVar(&opts.AppendNotes, "append-notes", "", "append a note line to issue notes")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
+	fs.BoolVar(&opts.JSON, "json", false, "output issue update result as JSON")
 	fs.StringVar(&statusRaw, "status", "", "updated status (open|in_progress|blocked|closed)")
 	fs.Func("update-impl", "set implementation assignment (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
@@ -1306,7 +1320,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueUpdateOptions{}, fmt.Errorf("--impl is not supported for issue update; use --update-impl to change issue implementations")
@@ -1318,7 +1332,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
+		return IssueUpdateOptions{}, fmt.Errorf("usage: az issue update [--project <project-id>] [--id <issue-id>] [--json] [<issue-id>] [--title text] [--description text] [--append-notes text] [--status open|in_progress|blocked|closed] [--type task|bug|feature|epic|chore] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]")
 	}
 	if typeRaw != "" {
 		tt, err := parseTaskType(typeRaw)
@@ -1364,11 +1378,12 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
+	fs.BoolVar(&opts.JSON, "json", false, "output dependency add result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyAddOptions{}, fmt.Errorf("--impl is not supported for issue dep add; dependencies target existing issues")
@@ -1386,7 +1401,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from]")
+		return IssueDependencyAddOptions{}, fmt.Errorf("usage: az issue dep add [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -1405,11 +1420,12 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
+	fs.BoolVar(&opts.JSON, "json", false, "output dependency remove result as JSON")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm] [--json]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueDependencyRemoveOptions{}, fmt.Errorf("--impl is not supported for issue dep remove; dependencies target existing issues")
@@ -1427,7 +1443,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 		opts.DependsOnID = strings.TrimSpace(dependsOnIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" || strings.TrimSpace(opts.DependsOnID) == "" {
-		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm]")
+		return IssueDependencyRemoveOptions{}, fmt.Errorf("usage: az issue dep remove [--project <project-id>] [--issue-id <issue-id>] [--depends-on-id <depends-on-id>] [<issue-id> <depends-on-id>] [--type blocks|related|parent-child|discovered-from] [--confirm] [--json]")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -1467,6 +1483,7 @@ func ParseIssueBulkCreateArgs(args []string) (IssueBulkCreateOptions, error) {
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
 	fs.StringVar(&opts.InputPath, "input", "", "path to JSON array input")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "validate and preview without mutating")
+	fs.BoolVar(&opts.JSON, "json", false, "output bulk-create result as JSON")
 	if err := fs.Parse(args); err != nil {
 		return IssueBulkCreateOptions{}, err
 	}
@@ -1488,6 +1505,7 @@ func ParseIssueBulkUpdateArgs(args []string) (IssueBulkUpdateOptions, error) {
 	fs.StringVar(&opts.Implementation, "impl", "", "target implementation key")
 	fs.StringVar(&opts.InputPath, "input", "", "path to JSON array input")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "validate and preview without mutating")
+	fs.BoolVar(&opts.JSON, "json", false, "output bulk-update result as JSON")
 	if err := fs.Parse(args); err != nil {
 		return IssueBulkUpdateOptions{}, err
 	}
@@ -2038,9 +2056,27 @@ func IssueDoctorCommand(deps *Dependencies, opts IssueDoctorOptions) error {
 	}
 
 	if len(diagnostics) == 0 {
+		if opts.JSON {
+			return printJSON(map[string]any{
+				"issue_id":      task.ID,
+				"status":        "ok",
+				"dependencies":  formatDependencySummary(task.Dependencies),
+				"diagnostics":   []string{},
+				"diagnostic_ct": 0,
+			})
+		}
 		fmt.Printf("Doctor: OK %s\n", task.ID)
 		fmt.Printf("Dependencies: %s\n", formatDependencySummary(task.Dependencies))
 		return nil
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":      task.ID,
+			"status":        "warn",
+			"dependencies":  formatDependencySummary(task.Dependencies),
+			"diagnostics":   diagnostics,
+			"diagnostic_ct": len(diagnostics),
+		})
 	}
 	fmt.Printf("Doctor: WARN %s\n", task.ID)
 	for _, diagnostic := range diagnostics {
@@ -2109,6 +2145,20 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	if opts.Deferred {
 		message = fmt.Sprintf("%s [deferred]", message)
 	}
+	if opts.JSON {
+		var parentIDValue string
+		if parentID != nil {
+			parentIDValue = strings.TrimSpace(*parentID)
+		}
+		return printJSON(map[string]any{
+			"issue_id":   taskID,
+			"parent_id":  parentIDValue,
+			"deferred":   opts.Deferred,
+			"message":    message,
+			"created":    true,
+			"project_id": strings.TrimSpace(deps.ProjectID),
+		})
+	}
 	fmt.Println(message)
 	return nil
 }
@@ -2126,6 +2176,13 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	if err := deps.DaemonClient.UpdateTaskStatus(ctx, opts.IssueID, domain.StatusDone); err != nil {
 		return fmt.Errorf("failed to close issue %s: %w", opts.IssueID, err)
 	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id": opts.IssueID,
+			"status":   "closed",
+			"updated":  true,
+		})
+	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
 	return nil
 }
@@ -2142,6 +2199,12 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 
 	if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
 		return fmt.Errorf("failed to delete issue %s: %w", opts.IssueID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id": opts.IssueID,
+			"deleted":  true,
+		})
 	}
 	fmt.Printf("Deleted issue: %s\n", opts.IssueID)
 	return nil
@@ -2201,6 +2264,14 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 			return fmt.Errorf("failed to append notes for issue %s: %w", opts.IssueID, err)
 		}
 	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"issue_id":      opts.IssueID,
+			"updated":       true,
+			"status_set":    opts.Status != nil,
+			"notes_appended": opts.AppendNotes != "",
+		})
+	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
 	return nil
 }
@@ -2221,6 +2292,15 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 		Type:        opts.Type,
 	}); err != nil {
 		return fmt.Errorf("failed to add dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"action":         "add",
+			"issue_id":       opts.IssueID,
+			"depends_on_id":  opts.DependsOnID,
+			"dependency_type": opts.Type,
+			"updated":        true,
+		})
 	}
 	fmt.Printf("Added dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
 	return nil
@@ -2243,6 +2323,15 @@ func IssueDependencyRemoveCommand(deps *Dependencies, opts IssueDependencyRemove
 		Confirm:     opts.Confirm,
 	}); err != nil {
 		return fmt.Errorf("failed to remove dependency %s -> %s: %w", opts.IssueID, opts.DependsOnID, err)
+	}
+	if opts.JSON {
+		return printJSON(map[string]any{
+			"action":          "remove",
+			"issue_id":        opts.IssueID,
+			"depends_on_id":   opts.DependsOnID,
+			"dependency_type": opts.Type,
+			"updated":         true,
+		})
 	}
 	fmt.Printf("Removed dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
 	return nil
@@ -2344,7 +2433,7 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 	}
 
 	if !opts.DryRun && len(ops) > 0 {
-		if err := executeBulkApply(deps, false, ops); err != nil {
+		if err := executeBulkApply(deps, false, opts.JSON, ops); err != nil {
 			return err
 		}
 		summary.Applied = summary.Planned
@@ -2440,7 +2529,7 @@ func IssueBulkCreateCommand(deps *Dependencies, opts IssueBulkCreateOptions) err
 		})
 	}
 
-	return executeBulkApply(deps, opts.DryRun, ops)
+	return executeBulkApply(deps, opts.DryRun, opts.JSON, ops)
 }
 
 func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) error {
@@ -2593,7 +2682,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		return fmt.Errorf("bulk-update input produced no operations")
 	}
 
-	return executeBulkApply(deps, opts.DryRun, ops)
+	return executeBulkApply(deps, opts.DryRun, opts.JSON, ops)
 }
 
 func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
@@ -3028,7 +3117,7 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]depe
 	return dependencies, dependents
 }
 
-func executeBulkApply(deps *Dependencies, dryRun bool, operations []protocol.ApplyOperationBody) error {
+func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations []protocol.ApplyOperationBody) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -3071,6 +3160,18 @@ func executeBulkApply(deps *Dependencies, dryRun bool, operations []protocol.App
 
 	if len(resp.Body) == 0 {
 		fmt.Println("Bulk apply completed.")
+		return nil
+	}
+	if asJSON {
+		if _, err := os.Stdout.Write(resp.Body); err != nil {
+			return fmt.Errorf("write bulk apply response: %w", err)
+		}
+		if !bytes.HasSuffix(resp.Body, []byte("\n")) {
+			fmt.Println()
+		}
+		if applyResponseExitCode(resp) == exitCodePartialFailure {
+			return fmt.Errorf("bulk apply completed with partial failures")
+		}
 		return nil
 	}
 	var pretty any
