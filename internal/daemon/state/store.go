@@ -108,11 +108,20 @@ func (s *Store) UpsertSession(projectID, sessionID, issueID string, state Sessio
 		}
 	}
 	ps.revision++
+	updatedAt := s.nowFn().UTC()
+	if ok && !existing.UpdatedAt.IsZero() {
+		// Preserve the original session-start timestamp across lifecycle transitions
+		// so UI age counters remain stable. Reset only on a fresh restart.
+		resetStartTimestamp := existing.State == SessionStateStopped && state == SessionStateStarting
+		if !resetStartTimestamp {
+			updatedAt = existing.UpdatedAt
+		}
+	}
 	next := Session{
 		ID:        sessionID,
 		IssueID:   issueID,
 		State:     state,
-		UpdatedAt: s.nowFn().UTC(),
+		UpdatedAt: updatedAt,
 	}
 	ps.sessions[sessionID] = next
 	return SessionEvent{
