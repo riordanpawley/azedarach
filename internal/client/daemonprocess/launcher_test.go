@@ -2,11 +2,13 @@ package daemonprocess
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type trackingWriteCloser struct {
@@ -37,6 +39,7 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 		t.Fatalf("launcher.LockPath = %q, want %q", launcher.LockPath, filepath.Join(socketRoot, "daemon.lock"))
 	}
 	launcher.BinPath = "true"
+	launcher.waitForReady = func(context.Context, string) error { return nil }
 	launcher.openLogFile = func(path string) (io.WriteCloser, error) {
 		want := filepath.Join(repoDir, ".azedarach", "daemon.log")
 		if path != want {
@@ -117,5 +120,30 @@ func TestLauncherResolveBinary_UsesWorkingDirBinFallback(t *testing.T) {
 	launcher := NewLauncher(repoDir, socketPath)
 	if got := launcher.resolveBinary(); got != azd {
 		t.Fatalf("resolveBinary() = %q, want %q", got, azd)
+	}
+}
+
+func TestLauncherStart_SkipsSpawnWhenLockOwnerAlive(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = filepath.Join(t.TempDir(), "missing-azd")
+	launcher.waitForReady = func(context.Context, string) error { return nil }
+	launcher.sleepFn = func(time.Duration) {}
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v, want nil (skip spawn when daemon lock owner alive)", err)
 	}
 }

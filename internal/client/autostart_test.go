@@ -88,6 +88,36 @@ func TestEnsureAttachedSingleflightStart(t *testing.T) {
 	}
 }
 
+func TestEnsureAttachedTransientHandshakeFailureDoesNotAutostart(t *testing.T) {
+	var calls atomic.Int32
+	h := &fakeHandshaker{
+		fn: func() (protocol.HelloAck, error) {
+			if calls.Add(1) == 1 {
+				return protocol.HelloAck{}, errors.New("dial unavailable")
+			}
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+	}
+	s := &fakeStarter{}
+	o := NewAutostartOrchestrator(h, s)
+	o.sleepFn = func(_ time.Duration) {}
+
+	ack, err := o.EnsureAttached(context.Background(), protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "cli",
+		ClientVersion:   "dev",
+	})
+	if err != nil {
+		t.Fatalf("EnsureAttached err: %v", err)
+	}
+	if !ack.Accepted {
+		t.Fatalf("ack.Accepted = false, want true")
+	}
+	if got := s.startCalls.Load(); got != 0 {
+		t.Fatalf("starter calls = %d, want 0", got)
+	}
+}
+
 func TestEnsureAttachedUpgradeRequiredNoRetry(t *testing.T) {
 	h := &fakeHandshaker{
 		fn: func() (protocol.HelloAck, error) {
