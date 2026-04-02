@@ -182,7 +182,7 @@ func TestGitHooksInstallCommandInjectsManagedBlockBeforeEarlyReturn(t *testing.T
 	}
 }
 
-func TestGitHooksNotifyCommandSyncsDaemonGitStatus(t *testing.T) {
+func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	projectDir := t.TempDir()
 	initCmd := exec.Command("git", "-C", projectDir, "init")
 	initCmd.Env = gitExecEnvWithoutRoutingVars()
@@ -211,8 +211,8 @@ func TestGitHooksNotifyCommandSyncsDaemonGitStatus(t *testing.T) {
 	if err := GitHooksNotifyCommand(deps, opts); err != nil {
 		t.Fatalf("GitHooksNotifyCommand error: %v", err)
 	}
-	if gotReq.Command != daemonclient.CommandGitStatusSync {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatusSync)
+	if gotReq.Command != daemonclient.CommandGitStatus {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatus)
 	}
 	var body daemonclient.GitCommandRequest
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {

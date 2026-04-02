@@ -15,7 +15,6 @@ const (
 	CommandGitAbortMerge     = "git.abort_merge"
 	CommandGitDiffStat       = "git.diff_stat"
 	CommandGitStatus         = "git.status"
-	CommandGitStatusSync     = "git.status_sync"
 	CommandGitRuntimeSignals = "git.runtime_signals"
 	CommandGitMergePreflight = "git.merge_preflight"
 	CommandGitDiscard        = "git.discard_changes"
@@ -36,8 +35,6 @@ type GitCommandRequest struct {
 	BaseBranch    string                    `json:"base_branch,omitempty"`
 	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
 	CompareRemote bool                      `json:"compare_remote,omitempty"`
-	Status        *git.GitStatus            `json:"status,omitempty"`
-	ForcePublish  bool                      `json:"force_publish,omitempty"`
 }
 
 // GitCommandResponse captures the daemon response body for git workflow commands.
@@ -210,15 +207,6 @@ func (c *Client) GitStatus(ctx context.Context, worktree string) (git.GitStatus,
 		return git.GitStatus{}, err
 	}
 	return resp.Status, nil
-}
-
-// GitStatusSync asks the daemon to persist a caller-observed git status snapshot.
-func (c *Client) GitStatusSync(ctx context.Context, worktree string, status git.GitStatus, forcePublish bool) error {
-	return c.commandJSON(ctx, CommandGitStatusSync, GitCommandRequest{
-		Worktree:     worktree,
-		Status:       &status,
-		ForcePublish: forcePublish,
-	}, &gitStatusBody{})
 }
 
 // GitRuntimeSignals asks the daemon to compute runtime git signals for issue worktrees.

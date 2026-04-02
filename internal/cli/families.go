@@ -15,7 +15,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
@@ -681,14 +680,6 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if knownStatus, ok := localGitStatusSnapshot(worktreeRoot); ok {
-		if err := deps.DaemonClient.GitStatusSync(ctx, worktreeRoot, knownStatus, true); err == nil {
-			if verbose {
-				fmt.Printf("githooks hook: synced daemon git state for %s (%s)\n", worktreeRoot, hookName)
-			}
-			return nil
-		}
-	}
 	if _, err := deps.DaemonClient.GitStatus(ctx, worktreeRoot); err != nil {
 		if verbose {
 			fmt.Fprintf(os.Stderr, "githooks hook: daemon git status refresh failed for %s: %v\n", worktreeRoot, err)
@@ -703,48 +694,6 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-func localGitStatusSnapshot(worktreeRoot string) (daemonclient.GitStatus, bool) {
-	output, err := runShellCommandOutput(worktreeRoot, "git status --porcelain")
-	if err != nil {
-		return daemonclient.GitStatus{}, false
-	}
-	status := daemonclient.GitStatus{}
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || len(line) < 3 {
-			continue
-		}
-		indexStatus := line[0]
-		worktreeStatus := line[1]
-		path := strings.TrimSpace(line[2:])
-		if path == "" {
-			continue
-		}
-		if indexStatus == '?' && worktreeStatus == '?' {
-			status.Untracked = append(status.Untracked, path)
-			continue
-		}
-		switch indexStatus {
-		case 'A', 'C':
-			status.Added = append(status.Added, path)
-			status.Staged = append(status.Staged, path)
-		case 'M', 'R':
-			status.Staged = append(status.Staged, path)
-		case 'D':
-			status.Deleted = append(status.Deleted, path)
-			status.Staged = append(status.Staged, path)
-		}
-		switch worktreeStatus {
-		case 'M':
-			status.Modified = append(status.Modified, path)
-		case 'D':
-			status.Deleted = append(status.Deleted, path)
-		}
-	}
-	status.HasChanges = len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Staged) > 0
-	return status, true
 }
 
 func GateCommand(_ *Dependencies, opts GateOptions) error {
@@ -1786,17 +1735,6 @@ func runShellCommand(projectDir, command string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-func runShellCommandOutput(projectDir, command string) (string, error) {
-	cmd := exec.Command("/bin/sh", "-lc", command)
-	cmd.Dir = projectDir
-	cmd.Env = gitExecEnvWithoutRoutingVars()
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return string(output), nil
 }
 
 func setGitHooksPath(projectDir, hooksPath string) error {
