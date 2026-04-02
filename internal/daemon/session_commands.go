@@ -345,6 +345,10 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
+	// Write-through stopped projection immediately so cache-first task/session
+	// reads do not resurrect a just-stopped session while tmux/process stop
+	// work is still in flight.
+	d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
 	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -379,6 +383,46 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		"",
 	), "\n")
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
+	if d.projectionStore == nil {
+		return
+	}
+
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	issueID = strings.TrimSpace(issueID)
+	if sessionID == "" {
+		return
+	}
+	if issueID == "" {
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionID, d.sessionNamingScope(projectID)); ok {
+			issueID = parsedIssueID
+		}
+	}
+	if issueID == "" {
+		issueID = sessionID
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.projectionStore.UpsertSession(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateStopped,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("write-through stop session projection failed",
+			"project_id", projectID,
+			"session_id", sessionID,
+			"issue_id", issueID,
+			"error", err,
+		)
+	}
 }
 
 func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -747,6 +791,14 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 			for _, session := range cachedSessions {
 				if session.State == daemonstate.SessionStateStopped {
 					continue
+				}
+				if d.isSessionStopPending(projectID, session.IssueID) {
+					continue
+				}
+				if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, d.sessionNamingScope(projectID)); ok {
+					if d.isSessionStopPending(projectID, parsedIssueID) {
+						continue
+					}
 				}
 				if strings.TrimSpace(session.ID) == "" {
 					continue
