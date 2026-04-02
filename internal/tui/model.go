@@ -3546,6 +3546,25 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	return nil, nil
 }
 
+func (m Model) taskAndSessionByID(issueID string) (*domain.Task, *domain.Session, bool) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, nil, false
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID != issueID {
+			continue
+		}
+		task := m.tasks[i]
+		session := task.Session
+		if session == nil {
+			session = m.sessionForIssue(issueID)
+		}
+		return &task, session, true
+	}
+	return nil, nil, false
+}
+
 // handleBulkAction handles bulk action menu selections
 func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) {
 	count := len(msg.SelectedIDs)
@@ -3593,6 +3612,11 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 
 // handleSelection handles overlay selection messages
 func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
+	selectionTaskID := ""
+	if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
+		selectionTaskID = strings.TrimSpace(workspace.TaskID())
+	}
+
 	// Handle special overlay-specific messages first (before popping overlay)
 	switch msg.Key {
 	case "abort", "claude", "manual":
@@ -3757,6 +3781,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	task, session := m.getCurrentTaskAndSession()
+	if selectionTaskID != "" {
+		if selectedTask, selectedSession, ok := m.taskAndSessionByID(selectionTaskID); ok {
+			task, session = selectedTask, selectedSession
+		}
+	}
 	if task == nil {
 		return m, nil
 	}
