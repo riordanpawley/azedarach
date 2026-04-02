@@ -1657,6 +1657,21 @@ func TestParseIssueGetArgs(t *testing.T) {
 			args: []string{"--id", "az-4"},
 			want: IssueGetOptions{IssueID: "az-4", JSON: false},
 		},
+		{
+			name:        "single-dash long flag rejected",
+			args:        []string{"-id", "az-4"},
+			errContains: "invalid flag \"-id\": use --id",
+		},
+		{
+			name: "interspersed json flag after positional id",
+			args: []string{"az-4", "--json"},
+			want: IssueGetOptions{IssueID: "az-4", JSON: true},
+		},
+		{
+			name:        "single-dash long interspersed flag rejected",
+			args:        []string{"az-4", "-json"},
+			errContains: "invalid flag \"-json\": use --json",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1704,6 +1719,20 @@ func TestParseIssueCheckAndDoctorArgs(t *testing.T) {
 	}
 	if doctor.IssueID != "az-3" {
 		t.Fatalf("ParseIssueDoctorArgs() named id = %+v", doctor)
+	}
+	check, err = ParseIssueCheckArgs([]string{"az-1", "--json"})
+	if err != nil {
+		t.Fatalf("ParseIssueCheckArgs() interspersed json error = %v", err)
+	}
+	if check.IssueID != "az-1" || !check.JSON {
+		t.Fatalf("ParseIssueCheckArgs() interspersed json = %+v", check)
+	}
+	doctor, err = ParseIssueDoctorArgs([]string{"az-2", "--id", "az-3"})
+	if err != nil {
+		t.Fatalf("ParseIssueDoctorArgs() interspersed named id error = %v", err)
+	}
+	if doctor.IssueID != "az-3" {
+		t.Fatalf("ParseIssueDoctorArgs() interspersed named id = %+v", doctor)
 	}
 	_, err = ParseIssueDoctorArgs([]string{})
 	if err == nil || !strings.Contains(err.Error(), "usage: az issue doctor [--project <project-id>] [--id <issue-id>] [<issue-id>]") {
@@ -1765,6 +1794,18 @@ func TestParseIssueCreateArgs(t *testing.T) {
 				AutoParentFromIssueID: ptrToString("az-parent"),
 			},
 		},
+			{
+				name: "interspersed flags after title",
+				args: []string{"Title", "--impl", "go-bubbletea", "--priority", "P1"},
+				want: IssueCreateOptions{
+					Title:                 "Title",
+					Type:                  domain.TypeTask,
+					Priority:              domain.P1,
+					PriorityExplicit:      true,
+					Implementations:       []string{"go-bubbletea"},
+					AutoParentFromIssueID: ptrToString("az-parent"),
+				},
+			},
 		{
 			name: "deferred defaults priority",
 			args: []string{"--deferred", "Title"},
@@ -1839,6 +1880,11 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			args: []string{"--id", "az-2"},
 			want: IssueCloseOptions{IssueID: "az-2"},
 		},
+		{
+			name: "interspersed named id overrides positional",
+			args: []string{"az-1", "--id", "az-2"},
+			want: IssueCloseOptions{IssueID: "az-2"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1875,6 +1921,13 @@ func TestParseIssueDeleteArgs(t *testing.T) {
 	_, err = ParseIssueDeleteArgs([]string{"--impl", "go-bubbletea", "--confirm", "az-1"})
 	if err == nil || !strings.Contains(err.Error(), "--impl is not supported for issue delete") {
 		t.Fatalf("expected impl forbidden error, got %v", err)
+	}
+	got, err = ParseIssueDeleteArgs([]string{"az-1", "--confirm"})
+	if err != nil {
+		t.Fatalf("ParseIssueDeleteArgs() interspersed confirm error = %v", err)
+	}
+	if got.IssueID != "az-1" || !got.Confirm {
+		t.Fatalf("ParseIssueDeleteArgs() interspersed confirm = %+v", got)
 	}
 }
 
@@ -1937,6 +1990,17 @@ func TestParseIssueUpdateArgs(t *testing.T) {
 				Title:   "Renamed",
 			},
 		},
+		{
+			name: "interspersed positional then status flag",
+			args: []string{"az-1", "--status", "blocked"},
+			want: func() IssueUpdateOptions {
+				status := domain.StatusBlocked
+				return IssueUpdateOptions{
+					IssueID: "az-1",
+					Status:  &status,
+				}
+			}(),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1988,6 +2052,13 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	if add.IssueID != "az-1" || add.DependsOnID != "az-2" {
 		t.Fatalf("ParseIssueDependencyAddArgs() named flags = %+v", add)
 	}
+	add, err = ParseIssueDependencyAddArgs([]string{"az-1", "--depends-on-id", "az-2"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyAddArgs() interspersed id+flag error = %v", err)
+	}
+	if add.IssueID != "az-1" || add.DependsOnID != "az-2" {
+		t.Fatalf("ParseIssueDependencyAddArgs() interspersed id+flag = %+v", add)
+	}
 
 	remove, err := ParseIssueDependencyRemoveArgs([]string{"--type", "blocks", "--confirm", "az-3", "az-4"})
 	if err != nil {
@@ -2006,6 +2077,13 @@ func TestParseIssueDependencyArgs(t *testing.T) {
 	}
 	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" {
 		t.Fatalf("ParseIssueDependencyRemoveArgs() named flags = %+v", remove)
+	}
+	remove, err = ParseIssueDependencyRemoveArgs([]string{"az-3", "--depends-on-id", "az-4", "--confirm"})
+	if err != nil {
+		t.Fatalf("ParseIssueDependencyRemoveArgs() interspersed id+flags error = %v", err)
+	}
+	if remove.IssueID != "az-3" || remove.DependsOnID != "az-4" || !remove.Confirm {
+		t.Fatalf("ParseIssueDependencyRemoveArgs() interspersed id+flags = %+v", remove)
 	}
 }
 

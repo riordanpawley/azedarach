@@ -37,11 +37,20 @@ func (e *ExecRunner) Run(ctx context.Context, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	stdoutText := strings.TrimSpace(stdout.String())
+	stderrText := strings.TrimSpace(stderr.String())
 	if err != nil {
-		return "", fmt.Errorf("git %s failed: %w: %s", strings.Join(args, " "), err, stderr.String())
+		detail := stderrText
+		if detail == "" {
+			detail = stdoutText
+		}
+		if detail == "" {
+			return stdoutText, fmt.Errorf("git %s failed: %w", strings.Join(args, " "), err)
+		}
+		return stdoutText, fmt.Errorf("git %s failed: %w: %s", strings.Join(args, " "), err, detail)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return stdoutText, nil
 }
 
 func sanitizedGitEnv(env []string) []string {

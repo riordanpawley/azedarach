@@ -64,8 +64,8 @@ func TestEventLogOverlay_View_RendersNewestFirst(t *testing.T) {
 	overlay := NewEventLogOverlay([]protocol.EventEnvelope{older, newer})
 	overlay.viewHeight = 20
 
-	if got := overlay.events[0].Revision; got != newer.Revision {
-		t.Fatalf("events[0].Revision = %d, want newest revision %d", got, newer.Revision)
+	if got := overlay.events[len(overlay.events)-1].Revision; got != newer.Revision {
+		t.Fatalf("events[last].Revision = %d, want newest revision %d", got, newer.Revision)
 	}
 
 	view := overlay.View()
@@ -153,6 +153,20 @@ func TestEventLogOverlay_Update_NavigationAndClose(t *testing.T) {
 	overlay = model.(*EventLogOverlay)
 	if overlay.scroll != overlay.maxScroll {
 		t.Fatalf("scroll after G = %d, want %d", overlay.scroll, overlay.maxScroll)
+	}
+
+	overlay.scroll = 0
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll <= 0 {
+		t.Fatalf("scroll after ctrl+d = %d, want > 0", overlay.scroll)
+	}
+
+	afterHalfDown := overlay.scroll
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	overlay = model.(*EventLogOverlay)
+	if overlay.scroll >= afterHalfDown {
+		t.Fatalf("scroll after ctrl+u = %d, want < %d", overlay.scroll, afterHalfDown)
 	}
 
 	for _, keyMsg := range []tea.KeyMsg{
@@ -248,6 +262,48 @@ func TestEventLogOverlay_RenderBodyLines_PrettyPrintsJSON(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "\n  \"project_id\": \"azedarach\"") {
 		t.Fatalf("missing pretty-printed field: %q", rendered)
+	}
+}
+
+func TestEventLogOverlay_ContentCacheInvalidation(t *testing.T) {
+	overlay := NewEventLogOverlay([]protocol.EventEnvelope{
+		testEvent(1, "daemon.event.one"),
+		testEvent(2, "daemon.event.two"),
+	})
+
+	if !overlay.contentDirty {
+		t.Fatal("expected initial content cache to be dirty")
+	}
+
+	first := overlay.contentLines()
+	if overlay.contentDirty {
+		t.Fatal("expected cache to be clean after rendering content lines")
+	}
+	second := overlay.contentLines()
+	if len(first) != len(second) {
+		t.Fatalf("cache size mismatch: %d vs %d", len(first), len(second))
+	}
+
+	overlay.AddEvent(testEvent(3, "daemon.event.three"))
+	if !overlay.contentDirty {
+		t.Fatal("expected cache invalidation after AddEvent")
+	}
+}
+
+func TestEventLogOverlay_EventCapAndChronologicalAppend(t *testing.T) {
+	overlay := NewEventLogOverlay(nil)
+	for i := 1; i <= eventLogMaxRetainedEvents+25; i++ {
+		overlay.AddEvent(testEvent(uint64(i), "daemon.event.cap"))
+	}
+
+	if len(overlay.events) != eventLogMaxRetainedEvents {
+		t.Fatalf("retained events = %d, want %d", len(overlay.events), eventLogMaxRetainedEvents)
+	}
+	if got := overlay.events[0].Revision; got != 26 {
+		t.Fatalf("oldest retained revision = %d, want 26", got)
+	}
+	if got := overlay.events[len(overlay.events)-1].Revision; got != eventLogMaxRetainedEvents+25 {
+		t.Fatalf("newest retained revision = %d, want %d", got, eventLogMaxRetainedEvents+25)
 	}
 }
 

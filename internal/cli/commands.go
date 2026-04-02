@@ -749,6 +749,108 @@ func splitLogSourceList(value string) []string {
 	return out
 }
 
+func parseWithInterspersedFlags(fs *flag.FlagSet, args []string) error {
+	normalized, err := normalizeInterspersedFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	return fs.Parse(normalized)
+}
+
+func normalizeInterspersedFlags(fs *flag.FlagSet, args []string) ([]string, error) {
+	if len(args) == 0 {
+		return args, nil
+	}
+
+	flagTokens := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		if token == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if !isFlagToken(token) {
+			positionals = append(positionals, token)
+			continue
+		}
+		if isSingleDashLongFlagToken(token) {
+			flagName := strings.TrimPrefix(token, "-")
+			if idx := strings.Index(flagName, "="); idx >= 0 {
+				flagName = flagName[:idx]
+			}
+			return nil, fmt.Errorf("invalid flag %q: use --%s (single dash is reserved for one-letter aliases)", token, flagName)
+		}
+
+		flagTokens = append(flagTokens, token)
+		if consumesFlagValue(fs, token) && i+1 < len(args) {
+			i++
+			flagTokens = append(flagTokens, args[i])
+		}
+	}
+
+	if len(flagTokens) == 0 || len(positionals) == 0 {
+		return args, nil
+	}
+
+	normalized := make([]string, 0, len(flagTokens)+len(positionals)+1)
+	normalized = append(normalized, flagTokens...)
+	normalized = append(normalized, "--")
+	normalized = append(normalized, positionals...)
+	return normalized, nil
+}
+
+func isFlagToken(token string) bool {
+	return strings.HasPrefix(token, "-") && token != "-"
+}
+
+func isSingleDashLongFlagToken(token string) bool {
+	return strings.HasPrefix(token, "-") && !strings.HasPrefix(token, "--") && len(strings.TrimPrefix(token, "-")) > 1
+}
+
+func consumesFlagValue(fs *flag.FlagSet, token string) bool {
+	name, hasInlineValue := parseFlagName(token)
+	if name == "" || hasInlineValue {
+		return false
+	}
+	defined := fs.Lookup(name)
+	if defined == nil {
+		return false
+	}
+	if bf, ok := defined.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+		return false
+	}
+	return true
+}
+
+func parseFlagName(token string) (string, bool) {
+	switch {
+	case strings.HasPrefix(token, "--"):
+		trimmed := strings.TrimPrefix(token, "--")
+		if trimmed == "" {
+			return "", false
+		}
+		if idx := strings.Index(trimmed, "="); idx >= 0 {
+			return trimmed[:idx], true
+		}
+		return trimmed, false
+	case strings.HasPrefix(token, "-"):
+		trimmed := strings.TrimPrefix(token, "-")
+		if trimmed == "" {
+			return "", false
+		}
+		if idx := strings.Index(trimmed, "="); idx >= 0 {
+			return trimmed[:idx], true
+		}
+		if len(trimmed) != 1 {
+			return "", false
+		}
+		return trimmed, false
+	default:
+		return "", false
+	}
+}
+
 func ParseImplDeleteArgs(args []string) (ImplDeleteOptions, error) {
 	opts := ImplDeleteOptions{}
 	fs := flag.NewFlagSet("impl delete", flag.ContinueOnError)
@@ -954,7 +1056,7 @@ func ParseIssueGetArgs(args []string) (IssueGetOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issue as JSON")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueGetOptions{}, err
 	}
 	if fs.NArg() > 1 {
@@ -1034,7 +1136,7 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	fs.StringVar(&priorityRaw, "priority", "", "issue priority (P0-P4)")
 	fs.BoolVar(&opts.Deferred, "deferred", false, "mark follow-up as deferred (defaults priority to P4 unless --priority provided)")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "issue type (task|bug|feature|epic|chore)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCreateOptions{}, err
 	}
 	if fs.NArg() != 1 {
@@ -1086,7 +1188,7 @@ func ParseIssueDoctorArgs(args []string) (IssueDoctorOptions, error) {
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDoctorOptions{}, err
 	}
 	if fs.NArg() > 1 {
@@ -1116,7 +1218,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
@@ -1148,7 +1250,7 @@ func ParseIssueDeleteArgs(args []string) (IssueDeleteOptions, error) {
 	fs.StringVar(&implFlag, "impl", "", "forbidden for existing-issue commands")
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm permanent issue deletion")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDeleteOptions{}, err
 	}
 	if fs.NArg() > 1 {
@@ -1200,7 +1302,7 @@ func ParseIssueUpdateArgs(args []string) (IssueUpdateOptions, error) {
 	})
 	fs.StringVar(&typeRaw, "type", "", "updated issue type (task|bug|feature|epic|chore)")
 	fs.StringVar(&priorityRaw, "priority", "", "updated priority (P0-P4)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueUpdateOptions{}, err
 	}
 	if fs.NArg() > 1 {
@@ -1262,7 +1364,7 @@ func ParseIssueDependencyAddArgs(args []string) (IssueDependencyAddOptions, erro
 	fs.StringVar(&issueIDFlag, "issue-id", "", "source issue id (named alternative to positional)")
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyAddOptions{}, err
 	}
 	if fs.NArg() > 2 {
@@ -1303,7 +1405,7 @@ func ParseIssueDependencyRemoveArgs(args []string) (IssueDependencyRemoveOptions
 	fs.StringVar(&dependsOnIDFlag, "depends-on-id", "", "dependency target issue id (named alternative to positional)")
 	fs.StringVar(&opts.Type, "type", "blocks", "dependency type (blocks|related|parent-child|discovered-from)")
 	fs.BoolVar(&opts.Confirm, "confirm", false, "confirm removal for guarded dependency types")
-	if err := fs.Parse(args); err != nil {
+	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueDependencyRemoveOptions{}, err
 	}
 	if fs.NArg() > 2 {

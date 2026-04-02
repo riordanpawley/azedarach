@@ -14,7 +14,7 @@
 ││ Priority: [ 0] [ 1] [●2] [ 3] [ 4]          combinations          │
 ││ Impls: [<] (none) [>]                        Ctrl+P Paste image   │
 ││ Acceptance Criteria:                        (edit task)           │
-││ ┃   1 Acceptance criteria (optional)...      Ctrl+O Paste image   │
-││ ┃                                           (alias)               │
-││ ┃                                            j/k + d Manage       │
+││ ┃   1 Acceptance criteria (optional)...      j/k + d Manage       │
+││ ┃                                           attachments           │
+││ ┃                                            Enter Create task    │
 ╰────────────────────────────────────────────────────────────────────╯

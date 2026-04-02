@@ -152,6 +152,69 @@ func TestClient_MigratesLegacySpecSchemaWithoutDataLoss(t *testing.T) {
 	assert.Equal(t, []string{"0004_spec_tables", "0005_spec_audit_log"}, gotMigrations)
 }
 
+func TestClient_ListRequirements_WithTextPrimaryKeyIDs(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "text-id-spec.db")
+	db := openSQLiteDB(t, dbPath)
+
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE IF NOT EXISTS issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS spec_requirements (
+			id TEXT PRIMARY KEY,
+			local_id TEXT NOT NULL,
+			external_code TEXT,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
+		INSERT INTO spec_requirements (id, local_id, external_code, title, description, status, created_at, updated_at, deleted_at)
+		VALUES ('sr_bf420304b9e84e75a5f8b594c494cf0f', 'REQ-TEXT-ID', NULL, 'Text ID requirement', 'compatible with text PK', 'open', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', NULL);
+	`)
+	require.NoError(t, err)
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	requirements, err := client.ListRequirements(ctx, RequirementFilter{})
+	require.NoError(t, err)
+	require.Len(t, requirements, 1)
+	assert.Equal(t, "REQ-TEXT-ID", requirements[0].LocalID)
+}
+
 func TestClient_RequirementCRUDAndSelectorResolution(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

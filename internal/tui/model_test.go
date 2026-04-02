@@ -3202,6 +3202,30 @@ func TestDaemonStreamEventMsg_IgnoresDifferentProject(t *testing.T) {
 	}
 }
 
+func TestDaemonStreamEventMsg_GitStatusEventForcesRuntimeSignalRefresh(t *testing.T) {
+	m := newTestModel()
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		m.tasks[0].ID: {HasWorktree: true},
+	}
+	m.lastRuntimeRefresh = time.Now()
+
+	if m.shouldRefreshRuntimeSignals() {
+		t.Fatal("expected runtime signal refresh TTL gate to be closed before event")
+	}
+
+	next, _ := m.Update(daemonStreamEventMsg{
+		event: protocol.EventEnvelope{
+			Revision: 11,
+			Event:    protocol.EventGitStatusUpdated,
+		},
+	})
+	updated := next.(Model)
+
+	if !updated.runtimeSignalsBusy {
+		t.Fatal("expected git status event to force runtime signal refresh")
+	}
+}
+
 func TestRuntimeSignalsForBoardIncludesPendingMutationState(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
@@ -3229,6 +3253,76 @@ func TestRuntimeSignalsForBoardIncludesPendingMutationState(t *testing.T) {
 	}
 	if got.PendingOperationID != "op-status" {
 		t.Fatalf("pending operation id = %q, want %q", got.PendingOperationID, "op-status")
+	}
+}
+
+func TestPendingMutationForTaskFallsBackToRuntimeSignals(t *testing.T) {
+	m := newTestModel()
+	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
+		"az-1": {
+			PendingOperationState:   "running",
+			PendingOperationID:      "op-runtime",
+			PendingOperationPercent: 33,
+		},
+	}
+
+	progress := m.pendingMutationForTask("az-1")
+	if progress == nil {
+		t.Fatal("expected pending mutation progress from runtime signals")
+	}
+	if progress.OperationID != "op-runtime" {
+		t.Fatalf("operation id = %q, want %q", progress.OperationID, "op-runtime")
+	}
+	if progress.State != "running" {
+		t.Fatalf("state = %q, want %q", progress.State, "running")
+	}
+	if progress.ProgressPercent != 33 {
+		t.Fatalf("progress percent = %d, want 33", progress.ProgressPercent)
+	}
+}
+
+func TestRuntimeSignalsLoadedSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
+	m := newTestModel()
+	task := m.tasks[0]
+	task.HasWorktree = false
+	task.HasUncommittedChanges = false
+	task.GitAdditions = 0
+	task.GitDeletions = 0
+	m.tasks[0] = task
+	m.nav.SelectTask(task.ID, 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
+
+	updatedAny, _ := m.Update(runtimeSignalsLoadedMsg{
+		projectID: m.daemonProjectID(),
+		signalsByTask: map[string]board.RuntimeSignals{
+			task.ID: {
+				HasWorktree:           true,
+				HasUncommittedChanges: true,
+				GitAdditions:          3,
+				GitDeletions:          1,
+			},
+		},
+		refreshedAtByTask: map[string]time.Time{
+			task.ID: time.Now(),
+		},
+		worktreeByTask: map[string]string{
+			task.ID: "/tmp/wt-az-1",
+		},
+		refreshedAt: time.Now(),
+	})
+	updated := updatedAny.(Model)
+
+	current := updated.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay on stack, got %T", current)
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Worktree:") {
+		t.Fatalf("expected worktree summary row in detail panel after runtime refresh, got: %q", view)
+	}
+	if !strings.Contains(view, "dirty (+3/-1)") {
+		t.Fatalf("expected refreshed git status in detail panel, got: %q", view)
 	}
 }
 
