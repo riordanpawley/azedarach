@@ -68,5 +68,10 @@ if [[ "$no_run" -eq 1 ]]; then
   echo "Skipping run (--no-run)"
   exit 0
 fi
+if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
+  AZEDARACH_DAEMON_SCOPE=worktree "$link_dir/az" daemon restart
+else
+  "$link_dir/az" daemon restart
+fi
 echo "Running az..."
 exec "$link_dir/az"

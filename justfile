@@ -3,7 +3,6 @@ default:
     @just --list
 
 build-link-run:
-    az daemon restart
     ./scripts/build-link-run.sh
 
 build:
