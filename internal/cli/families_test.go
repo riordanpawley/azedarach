@@ -426,6 +426,7 @@ func TestCodexInstallCommandWritesHooksConfig(t *testing.T) {
 	for _, want := range []string{
 		"az codex hook run --json session-start",
 		"az codex hook run --json stop",
+		"tail -n 1",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("hooks config missing %q: %s", want, content)

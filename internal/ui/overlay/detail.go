@@ -189,15 +189,11 @@ func (d *DetailPanel) viewStandard() string {
 	// Runtime info
 	if d.showRuntimeSections() {
 		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Session"))
+		b.WriteString(headerStyle.Render("Runtime"))
 		b.WriteString("\n")
 		b.WriteString(labelStyle.Render("Session:"))
 		b.WriteString("  ")
 		b.WriteString(d.formatSessionSummary())
-		b.WriteString("\n")
-
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Git/Worktree"))
 		b.WriteString("\n")
 		b.WriteString(labelStyle.Render("Worktree:"))
 		b.WriteString("  ")
@@ -282,11 +278,8 @@ func (d *DetailPanel) viewCompact() string {
 
 	if d.showRuntimeSections() {
 		addLine("")
-		addLine(headerStyle.Render("Session"))
+		addLine(headerStyle.Render("Runtime"))
 		addLine(labelStyle.Render("Session:") + "  " + d.formatSessionSummary())
-
-		addLine("")
-		addLine(headerStyle.Render("Git/Worktree"))
 		addLine(labelStyle.Render("Worktree:") + "  " + valueStyle.Render(d.formatGitWorktreeSummary()))
 	}
 
@@ -654,14 +647,27 @@ func (d *DetailPanel) formatGitStatus() string {
 	if d.task.GitAdditions > 0 || d.task.GitDeletions > 0 {
 		details = append(details, fmt.Sprintf("+%d/-%d", d.task.GitAdditions, d.task.GitDeletions))
 	}
-	if d.task.GitAheadCount > 0 || d.task.GitBehindCount > 0 {
-		details = append(details, fmt.Sprintf("up %d, down %d", d.task.GitAheadCount, d.task.GitBehindCount))
+	if divergence := formatAheadBehindSummary(d.task.GitAheadCount, d.task.GitBehindCount); divergence != "" {
+		details = append(details, divergence)
 	}
 
 	if len(details) == 0 {
 		return status
 	}
 	return fmt.Sprintf("%s (%s)", status, strings.Join(details, "; "))
+}
+
+func formatAheadBehindSummary(ahead, behind int) string {
+	if ahead > 0 && behind > 0 {
+		return fmt.Sprintf("↑%d/↓%d", ahead, behind)
+	}
+	if behind > 0 {
+		return fmt.Sprintf("↓%d", behind)
+	}
+	if ahead > 0 {
+		return fmt.Sprintf("↑%d", ahead)
+	}
+	return ""
 }
 
 func wrapDescriptionLines(description string, width int) []string {

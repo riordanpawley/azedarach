@@ -100,21 +100,36 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	view := panel.View()
 
 	// Check runtime sections are present
-	assert.Contains(t, view, "Session")
-	assert.Contains(t, view, "Git/Worktree")
+	assert.Contains(t, view, "Runtime")
 	assert.Contains(t, view, "Session:")
 	assert.Contains(t, view, "Worktree:")
 	assert.Contains(t, view, "busy")
 	assert.Contains(t, view, "Age")
 	assert.Contains(t, view, "dirty")
 	assert.Contains(t, view, "+9/-2")
-	assert.Contains(t, view, "up 1, down 3")
+	assert.Contains(t, view, "↑1/↓3")
 	assert.Contains(t, view, "|")
 	assert.Contains(t, view, "Age")
 	assert.NotContains(t, view, "available")
 	assert.NotContains(t, view, "Attached:")
 	assert.Contains(t, view, ":3000")
 	assert.Contains(t, view, "Dev :3000")
+}
+
+func TestDetailPanelViewShowsBehindOnlyDirectionalStatus(t *testing.T) {
+	task := domain.Task{
+		ID:             "az-790",
+		Title:          "Task with behind-only divergence",
+		Status:         domain.StatusInProgress,
+		HasWorktree:    true,
+		GitBehindCount: 5,
+	}
+
+	panel := NewDetailPanel(task)
+	view := panel.View()
+
+	assert.Contains(t, view, "↓5")
+	assert.NotContains(t, view, "↑0/↓5")
 }
 
 func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
@@ -150,9 +165,8 @@ func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
 	panel := NewDetailPanel(task)
 	view := panel.View()
 
-	assert.Contains(t, view, "Session")
+	assert.Contains(t, view, "Runtime")
 	assert.Contains(t, view, "none")
-	assert.Contains(t, view, "Git/Worktree")
 	assert.Contains(t, view, "Age N/A")
 }
 

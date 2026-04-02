@@ -357,12 +357,29 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 
 	hasChanges := signals.HasUncommittedChanges || signals.GitAdditions > 0 || signals.GitDeletions > 0
 	if hasChanges {
-		parts = append(parts, renderRuntimeSignalToken("G*", styles.Peach, s))
+		token := "G*"
+		if divergence := formatAheadBehindToken(signals.GitAheadCount, signals.GitBehindCount); divergence != "" {
+			token += divergence
+		}
+		parts = append(parts, renderRuntimeSignalToken(token, styles.Peach, s))
 	} else if signals.GitAheadCount > 0 || signals.GitBehindCount > 0 {
-		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G%d/%d", signals.GitAheadCount, signals.GitBehindCount), styles.Yellow, s))
+		parts = append(parts, renderRuntimeSignalToken("G"+formatAheadBehindToken(signals.GitAheadCount, signals.GitBehindCount), styles.Yellow, s))
 	}
 
 	return strings.Join(parts, "")
+}
+
+func formatAheadBehindToken(ahead, behind int) string {
+	if ahead > 0 && behind > 0 {
+		return fmt.Sprintf("↑%d/↓%d", ahead, behind)
+	}
+	if behind > 0 {
+		return fmt.Sprintf("↓%d", behind)
+	}
+	if ahead > 0 {
+		return fmt.Sprintf("↑%d", ahead)
+	}
+	return ""
 }
 
 func renderPendingOperationToken(state string, percent int, compact bool) string {

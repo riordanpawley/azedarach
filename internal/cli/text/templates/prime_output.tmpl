@@ -8,10 +8,10 @@ Primer evidence key: `{{ .PrimeEvidenceKey }}`
   - `az issue create "Title"` (auto-parents under `AZEDARACH_ISSUE_ID`; use `--deferred` for non-immediate follow-ups)
 - How to use `az` command map:
   - Issue lifecycle:
-  - `az issue list --limit 20`, `az issue get <issue-id>`, `az issue create "Child task"` (auto-parent), `az issue create --deferred "Later task"`, `az issue update <issue-id> --status in_progress|blocked|open`, `az issue close <issue-id> --reason "..."`
+  - `az issue list --limit 20`, `az issue get <issue-id>`, `az issue create "Child task" [--json]` (auto-parent), `az issue create --deferred "Later task" [--json]`, `az issue update <issue-id> --status in_progress|blocked|open [--json]`, `az issue close <issue-id> [--json]`
   - `az issue bulk-create --input issues.json --json`, `az issue bulk-update --input updates.json --json`, `az issue update <issue-id> --design "..."`, `az issue update <issue-id> --notes "..."`, `az issue update <issue-id> --append-notes "..."`
   - Issue dependency graph:
-  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]`
+  - `az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`, `az issue dep remove <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from] [--json]`
   - Fanout orchestration:
   - `az issue fanout --input ./fanout.json`, `az issue fanout --input ./fanout.json --apply`, `az issue fanout ready --root <issue-id> --json`, `az issue fanout drift --issue <issue-id> --worktree <path> --fail-on-out`
   - Mailbox coordination:
