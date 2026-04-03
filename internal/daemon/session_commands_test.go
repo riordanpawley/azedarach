@@ -608,6 +608,10 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 	if !foundStopped {
 		t.Fatalf("expected write-through stopped projection for %s before kill completes; rows=%+v", sessionID, rows)
 	}
+	snapshot := store.ReadSnapshot(projectID)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
+		t.Fatalf("expected cached session state stopped for %s before kill completes, got %s", sessionID, got)
+	}
 
 	close(tmuxRunner.killRelease)
 	if err := <-done; err != nil {

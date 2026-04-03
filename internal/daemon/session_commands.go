@@ -504,21 +504,9 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
 	// work is still in flight.
+	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
+	defer clearStopPending()
 	d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
-	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	exists := len(sessionNamesToKill) > 0
-	if exists {
-		clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
-		defer clearStopPending()
-		for _, sessionName := range sessionNamesToKill {
-			if err := d.tmux.KillSession(ctx, sessionName); err != nil {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-			}
-		}
-	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -528,6 +516,18 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		daemonhandlers.CommandSessionStop,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
+	}
+	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	exists := len(sessionNamesToKill) > 0
+	if exists {
+		for _, sessionName := range sessionNamesToKill {
+			if err := d.tmux.KillSession(ctx, sessionName); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+		}
 	}
 	outputLines := []string{
 		fmt.Sprintf("Killing session: %s", cmd.IssueID),
@@ -834,6 +834,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionIDInTmux, namingScope)
 		if !parsed {
 			issueID = sessionIDInTmux
+		}
+		if d.isSessionStopPending(projectID, issueID) {
+			continue
 		}
 		d.ensureSessionWorktreeProjection(ctx, projectID, issueID)
 		if !ok {
