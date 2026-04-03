@@ -98,6 +98,21 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 	if _, err := client.DBStats(); err != nil {
 		return fmt.Errorf("open issue store: %w", err)
 	}
+	runtimeStore := d.runtimeStateStoreForProject(protocol.DefaultProjectID)
+	if runtimeStore == nil {
+		return nil
+	}
+	if _, err := runtimeStore.ListProjectIDs(ctx); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("open runtime state store failed during bootstrap", "error", err)
+		}
+		return nil
+	}
+	if err := d.migrateLegacyRuntimeState(ctx); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("migrate runtime state store failed during bootstrap", "error", err)
+		}
+	}
 	return nil
 }
 

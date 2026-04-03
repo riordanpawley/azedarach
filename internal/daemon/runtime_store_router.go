@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"context"
+	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -55,4 +58,65 @@ func (d *Daemon) runtimeStateStoreForProject(projectID string) *daemonstate.Runt
 		d.worktreeRuntimeStore = store
 	}
 	return store
+}
+
+func (d *Daemon) migrateLegacyRuntimeState(ctx context.Context) error {
+	source := d.runtimeStateStoreForProject(protocol.DefaultProjectID)
+	if source == nil {
+		return fmt.Errorf("runtime state store unavailable")
+	}
+	projectIDs, err := source.ListProjectIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("list runtime state project ids: %w", err)
+	}
+	slices.Sort(projectIDs)
+	for _, projectID := range projectIDs {
+		projectID = protocol.NormalizeProjectID(projectID)
+		if projectID == "" {
+			continue
+		}
+		target := d.runtimeStateStoreForProject(projectID)
+		if target == nil || target == source {
+			continue
+		}
+
+		existingSessions, err := target.ListSessionStates(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("check migrated session state %s: %w", projectID, err)
+		}
+		existingWorktrees, err := target.ListWorktreeStates(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("check migrated worktree state %s: %w", projectID, err)
+		}
+		if len(existingSessions) > 0 || len(existingWorktrees) > 0 {
+			continue
+		}
+
+		sourceSessions, err := source.ListSessionStates(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("load legacy session state %s: %w", projectID, err)
+		}
+		sourceWorktrees, err := source.ListWorktreeStates(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("load legacy worktree state %s: %w", projectID, err)
+		}
+		if len(sourceSessions) == 0 && len(sourceWorktrees) == 0 {
+			continue
+		}
+		if err := target.ReplaceSessionStates(ctx, projectID, sourceSessions); err != nil {
+			return fmt.Errorf("migrate session state %s: %w", projectID, err)
+		}
+		if err := target.ReplaceWorktreeStates(ctx, projectID, sourceWorktrees); err != nil {
+			return fmt.Errorf("migrate worktree state %s: %w", projectID, err)
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info(
+				"migrated legacy runtime state to routed project store",
+				"project_id", projectID,
+				"session_rows", len(sourceSessions),
+				"worktree_rows", len(sourceWorktrees),
+			)
+		}
+	}
+	return nil
 }
