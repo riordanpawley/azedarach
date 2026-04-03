@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,9 @@ type Daemon struct {
 	apply  *daemonhandlers.ApplyHandler
 
 	issues                   *issues.Client
+	issueClientsMu           sync.Mutex
+	issueClientsByProject    map[string]*issues.Client
+	issueClientsByRoot       map[string]*issues.Client
 	tmux                     *tmux.Client
 	git                      *git.Client
 	worktree                 *git.WorktreeManager
@@ -171,13 +175,15 @@ func New(cfg Config) *Daemon {
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
-	specHandler := daemonhandlers.NewSpecHandler(issueSpecService{client: issuesClient})
+	specService := issueSpecService{daemon: nil}
 
 	d := &Daemon{
 		cfg:                     cfg,
 		lock:                    lifecycle.NewLockManager(cfg.LockPath),
 		hub:                     publish.NewHub(512, 64, cfg.Logger),
 		issues:                  issuesClient,
+		issueClientsByProject:   map[string]*issues.Client{},
+		issueClientsByRoot:      map[string]*issues.Client{},
 		tmux:                    tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                     gitClient,
 		worktree:                git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
@@ -192,6 +198,16 @@ func New(cfg Config) *Daemon {
 		sessionStateLastRefresh: map[string]time.Time{},
 		revision:                map[string]uint64{},
 	}
+	d.issueClientsByRoot[strings.TrimSpace(cfg.RepoDir)] = issuesClient
+	d.issueClientsByProject[protocol.DefaultProjectID] = issuesClient
+	if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
+		d.issueClientsByProject[repoName] = issuesClient
+	}
+	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
+		d.issueClientsByProject[protocol.NormalizeProjectID(hashProjectID)] = issuesClient
+	}
+	specService.daemon = d
+	specHandler := daemonhandlers.NewSpecHandler(specService)
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
@@ -240,7 +256,7 @@ func New(cfg Config) *Daemon {
 		specHandler,
 		runtime,
 	)
-	d.apply = daemonhandlers.NewApplyHandler(d.issues, applyRevisionAdapter{daemon: d})
+	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})
 
 	d.serve = transport.NewServer(cfg.SocketPath, transport.Handlers{
 		Handshake: d.handshake,
@@ -286,11 +302,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close operation runtime", "error", closeErr)
 			}
 		}
-		if d.issues != nil {
-			if closeErr := d.issues.CloseDB(); closeErr != nil {
-				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
-			}
-		}
+		d.closeIssueClients()
 		if d.runtimeReconcileQueue != nil {
 			if closeErr := d.runtimeReconcileQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
@@ -357,6 +369,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	startedAt := time.Now()
 	projectID := d.projectID(req.Meta)
 	req.Meta.ProjectID = projectID
+	ctx = withDaemonProjectIDContext(ctx, projectID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
 			"daemon command received",

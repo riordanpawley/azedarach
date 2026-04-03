@@ -20,10 +20,25 @@ import (
 )
 
 type issueSpecService struct {
-	client *issues.Client
+	daemon *Daemon
+}
+
+func (s issueSpecService) issueClient(ctx context.Context) (*issues.Client, error) {
+	if s.daemon == nil {
+		return nil, errors.New("issue store unavailable")
+	}
+	client := s.daemon.issueClientForProject(daemonProjectIDFromContext(ctx))
+	if client == nil {
+		return nil, errors.New("issue store unavailable")
+	}
+	return client, nil
 }
 
 func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.SpecRequirementListRequestBody) (protocol.SpecRequirementListResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecRequirementListResponseBody{}, err
+	}
 	filter := issues.RequirementFilter{
 		IssueID:  req.IssueID,
 		LocalIDs: req.IDs,
@@ -31,7 +46,7 @@ func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.Spe
 	if req.Status != "" {
 		filter.Statuses = []issues.RequirementStatus{issues.RequirementStatus(req.Status)}
 	}
-	rows, err := s.client.ListRequirements(ctx, filter)
+	rows, err := client.ListRequirements(ctx, filter)
 	if err != nil {
 		return protocol.SpecRequirementListResponseBody{}, err
 	}
@@ -43,7 +58,11 @@ func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.Spe
 }
 
 func (s issueSpecService) GetRequirement(ctx context.Context, req protocol.SpecRequirementGetRequestBody) (protocol.SpecRequirementGetResponseBody, error) {
-	row, err := s.client.GetRequirement(ctx, req.ID)
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecRequirementGetResponseBody{}, err
+	}
+	row, err := client.GetRequirement(ctx, req.ID)
 	if err != nil {
 		return protocol.SpecRequirementGetResponseBody{}, err
 	}
@@ -51,6 +70,10 @@ func (s issueSpecService) GetRequirement(ctx context.Context, req protocol.SpecR
 }
 
 func (s issueSpecService) CreateRequirement(ctx context.Context, req protocol.SpecRequirementCreateRequestBody) (protocol.SpecRequirementCreateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecRequirementCreateResponseBody{}, err
+	}
 	params := issues.CreateRequirementParams{
 		LocalID:     req.ID,
 		Title:       req.Title,
@@ -60,7 +83,7 @@ func (s issueSpecService) CreateRequirement(ctx context.Context, req protocol.Sp
 	if req.IssueID != "" {
 		params.IssueID = &req.IssueID
 	}
-	row, err := s.client.CreateRequirement(ctx, params)
+	row, err := client.CreateRequirement(ctx, params)
 	if err != nil {
 		return protocol.SpecRequirementCreateResponseBody{}, err
 	}
@@ -68,6 +91,10 @@ func (s issueSpecService) CreateRequirement(ctx context.Context, req protocol.Sp
 }
 
 func (s issueSpecService) UpdateRequirement(ctx context.Context, req protocol.SpecRequirementUpdateRequestBody) (protocol.SpecRequirementUpdateResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecRequirementUpdateResponseBody{}, err
+	}
 	params := issues.UpdateRequirementParams{
 		Title:       req.Title,
 		Description: req.Description,
@@ -76,7 +103,7 @@ func (s issueSpecService) UpdateRequirement(ctx context.Context, req protocol.Sp
 		status := issues.RequirementStatus(*req.Status)
 		params.Status = &status
 	}
-	row, err := s.client.UpdateRequirement(ctx, req.ID, params)
+	row, err := client.UpdateRequirement(ctx, req.ID, params)
 	if err != nil {
 		return protocol.SpecRequirementUpdateResponseBody{}, err
 	}
@@ -84,7 +111,11 @@ func (s issueSpecService) UpdateRequirement(ctx context.Context, req protocol.Sp
 }
 
 func (s issueSpecService) DeleteRequirement(ctx context.Context, req protocol.SpecRequirementDeleteRequestBody) (protocol.SpecRequirementDeleteResponseBody, error) {
-	if err := s.client.DeleteRequirement(ctx, req.ID); err != nil {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecRequirementDeleteResponseBody{}, err
+	}
+	if err := client.DeleteRequirement(ctx, req.ID); err != nil {
 		return protocol.SpecRequirementDeleteResponseBody{}, err
 	}
 	return protocol.SpecRequirementDeleteResponseBody{
@@ -94,7 +125,11 @@ func (s issueSpecService) DeleteRequirement(ctx context.Context, req protocol.Sp
 }
 
 func (s issueSpecService) ListLinks(ctx context.Context, req protocol.SpecLinkListRequestBody) (protocol.SpecLinkListResponseBody, error) {
-	links, err := s.client.ListSpecLinks(ctx, issues.SpecLinkFilter{
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecLinkListResponseBody{}, err
+	}
+	links, err := client.ListSpecLinks(ctx, issues.SpecLinkFilter{
 		IssueID:       req.IssueID,
 		RequirementID: req.ReqID,
 		LinkIDs:       req.IDs,
@@ -110,6 +145,10 @@ func (s issueSpecService) ListLinks(ctx context.Context, req protocol.SpecLinkLi
 }
 
 func (s issueSpecService) AddLink(ctx context.Context, req protocol.SpecLinkAddRequestBody) (protocol.SpecLinkAddResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecLinkAddResponseBody{}, err
+	}
 	params := issues.AddSpecLinkParams{
 		IssueID:       req.IssueID,
 		RequirementID: req.ReqID,
@@ -118,7 +157,7 @@ func (s issueSpecService) AddLink(ctx context.Context, req protocol.SpecLinkAddR
 	if req.Note != "" {
 		params.Note = &req.Note
 	}
-	link, err := s.client.AddSpecLink(ctx, params)
+	link, err := client.AddSpecLink(ctx, params)
 	if err != nil {
 		return protocol.SpecLinkAddResponseBody{}, err
 	}
@@ -126,7 +165,11 @@ func (s issueSpecService) AddLink(ctx context.Context, req protocol.SpecLinkAddR
 }
 
 func (s issueSpecService) RemoveLink(ctx context.Context, req protocol.SpecLinkRemoveRequestBody) (protocol.SpecLinkRemoveResponseBody, error) {
-	if err := s.client.RemoveSpecLink(ctx, req.IssueID, req.ReqID); err != nil {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecLinkRemoveResponseBody{}, err
+	}
+	if err := client.RemoveSpecLink(ctx, req.IssueID, req.ReqID); err != nil {
 		return protocol.SpecLinkRemoveResponseBody{}, err
 	}
 	return protocol.SpecLinkRemoveResponseBody{
@@ -137,10 +180,14 @@ func (s issueSpecService) RemoveLink(ctx context.Context, req protocol.SpecLinkR
 }
 
 func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequestBody) (protocol.SpecReadResponseBody, error) {
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecReadResponseBody{}, err
+	}
 	resolvedReqID := req.ReqID
 	requirements := make([]issues.Requirement, 0, 1)
 	if req.ReqID != "" {
-		requirement, err := s.client.GetRequirement(ctx, req.ReqID)
+		requirement, err := client.GetRequirement(ctx, req.ReqID)
 		if err != nil {
 			return protocol.SpecReadResponseBody{}, err
 		}
@@ -150,14 +197,14 @@ func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 
 	if req.ReqID == "" {
 		reqFilter := issues.RequirementFilter{IssueID: req.IssueID}
-		rows, err := s.client.ListRequirements(ctx, reqFilter)
+		rows, err := client.ListRequirements(ctx, reqFilter)
 		if err != nil {
 			return protocol.SpecReadResponseBody{}, err
 		}
 		requirements = rows
 	}
 	linkFilter := issues.SpecLinkFilter{IssueID: req.IssueID, RequirementID: resolvedReqID}
-	links, err := s.client.ListSpecLinks(ctx, linkFilter)
+	links, err := client.ListSpecLinks(ctx, linkFilter)
 	if err != nil {
 		return protocol.SpecReadResponseBody{}, err
 	}
@@ -173,7 +220,7 @@ func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 			if _, ok := present[link.RequirementID]; ok {
 				continue
 			}
-			row, err := s.client.GetRequirement(ctx, link.RequirementID)
+			row, err := client.GetRequirement(ctx, link.RequirementID)
 			if err != nil {
 				return protocol.SpecReadResponseBody{}, err
 			}
@@ -197,13 +244,17 @@ func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 }
 
 func (s issueSpecService) Lint(ctx context.Context, _ protocol.SpecLintRequestBody) (protocol.SpecLintResponseBody, error) {
-	requirements, err := s.client.ListRequirements(ctx, issues.RequirementFilter{})
+	client, err := s.issueClient(ctx)
+	if err != nil {
+		return protocol.SpecLintResponseBody{}, err
+	}
+	requirements, err := client.ListRequirements(ctx, issues.RequirementFilter{})
 	if err != nil {
 		return protocol.SpecLintResponseBody{}, err
 	}
 	diagnostics := make([]protocol.SpecDiagnostic, 0)
 	for _, req := range requirements {
-		links, err := s.client.ListSpecLinksByRequirementLocalID(ctx, req.LocalID)
+		links, err := client.ListSpecLinksByRequirementLocalID(ctx, req.LocalID)
 		if err != nil {
 			return protocol.SpecLintResponseBody{}, err
 		}

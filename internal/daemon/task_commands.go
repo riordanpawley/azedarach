@@ -58,7 +58,11 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID)
 	}
-	tasks, err := d.issues.List(ctx)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -445,6 +449,10 @@ func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issu
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		Title           string          `json:"title"`
 		Description     string          `json:"description"`
@@ -472,7 +480,7 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 			"parent_id", cmd.ParentID,
 		)
 	}
-	taskID, err := d.issues.Create(ctx, issues.CreateTaskParams{
+	taskID, err := issueClient.Create(ctx, issues.CreateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
 		Type:            cmd.Type,
@@ -504,6 +512,10 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 
 func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID string        `json:"task_id"`
 		Status domain.Status `json:"status"`
@@ -514,7 +526,7 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task status update requested", "project_id", projectID, "task_id", cmd.TaskID, "status", cmd.Status)
 	}
-	if err := d.issues.Update(ctx, cmd.TaskID, cmd.Status); err != nil {
+	if err := issueClient.Update(ctx, cmd.TaskID, cmd.Status); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
@@ -528,6 +540,10 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 
 func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID          string          `json:"task_id"`
 		Title           string          `json:"title"`
@@ -542,7 +558,7 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task details update requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
-	if err := d.issues.UpdateDetails(ctx, cmd.TaskID, issues.UpdateTaskParams{
+	if err := issueClient.UpdateDetails(ctx, cmd.TaskID, issues.UpdateTaskParams{
 		Title:           cmd.Title,
 		Description:     cmd.Description,
 		Type:            cmd.Type,
@@ -562,6 +578,10 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 
 func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID string `json:"task_id"`
 		Line   string `json:"line"`
@@ -572,7 +592,7 @@ func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.Request
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task append notes requested", "project_id", projectID, "task_id", cmd.TaskID, "line_bytes", len(cmd.Line))
 	}
-	if err := d.issues.AppendNotes(ctx, cmd.TaskID, cmd.Line); err != nil {
+	if err := issueClient.AppendNotes(ctx, cmd.TaskID, cmd.Line); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
@@ -586,6 +606,10 @@ func (d *Daemon) handleTaskAppendNotes(ctx context.Context, req protocol.Request
 
 func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID string `json:"task_id"`
 	}
@@ -595,7 +619,7 @@ func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvel
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task delete requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
-	if err := d.issues.Delete(ctx, cmd.TaskID); err != nil {
+	if err := issueClient.Delete(ctx, cmd.TaskID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
@@ -609,6 +633,10 @@ func (d *Daemon) handleTaskDelete(ctx context.Context, req protocol.RequestEnvel
 
 func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID string `json:"task_id"`
 	}
@@ -618,7 +646,7 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task archive requested", "project_id", projectID, "task_id", cmd.TaskID)
 	}
-	if err := d.issues.Archive(ctx, cmd.TaskID); err != nil {
+	if err := issueClient.Archive(ctx, cmd.TaskID); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
@@ -632,6 +660,10 @@ func (d *Daemon) handleTaskArchive(ctx context.Context, req protocol.RequestEnve
 
 func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID         string `json:"task_id"`
 		DependsOnID    string `json:"depends_on_id"`
@@ -648,7 +680,7 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 			"dependency_type", cmd.DependencyType,
 		)
 	}
-	if err := d.issues.AddDependency(ctx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
+	if err := issueClient.AddDependency(ctx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
@@ -668,6 +700,10 @@ func (d *Daemon) handleTaskDependencyAdd(ctx context.Context, req protocol.Reque
 
 func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
 	var cmd struct {
 		TaskID         string `json:"task_id"`
 		DependsOnID    string `json:"depends_on_id"`
@@ -690,7 +726,7 @@ func (d *Daemon) handleTaskDependencyRemove(ctx context.Context, req protocol.Re
 	if cmd.Confirm {
 		callCtx = issues.WithDependencyRemovalConfirmation(callCtx)
 	}
-	if err := d.issues.RemoveDependency(callCtx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
+	if err := issueClient.RemoveDependency(callCtx, cmd.TaskID, cmd.DependsOnID, cmd.DependencyType); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	resp := d.successResponse(req)
@@ -713,7 +749,11 @@ func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.Requ
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task snapshot export requested", "project_id", projectID)
 	}
-	tasks, err := d.issues.List(ctx)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}

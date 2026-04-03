@@ -91,10 +91,11 @@ func (d *Daemon) bootstrapSyncOrchestrator(ctx context.Context) error {
 }
 
 func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
-	if d.issues == nil {
+	client := d.issueClientForProject(protocol.DefaultProjectID)
+	if client == nil {
 		return errors.New("issue store unavailable")
 	}
-	if _, err := d.issues.DBStats(); err != nil {
+	if _, err := client.DBStats(); err != nil {
 		return fmt.Errorf("open issue store: %w", err)
 	}
 	return nil

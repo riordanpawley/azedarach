@@ -86,10 +86,19 @@ func (l *Launcher) Start(ctx context.Context) error {
 	if l.daemonLockOwnerAlive() {
 		if l.waitForReady != nil {
 			readyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = l.waitForReady(readyCtx, l.SocketPath)
+			err := l.waitForReady(readyCtx, l.SocketPath)
 			cancel()
+			if err == nil {
+				return nil
+			}
+			if l.Logger != nil {
+				l.Logger.Warn("daemon lock owner alive but socket is not ready; attempting fresh spawn",
+					"lock_path", l.LockPath,
+					"socket_path", l.SocketPath,
+					"error", err,
+				)
+			}
 		}
-		return nil
 	}
 
 	if err := os.MkdirAll(filepath.Join(l.RepoDir, ".azedarach"), 0o755); err != nil {
@@ -115,7 +124,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 		return fmt.Errorf("start daemon %s: %w", bin, err)
 	}
 	if l.waitForReady != nil {
-		readyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		readyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err := l.waitForReady(readyCtx, l.SocketPath)
 		cancel()
 		if err != nil {

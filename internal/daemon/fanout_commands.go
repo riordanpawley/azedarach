@@ -277,6 +277,10 @@ func buildFanoutPlan(parentIssue string, flat []fanoutFlatNode, warnings []strin
 }
 
 func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat []fanoutFlatNode, repoDir string) (protocol.FanoutApplyResult, error) {
+	issueClient := d.issueClientForProject(daemonProjectIDFromContext(ctx))
+	if issueClient == nil {
+		return protocol.FanoutApplyResult{}, fmt.Errorf("issue store unavailable")
+	}
 	created := make(map[string]string, len(flat))
 	registry := make(map[string]fanoutRegistryEntry, len(flat))
 	blocksAdded := 0
@@ -294,7 +298,7 @@ func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat [
 		estimate := 0
 		notes := fmt.Sprintf("fanout.key=%s\nfanout.parent=%s", node.Key, node.ParentKey)
 		design := fanoutDesignMetadata(node)
-		id, err := d.issues.Create(ctx, issues.CreateTaskParams{
+		id, err := issueClient.Create(ctx, issues.CreateTaskParams{
 			Title:           node.Title,
 			Description:     node.Description,
 			Type:            taskType,
@@ -326,7 +330,7 @@ func (d *Daemon) applyFanoutPlan(ctx context.Context, parentIssue string, flat [
 			if depID == "" {
 				return protocol.FanoutApplyResult{}, fmt.Errorf("depends_on key unresolved for %s: %s", node.Key, dep)
 			}
-			if err := d.issues.AddDependency(ctx, issueID, depID, string(domain.DependencyBlocks)); err != nil {
+			if err := issueClient.AddDependency(ctx, issueID, depID, string(domain.DependencyBlocks)); err != nil {
 				return protocol.FanoutApplyResult{}, fmt.Errorf("add blocks edge %s->%s: %w", node.Key, dep, err)
 			}
 			blocksAdded++

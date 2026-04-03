@@ -197,7 +197,11 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if exists {
 		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.IssueID, cmd.IssueID)), nil
 	}
-	tasks, err := d.issues.Search(ctx, cmd.IssueID)
+	issueClient := d.issueClientForProject(cmd.ProjectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.Search(ctx, cmd.IssueID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -260,7 +264,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"prompt_bytes", len(initialPrompt),
 		)
 	}
-	if updateErr := d.issues.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
+	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
 			"project_id", cmd.ProjectID,
 			"issue_id", cmd.IssueID,
@@ -545,7 +549,11 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	tasks, err := d.issues.List(ctx)
+	issueClient := d.issueClientForProject(cmd.ProjectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	tasks, err := issueClient.List(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}

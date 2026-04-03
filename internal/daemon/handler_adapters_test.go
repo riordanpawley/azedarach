@@ -15,7 +15,7 @@ import (
 
 func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 	ctx := context.Background()
-	client := newTestIssueClient(t)
+	client, repoDir := newTestIssueClient(t)
 
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{
 		Title:    "implementation issue",
@@ -45,7 +45,7 @@ func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 		t.Fatalf("add spec link: %v", err)
 	}
 
-	service := issueSpecService{client: client}
+	service := newTestIssueSpecService(client, repoDir)
 	out, err := service.Read(ctx, protocol.SpecReadRequestBody{
 		IssueID: issueID,
 		ReqID:   ext,
@@ -69,7 +69,7 @@ func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 
 func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(t *testing.T) {
 	ctx := context.Background()
-	client := newTestIssueClient(t)
+	client, repoDir := newTestIssueClient(t)
 
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{
 		Title:    "implementation issue",
@@ -96,7 +96,7 @@ func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(
 		t.Fatalf("add spec link: %v", err)
 	}
 
-	service := issueSpecService{client: client}
+	service := newTestIssueSpecService(client, repoDir)
 	out, err := service.Read(ctx, protocol.SpecReadRequestBody{IssueID: issueID})
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -114,7 +114,7 @@ func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(
 
 func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *testing.T) {
 	ctx := context.Background()
-	client := newTestIssueClient(t)
+	client, repoDir := newTestIssueClient(t)
 
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{
 		Title:    "implementation issue",
@@ -152,7 +152,7 @@ func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *te
 		t.Fatalf("create requirement B: %v", err)
 	}
 
-	service := issueSpecService{client: client}
+	service := newTestIssueSpecService(client, repoDir)
 	out, err := service.Lint(ctx, protocol.SpecLintRequestBody{})
 	if err != nil {
 		t.Fatalf("lint: %v", err)
@@ -165,7 +165,23 @@ func TestIssueSpecServiceLintDoesNotFailOnOverlappingLocalAndExternalCodes(t *te
 	}
 }
 
-func newTestIssueClient(t *testing.T) *issues.Client {
+func newTestIssueSpecService(client *issues.Client, repoDir string) issueSpecService {
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+		},
+		issues: client,
+		issueClientsByProject: map[string]*issues.Client{
+			protocol.DefaultProjectID: client,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: client,
+		},
+	}
+	return issueSpecService{daemon: d}
+}
+
+func newTestIssueClient(t *testing.T) (*issues.Client, string) {
 	t.Helper()
 	repoDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
@@ -176,5 +192,5 @@ func newTestIssueClient(t *testing.T) *issues.Client {
 	}
 	client := issues.NewClient(repoDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = client.CloseDB() })
-	return client
+	return client, repoDir
 }
