@@ -50,7 +50,7 @@ func TestTaskListSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal task list snapshot: %v", err)
 	}
-	want := `{"schema_version":1,"protocol_version":2,"snapshot_revision":17,"project_id":"proj-joined","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`
+	want := `{"schema_version":1,"protocol_version":3,"snapshot_revision":17,"project_id":"proj-joined","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`
 	if string(got) != want {
 		t.Fatalf("json = %s, want %s", string(got), want)
 	}

@@ -167,8 +167,9 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 				return "", nil
 			}
 		}}, slog.Default()),
-		sessionStore:      sessionStore,
-		runtimeStateStore: runtimeStateStore,
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -258,8 +259,9 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 				return "", nil
 			}
 		}}, slog.Default()),
-		sessionStore:      sessionStore,
-		runtimeStateStore: runtimeStateStore,
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -342,10 +344,11 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 
 	daemon := &Daemon{
-		cfg:               Config{Logger: slog.Default()},
-		hub:               publish.NewHub(32, 16, slog.Default()),
-		sessionStore:      sessionStore,
-		runtimeStateStore: runtimeStateStore,
+		cfg:                  Config{Logger: slog.Default()},
+		hub:                  publish.NewHub(32, 16, slog.Default()),
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
