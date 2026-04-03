@@ -16,14 +16,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
-type taskListReader interface {
-	List(context.Context) ([]domain.Task, error)
-}
-
-type tmuxSessionReader interface {
-	ListSessions(context.Context) ([]string, error)
-}
-
 type taskSnapshotExportBody struct {
 	SchemaVersion    uint16                      `json:"schema_version"`
 	ProtocolVersion  protocol.Version            `json:"protocol_version"`
@@ -62,12 +54,10 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
-	tasks, err := issueClient.List(ctx)
+	tasks, err := issueClient.ListWithRuntime(ctx, projectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	tasks = d.enrichTasksWithSessionStateReadOnly(ctx, projectID, tasks)
-	tasks = d.enrichTasksWithRuntimeProjectionCache(ctx, projectID, tasks)
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
 	body, err := json.Marshal(payload)
@@ -161,74 +151,6 @@ func laterTime(current, candidate time.Time) time.Time {
 		return candidate
 	}
 	return current
-}
-
-func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
-	if len(tasks) == 0 {
-		return tasks
-	}
-
-	namingScope := d.sessionNamingScope(projectID)
-	snapshotByKey := map[string]daemonstate.Session{}
-	if d.sessionStore != nil {
-		snapshot := d.sessionStore.ReadSnapshot(projectID)
-		snapshotSessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
-		for _, session := range snapshot.Sessions {
-			snapshotSessions = append(snapshotSessions, session)
-		}
-		snapshotByKey = sessionProjectionByIssueKey(snapshotSessions, namingScope)
-	}
-
-	projectionByKey := map[string]daemonstate.Session{}
-	if d.sessionRuntimeStateStore(projectID) != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("failed to load cached session projections while enriching read-only tasks", "project_id", projectID, "error", err)
-			}
-		} else {
-			projectionByKey = sessionProjectionByIssueKey(cachedSessions, namingScope)
-		}
-	}
-
-	for i := range tasks {
-		taskKey := sessionKey(tasks[i].ID)
-		snapshotSession, snapshotOK := snapshotByKey[taskKey]
-		projectionSession, projectionOK := projectionByKey[taskKey]
-		session, ok := snapshotSession, snapshotOK
-		if !ok {
-			session, ok = projectionSession, projectionOK
-		}
-		if !ok || session.State == daemonstate.SessionStateStopped {
-			continue
-		}
-
-		state := domain.SessionBusy
-		if session.State == daemonstate.SessionStatePaused {
-			state = domain.SessionPaused
-		}
-		var startedAt *time.Time
-		startedSource := session.StartedAt
-		if projectionOK && projectionSession.StartedAt != nil && !projectionSession.StartedAt.IsZero() {
-			if startedSource == nil || startedSource.IsZero() || projectionSession.StartedAt.Before(*startedSource) {
-				startedSource = projectionSession.StartedAt
-			}
-		}
-		if (startedSource == nil || startedSource.IsZero()) && !session.UpdatedAt.IsZero() {
-			startedSource = &session.UpdatedAt
-		}
-		if startedSource != nil && !startedSource.IsZero() {
-			started := startedSource.UTC()
-			startedAt = &started
-		}
-		tasks[i].Session = &domain.Session{
-			IssueID:   tasks[i].ID,
-			State:     state,
-			StartedAt: startedAt,
-		}
-	}
-
-	return tasks
 }
 
 func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID string) (int, error) {
@@ -405,121 +327,6 @@ func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
 		})
 	}
 	return d.worktreeGitProbeThrottle
-}
-
-func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
-	if len(tasks) == 0 || d.worktreeRuntimeStateStore(projectID) == nil {
-		return tasks
-	}
-
-	projectID = protocol.NormalizeProjectID(projectID)
-
-	worktreeRows, err := d.worktreeRuntimeStateStore(projectID).ListWorktreeStates(ctx, projectID)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("load worktree projections for task enrichment failed", "project_id", projectID, "error", err)
-		}
-		return tasks
-	}
-	if len(worktreeRows) == 0 {
-		return tasks
-	}
-
-	worktreeByIssue := make(map[string]daemonstate.WorktreeState, len(worktreeRows))
-	for _, row := range worktreeRows {
-		issueID := issueProjectionKey(row.IssueID)
-		if issueID == "" {
-			continue
-		}
-		worktreeByIssue[issueID] = row
-	}
-
-	missingGitStatus := 0
-	missingIssueIDs := make([]string, 0, 8)
-	for i := range tasks {
-		row, ok := worktreeByIssue[issueProjectionKey(tasks[i].ID)]
-		if !ok {
-			continue
-		}
-
-		worktreePath := strings.TrimSpace(row.Path)
-		tasks[i].HasWorktree = worktreePath != ""
-		if tasks[i].Session != nil && tasks[i].Session.Worktree == "" && worktreePath != "" {
-			tasks[i].Session.Worktree = worktreePath
-		}
-
-		statusRaw := row.GitStatusRaw
-		if len(statusRaw) == 0 {
-			if worktreePath != "" {
-				missingGitStatus++
-				if len(missingIssueIDs) < cap(missingIssueIDs) {
-					missingIssueIDs = append(missingIssueIDs, strings.TrimSpace(tasks[i].ID))
-				}
-			}
-			continue
-		}
-
-		var status git.GitStatus
-		if err := json.Unmarshal(statusRaw, &status); err != nil {
-			continue
-		}
-		tasks[i].HasUncommittedChanges = status.HasChanges
-		tasks[i].GitAdditions = status.GitAdditions
-		tasks[i].GitDeletions = status.GitDeletions
-		tasks[i].GitAheadCount = status.GitAheadCount
-		tasks[i].GitBehindCount = status.GitBehindCount
-		if tasks[i].GitAdditions == 0 {
-			tasks[i].GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
-		}
-		if tasks[i].GitDeletions == 0 {
-			tasks[i].GitDeletions = len(status.Deleted)
-		}
-	}
-	if missingGitStatus > 0 {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Info(
-				"task list enrichment found worktrees missing cached git status",
-				"project_id", projectID,
-				"missing_count", missingGitStatus,
-				"worktree_count", len(worktreeByIssue),
-				"sample_issue_ids", strings.Join(missingIssueIDs, ","),
-			)
-		}
-		d.triggerMissingGitStatusReconcile(projectID, missingGitStatus, len(worktreeByIssue))
-	}
-
-	return tasks
-}
-
-func (d *Daemon) triggerMissingGitStatusReconcile(projectID string, missing, total int) {
-	if d == nil || missing <= 0 {
-		return
-	}
-	projectID = protocol.NormalizeProjectID(projectID)
-	if projectID == "" || d.git == nil || d.tmux == nil || d.sessionStore == nil || d.worktreeRuntimeStateStore(projectID) == nil || d.worktreeManagerForProject(projectID) == nil {
-		return
-	}
-	submission, err := d.queueRuntimeReconcile(context.Background(), projectID, reconcilePriorityManual, "task_list_missing_git_status")
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("enqueue runtime reconcile for missing git status failed", "project_id", projectID, "missing", missing, "total_worktrees", total, "error", err)
-		}
-		return
-	}
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info(
-			"queued runtime reconcile for missing git status",
-			"project_id", projectID,
-			"missing", missing,
-			"total_worktrees", total,
-			"queue_deduped", submission.Deduped,
-			"queue_reprioritized", submission.Reprioritized,
-		)
-	}
-}
-
-func issueProjectionKey(issueID string) string {
-	return strings.ToLower(strings.TrimSpace(issueID))
 }
 
 func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issueID, worktree string) *git.GitStatus {

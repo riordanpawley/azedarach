@@ -37,6 +37,8 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 		if task.Session != nil {
 			if worktreePath := strings.TrimSpace(task.Session.Worktree); worktreePath != "" {
 				nextWorktrees[taskID] = worktreePath
+			} else if cached := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); cached != "" {
+				nextWorktrees[taskID] = cached
 			}
 		} else if cached := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); cached != "" {
 			nextWorktrees[taskID] = cached

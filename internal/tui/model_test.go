@@ -4026,6 +4026,38 @@ func TestResolveOperationTaskIDCoversSessionGitAndWorktreeMutations(t *testing.T
 	}
 }
 
+func TestSyncTaskWorkspaceOverlayBackfillsSessionWorktreeFromRuntimeMap(t *testing.T) {
+	m := newTestModel()
+	m.tasks = []domain.Task{
+		{
+			ID:          "az-1",
+			Title:       "runtime worktree fallback",
+			Status:      domain.StatusInProgress,
+			HasWorktree: true,
+			Session: &domain.Session{
+				IssueID: "az-1",
+				State:   domain.SessionBusy,
+			},
+		},
+	}
+	m.runtimeSignalWorktreeByTask = map[string]string{
+		"az-1": "/tmp/repo-az-1",
+	}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	m.syncTaskWorkspaceOverlay()
+
+	current := m.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace overlay, got %T", current)
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "/tmp/repo-az-1") {
+		t.Fatalf("workspace view missing runtime worktree path: %q", view)
+	}
+}
+
 func TestDaemonOperationLifecycleEventsTrackPendingForGitAndWorktreeMutations(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
