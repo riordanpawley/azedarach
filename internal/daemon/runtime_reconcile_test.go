@@ -64,6 +64,78 @@ func (r *runtimeReconcileRecorder) snapshot() (calls int, projectIDs []string) {
 	return r.calls, append([]string(nil), r.projectIDs...)
 }
 
+type scriptedRuntimeReconciler struct {
+	mu            sync.Mutex
+	started       chan string
+	releaseByID   map[string]chan struct{}
+	startOrder    []string
+	callCountByID map[string]int
+	current       int
+	maxConcurrent int
+	resultsByID   map[string]protocol.RuntimeReconcileResponseBody
+}
+
+func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
+	r.mu.Lock()
+	if r.callCountByID == nil {
+		r.callCountByID = map[string]int{}
+	}
+	r.callCountByID[projectID]++
+	r.startOrder = append(r.startOrder, projectID)
+	r.current++
+	if r.current > r.maxConcurrent {
+		r.maxConcurrent = r.current
+	}
+	started := r.started
+	release := map[string]chan struct{}(nil)
+	if r.releaseByID != nil {
+		release = r.releaseByID
+	}
+	result := protocol.RuntimeReconcileResponseBody{ProjectID: projectID}
+	if stored, ok := r.resultsByID[projectID]; ok {
+		result = stored
+		if result.ProjectID == "" {
+			result.ProjectID = projectID
+		}
+	}
+	r.mu.Unlock()
+
+	if started != nil {
+		select {
+		case started <- projectID:
+		default:
+		}
+	}
+
+	if release != nil {
+		if gate := release[projectID]; gate != nil {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				r.mu.Lock()
+				r.current--
+				r.mu.Unlock()
+				return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+			}
+		}
+	}
+
+	r.mu.Lock()
+	r.current--
+	r.mu.Unlock()
+	return result, nil
+}
+
+func (r *scriptedRuntimeReconciler) snapshot() (order []string, callCount map[string]int, maxConcurrent int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	outCounts := make(map[string]int, len(r.callCountByID))
+	for key, value := range r.callCountByID {
+		outCounts[key] = value
+	}
+	return append([]string(nil), r.startOrder...), outCounts, r.maxConcurrent
+}
+
 type runtimeReconcileTestServer struct {
 	served chan struct{}
 }
@@ -233,6 +305,71 @@ func TestRunStartupRuntimeReconcileUsesRepoScopedProjectID(t *testing.T) {
 	}
 }
 
+func TestRunRuntimeReconcileSweepUsesBoundedQueueConcurrency(t *testing.T) {
+	release := make(chan struct{})
+	recorder := &scriptedRuntimeReconciler{
+		started: make(chan string, 8),
+		releaseByID: map[string]chan struct{}{
+			"proj-a": release,
+			"proj-b": release,
+			"proj-c": release,
+		},
+	}
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_test",
+		Workers: 2,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     recorder,
+		runtimeReconcileQueue: queue,
+		revision: map[string]uint64{
+			"proj-a": 1,
+			"proj-b": 1,
+			"proj-c": 1,
+		},
+	}
+
+	type sweepResult struct {
+		results []protocol.RuntimeReconcileResponseBody
+		err     error
+	}
+	done := make(chan sweepResult, 1)
+	go func() {
+		results, err := d.runRuntimeReconcileSweep(context.Background())
+		done <- sweepResult{results: results, err: err}
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-recorder.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for queued reconciles to start")
+		}
+	}
+	time.Sleep(25 * time.Millisecond)
+
+	_, _, maxConcurrent := recorder.snapshot()
+	if maxConcurrent != 2 {
+		t.Fatalf("max concurrent reconciles = %d, want 2", maxConcurrent)
+	}
+
+	close(release)
+
+	out := <-done
+	if out.err != nil {
+		t.Fatalf("runRuntimeReconcileSweep error: %v", out.err)
+	}
+	if len(out.results) != 3 {
+		t.Fatalf("reconcile results = %d, want 3", len(out.results))
+	}
+}
+
 func TestRuntimeReconcileWorkerInvokesUntilCanceled(t *testing.T) {
 	recorder := &runtimeReconcileRecorder{
 		started: make(chan struct{}, 4),
@@ -262,6 +399,245 @@ func TestRuntimeReconcileWorkerInvokesUntilCanceled(t *testing.T) {
 	calls, _ := recorder.snapshot()
 	if calls != 1 {
 		t.Fatalf("periodic reconcile calls = %d, want 1 after cancellation", calls)
+	}
+}
+
+func TestCommandRuntimeReconcileReprioritizesPendingQueuedProject(t *testing.T) {
+	releaseBusy := make(chan struct{})
+	recorder := &scriptedRuntimeReconciler{
+		started: make(chan string, 8),
+		releaseByID: map[string]chan struct{}{
+			"busy": releaseBusy,
+		},
+		resultsByID: map[string]protocol.RuntimeReconcileResponseBody{
+			"proj-runtime": {
+				ProjectID:             "proj-runtime",
+				WorktreesRefreshed:    1,
+				RecreatedTmuxSessions: 2,
+				AlignedDaemonSessions: 3,
+			},
+		},
+	}
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     recorder,
+		runtimeReconcileQueue: queue,
+		revision: map[string]uint64{
+			"busy":         1,
+			"later":        1,
+			"proj-runtime": 1,
+		},
+	}
+
+	sweepDone := make(chan error, 1)
+	go func() {
+		_, err := d.runRuntimeReconcileSweep(context.Background())
+		sweepDone <- err
+	}()
+
+	select {
+	case started := <-recorder.started:
+		if started != "busy" {
+			t.Fatalf("first started project = %q, want busy", started)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for busy reconcile to start")
+	}
+
+	waitForPending := func() {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			snapshot := queue.snapshot()
+			if len(snapshot.Pending) == 2 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal("timed out waiting for pending reconcile jobs")
+	}
+	waitForPending()
+
+	type commandResult struct {
+		resp protocol.ResponseEnvelope
+		err  error
+	}
+	commandDone := make(chan commandResult, 1)
+	go func() {
+		resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "req-runtime-reconcile-manual",
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         protocol.CommandRuntimeReconcile,
+			Meta:            protocol.Metadata{ProjectID: "proj-runtime"},
+			Body:            mustJSONBody(t, protocol.RuntimeReconcileRequestBody{ProjectID: "proj-runtime"}),
+		})
+		commandDone <- commandResult{resp: resp, err: err}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := queue.snapshot()
+		if len(snapshot.Pending) == 2 &&
+			snapshot.Pending[0] == "proj-runtime" &&
+			snapshot.Pending[1] == "later" &&
+			snapshot.Counters.Deduped == 1 &&
+			snapshot.Counters.Reprioritized == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot := queue.snapshot()
+	if len(snapshot.Pending) != 2 || snapshot.Pending[0] != "proj-runtime" || snapshot.Pending[1] != "later" {
+		t.Fatalf("pending order after manual bump = %v, want [proj-runtime later]", snapshot.Pending)
+	}
+	if snapshot.Counters.Deduped != 1 || snapshot.Counters.Reprioritized != 1 {
+		t.Fatalf("queue counters after manual bump = %+v", snapshot.Counters)
+	}
+
+	close(releaseBusy)
+
+	commandOut := <-commandDone
+	if commandOut.err != nil {
+		t.Fatalf("command returned error: %v", commandOut.err)
+	}
+	if !commandOut.resp.OK {
+		t.Fatalf("runtime.reconcile response not OK: %+v", commandOut.resp.Error)
+	}
+	var out protocol.RuntimeReconcileResponseBody
+	if err := json.Unmarshal(commandOut.resp.Body, &out); err != nil {
+		t.Fatalf("unmarshal command response: %v", err)
+	}
+	if out.ProjectID != "proj-runtime" || out.WorktreesRefreshed != 1 || out.RecreatedTmuxSessions != 2 || out.AlignedDaemonSessions != 3 {
+		t.Fatalf("runtime.reconcile body = %+v", out)
+	}
+
+	if err := <-sweepDone; err != nil {
+		t.Fatalf("background sweep error: %v", err)
+	}
+
+	order, callCounts, _ := recorder.snapshot()
+	wantOrder := []string{"busy", "proj-runtime", "later"}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Fatalf("reconcile start order = %v, want %v", order, wantOrder)
+	}
+	for _, projectID := range []string{"busy", "later", "proj-runtime"} {
+		if got := callCounts[projectID]; got != 1 {
+			t.Fatalf("reconcile calls for %s = %d, want 1", projectID, got)
+		}
+	}
+}
+
+func TestRunRuntimeReconcileSweepDefersProjectsWhenBudgetExhausted(t *testing.T) {
+	now := time.Date(2026, time.April, 3, 14, 0, 0, 0, time.UTC)
+	recorder := &runtimeReconcileRecorder{
+		result: protocol.RuntimeReconcileResponseBody{
+			ProjectID:             "proj-a",
+			WorktreesRefreshed:    1,
+			RecreatedTmuxSessions: 1,
+			AlignedDaemonSessions: 1,
+		},
+	}
+	d := &Daemon{
+		cfg:               Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler: recorder,
+		runtimeReconcileThrottle: newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "runtime_reconcile_budget_test",
+			Budget:               1,
+			Cadence:              time.Hour,
+			UnchangedBackoffBase: time.Hour,
+			UnchangedBackoffMax:  time.Hour,
+			FailureBackoffBase:   time.Hour,
+			FailureBackoffMax:    time.Hour,
+			Now:                  func() time.Time { return now },
+		}),
+		revision: map[string]uint64{
+			"proj-a": 1,
+			"proj-b": 1,
+			"proj-c": 1,
+		},
+	}
+
+	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(context.Background(), reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("runRuntimeReconcileSweepWithPriority error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(results))
+	}
+	if metrics.Processed != 1 || metrics.Deferred != 2 || metrics.Skipped != 0 || metrics.Failed != 0 {
+		t.Fatalf("metrics = %+v, want processed=1 deferred=2 skipped=0 failed=0", metrics)
+	}
+	calls, _ := recorder.snapshot()
+	if calls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", calls)
+	}
+}
+
+func TestRunRuntimeReconcileSweepSkipsProjectDuringBackoffAfterUnchangedResult(t *testing.T) {
+	now := time.Date(2026, time.April, 3, 15, 0, 0, 0, time.UTC)
+	recorder := &runtimeReconcileRecorder{
+		result: protocol.RuntimeReconcileResponseBody{
+			ProjectID:             "proj-runtime",
+			WorktreesRefreshed:    1,
+			RecreatedTmuxSessions: 1,
+			AlignedDaemonSessions: 1,
+		},
+	}
+	d := &Daemon{
+		cfg:               Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler: recorder,
+		runtimeReconcileThrottle: newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "runtime_reconcile_backoff_test",
+			Budget:               4,
+			Cadence:              time.Second,
+			UnchangedBackoffBase: time.Hour,
+			UnchangedBackoffMax:  time.Hour,
+			FailureBackoffBase:   time.Hour,
+			FailureBackoffMax:    time.Hour,
+			Now:                  func() time.Time { return now },
+		}),
+		revision: map[string]uint64{
+			"proj-runtime": 1,
+		},
+	}
+
+	firstResults, firstMetrics, err := d.runRuntimeReconcileSweepWithPriority(context.Background(), reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("first sweep error: %v", err)
+	}
+	if len(firstResults) != 1 {
+		t.Fatalf("first results len = %d, want 1", len(firstResults))
+	}
+	if firstMetrics.Processed != 1 || firstMetrics.Skipped != 0 || firstMetrics.Deferred != 0 || firstMetrics.Failed != 0 {
+		t.Fatalf("first metrics = %+v, want processed=1 skipped=0 deferred=0 failed=0", firstMetrics)
+	}
+
+	secondResults, secondMetrics, err := d.runRuntimeReconcileSweepWithPriority(context.Background(), reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("second sweep error: %v", err)
+	}
+	if len(secondResults) != 0 {
+		t.Fatalf("second results len = %d, want 0", len(secondResults))
+	}
+	if secondMetrics.Processed != 0 || secondMetrics.Skipped != 1 || secondMetrics.Deferred != 0 || secondMetrics.Failed != 0 {
+		t.Fatalf("second metrics = %+v, want processed=0 skipped=1 deferred=0 failed=0", secondMetrics)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", calls)
+	}
+	if len(projectIDs) != 1 || projectIDs[0] != "proj-runtime" {
+		t.Fatalf("reconcile project ids = %v, want [proj-runtime]", projectIDs)
 	}
 }
 

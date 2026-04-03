@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -346,5 +347,353 @@ func TestGitServiceAdapterCreateCheckpointReturnsNoChangesWithoutPublishing(t *t
 	}
 	if updates != 0 {
 		t.Fatalf("status update publishes = %d, want 0", updates)
+	}
+}
+
+func TestGitServiceAdapterStatusCachedPathBumpsVisibleRefreshPriority(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	busyWorktree := "/tmp/az-busy"
+	targetWorktree := "/tmp/az-target"
+	laterWorktree := "/tmp/az-later"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	seed := func(issueID, worktree string) {
+		t.Helper()
+		if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+			ProjectID: projectID,
+			IssueID:   issueID,
+			Path:      worktree,
+			Branch:    "az/" + issueID,
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed worktree %s: %v", issueID, err)
+		}
+		rawStatus, err := json.Marshal(cleanGitStatus())
+		if err != nil {
+			t.Fatalf("marshal seed status %s: %v", issueID, err)
+		}
+		if err := store.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
+			t.Fatalf("seed git status %s: %v", issueID, err)
+		}
+	}
+	seed("az-busy", busyWorktree)
+	seed("az-target", targetWorktree)
+	seed("az-later", laterWorktree)
+
+	busyStarted := make(chan struct{}, 1)
+	releaseBusy := make(chan struct{})
+	targetRan := make(chan struct{}, 1)
+	laterRan := make(chan struct{}, 1)
+	var (
+		orderMu sync.Mutex
+		order   []string
+	)
+	recordOrder := func(worktree string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		order = append(order, worktree)
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) < 4 || args[0] != "-C" || args[2] != "status" || args[3] != "--porcelain" {
+			t.Fatalf("unexpected git args: %v", args)
+		}
+		worktree := args[1]
+		switch worktree {
+		case busyWorktree:
+			busyStarted <- struct{}{}
+			<-releaseBusy
+			recordOrder("busy")
+			return " M busy.go", nil
+		case targetWorktree:
+			recordOrder("target")
+			targetRan <- struct{}{}
+			return " M target.go", nil
+		case laterWorktree:
+			recordOrder("later")
+			laterRan <- struct{}{}
+			return " M later.go", nil
+		default:
+			t.Fatalf("unexpected worktree: %s", worktree)
+			return "", nil
+		}
+	}}
+
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_refresh_test",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+
+	adapter := &gitServiceAdapter{
+		client:             git.NewClient(runner, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+	}
+
+	adapter.refreshGitStatusAsync(projectID, busyWorktree)
+	select {
+	case <-busyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for busy refresh to start")
+	}
+
+	adapter.refreshGitStatusAsync(projectID, targetWorktree)
+	adapter.refreshGitStatusAsync(projectID, laterWorktree)
+
+	status, err := adapter.Status(ctx, projectID, targetWorktree)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status == nil {
+		t.Fatal("expected cached status")
+	}
+	if status.HasChanges {
+		t.Fatal("cached status should remain clean before queued refresh runs")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := queue.snapshot()
+		if len(snapshot.Pending) == 2 &&
+			snapshot.Pending[0] == gitStatusRefreshQueueKey(projectID, targetWorktree) &&
+			snapshot.Pending[1] == gitStatusRefreshQueueKey(projectID, laterWorktree) &&
+			snapshot.Counters.Deduped == 1 &&
+			snapshot.Counters.Reprioritized == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot := queue.snapshot()
+	if len(snapshot.Pending) != 2 ||
+		snapshot.Pending[0] != gitStatusRefreshQueueKey(projectID, targetWorktree) ||
+		snapshot.Pending[1] != gitStatusRefreshQueueKey(projectID, laterWorktree) {
+		t.Fatalf("pending git refresh order = %v", snapshot.Pending)
+	}
+	if snapshot.Counters.Deduped != 1 || snapshot.Counters.Reprioritized != 1 {
+		t.Fatalf("queue counters = %+v", snapshot.Counters)
+	}
+
+	close(releaseBusy)
+
+	select {
+	case <-targetRan:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for target refresh to run")
+	}
+	select {
+	case <-laterRan:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for later refresh to run")
+	}
+
+	orderMu.Lock()
+	gotOrder := append([]string(nil), order...)
+	orderMu.Unlock()
+	wantOrder := []string{"busy", "target", "later"}
+	if !reflect.DeepEqual(gotOrder, wantOrder) {
+		t.Fatalf("git refresh order = %v, want %v", gotOrder, wantOrder)
+	}
+}
+
+func TestGitServiceAdapterQueueGitStatusRefreshDefersWhenBudgetExhausted(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	firstWorktree := "/tmp/az-first"
+	secondWorktree := "/tmp/az-second"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	seed := func(issueID, worktree string) {
+		t.Helper()
+		if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+			ProjectID: projectID,
+			IssueID:   issueID,
+			Path:      worktree,
+			Branch:    "az/" + issueID,
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed worktree %s: %v", issueID, err)
+		}
+		rawStatus, err := json.Marshal(cleanGitStatus())
+		if err != nil {
+			t.Fatalf("marshal seed status %s: %v", issueID, err)
+		}
+		if err := store.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
+			t.Fatalf("seed git status %s: %v", issueID, err)
+		}
+	}
+	seed("az-first", firstWorktree)
+	seed("az-second", secondWorktree)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var calls sync.Map
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) < 4 || args[0] != "-C" || args[2] != "status" || args[3] != "--porcelain" {
+			t.Fatalf("unexpected git args: %v", args)
+		}
+		worktree := args[1]
+		calls.Store(worktree, true)
+		if worktree == firstWorktree {
+			started <- struct{}{}
+			<-release
+		}
+		return "", nil
+	}}
+
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_refresh_budget_test",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+	throttle := newReconcileThrottle(reconcileThrottleConfig{
+		Name:                 "git_status_refresh_budget_test",
+		Budget:               1,
+		Cadence:              time.Hour,
+		UnchangedBackoffBase: time.Hour,
+		UnchangedBackoffMax:  time.Hour,
+		FailureBackoffBase:   time.Hour,
+		FailureBackoffMax:    time.Hour,
+		Now:                  func() time.Time { return now },
+	})
+
+	adapter := &gitServiceAdapter{
+		client:                git.NewClient(runner, slog.Default()),
+		runtimeStateStore:     store,
+		statusRefreshQueue:    queue,
+		statusRefreshThrottle: throttle,
+		logger:                slog.Default(),
+	}
+
+	first, err := adapter.queueGitStatusRefresh(projectID, firstWorktree, reconcilePriorityBackground, "background")
+	if err != nil {
+		t.Fatalf("queue first refresh: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first refresh to start")
+	}
+
+	second, err := adapter.queueGitStatusRefresh(projectID, secondWorktree, reconcilePriorityBackground, "background")
+	if err != nil {
+		t.Fatalf("queue second refresh: %v", err)
+	}
+	secondResult, err := second.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait second refresh: %v", err)
+	}
+	if !secondResult.Deferred || secondResult.Skipped {
+		t.Fatalf("second refresh result = %+v, want deferred", secondResult)
+	}
+
+	close(release)
+
+	firstResult, err := first.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait first refresh: %v", err)
+	}
+	if firstResult.Err != nil {
+		t.Fatalf("first refresh error = %v, want nil", firstResult.Err)
+	}
+	if _, ok := calls.Load(secondWorktree); ok {
+		t.Fatal("second worktree should not have been probed while budget was exhausted")
+	}
+	counters := throttle.snapshotCounters()
+	if counters.Processed != 1 || counters.Deferred != 1 || counters.Skipped != 0 {
+		t.Fatalf("throttle counters = %+v, want processed=1 deferred=1 skipped=0", counters)
+	}
+}
+
+func TestGitServiceAdapterQueueGitStatusRefreshBacksOffUnchangedTarget(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-target"
+	worktree := "/tmp/az-target"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+
+	statusCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
+			statusCalls++
+			return "", nil
+		}
+		t.Fatalf("unexpected git args: %v", args)
+		return "", nil
+	}}
+
+	now := time.Date(2026, time.April, 3, 13, 0, 0, 0, time.UTC)
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_refresh_backoff_test",
+		Workers: 1,
+		Logger:  slog.Default(),
+	})
+	t.Cleanup(func() {
+		_ = queue.Close()
+	})
+	throttle := newReconcileThrottle(reconcileThrottleConfig{
+		Name:                 "git_status_refresh_backoff_test",
+		Budget:               4,
+		Cadence:              time.Second,
+		UnchangedBackoffBase: time.Hour,
+		UnchangedBackoffMax:  time.Hour,
+		FailureBackoffBase:   time.Hour,
+		FailureBackoffMax:    time.Hour,
+		Now:                  func() time.Time { return now },
+	})
+
+	adapter := &gitServiceAdapter{
+		client:                git.NewClient(runner, slog.Default()),
+		runtimeStateStore:     store,
+		statusRefreshQueue:    queue,
+		statusRefreshThrottle: throttle,
+		logger:                slog.Default(),
+	}
+
+	first, err := adapter.queueGitStatusRefresh(projectID, worktree, reconcilePriorityBackground, "background")
+	if err != nil {
+		t.Fatalf("queue first refresh: %v", err)
+	}
+	firstResult, err := first.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait first refresh: %v", err)
+	}
+	if firstResult.Err != nil {
+		t.Fatalf("first refresh error = %v, want nil", firstResult.Err)
+	}
+
+	second, err := adapter.queueGitStatusRefresh(projectID, worktree, reconcilePriorityBackground, "background")
+	if err != nil {
+		t.Fatalf("queue second refresh: %v", err)
+	}
+	secondResult, err := second.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait second refresh: %v", err)
+	}
+	if !secondResult.Skipped || secondResult.Deferred {
+		t.Fatalf("second refresh result = %+v, want skipped", secondResult)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1", statusCalls)
+	}
+	counters := throttle.snapshotCounters()
+	if counters.Processed != 1 || counters.Skipped != 1 || counters.Deferred != 0 {
+		t.Fatalf("throttle counters = %+v, want processed=1 skipped=1 deferred=0", counters)
 	}
 }

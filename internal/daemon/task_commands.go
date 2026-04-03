@@ -64,7 +64,8 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	}
 	tasks = d.enrichTasksWithSessionStateReadOnly(ctx, projectID, tasks)
 	tasks = d.enrichTasksWithRuntimeProjectionCache(ctx, projectID, tasks)
-	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), tasks)
+	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
+	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -77,14 +78,85 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	return resp, nil
 }
 
-func buildTaskListSnapshotPayload(projectID string, revision uint64, tasks []domain.Task) protocol.TaskListSnapshotPayload {
+func buildTaskListSnapshotPayload(projectID string, revision uint64, lastCheckedAt time.Time, freshness protocol.TaskListFreshness, tasks []domain.Task) protocol.TaskListSnapshotPayload {
+	if lastCheckedAt.IsZero() {
+		lastCheckedAt = timeNow()
+	}
+	if !freshness.Valid() {
+		freshness = protocol.TaskListFreshnessFresh
+	}
 	return protocol.TaskListSnapshotPayload{
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocol.CurrentVersion,
 		SnapshotRevision: revision,
 		ProjectID:        projectID,
+		LastCheckedAt:    lastCheckedAt.UTC(),
+		Freshness:        freshness,
 		Tasks:            tasks,
 	}
+}
+
+const taskListSnapshotStaleAfter = 15 * time.Second
+
+func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string) (time.Time, protocol.TaskListFreshness) {
+	lastCheckedAt := time.Time{}
+	projectID = protocol.NormalizeProjectID(projectID)
+
+	if d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		for _, session := range snapshot.Sessions {
+			lastCheckedAt = laterTime(lastCheckedAt, session.UpdatedAt)
+		}
+	}
+
+	if d.sessionRuntimeStateStore() != nil {
+		sessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("load session freshness projections failed", "project_id", projectID, "error", err)
+			}
+		} else {
+			for _, session := range sessions {
+				lastCheckedAt = laterTime(lastCheckedAt, session.UpdatedAt)
+			}
+		}
+	}
+
+	if d.worktreeRuntimeStateStore() != nil {
+		worktrees, err := d.worktreeRuntimeStateStore().ListWorktreeStates(ctx, projectID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("load worktree freshness projections failed", "project_id", projectID, "error", err)
+			}
+		} else {
+			for _, worktree := range worktrees {
+				lastCheckedAt = laterTime(lastCheckedAt, worktree.UpdatedAt)
+				if worktree.GitStatusUpdated != nil {
+					lastCheckedAt = laterTime(lastCheckedAt, *worktree.GitStatusUpdated)
+				}
+			}
+		}
+	}
+
+	if lastCheckedAt.IsZero() {
+		lastCheckedAt = timeNow()
+	}
+	freshness := protocol.TaskListFreshnessFresh
+	if timeNow().Sub(lastCheckedAt) > taskListSnapshotStaleAfter {
+		freshness = protocol.TaskListFreshnessStale
+	}
+	return lastCheckedAt.UTC(), freshness
+}
+
+func laterTime(current, candidate time.Time) time.Time {
+	if candidate.IsZero() {
+		return current
+	}
+	candidate = candidate.UTC()
+	if current.IsZero() || candidate.After(current) {
+		return candidate
+	}
+	return current
 }
 
 func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
@@ -160,6 +232,13 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 
 	rows := make([]daemonstate.WorktreeState, 0, len(worktrees))
 	statusByIssue := make(map[string]*git.GitStatus, len(worktrees))
+	throttle := d.ensureWorktreeGitProbeThrottle()
+	trigger := runtimeReconcileRequestFromContext(ctx)
+	forceProbe := trigger.Priority >= reconcilePriorityManual
+	processedProbes := 0
+	skippedProbes := 0
+	deferredProbes := 0
+	failedProbes := 0
 	now := time.Now().UTC()
 	for _, wt := range worktrees {
 		issueID := strings.TrimSpace(wt.IssueID)
@@ -168,13 +247,31 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 		}
 		worktreePath := strings.TrimSpace(wt.Path)
 		if d.git != nil && worktreePath != "" {
-			status, err := d.git.RuntimeStatus(ctx, worktreePath, d.cfg.BaseBranch)
-			if err != nil {
-				if d.cfg.Logger != nil {
-					d.cfg.Logger.Debug("refresh worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "worktree", worktreePath, "error", err)
+			probeKey := gitStatusRefreshQueueKey(projectID, worktreePath)
+			decision := throttle.Admit(probeKey, forceProbe)
+			switch decision.Action {
+			case reconcileThrottleSkip:
+				skippedProbes++
+			case reconcileThrottleDefer:
+				deferredProbes++
+			default:
+				processedProbes++
+				status, err := d.git.RuntimeStatus(ctx, worktreePath, d.cfg.BaseBranch)
+				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
+				if err != nil {
+					failedProbes++
+					if d.cfg.Logger != nil {
+						d.cfg.Logger.Debug("refresh worktree runtime git status failed",
+							"project_id", projectID,
+							"issue_id", issueID,
+							"worktree", worktreePath,
+							"outcome", string(outcome),
+							"error", err,
+						)
+					}
+				} else {
+					statusByIssue[issueID] = status
 				}
-			} else {
-				statusByIssue[issueID] = status
 			}
 		}
 		rows = append(rows, daemonstate.WorktreeState{
@@ -206,7 +303,51 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			}
 		}
 	}
+	if d.cfg.Logger != nil && d.git != nil {
+		counters := throttle.snapshotCounters()
+		d.cfg.Logger.Debug("refresh worktree runtime state completed",
+			"project_id", projectID,
+			"reason", strings.TrimSpace(trigger.Reason),
+			"processed_tasks", processedProbes,
+			"skipped_tasks", skippedProbes,
+			"deferred_tasks", deferredProbes,
+			"failed_tasks", failedProbes,
+			"throttle_processed", counters.Processed,
+			"throttle_skipped", counters.Skipped,
+			"throttle_deferred", counters.Deferred,
+		)
+	}
 	return len(rows), nil
+}
+
+func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
+	if d == nil {
+		return newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "worktree_git_probe",
+			Budget:               defaultWorktreeGitProbeBudget,
+			Cadence:              defaultRuntimeReconcileInterval,
+			UnchangedBackoffBase: defaultWorktreeGitProbeUnchangedBackoff,
+			UnchangedBackoffMax:  maxWorktreeGitProbeUnchangedBackoff,
+			FailureBackoffBase:   defaultWorktreeGitProbeFailureBackoff,
+			FailureBackoffMax:    maxWorktreeGitProbeFailureBackoff,
+		})
+	}
+
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	if d.worktreeGitProbeThrottle == nil {
+		d.worktreeGitProbeThrottle = newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "worktree_git_probe",
+			Budget:               defaultWorktreeGitProbeBudget,
+			Cadence:              d.runtimeReconcileInterval(),
+			UnchangedBackoffBase: defaultWorktreeGitProbeUnchangedBackoff,
+			UnchangedBackoffMax:  maxWorktreeGitProbeUnchangedBackoff,
+			FailureBackoffBase:   defaultWorktreeGitProbeFailureBackoff,
+			FailureBackoffMax:    maxWorktreeGitProbeFailureBackoff,
+			Logger:               d.cfg.Logger,
+		})
+	}
+	return d.worktreeGitProbeThrottle
 }
 
 func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {

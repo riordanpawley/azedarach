@@ -27,6 +27,30 @@ import (
 
 const daemonVersion = "dev"
 
+const (
+	defaultRuntimeReconcileQueueWorkers = 2
+	defaultGitStatusRefreshQueueWorkers = 4
+	defaultRuntimeReconcileBudget       = 8
+	defaultWorktreeGitProbeBudget       = 16
+	defaultGitStatusRefreshBudget       = 32
+
+	defaultRuntimeReconcileUnchangedBackoff = 2 * time.Minute
+	defaultRuntimeReconcileFailureBackoff   = 1 * time.Minute
+	maxRuntimeReconcileUnchangedBackoff     = 10 * time.Minute
+	maxRuntimeReconcileFailureBackoff       = 15 * time.Minute
+
+	defaultWorktreeGitProbeUnchangedBackoff = 2 * time.Minute
+	defaultWorktreeGitProbeFailureBackoff   = 1 * time.Minute
+	maxWorktreeGitProbeUnchangedBackoff     = 10 * time.Minute
+	maxWorktreeGitProbeFailureBackoff       = 15 * time.Minute
+
+	defaultGitStatusRefreshCadence          = 5 * time.Second
+	defaultGitStatusRefreshUnchangedBackoff = 15 * time.Second
+	defaultGitStatusRefreshFailureBackoff   = 30 * time.Second
+	maxGitStatusRefreshUnchangedBackoff     = 2 * time.Minute
+	maxGitStatusRefreshFailureBackoff       = 5 * time.Minute
+)
+
 // Config configures daemon runtime wiring.
 type Config struct {
 	RepoDir                  string
@@ -52,25 +76,30 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues                  *issues.Client
-	tmux                    *tmux.Client
-	git                     *git.Client
-	worktree                *git.WorktreeManager
-	gitHandler              *daemonhandlers.GitHandler
-	worktreeHandler         *daemonhandlers.WorktreeHandler
-	session                 *daemonhandlers.SessionHandler
-	sessionStore            *daemonstate.Store
-	sessionRuntimeStore     *daemonstate.RuntimeStateStore
-	worktreeRuntimeStore    *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter runtimeProjectionWriter
-	sessionLongRunning      SessionLongRunningExecutor
-	runtimeReconciler       runtimeReconciler
-	operationRuntime        *operationRuntime
-	sessionStopMu           sync.Mutex
-	sessionStopPending      map[string]int
-	sessionStateRefreshMu   sync.Mutex
-	sessionStateRefreshing  map[string]bool
-	sessionStateLastRefresh map[string]time.Time
+	issues                   *issues.Client
+	tmux                     *tmux.Client
+	git                      *git.Client
+	worktree                 *git.WorktreeManager
+	gitHandler               *daemonhandlers.GitHandler
+	worktreeHandler          *daemonhandlers.WorktreeHandler
+	session                  *daemonhandlers.SessionHandler
+	sessionStore             *daemonstate.Store
+	sessionRuntimeStore      *daemonstate.RuntimeStateStore
+	worktreeRuntimeStore     *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter  runtimeProjectionWriter
+	sessionLongRunning       SessionLongRunningExecutor
+	runtimeReconciler        runtimeReconciler
+	runtimeReconcileQueue    *reconcileQueue[protocol.RuntimeReconcileResponseBody]
+	gitStatusRefreshQueue    *reconcileQueue[*git.GitStatus]
+	runtimeReconcileThrottle *reconcileThrottle
+	worktreeGitProbeThrottle *reconcileThrottle
+	queueMu                  sync.Mutex
+	operationRuntime         *operationRuntime
+	sessionStopMu            sync.Mutex
+	sessionStopPending       map[string]int
+	sessionStateRefreshMu    sync.Mutex
+	sessionStateRefreshing   map[string]bool
+	sessionStateLastRefresh  map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -118,11 +147,22 @@ func New(cfg Config) *Daemon {
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
 	runtimeStateStore := daemonstate.NewRuntimeStateStore(cfg.RepoDir, cfg.Logger)
+	runtimeReconcileQueue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile",
+		Workers: defaultRuntimeReconcileQueueWorkers,
+		Logger:  cfg.Logger,
+	})
+	gitStatusRefreshQueue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+		Name:    "git_status_refresh",
+		Workers: defaultGitStatusRefreshQueueWorkers,
+		Logger:  cfg.Logger,
+	})
 	gitService := &gitServiceAdapter{
-		client:            gitClient,
-		runtimeStateStore: runtimeStateStore,
-		logger:            cfg.Logger,
-		baseBranch:        cfg.BaseBranch,
+		client:             gitClient,
+		runtimeStateStore:  runtimeStateStore,
+		statusRefreshQueue: gitStatusRefreshQueue,
+		logger:             cfg.Logger,
+		baseBranch:         cfg.BaseBranch,
 	}
 	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
@@ -145,6 +185,8 @@ func New(cfg Config) *Daemon {
 		sessionStore:            sessionStore,
 		sessionRuntimeStore:     runtimeStateStore,
 		worktreeRuntimeStore:    runtimeStateStore,
+		runtimeReconcileQueue:   runtimeReconcileQueue,
+		gitStatusRefreshQueue:   gitStatusRefreshQueue,
 		sessionStopPending:      map[string]int{},
 		sessionStateRefreshing:  map[string]bool{},
 		sessionStateLastRefresh: map[string]time.Time{},
@@ -208,7 +250,6 @@ func New(cfg Config) *Daemon {
 	return d
 }
 
-
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
 	startedAt := time.Now()
@@ -248,6 +289,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if d.issues != nil {
 			if closeErr := d.issues.CloseDB(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
+			}
+		}
+		if d.runtimeReconcileQueue != nil {
+			if closeErr := d.runtimeReconcileQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
+			}
+		}
+		if d.gitStatusRefreshQueue != nil {
+			if closeErr := d.gitStatusRefreshQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to close git status refresh queue", "error", closeErr)
 			}
 		}
 		d.closeRuntimeStateStores()

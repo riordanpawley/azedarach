@@ -157,8 +157,11 @@ func listWorktrees(repoRoot string) ([]worktreeInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("git worktree list --porcelain failed: %w", err)
 	}
+	return parseWorktreeListPorcelain(string(out))
+}
 
-	lines := strings.Split(string(out), "\n")
+func parseWorktreeListPorcelain(raw string) ([]worktreeInfo, error) {
+	lines := strings.Split(raw, "\n")
 	var worktrees []worktreeInfo
 	var current worktreeInfo
 	for _, raw := range lines {
@@ -180,6 +183,9 @@ func listWorktrees(repoRoot string) ([]worktreeInfo, error) {
 	}
 	if current.Path != "" {
 		worktrees = append(worktrees, current)
+	}
+	if len(worktrees) == 0 {
+		return nil, fmt.Errorf("no worktrees parsed from porcelain output")
 	}
 	for i := range worktrees {
 		if abs, err := absPath(worktrees[i].Path); err == nil {

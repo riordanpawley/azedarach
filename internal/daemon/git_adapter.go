@@ -28,6 +28,8 @@ type gitServiceAdapter struct {
 	client                  *git.Client
 	runtimeStateStore       *daemonstate.RuntimeStateStore
 	runtimeProjectionWriter runtimeProjectionWriter
+	statusRefreshQueue      *reconcileQueue[*git.GitStatus]
+	statusRefreshThrottle   *reconcileThrottle
 	logger                  *slog.Logger
 	pollInterval            time.Duration
 	onStatusUpdate          func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
@@ -210,7 +212,7 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 		if projection, found, err := a.runtimeStateStore.GetWorktreeStateByPath(ctx, projectID, worktree); err == nil && found && len(projection.GitStatusRaw) > 0 {
 			var cached git.GitStatus
 			if unmarshalErr := json.Unmarshal(projection.GitStatusRaw, &cached); unmarshalErr == nil {
-				a.refreshGitStatusAsync(projectID, worktree)
+				a.refreshGitStatusVisible(projectID, worktree)
 				a.ensureStatusPoller(projectID, worktree)
 				return &cached, nil
 			}
@@ -226,54 +228,173 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 	return status, nil
 }
 
+func (a *gitServiceAdapter) ensureStatusRefreshQueue() *reconcileQueue[*git.GitStatus] {
+	if a == nil {
+		return newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+			Name:    "git_status_refresh",
+			Workers: defaultGitStatusRefreshQueueWorkers,
+		})
+	}
+
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.statusRefreshQueue == nil {
+		a.statusRefreshQueue = newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
+			Name:    "git_status_refresh",
+			Workers: defaultGitStatusRefreshQueueWorkers,
+			Logger:  a.logger,
+		})
+	}
+	return a.statusRefreshQueue
+}
+
+func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, priority reconcileQueuePriority, reason string) (reconcileQueueSubmission[*git.GitStatus], error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return reconcileQueueSubmission[*git.GitStatus]{}, fmt.Errorf("missing worktree")
+	}
+	key := gitStatusRefreshQueueKey(projectID, worktree)
+	queue := a.ensureStatusRefreshQueue()
+	force := priority >= reconcilePriorityManual
+	throttle := a.ensureStatusRefreshThrottle()
+	admission := reconcileThrottleDecision{Action: reconcileThrottleProcess}
+	if !force && !queue.HasJob(key) {
+		admission = throttle.Admit(key, false)
+		if !admission.Allowed() {
+			if a.logger != nil {
+				counters := throttle.snapshotCounters()
+				a.logger.Debug("git status refresh suppressed",
+					"project_id", projectID,
+					"worktree", worktree,
+					"reason", reason,
+					"action", string(admission.Action),
+					"until", admission.Until,
+					"throttle_processed", counters.Processed,
+					"throttle_skipped", counters.Skipped,
+					"throttle_deferred", counters.Deferred,
+				)
+			}
+			return immediateReconcileSubmission(reconcileQueueResult[*git.GitStatus]{
+				Key:      key,
+				Skipped:  admission.Action == reconcileThrottleSkip,
+				Deferred: admission.Action == reconcileThrottleDefer,
+				Reason:   admission.Reason,
+				Until:    admission.Until,
+			}), nil
+		}
+	}
+
+	submission, err := queue.Enqueue(reconcileQueueRequest[*git.GitStatus]{
+		Key:      key,
+		Priority: priority,
+		Reason:   reason,
+		Work: func(ctx context.Context) (*git.GitStatus, error) {
+			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, false)
+			outcome := throttle.Record(key, gitStatusSignature(status), refreshErr)
+			if a.logger != nil {
+				counters := throttle.snapshotCounters()
+				a.logger.Debug("git status refresh processed",
+					"project_id", projectID,
+					"worktree", worktree,
+					"reason", reason,
+					"outcome", string(outcome),
+					"throttle_processed", counters.Processed,
+					"throttle_skipped", counters.Skipped,
+					"throttle_deferred", counters.Deferred,
+				)
+			}
+			return status, refreshErr
+		},
+	})
+	if err != nil {
+		return reconcileQueueSubmission[*git.GitStatus]{}, err
+	}
+	if submission.Deduped {
+		throttle.Refund(admission)
+	}
+	return submission, nil
+}
+
+func (a *gitServiceAdapter) refreshGitStatusVisible(projectID, worktree string) {
+	if _, err := a.queueGitStatusRefresh(projectID, worktree, reconcilePriorityVisible, "visible"); err != nil && a.logger != nil {
+		a.logger.Debug("git status visible refresh enqueue failed", "project_id", projectID, "worktree", worktree, "error", err)
+	}
+}
+
+func (a *gitServiceAdapter) refreshGitStatusManual(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
+	submission, err := a.queueGitStatusRefresh(projectID, worktree, reconcilePriorityManual, "manual")
+	if err != nil {
+		return nil, err
+	}
+	result, err := submission.Wait(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return result.Value, result.Err
+}
+
 func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) {
+	_, _ = a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, publishOnChange, forcePublish)
+}
+
+func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
 	status, err := a.client.Status(ctx, worktree)
 	if err != nil {
 		if a.logger != nil {
 			a.logger.Debug("git status refresh after mutation failed", "project_id", projectID, "worktree", worktree, "error", err)
 		}
-		return
+		return nil, err
 	}
 	if a.runtimeProjectionWriter != nil {
 		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, "", worktree, status, publishOnChange, forcePublish)
 		a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
-		return
+		return status, nil
 	}
 	changed, issueID := a.persistStatusSnapshot(ctx, projectID, worktree, status)
 	a.invalidateRuntimeSignalCache(normalizeProjectID(projectID), worktree)
 	if (forcePublish || (publishOnChange && changed)) && a.onStatusUpdate != nil && strings.TrimSpace(issueID) != "" {
 		a.onStatusUpdate(ctx, normalizeProjectID(projectID), issueID, worktree, status)
 	}
+	return status, nil
 }
 
 func (a *gitServiceAdapter) refreshGitStatusAsync(projectID, worktree string) {
-	projectID = normalizeProjectID(projectID)
-	worktree = strings.TrimSpace(worktree)
-	if worktree == "" {
-		return
+	if _, err := a.queueGitStatusRefresh(projectID, worktree, reconcilePriorityBackground, "background"); err != nil && a.logger != nil {
+		a.logger.Debug("git status background refresh enqueue failed", "project_id", projectID, "worktree", worktree, "error", err)
 	}
-	key := projectID + "|" + worktree
-	a.refreshMu.Lock()
-	if a.refreshRunning == nil {
-		a.refreshRunning = map[string]bool{}
-	}
-	if a.refreshRunning[key] {
-		a.refreshMu.Unlock()
-		return
-	}
-	a.refreshRunning[key] = true
-	a.refreshMu.Unlock()
+}
 
-	go func() {
-		defer func() {
-			a.refreshMu.Lock()
-			delete(a.refreshRunning, key)
-			a.refreshMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
-	}()
+func (a *gitServiceAdapter) ensureStatusRefreshThrottle() *reconcileThrottle {
+	if a == nil {
+		return newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "git_status_refresh",
+			Budget:               defaultGitStatusRefreshBudget,
+			Cadence:              defaultGitStatusRefreshCadence,
+			UnchangedBackoffBase: defaultGitStatusRefreshUnchangedBackoff,
+			UnchangedBackoffMax:  maxGitStatusRefreshUnchangedBackoff,
+			FailureBackoffBase:   defaultGitStatusRefreshFailureBackoff,
+			FailureBackoffMax:    maxGitStatusRefreshFailureBackoff,
+		})
+	}
+
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.statusRefreshThrottle == nil {
+		a.statusRefreshThrottle = newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "git_status_refresh",
+			Budget:               defaultGitStatusRefreshBudget,
+			Cadence:              defaultGitStatusRefreshCadence,
+			UnchangedBackoffBase: defaultGitStatusRefreshUnchangedBackoff,
+			UnchangedBackoffMax:  maxGitStatusRefreshUnchangedBackoff,
+			FailureBackoffBase:   defaultGitStatusRefreshFailureBackoff,
+			FailureBackoffMax:    maxGitStatusRefreshFailureBackoff,
+			Logger:               a.logger,
+		})
+	}
+	return a.statusRefreshThrottle
 }
 
 func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID, worktree string, status *git.GitStatus) (bool, string) {
@@ -327,12 +448,14 @@ func (a *gitServiceAdapter) ensureStatusPoller(projectID, worktree string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				pollCtx, pollCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				a.refreshGitStatusWriteThrough(pollCtx, projectID, worktree, true, false)
-				pollCancel()
+				a.refreshGitStatusAsync(projectID, worktree)
 			}
 		}
 	}()
+}
+
+func gitStatusRefreshQueueKey(projectID, worktree string) string {
+	return normalizeProjectID(projectID) + "|" + strings.TrimSpace(worktree)
 }
 
 func gitStatusFiles(status git.GitStatus) []string {
@@ -361,6 +484,17 @@ func gitStatusFiles(status git.GitStatus) []string {
 
 func normalizeProjectID(projectID string) string {
 	return protocol.NormalizeProjectID(projectID)
+}
+
+func gitStatusSignature(status *git.GitStatus) string {
+	if status == nil {
+		return ""
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 func (a *gitServiceAdapter) computeRuntimeSignal(ctx context.Context, issueID, worktree, baseBranch string, compareRemote bool, remote string) (daemonhandlers.GitRuntimeSignalsResult, error) {

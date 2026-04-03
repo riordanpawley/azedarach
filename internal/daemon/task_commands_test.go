@@ -227,6 +227,13 @@ func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
 func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
+	originalNow := timeNow
+	t.Cleanup(func() {
+		timeNow = originalNow
+	})
+	timeNow = func() time.Time {
+		return time.Date(2026, time.April, 2, 11, 2, 5, 0, time.UTC)
+	}
 
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := issues.NewClientAtPath(issuesDBPath, logger)
@@ -346,6 +353,13 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if got, want := payload.SnapshotRevision, uint64(7); got != want {
 		t.Fatalf("payload.SnapshotRevision = %d, want %d", got, want)
 	}
+	wantLastCheckedAt := laterTime(storedSession.UpdatedAt, time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC))
+	if got, want := payload.LastCheckedAt, wantLastCheckedAt; !got.Equal(want) {
+		t.Fatalf("payload.LastCheckedAt = %v, want %v", got, want)
+	}
+	if got, want := payload.Freshness, protocol.TaskListFreshnessFresh; got != want {
+		t.Fatalf("payload.Freshness = %q, want %q", got, want)
+	}
 	tasks := payload.Tasks
 	if got, want := len(tasks), 1; got != want {
 		t.Fatalf("task count = %d, want %d", got, want)
@@ -415,6 +429,42 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 	if !bytes.Equal(worktrees[0].GitStatusRaw, rawStatus) {
 		t.Fatalf("projected worktree git status was mutated")
+	}
+}
+
+func TestTaskListSnapshotFreshnessMarksStaleProjection(t *testing.T) {
+	originalNow := timeNow
+	t.Cleanup(func() {
+		timeNow = originalNow
+	})
+	timeNow = func() time.Time {
+		return time.Date(2026, time.April, 2, 11, 5, 0, 0, time.UTC)
+	}
+
+	ctx := context.Background()
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	checkedAt := time.Date(2026, time.April, 2, 11, 4, 0, 0, time.UTC)
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: "proj-stale",
+		IssueID:   "az-1",
+		Path:      "/tmp/proj-stale-az-1",
+		UpdatedAt: checkedAt,
+	}); err != nil {
+		t.Fatalf("seed worktree projection: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:                  Config{Logger: slog.Default()},
+		worktreeRuntimeStore: store,
+	}
+	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, "proj-stale")
+	if !lastCheckedAt.Equal(checkedAt) {
+		t.Fatalf("lastCheckedAt = %v, want %v", lastCheckedAt, checkedAt)
+	}
+	if freshness != protocol.TaskListFreshnessStale {
+		t.Fatalf("freshness = %q, want %q", freshness, protocol.TaskListFreshnessStale)
 	}
 }
 

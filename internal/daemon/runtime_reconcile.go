@@ -33,6 +33,20 @@ type runtimeReconcileCommandBody struct {
 	ProjectID string `json:"project_id"`
 }
 
+type runtimeReconcileRequestContextKey struct{}
+
+type runtimeReconcileRequestContext struct {
+	Priority reconcileQueuePriority
+	Reason   string
+}
+
+type runtimeReconcileSweepMetrics struct {
+	Processed int
+	Skipped   int
+	Deferred  int
+	Failed    int
+}
+
 func newRuntimeReconcileService(d *Daemon) *runtimeReconcileService {
 	return &runtimeReconcileService{daemon: d}
 }
@@ -102,6 +116,75 @@ func (d *Daemon) ensureRuntimeReconciler() runtimeReconciler {
 	return d.runtimeReconciler
 }
 
+func (d *Daemon) ensureRuntimeReconcileThrottle() *reconcileThrottle {
+	if d == nil {
+		return newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "runtime_reconcile",
+			Budget:               defaultRuntimeReconcileBudget,
+			Cadence:              defaultRuntimeReconcileInterval,
+			UnchangedBackoffBase: defaultRuntimeReconcileUnchangedBackoff,
+			UnchangedBackoffMax:  maxRuntimeReconcileUnchangedBackoff,
+			FailureBackoffBase:   defaultRuntimeReconcileFailureBackoff,
+			FailureBackoffMax:    maxRuntimeReconcileFailureBackoff,
+		})
+	}
+
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	if d.runtimeReconcileThrottle == nil {
+		d.runtimeReconcileThrottle = newReconcileThrottle(reconcileThrottleConfig{
+			Name:                 "runtime_reconcile",
+			Budget:               defaultRuntimeReconcileBudget,
+			Cadence:              d.runtimeReconcileInterval(),
+			UnchangedBackoffBase: defaultRuntimeReconcileUnchangedBackoff,
+			UnchangedBackoffMax:  maxRuntimeReconcileUnchangedBackoff,
+			FailureBackoffBase:   defaultRuntimeReconcileFailureBackoff,
+			FailureBackoffMax:    maxRuntimeReconcileFailureBackoff,
+			Logger:               d.cfg.Logger,
+		})
+	}
+	return d.runtimeReconcileThrottle
+}
+
+func (d *Daemon) ensureRuntimeReconcileQueue() *reconcileQueue[protocol.RuntimeReconcileResponseBody] {
+	if d == nil {
+		return newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+			Name:    "runtime_reconcile",
+			Workers: defaultRuntimeReconcileQueueWorkers,
+		})
+	}
+
+	d.queueMu.Lock()
+	defer d.queueMu.Unlock()
+	if d.runtimeReconcileQueue == nil {
+		d.runtimeReconcileQueue = newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+			Name:    "runtime_reconcile",
+			Workers: defaultRuntimeReconcileQueueWorkers,
+			Logger:  d.cfg.Logger,
+		})
+	}
+	return d.runtimeReconcileQueue
+}
+
+func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, priority reconcileQueuePriority, reason string) (reconcileQueueSubmission[protocol.RuntimeReconcileResponseBody], error) {
+	projectID = protocol.NormalizeProjectID(projectID)
+	return d.ensureRuntimeReconcileQueue().Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:         projectID,
+		Priority:    priority,
+		Reason:      reason,
+		ExecContext: ctx,
+		Work: func(workCtx context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			workCtx = context.WithValue(workCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+				Priority: priority,
+				Reason:   reason,
+			})
+			result, err := d.ensureRuntimeReconciler().Reconcile(workCtx, projectID)
+			d.ensureRuntimeReconcileThrottle().Record(projectID, runtimeReconcileResultSignature(result), err)
+			return result, err
+		},
+	})
+}
+
 func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var body runtimeReconcileCommandBody
 	if len(req.Body) > 0 {
@@ -116,10 +199,18 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 		projectID = protocol.NormalizeProjectID(projectID)
 	}
 
-	result, err := d.ensureRuntimeReconciler().Reconcile(ctx, projectID)
+	submission, err := d.queueRuntimeReconcile(ctx, projectID, reconcilePriorityManual, "manual")
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	outcome, err := submission.Wait(ctx)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if outcome.Err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, outcome.Err.Error()), nil
+	}
+	result := outcome.Value
 
 	resp := d.successResponse(req)
 	resp.Revision = d.currentRevision(projectID)
@@ -141,7 +232,7 @@ func (d *Daemon) runStartupRuntimeReconcile(ctx context.Context) (protocol.Runti
 	}
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	results, err := d.runRuntimeReconcileSweep(reconcileCtx)
+	results, _, err := d.runRuntimeReconcileSweepWithPriority(reconcileCtx, reconcilePriorityBackground, "startup")
 	return summarizeRuntimeReconcileSweep(results), err
 }
 
@@ -178,17 +269,30 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	results, err := d.runRuntimeReconcileSweep(reconcileCtx)
+	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(reconcileCtx, reconcilePriorityBackground, "periodic")
 	result := summarizeRuntimeReconcileSweep(results)
 	projectCount := len(results)
 	if projectCount == 0 {
 		projectCount = 1
 	}
+	queueCounters := d.ensureRuntimeReconcileQueue().snapshotCounters()
+	throttleCounters := d.ensureRuntimeReconcileThrottle().snapshotCounters()
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("daemon runtime reconcile cycle failed",
 				"project_id", result.ProjectID,
 				"project_count", projectCount,
+				"processed_tasks", metrics.Processed,
+				"skipped_tasks", metrics.Skipped,
+				"deferred_tasks", metrics.Deferred,
+				"failed_tasks", metrics.Failed,
+				"queue_enqueued", queueCounters.Enqueued,
+				"queue_dequeued", queueCounters.Dequeued,
+				"queue_deduped", queueCounters.Deduped,
+				"queue_reprioritized", queueCounters.Reprioritized,
+				"throttle_processed", throttleCounters.Processed,
+				"throttle_skipped", throttleCounters.Skipped,
+				"throttle_deferred", throttleCounters.Deferred,
 				"error", err,
 			)
 		}
@@ -201,25 +305,93 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 			"worktrees_refreshed", result.WorktreesRefreshed,
 			"recreated_tmux_sessions", result.RecreatedTmuxSessions,
 			"aligned_daemon_sessions", result.AlignedDaemonSessions,
+			"processed_tasks", metrics.Processed,
+			"skipped_tasks", metrics.Skipped,
+			"deferred_tasks", metrics.Deferred,
+			"failed_tasks", metrics.Failed,
+			"queue_enqueued", queueCounters.Enqueued,
+			"queue_dequeued", queueCounters.Dequeued,
+			"queue_deduped", queueCounters.Deduped,
+			"queue_reprioritized", queueCounters.Reprioritized,
+			"throttle_processed", throttleCounters.Processed,
+			"throttle_skipped", throttleCounters.Skipped,
+			"throttle_deferred", throttleCounters.Deferred,
 		)
 	}
 }
 
 func (d *Daemon) runRuntimeReconcileSweep(ctx context.Context) ([]protocol.RuntimeReconcileResponseBody, error) {
+	results, _, err := d.runRuntimeReconcileSweepWithPriority(ctx, reconcilePriorityBackground, "background")
+	return results, err
+}
+
+func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, priority reconcileQueuePriority, reason string) ([]protocol.RuntimeReconcileResponseBody, runtimeReconcileSweepMetrics, error) {
 	projectIDs, err := d.runtimeReconcileKnownProjectIDs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, runtimeReconcileSweepMetrics{}, err
 	}
-	results := make([]protocol.RuntimeReconcileResponseBody, 0, len(projectIDs))
-	var errs []error
+	type queuedProject struct {
+		projectID  string
+		submission reconcileQueueSubmission[protocol.RuntimeReconcileResponseBody]
+	}
+	metrics := runtimeReconcileSweepMetrics{}
+	queued := make([]queuedProject, 0, len(projectIDs))
+	var submitErrs []error
+	queue := d.ensureRuntimeReconcileQueue()
+	throttle := d.ensureRuntimeReconcileThrottle()
+	force := priority >= reconcilePriorityManual
 	for _, projectID := range projectIDs {
-		result, reconcileErr := d.ensureRuntimeReconciler().Reconcile(ctx, projectID)
-		results = append(results, result)
-		if reconcileErr != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", projectID, reconcileErr))
+		admission := reconcileThrottleDecision{Action: reconcileThrottleProcess}
+		if !force && !queue.HasJob(projectID) {
+			admission = throttle.Admit(projectID, false)
+			switch admission.Action {
+			case reconcileThrottleSkip:
+				metrics.Skipped++
+				continue
+			case reconcileThrottleDefer:
+				metrics.Deferred++
+				continue
+			}
+		}
+		submission, submitErr := d.queueRuntimeReconcile(ctx, projectID, priority, reason)
+		if submitErr != nil {
+			throttle.Refund(admission)
+			submitErrs = append(submitErrs, fmt.Errorf("%s: %w", projectID, submitErr))
+			metrics.Failed++
+			continue
+		}
+		if submission.Deduped {
+			throttle.Refund(admission)
+		}
+		if !submission.Deduped {
+			metrics.Processed++
+		}
+		queued = append(queued, queuedProject{
+			projectID:  projectID,
+			submission: submission,
+		})
+	}
+
+	results := make([]protocol.RuntimeReconcileResponseBody, 0, len(queued))
+	var errs []error
+	errs = append(errs, submitErrs...)
+	for _, item := range queued {
+		outcome, waitErr := item.submission.Wait(ctx)
+		if waitErr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", item.projectID, waitErr))
+			metrics.Failed++
+			continue
+		}
+		if outcome.Skipped || outcome.Deferred {
+			continue
+		}
+		results = append(results, outcome.Value)
+		if outcome.Err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", item.projectID, outcome.Err))
+			metrics.Failed++
 		}
 	}
-	return results, errors.Join(errs...)
+	return results, metrics, errors.Join(errs...)
 }
 
 func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string, error) {
@@ -262,11 +434,16 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 
 	addRuntimeStateProjects := func(store interface {
 		ListProjectIDs(context.Context) ([]string, error)
-	}) error { known, err := store.ListProjectIDs(ctx); if err != nil {
-		return fmt.Errorf("list runtime-state project ids: %w", err)
-	}; for _, projectID := range known {
-		add(projectID)
-	}; return nil }
+	}) error {
+		known, err := store.ListProjectIDs(ctx)
+		if err != nil {
+			return fmt.Errorf("list runtime-state project ids: %w", err)
+		}
+		for _, projectID := range known {
+			add(projectID)
+		}
+		return nil
+	}
 	if sessionStore := d.sessionRuntimeStateStore(); sessionStore != nil {
 		if err := addRuntimeStateProjects(sessionStore); err != nil {
 			return nil, err
@@ -359,4 +536,23 @@ func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseB
 		summary.AlignedDaemonSessions += result.AlignedDaemonSessions
 	}
 	return summary
+}
+
+func runtimeReconcileResultSignature(result protocol.RuntimeReconcileResponseBody) string {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func runtimeReconcileRequestFromContext(ctx context.Context) runtimeReconcileRequestContext {
+	if ctx == nil {
+		return runtimeReconcileRequestContext{}
+	}
+	value, ok := ctx.Value(runtimeReconcileRequestContextKey{}).(runtimeReconcileRequestContext)
+	if !ok {
+		return runtimeReconcileRequestContext{}
+	}
+	return value
 }
