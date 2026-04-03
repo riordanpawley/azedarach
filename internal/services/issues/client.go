@@ -18,6 +18,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
 type dependencyRemovalConfirmationKey struct{}
@@ -134,6 +135,10 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
 	}
+	if err := c.ensureRuntimeProjectionSchema(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	specAuditDoneAt := time.Now()
 
 	c.db = db
@@ -151,6 +156,40 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
+}
+
+func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS daemon_session_projections (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			started_at TEXT,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
+			ON daemon_session_projections (project_id, issue_id)`,
+		`CREATE TABLE IF NOT EXISTS daemon_worktree_projections (
+			project_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			path TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			git_status_json TEXT,
+			git_status_updated_at TEXT,
+			PRIMARY KEY (project_id, issue_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
+			ON daemon_worktree_projections (project_id, path)`,
+	}
+	for _, stmt := range statements {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("ensure runtime projection schema: %w", err)
+		}
+	}
+	return nil
 }
 
 func (c *Client) CloseDB() error {
@@ -235,6 +274,23 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 	`)
 	if err != nil {
 		return nil, c.wrapError("list", "", err)
+	}
+	return tasks, nil
+}
+
+// ListWithRuntime fetches active issues and runtime projection fields using a single joined SQLite query.
+func (c *Client) ListWithRuntime(ctx context.Context, projectID string) ([]domain.Task, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID)
+	if err != nil {
+		return nil, c.wrapError("list-with-runtime", projectID, err)
 	}
 	return tasks, nil
 }
@@ -879,6 +935,160 @@ func (c *Client) queryTasks(ctx context.Context, db *sql.DB, query string, args 
 	return tasks, nil
 }
 
+func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectID string) ([]domain.Task, error) {
+	rows, err := db.QueryContext(ctx, `
+		WITH ranked_session AS (
+			SELECT
+				issue_id,
+				state,
+				COALESCE(started_at, '') AS started_at,
+				updated_at,
+				session_id,
+				ROW_NUMBER() OVER (
+					PARTITION BY issue_id
+					ORDER BY
+						CASE state
+							WHEN 'attached' THEN 0
+							WHEN 'paused' THEN 1
+							WHEN 'starting' THEN 2
+							WHEN 'stopped' THEN 3
+							ELSE 4
+						END,
+						updated_at DESC,
+						session_id DESC
+				) AS rn
+			FROM daemon_session_projections
+			WHERE project_id = ?
+		),
+		session_pick AS (
+			SELECT issue_id, state, started_at, updated_at
+			FROM ranked_session
+			WHERE rn = 1
+		)
+		SELECT
+			i.id,
+			i.title,
+			COALESCE(i.description, ''),
+			i.status,
+			i.priority,
+			i.issue_type,
+			COALESCE(i.implementations_json, '[]'),
+			i.created_at,
+			i.updated_at,
+			COALESCE(sp.state, ''),
+			COALESCE(sp.started_at, ''),
+			COALESCE(sp.updated_at, ''),
+			COALESCE(w.path, ''),
+			COALESCE(w.git_status_json, '')
+		FROM issues i
+		LEFT JOIN session_pick sp ON sp.issue_id = i.id
+		LEFT JOIN daemon_worktree_projections w
+			ON w.project_id = ? AND w.issue_id = i.id
+		WHERE i.deleted_at IS NULL
+		ORDER BY i.updated_at DESC
+	`, projectID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]domain.Task, 0, 32)
+	taskIDs := make([]string, 0, 32)
+	taskIndexByID := map[string]int{}
+
+	for rows.Next() {
+		task := domain.Task{}
+		var (
+			createdRaw         string
+			updatedRaw         string
+			statusRaw          string
+			typeRaw            string
+			priorityRaw        int
+			implementationsRaw string
+			sessionStateRaw    string
+			sessionStartedRaw  string
+			sessionUpdatedRaw  string
+			worktreePath       string
+			gitStatusRaw       string
+		)
+		if err := rows.Scan(
+			&task.ID,
+			&task.Title,
+			&task.Description,
+			&statusRaw,
+			&priorityRaw,
+			&typeRaw,
+			&implementationsRaw,
+			&createdRaw,
+			&updatedRaw,
+			&sessionStateRaw,
+			&sessionStartedRaw,
+			&sessionUpdatedRaw,
+			&worktreePath,
+			&gitStatusRaw,
+		); err != nil {
+			return nil, err
+		}
+
+		task.Status = domain.Status(statusRaw)
+		task.Priority = domain.Priority(priorityRaw)
+		task.Type = domain.TaskType(typeRaw)
+		task.CreatedAt = parseTimestamp(createdRaw)
+		task.UpdatedAt = parseTimestamp(updatedRaw)
+		task.Implementations = decodeImplementationsJSON(implementationsRaw)
+
+		worktreePath = strings.TrimSpace(worktreePath)
+		if worktreePath != "" {
+			task.HasWorktree = true
+		}
+		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
+		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
+			startedAt := parseOptionalTimestamp(sessionStartedRaw)
+			if startedAt == nil {
+				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
+			}
+			task.Session = &domain.Session{
+				IssueID:   task.ID,
+				State:     mapRuntimeSessionState(sessionStateRaw),
+				StartedAt: startedAt,
+				Worktree:  worktreePath,
+			}
+			task.HasTmuxSession = true
+		}
+
+		if strings.TrimSpace(gitStatusRaw) != "" {
+			var status git.GitStatus
+			if err := json.Unmarshal([]byte(gitStatusRaw), &status); err == nil {
+				task.HasUncommittedChanges = status.HasChanges
+				task.GitAdditions = status.GitAdditions
+				task.GitDeletions = status.GitDeletions
+				task.GitAheadCount = status.GitAheadCount
+				task.GitBehindCount = status.GitBehindCount
+				if task.GitAdditions == 0 {
+					task.GitAdditions = len(status.Added) + len(status.Modified) + len(status.Staged)
+				}
+				if task.GitDeletions == 0 {
+					task.GitDeletions = len(status.Deleted)
+				}
+			}
+		}
+
+		tasks = append(tasks, task)
+		taskIDs = append(taskIDs, task.ID)
+		taskIndexByID[task.ID] = len(tasks) - 1
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(tasks) == 0 {
+		return tasks, nil
+	}
+	if err := c.loadDependenciesForTasks(ctx, db, taskIDs, taskIndexByID, tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 func decodeImplementationsJSON(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -891,6 +1101,36 @@ func decodeImplementationsJSON(raw string) []string {
 		return nil
 	}
 	return impls
+}
+
+func parseOptionalTimestamp(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed := parseTimestamp(raw)
+	if parsed.IsZero() {
+		return nil
+	}
+	utc := parsed.UTC()
+	return &utc
+}
+
+func mapRuntimeSessionState(value string) domain.SessionState {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "paused":
+		return domain.SessionPaused
+	case "attached", "starting":
+		return domain.SessionBusy
+	case "done":
+		return domain.SessionDone
+	case "waiting":
+		return domain.SessionWaiting
+	case "error":
+		return domain.SessionError
+	default:
+		return domain.SessionBusy
+	}
 }
 
 func (c *Client) loadDependenciesForTasks(

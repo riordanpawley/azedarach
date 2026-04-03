@@ -3133,9 +3133,18 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 	if task == nil {
 		return
 	}
+	taskView := *task
+	if path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); path != "" {
+		if taskView.Session == nil {
+			taskView.Session = &domain.Session{IssueID: taskView.ID}
+		}
+		if strings.TrimSpace(taskView.Session.Worktree) == "" {
+			taskView.Session.Worktree = path
+		}
+	}
 
 	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(taskID))
+	workspace.SyncTask(taskView, m.tasks, m.pendingMutationForTask(taskID))
 }
 
 func (m *Model) applyPendingStatusOverlays() {

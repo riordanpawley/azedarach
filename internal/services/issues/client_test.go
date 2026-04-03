@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,6 +81,66 @@ func TestClient_CRUDLifecycle(t *testing.T) {
 	tasks, err = client.List(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, tasks)
+}
+
+func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Runtime joined task",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", client.dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	sessionID := "sess-runtime-1"
+	startedAt := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
+	updatedAt := startedAt.Add(2 * time.Minute)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, sessionID, taskID, "attached", startedAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	statusRaw, err := json.Marshal(git.GitStatus{
+		HasChanges:     true,
+		GitAdditions:   7,
+		GitDeletions:   3,
+		GitAheadCount:  2,
+		GitBehindCount: 1,
+	})
+	require.NoError(t, err)
+	worktreePath := "/tmp/proj-runtime-" + taskID
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at, git_status_json)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, taskID, worktreePath, "riordan/"+taskID+"/task", updatedAt.Format(time.RFC3339Nano), string(statusRaw))
+	require.NoError(t, err)
+
+	tasks, err := client.ListWithRuntime(ctx, projectID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	got := tasks[0]
+	assert.Equal(t, taskID, got.ID)
+	require.NotNil(t, got.Session)
+	assert.Equal(t, domain.SessionBusy, got.Session.State)
+	assert.Equal(t, worktreePath, got.Session.Worktree)
+	require.NotNil(t, got.Session.StartedAt)
+	assert.True(t, got.Session.StartedAt.Equal(startedAt))
+	assert.True(t, got.HasWorktree)
+	assert.True(t, got.HasUncommittedChanges)
+	assert.Equal(t, 7, got.GitAdditions)
+	assert.Equal(t, 3, got.GitDeletions)
+	assert.Equal(t, 2, got.GitAheadCount)
+	assert.Equal(t, 1, got.GitBehindCount)
 }
 
 func TestClient_AppendNotes(t *testing.T) {
