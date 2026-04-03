@@ -164,6 +164,8 @@ func TestRunDevCommandsAgainstDaemonClient(t *testing.T) {
 					ProtocolVersion:  protocol.CurrentVersion,
 					SnapshotRevision: 1,
 					ProjectID:        "proj-dev",
+					LastCheckedAt:    timeNow(t),
+					Freshness:        protocol.TaskListFreshnessFresh,
 					Tasks: []domain.Task{
 						{ID: "az-123", Title: "Server 123"},
 						{ID: "az-999", Title: "Server 999"},
