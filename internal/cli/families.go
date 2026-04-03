@@ -621,7 +621,14 @@ func GitHooksHookCommand(deps *Dependencies, opts GitHooksHookOptions) error {
 		}
 	}
 
-	return reconcileDaemonGitState(projectDir, deps, hookName, opts.Verbose)
+	reconcileDir := projectDir
+	if strings.TrimSpace(opts.ProjectDir) == "" {
+		if cwd, cwdErr := os.Getwd(); cwdErr == nil && strings.TrimSpace(cwd) != "" {
+			reconcileDir = cwd
+		}
+	}
+
+	return reconcileDaemonGitState(reconcileDir, deps, hookName, opts.Verbose)
 }
 
 func loadConfigForHook(projectDir string, deps *Dependencies) (*config.Config, error) {

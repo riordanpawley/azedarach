@@ -231,6 +231,77 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	}
 }
 
+func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed file: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "add", "README.md"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeDir, "-b", "hook-test"); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatalf("chdir worktree: %v", err)
+	}
+	defer func() {
+		if chdirErr := os.Chdir(wd); chdirErr != nil {
+			t.Fatalf("restore cwd: %v", chdirErr)
+		}
+	}()
+
+	var gotReq protocol.RequestEnvelope
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			gotReq = req
+			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+		},
+	}
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+		RepoDir:      baseDir,
+	}
+
+	if err := GitHooksNotifyCommand(deps, GitHooksNotifyOptions{Hook: "post-commit"}); err != nil {
+		t.Fatalf("GitHooksNotifyCommand error: %v", err)
+	}
+	if gotReq.Command != daemonclient.CommandGitStatus {
+		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatus)
+	}
+
+	var body daemonclient.GitCommandRequest
+	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	gotWorktree, err := filepath.EvalSymlinks(body.Worktree)
+	if err != nil {
+		gotWorktree = body.Worktree
+	}
+	wantWorktree, err := filepath.EvalSymlinks(worktreeDir)
+	if err != nil {
+		wantWorktree = worktreeDir
+	}
+	if gotWorktree != wantWorktree {
+		t.Fatalf("worktree = %q (canon %q), want %q (canon %q)", body.Worktree, gotWorktree, worktreeDir, wantWorktree)
+	}
+}
+
 func TestGitHooksRunCommandExecutesConfiguredPreCommitCommands(t *testing.T) {
 	projectDir := t.TempDir()
 	cmd := exec.Command("git", "-C", projectDir, "init")
