@@ -96,6 +96,7 @@ type IssueListOptions struct {
 	Deps    bool
 	Limit   int
 	IDs     []string
+	States  []domain.Status
 }
 
 type IssueGetOptions struct {
@@ -1027,12 +1028,22 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 	opts := IssueListOptions{Limit: defaultIssueListLimit}
 	ids := make([]string, 0, 4)
 	idsCSV := ""
+	stateInputs := make([]string, 0, 4)
+	statesCSV := ""
 	fs := flag.NewFlagSet("issue list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.BoolVar(&opts.JSON, "json", false, "output issues as JSON")
 	fs.BoolVar(&opts.Deps, "deps", false, "include dependency summary in table output")
 	fs.IntVar(&opts.Limit, "limit", defaultIssueListLimit, "maximum issues to list in one window")
+	addStatusInput := func(v string) error {
+		stateInputs = append(stateInputs, v)
+		return nil
+	}
+	fs.Func("status", "restrict to a specific issue status (repeatable)", addStatusInput)
+	fs.Func("state", "deprecated alias for --status", addStatusInput)
+	fs.StringVar(&statesCSV, "statuses", "", "comma-separated issue statuses")
+	fs.StringVar(&statesCSV, "states", "", "deprecated alias for --statuses")
 	fs.Func("id", "restrict list to specific issue ids (repeatable)", func(v string) error {
 		trimmed := strings.TrimSpace(v)
 		if trimmed == "" {
@@ -1062,6 +1073,14 @@ func ParseIssueListArgs(args []string) (IssueListOptions, error) {
 		}
 	}
 	opts.IDs = dedupeOrderedIDs(ids)
+	if strings.TrimSpace(statesCSV) != "" {
+		stateInputs = append(stateInputs, strings.Split(statesCSV, ",")...)
+	}
+	states, err := parseIssueStatuses(stateInputs)
+	if err != nil {
+		return IssueListOptions{}, err
+	}
+	opts.States = states
 	return opts, nil
 }
 
@@ -1817,6 +1836,9 @@ func IssueListCommand(deps *Dependencies, opts IssueListOptions) error {
 	tasks := snapshot.Tasks
 	if len(opts.IDs) > 0 {
 		tasks = filterTasksByIDs(tasks, opts.IDs)
+	}
+	if len(opts.States) > 0 {
+		tasks = filterTasksByStatus(tasks, opts.States)
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
 		if tasks[i].UpdatedAt.Equal(tasks[j].UpdatedAt) {
@@ -2713,6 +2735,23 @@ func filterTasksByIDs(tasks []domain.Task, ids []string) []domain.Task {
 	filtered := make([]domain.Task, 0, len(ids))
 	for _, task := range tasks {
 		if _, ok := idSet[task.ID]; ok {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
+}
+
+func filterTasksByStatus(tasks []domain.Task, statuses []domain.Status) []domain.Task {
+	if len(statuses) == 0 {
+		return tasks
+	}
+	statusSet := make(map[domain.Status]struct{}, len(statuses))
+	for _, status := range statuses {
+		statusSet[status] = struct{}{}
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if _, ok := statusSet[task.Status]; ok {
 			filtered = append(filtered, task)
 		}
 	}
@@ -3803,6 +3842,28 @@ func parseOperationStates(values []string) ([]protocol.OperationState, error) {
 		}
 	}
 	return states, nil
+}
+
+func parseIssueStatuses(values []string) ([]domain.Status, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	statuses := make([]domain.Status, 0, len(values))
+	seen := make(map[domain.Status]struct{}, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			status, err := parseStatus(strings.TrimSpace(part))
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := seen[status]; ok {
+				continue
+			}
+			seen[status] = struct{}{}
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses, nil
 }
 
 func operationStateFromString(raw string) protocol.OperationState {

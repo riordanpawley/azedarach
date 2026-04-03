@@ -374,7 +374,7 @@ func main() {
 		case "list":
 			opts, err := cli.ParseIssueListArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az issue list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az issue list [--project <project-id>] [--json] [--deps] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

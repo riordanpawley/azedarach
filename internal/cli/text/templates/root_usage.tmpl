@@ -25,7 +25,7 @@ Commands:
   opencode <init|plugin>     Manage OpenCode integration
   codex <install|guard|hook>  Install Codex hook configuration and run hook commands
   spec <subcommand>          Spec workflows (req|link|read|lint|parity|sync)
-  issue list [--project <project-id>] [--json] [--deps] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
+  issue list [--project <project-id>] [--json] [--deps] [--status <status> ...] [--statuses a,b,c] [--limit N] [--id <id> ...] [--ids a,b,c]  List issues from daemon-backed store
   issue get [--project <project-id>] [--id <id>] [--json] [<id>]  Show a single issue from daemon-backed store
   issue get-many [--project <project-id>] --id <id> [--id <id> ...] [--ids a,b,c] [--json]  Fetch many issues in requested order
   issue check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for issue get
@@ -59,6 +59,7 @@ Examples:
   az session status az-123  # Show status for az-123
   az branch merge az-123    # Merge issue branch into base branch (daemon path)
   az issue list
+  az issue list --status in_progress
   az issue list --id az-1 --id az-2
   az issue list --deps
   az issue get --id az-123 --json
