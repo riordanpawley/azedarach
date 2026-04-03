@@ -193,9 +193,11 @@ func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projec
 
 	for i := range tasks {
 		taskKey := sessionKey(tasks[i].ID)
-		session, ok := snapshotByKey[taskKey]
+		snapshotSession, snapshotOK := snapshotByKey[taskKey]
+		projectionSession, projectionOK := projectionByKey[taskKey]
+		session, ok := snapshotSession, snapshotOK
 		if !ok {
-			session, ok = projectionByKey[taskKey]
+			session, ok = projectionSession, projectionOK
 		}
 		if !ok || session.State == daemonstate.SessionStateStopped {
 			continue
@@ -206,8 +208,17 @@ func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projec
 			state = domain.SessionPaused
 		}
 		var startedAt *time.Time
-		if !session.UpdatedAt.IsZero() {
-			started := session.UpdatedAt.UTC()
+		startedSource := session.StartedAt
+		if projectionOK && projectionSession.StartedAt != nil && !projectionSession.StartedAt.IsZero() {
+			if startedSource == nil || startedSource.IsZero() || projectionSession.StartedAt.Before(*startedSource) {
+				startedSource = projectionSession.StartedAt
+			}
+		}
+		if (startedSource == nil || startedSource.IsZero()) && !session.UpdatedAt.IsZero() {
+			startedSource = &session.UpdatedAt
+		}
+		if startedSource != nil && !startedSource.IsZero() {
+			started := startedSource.UTC()
 			startedAt = &started
 		}
 		tasks[i].Session = &domain.Session{
@@ -221,12 +232,17 @@ func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projec
 }
 
 func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID string) (int, error) {
-	if d == nil || d.worktree == nil || d.worktreeRuntimeStateStore(projectID) == nil {
+	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
 		return 0, nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
+	baseBranch := d.baseBranchForProject(projectID)
+	manager := d.worktreeManagerForProject(projectID)
+	if manager == nil {
+		return 0, nil
+	}
 
-	worktrees, err := d.worktree.List(ctx)
+	worktrees, err := manager.List(ctx)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("refresh worktree projection cache failed", "project_id", projectID, "error", err)
@@ -236,6 +252,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 
 	rows := make([]daemonstate.WorktreeState, 0, len(worktrees))
 	statusByIssue := make(map[string]*git.GitStatus, len(worktrees))
+	worktreePathByIssue := make(map[string]string, len(worktrees))
 	throttle := d.ensureWorktreeGitProbeThrottle()
 	trigger := runtimeReconcileRequestFromContext(ctx)
 	forceProbe := trigger.Priority >= reconcilePriorityManual
@@ -243,6 +260,10 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	skippedProbes := 0
 	deferredProbes := 0
 	failedProbes := 0
+	processedIssueIDs := make([]string, 0, 10)
+	failedIssueIDs := make([]string, 0, 10)
+	skippedIssueIDs := make([]string, 0, 10)
+	deferredIssueIDs := make([]string, 0, 10)
 	now := time.Now().UTC()
 	for _, wt := range worktrees {
 		issueID := strings.TrimSpace(wt.IssueID)
@@ -256,14 +277,26 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			switch decision.Action {
 			case reconcileThrottleSkip:
 				skippedProbes++
+				if len(skippedIssueIDs) < cap(skippedIssueIDs) {
+					skippedIssueIDs = append(skippedIssueIDs, issueID)
+				}
 			case reconcileThrottleDefer:
 				deferredProbes++
+				if len(deferredIssueIDs) < cap(deferredIssueIDs) {
+					deferredIssueIDs = append(deferredIssueIDs, issueID)
+				}
 			default:
 				processedProbes++
-				status, err := d.git.RuntimeStatus(ctx, worktreePath, d.cfg.BaseBranch)
+				if len(processedIssueIDs) < cap(processedIssueIDs) {
+					processedIssueIDs = append(processedIssueIDs, issueID)
+				}
+				status, err := d.git.RuntimeStatus(ctx, worktreePath, baseBranch)
 				outcome := throttle.Record(probeKey, gitStatusSignature(status), err)
 				if err != nil {
 					failedProbes++
+					if len(failedIssueIDs) < cap(failedIssueIDs) {
+						failedIssueIDs = append(failedIssueIDs, issueID)
+					}
 					if d.cfg.Logger != nil {
 						d.cfg.Logger.Debug("refresh worktree runtime git status failed",
 							"project_id", projectID,
@@ -275,6 +308,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 					}
 				} else {
 					statusByIssue[issueID] = status
+					worktreePathByIssue[issueID] = worktreePath
 				}
 			}
 		}
@@ -294,28 +328,47 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 	}
 
 	for issueID, status := range statusByIssue {
-		rawStatus, err := json.Marshal(status)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("marshal worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		worktreePath := worktreePathByIssue[issueID]
+		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
+			rawStatus, err := json.Marshal(status)
+			if err != nil {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Debug("marshal worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "error", err)
+				}
+				continue
+			}
+			if err := d.worktreeRuntimeStateStore(projectID).UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, now); err != nil {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Debug("persist refreshed worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "error", err)
+				}
 			}
 			continue
 		}
-		if err := d.worktreeRuntimeStateStore(projectID).UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, now); err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("persist refreshed worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "error", err)
-			}
+		if d.cfg.Logger != nil && rev > 0 {
+			d.cfg.Logger.Debug("published refreshed worktree runtime git status", "project_id", projectID, "issue_id", issueID, "revision", rev)
+		}
+		if rev == 0 && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("persist refreshed worktree runtime git status without publish", "project_id", projectID, "issue_id", issueID)
 		}
 	}
 	if d.cfg.Logger != nil && d.git != nil {
 		counters := throttle.snapshotCounters()
-		d.cfg.Logger.Debug("refresh worktree runtime state completed",
+		logFn := d.cfg.Logger.Debug
+		if failedProbes > 0 || skippedProbes > 0 || deferredProbes > 0 || trigger.Priority >= reconcilePriorityManual {
+			logFn = d.cfg.Logger.Info
+		}
+		logFn("refresh worktree runtime state completed",
 			"project_id", projectID,
 			"reason", strings.TrimSpace(trigger.Reason),
 			"processed_tasks", processedProbes,
 			"skipped_tasks", skippedProbes,
 			"deferred_tasks", deferredProbes,
 			"failed_tasks", failedProbes,
+			"sample_processed_issue_ids", strings.Join(processedIssueIDs, ","),
+			"sample_skipped_issue_ids", strings.Join(skippedIssueIDs, ","),
+			"sample_deferred_issue_ids", strings.Join(deferredIssueIDs, ","),
+			"sample_failed_issue_ids", strings.Join(failedIssueIDs, ","),
 			"throttle_processed", counters.Processed,
 			"throttle_skipped", counters.Skipped,
 			"throttle_deferred", counters.Deferred,
@@ -374,15 +427,17 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 
 	worktreeByIssue := make(map[string]daemonstate.WorktreeState, len(worktreeRows))
 	for _, row := range worktreeRows {
-		issueID := strings.TrimSpace(row.IssueID)
+		issueID := issueProjectionKey(row.IssueID)
 		if issueID == "" {
 			continue
 		}
 		worktreeByIssue[issueID] = row
 	}
 
+	missingGitStatus := 0
+	missingIssueIDs := make([]string, 0, 8)
 	for i := range tasks {
-		row, ok := worktreeByIssue[strings.TrimSpace(tasks[i].ID)]
+		row, ok := worktreeByIssue[issueProjectionKey(tasks[i].ID)]
 		if !ok {
 			continue
 		}
@@ -395,6 +450,12 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 
 		statusRaw := row.GitStatusRaw
 		if len(statusRaw) == 0 {
+			if worktreePath != "" {
+				missingGitStatus++
+				if len(missingIssueIDs) < cap(missingIssueIDs) {
+					missingIssueIDs = append(missingIssueIDs, strings.TrimSpace(tasks[i].ID))
+				}
+			}
 			continue
 		}
 
@@ -414,8 +475,51 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 			tasks[i].GitDeletions = len(status.Deleted)
 		}
 	}
+	if missingGitStatus > 0 {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info(
+				"task list enrichment found worktrees missing cached git status",
+				"project_id", projectID,
+				"missing_count", missingGitStatus,
+				"worktree_count", len(worktreeByIssue),
+				"sample_issue_ids", strings.Join(missingIssueIDs, ","),
+			)
+		}
+		d.triggerMissingGitStatusReconcile(projectID, missingGitStatus, len(worktreeByIssue))
+	}
 
 	return tasks
+}
+
+func (d *Daemon) triggerMissingGitStatusReconcile(projectID string, missing, total int) {
+	if d == nil || missing <= 0 {
+		return
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	if projectID == "" || d.git == nil || d.tmux == nil || d.sessionStore == nil || d.worktreeRuntimeStateStore(projectID) == nil || d.worktreeManagerForProject(projectID) == nil {
+		return
+	}
+	submission, err := d.queueRuntimeReconcile(context.Background(), projectID, reconcilePriorityManual, "task_list_missing_git_status")
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("enqueue runtime reconcile for missing git status failed", "project_id", projectID, "missing", missing, "total_worktrees", total, "error", err)
+		}
+		return
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info(
+			"queued runtime reconcile for missing git status",
+			"project_id", projectID,
+			"missing", missing,
+			"total_worktrees", total,
+			"queue_deduped", submission.Deduped,
+			"queue_reprioritized", submission.Reprioritized,
+		)
+	}
+}
+
+func issueProjectionKey(issueID string) string {
+	return strings.ToLower(strings.TrimSpace(issueID))
 }
 
 func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issueID, worktree string) *git.GitStatus {
@@ -436,7 +540,7 @@ func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issu
 	}
 	defer cancel()
 
-	status, err := d.git.RuntimeStatus(timeoutCtx, worktree, d.cfg.BaseBranch)
+	status, err := d.git.RuntimeStatus(timeoutCtx, worktree, d.baseBranchForProject(projectID))
 	if err != nil || status == nil {
 		return nil
 	}

@@ -22,6 +22,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			HasSession: true,
 			SessionID:  strings.TrimSpace(session.ID),
 			State:      protocol.SessionLifecycleState(session.State),
+			StartedAt:  timePtrFrom(session.StartedAt),
 			UpdatedAt:  timePtr(updatedAt),
 			Worktree:   strings.TrimSpace(projection.Worktree.Path),
 		}

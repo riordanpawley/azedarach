@@ -908,10 +908,10 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime pending op after git event = %+v, want running op-git 40%%", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, "T:Y") || !strings.Contains(view, "W:Y") || !strings.Contains(view, "G:↓1") || !strings.Contains(view, "G:✎") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
+				if !strings.Contains(view, " T ") || !strings.Contains(view, " ✓ ") || !strings.Contains(view, " ↓1 ") || !strings.Contains(view, " ✎ ") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
 					t.Fatalf("board view after git event = %q, missing projected runtime tokens", view)
 				}
-				if strings.Contains(view, "G:↑2") {
+				if strings.Contains(view, " ↑2 ") {
 					t.Fatalf("board view after git event = %q, should hide ahead token when line changes exist", view)
 				}
 				workspaceView := workspace(model).View()
@@ -945,7 +945,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime signals after worktree event = %+v, want worktree and refreshed diff stat", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, "W:Y") || !strings.Contains(view, "+5/-2") {
+				if !strings.Contains(view, " ✓ ") || !strings.Contains(view, "+5/-2") {
 					t.Fatalf("board view after worktree event = %q, missing refreshed worktree/diff tokens", view)
 				}
 				workspaceView := workspace(model).View()
@@ -977,7 +977,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime signals after session event = %+v, want tmux session", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, "PAUSED") {
+				if !strings.Contains(view, "⏸ P") {
 					t.Fatalf("board view after session event = %q, missing paused session state", view)
 				}
 				workspaceView := workspace(model).View()

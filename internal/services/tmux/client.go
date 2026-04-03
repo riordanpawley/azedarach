@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -13,6 +15,12 @@ import (
 type Client struct {
 	runner CommandRunner
 	logger *slog.Logger
+}
+
+// SessionInfo captures tmux session identity plus creation time.
+type SessionInfo struct {
+	Name      string
+	CreatedAt *time.Time
 }
 
 // NewClient creates a new tmux client with dependency injection
@@ -119,19 +127,57 @@ func (c *Client) CapturePane(ctx context.Context, name string, lines int) (strin
 // ListSessions returns a list of all tmux session names
 // Uses: tmux list-sessions -F "#{session_name}"
 func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
+	infos, err := c.ListSessionInfos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]string, 0, len(infos))
+	for _, info := range infos {
+		sessions = append(sessions, info.Name)
+	}
+	return sessions, nil
+}
+
+// ListSessionInfos returns tmux sessions with creation timestamps.
+// Uses: tmux list-sessions -F "#{session_name}\t#{session_created}"
+func (c *Client) ListSessionInfos(ctx context.Context) ([]SessionInfo, error) {
 	c.logger.Debug("listing tmux sessions")
 
-	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}")
+	out, err := c.runner.Run(ctx, "list-sessions", "-F", "#{session_name}\t#{session_created}")
 	if err != nil {
 		// If no sessions exist, tmux returns an error
 		// Return empty list instead
 		c.logger.Debug("no tmux sessions found")
-		return []string{}, nil
+		return []SessionInfo{}, nil
 	}
 
-	sessions := strings.Split(strings.TrimSpace(out), "\n")
-	if len(sessions) == 1 && sessions[0] == "" {
-		return []string{}, nil
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
+		return []SessionInfo{}, nil
+	}
+
+	sessions := make([]SessionInfo, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		name := strings.TrimSpace(parts[0])
+		if name == "" {
+			continue
+		}
+		info := SessionInfo{Name: name}
+		if len(parts) == 2 {
+			createdRaw := strings.TrimSpace(parts[1])
+			if createdRaw != "" {
+				if sec, parseErr := strconv.ParseInt(createdRaw, 10, 64); parseErr == nil && sec > 0 {
+					createdAt := time.Unix(sec, 0).UTC()
+					info.CreatedAt = &createdAt
+				}
+			}
+		}
+		sessions = append(sessions, info)
 	}
 
 	c.logger.Debug("tmux sessions listed", "count", len(sessions))

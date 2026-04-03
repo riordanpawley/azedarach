@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/assert"
@@ -319,6 +320,61 @@ func TestClient_ListSessions(t *testing.T) {
 			require.NoError(t, err)
 			assert.Len(t, sessions, tt.wantCount)
 			assert.Equal(t, tt.wantNames, sessions)
+		})
+	}
+}
+
+func TestClient_ListSessionInfos(t *testing.T) {
+	createdOne := time.Unix(1775209200, 0).UTC()
+	tests := []struct {
+		name    string
+		output  string
+		runErr  error
+		want    []SessionInfo
+		wantErr bool
+	}{
+		{
+			name:   "parses names and created at",
+			output: "session1\t1775209200\nsession2\t\nsession3\tgarbage\n",
+			want: []SessionInfo{
+				{Name: "session1", CreatedAt: &createdOne},
+				{Name: "session2"},
+				{Name: "session3"},
+			},
+		},
+		{
+			name:   "parses name-only format",
+			output: "legacy-session\n",
+			want:   []SessionInfo{{Name: "legacy-session"}},
+		},
+		{
+			name:   "no sessions",
+			runErr: errors.New("no sessions"),
+			want:   []SessionInfo{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &mockRunner{output: tt.output, err: tt.runErr}
+			client := NewClient(runner, slog.Default())
+
+			got, err := client.ListSessionInfos(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, got, len(tt.want))
+			for i := range tt.want {
+				assert.Equal(t, tt.want[i].Name, got[i].Name)
+				if tt.want[i].CreatedAt == nil {
+					assert.Nil(t, got[i].CreatedAt)
+					continue
+				}
+				require.NotNil(t, got[i].CreatedAt)
+				assert.True(t, got[i].CreatedAt.Equal(*tt.want[i].CreatedAt))
+			}
 		})
 	}
 }

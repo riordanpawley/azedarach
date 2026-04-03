@@ -100,7 +100,7 @@ func TestStoreSessionByIssueIDReturnsMostRecent(t *testing.T) {
 	}
 }
 
-func TestStoreUpsertSession_PreservesStartTimestampAcrossLifecycle(t *testing.T) {
+func TestStoreUpsertSession_PreservesStartedAtAcrossLifecycle(t *testing.T) {
 	s := NewStore()
 	base := time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC)
 	current := base
@@ -122,12 +122,15 @@ func TestStoreUpsertSession_PreservesStartTimestampAcrossLifecycle(t *testing.T)
 	if err != nil {
 		t.Fatalf("session lookup: %v", err)
 	}
-	if !session.UpdatedAt.Equal(base) {
-		t.Fatalf("updated_at = %v, want preserved start time %v", session.UpdatedAt, base)
+	if session.StartedAt == nil || !session.StartedAt.Equal(base) {
+		t.Fatalf("started_at = %v, want preserved start time %v", session.StartedAt, base)
+	}
+	if !session.UpdatedAt.Equal(current) {
+		t.Fatalf("updated_at = %v, want last transition time %v", session.UpdatedAt, current)
 	}
 }
 
-func TestStoreUpsertSession_ResetsStartTimestampAfterRestart(t *testing.T) {
+func TestStoreUpsertSession_ResetsStartedAtAfterRestart(t *testing.T) {
 	s := NewStore()
 	base := time.Date(2026, time.April, 2, 0, 0, 0, 0, time.UTC)
 	current := base
@@ -155,8 +158,11 @@ func TestStoreUpsertSession_ResetsStartTimestampAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session lookup: %v", err)
 	}
+	if session.StartedAt == nil || !session.StartedAt.Equal(restartAt) {
+		t.Fatalf("started_at = %v, want restart time %v", session.StartedAt, restartAt)
+	}
 	if !session.UpdatedAt.Equal(restartAt) {
-		t.Fatalf("updated_at = %v, want restart time %v", session.UpdatedAt, restartAt)
+		t.Fatalf("updated_at = %v, want restart transition time %v", session.UpdatedAt, restartAt)
 	}
 }
 

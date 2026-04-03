@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 type recordingRuntimeProjectionWriter struct {
@@ -141,7 +142,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		t.Fatalf("upsertSessionAndPublish: %v", err)
 	}
 	d.writeSessionStopProjection(projectID, sessionID, issueID)
-	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []string{sessionID}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
 		t.Fatalf("persistTmuxSessionRuntimeState: %v", err)
 	}
 
