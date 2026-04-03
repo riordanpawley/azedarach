@@ -92,13 +92,17 @@ func (o *AutostartOrchestrator) EnsureAttached(ctx context.Context, hello protoc
 			}
 		}
 	}
-	if err == nil && ack.ErrorCode.IsCompatibilityFailure() && !ack.RetryAfterRestart {
-		return ack, ErrUpgradeRequired
-	}
-
-	if err == nil && ack.ErrorCode.IsCompatibilityFailure() && ack.RetryAfterRestart {
-		if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
-			return protocol.HelloAck{}, fmt.Errorf("%w: replace daemon: %v", ErrUpgradeRequired, replaceErr)
+	if err == nil {
+		if ack.ErrorCode.IsCompatibilityFailure() && !ack.RetryAfterRestart {
+			return ack, ErrUpgradeRequired
+		}
+		if ack.ErrorCode.IsCompatibilityFailure() && ack.RetryAfterRestart {
+			if replaceErr := o.replaceDaemon(ctx); replaceErr != nil {
+				return protocol.HelloAck{}, fmt.Errorf("%w: replace daemon: %v", ErrUpgradeRequired, replaceErr)
+			}
+		} else {
+			// Daemon responded, so do not restart/restart-replace on generic handshake rejection.
+			return ack, fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 		}
 	} else {
 		if startErr := o.startDaemon(ctx); startErr != nil {

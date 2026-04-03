@@ -6,14 +6,18 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 type taskRecordingTransport struct {
-	lastReq protocol.RequestEnvelope
-	replyFn func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	lastReq         protocol.RequestEnvelope
+	commandCalls    int
+	handshakeCalls  int
+	replyFn         func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	handshakeFn     func(protocol.Hello) (protocol.HelloAck, error)
 }
 
 func assertTaskProjectID(t *testing.T, req protocol.RequestEnvelope, want string) {
@@ -23,12 +27,17 @@ func assertTaskProjectID(t *testing.T, req protocol.RequestEnvelope, want string
 	}
 }
 
-func (t *taskRecordingTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+func (t *taskRecordingTransport) Handshake(_ context.Context, hello protocol.Hello) (protocol.HelloAck, error) {
+	t.handshakeCalls++
+	if t.handshakeFn != nil {
+		return t.handshakeFn(hello)
+	}
 	return protocol.HelloAck{Accepted: true}, nil
 }
 
 func (t *taskRecordingTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	_ = ctx
+	t.commandCalls++
 	t.lastReq = req
 	if t.replyFn != nil {
 		return t.replyFn(req)
@@ -52,12 +61,27 @@ func mustMarshalTaskSnapshotPayload(t *testing.T, protocolVersion protocol.Versi
 		ProtocolVersion:  protocolVersion,
 		SnapshotRevision: revision,
 		ProjectID:        projectID,
+		LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
 	})
 	if err != nil {
 		t.Fatalf("marshal snapshot payload: %v", err)
 	}
 	return body
+}
+
+func mustTaskSnapshotCheckedAt() time.Time {
+	return time.Date(2026, time.April, 2, 10, 31, 45, 0, time.UTC)
+}
+
+func mustMarshalRawTaskListSnapshotBody(t *testing.T, body any) []byte {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal snapshot body: %v", err)
+	}
+	return data
 }
 
 func TestTaskListCreateAndMutationCommands(t *testing.T) {
@@ -116,6 +140,12 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		if snapshot.Revision != 17 {
 			t.Fatalf("revision = %d, want 17", snapshot.Revision)
 		}
+		if !snapshot.LastCheckedAt.Equal(mustTaskSnapshotCheckedAt()) {
+			t.Fatalf("last_checked_at = %v, want %v", snapshot.LastCheckedAt, mustTaskSnapshotCheckedAt())
+		}
+		if snapshot.Freshness != protocol.TaskListFreshnessFresh {
+			t.Fatalf("freshness = %q, want %q", snapshot.Freshness, protocol.TaskListFreshnessFresh)
+		}
 		if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-9" {
 			t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
 		}
@@ -125,17 +155,13 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
-				body, err := json.Marshal([]domain.Task{{ID: "az-legacy", Title: "Legacy Task", Status: domain.StatusOpen}})
-				if err != nil {
-					t.Fatalf("marshal response: %v", err)
-				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: req.ProtocolVersion,
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					Revision:        23,
 					OK:              true,
-					Body:            body,
+					Body:            mustMarshalRawTaskListSnapshotBody(t, []domain.Task{{ID: "az-legacy", Title: "Legacy Task", Status: domain.StatusOpen}}),
 				}, nil
 			},
 		}
@@ -147,6 +173,163 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if got := err.Error(); !strings.Contains(got, "decode task.list response") {
 			t.Fatalf("error = %q, want decode task.list response", got)
+		}
+	})
+
+	t.Run("list snapshot rejects schema and protocol mismatches with expected and actual versions", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			body        protocol.TaskListSnapshotPayload
+			wantSubstrs []string
+		}{
+			{
+				name: "schema mismatch",
+				body: protocol.TaskListSnapshotPayload{
+					SchemaVersion:    protocol.TaskListSnapshotSchemaVersion + 1,
+					ProtocolVersion:  protocol.CurrentVersion,
+					SnapshotRevision: 3,
+					ProjectID:        wantProjectID,
+					LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+					Freshness:        protocol.TaskListFreshnessFresh,
+				},
+				wantSubstrs: []string{
+					"decode task.list response",
+					"schema_version mismatch: expected 2, actual 3",
+				},
+			},
+			{
+				name: "protocol mismatch",
+				body: protocol.TaskListSnapshotPayload{
+					SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+					ProtocolVersion:  protocol.CurrentVersion + 1,
+					SnapshotRevision: 3,
+					ProjectID:        wantProjectID,
+					LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+					Freshness:        protocol.TaskListFreshnessFresh,
+				},
+				wantSubstrs: []string{
+					"decode task.list response",
+					"protocol_version mismatch: expected 3, actual 4",
+				},
+			},
+		}
+
+		for _, tt := range cases {
+			t.Run(tt.name, func(t *testing.T) {
+				transport := &taskRecordingTransport{
+					replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						assertTaskProjectID(t, req, wantProjectID)
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							Revision:        23,
+							OK:              true,
+							Body:            mustMarshalRawTaskListSnapshotBody(t, tt.body),
+						}, nil
+					},
+				}
+
+				client := New(transport).WithProjectID(wantProjectID)
+				_, err := client.ListTasksSnapshot(context.Background())
+				if err == nil {
+					t.Fatal("expected version mismatch error")
+				}
+				for _, want := range tt.wantSubstrs {
+					if got := err.Error(); !strings.Contains(got, want) {
+						t.Fatalf("error = %q, want substring %q", got, want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("list snapshot retries once after version mismatch and successful handshake", func(t *testing.T) {
+		var transport *taskRecordingTransport
+		transport = &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if transport.commandCalls == 1 {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Revision:        41,
+						OK:              true,
+						Body: mustMarshalRawTaskListSnapshotBody(t, protocol.TaskListSnapshotPayload{
+							SchemaVersion:    protocol.TaskListSnapshotSchemaVersion + 1,
+							ProtocolVersion:  protocol.CurrentVersion,
+							SnapshotRevision: 41,
+							ProjectID:        wantProjectID,
+							LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+							Freshness:        protocol.TaskListFreshnessFresh,
+						}),
+					}, nil
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        42,
+					OK:              true,
+					Body:            mustMarshalTaskSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 42, []domain.Task{{ID: "az-retry", Title: "Retry task", Status: domain.StatusOpen}}),
+				}, nil
+			},
+		}
+		client := New(transport).WithProjectID(wantProjectID)
+		snapshot, err := client.ListTasksSnapshot(context.Background())
+		if err != nil {
+			t.Fatalf("ListTasksSnapshot error: %v", err)
+		}
+		if snapshot.Revision != 42 || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "az-retry" {
+			t.Fatalf("snapshot = %+v, want retried payload", snapshot)
+		}
+		if transport.handshakeCalls != 1 {
+			t.Fatalf("handshake calls = %d, want 1", transport.handshakeCalls)
+		}
+		if transport.commandCalls != 2 {
+			t.Fatalf("command calls = %d, want 2", transport.commandCalls)
+		}
+	})
+
+	t.Run("list snapshot version mismatch returns decode error when handshake fails", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        23,
+					OK:              true,
+					Body: mustMarshalRawTaskListSnapshotBody(t, protocol.TaskListSnapshotPayload{
+						SchemaVersion:    protocol.TaskListSnapshotSchemaVersion + 1,
+						ProtocolVersion:  protocol.CurrentVersion,
+						SnapshotRevision: 23,
+						ProjectID:        wantProjectID,
+						LastCheckedAt:    mustTaskSnapshotCheckedAt(),
+						Freshness:        protocol.TaskListFreshnessFresh,
+					}),
+				}, nil
+			},
+			handshakeFn: func(protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{}, errors.New("dial down")
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.ListTasksSnapshot(context.Background())
+		if err == nil {
+			t.Fatal("expected version mismatch error with failed handshake")
+		}
+		if got := err.Error(); !strings.Contains(got, "decode task.list response") || !strings.Contains(got, "handshake after mismatch failed") {
+			t.Fatalf("error = %q, want decode+handshake failure context", got)
+		}
+		if transport.handshakeCalls != 1 {
+			t.Fatalf("handshake calls = %d, want 1", transport.handshakeCalls)
+		}
+		if transport.commandCalls != 1 {
+			t.Fatalf("command calls = %d, want 1", transport.commandCalls)
 		}
 	})
 

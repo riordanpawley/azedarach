@@ -88,8 +88,10 @@ type TaskIDResponse struct {
 
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
 type TaskSnapshot struct {
-	Tasks    []domain.Task
-	Revision uint64
+	Tasks         []domain.Task
+	Revision      uint64
+	LastCheckedAt time.Time
+	Freshness     protocol.TaskListFreshness
 }
 
 // CommandError wraps typed daemon command failures.
@@ -101,6 +103,11 @@ type CommandError struct {
 
 func (e *CommandError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+// ReadWaitPolicy returns the normalized bounded read wait policy configured on the client.
+func (c *Client) ReadWaitPolicy() ReadWaitPolicy {
+	return c.readWait.Normalize()
 }
 
 func (c *Client) commandJSONResponse(ctx context.Context, command string, body any) (protocol.ResponseEnvelope, error) {
@@ -194,25 +201,57 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 		}
 		return TaskSnapshot{}, err
 	}
+	snapshot, decodeErr := c.decodeTaskSnapshotResponse(resp)
+	if decodeErr == nil {
+		return snapshot, nil
+	}
+	if protocol.IsTaskListSnapshotVersionMismatch(decodeErr) {
+		ack, diag := c.Handshake(waitCtx, protocol.Hello{
+			ProtocolVersion: protocol.CurrentVersion,
+			ClientName:      "client",
+			ClientVersion:   "dev",
+			Capabilities:    []string{"snapshot", "subscribe"},
+		})
+		if diag != nil {
+			if diag.Message != "" {
+				return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (handshake after mismatch failed: %s)", CommandTaskList, decodeErr, diag.Message)
+			}
+			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (handshake after mismatch failed)", CommandTaskList, decodeErr)
+		}
+		if !ack.Accepted {
+			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (handshake rejected after mismatch: %s)", CommandTaskList, decodeErr, ack.Reason)
+		}
+		retryResp, retryErr := c.commandJSONResponse(waitCtx, CommandTaskList, nil)
+		if retryErr != nil {
+			return TaskSnapshot{}, retryErr
+		}
+		retrySnapshot, retryDecodeErr := c.decodeTaskSnapshotResponse(retryResp)
+		if retryDecodeErr != nil {
+			return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskList, retryDecodeErr, "TaskListSnapshotPayload")
+		}
+		return retrySnapshot, nil
+	}
+	return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskList, decodeErr, "TaskListSnapshotPayload")
+}
 
+func (c *Client) decodeTaskSnapshotResponse(resp protocol.ResponseEnvelope) (TaskSnapshot, error) {
 	if len(resp.Body) == 0 {
 		return TaskSnapshot{Revision: resp.Revision}, nil
 	}
 
-	var payload protocol.TaskListSnapshotPayload
-	if err := json.Unmarshal(resp.Body, &payload); err != nil {
-		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskList, err, "TaskListSnapshotPayload")
-	}
-	if payload.SchemaVersion != protocol.TaskListSnapshotSchemaVersion {
-		return TaskSnapshot{}, fmt.Errorf("decode %s response: unsupported schema version %d", CommandTaskList, payload.SchemaVersion)
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		return TaskSnapshot{}, err
 	}
 	revision := payload.SnapshotRevision
 	if revision == 0 {
 		revision = resp.Revision
 	}
 	return TaskSnapshot{
-		Tasks:    payload.Tasks,
-		Revision: revision,
+		Tasks:         payload.Tasks,
+		Revision:      revision,
+		LastCheckedAt: payload.LastCheckedAt,
+		Freshness:     payload.Freshness,
 	}, nil
 }
 

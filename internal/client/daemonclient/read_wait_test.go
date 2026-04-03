@@ -32,6 +32,8 @@ func (t *readWaitDeadlineTransport) Command(ctx context.Context, req protocol.Re
 		ProtocolVersion:  req.ProtocolVersion,
 		SnapshotRevision: 0,
 		ProjectID:        req.Meta.ProjectID,
+		LastCheckedAt:    time.Unix(1700000000, 0).UTC(),
+		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}},
 	})
 	if err != nil {

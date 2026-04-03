@@ -118,6 +118,34 @@ func TestEnsureAttachedTransientHandshakeFailureDoesNotAutostart(t *testing.T) {
 	}
 }
 
+func TestEnsureAttachedHandshakeRejectedDoesNotAutostart(t *testing.T) {
+	h := &fakeHandshaker{
+		fn: func() (protocol.HelloAck, error) {
+			return protocol.HelloAck{
+				Accepted: false,
+				Reason:   "busy",
+			}, nil
+		},
+	}
+	s := &fakeStarter{}
+	o := NewAutostartOrchestrator(h, s)
+
+	_, err := o.EnsureAttached(context.Background(), protocol.Hello{
+		ProtocolVersion: protocol.CurrentVersion,
+		ClientName:      "cli",
+		ClientVersion:   "dev",
+	})
+	if err == nil || err.Error() != "daemon handshake rejected: busy" {
+		t.Fatalf("err = %v, want daemon handshake rejected", err)
+	}
+	if got := s.startCalls.Load(); got != 0 {
+		t.Fatalf("start calls = %d, want 0", got)
+	}
+	if got := s.replaceCalls.Load(); got != 0 {
+		t.Fatalf("replace calls = %d, want 0", got)
+	}
+}
+
 func TestEnsureAttachedUpgradeRequiredNoRetry(t *testing.T) {
 	h := &fakeHandshaker{
 		fn: func() (protocol.HelloAck, error) {
