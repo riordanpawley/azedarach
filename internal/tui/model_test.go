@@ -229,12 +229,76 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
+func TestResolveTUILogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("PATH", "")
+	t.Chdir(nested)
+
+	cfg := &config.Config{
+		Session: config.SessionConfig{
+			LogDir: "/tmp/azedarach-user-logs",
+		},
+	}
+	got := resolveTUILogFilePath(cfg)
+	want := filepath.Join(worktree, ".azedarach", "az.log")
+	if got != want {
+		t.Fatalf("resolveTUILogFilePath() = %q, want %q", got, want)
+	}
+}
+
 func TestDaemonLogFilePath_UsesRepoDir(t *testing.T) {
 	m := newTestModel()
 	m.repoDir = "/tmp/worktree"
 
 	got := m.daemonLogFilePath()
 	want := filepath.Join("/tmp/worktree", ".azedarach", "daemon.log")
+	if got != want {
+		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestDaemonLogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("PATH", "")
+	t.Chdir(nested)
+
+	m := newTestModel()
+	m.repoDir = repo
+
+	got := m.daemonLogFilePath()
+	want := filepath.Join(worktree, ".azedarach", "daemon.log")
 	if got != want {
 		t.Fatalf("daemonLogFilePath() = %q, want %q", got, want)
 	}
@@ -3546,17 +3610,17 @@ func TestRuntimeSignalsForBoardUsesTaskProjectionAsBaseline(t *testing.T) {
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{
-			ID:         "az-1",
-			Title:      "Projection task",
-			Status:     domain.StatusOpen,
-			Priority:   domain.P2,
-			Type:       domain.TypeTask,
-			HasWorktree: true,
-			GitAheadCount: 2,
-			GitBehindCount: 3,
+			ID:                    "az-1",
+			Title:                 "Projection task",
+			Status:                domain.StatusOpen,
+			Priority:              domain.P2,
+			Type:                  domain.TypeTask,
+			HasWorktree:           true,
+			GitAheadCount:         2,
+			GitBehindCount:        3,
 			HasUncommittedChanges: true,
-			GitAdditions: 5,
-			GitDeletions: 1,
+			GitAdditions:          5,
+			GitDeletions:          1,
 			Session: &domain.Session{
 				IssueID:   "az-1",
 				State:     domain.SessionBusy,

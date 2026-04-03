@@ -49,12 +49,13 @@ const (
 )
 
 type Dependencies struct {
-	Config       *config.Config
-	DaemonClient *daemonclient.Client
-	DaemonSocket string
-	Logger       *slog.Logger
-	ProjectID    string
-	RepoDir      string
+	Config         *config.Config
+	DaemonClient   *daemonclient.Client
+	DaemonSocket   string
+	Logger         *slog.Logger
+	ProjectID      string
+	RepoDir        string
+	RuntimeRepoDir string
 }
 
 type daemonStarter interface {
@@ -242,9 +243,6 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 }
 
 func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error) {
-	logPath := filepath.Join(resolveSessionLogDir(cfg), "az-cli.log")
-	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
-
 	if strings.TrimSpace(repoDir) == "" {
 		return nil, fmt.Errorf("failed to get current directory: empty repo dir")
 	}
@@ -252,9 +250,18 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve repo directory %q: %w", repoDir, err)
 	}
+	logPath := filepath.Join(resolveSessionLogDirFor(cfg, absRepoDir), "az-cli.log")
+	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
+
 	rootRepoDir, err := config.ResolveProjectRoot(absRepoDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project root from %q: %w", absRepoDir, err)
+	}
+	runtimeRepoDir := rootRepoDir
+	if scopedDaemonRuntimeEnabledForJustRun() {
+		if worktreeRoot, err := config.ResolveWorktreeRoot(absRepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
+			runtimeRepoDir = worktreeRoot
+		}
 	}
 
 	projectID, err := config.ProjectIDForRoot(rootRepoDir)
@@ -265,12 +272,13 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	daemonTransport := transport.NewClient(socketPath)
 
 	return &Dependencies{
-		Config:       cfg,
-		DaemonClient: daemonclient.New(daemonTransport).WithProjectID(projectID),
-		DaemonSocket: socketPath,
-		Logger:       logger,
-		ProjectID:    projectID,
-		RepoDir:      rootRepoDir,
+		Config:         cfg,
+		DaemonClient:   daemonclient.New(daemonTransport).WithProjectID(projectID),
+		DaemonSocket:   socketPath,
+		Logger:         logger,
+		ProjectID:      projectID,
+		RepoDir:        rootRepoDir,
+		RuntimeRepoDir: runtimeRepoDir,
 	}, nil
 }
 
@@ -2266,9 +2274,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":      opts.IssueID,
-			"updated":       true,
-			"status_set":    opts.Status != nil,
+			"issue_id":       opts.IssueID,
+			"updated":        true,
+			"status_set":     opts.Status != nil,
 			"notes_appended": opts.AppendNotes != "",
 		})
 	}
@@ -2295,11 +2303,11 @@ func IssueDependencyAddCommand(deps *Dependencies, opts IssueDependencyAddOption
 	}
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"action":         "add",
-			"issue_id":       opts.IssueID,
-			"depends_on_id":  opts.DependsOnID,
+			"action":          "add",
+			"issue_id":        opts.IssueID,
+			"depends_on_id":   opts.DependsOnID,
 			"dependency_type": opts.Type,
-			"updated":        true,
+			"updated":         true,
 		})
 	}
 	fmt.Printf("Added dependency: %s --(%s)--> %s\n", opts.IssueID, opts.Type, opts.DependsOnID)
@@ -3236,7 +3244,7 @@ func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
 	if err := launcher.Replace(ctx); err != nil {
 		return fmt.Errorf("restart daemon: %w", err)
 	}
@@ -3452,7 +3460,11 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 	if repoDir == "" {
 		repoDir = "."
 	}
-	sessionLogDir := resolveSessionLogDir(deps.Config)
+	runtimeRepoDir := strings.TrimSpace(deps.RuntimeRepoDir)
+	if runtimeRepoDir == "" {
+		runtimeRepoDir = resolveRuntimeRepoDir(repoDir)
+	}
+	sessionLogDir := resolveSessionLogDirFor(deps.Config, runtimeRepoDir)
 	logSources := make([]logSourceSpec, 0, len(opts.Sources))
 	seen := make(map[string]struct{}, len(opts.Sources))
 	for _, source := range opts.Sources {
@@ -3460,7 +3472,7 @@ func LogCommand(deps *Dependencies, opts LogOptions) error {
 		normalizedSource := strings.ToLower(strings.TrimSpace(source))
 		switch strings.ToLower(strings.TrimSpace(source)) {
 		case "daemon":
-			logPath = filepath.Join(repoDir, ".azedarach", "daemon.log")
+			logPath = filepath.Join(runtimeRepoDir, ".azedarach", "daemon.log")
 		case "tui":
 			logPath = filepath.Join(sessionLogDir, "az.log")
 		case "cli":
@@ -3677,6 +3689,16 @@ func extractLogTimestamp(line string) (time.Time, string, bool) {
 }
 
 func resolveSessionLogDir(cfg *config.Config) string {
+	return resolveSessionLogDirFor(cfg, "")
+}
+
+func resolveSessionLogDirFor(cfg *config.Config, startPath string) string {
+	if scopedDaemonRuntimeEnabledForJustRun() {
+		if worktreeRoot, ok := resolveScopedWorktreeRoot(startPath); ok {
+			return filepath.Join(worktreeRoot, ".azedarach")
+		}
+	}
+
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
@@ -3688,6 +3710,41 @@ func resolveSessionLogDir(cfg *config.Config) string {
 		return filepath.Join(homeDir, ".azedarach", "logs")
 	}
 	return filepath.Join(".", ".azedarach", "logs")
+}
+
+func resolveRuntimeRepoDir(repoDir string) string {
+	if !scopedDaemonRuntimeEnabledForJustRun() {
+		return repoDir
+	}
+	if worktreeRoot, ok := resolveScopedWorktreeRoot(repoDir); ok {
+		return worktreeRoot
+	}
+	return repoDir
+}
+
+func resolveScopedWorktreeRoot(startPath string) (string, bool) {
+	candidates := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		candidates = append(candidates, cwd)
+	}
+	if candidate := strings.TrimSpace(startPath); candidate != "" {
+		candidates = append(candidates, candidate)
+	}
+	for _, candidate := range candidates {
+		worktreeRoot, err := config.ResolveWorktreeRoot(candidate)
+		if err != nil || strings.TrimSpace(worktreeRoot) == "" {
+			continue
+		}
+		return worktreeRoot, true
+	}
+	return "", false
+}
+
+func scopedDaemonRuntimeEnabledForJustRun() bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
+	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
+	return modeEnabled && source == "just-run"
 }
 
 func newSessionRequest(command, projectID, sessionID, baseBranch string) protocol.RequestEnvelope {
@@ -3989,7 +4046,7 @@ func applyResponseExitCode(resp protocol.ResponseEnvelope) int {
 }
 
 func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) error {
-	launcher := newLauncher(deps.RepoDir, deps.DaemonSocket)
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
 	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
 		concreteLauncher.WithLogger(deps.Logger)
 	}
@@ -4007,4 +4064,17 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
 	return nil
+}
+
+func runtimeRepoDirForDeps(deps *Dependencies) string {
+	if deps == nil {
+		return "."
+	}
+	if repoDir := strings.TrimSpace(deps.RuntimeRepoDir); repoDir != "" {
+		return repoDir
+	}
+	if repoDir := strings.TrimSpace(deps.RepoDir); repoDir != "" {
+		return repoDir
+	}
+	return "."
 }

@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
@@ -543,6 +544,7 @@ func (m Model) renderBoardView() string {
 		m.width,
 		contentHeight,
 	)
+	boardView = m.overlayFreshnessIndicator(boardView, contentHeight)
 	if toolbar == "" {
 		return boardView
 	}
@@ -700,7 +702,49 @@ func (m Model) renderCompactView() string {
 	// Set selected tasks
 	compactView.SetSelected(m.editor.GetSelectedTasks())
 
-	return compactView.Render()
+	rendered := compactView.Render()
+	return m.overlayFreshnessIndicator(rendered, board.BoardContentHeight(m.height))
+}
+
+func (m Model) overlayFreshnessIndicator(content string, height int) string {
+	indicator := m.renderFreshnessIndicator()
+	if indicator == "" || m.width <= 0 || height <= 0 {
+		return content
+	}
+	overlayLines := make([]string, height)
+	overlayLines[0] = lipgloss.NewStyle().
+		Width(m.width).
+		MaxWidth(m.width).
+		Align(lipgloss.Right).
+		Render(indicator)
+	return m.layerWithinHeightTransparent(content, strings.Join(overlayLines, "\n"), height)
+}
+
+func (m Model) renderFreshnessIndicator() string {
+	if m.taskSnapshotCheckedAt.IsZero() || !m.taskSnapshotFreshness.Valid() {
+		return ""
+	}
+
+	label := string(m.taskSnapshotFreshness)
+	if m.taskSnapshotFreshness == protocol.TaskListFreshnessFresh {
+		label = "fresh"
+	}
+	if m.taskSnapshotFreshness == protocol.TaskListFreshnessStale {
+		label = "stale"
+	}
+
+	timestamp := m.taskSnapshotCheckedAt.UTC().Format("15:04:05")
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#a6adc8")).
+		Background(lipgloss.Color("#313244")).
+		Padding(0, 1)
+	switch m.taskSnapshotFreshness {
+	case protocol.TaskListFreshnessFresh:
+		style = style.Foreground(lipgloss.Color("#a6e3a1"))
+	case protocol.TaskListFreshnessStale:
+		style = style.Foreground(lipgloss.Color("#f9e2af"))
+	}
+	return style.Render(fmt.Sprintf("%s %s", label, timestamp))
 }
 
 // getFlatIndexFromPosition converts a column/task position to a flat index

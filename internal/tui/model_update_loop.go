@@ -141,6 +141,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconcilePendingStatuses()
 		m.editor.ReconcileSelection(m.tasks)
 		m.applyPendingCreatedTaskSelection()
+		m.taskSnapshotCheckedAt = msg.lastCheckedAt
+		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
 		m.syncTaskWorkspaceOverlay()
 		if msg.revision > m.daemonRevision {
@@ -579,7 +581,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncProjectionIndexesFromTasks()
 		m.editor.ReconcileSelection(tasks)
 		m.applyPendingCreatedTaskSelection()
+		m.taskSnapshotCheckedAt = msg.lastCheckedAt
+		m.taskSnapshotFreshness = msg.freshness
 		m.reconcileCursorAfterIssuesRefresh()
+		m.syncTaskWorkspaceOverlay()
 		if msg.revision > m.daemonRevision {
 			m.daemonRevision = msg.revision
 		}

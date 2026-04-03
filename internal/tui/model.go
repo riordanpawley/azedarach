@@ -67,6 +67,11 @@ var lookupPath = exec.LookPath
 var processArgs = func() []string { return os.Args }
 var workingDir = os.Getwd
 var execProcess = tea.ExecProcess
+var newScopedDaemonClient = func(socketPath, projectID string, readWaitPolicy daemonclient.ReadWaitPolicy) *daemonclient.Client {
+	return daemonclient.New(transport.NewClient(socketPath)).
+		WithProjectID(projectID).
+		WithReadWaitPolicy(readWaitPolicy)
+}
 
 // Re-export Toast type and constants for convenience
 type Toast = types.Toast
@@ -145,6 +150,7 @@ type Model struct {
 	currentProject string
 	projects       []domain.Project
 	repoDir        string
+	runtimeRepoDir string
 	logFilePath    string
 
 	// Toasts
@@ -172,6 +178,8 @@ type Model struct {
 	projectSwitchInFlight bool
 	spinner               spinner.Model
 	lastRefresh           time.Time
+	taskSnapshotFreshness protocol.TaskListFreshness
+	taskSnapshotCheckedAt time.Time
 	hasRefreshLoop        bool
 
 	// Shared daemon client for task-domain operations
@@ -217,6 +225,12 @@ func New(cfg *config.Config) Model {
 		repoDir = "."
 	}
 	daemonSocketPath := config.DaemonSocketPathFor(repoDir)
+	runtimeRepoDir := repoDir
+	if scopedDaemonRuntimeEnabledForJustRun() {
+		if normalizedRuntimeRepoDir, normalizeErr := config.ResolveWorktreeRoot(repoDir); normalizeErr == nil {
+			runtimeRepoDir = normalizedRuntimeRepoDir
+		}
+	}
 	if normalizedRepoDir, normalizeErr := config.ResolveProjectRoot(repoDir); normalizeErr == nil {
 		repoDir = normalizedRepoDir
 	}
@@ -260,9 +274,11 @@ func New(cfg *config.Config) Model {
 		tmuxAvailable:               deps.TmuxAvailable,
 		tmuxClient:                  deps.TmuxClient,
 		repoDir:                     repoDir,
+		runtimeRepoDir:              runtimeRepoDir,
 		logFilePath:                 logFilePath,
 		currentProject:              resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
+	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
 	m.daemonClient.WithProjectID(m.daemonProjectID())
 	return m
 }
@@ -460,7 +476,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
 		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
-			return m, m.openOverlay(overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height))
+			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height)
+			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+			return m, m.openOverlay(workspace)
 		}
 		return m, nil
 
@@ -779,6 +797,8 @@ type issuesLoadedMsg struct {
 	projectID     string
 	tasks         []domain.Task
 	revision      uint64
+	lastCheckedAt time.Time
+	freshness     protocol.TaskListFreshness
 	events        <-chan protocol.EventEnvelope
 	daemonClient  *daemonclient.Client
 	daemonSocket  string
@@ -798,6 +818,8 @@ type projectSwitchResultMsg struct {
 	projectConfig *config.Config
 	tasks         []domain.Task
 	revision      uint64
+	lastCheckedAt time.Time
+	freshness     protocol.TaskListFreshness
 	events        <-chan protocol.EventEnvelope
 	daemonClient  *daemonclient.Client
 	daemonSocket  string
@@ -1029,23 +1051,8 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		if m.daemonClient == nil {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
 		}
-		ack, diag := m.daemonClient.Handshake(ctx, protocol.Hello{
-			ProtocolVersion: protocol.CurrentVersion,
-			ClientName:      "tui",
-			ClientVersion:   "dev",
-			Capabilities:    []string{"snapshot", "subscribe"},
-		})
-		if diag != nil {
-			if diag.Message != "" {
-				return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake: %s", diag.Message)}
-			}
-			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake failed")}
-		}
-		if !ack.Accepted {
-			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
-		}
 
-		snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
 		if err != nil {
 			var timeoutErr *daemonclient.ReadWaitTimeoutError
 			if errors.As(err, &timeoutErr) {
@@ -1059,10 +1066,12 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			return issuesErrorMsg{refreshSeq: refreshSeq, projectID: projectID, err: err}
 		}
 		return issuesLoadedMsg{
-			refreshSeq: refreshSeq,
-			projectID:  projectID,
-			tasks:      snapshot.Tasks,
-			revision:   snapshot.Revision,
+			refreshSeq:    refreshSeq,
+			projectID:     projectID,
+			tasks:         snapshot.Tasks,
+			revision:      snapshot.Revision,
+			lastCheckedAt: snapshot.LastCheckedAt,
+			freshness:     snapshot.Freshness,
 		}
 	}
 }
@@ -1150,7 +1159,18 @@ func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient
 			return m.daemonClient.WithProjectID(projectID)
 		}
 	}
-	return daemonclient.New(transport.NewClient(socketPath)).WithProjectID(projectID)
+	readWaitPolicy := daemonclient.DefaultReadWaitPolicy()
+	if m.daemonClient != nil {
+		readWaitPolicy = m.daemonClient.ReadWaitPolicy()
+	}
+	return newScopedDaemonClient(socketPath, projectID, readWaitPolicy)
+}
+
+func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client) (daemonclient.TaskSnapshot, error) {
+	if client == nil {
+		return daemonclient.TaskSnapshot{}, fmt.Errorf("daemon client unavailable")
+	}
+	return client.ListTasksSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
 }
 
 func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
@@ -1178,49 +1198,22 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:       fmt.Errorf("load config for project %q: %w", project.Name, err),
 			}
 		}
+		startedAt := time.Now()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		socketPath := config.DaemonSocketPathFor(project.Path)
+		socketPath := strings.TrimSpace(m.daemonSocketPath)
+		if socketPath == "" {
+			socketPath = config.DaemonSocketPathFor(m.activeProjectPath())
+		}
 		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
-		launcher := daemonprocess.NewLauncher(project.Path, socketPath).WithLogger(m.logger)
-		if bin := resolveDaemonBinaryForRepo(project.Path); bin != "" {
-			launcher.BinPath = bin
-		}
-		if err := launcher.Replace(ctx); err != nil {
-			return projectSwitchResultMsg{
-				switchSeq: switchSeq,
-				project:   project,
-				err:       fmt.Errorf("restart daemon for project %q: %w", project.Name, err),
-			}
-		}
 
-		hello := protocol.Hello{
-			ProtocolVersion: protocol.CurrentVersion,
-			ClientName:      "tui",
-			ClientVersion:   "dev",
-			Capabilities:    []string{"snapshot", "subscribe"},
-		}
-		orch := autoclient.NewAutostartOrchestrator(autoclient.NewDaemonHandshaker(daemonClient), launcher)
-		ack, err := orch.EnsureAttached(ctx, hello)
+		snapshot, err := m.readTaskSnapshot(ctx, daemonClient)
 		if err != nil {
-			return projectSwitchResultMsg{
-				switchSeq: switchSeq,
-				project:   project,
-				err:       fmt.Errorf("attach daemon for project %q: %w", project.Name, err),
+			if m.logger != nil {
+				m.logger.Warn("project switch snapshot failed", "from_project", m.currentProject, "to_project", project.Name, "socket", socketPath, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 			}
-		}
-		if !ack.Accepted {
-			return projectSwitchResultMsg{
-				switchSeq: switchSeq,
-				project:   project,
-				err:       fmt.Errorf("daemon handshake rejected: %s", ack.Reason),
-			}
-		}
-
-		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
-		if err != nil {
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
 				project:   project,
@@ -1229,11 +1222,17 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		}
 		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+			}
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
 				project:   project,
 				err:       err,
 			}
+		}
+		if m.logger != nil {
+			m.logger.Info("project switch snapshot loaded", "from_project", m.currentProject, "to_project", project.Name, "revision", snapshot.Revision, "task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
 		}
 
 		return projectSwitchResultMsg{
@@ -1242,6 +1241,8 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			projectConfig: projectConfig,
 			tasks:         snapshot.Tasks,
 			revision:      snapshot.Revision,
+			lastCheckedAt: snapshot.LastCheckedAt,
+			freshness:     snapshot.Freshness,
 			events:        events,
 			daemonClient:  daemonClient,
 			daemonSocket:  socketPath,
@@ -1252,6 +1253,9 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 func (m Model) attachDaemonCmd() tea.Cmd {
 	projectID := m.daemonProjectID()
 	targetRepoDir := m.activeProjectPath()
+	if scopedDaemonRuntimeEnabledForJustRun() && strings.TrimSpace(m.runtimeRepoDir) != "" {
+		targetRepoDir = m.runtimeRepoDir
+	}
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon client unavailable")}
@@ -1279,29 +1283,43 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 			Capabilities:    []string{"snapshot", "subscribe"},
 		})
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("daemon attach failed", "project_id", projectID, "target_repo_dir", targetRepoDir, "socket", socketPath, "error", err)
+			}
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon attach: %w", err)}
 		}
 		if !ack.Accepted {
 			return issuesErrorMsg{projectID: projectID, err: fmt.Errorf("daemon handshake rejected: %s", ack.Reason)}
 		}
 
-		snapshot, err := daemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := m.readTaskSnapshot(ctx, daemonClient)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("daemon attach snapshot failed", "project_id", projectID, "target_repo_dir", targetRepoDir, "error", err)
+			}
 			return issuesErrorMsg{projectID: projectID, err: err}
 		}
 
 		events, err := daemonClient.Subscribe(context.Background(), projectID, snapshot.Revision)
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("daemon attach subscribe failed", "project_id", projectID, "revision", snapshot.Revision, "error", err)
+			}
 			return issuesErrorMsg{projectID: projectID, err: err}
+		}
+		if m.logger != nil {
+			m.logger.Info("daemon attach success", "project_id", projectID, "target_repo_dir", targetRepoDir, "revision", snapshot.Revision, "task_count", len(snapshot.Tasks))
 		}
 
 		return issuesLoadedMsg{
-			projectID:    projectID,
-			tasks:        snapshot.Tasks,
-			revision:     snapshot.Revision,
-			events:       events,
-			daemonClient: daemonClient,
-			daemonSocket: socketPath,
+			projectID:     projectID,
+			tasks:         snapshot.Tasks,
+			revision:      snapshot.Revision,
+			lastCheckedAt: snapshot.LastCheckedAt,
+			freshness:     snapshot.Freshness,
+			events:        events,
+			daemonClient:  daemonClient,
+			daemonSocket:  socketPath,
 		}
 	}
 }
@@ -1860,6 +1878,16 @@ func (m Model) eventLogFilePath() string {
 }
 
 func (m Model) daemonLogFilePath() string {
+	if scopedDaemonRuntimeEnabledForJustRun() && strings.TrimSpace(m.runtimeRepoDir) != "" {
+		return filepath.Join(m.runtimeRepoDir, ".azedarach", "daemon.log")
+	}
+	if scopedDaemonRuntimeEnabledForJustRun() {
+		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
+				return filepath.Join(worktreeRoot, ".azedarach", "daemon.log")
+			}
+		}
+	}
 	repoDir := strings.TrimSpace(m.repoDir)
 	if repoDir == "" {
 		repoDir = "."
@@ -1868,6 +1896,14 @@ func (m Model) daemonLogFilePath() string {
 }
 
 func resolveTUILogFilePath(cfg *config.Config) string {
+	if scopedDaemonRuntimeEnabledForJustRun() {
+		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+			if worktreeRoot, rootErr := config.ResolveWorktreeRoot(cwd); rootErr == nil && strings.TrimSpace(worktreeRoot) != "" {
+				return filepath.Join(worktreeRoot, ".azedarach", "az.log")
+			}
+		}
+	}
+
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
@@ -1880,6 +1916,13 @@ func resolveTUILogFilePath(cfg *config.Config) string {
 		}
 	}
 	return filepath.Join(baseDir, "az.log")
+}
+
+func scopedDaemonRuntimeEnabledForJustRun() bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
+	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
+	return modeEnabled && source == "just-run"
 }
 
 func newTUILogger(logPath string) *slog.Logger {
@@ -3004,6 +3047,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 		return
 	}
 
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 	workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(taskID))
 }
 
@@ -3278,7 +3322,7 @@ func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID
 		return domain.SessionIdle, false, fmt.Errorf("daemon client unavailable")
 	}
 
-	snapshot, err := m.daemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
 	if err != nil {
 		return domain.SessionIdle, false, err
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 type recordingDaemonTransport struct {
 	calls            []string
 	requests         []string
+	commandBudgets   []time.Duration
 	lastHello        protocol.Hello
 	subscribeProject string
 	subscribeFrom    uint64
@@ -66,7 +68,9 @@ func (r *recordingDaemonTransport) Handshake(_ context.Context, hello protocol.H
 }
 
 func (r *recordingDaemonTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	_ = ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		r.commandBudgets = append(r.commandBudgets, time.Until(deadline))
+	}
 	r.calls = append(r.calls, req.Command)
 	r.requests = append(r.requests, req.Command)
 	if r.replyFn != nil {
@@ -104,12 +108,18 @@ func mustMarshalTaskListSnapshot(t *testing.T, protocolVersion protocol.Version,
 		ProtocolVersion:  protocolVersion,
 		SnapshotRevision: revision,
 		ProjectID:        projectID,
+		LastCheckedAt:    daemonSnapshotCheckedAt(),
+		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
 	})
 	if err != nil {
 		t.Fatalf("marshal task list snapshot: %v", err)
 	}
 	return body
+}
+
+func daemonSnapshotCheckedAt() time.Time {
+	return time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
 }
 
 func setTaskSession(t *testing.T, m *Model, issueID string, session *domain.Session) {
@@ -150,6 +160,12 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 		}
 		if len(loaded.tasks) != 1 || loaded.tasks[0].ID != "az-1" {
 			t.Fatalf("loaded tasks = %+v", loaded.tasks)
+		}
+		if !loaded.lastCheckedAt.Equal(daemonSnapshotCheckedAt()) {
+			t.Fatalf("last_checked_at = %v, want %v", loaded.lastCheckedAt, daemonSnapshotCheckedAt())
+		}
+		if loaded.freshness != protocol.TaskListFreshnessFresh {
+			t.Fatalf("freshness = %q, want %q", loaded.freshness, protocol.TaskListFreshnessFresh)
 		}
 		if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandTaskList {
 			t.Fatalf("requests = %v", transport.requests)
@@ -459,6 +475,133 @@ func TestLoadIssuesCmdTimeoutReturnsStaleIssuesMsg(t *testing.T) {
 	if len(newModel.toasts) == 0 || !strings.Contains(newModel.toasts[len(newModel.toasts)-1].Message, "local-first data") {
 		t.Fatalf("toasts = %+v, want freshness warning", newModel.toasts)
 	}
+}
+
+func TestIssuesLoadedHydratesFreshnessMetadataAndSyncsWorkspace(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+
+	checkedAt := time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
+	updatedAny, _ := m.Update(issuesLoadedMsg{
+		tasks:         append([]domain.Task(nil), m.tasks...),
+		lastCheckedAt: checkedAt,
+		freshness:     protocol.TaskListFreshnessStale,
+	})
+
+	updated, ok := updatedAny.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedAny)
+	}
+	if !updated.taskSnapshotCheckedAt.Equal(checkedAt) {
+		t.Fatalf("taskSnapshotCheckedAt = %v, want %v", updated.taskSnapshotCheckedAt, checkedAt)
+	}
+	if updated.taskSnapshotFreshness != protocol.TaskListFreshnessStale {
+		t.Fatalf("taskSnapshotFreshness = %q, want %q", updated.taskSnapshotFreshness, protocol.TaskListFreshnessStale)
+	}
+
+	current := updated.overlayStack.Current()
+	workspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay, got %T", current)
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Freshness:") || !strings.Contains(view, "stale") {
+		t.Fatalf("workspace view = %q, want freshness row", view)
+	}
+	if !strings.Contains(view, "Checked:") || !strings.Contains(view, "2026-04-02 11:02:00") {
+		t.Fatalf("workspace view = %q, want checked timestamp", view)
+	}
+}
+
+func TestTaskSnapshotReadPathsUseExplicitTimeoutBudget(t *testing.T) {
+	const (
+		defaultBudget  = 25 * time.Millisecond
+		explicitBudget = 250 * time.Millisecond
+	)
+
+	replyWithSnapshot := func(t *testing.T, transport *recordingDaemonTransport) {
+		t.Helper()
+		transport.replyFn = func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        11,
+				OK:              true,
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 11, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+			}, nil
+		}
+	}
+
+	assertExplicitBudget := func(t *testing.T, budgets []time.Duration) {
+		t.Helper()
+		if len(budgets) != 1 {
+			t.Fatalf("command budget count = %d, want 1", len(budgets))
+		}
+		if budgets[0] < explicitBudget/2 {
+			t.Fatalf("command budget = %s, want explicit budget near %s", budgets[0], explicitBudget)
+		}
+		if budgets[0] <= defaultBudget {
+			t.Fatalf("command budget = %s, want greater than default budget %s", budgets[0], defaultBudget)
+		}
+	}
+
+	t.Run("load issues uses explicit snapshot budget", func(t *testing.T) {
+		transport := &recordingDaemonTransport{}
+		replyWithSnapshot(t, transport)
+
+		m := newTestModel()
+		m.currentProject = "proj-read"
+		m.daemonClient = daemonclient.New(transport).
+			WithProjectID("proj-read").
+			WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
+				Default:  defaultBudget,
+				Explicit: explicitBudget,
+			})
+
+		msg := m.loadIssuesCmd()()
+		if _, ok := msg.(issuesLoadedMsg); !ok {
+			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		}
+		assertExplicitBudget(t, transport.commandBudgets)
+	})
+
+	t.Run("scoped attach propagates explicit snapshot budget", func(t *testing.T) {
+		transport := &recordingDaemonTransport{}
+		replyWithSnapshot(t, transport)
+
+		previousFactory := newScopedDaemonClient
+		defer func() { newScopedDaemonClient = previousFactory }()
+
+		var capturedPolicy daemonclient.ReadWaitPolicy
+		newScopedDaemonClient = func(socketPath, projectID string, readWaitPolicy daemonclient.ReadWaitPolicy) *daemonclient.Client {
+			capturedPolicy = readWaitPolicy
+			return daemonclient.New(transport).
+				WithProjectID(projectID).
+				WithReadWaitPolicy(readWaitPolicy)
+		}
+
+		m := newTestModel()
+		m.currentProject = "proj-read"
+		m.repoDir = t.TempDir()
+		m.daemonSocketPath = filepath.Join(t.TempDir(), "other.sock")
+		m.daemonClient = daemonclient.New(&recordingDaemonTransport{}).
+			WithProjectID("proj-read").
+			WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
+				Default:  defaultBudget,
+				Explicit: explicitBudget,
+			})
+
+		msg := m.attachDaemonCmd()()
+		if _, ok := msg.(issuesLoadedMsg); !ok {
+			t.Fatalf("message type = %T, want issuesLoadedMsg", msg)
+		}
+		if capturedPolicy.Default != defaultBudget || capturedPolicy.Explicit != explicitBudget {
+			t.Fatalf("captured policy = %+v, want default=%s explicit=%s", capturedPolicy, defaultBudget, explicitBudget)
+		}
+		assertExplicitBudget(t, transport.commandBudgets)
+	})
 }
 
 func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {

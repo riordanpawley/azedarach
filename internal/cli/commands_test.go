@@ -36,6 +36,8 @@ func marshalTaskListBody(tasks []domain.Task) ([]byte, error) {
 		SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
 		ProtocolVersion:  protocol.CurrentVersion,
 		SnapshotRevision: 0,
+		LastCheckedAt:    time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC),
+		Freshness:        protocol.TaskListFreshnessFresh,
 		Tasks:            tasks,
 	})
 }
@@ -63,6 +65,9 @@ func TestNewDependenciesAtNormalizesWorktreeToBaseRepoRoot(t *testing.T) {
 	}
 	if deps.RepoDir != repo {
 		t.Fatalf("RepoDir = %q, want %q", deps.RepoDir, repo)
+	}
+	if deps.RuntimeRepoDir != repo {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, repo)
 	}
 	wantProjectID, err := config.ProjectIDForRoot(repo)
 	if err != nil {
@@ -101,6 +106,9 @@ func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
 	}
 	if deps.DaemonSocket != config.ScopedDaemonSocketPath(start) {
 		t.Fatalf("DaemonSocket = %q, want %q", deps.DaemonSocket, config.ScopedDaemonSocketPath(start))
+	}
+	if deps.RuntimeRepoDir != worktree {
+		t.Fatalf("RuntimeRepoDir = %q, want %q", deps.RuntimeRepoDir, worktree)
 	}
 }
 
@@ -869,6 +877,90 @@ func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 	}
 	if !strings.Contains(output, "level=INFO msg=\"hello from tui\"") {
 		t.Fatalf("output = %q, want tui message payload", output)
+	}
+}
+
+func TestResolveSessionLogDirFor_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("PATH", "")
+	t.Chdir(nested)
+
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	got := resolveSessionLogDirFor(cfg, nested)
+	want := filepath.Join(worktree, ".azedarach")
+	if got != want {
+		t.Fatalf("resolveSessionLogDirFor() = %q, want %q", got, want)
+	}
+}
+
+func TestLogCommandReadsScopedWorktreeDaemonAndTUILogs(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	worktree := filepath.Join(base, "wt")
+	nested := filepath.Join(worktree, "go-bubbletea")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(repo worktrees): %v", err)
+	}
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("MkdirAll(nested): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "wt")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .git): %v", err)
+	}
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("PATH", "")
+	t.Chdir(nested)
+
+	cfg := config.DefaultConfig()
+	cfg.Session.LogDir = filepath.Join(t.TempDir(), "logs")
+	deps := &Dependencies{
+		Config:  cfg,
+		RepoDir: repo,
+	}
+
+	daemonLogPath := filepath.Join(worktree, ".azedarach", "daemon.log")
+	tuiLogPath := filepath.Join(worktree, ".azedarach", "az.log")
+	if err := os.MkdirAll(filepath.Dir(daemonLogPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(log dir): %v", err)
+	}
+	if err := os.WriteFile(daemonLogPath, []byte("2026/04/01 16:50:04 INFO daemon started scoped\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(daemon log): %v", err)
+	}
+	if err := os.WriteFile(tuiLogPath, []byte("time=2026-04-01T16:50:15.468+11:00 level=INFO msg=\"hello from scoped tui\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(tui log): %v", err)
+	}
+
+	output := captureStdout(t, func() error {
+		return LogCommand(deps, LogOptions{
+			Sources: []string{"daemon", "tui"},
+			Lines:   25,
+			Follow:  false,
+		})
+	})
+	if !strings.Contains(output, "daemon started scoped") {
+		t.Fatalf("output = %q, want scoped daemon log line", output)
+	}
+	if !strings.Contains(output, "hello from scoped tui") {
+		t.Fatalf("output = %q, want scoped tui log line", output)
 	}
 }
 
@@ -4279,7 +4371,9 @@ func TestRestartDaemonCommand(t *testing.T) {
 	t.Cleanup(func() { newLauncher = oldLauncher })
 
 	fake := &fakeLauncher{}
-	newLauncher = func(_, _ string) daemonStarter {
+	var gotRepoDir string
+	newLauncher = func(repoDir, _ string) daemonStarter {
+		gotRepoDir = repoDir
 		return fake
 	}
 
@@ -4290,9 +4384,10 @@ func TestRestartDaemonCommand(t *testing.T) {
 				return protocol.HelloAck{Accepted: true}, nil
 			},
 		}),
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:      "proj",
+		RepoDir:        t.TempDir(),
+		RuntimeRepoDir: "/tmp/runtime-worktree",
 	}
 
 	output := captureStdout(t, func() error {
@@ -4301,6 +4396,9 @@ func TestRestartDaemonCommand(t *testing.T) {
 
 	if !fake.replaceCalled {
 		t.Fatalf("expected replace to be called")
+	}
+	if gotRepoDir != deps.RuntimeRepoDir {
+		t.Fatalf("launcher repoDir = %q, want %q", gotRepoDir, deps.RuntimeRepoDir)
 	}
 	if !strings.Contains(output, "Daemon restarted successfully.") {
 		t.Fatalf("output missing restart success: %q", output)
@@ -4335,7 +4433,9 @@ func TestEnsureDaemonDoesNotReplaceOnAcceptedHandshake(t *testing.T) {
 	t.Cleanup(func() { newLauncher = oldLauncher })
 
 	fake := &fakeLauncher{}
-	newLauncher = func(_, _ string) daemonStarter {
+	var gotRepoDir string
+	newLauncher = func(repoDir, _ string) daemonStarter {
+		gotRepoDir = repoDir
 		return fake
 	}
 
@@ -4348,9 +4448,10 @@ func TestEnsureDaemonDoesNotReplaceOnAcceptedHandshake(t *testing.T) {
 				return protocol.HelloAck{Accepted: true}, nil
 			},
 		}),
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:      "proj",
+		RepoDir:        t.TempDir(),
+		RuntimeRepoDir: "/tmp/runtime-worktree",
 	}
 
 	if err := ensureDaemon(context.Background(), deps, "cli"); err != nil {
@@ -4358,6 +4459,9 @@ func TestEnsureDaemonDoesNotReplaceOnAcceptedHandshake(t *testing.T) {
 	}
 	if fake.replaceCalled {
 		t.Fatalf("expected replace to remain false for accepted handshake")
+	}
+	if gotRepoDir != deps.RuntimeRepoDir {
+		t.Fatalf("launcher repoDir = %q, want %q", gotRepoDir, deps.RuntimeRepoDir)
 	}
 	if handshakes != 1 {
 		t.Fatalf("handshakes = %d, want 1", handshakes)

@@ -1,7 +1,10 @@
 package overlay
 
 import (
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
@@ -223,6 +226,12 @@ func (w *TaskWorkspaceOverlay) halfPageStep() int {
 // TaskID returns the selected task ID shown in the workspace.
 func (w *TaskWorkspaceOverlay) TaskID() string {
 	return w.detail.task.ID
+}
+
+// SyncSnapshotFreshness updates the detail panel freshness metadata from the latest daemon snapshot.
+func (w *TaskWorkspaceOverlay) SyncSnapshotFreshness(checkedAt time.Time, freshness protocol.TaskListFreshness) {
+	w.detail.checkedAt = checkedAt
+	w.detail.freshness = freshness
 }
 
 // SyncTask updates workspace detail/actions from refreshed task projection data.

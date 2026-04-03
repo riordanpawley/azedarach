@@ -7,8 +7,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
 func TestViewHeight(t *testing.T) {
@@ -256,6 +258,51 @@ func TestView_TabToggleRendersCompactAndBoardSurfaces(t *testing.T) {
 	}
 	if got := getCursorPosition(boardModel); got.Column != 0 || got.Task != 1 {
 		t.Fatalf("cursor position changed after toggling back: got (%d,%d), want (0,1)", got.Column, got.Task)
+	}
+}
+
+func TestView_RendersFreshnessIndicatorAcrossBoardAndCompactViews(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.taskSnapshotCheckedAt = time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
+	m.taskSnapshotFreshness = protocol.TaskListFreshnessStale
+
+	boardView := m.View()
+	if !strings.Contains(boardView, "stale 11:02:00") {
+		t.Fatalf("board view = %q, want compact freshness indicator", boardView)
+	}
+	if !strings.Contains(strings.Split(strings.TrimRight(boardView, "\n"), "\n")[0], "Open (") {
+		t.Fatalf("expected board headers to remain on first line, got %q", strings.Split(strings.TrimRight(boardView, "\n"), "\n")[0])
+	}
+
+	updated, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	compactModel := updated.(Model)
+	compactView := compactModel.View()
+	if !strings.Contains(compactView, "stale 11:02:00") {
+		t.Fatalf("compact view = %q, want compact freshness indicator", compactView)
+	}
+}
+
+func TestView_TaskWorkspaceShowsFreshnessTimestampAndStatus(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 24
+	m.loading = false
+	m.taskSnapshotCheckedAt = time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
+	m.taskSnapshotFreshness = protocol.TaskListFreshnessFresh
+
+	workspace := overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30)
+	workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
+	m.overlayStack.Push(workspace)
+
+	view := m.View()
+	if !strings.Contains(view, "Freshness:") || !strings.Contains(view, "fresh") {
+		t.Fatalf("view = %q, want freshness status in detail pane", view)
+	}
+	if !strings.Contains(view, "Checked:") || !strings.Contains(view, "2026-04-02 11:02:00") {
+		t.Fatalf("view = %q, want freshness timestamp in detail pane", view)
 	}
 }
 

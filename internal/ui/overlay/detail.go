@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	uistyles "github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -22,6 +23,8 @@ type DetailPanel struct {
 	viewHeight     int
 	descViewHeight int
 	wrapWidth      int
+	checkedAt      time.Time
+	freshness      protocol.TaskListFreshness
 	styles         *Styles
 }
 
@@ -64,6 +67,13 @@ func (d *DetailPanel) WithMutationProgress(progress *TaskMutationProgress) *Deta
 // incoming dependency edges alongside the task's outgoing dependencies.
 func (d *DetailPanel) WithRelatedTasks(tasks []domain.Task) *DetailPanel {
 	d.relatedTasks = append([]domain.Task(nil), tasks...)
+	return d
+}
+
+// WithSnapshotFreshness attaches daemon-authored snapshot freshness metadata.
+func (d *DetailPanel) WithSnapshotFreshness(checkedAt time.Time, freshness protocol.TaskListFreshness) *DetailPanel {
+	d.checkedAt = checkedAt
+	d.freshness = freshness
 	return d
 }
 
@@ -186,6 +196,17 @@ func (d *DetailPanel) viewStandard() string {
 	b.WriteString(valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
 	b.WriteString("\n")
 
+	if d.hasSnapshotFreshness() {
+		b.WriteString(labelStyle.Render("Freshness:"))
+		b.WriteString("  ")
+		b.WriteString(d.formatSnapshotFreshness())
+		b.WriteString("\n")
+		b.WriteString(labelStyle.Render("Checked:"))
+		b.WriteString("  ")
+		b.WriteString(valueStyle.Render(d.formatTime(d.checkedAt)))
+		b.WriteString("\n")
+	}
+
 	// Runtime info
 	if d.showRuntimeSections() {
 		b.WriteString("\n")
@@ -275,6 +296,10 @@ func (d *DetailPanel) viewCompact() string {
 	addLine("")
 	addLine(labelStyle.Render("Created:") + "  " + valueStyle.Render(d.formatTime(d.task.CreatedAt)))
 	addLine(labelStyle.Render("Updated:") + "  " + valueStyle.Render(d.formatTime(d.task.UpdatedAt)))
+	if d.hasSnapshotFreshness() {
+		addLine(labelStyle.Render("Freshness:") + "  " + d.formatSnapshotFreshness())
+		addLine(labelStyle.Render("Checked:") + "  " + valueStyle.Render(d.formatTime(d.checkedAt)))
+	}
 
 	if d.showRuntimeSections() {
 		addLine("")
@@ -512,6 +537,22 @@ func (d *DetailPanel) useCompactScrollMode() bool {
 
 func (d *DetailPanel) showRuntimeSections() bool {
 	return d.task.Session != nil || d.hasGitStatusData()
+}
+
+func (d *DetailPanel) hasSnapshotFreshness() bool {
+	return !d.checkedAt.IsZero() && d.freshness.Valid()
+}
+
+func (d *DetailPanel) formatSnapshotFreshness() string {
+	label := string(d.freshness)
+	style := lipgloss.NewStyle().Foreground(uistyles.Subtext0).Bold(true)
+	switch d.freshness {
+	case protocol.TaskListFreshnessFresh:
+		style = lipgloss.NewStyle().Foreground(uistyles.Green).Bold(true)
+	case protocol.TaskListFreshnessStale:
+		style = lipgloss.NewStyle().Foreground(uistyles.Yellow).Bold(true)
+	}
+	return style.Render(label)
 }
 
 func (d *DetailPanel) formatSessionState() string {
