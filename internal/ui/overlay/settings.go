@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -282,7 +283,7 @@ func (m *SettingsOverlay) View() string {
 		b.WriteString("\n")
 	}
 
-	width, height := m.Clamp(72, len(m.items)+9)
+	width, height := m.Size()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,
@@ -595,14 +596,44 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 	prNotifyAfterCreate := true
 	prCreateWithoutMerge := false
 	networkAutoDetect := true
+	gitWorkflowMode := "worktree"
+	gitDefaultMergeStrategy := "merge"
+	gitShowLineChanges := true
+	mergeStrategy := "merge"
+	mergeAutoMerge := false
+	mergeCompareWithOrigin := true
+	networkCheckInterval := 60
+	networkOfflineTimeout := 300
+	networkRetryAttempts := 3
+	notificationsCompletedTask := true
+	notificationsFailedTask := true
+	notificationsErrorThreshold := 3
+	worktreeAutoCleanup := true
+	worktreeKeepDays := 7
+	specEnabled := true
 	if cfg != nil {
 		gitPushEnabled = cfg.Git.PushEnabled
 		gitFetchEnabled = cfg.Git.FetchEnabled
+		gitWorkflowMode = cfg.Git.WorkflowMode
+		gitDefaultMergeStrategy = cfg.Git.DefaultMergeStrategy
+		gitShowLineChanges = cfg.Git.ShowLineChanges
 		prDraftByDefault = cfg.PR.DraftByDefault
 		prAutoLink = cfg.PR.AutoLink
 		prNotifyAfterCreate = cfg.PR.NotifyAfterCreate
 		prCreateWithoutMerge = cfg.PR.CreateWithoutMerge
 		networkAutoDetect = cfg.Network.AutoDetect
+		networkCheckInterval = cfg.Network.CheckInterval
+		networkOfflineTimeout = cfg.Network.OfflineTimeout
+		networkRetryAttempts = cfg.Network.RetryAttempts
+		mergeStrategy = cfg.Merge.Strategy
+		mergeAutoMerge = cfg.Merge.AutoMerge
+		mergeCompareWithOrigin = cfg.Merge.CompareWithOrigin
+		notificationsCompletedTask = cfg.Notifications.CompletedTask
+		notificationsFailedTask = cfg.Notifications.FailedTask
+		notificationsErrorThreshold = cfg.Notifications.ErrorThreshold
+		worktreeAutoCleanup = cfg.Worktree.AutoCleanup
+		worktreeKeepDays = cfg.Worktree.KeepDays
+		specEnabled = cfg.Spec.Enabled
 	}
 	items := []SettingItem{
 		{
@@ -641,6 +672,25 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 			},
 		},
 		{
+			Key:   "session-timeout-ms",
+			Group: "Session",
+			Label: "Session timeout (ms)",
+			Type:  SettingChoice,
+			Value: fmt.Sprintf("%d", sessionTimeout(cfg)),
+			Choices: []string{
+				"15000",
+				"30000",
+				"60000",
+				"120000",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				cfg.Session.TimeoutMs = parseIntChoice(value, cfg.Session.TimeoutMs)
+			},
+		},
+		{
 			Key:   "phases",
 			Group: "General",
 			Label: "Show dependency phases",
@@ -651,39 +701,57 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 			},
 		},
 		{
-			Key:   "refresh",
-			Group: "General",
-			Label: "Auto-refresh issues",
-			Type:  SettingToggle,
-			Value: true,
-			OnChange: func(value any) {
-				// TODO: Wire this to config
-			},
-		},
-		{
-			Key:   "compact",
-			Group: "General",
-			Label: "Compact card view",
-			Type:  SettingToggle,
-			Value: false,
-			OnChange: func(value any) {
-				// TODO: Wire this to config
-			},
-		},
-		{
-			Key:   "theme",
-			Group: "General",
-			Label: "Theme",
+			Key:   "git-workflow-mode",
+			Group: "Git",
+			Label: "Workflow mode",
 			Type:  SettingChoice,
-			Value: "macchiato",
+			Value: gitWorkflowMode,
 			Choices: []string{
-				"latte",
-				"frappe",
-				"macchiato",
-				"mocha",
+				"worktree",
+				"branch",
 			},
 			OnChange: func(value any) {
-				// TODO: Wire this to config
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(string); ok {
+					cfg.Git.WorkflowMode = v
+				}
+			},
+		},
+		{
+			Key:   "git-default-merge-strategy",
+			Group: "Git",
+			Label: "Default merge strategy",
+			Type:  SettingChoice,
+			Value: gitDefaultMergeStrategy,
+			Choices: []string{
+				"merge",
+				"squash",
+				"rebase",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(string); ok {
+					cfg.Git.DefaultMergeStrategy = v
+				}
+			},
+		},
+		{
+			Key:   "git-show-line-changes",
+			Group: "Git",
+			Label: "Show line changes",
+			Type:  SettingToggle,
+			Value: gitShowLineChanges,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Git.ShowLineChanges = v
+				}
 			},
 		},
 		{
@@ -792,6 +860,215 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 			},
 		},
 		{
+			Key:   "network-check-interval",
+			Group: "Network",
+			Label: "Check interval (sec)",
+			Type:  SettingChoice,
+			Value: fmt.Sprintf("%d", networkCheckInterval),
+			Choices: []string{
+				"15",
+				"30",
+				"60",
+				"120",
+				"300",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				cfg.Network.CheckInterval = parseIntChoice(value, cfg.Network.CheckInterval)
+			},
+		},
+		{
+			Key:   "network-offline-timeout",
+			Group: "Network",
+			Label: "Offline timeout (sec)",
+			Type:  SettingChoice,
+			Value: fmt.Sprintf("%d", networkOfflineTimeout),
+			Choices: []string{
+				"60",
+				"120",
+				"300",
+				"600",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				cfg.Network.OfflineTimeout = parseIntChoice(value, cfg.Network.OfflineTimeout)
+			},
+		},
+		{
+			Key:   "network-retry-attempts",
+			Group: "Network",
+			Label: "Retry attempts",
+			Type:  SettingChoice,
+			Value: fmt.Sprintf("%d", networkRetryAttempts),
+			Choices: []string{
+				"1",
+				"2",
+				"3",
+				"5",
+				"8",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				cfg.Network.RetryAttempts = parseIntChoice(value, cfg.Network.RetryAttempts)
+			},
+		},
+		{
+			Key:   "merge-strategy",
+			Group: "Merge",
+			Label: "Merge strategy",
+			Type:  SettingChoice,
+			Value: mergeStrategy,
+			Choices: []string{
+				"merge",
+				"squash",
+				"rebase",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(string); ok {
+					cfg.Merge.Strategy = v
+				}
+			},
+		},
+		{
+			Key:   "merge-auto-merge",
+			Group: "Merge",
+			Label: "Auto-merge",
+			Type:  SettingToggle,
+			Value: mergeAutoMerge,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Merge.AutoMerge = v
+				}
+			},
+		},
+		{
+			Key:   "merge-compare-with-origin",
+			Group: "Merge",
+			Label: "Compare with origin",
+			Type:  SettingToggle,
+			Value: mergeCompareWithOrigin,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Merge.CompareWithOrigin = v
+				}
+			},
+		},
+		{
+			Key:   "notifications-completed-task",
+			Group: "Notifications",
+			Label: "Notify completed task",
+			Type:  SettingToggle,
+			Value: notificationsCompletedTask,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Notifications.CompletedTask = v
+				}
+			},
+		},
+		{
+			Key:   "notifications-failed-task",
+			Group: "Notifications",
+			Label: "Notify failed task",
+			Type:  SettingToggle,
+			Value: notificationsFailedTask,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Notifications.FailedTask = v
+				}
+			},
+		},
+		{
+			Key:   "notifications-error-threshold",
+			Group: "Notifications",
+			Label: "Error threshold",
+			Type:  SettingChoice,
+			Value: fmt.Sprintf("%d", notificationsErrorThreshold),
+			Choices: []string{
+				"1",
+				"2",
+				"3",
+				"5",
+				"10",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				cfg.Notifications.ErrorThreshold = parseIntChoice(value, cfg.Notifications.ErrorThreshold)
+			},
+		},
+		{
+			Key:   "worktree-auto-cleanup",
+			Group: "Worktree",
+			Label: "Auto-cleanup",
+			Type:  SettingToggle,
+			Value: worktreeAutoCleanup,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Worktree.AutoCleanup = v
+				}
+			},
+		},
+		{
+			Key:   "worktree-keep-days",
+			Group: "Worktree",
+			Label: "Keep days",
+			Type:  SettingChoice,
+			Value: fmt.Sprintf("%d", worktreeKeepDays),
+			Choices: []string{
+				"1",
+				"3",
+				"7",
+				"14",
+				"30",
+			},
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				cfg.Worktree.KeepDays = parseIntChoice(value, cfg.Worktree.KeepDays)
+			},
+		},
+		{
+			Key:   "spec-enabled",
+			Group: "Spec",
+			Label: "Spec workflow enabled",
+			Type:  SettingToggle,
+			Value: specEnabled,
+			OnChange: func(value any) {
+				if cfg == nil {
+					return
+				}
+				if v, ok := value.(bool); ok {
+					cfg.Spec.Enabled = v
+				}
+			},
+		},
+		{
 			Key:      "",
 			Group:    "Actions",
 			Label:    "───────────────────",
@@ -830,4 +1107,23 @@ func NewSettingsOverlayWithEditorAndConfig(editor interface {
 	}
 
 	return NewSettingsOverlayWithConfig(items, cfg, configSource)
+}
+
+func parseIntChoice(value any, fallback int) int {
+	v, ok := value.(string)
+	if !ok {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func sessionTimeout(cfg *config.Config) int {
+	if cfg == nil || cfg.Session.TimeoutMs <= 0 {
+		return config.DefaultConfig().Session.TimeoutMs
+	}
+	return cfg.Session.TimeoutMs
 }
