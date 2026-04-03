@@ -91,3 +91,4 @@ coverage/
 /go-bubbletea
 /ts-opentui
 /staged.txt
+/.runtime
