@@ -185,14 +185,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			UpdatedAt: now,
 		})
 	}
-	if d.runtimeProjectionWriter != nil {
-		if err := d.runtimeProjectionWriter.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("replace worktree projections failed", "project_id", projectID, "error", err)
-			}
-			return len(rows), err
-		}
-	} else if err := d.worktreeRuntimeStateStore().ReplaceWorktreeStates(ctx, projectID, rows); err != nil {
+	if err := d.runtimeProjectionStateWriter().ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("replace worktree projections failed", "project_id", projectID, "error", err)
 		}
@@ -302,23 +295,9 @@ func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issu
 	if err != nil || status == nil {
 		return nil
 	}
-	if d.runtimeProjectionWriter != nil {
-		if rev := d.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(timeoutCtx, projectID, issueID, worktree, status, true, true); rev == 0 {
-			return status
-		}
+	if rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(timeoutCtx, projectID, issueID, worktree, status, true, true); rev == 0 {
 		return status
 	}
-	rawStatus, err := json.Marshal(status)
-	if err != nil {
-		return nil
-	}
-	if err := d.worktreeRuntimeStateStore().UpsertWorktreeStateGitStatus(timeoutCtx, projectID, issueID, rawStatus, time.Now().UTC()); err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("persist git status projection failed", "project_id", projectID, "issue_id", issueID, "worktree", worktree, "error", err)
-		}
-		return nil
-	}
-	d.publishGitStatusProjectionEvent(timeoutCtx, projectID, issueID, worktree, status)
 	return status
 }
 

@@ -216,6 +216,7 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	}
 }
 
+
 func TestCommandDefaultsBlankProjectID(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

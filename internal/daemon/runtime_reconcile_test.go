@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -293,6 +294,21 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 	}
 }
 
+func TestRuntimeReconcileTimeoutDefaultsByScopeMode(t *testing.T) {
+	d := &Daemon{}
+
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	if got, want := d.runtimeReconcileTimeout(), defaultRuntimeReconcileTimeout; got != want {
+		t.Fatalf("runtimeReconcileTimeout() non-scoped = %s, want %s", got, want)
+	}
+
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	if got, want := d.runtimeReconcileTimeout(), scopedRuntimeReconcileTimeout; got != want {
+		t.Fatalf("runtimeReconcileTimeout() scoped = %s, want %s", got, want)
+	}
+}
+
 func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	repoDir := t.TempDir()
 	repoProjectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -316,10 +332,11 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:               Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
-		sessionStore:      sessionStore,
-		runtimeStateStore: runtimeStateStore,
-		revision:          map[string]uint64{"proj-revision": 3},
+		cfg:                  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
+		revision:             map[string]uint64{"proj-revision": 3},
 	}
 
 	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
@@ -329,6 +346,109 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	want := []string{repoProjectID, "proj-projection", "proj-revision", "proj-session"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("project ids = %v, want %v", got, want)
+	}
+}
+
+func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	repoDir := t.TempDir()
+	repoProjectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession("proj-zeta", "sess-1", "az-1", daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession: %v", err)
+	}
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	if err := runtimeStateStore.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
+		ProjectID: "proj-alpha",
+		IssueID:   "az-2",
+		Path:      "/tmp/repo-az-2",
+		Branch:    "riordan/az-2/task",
+		UpdatedAt: time.Date(2026, time.April, 2, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertWorktree: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:                  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
+		revision:             map[string]uint64{"proj-beta": 1},
+	}
+
+	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
+	if err != nil {
+		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("project ids len = %d, want 4 (%v)", len(got), got)
+	}
+	if got[0] != repoProjectID {
+		t.Fatalf("first project id = %q, want repo-scoped %q", got[0], repoProjectID)
+	}
+	wantSet := map[string]struct{}{
+		repoProjectID: {},
+		"proj-alpha":  {},
+		"proj-beta":   {},
+		"proj-zeta":   {},
+	}
+	for _, projectID := range got {
+		if _, ok := wantSet[projectID]; !ok {
+			t.Fatalf("unexpected project id %q in %v", projectID, got)
+		}
+		delete(wantSet, projectID)
+	}
+	if len(wantSet) != 0 {
+		t.Fatalf("missing project ids: %v (got %v)", wantSet, got)
+	}
+}
+
+func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "azedarach")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(repoDir): %v", err)
+	}
+	repoProjectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession("azedarach", "sess-1", "az-1", daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession(azedarach): %v", err)
+	}
+	if _, err := sessionStore.UpsertSession("proj-zeta", "sess-2", "az-2", daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("UpsertSession(proj-zeta): %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: sessionStore,
+		revision: map[string]uint64{
+			repoProjectID: 1,
+		},
+	}
+
+	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
+	if err != nil {
+		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("project ids len = %d, want >=2 (%v)", len(got), got)
+	}
+	if got[0] != "azedarach" {
+		t.Fatalf("first project id = %q, want %q", got[0], "azedarach")
+	}
+	if got[1] != repoProjectID {
+		t.Fatalf("second project id = %q, want repo-scoped id %q", got[1], repoProjectID)
 	}
 }
 

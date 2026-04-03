@@ -201,7 +201,7 @@ func (c *Client) ListTasksSnapshotWithMode(ctx context.Context, mode ReadWaitMod
 
 	var payload protocol.TaskListSnapshotPayload
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
-		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w", CommandTaskList, err)
+		return TaskSnapshot{}, fmt.Errorf("decode %s response: %w (expected %s payload; daemon likely outdated)", CommandTaskList, err, "TaskListSnapshotPayload")
 	}
 	if payload.SchemaVersion != protocol.TaskListSnapshotSchemaVersion {
 		return TaskSnapshot{}, fmt.Errorf("decode %s response: unsupported schema version %d", CommandTaskList, payload.SchemaVersion)

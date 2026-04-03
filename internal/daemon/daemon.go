@@ -62,7 +62,6 @@ type Daemon struct {
 	sessionStore            *daemonstate.Store
 	sessionRuntimeStore     *daemonstate.RuntimeStateStore
 	worktreeRuntimeStore    *daemonstate.RuntimeStateStore
-	runtimeStateStore       *daemonstate.RuntimeStateStore
 	runtimeProjectionWriter runtimeProjectionWriter
 	sessionLongRunning      SessionLongRunningExecutor
 	runtimeReconciler       runtimeReconciler
@@ -146,7 +145,6 @@ func New(cfg Config) *Daemon {
 		sessionStore:            sessionStore,
 		sessionRuntimeStore:     runtimeStateStore,
 		worktreeRuntimeStore:    runtimeStateStore,
-		runtimeStateStore:       runtimeStateStore,
 		sessionStopPending:      map[string]int{},
 		sessionStateRefreshing:  map[string]bool{},
 		sessionStateLastRefresh: map[string]time.Time{},
@@ -154,13 +152,9 @@ func New(cfg Config) *Daemon {
 	}
 	d.syncBootstrapFn = d.defaultSyncBootstrap
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
-	gitService.runtimeProjectionWriter = d.runtimeProjectionWriter
+	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
-		if d.runtimeProjectionWriter != nil {
-			d.runtimeProjectionWriter.PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
-			return
-		}
-		d.publishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
+		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      cfg.RepoDir,
@@ -177,14 +171,10 @@ func New(cfg Config) *Daemon {
 		&worktreeServiceAdapter{
 			manager:                 d.worktree,
 			runtimeStateStore:       d.worktreeRuntimeStateStore(),
-			runtimeProjectionWriter: d.runtimeProjectionWriter,
+			runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
 			logger:                  cfg.Logger,
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
-				if d.runtimeProjectionWriter != nil {
-					d.runtimeProjectionWriter.PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
-					return
-				}
-				d.publishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+				d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 			},
 			onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
 				gitService.refreshGitStatusAsync(projectID, path)
@@ -217,6 +207,7 @@ func New(cfg Config) *Daemon {
 	})
 	return d
 }
+
 
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
 func (d *Daemon) Run(ctx context.Context) error {
@@ -259,11 +250,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close issue store", "error", closeErr)
 			}
 		}
-		if d.sessionRuntimeStateStore() != nil {
-			if closeErr := d.sessionRuntimeStateStore().Close(); closeErr != nil {
-				d.cfg.Logger.Warn("failed to close runtime state store", "error", closeErr)
-			}
-		}
+		d.closeRuntimeStateStores()
 		_ = lease.Release()
 		_ = d.lock.Release()
 	}()
@@ -525,12 +512,7 @@ func (d *Daemon) applySessionLifecycleTransition(
 		if err != nil {
 			return err
 		}
-		if d.runtimeProjectionWriter != nil {
-			d.runtimeProjectionWriter.PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
-		} else {
-			d.persistSessionState(projectID, session)
-			d.publishSessionProjectionEvent(ctx, projectID, req.Meta, session)
-		}
+		d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, session)
 		return nil
 	}
 	if resp.Error != nil {
@@ -543,20 +525,43 @@ func (d *Daemon) sessionRuntimeStateStore() *daemonstate.RuntimeStateStore {
 	if d == nil {
 		return nil
 	}
-	if d.sessionRuntimeStore != nil {
-		return d.sessionRuntimeStore
-	}
-	return d.runtimeStateStore
+	return d.sessionRuntimeStore
 }
 
 func (d *Daemon) worktreeRuntimeStateStore() *daemonstate.RuntimeStateStore {
 	if d == nil {
 		return nil
 	}
-	if d.worktreeRuntimeStore != nil {
-		return d.worktreeRuntimeStore
+	return d.worktreeRuntimeStore
+}
+
+func (d *Daemon) runtimeProjectionStateWriter() runtimeProjectionWriter {
+	if d == nil {
+		return nil
 	}
-	return d.runtimeStateStore
+	if d.runtimeProjectionWriter == nil {
+		d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	}
+	return d.runtimeProjectionWriter
+}
+
+func (d *Daemon) closeRuntimeStateStores() {
+	if d == nil {
+		return
+	}
+	seen := map[*daemonstate.RuntimeStateStore]struct{}{}
+	for _, store := range []*daemonstate.RuntimeStateStore{d.sessionRuntimeStateStore(), d.worktreeRuntimeStateStore()} {
+		if store == nil {
+			continue
+		}
+		if _, exists := seen[store]; exists {
+			continue
+		}
+		seen[store] = struct{}{}
+		if closeErr := store.Close(); closeErr != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("failed to close runtime state store", "error", closeErr)
+		}
+	}
 }
 
 func (d *Daemon) persistSessionState(projectID string, session daemonstate.Session) {

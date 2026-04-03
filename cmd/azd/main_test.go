@@ -10,20 +10,22 @@ func TestIsScopedDaemonMode(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
+		source string
 		want bool
 	}{
-		{name: "worktree", in: "worktree", want: true},
-		{name: "scoped", in: "scoped", want: true},
-		{name: "local", in: "local", want: true},
-		{name: "whitespace and case", in: "  WorkTree  ", want: true},
+		{name: "worktree", in: "worktree", source: "just-run", want: true},
+		{name: "scoped", in: "scoped", source: "just-run", want: true},
+		{name: "local", in: "local", source: "just-run", want: true},
+		{name: "whitespace and case", in: "  WorkTree  ", source: "  JUST-RUN  ", want: true},
+		{name: "mode without source", in: "worktree", source: "", want: false},
 		{name: "empty", in: "", want: false},
 		{name: "global", in: "global", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isScopedDaemonMode(tt.in); got != tt.want {
-				t.Fatalf("isScopedDaemonMode(%q) = %v, want %v", tt.in, got, tt.want)
+			if got := isScopedDaemonMode(tt.in, tt.source); got != tt.want {
+				t.Fatalf("isScopedDaemonMode(%q, %q) = %v, want %v", tt.in, tt.source, got, tt.want)
 			}
 		})
 	}
@@ -46,6 +48,7 @@ func TestResolveScopedWorktreeWatchPathUsesRepoDir(t *testing.T) {
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	t.Setenv("PATH", "")
 	if got := resolveScopedWorktreeWatchPath(nested); got != worktree {
 		t.Fatalf("resolveScopedWorktreeWatchPath(%q) = %q, want %q", nested, got, worktree)

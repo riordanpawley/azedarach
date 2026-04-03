@@ -282,13 +282,9 @@ func (c *Client) DiffStatTotals(ctx context.Context, worktree, baseBranch string
 // MergeBase resolves the merge base between base branch and HEAD.
 func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (string, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
-	if baseBranch == "" {
+	candidates := c.baseRefCandidates(ctx, worktree, baseBranch)
+	if len(candidates) == 0 {
 		return "", fmt.Errorf("base branch is empty")
-	}
-
-	candidates := []string{baseBranch}
-	if !strings.Contains(baseBranch, "/") {
-		candidates = append(candidates, "origin/"+baseBranch)
 	}
 
 	var lastErr error
@@ -389,13 +385,9 @@ func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (i
 // It tries the local base branch first, then falls back to origin/<base>.
 func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch string) (int, int, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
-	if baseBranch == "" {
+	candidates := c.baseRefCandidates(ctx, worktree, baseBranch)
+	if len(candidates) == 0 {
 		return 0, 0, fmt.Errorf("base branch is empty")
-	}
-
-	candidates := []string{baseBranch}
-	if !strings.Contains(baseBranch, "/") {
-		candidates = append(candidates, "origin/"+baseBranch)
 	}
 
 	var lastErr error
@@ -417,6 +409,45 @@ func (c *Client) BranchAheadBehind(ctx context.Context, worktree, baseBranch str
 		return 0, 0, fmt.Errorf("failed to resolve branch delta for %s: %w", baseBranch, lastErr)
 	}
 	return 0, 0, fmt.Errorf("failed to resolve branch delta for %s", baseBranch)
+}
+
+func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch string) []string {
+	ordered := make([]string, 0, 10)
+	seen := map[string]struct{}{}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return
+		}
+		if _, exists := seen[ref]; exists {
+			return
+		}
+		seen[ref] = struct{}{}
+		ordered = append(ordered, ref)
+	}
+
+	add(baseBranch)
+	if baseBranch != "" && !strings.Contains(baseBranch, "/") {
+		add("origin/" + baseBranch)
+	}
+
+	// Prefer remote default branch if available; this helps repos that do not
+	// use "main" while still keeping configured base as first priority.
+	if headRef, err := c.runInWorktree(ctx, worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		headRef = strings.TrimSpace(headRef) // e.g. origin/main or origin/trunk
+		add(headRef)
+		if strings.HasPrefix(headRef, "origin/") {
+			add(strings.TrimPrefix(headRef, "origin/"))
+		}
+	}
+
+	// Conservative well-known fallback refs.
+	add("main")
+	add("origin/main")
+	add("master")
+	add("origin/master")
+
+	return ordered
 }
 
 func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...string) (string, error) {

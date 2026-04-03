@@ -334,19 +334,6 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	if a.runtimeStateStore != nil && worktree != nil {
 		if a.runtimeProjectionWriter != nil {
 			a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
-		} else {
-			if upsertErr := a.runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
-				ProjectID: normalizedProjectID(projectID),
-				IssueID:   worktree.IssueID,
-				Path:      worktree.Path,
-				Branch:    worktree.Branch,
-				UpdatedAt: time.Now().UTC(),
-			}); upsertErr != nil && a.logger != nil {
-				a.logger.Warn("failed to upsert worktree projection on create", "project_id", projectID, "issue_id", issueID, "error", upsertErr)
-			}
-			if a.onProjectionUpdate != nil {
-				a.onProjectionUpdate(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path)
-			}
 		}
 		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree})
 	}
@@ -366,13 +353,6 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	}
 	if a.runtimeProjectionWriter != nil {
 		a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
-	} else if a.runtimeStateStore != nil {
-		if deleteErr := a.runtimeStateStore.DeleteWorktreeState(ctx, normalizedProjectID(projectID), issueID); deleteErr != nil && a.logger != nil {
-			a.logger.Warn("failed to delete worktree projection", "project_id", projectID, "issue_id", issueID, "error", deleteErr)
-		}
-		if a.onProjectionUpdate != nil {
-			a.onProjectionUpdate(ctx, normalizedProjectID(projectID), issueID, "")
-		}
 	}
 	return nil
 }
@@ -395,13 +375,6 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 		result.Removed = append(result.Removed, wt)
 		if a.runtimeProjectionWriter != nil {
 			a.runtimeProjectionWriter.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), wt.IssueID)
-		} else if a.runtimeStateStore != nil {
-			if deleteErr := a.runtimeStateStore.DeleteWorktreeState(ctx, normalizedProjectID(projectID), wt.IssueID); deleteErr != nil && a.logger != nil {
-				a.logger.Warn("failed to delete worktree projection during cleanup", "project_id", projectID, "issue_id", wt.IssueID, "error", deleteErr)
-			}
-			if a.onProjectionUpdate != nil {
-				a.onProjectionUpdate(ctx, normalizedProjectID(projectID), wt.IssueID, "")
-			}
 		}
 	}
 

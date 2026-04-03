@@ -131,7 +131,8 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	d := &Daemon{
 		cfg:                     Config{Logger: logger},
 		sessionStore:            sessionStore,
-		runtimeStateStore:       runtimeStateStore,
+		sessionRuntimeStore:     runtimeStateStore,
+		worktreeRuntimeStore:    runtimeStateStore,
 		runtimeProjectionWriter: writer,
 	}
 
@@ -195,10 +196,11 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 
 	d := &Daemon{
-		cfg:               Config{Logger: logger},
-		hub:               publish.NewHub(8, 4, logger),
-		sessionStore:      sessionStore,
-		runtimeStateStore: runtimeStateStore,
+		cfg:                  Config{Logger: logger},
+		hub:                  publish.NewHub(8, 4, logger),
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
 	}
 	writer := newRuntimeProjectionWriter(d)
 

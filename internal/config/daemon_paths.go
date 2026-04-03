@@ -94,7 +94,9 @@ func daemonScopeID(path string) string {
 
 func useScopedDaemonRuntime() bool {
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	return mode == "worktree" || mode == "scoped" || mode == "local"
+	source := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")))
+	modeEnabled := mode == "worktree" || mode == "scoped" || mode == "local"
+	return modeEnabled && source == "just-run"
 }
 
 func daemonRuntimeDirWritable(dir string) bool {

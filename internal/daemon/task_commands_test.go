@@ -182,8 +182,9 @@ func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:               Config{Logger: slog.Default()},
-		runtimeStateStore: store,
+		cfg:                  Config{Logger: slog.Default()},
+		sessionRuntimeStore:  store,
+		worktreeRuntimeStore: store,
 	}
 
 	now := time.Date(2026, time.April, 2, 10, 2, 0, 0, time.UTC)
@@ -302,13 +303,14 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 		cfg: Config{
 			Logger: logger,
 		},
-		issues:            issuesClient,
-		sessionStore:      sessionStore,
-		runtimeStateStore: runtimeStateStore,
-		revision:          map[string]uint64{projectID: 7},
-		tmux:              nil,
-		worktree:          &git.WorktreeManager{},
-		git:               &git.Client{},
+		issues:               issuesClient,
+		sessionStore:         sessionStore,
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
+		revision:             map[string]uint64{projectID: 7},
+		tmux:                 nil,
+		worktree:             &git.WorktreeManager{},
+		git:                  &git.Client{},
 	}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
@@ -448,11 +450,12 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:               Config{RepoDir: repoDir, Logger: slog.Default()},
-		issues:            issuesClient,
-		sessionStore:      daemonstate.NewStore(),
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		runtimeStateStore: runtimeStateStore,
+		cfg:                  Config{RepoDir: repoDir, Logger: slog.Default()},
+		issues:               issuesClient,
+		sessionStore:         daemonstate.NewStore(),
+		tmux:                 tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionRuntimeStore:  runtimeStateStore,
+		worktreeRuntimeStore: runtimeStateStore,
 	}
 
 	req := protocol.RequestEnvelope{

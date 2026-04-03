@@ -94,6 +94,7 @@ func TestNewDependenciesAtUsesScopedSocketWhenEnabled(t *testing.T) {
 
 	t.Setenv("PATH", "")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
 	deps, err := NewDependenciesAt(config.DefaultConfig(), start)
 	if err != nil {
 		t.Fatalf("NewDependenciesAt() error = %v", err)

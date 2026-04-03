@@ -240,13 +240,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"reused_worktree", reusedWorktree,
 		)
 	}
-	if d.runtimeProjectionWriter != nil {
-		d.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
-	} else {
-		if err := d.persistWorktreeState(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch); err == nil {
-			d.publishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path)
-		}
-	}
+	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -532,18 +526,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		State:     daemonstate.SessionStateStopped,
 		UpdatedAt: time.Now().UTC(),
 	}
-	if d.runtimeProjectionWriter != nil {
-		if err := d.runtimeProjectionWriter.PersistSessionProjection(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("write-through stop session projection failed",
-				"project_id", projectID,
-				"session_id", sessionID,
-				"issue_id", issueID,
-				"error", err,
-			)
-		}
-		return
-	}
-	if err := d.sessionRuntimeStateStore().UpsertSessionState(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("write-through stop session runtime state failed",
 			"project_id", projectID,
 			"session_id", sessionID,
@@ -669,12 +652,7 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 	if err != nil {
 		return err
 	}
-	if d.runtimeProjectionWriter != nil {
-		d.runtimeProjectionWriter.PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
-		return nil
-	}
-	d.persistSessionState(projectID, event.Session)
-	d.publishSessionProjectionEvent(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
+	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
 	return nil
 }
 
@@ -1083,10 +1061,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		}
 		rows = append(rows, row)
 	}
-	if d.runtimeProjectionWriter != nil {
-		return d.runtimeProjectionWriter.ReplaceSessionProjectionSnapshot(ctx, projectID, rows)
-	}
-	return d.sessionRuntimeStateStore().ReplaceSessionStates(ctx, projectID, rows)
+	return d.runtimeProjectionStateWriter().ReplaceSessionProjectionSnapshot(ctx, projectID, rows)
 }
 
 func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
