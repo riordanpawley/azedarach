@@ -481,7 +481,7 @@ func TestCodexInstallCommandMergesExistingHooks(t *testing.T) {
 	}
 }
 
-func TestCodexGuardSessionStartBlocksWhenPromptMissingPrime(t *testing.T) {
+func TestCodexGuardSessionStartAllowsWhenPromptMissingPrime(t *testing.T) {
 	projectDir := t.TempDir()
 	deps := &Dependencies{RepoDir: projectDir}
 
@@ -503,14 +503,8 @@ func TestCodexGuardSessionStartBlocksWhenPromptMissingPrime(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	if !strings.Contains(output, `"continue":false`) {
-		t.Fatalf("session-start output = %q, want continue:false", output)
-	}
-	if !strings.Contains(output, "\"stopReason\":\"Run `az prime` now before any other shell commands.\"") {
-		t.Fatalf("session-start output = %q, want stopReason", output)
-	}
-	if !strings.Contains(output, "Run `az prime` now before any other shell commands.") {
-		t.Fatalf("session-start output = %q, want az-prime reason", output)
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("session-start output = %q, want {}", output)
 	}
 }
 
@@ -541,7 +535,7 @@ func TestCodexGuardSessionStartAllowsWhenPrimeEvidenceKeyPresent(t *testing.T) {
 	}
 }
 
-func TestCodexGuardSessionStartBlocksWhenOnlyPrimeCommandMentioned(t *testing.T) {
+func TestCodexGuardSessionStartAllowsWhenOnlyPrimeCommandMentioned(t *testing.T) {
 	projectDir := t.TempDir()
 	deps := &Dependencies{RepoDir: projectDir}
 
@@ -563,8 +557,8 @@ func TestCodexGuardSessionStartBlocksWhenOnlyPrimeCommandMentioned(t *testing.T)
 	output := captureStdout(t, func() error {
 		return CodexGuardCommand(deps, CodexGuardOptions{Event: "session-start", JSON: true})
 	})
-	if !strings.Contains(output, `"continue":false`) {
-		t.Fatalf("session-start output = %q, want continue:false", output)
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("session-start output = %q, want {}", output)
 	}
 }
 
@@ -590,8 +584,8 @@ func TestCodexHookRunCommandJSONMatchesGuardContract(t *testing.T) {
 	output := captureStdout(t, func() error {
 		return CodexHookRunCommand(deps, CodexHookRunOptions{Event: "session-start", JSON: true})
 	})
-	if !strings.Contains(output, `"continue":false`) {
-		t.Fatalf("hook run output = %q, want continue:false", output)
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("hook run output = %q, want {}", output)
 	}
 }
 

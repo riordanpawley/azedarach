@@ -1204,13 +1204,8 @@ func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap ma
 	case "session-start":
 		threadState = codexGuardThreadState{}
 		state.Threads[threadID] = threadState
-		if !codexGuardPayloadHasPrimeEvidence(payloadMap) {
-			reason := "Run `az prime` now before any other shell commands."
-			// SessionStart hooks use continue/stopReason; decision/reason is for tool hooks.
-			response["continue"] = false
-			response["stopReason"] = reason
-			response["systemMessage"] = reason
-		}
+		// bpn: Temporary workaround. Keep tracking state, but disable hard
+		// az-prime enforcement until codex hook behavior is fixed.
 	case "user-prompt-submit":
 		if codexGuardCompactionDetected(payloadMap) {
 			threadState.Primed = false
@@ -1229,14 +1224,7 @@ func codexGuardResponse(projectDir string, opts CodexGuardOptions, payloadMap ma
 			state.Threads[threadID] = threadState
 			break
 		}
-		if strings.TrimSpace(command) != "" && (!threadState.Primed || threadState.NeedsRefresh) {
-			response["decision"] = "block"
-			if threadState.NeedsRefresh {
-				response["reason"] = "Run `az prime` before continuing so your context is refreshed after compaction."
-			} else {
-				response["reason"] = "Run `az prime` before any other shell command in this session."
-			}
-		}
+		// bpn: Temporary workaround. Pre-tool enforcement remains disabled.
 	case "post-tool-use":
 	case "stop":
 		delete(state.Threads, threadID)
