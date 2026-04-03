@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,23 +26,34 @@ func EventLogHotkeyHint() string {
 type EventLogOverlay struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	tuiLogFilePath    string
-	daemonLogFilePath string
-	events            []protocol.EventEnvelope
+	tuiLogFilePath     string
+	daemonLogFilePath  string
+	events             []protocol.EventEnvelope
+	activeTab          eventLogTab
+	cachedHookLogLines []string
 	cachedContentLines []string
 	contentDirty       bool
 	cachedPrettyStart  int
 	cachedPrettyEnd    int
-	scroll            int
-	maxScroll         int
-	viewHeight        int
-	styles            *Styles
+	scroll             int
+	maxScroll          int
+	viewHeight         int
+	styles             *Styles
 }
 
 const (
 	eventLogMaxRetainedEvents   = 2000
 	eventLogApproxLinesPerEvent = 4
 	eventLogPrettyWindowPadding = 2
+	eventLogMaxHookLogLines     = 400
+)
+
+type eventLogTab int
+
+const (
+	eventLogTabRuntime eventLogTab = iota
+	eventLogTabHooks
+	eventLogTabCount
 )
 
 // NewEventLogOverlay creates an event log overlay from chronologically ordered events.
@@ -61,6 +74,7 @@ func NewEventLogOverlayWithLogFiles(events []protocol.EventEnvelope, tuiLogFileP
 		contentDirty:      true,
 		cachedPrettyStart: -1,
 		cachedPrettyEnd:   -1,
+		activeTab:         eventLogTabRuntime,
 		scroll:            0,
 		viewHeight:        18,
 		styles:            New(),
@@ -109,6 +123,12 @@ func (o *EventLogOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q", "backspace":
 			return o, func() tea.Msg { return CloseOverlayMsg{} }
+		case "tab":
+			o.cycleTab(1)
+			return o, nil
+		case "shift+tab":
+			o.cycleTab(-1)
+			return o, nil
 		case "j", "down":
 			if o.scroll < o.maxScroll {
 				o.scroll++
@@ -212,7 +232,19 @@ func (o *EventLogOverlay) Size() (width, height int) {
 }
 
 func (o *EventLogOverlay) renderContentLines() []string {
-	lines := make([]string, 0, len(o.events)*4+6)
+	lines := []string{o.tabHeaderLine()}
+
+	switch o.activeTab {
+	case eventLogTabHooks:
+		lines = append(lines, o.renderHookLogLines()...)
+	default:
+		lines = append(lines, o.renderRuntimeEventLines()...)
+	}
+	return lines
+}
+
+func (o *EventLogOverlay) renderRuntimeEventLines() []string {
+	lines := make([]string, 0, len(o.events)*4+4)
 	if o.tuiLogFilePath != "" {
 		lines = append(lines, o.styles.MenuItemDisabled.Render("TUI log: "+o.tuiLogFilePath))
 	}
@@ -231,7 +263,26 @@ func (o *EventLogOverlay) renderContentLines() []string {
 		prettyBody := displayIndex >= prettyStart && displayIndex <= prettyEnd
 		lines = append(lines, o.renderEvent(o.events[eventIndex], prettyBody)...)
 	}
+	return lines
+}
 
+func (o *EventLogOverlay) renderHookLogLines() []string {
+	lines := []string{}
+	if o.tuiLogFilePath != "" {
+		lines = append(lines, o.styles.MenuItemDisabled.Render("Source: "+o.tuiLogFilePath))
+	} else {
+		lines = append(lines, o.styles.MenuItemDisabled.Render("Source: TUI log unavailable"))
+	}
+
+	hookLines := o.hookLogLines()
+	if len(hookLines) == 0 {
+		lines = append(lines, o.styles.MenuItemDisabled.Render("No hook events found in az.log."))
+		return lines
+	}
+
+	for i := len(hookLines) - 1; i >= 0; i-- {
+		lines = append(lines, o.styles.MenuItem.Render(hookLines[i]))
+	}
 	return lines
 }
 
@@ -379,7 +430,8 @@ func (o *EventLogOverlay) halfPageStep() int {
 }
 
 func (o *EventLogOverlay) actionBindings(scrollable bool) []keybinds.Binding {
-	bindings := make([]keybinds.Binding, 0, 7)
+	bindings := make([]keybinds.Binding, 0, 8)
+	bindings = append(bindings, keybinds.Binding{Key: "Tab/Shift+Tab", Description: "switch source"})
 	if scrollable {
 		bindings = append(bindings,
 			keybinds.Binding{Key: "j/k", Description: "scroll"},
@@ -409,6 +461,116 @@ func (o *EventLogOverlay) streamLogPaths() []string {
 		paths = append(paths, o.tuiLogFilePath)
 	}
 	return paths
+}
+
+func (o *EventLogOverlay) tabHeaderLine() string {
+	runtimeLabel := "Runtime Events"
+	hooksLabel := "Hook Events"
+	if o.activeTab == eventLogTabRuntime {
+		runtimeLabel = "[Runtime Events]"
+	} else {
+		hooksLabel = "[Hook Events]"
+	}
+	return o.styles.MenuItemDisabled.Render(runtimeLabel + "  |  " + hooksLabel)
+}
+
+func (o *EventLogOverlay) cycleTab(delta int) {
+	next := (int(o.activeTab) + delta) % int(eventLogTabCount)
+	if next < 0 {
+		next += int(eventLogTabCount)
+	}
+	o.activeTab = eventLogTab(next)
+	o.scroll = 0
+	o.contentDirty = true
+	o.cachedPrettyStart = -1
+	o.cachedPrettyEnd = -1
+	if o.activeTab == eventLogTabHooks {
+		o.cachedHookLogLines = readHookEventLinesFromLogFile(o.tuiLogFilePath, eventLogMaxHookLogLines)
+	}
+}
+
+func (o *EventLogOverlay) hookLogLines() []string {
+	if o.activeTab == eventLogTabHooks && len(o.cachedHookLogLines) == 0 {
+		o.cachedHookLogLines = readHookEventLinesFromLogFile(o.tuiLogFilePath, eventLogMaxHookLogLines)
+	}
+	return o.cachedHookLogLines
+}
+
+func readHookEventLinesFromLogFile(path string, maxLines int) []string {
+	path = strings.TrimSpace(path)
+	if path == "" || maxLines <= 0 {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	rawLines := strings.Split(string(data), "\n")
+	filtered := make([]string, 0, len(rawLines))
+	for _, raw := range rawLines {
+		if line := extractHookEventLogLine(raw); line != "" {
+			filtered = append(filtered, line)
+		}
+	}
+	if len(filtered) <= maxLines {
+		return filtered
+	}
+	return append([]string(nil), filtered[len(filtered)-maxLines:]...)
+}
+
+func extractHookEventLogLine(raw string) string {
+	line := strings.TrimSpace(raw)
+	if line == "" {
+		return ""
+	}
+	normalized := strings.ToLower(line)
+	if strings.Contains(normalized, "hook notification:") ||
+		strings.Contains(normalized, "githooks hook:") ||
+		strings.Contains(normalized, "githooks notify:") ||
+		strings.Contains(normalized, "az notify ") ||
+		strings.Contains(normalized, "az githooks ") ||
+		strings.Contains(normalized, "az codex hook run") {
+		if rendered := renderHookLogDisplayLine(line); rendered != "" {
+			return rendered
+		}
+		return line
+	}
+	return ""
+}
+
+func renderHookLogDisplayLine(raw string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return strings.TrimSpace(raw)
+	}
+	parts := make([]string, 0, 4)
+	if ts, ok := payload["time"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			parts = append(parts, parsed.UTC().Format("2006-01-02 15:04:05"))
+		}
+	}
+	if lvl, ok := payload["level"].(string); ok && strings.TrimSpace(lvl) != "" {
+		parts = append(parts, strings.ToUpper(strings.TrimSpace(lvl)))
+	}
+	msg := ""
+	if value, ok := payload["msg"].(string); ok {
+		msg = strings.TrimSpace(value)
+	} else if value, ok := payload["message"].(string); ok {
+		msg = strings.TrimSpace(value)
+	}
+	if msg != "" {
+		parts = append(parts, msg)
+	}
+	for _, key := range []string{"command", "cmd", "event", "hook"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			parts = append(parts, key+"="+strings.TrimSpace(value))
+		}
+	}
+	if len(parts) == 0 {
+		return strings.TrimSpace(raw)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func formatJSONLogBody(raw []byte) (string, bool) {
