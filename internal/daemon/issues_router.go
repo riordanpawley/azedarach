@@ -75,6 +75,19 @@ func (d *Daemon) resolveRepoDirForProjectLocked(projectID string) string {
 		return ""
 	}
 
+	if matchedRepoDir, ok := d.resolveRepoDirForProjectExactLocked(projectID); ok {
+		return matchedRepoDir
+	}
+	return baseRepoDir
+}
+
+func (d *Daemon) resolveRepoDirForProjectExactLocked(projectID string) (string, bool) {
+	projectID = protocol.NormalizeProjectID(projectID)
+	baseRepoDir := strings.TrimSpace(d.cfg.RepoDir)
+	if baseRepoDir == "" {
+		return "", false
+	}
+
 	// Always accept canonical routes for this daemon's root repo.
 	baseCandidates := make([]string, 0, 3)
 	baseCandidates = append(baseCandidates, protocol.DefaultProjectID, protocol.NormalizeProjectID(filepath.Base(baseRepoDir)))
@@ -83,13 +96,13 @@ func (d *Daemon) resolveRepoDirForProjectLocked(projectID string) string {
 	}
 	for _, candidate := range baseCandidates {
 		if projectID == candidate {
-			return baseRepoDir
+			return baseRepoDir, true
 		}
 	}
 
 	registry, err := appconfig.LoadProjectsRegistry()
 	if err != nil || registry == nil {
-		return baseRepoDir
+		return "", false
 	}
 	for _, project := range registry.Projects {
 		repoDir := strings.TrimSpace(project.Path)
@@ -105,12 +118,34 @@ func (d *Daemon) resolveRepoDirForProjectLocked(projectID string) string {
 		}
 		for _, candidate := range candidates {
 			if projectID == candidate {
-				return repoDir
+				return repoDir, true
 			}
 		}
 	}
 
-	return baseRepoDir
+	return "", false
+}
+
+func (d *Daemon) resolveRepoDirForProject(projectID string) string {
+	if d == nil {
+		return ""
+	}
+	d.issueClientsMu.Lock()
+	defer d.issueClientsMu.Unlock()
+	return strings.TrimSpace(d.resolveRepoDirForProjectLocked(projectID))
+}
+
+func (d *Daemon) resolveRepoDirForProjectExact(projectID string) string {
+	if d == nil {
+		return ""
+	}
+	d.issueClientsMu.Lock()
+	defer d.issueClientsMu.Unlock()
+	repoDir, ok := d.resolveRepoDirForProjectExactLocked(projectID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(repoDir)
 }
 
 func (d *Daemon) closeIssueClients() {

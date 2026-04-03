@@ -15,9 +15,9 @@ import (
 // CardContentHeight is the single source of truth for rendered card content height.
 const CardContentHeight = 4
 
-const tmuxSessionToken = "T:Y"
-const descendantTmuxSessionToken = "TD:Y"
-const worktreeToken = "W:Y"
+const tmuxSessionToken = "T"
+const descendantTmuxSessionToken = "Td"
+const worktreeToken = "✓"
 
 // RuntimeSignals represents runtime metadata rendered for a task card.
 // These values are computed independently from session state.
@@ -256,9 +256,16 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 	}
 
 	stateStyle := s.SessionState(session.State)
-	label := strings.ToUpper(session.State.String())
-	if session.State == domain.SessionWaiting {
-		label = "WAIT"
+	label := map[domain.SessionState]string{
+		domain.SessionBusy:    "B",
+		domain.SessionWaiting: "W",
+		domain.SessionDone:    "D",
+		domain.SessionError:   "E",
+		domain.SessionPaused:  "P",
+		domain.SessionIdle:    "I",
+	}[session.State]
+	if label == "" {
+		label = "?"
 	}
 	var value string
 	if elapsed != "" {
@@ -314,13 +321,13 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
 	}
 	if signals.GitAheadCount > 0 && !hasLineChanges {
-		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G:↑%d", signals.GitAheadCount), styles.Green, s))
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↑%d", signals.GitAheadCount), styles.Green, s))
 	}
 	if signals.GitBehindCount > 0 {
-		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("G:↓%d", signals.GitBehindCount), styles.Yellow, s))
+		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↓%d", signals.GitBehindCount), styles.Yellow, s))
 	}
 	if signals.HasUncommittedChanges {
-		parts = append(parts, renderRuntimeSignalToken("G:✎", styles.Peach, s))
+		parts = append(parts, renderRuntimeSignalToken("✎", styles.Peach, s))
 	}
 	if hasLineChanges {
 		if s == nil {
@@ -349,7 +356,7 @@ func renderRuntimeSignalsCompact(signals *RuntimeSignals, s *styles.Styles) stri
 		parts = append(parts, renderRuntimeSignalToken("Td", styles.Sky, s))
 	}
 	if signals.HasWorktree {
-		parts = append(parts, renderRuntimeSignalToken("W", styles.Teal, s))
+		parts = append(parts, renderRuntimeSignalToken(worktreeToken, styles.Teal, s))
 	}
 	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, true); pendingToken != "" {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))

@@ -335,6 +335,7 @@ func mapSpecStoreError(err error) error {
 
 type worktreeServiceAdapter struct {
 	manager                     *git.WorktreeManager
+	managerForProject           func(string) *git.WorktreeManager
 	runtimeStateStore           *daemonstate.RuntimeStateStore
 	runtimeStateStoreForProject func(string) *daemonstate.RuntimeStateStore
 	runtimeProjectionWriter     runtimeProjectionWriter
@@ -359,11 +360,27 @@ func (a *worktreeServiceAdapter) runtimeStore(projectID string) *daemonstate.Run
 	return a.runtimeStateStore
 }
 
+func (a *worktreeServiceAdapter) managerFor(projectID string) *git.WorktreeManager {
+	if a == nil {
+		return nil
+	}
+	if a.managerForProject != nil {
+		if manager := a.managerForProject(projectID); manager != nil {
+			return manager
+		}
+	}
+	return a.manager
+}
+
 func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]git.Worktree, error) {
 	projectID = normalizedProjectID(projectID)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return nil, errors.New("worktree manager unavailable")
+	}
 	runtimeStore := a.runtimeStore(projectID)
 	if runtimeStore == nil {
-		worktrees, err := a.manager.List(ctx)
+		worktrees, err := manager.List(ctx)
 		if err == nil {
 			a.observeWorktrees(ctx, projectID, worktrees)
 		}
@@ -378,7 +395,7 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 		return worktrees, nil
 	}
 
-	worktrees, listErr := a.manager.List(ctx)
+	worktrees, listErr := manager.List(ctx)
 	if listErr != nil {
 		if err == nil {
 			return mapProjectionWorktrees(cached), nil
@@ -392,7 +409,11 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 }
 
 func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, error) {
-	worktree, err := a.manager.Create(ctx, issueID, baseBranch)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return nil, errors.New("worktree manager unavailable")
+	}
+	worktree, err := manager.Create(ctx, issueID, baseBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -406,11 +427,15 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 }
 
 func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, force bool) error {
-	worktree, err := a.manager.Get(ctx, issueID)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return errors.New("worktree manager unavailable")
+	}
+	worktree, err := manager.Get(ctx, issueID)
 	if err != nil {
 		return err
 	}
-	if err := a.manager.DeleteWithOptions(ctx, issueID, force); err != nil {
+	if err := manager.DeleteWithOptions(ctx, issueID, force); err != nil {
 		return err
 	}
 	if worktree != nil {
@@ -423,7 +448,11 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 }
 
 func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
-	worktrees, err := a.manager.List(ctx)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return nil, errors.New("worktree manager unavailable")
+	}
+	worktrees, err := manager.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +461,7 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 		ProjectID: projectID,
 	}
 	for _, wt := range worktrees {
-		if err := a.manager.Delete(ctx, wt.IssueID); err != nil {
+		if err := manager.Delete(ctx, wt.IssueID); err != nil {
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}
@@ -484,13 +513,17 @@ func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {
 }
 
 func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, projectID string) {
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return
+	}
 	var previous []daemonstate.WorktreeState
 	if runtimeStore := a.runtimeStore(projectID); runtimeStore != nil {
 		if cached, err := runtimeStore.ListWorktreeStates(ctx, projectID); err == nil {
 			previous = cached
 		}
 	}
-	worktrees, err := a.manager.List(ctx)
+	worktrees, err := manager.List(ctx)
 	if err != nil {
 		if a.logger != nil {
 			a.logger.Debug("worktree projection poll failed", "project_id", projectID, "error", err)

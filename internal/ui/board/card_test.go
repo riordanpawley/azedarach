@@ -460,8 +460,8 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "●") {
 			t.Errorf("Busy session should contain busy icon, got: %s", stripped)
 		}
-		if !strings.Contains(stripped, "BUSY") {
-			t.Errorf("Busy session should contain BUSY label, got: %s", stripped)
+		if !strings.Contains(stripped, " B ") {
+			t.Errorf("Busy session should contain compact B label, got: %s", stripped)
 		}
 
 		if !strings.Contains(stripped, "h") || !strings.Contains(stripped, "m") {
@@ -481,8 +481,8 @@ func TestRenderSessionStatus(t *testing.T) {
 		if !strings.Contains(stripped, "✓") {
 			t.Errorf("Done session should contain done icon, got: %s", stripped)
 		}
-		if !strings.Contains(stripped, "DONE") {
-			t.Errorf("Done session should contain DONE label, got: %s", stripped)
+		if !strings.Contains(stripped, " D") {
+			t.Errorf("Done session should contain compact D label, got: %s", stripped)
 		}
 
 		// Should NOT contain time format
@@ -538,12 +538,12 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		t.Fatalf("expected header line in card, got: %s", stripped)
 	}
 
-	for _, token := range []string{tmuxSessionToken, worktreeToken, "G:↓4", "G:✎", "+8/-2"} {
+	for _, token := range []string{tmuxSessionToken, worktreeToken, "↓4", "✎", "+8/-2"} {
 		if !strings.Contains(headerLine, token) {
 			t.Fatalf("header should contain %q, got: %s", token, headerLine)
 		}
 	}
-	if strings.Contains(headerLine, "G:↑2") {
+	if strings.Contains(headerLine, "↑2") {
 		t.Fatalf("header should hide ahead token when line changes exist, got: %s", headerLine)
 	}
 }
@@ -587,7 +587,7 @@ func TestRenderCard_MetadataOnFirstLine(t *testing.T) {
 	if first == "" {
 		t.Fatalf("expected metadata line containing issue id, got: %s", result)
 	}
-	for _, token := range []string{"P2", "CHE-3002", " T ", "WAIT", "2d 2h", tmuxSessionToken, worktreeToken, "G:✎", "+12/-3", "[1/7]"} {
+	for _, token := range []string{"P2", "CHE-3002", " T ", " W ", "2d 2h", tmuxSessionToken, worktreeToken, "✎", "+12/-3", "[1/7]"} {
 		if !strings.Contains(first, token) {
 			t.Fatalf("first line should contain %q, got: %s", token, first)
 		}
@@ -637,7 +637,7 @@ func TestRenderCard_MetadataCompactsOnNarrowWidth(t *testing.T) {
 	if !strings.Contains(first, "P2") || !strings.Contains(first, "CHE-3010") || !strings.Contains(first, " T ") {
 		t.Fatalf("first line must preserve core tokens, got: %s", first)
 	}
-	if strings.Contains(first, "WAIT") || strings.Contains(first, "+12/-3") {
+	if strings.Contains(first, " W ") || strings.Contains(first, "+12/-3") {
 		t.Fatalf("first line should compact verbose metadata at narrow width, got: %s", first)
 	}
 }
@@ -667,12 +667,12 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			!strings.Contains(got, descendantTmuxSessionToken) ||
 			!strings.Contains(got, worktreeToken) ||
 			!strings.Contains(got, "M:queued(25%)") ||
-			!strings.Contains(got, "G:↓2") ||
-			!strings.Contains(got, "G:✎") ||
+			!strings.Contains(got, "↓2") ||
+			!strings.Contains(got, "✎") ||
 			!strings.Contains(got, "+10/-3") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing expected token(s)", got)
 		}
-		if strings.Contains(got, "G:↑1") {
+		if strings.Contains(got, "↑1") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, should hide ahead token when line changes exist", got)
 		}
 	})
@@ -684,7 +684,7 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			GitAheadCount:  3,
 		}
 		got := stripANSI(renderRuntimeSignals(signals, styles.New()))
-		if !strings.Contains(got, "G:↑3") {
+		if !strings.Contains(got, "↑3") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing ahead token", got)
 		}
 	})
@@ -710,7 +710,7 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 			PendingOperationPercent:  50,
 		}
 		got := stripANSI(renderRuntimeSignalsCompact(signals, styles.New()))
-		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, "W") || !strings.Contains(got, "M:R50") || !strings.Contains(got, "G*↓4") {
+		if !strings.Contains(got, "T") || !strings.Contains(got, "Td") || !strings.Contains(got, worktreeToken) || !strings.Contains(got, "M:R50") || !strings.Contains(got, "G*↓4") {
 			t.Fatalf("renderRuntimeSignalsCompact(...) = %q, missing expected compact token(s)", got)
 		}
 		if strings.Contains(got, "+10/-3") {

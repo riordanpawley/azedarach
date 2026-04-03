@@ -513,6 +513,35 @@ func TestBranchAheadBehindFallsBackToOriginRef(t *testing.T) {
 	}
 }
 
+func TestBranchAheadBehindPrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
+				return "origin/preview\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "HEAD..origin/preview" {
+				return "7\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && args[2] == "origin/preview..HEAD" {
+				return "3\n", nil
+			}
+			if len(args) >= 3 && args[0] == "rev-list" && args[1] == "--count" && (args[2] == "HEAD..main" || args[2] == "main..HEAD") {
+				return "", fmt.Errorf("should not use main when origin/HEAD differs")
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	ahead, behind, err := client.BranchAheadBehind(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("BranchAheadBehind() error = %v", err)
+	}
+	if ahead != 3 || behind != 7 {
+		t.Fatalf("BranchAheadBehind() = %d/%d, want 3/7", ahead, behind)
+	}
+}
+
 func TestRuntimeStatus(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
@@ -573,6 +602,32 @@ func TestMergeBaseFallsBackToOriginRef(t *testing.T) {
 	}
 	if mergeBase != "def456" {
 		t.Fatalf("MergeBase() = %q, want def456", mergeBase)
+	}
+}
+
+func TestMergeBasePrefersOriginHeadWhenBaseIsGeneric(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "symbolic-ref" && args[1] == "--short" && args[2] == "refs/remotes/origin/HEAD" {
+				return "origin/preview\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "origin/preview" && args[2] == "HEAD" {
+				return "fedcba\n", nil
+			}
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "HEAD" {
+				return "", fmt.Errorf("should not use main when origin/HEAD differs")
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.MergeBase(context.Background(), "/fake/worktree", "main")
+	if err != nil {
+		t.Fatalf("MergeBase() error = %v", err)
+	}
+	if mergeBase != "fedcba" {
+		t.Fatalf("MergeBase() = %q, want fedcba", mergeBase)
 	}
 }
 

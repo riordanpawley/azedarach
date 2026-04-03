@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -29,6 +30,8 @@ type Worktree struct {
 var (
 	ErrWorktreeNotFound      = errors.New("worktree not found")
 	ErrWorktreeAlreadyExists = errors.New("worktree already exists")
+	// Accept short local IDs (e.g. hn, bmd) and ticket-style IDs (e.g. che-3002, issue-123).
+	worktreePathIssuePattern = regexp.MustCompile(`(?i)^(?:[a-z]{1,4}|[a-z][a-z0-9]*-[0-9][a-z0-9-]*)$`)
 )
 
 // NewWorktreeManager creates a new WorktreeManager.
@@ -201,6 +204,9 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 			currentBranch = strings.TrimPrefix(branchRef, "refs/heads/")
 		} else if line == "" && currentPath != "" && currentBranch != "" {
 			issueID, ok := naming.ExtractIssueIDFromBranchName(currentBranch)
+			if !ok {
+				issueID, ok = w.extractIssueIDFromWorktreePath(currentPath)
+			}
 			if ok {
 				worktrees = append(worktrees, Worktree{
 					Path:    currentPath,
@@ -217,6 +223,9 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	if currentPath != "" && currentBranch != "" {
 		issueID, ok := naming.ExtractIssueIDFromBranchName(currentBranch)
 		if !ok {
+			issueID, ok = w.extractIssueIDFromWorktreePath(currentPath)
+		}
+		if !ok {
 			return worktrees
 		}
 		worktrees = append(worktrees, Worktree{
@@ -227,6 +236,27 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	}
 
 	return worktrees
+}
+
+func (w *WorktreeManager) extractIssueIDFromWorktreePath(worktreePath string) (string, bool) {
+	repoName := strings.TrimSpace(filepath.Base(w.repoDir))
+	worktreeName := strings.TrimSpace(filepath.Base(worktreePath))
+	if repoName == "" || worktreeName == "" {
+		return "", false
+	}
+
+	prefix := repoName + "-"
+	if !strings.HasPrefix(strings.ToLower(worktreeName), strings.ToLower(prefix)) {
+		return "", false
+	}
+	issueID := strings.TrimSpace(worktreeName[len(prefix):])
+	if issueID == "" {
+		return "", false
+	}
+	if !worktreePathIssuePattern.MatchString(issueID) {
+		return "", false
+	}
+	return issueID, true
 }
 
 func (w *WorktreeManager) resolveBranchAuthor(ctx context.Context) string {

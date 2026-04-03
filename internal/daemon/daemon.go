@@ -77,34 +77,47 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues                   *issues.Client
-	issueClientsMu           sync.Mutex
-	issueClientsByProject    map[string]*issues.Client
-	issueClientsByRoot       map[string]*issues.Client
-	runtimeStoresMu          sync.Mutex
-	runtimeStoresByProject   map[string]*daemonstate.RuntimeStateStore
-	runtimeStoresByRoot      map[string]*daemonstate.RuntimeStateStore
-	tmux                     *tmux.Client
-	git                      *git.Client
-	worktree                 *git.WorktreeManager
-	gitHandler               *daemonhandlers.GitHandler
-	worktreeHandler          *daemonhandlers.WorktreeHandler
-	session                  *daemonhandlers.SessionHandler
-	sessionStore             *daemonstate.Store
-	runtimeProjectionWriter  runtimeProjectionWriter
-	sessionLongRunning       SessionLongRunningExecutor
-	runtimeReconciler        runtimeReconciler
-	runtimeReconcileQueue    *reconcileQueue[protocol.RuntimeReconcileResponseBody]
-	gitStatusRefreshQueue    *reconcileQueue[*git.GitStatus]
-	runtimeReconcileThrottle *reconcileThrottle
-	worktreeGitProbeThrottle *reconcileThrottle
-	queueMu                  sync.Mutex
-	operationRuntime         *operationRuntime
-	sessionStopMu            sync.Mutex
-	sessionStopPending       map[string]int
-	sessionStateRefreshMu    sync.Mutex
-	sessionStateRefreshing   map[string]bool
-	sessionStateLastRefresh  map[string]time.Time
+	issues                        *issues.Client
+	issueClientsMu                sync.Mutex
+	issueClientsByProject         map[string]*issues.Client
+	issueClientsByRoot            map[string]*issues.Client
+	projectConfigMu               sync.Mutex
+	baseBranchByProject           map[string]string
+	baseBranchByRoot              map[string]string
+	cliToolByProject              map[string]string
+	cliToolByRoot                 map[string]string
+	sessionShellByProject         map[string]string
+	sessionShellByRoot            map[string]string
+	sessionInitCommandsByProject  map[string][]string
+	sessionInitCommandsByRoot     map[string][]string
+	worktreeInitCommandsByProject map[string][]string
+	worktreeInitCommandsByRoot    map[string][]string
+	worktreeManagersMu            sync.Mutex
+	worktreeManagersByProject     map[string]*git.WorktreeManager
+	worktreeManagersByRoot        map[string]*git.WorktreeManager
+	runtimeStoresMu               sync.Mutex
+	runtimeStoresByProject        map[string]*daemonstate.RuntimeStateStore
+	runtimeStoresByRoot           map[string]*daemonstate.RuntimeStateStore
+	tmux                          *tmux.Client
+	git                           *git.Client
+	gitHandler                    *daemonhandlers.GitHandler
+	worktreeHandler               *daemonhandlers.WorktreeHandler
+	session                       *daemonhandlers.SessionHandler
+	sessionStore                  *daemonstate.Store
+	runtimeProjectionWriter       runtimeProjectionWriter
+	sessionLongRunning            SessionLongRunningExecutor
+	runtimeReconciler             runtimeReconciler
+	runtimeReconcileQueue         *reconcileQueue[protocol.RuntimeReconcileResponseBody]
+	gitStatusRefreshQueue         *reconcileQueue[*git.GitStatus]
+	runtimeReconcileThrottle      *reconcileThrottle
+	worktreeGitProbeThrottle      *reconcileThrottle
+	queueMu                       sync.Mutex
+	operationRuntime              *operationRuntime
+	sessionStopMu                 sync.Mutex
+	sessionStopPending            map[string]int
+	sessionStateRefreshMu         sync.Mutex
+	sessionStateRefreshing        map[string]bool
+	sessionStateLastRefresh       map[string]time.Time
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -179,36 +192,52 @@ func New(cfg Config) *Daemon {
 	specService := issueSpecService{daemon: nil}
 
 	d := &Daemon{
-		cfg:                     cfg,
-		lock:                    lifecycle.NewLockManager(cfg.LockPath),
-		hub:                     publish.NewHub(512, 64, cfg.Logger),
-		issues:                  issuesClient,
-		issueClientsByProject:   map[string]*issues.Client{},
-		issueClientsByRoot:      map[string]*issues.Client{},
-		runtimeStoresByProject:  map[string]*daemonstate.RuntimeStateStore{},
-		runtimeStoresByRoot:     map[string]*daemonstate.RuntimeStateStore{},
-		tmux:                    tmux.NewClient(tmuxRunner, cfg.Logger),
-		git:                     gitClient,
-		worktree:                git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
-		session:                 sessionHandler,
-		sessionStore:            sessionStore,
-		runtimeReconcileQueue:   runtimeReconcileQueue,
-		gitStatusRefreshQueue:   gitStatusRefreshQueue,
-		sessionStopPending:      map[string]int{},
-		sessionStateRefreshing:  map[string]bool{},
-		sessionStateLastRefresh: map[string]time.Time{},
-		revision:                map[string]uint64{},
+		cfg:                           cfg,
+		lock:                          lifecycle.NewLockManager(cfg.LockPath),
+		hub:                           publish.NewHub(512, 64, cfg.Logger),
+		issues:                        issuesClient,
+		issueClientsByProject:         map[string]*issues.Client{},
+		issueClientsByRoot:            map[string]*issues.Client{},
+		baseBranchByProject:           map[string]string{},
+		baseBranchByRoot:              map[string]string{},
+		cliToolByProject:              map[string]string{},
+		cliToolByRoot:                 map[string]string{},
+		sessionShellByProject:         map[string]string{},
+		sessionShellByRoot:            map[string]string{},
+		sessionInitCommandsByProject:  map[string][]string{},
+		sessionInitCommandsByRoot:     map[string][]string{},
+		worktreeInitCommandsByProject: map[string][]string{},
+		worktreeInitCommandsByRoot:    map[string][]string{},
+		worktreeManagersByProject:     map[string]*git.WorktreeManager{},
+		worktreeManagersByRoot:        map[string]*git.WorktreeManager{},
+		runtimeStoresByProject:        map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByRoot:           map[string]*daemonstate.RuntimeStateStore{},
+		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
+		git:                           gitClient,
+		session:                       sessionHandler,
+		sessionStore:                  sessionStore,
+		runtimeReconcileQueue:         runtimeReconcileQueue,
+		gitStatusRefreshQueue:         gitStatusRefreshQueue,
+		sessionStopPending:            map[string]int{},
+		sessionStateRefreshing:        map[string]bool{},
+		sessionStateLastRefresh:       map[string]time.Time{},
+		revision:                      map[string]uint64{},
 	}
 	d.issueClientsByRoot[strings.TrimSpace(cfg.RepoDir)] = issuesClient
 	d.issueClientsByProject[protocol.DefaultProjectID] = issuesClient
+	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
+	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
+	d.worktreeManagersByProject[protocol.DefaultProjectID] = baseWorktreeManager
 	d.runtimeStoresByRoot[strings.TrimSpace(cfg.RepoDir)] = runtimeStateStore
 	d.runtimeStoresByProject[protocol.DefaultProjectID] = runtimeStateStore
 	if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
 		d.issueClientsByProject[repoName] = issuesClient
+		d.worktreeManagersByProject[repoName] = baseWorktreeManager
 		d.runtimeStoresByProject[repoName] = runtimeStateStore
 	}
 	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
 		d.issueClientsByProject[protocol.NormalizeProjectID(hashProjectID)] = issuesClient
+		d.worktreeManagersByProject[protocol.NormalizeProjectID(hashProjectID)] = baseWorktreeManager
 		d.runtimeStoresByProject[protocol.NormalizeProjectID(hashProjectID)] = runtimeStateStore
 	}
 	specService.daemon = d
@@ -219,6 +248,7 @@ func New(cfg Config) *Daemon {
 	gitService.runtimeStateStoreForProject = func(projectID string) *daemonstate.RuntimeStateStore {
 		return d.worktreeRuntimeStateStore(projectID)
 	}
+	gitService.baseBranchForProject = d.baseBranchForProject
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
 		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
 	}
@@ -235,7 +265,7 @@ func New(cfg Config) *Daemon {
 	gitHandler := daemonhandlers.NewGitHandler(gitService, daemonhandlers.WithGitLongRunningExecutor(commandExecutor))
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		&worktreeServiceAdapter{
-			manager:           d.worktree,
+			managerForProject: func(projectID string) *git.WorktreeManager { return d.worktreeManagerForProject(projectID) },
 			runtimeStateStore: d.worktreeRuntimeStateStore(),
 			runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
 				return d.worktreeRuntimeStateStore(projectID)
@@ -969,13 +999,14 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	}
 
 	if worktree != "" && d.git != nil {
+		baseBranch := d.baseBranchForProject(projectID)
 		switch {
 		case status == nil:
-			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, d.cfg.BaseBranch); err == nil {
+			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, baseBranch); err == nil {
 				status = liveStatus
 			}
 		case status.GitAdditions == 0 && status.GitDeletions == 0 && status.GitAheadCount == 0 && status.GitBehindCount == 0:
-			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, d.cfg.BaseBranch); err == nil {
+			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, baseBranch); err == nil {
 				status.GitAdditions = liveStatus.GitAdditions
 				status.GitDeletions = liveStatus.GitDeletions
 				status.GitAheadCount = liveStatus.GitAheadCount

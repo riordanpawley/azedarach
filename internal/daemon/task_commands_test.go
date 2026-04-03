@@ -321,9 +321,14 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 			".": runtimeStateStore,
 		},
 		revision: map[string]uint64{projectID: 7},
-		tmux:     nil,
-		worktree: &git.WorktreeManager{},
-		git:      &git.Client{},
+		tmux: nil,
+		git:  &git.Client{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			".": &git.WorktreeManager{},
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: &git.WorktreeManager{},
+		},
 	}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
@@ -570,9 +575,14 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	d := &Daemon{
 		cfg:      Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
 		git:      git.NewClient(runner, slog.Default()),
-		worktree: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			"/tmp/repo-root": store,
+		},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			"/tmp/repo-root": git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
 		},
 	}
 

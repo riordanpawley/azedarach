@@ -35,6 +35,7 @@ type gitServiceAdapter struct {
 	pollInterval                time.Duration
 	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
 	baseBranch                  string
+	baseBranchForProject        func(string) string
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -170,6 +171,11 @@ func (a *gitServiceAdapter) DiffStat(ctx context.Context, _ string, worktree, ba
 func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string, targets []daemonhandlers.GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string) ([]daemonhandlers.GitRuntimeSignalsResult, int, error) {
 	projectID = normalizeProjectID(projectID)
 	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		if a.baseBranchForProject != nil {
+			baseBranch = strings.TrimSpace(a.baseBranchForProject(projectID))
+		}
+	}
 	if baseBranch == "" {
 		baseBranch = strings.TrimSpace(a.baseBranch)
 	}
