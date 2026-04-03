@@ -396,6 +396,75 @@ func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T)
 	}
 }
 
+func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "bpm"
+	)
+
+	store := daemonstate.NewStore()
+	tmuxRunner := &testTmuxRunner{
+		sessions: map[string]bool{
+			issueID: true,
+		},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	close(tmuxRunner.killRelease)
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+	}
+
+	body, err := json.Marshal(map[string]string{
+		"project_id": projectID,
+		"session_id": issueID,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-legacy-name",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body:            body,
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+	}
+
+	resp, err := daemon.handleSessionStopDirect(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("stop response not OK: %+v", resp)
+	}
+
+	tmuxRunner.mu.Lock()
+	_, sessionStillRunning := tmuxRunner.sessions[issueID]
+	tmuxRunner.mu.Unlock()
+	if sessionStillRunning {
+		t.Fatalf("expected legacy tmux session %q to be killed", issueID)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	got, ok := snapshot.Sessions[sessionID]
+	if !ok {
+		t.Fatalf("missing session %q in snapshot", sessionID)
+	}
+	if got.State != daemonstate.SessionStateStopped {
+		t.Fatalf("session state = %s, want %s", got.State, daemonstate.SessionStateStopped)
+	}
+}
+
 func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T) {
 	const projectID = "proj"
 
@@ -538,6 +607,10 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 	}
 	if !foundStopped {
 		t.Fatalf("expected write-through stopped projection for %s before kill completes; rows=%+v", sessionID, rows)
+	}
+	snapshot := store.ReadSnapshot(projectID)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
+		t.Fatalf("expected cached session state stopped for %s before kill completes, got %s", sessionID, got)
 	}
 
 	close(tmuxRunner.killRelease)

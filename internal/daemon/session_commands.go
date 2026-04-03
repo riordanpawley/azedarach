@@ -172,6 +172,43 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 	}, protocol.ResponseEnvelope{}, true
 }
 
+func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueID, canonicalSessionID string) ([]string, error) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, nil
+	}
+
+	names := make(map[string]struct{})
+	if canonicalSessionID = strings.TrimSpace(canonicalSessionID); canonicalSessionID != "" {
+		exists, err := d.tmux.HasSession(ctx, canonicalSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			names[canonicalSessionID] = struct{}{}
+		}
+	}
+
+	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	namingScope := d.sessionNamingScope(projectID)
+	for _, name := range tmuxSessions {
+		parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		if !ok || !naming.IssueIDsEqual(parsedIssueID, issueID) {
+			continue
+		}
+		names[name] = struct{}{}
+	}
+
+	resolved := make([]string, 0, len(names))
+	for name := range names {
+		resolved = append(resolved, name)
+	}
+	return resolved, nil
+}
+
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	if d.sessionLongRunning != nil {
 		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
@@ -467,18 +504,9 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
 	// work is still in flight.
+	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
+	defer clearStopPending()
 	d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
-	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	if exists {
-		clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
-		defer clearStopPending()
-		if err := d.tmux.KillSession(ctx, cmd.SessionID); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -488,6 +516,18 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		daemonhandlers.CommandSessionStop,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
+	}
+	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	exists := len(sessionNamesToKill) > 0
+	if exists {
+		for _, sessionName := range sessionNamesToKill {
+			if err := d.tmux.KillSession(ctx, sessionName); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+		}
 	}
 	outputLines := []string{
 		fmt.Sprintf("Killing session: %s", cmd.IssueID),
@@ -794,6 +834,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionIDInTmux, namingScope)
 		if !parsed {
 			issueID = sessionIDInTmux
+		}
+		if d.isSessionStopPending(projectID, issueID) {
+			continue
 		}
 		d.ensureSessionWorktreeProjection(ctx, projectID, issueID)
 		if !ok {
