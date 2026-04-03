@@ -67,10 +67,12 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 
 	client := New(transport).WithProjectID("proj-a")
 	imagePaths := []string{"/tmp/a.png", "/tmp/with space/image.png"}
+	startWork := true
 	got, err := client.StartSession(context.Background(), StartSessionParams{
 		IssueID:    "az-1",
 		BaseBranch: "main",
 		Yolo:       false,
+		StartWork:  &startWork,
 		ImagePaths: imagePaths,
 	})
 	if err != nil {
@@ -91,6 +93,9 @@ func TestSessionLifecycleCommandsRouteThroughDaemon(t *testing.T) {
 	}
 	if body.BaseBranch != "main" {
 		t.Fatalf("base branch = %q, want main", body.BaseBranch)
+	}
+	if body.StartWork == nil || !*body.StartWork {
+		t.Fatalf("start_work = %v, want true", body.StartWork)
 	}
 	if len(body.ImagePaths) != len(imagePaths) {
 		t.Fatalf("image path count = %d, want %d", len(body.ImagePaths), len(imagePaths))
@@ -145,6 +150,46 @@ func TestStartSessionIncludesYoloFlagInRequestBody(t *testing.T) {
 	}
 	if !body.Yolo {
 		t.Fatal("expected yolo=true in session.start request body")
+	}
+}
+
+func TestStartSessionIncludesStartWorkFlagInRequestBody(t *testing.T) {
+	transport := &lifecycleRecordingTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			body, err := json.Marshal(commandOutputBody{Output: "ok"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+
+	client := New(transport).WithProjectID("proj-a")
+	startWork := false
+	if _, err := client.StartSession(context.Background(), StartSessionParams{
+		IssueID:    "az-1",
+		BaseBranch: "main",
+		Yolo:       false,
+		StartWork:  &startWork,
+	}); err != nil {
+		t.Fatalf("StartSession error: %v", err)
+	}
+
+	var body sessionCommandBody
+	if err := json.Unmarshal(transport.lastReq.Body, &body); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if body.StartWork == nil {
+		t.Fatal("expected start_work field in session.start request body")
+	}
+	if *body.StartWork {
+		t.Fatal("expected start_work=false in session.start request body")
 	}
 }
 

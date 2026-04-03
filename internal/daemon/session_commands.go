@@ -27,6 +27,7 @@ type sessionCommandBody struct {
 	SessionID  string   `json:"session_id"`
 	BaseBranch string   `json:"base_branch,omitempty"`
 	Yolo       bool     `json:"yolo,omitempty"`
+	StartWork  *bool    `json:"start_work,omitempty"`
 	ImagePaths []string `json:"image_paths,omitempty"`
 	Prompt     string   `json:"initial_prompt,omitempty"`
 }
@@ -37,6 +38,7 @@ type resolvedSessionTarget struct {
 	SessionID  string
 	BaseBranch string
 	Yolo       bool
+	StartWork  bool
 	ImagePaths []string
 	Prompt     string
 }
@@ -161,12 +163,17 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 	if issueID != "" {
 		sessionID = naming.CanonicalSessionID(namingScope, issueID)
 	}
+	startWork := true
+	if cmd.StartWork != nil {
+		startWork = *cmd.StartWork
+	}
 	return resolvedSessionTarget{
 		ProjectID:  cmd.ProjectID,
 		IssueID:    issueID,
 		SessionID:  sessionID,
 		BaseBranch: cmd.BaseBranch,
 		Yolo:       cmd.Yolo,
+		StartWork:  startWork,
 		ImagePaths: cmd.ImagePaths,
 		Prompt:     cmd.Prompt,
 	}, protocol.ResponseEnvelope{}, true
@@ -193,6 +200,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"session_id", cmd.SessionID,
 			"base_branch", cmd.BaseBranch,
 			"yolo", cmd.Yolo,
+			"start_work", cmd.StartWork,
 			"image_count", len(cmd.ImagePaths),
 		)
 	}
@@ -258,21 +266,23 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	initialPrompt := strings.TrimSpace(cmd.Prompt)
-	if initialPrompt == "" {
-		initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title)
-	}
-	launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
-	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon session start launch command sent",
-			"project_id", cmd.ProjectID,
-			"issue_id", cmd.IssueID,
-			"session_id", cmd.SessionID,
-			"prompt_bytes", len(initialPrompt),
-		)
+	if cmd.StartWork {
+		initialPrompt := strings.TrimSpace(cmd.Prompt)
+		if initialPrompt == "" {
+			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title)
+		}
+		launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
+		if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("daemon session start launch command sent",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+				"prompt_bytes", len(initialPrompt),
+			)
+		}
 	}
 	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
@@ -302,6 +312,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		fmt.Sprintf("Creating worktree from branch: %s", baseBranch),
 		worktreeLine,
 		fmt.Sprintf("Creating tmux session: %s", cmd.SessionID),
+		func() string {
+			if cmd.StartWork {
+				return "Launching AI session in tmux"
+			}
+			return "Skipping AI launch (tmux session only)"
+		}(),
 		"",
 		"✓ Session started successfully",
 		fmt.Sprintf("  To attach: az attach %s", cmd.IssueID),

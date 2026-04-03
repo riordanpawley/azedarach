@@ -241,17 +241,17 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	switch msg.Key {
 	// Session actions
 	case "s":
-		// Start session
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+		// Start tmux session only; do not launch work automatically.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false, false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false, true)
 	case "!":
 		// Start session with dangerous skip-permissions mode.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true)
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true, true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
-			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false)
+			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false, true)
 		}
 		return m, nil
 	case "a":
