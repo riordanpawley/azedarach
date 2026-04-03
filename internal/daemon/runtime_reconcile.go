@@ -59,7 +59,7 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if d == nil {
 		return result, nil
 	}
-	if d.worktree == nil || d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStore() == nil || d.worktreeRuntimeStateStore() == nil {
+	if d.worktree == nil || d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStore(result.ProjectID) == nil || d.worktreeRuntimeStateStore(result.ProjectID) == nil {
 		return result, nil
 	}
 

@@ -45,7 +45,7 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 		return client
 	}
 
-	repoDir := d.resolveIssueRepoDirLocked(projectID)
+	repoDir := d.resolveRepoDirForProjectLocked(projectID)
 	if repoDir == "" {
 		if d.issues != nil {
 			d.issueClientsByProject[projectID] = d.issues
@@ -68,7 +68,7 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 	return client
 }
 
-func (d *Daemon) resolveIssueRepoDirLocked(projectID string) string {
+func (d *Daemon) resolveRepoDirForProjectLocked(projectID string) string {
 	projectID = protocol.NormalizeProjectID(projectID)
 	baseRepoDir := strings.TrimSpace(d.cfg.RepoDir)
 	if baseRepoDir == "" {

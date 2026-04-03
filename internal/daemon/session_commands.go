@@ -503,7 +503,7 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 }
 
 func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
-	if d.sessionRuntimeStateStore() == nil {
+	if d.sessionRuntimeStateStore(projectID) == nil {
 		return
 	}
 
@@ -913,8 +913,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	snapshotByKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	projectionByKey := map[string]daemonstate.Session{}
-	if d.sessionRuntimeStateStore() != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	if d.sessionRuntimeStateStore(projectID) != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("failed to load cached session runtime state while enriching tasks", "project_id", projectID, "error", err)
@@ -964,8 +964,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	if d.sessionRuntimeStateStore() != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	if d.sessionRuntimeStateStore(projectID) != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 		if err == nil && len(cachedSessions) > 0 {
 			cachedActive := make([]string, 0, len(cachedSessions))
 			for _, session := range cachedSessions {
@@ -999,7 +999,7 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 }
 
 func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID string) error {
-	if d == nil || d.tmux == nil || d.sessionRuntimeStateStore() == nil || d.sessionStore == nil {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStore(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
 	tmuxSessions, err := d.tmux.ListSessions(ctx)
@@ -1010,7 +1010,7 @@ func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID strin
 }
 
 func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []string) error {
-	if d.sessionRuntimeStateStore() == nil || d.sessionStore == nil {
+	if d.sessionRuntimeStateStore(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
@@ -1024,7 +1024,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	byIssueKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	cachedByIssueKey := map[string]daemonstate.Session{}
-	cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load cached session runtime-state snapshot failed", "project_id", projectID, "error", err)

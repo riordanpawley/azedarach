@@ -113,8 +113,8 @@ func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string
 		}
 	}
 
-	if d.sessionRuntimeStateStore() != nil {
-		sessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	if d.sessionRuntimeStateStore(projectID) != nil {
+		sessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("load session freshness projections failed", "project_id", projectID, "error", err)
@@ -126,8 +126,8 @@ func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string
 		}
 	}
 
-	if d.worktreeRuntimeStateStore() != nil {
-		worktrees, err := d.worktreeRuntimeStateStore().ListWorktreeStates(ctx, projectID)
+	if d.worktreeRuntimeStateStore(projectID) != nil {
+		worktrees, err := d.worktreeRuntimeStateStore(projectID).ListWorktreeStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("load worktree freshness projections failed", "project_id", projectID, "error", err)
@@ -180,8 +180,8 @@ func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projec
 	}
 
 	projectionByKey := map[string]daemonstate.Session{}
-	if d.sessionRuntimeStateStore() != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	if d.sessionRuntimeStateStore(projectID) != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("failed to load cached session projections while enriching read-only tasks", "project_id", projectID, "error", err)
@@ -221,7 +221,7 @@ func (d *Daemon) enrichTasksWithSessionStateReadOnly(ctx context.Context, projec
 }
 
 func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID string) (int, error) {
-	if d == nil || d.worktree == nil || d.worktreeRuntimeStateStore() == nil {
+	if d == nil || d.worktree == nil || d.worktreeRuntimeStateStore(projectID) == nil {
 		return 0, nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
@@ -301,7 +301,7 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 			}
 			continue
 		}
-		if err := d.worktreeRuntimeStateStore().UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, now); err != nil {
+		if err := d.worktreeRuntimeStateStore(projectID).UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, now); err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("persist refreshed worktree runtime git status failed", "project_id", projectID, "issue_id", issueID, "error", err)
 			}
@@ -355,13 +355,13 @@ func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
 }
 
 func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
-	if len(tasks) == 0 || d.worktreeRuntimeStateStore() == nil {
+	if len(tasks) == 0 || d.worktreeRuntimeStateStore(projectID) == nil {
 		return tasks
 	}
 
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	worktreeRows, err := d.worktreeRuntimeStateStore().ListWorktreeStates(ctx, projectID)
+	worktreeRows, err := d.worktreeRuntimeStateStore(projectID).ListWorktreeStates(ctx, projectID)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load worktree projections for task enrichment failed", "project_id", projectID, "error", err)
@@ -419,7 +419,7 @@ func (d *Daemon) enrichTasksWithRuntimeProjectionCache(ctx context.Context, proj
 }
 
 func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issueID, worktree string) *git.GitStatus {
-	if d == nil || d.git == nil || d.worktreeRuntimeStateStore() == nil {
+	if d == nil || d.git == nil || d.worktreeRuntimeStateStore(projectID) == nil {
 		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
