@@ -56,8 +56,6 @@ func TestMigrateLegacyRuntimeStateCopiesRowsToProjectScopedStore(t *testing.T) {
 			RepoDir: baseRepo,
 			Logger:  logger,
 		},
-		sessionRuntimeStore:  source,
-		worktreeRuntimeStore: source,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			"default": source,
 		},

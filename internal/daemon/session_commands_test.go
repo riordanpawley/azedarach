@@ -429,9 +429,10 @@ func TestPersistTmuxSessionProjectionSnapshotRemovesMissingSessions(t *testing.T
 			RepoDir: ".",
 			Logger:  slog.Default(),
 		},
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	if err := daemon.persistTmuxSessionRuntimeState(ctx, projectID, []string{liveSessionID}); err != nil {
@@ -471,11 +472,12 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 			RepoDir: ".",
 			Logger:  slog.Default(),
 		},
-		tmux:                 tmux.NewClient(tmuxRunner, slog.Default()),
-		session:              daemonhandlers.NewSessionHandler(store),
-		sessionStore:         store,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
@@ -559,10 +561,11 @@ func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
 		killRelease: make(chan struct{}),
 	}
 	daemon := &Daemon{
-		cfg:                  Config{RepoDir: ".", Logger: slog.Default()},
-		tmux:                 tmux.NewClient(tmuxRunner, slog.Default()),
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:  Config{RepoDir: ".", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	clearStopPending := daemon.markSessionStopPending(projectID, issueID)
@@ -729,10 +732,11 @@ func TestListTmuxSessionsCacheFirstDoesNotPersistProjectionSnapshot(t *testing.T
 		killRelease: make(chan struct{}),
 	}
 	d := &Daemon{
-		cfg:                  Config{RepoDir: ".", Logger: slog.Default()},
-		tmux:                 tmux.NewClient(tmuxRunner, slog.Default()),
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:  Config{RepoDir: ".", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	sessions, err := d.listTmuxSessionsCacheFirst(context.Background(), projectID)
@@ -1137,11 +1141,12 @@ func TestEnrichTasksWithSessionStateFallsBackToProjectionCache(t *testing.T) {
 	tmuxRunner.sessions[sessionID] = true
 
 	d := &Daemon{
-		cfg:                  Config{RepoDir: ".", Logger: slog.Default()},
-		tmux:                 tmux.NewClient(tmuxRunner, slog.Default()),
-		sessionStore:         store,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	tasks := []domain.Task{
@@ -1186,10 +1191,11 @@ func TestPersistTmuxSessionProjectionSnapshotPreservesCachedStartedAt(t *testing
 	}
 
 	d := &Daemon{
-		cfg:                  Config{RepoDir: ".", Logger: slog.Default()},
-		sessionStore:         store,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	if err := d.persistTmuxSessionRuntimeState(context.Background(), projectID, []string{sessionID}); err != nil {

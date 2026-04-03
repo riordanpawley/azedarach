@@ -155,7 +155,7 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 
 	daemon := &Daemon{
-		cfg: Config{BaseBranch: "main", Logger: slog.Default()},
+		cfg: Config{RepoDir: ".", BaseBranch: "main", Logger: slog.Default()},
 		hub: publish.NewHub(32, 16, slog.Default()),
 		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
 			switch {
@@ -167,9 +167,10 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 				return "", nil
 			}
 		}}, slog.Default()),
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -247,7 +248,7 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 
 	daemon := &Daemon{
-		cfg: Config{BaseBranch: "main", Logger: slog.Default()},
+		cfg: Config{RepoDir: ".", BaseBranch: "main", Logger: slog.Default()},
 		hub: publish.NewHub(32, 16, slog.Default()),
 		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
 			switch {
@@ -259,9 +260,10 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 				return "", nil
 			}
 		}}, slog.Default()),
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -344,11 +346,12 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	}
 
 	daemon := &Daemon{
-		cfg:                  Config{Logger: slog.Default()},
-		hub:                  publish.NewHub(32, 16, slog.Default()),
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		hub:          publish.NewHub(32, 16, slog.Default()),
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)

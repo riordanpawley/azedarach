@@ -182,9 +182,10 @@ func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:                  Config{Logger: slog.Default()},
-		sessionRuntimeStore:  store,
-		worktreeRuntimeStore: store,
+		cfg: Config{RepoDir: ".", Logger: slog.Default()},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": store,
+		},
 	}
 
 	now := time.Date(2026, time.April, 2, 10, 2, 0, 0, time.UTC)
@@ -308,16 +309,21 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 
 	d := &Daemon{
 		cfg: Config{
-			Logger: logger,
+			RepoDir: ".",
+			Logger:  logger,
 		},
-		issues:               issuesClient,
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
-		revision:             map[string]uint64{projectID: 7},
-		tmux:                 nil,
-		worktree:             &git.WorktreeManager{},
-		git:                  &git.Client{},
+		issues: issuesClient,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		revision: map[string]uint64{projectID: 7},
+		tmux:     nil,
+		worktree: &git.WorktreeManager{},
+		git:      &git.Client{},
 	}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
@@ -456,8 +462,10 @@ func TestTaskListSnapshotFreshnessMarksStaleProjection(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:                  Config{Logger: slog.Default()},
-		worktreeRuntimeStore: store,
+		cfg: Config{RepoDir: ".", Logger: slog.Default()},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": store,
+		},
 	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, "proj-stale")
 	if !lastCheckedAt.Equal(checkedAt) {
@@ -500,12 +508,13 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:                  Config{RepoDir: repoDir, Logger: slog.Default()},
-		issues:               issuesClient,
-		sessionStore:         daemonstate.NewStore(),
-		tmux:                 tmux.NewClient(tmuxRunner, slog.Default()),
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		issues:       issuesClient,
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
 	}
 
 	req := protocol.RequestEnvelope{
@@ -559,10 +568,12 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	t.Cleanup(func() { _ = store.Close() })
 
 	d := &Daemon{
-		cfg:                  Config{BaseBranch: "main", Logger: slog.Default()},
-		git:                  git.NewClient(runner, slog.Default()),
-		worktree:             git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
-		worktreeRuntimeStore: store,
+		cfg:      Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
+		git:      git.NewClient(runner, slog.Default()),
+		worktree: git.NewWorktreeManager(runner, "/tmp/repo-root", slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			"/tmp/repo-root": store,
+		},
 	}
 
 	count, err := d.refreshWorktreeRuntimeState(ctx, projectID)

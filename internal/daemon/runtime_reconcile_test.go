@@ -708,11 +708,12 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 	}
 
 	d := &Daemon{
-		cfg:                  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
-		revision:             map[string]uint64{"proj-revision": 3},
+		cfg:          Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		revision: map[string]uint64{"proj-revision": 3},
 	}
 
 	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
@@ -750,11 +751,12 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *test
 	}
 
 	d := &Daemon{
-		cfg:                  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
-		revision:             map[string]uint64{"proj-beta": 1},
+		cfg:          Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		revision: map[string]uint64{"proj-beta": 1},
 	}
 
 	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())

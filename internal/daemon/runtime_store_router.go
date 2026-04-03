@@ -28,16 +28,6 @@ func (d *Daemon) runtimeStateStoreForProject(projectID string) *daemonstate.Runt
 	if store, ok := d.runtimeStoresByProject[projectID]; ok && store != nil {
 		return store
 	}
-	if len(d.runtimeStoresByRoot) == 0 {
-		legacy := d.sessionRuntimeStore
-		if legacy == nil {
-			legacy = d.worktreeRuntimeStore
-		}
-		if legacy != nil {
-			d.runtimeStoresByProject[projectID] = legacy
-			return legacy
-		}
-	}
 
 	repoDir := d.resolveRepoDirForProjectLocked(projectID)
 	if strings.TrimSpace(repoDir) == "" {
@@ -51,12 +41,6 @@ func (d *Daemon) runtimeStateStoreForProject(projectID string) *daemonstate.Runt
 	store := daemonstate.NewRuntimeStateStore(repoDir, d.cfg.Logger)
 	d.runtimeStoresByRoot[repoDir] = store
 	d.runtimeStoresByProject[projectID] = store
-	if d.sessionRuntimeStore == nil {
-		d.sessionRuntimeStore = store
-	}
-	if d.worktreeRuntimeStore == nil {
-		d.worktreeRuntimeStore = store
-	}
 	return store
 }
 

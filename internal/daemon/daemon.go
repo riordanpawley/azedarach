@@ -91,8 +91,6 @@ type Daemon struct {
 	worktreeHandler          *daemonhandlers.WorktreeHandler
 	session                  *daemonhandlers.SessionHandler
 	sessionStore             *daemonstate.Store
-	sessionRuntimeStore      *daemonstate.RuntimeStateStore
-	worktreeRuntimeStore     *daemonstate.RuntimeStateStore
 	runtimeProjectionWriter  runtimeProjectionWriter
 	sessionLongRunning       SessionLongRunningExecutor
 	runtimeReconciler        runtimeReconciler
@@ -194,8 +192,6 @@ func New(cfg Config) *Daemon {
 		worktree:                git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger),
 		session:                 sessionHandler,
 		sessionStore:            sessionStore,
-		sessionRuntimeStore:     runtimeStateStore,
-		worktreeRuntimeStore:    runtimeStateStore,
 		runtimeReconcileQueue:   runtimeReconcileQueue,
 		gitStatusRefreshQueue:   gitStatusRefreshQueue,
 		sessionStopPending:      map[string]int{},
@@ -637,12 +633,9 @@ func (d *Daemon) closeRuntimeStateStores() {
 	d.runtimeStoresMu.Lock()
 	defer d.runtimeStoresMu.Unlock()
 
-	stores := make([]*daemonstate.RuntimeStateStore, 0, len(d.runtimeStoresByRoot)+2)
+	stores := make([]*daemonstate.RuntimeStateStore, 0, len(d.runtimeStoresByRoot))
 	for _, store := range d.runtimeStoresByRoot {
 		stores = append(stores, store)
-	}
-	if len(stores) == 0 {
-		stores = append(stores, d.sessionRuntimeStore, d.worktreeRuntimeStore)
 	}
 
 	seen := map[*daemonstate.RuntimeStateStore]struct{}{}
