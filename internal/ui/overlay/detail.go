@@ -581,10 +581,15 @@ func (d *DetailPanel) sessionStateStyle(state domain.SessionState) lipgloss.Styl
 }
 
 func (d *DetailPanel) formatWorktreeSummary() string {
-	if d.task.Session != nil && d.task.Session.StartedAt != nil {
-		return "Age " + d.formatDuration(time.Since(*d.task.Session.StartedAt))
+	if d.task.Session != nil {
+		if worktreePath := strings.TrimSpace(d.task.Session.Worktree); worktreePath != "" {
+			return worktreePath
+		}
 	}
-	return "Age N/A"
+	if d.task.HasWorktree {
+		return "present"
+	}
+	return "unknown"
 }
 
 func (d *DetailPanel) formatIssueCardSummary() string {
@@ -675,6 +680,9 @@ func (d *DetailPanel) hasGitTelemetrySignal() bool {
 }
 
 func (d *DetailPanel) formatGitStatus() string {
+	if d.task.HasWorktree && !d.hasGitTelemetrySignal() {
+		return "clean"
+	}
 	if !d.hasGitTelemetrySignal() {
 		return "unknown"
 	}

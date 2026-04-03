@@ -4424,6 +4424,90 @@ func (f *fakeLauncher) Replace(context.Context) error {
 	return f.replaceErr
 }
 
+type timeoutBudgetLauncher struct {
+	minBudget time.Duration
+	started   *bool
+}
+
+func (l *timeoutBudgetLauncher) Start(ctx context.Context) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fmt.Errorf("wait for daemon socket readiness: %w", context.DeadlineExceeded)
+	}
+	if time.Until(deadline) < l.minBudget {
+		return fmt.Errorf("wait for daemon socket readiness: %w", context.DeadlineExceeded)
+	}
+	if l.started != nil {
+		*l.started = true
+	}
+	return nil
+}
+
+func (l *timeoutBudgetLauncher) Replace(ctx context.Context) error {
+	return l.Start(ctx)
+}
+
+func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	started := false
+	newLauncher = func(_, _ string) daemonStarter {
+		return &timeoutBudgetLauncher{
+			minBudget: 8 * time.Second,
+			started:   &started,
+		}
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if !started {
+					return protocol.ResponseEnvelope{}, errors.New("daemon socket unavailable")
+				}
+				switch req.Command {
+				case daemonclient.CommandTaskCreate:
+					body, err := json.Marshal(map[string]string{"task_id": "az-timeout"})
+					if err != nil {
+						t.Fatalf("marshal create response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:           "timeout budget",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Implementations: []string{"default"},
+	})
+	if err != nil {
+		t.Fatalf("IssueCreateCommand() error = %v", err)
+	}
+}
+
 func TestRestartDaemonCommand(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })

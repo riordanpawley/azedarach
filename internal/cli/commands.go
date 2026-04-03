@@ -21,6 +21,7 @@ import (
 	autoclient "github.com/riordanpawley/azedarach/internal/client"
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/client/daemonprocess"
+	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -35,17 +36,19 @@ var newLauncher = func(repoDir, socketPath string) daemonStarter {
 }
 
 const (
-	commandSessionStart       = "session.start"
-	commandSessionAttach      = "session.attach"
-	commandSessionStop        = "session.stop"
-	commandSessionStatus      = "session.status"
-	commandTaskSnapshotExport = "task.snapshot.export"
-	defaultExportFormat       = "json"
-	defaultIssueListLimit     = 200
-	defaultOperationListLimit = 50
-	branchMergeToMainTimeout  = 2 * time.Minute
-	exitCodeHardFailure       = 1
-	exitCodePartialFailure    = 2
+	commandSessionStart         = "session.start"
+	commandSessionAttach        = "session.attach"
+	commandSessionStop          = "session.stop"
+	commandSessionStatus        = "session.status"
+	commandTaskSnapshotExport   = "task.snapshot.export"
+	defaultExportFormat         = "json"
+	defaultIssueListLimit       = 200
+	defaultOperationListLimit   = 50
+	branchMergeToMainTimeout    = 2 * time.Minute
+	issueCreateCommandTimeout   = 10 * time.Second
+	issueCreateAutostartTimeout = 12 * time.Second
+	exitCodeHardFailure         = 1
+	exitCodePartialFailure      = 2
 )
 
 type Dependencies struct {
@@ -1575,7 +1578,9 @@ func resolveIssueWriteImplementation(ctx context.Context, deps *Dependencies, pr
 		return "", fmt.Errorf("missing required flag: --impl")
 	}
 
-	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+		return deps.DaemonClient.ListTasksSnapshot(callCtx)
+	})
 	if err != nil {
 		return "", fmt.Errorf("resolve implementation context: %w", err)
 	}
@@ -2119,17 +2124,16 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 	restoreProject := applyIssueProjectOverride(deps, opts.Project)
 	defer restoreProject()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), issueCreateCommandTimeout)
 	defer cancel()
-	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
-		return err
-	}
 
 	var parentID *string
 	implementations := append([]string{}, opts.Implementations...)
 	if opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
 		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
-		snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+		snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
+			return deps.DaemonClient.ListTasksSnapshot(callCtx)
+		})
 		if err != nil {
 			return fmt.Errorf("failed to resolve active parent issue %s: %w", parentIssueID, err)
 		}
@@ -2156,13 +2160,15 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 		implementations[0] = resolvedImpl
 	}
 
-	taskID, err := deps.DaemonClient.CreateTask(ctx, daemonclient.TaskCreateParams{
-		Title:           opts.Title,
-		Description:     opts.Description,
-		Type:            opts.Type,
-		Priority:        opts.Priority,
-		ParentID:        parentID,
-		Implementations: dedupeOrderedIDs(implementations),
+	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
+		return deps.DaemonClient.CreateTask(callCtx, daemonclient.TaskCreateParams{
+			Title:           opts.Title,
+			Description:     opts.Description,
+			Type:            opts.Type,
+			Priority:        opts.Priority,
+			ParentID:        parentID,
+			Implementations: dedupeOrderedIDs(implementations),
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create issue: %w", err)
@@ -3965,6 +3971,26 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		return fmt.Errorf("daemon handshake rejected: %s", ack.Reason)
 	}
 	return nil
+}
+
+func commandWithDaemonAutostartRetry[T any](ctx context.Context, deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
+	value, err := call(ctx)
+	if err == nil {
+		return value, nil
+	}
+	if !reconnect.IsTransientTransportError(err) {
+		return value, err
+	}
+	startCtx, cancel := context.WithTimeout(context.Background(), issueCreateAutostartTimeout)
+	defer cancel()
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
+	if concreteLauncher, ok := launcher.(*daemonprocess.Launcher); ok {
+		concreteLauncher.WithLogger(deps.Logger)
+	}
+	if startErr := launcher.Start(startCtx); startErr != nil {
+		return value, fmt.Errorf("autostart daemon: %w", startErr)
+	}
+	return call(ctx)
 }
 
 func runtimeRepoDirForDeps(deps *Dependencies) string {

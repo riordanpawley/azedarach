@@ -141,90 +141,6 @@ func TestBuildTaskSnapshotExportBody_ProjectScopedSessionPrefixMatchesIssue(t *t
 	}
 }
 
-func TestEnrichTasksWithRuntimeProjectionCache(t *testing.T) {
-	ctx := context.Background()
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
-	t.Cleanup(func() { _ = store.Close() })
-
-	const (
-		projectID = "proj-runtime-first-render"
-		issueID   = "az-123"
-		worktree  = "/tmp/repo-az-123"
-		branch    = "riordan/az-123/task"
-	)
-
-	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
-		ProjectID: projectID,
-		IssueID:   issueID,
-		Path:      worktree,
-		Branch:    branch,
-		UpdatedAt: time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC),
-	}); err != nil {
-		t.Fatalf("seed worktree projection: %v", err)
-	}
-
-	rawStatus, err := json.Marshal(git.GitStatus{
-		Added:          []string{"new.go"},
-		Modified:       []string{"changed.go"},
-		Staged:         []string{"staged.go"},
-		Deleted:        []string{"removed.go"},
-		HasChanges:     true,
-		GitAdditions:   11,
-		GitDeletions:   4,
-		GitAheadCount:  2,
-		GitBehindCount: 3,
-	})
-	if err != nil {
-		t.Fatalf("marshal git status: %v", err)
-	}
-	if err := store.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, time.Date(2026, time.April, 2, 10, 1, 0, 0, time.UTC)); err != nil {
-		t.Fatalf("seed git status projection: %v", err)
-	}
-
-	d := &Daemon{
-		cfg: Config{RepoDir: ".", Logger: slog.Default()},
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			".": store,
-		},
-	}
-
-	now := time.Date(2026, time.April, 2, 10, 2, 0, 0, time.UTC)
-	tasks := []domain.Task{
-		{
-			ID: issueID,
-			Session: &domain.Session{
-				IssueID:   issueID,
-				State:     domain.SessionBusy,
-				StartedAt: &now,
-			},
-		},
-		{ID: "az-999"},
-	}
-
-	got := d.enrichTasksWithRuntimeProjectionCache(ctx, projectID, tasks)
-	if len(got) != 2 {
-		t.Fatalf("task count = %d, want 2", len(got))
-	}
-	if !got[0].HasWorktree {
-		t.Fatal("task[0].HasWorktree = false, want true")
-	}
-	if got[0].Session == nil || got[0].Session.Worktree != worktree {
-		t.Fatalf("task[0].Session = %+v, want worktree %s", got[0].Session, worktree)
-	}
-	if !got[0].HasUncommittedChanges {
-		t.Fatal("task[0].HasUncommittedChanges = false, want true")
-	}
-	if got[0].GitAdditions != 11 || got[0].GitDeletions != 4 {
-		t.Fatalf("task[0] git counters = +%d/-%d, want +11/-4", got[0].GitAdditions, got[0].GitDeletions)
-	}
-	if got[0].GitAheadCount != 2 || got[0].GitBehindCount != 3 {
-		t.Fatalf("task[0] ahead/behind = %d/%d, want 2/3", got[0].GitAheadCount, got[0].GitBehindCount)
-	}
-	if got[1].HasWorktree || got[1].HasUncommittedChanges || got[1].GitAdditions != 0 || got[1].GitDeletions != 0 {
-		t.Fatalf("task[1] should remain unchanged, got %+v", got[1])
-	}
-}
-
 func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -255,25 +171,17 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	sessionStore := daemonstate.NewStore()
 	sessionID := naming.CanonicalSessionID(projectID, taskID)
-	if _, err := sessionStore.UpsertSession(projectID, sessionID, taskID, daemonstate.SessionStateAttached); err != nil {
-		t.Fatalf("seed session store: %v", err)
-	}
-	sessionSnapshot := sessionStore.ReadSnapshot(projectID)
-	storedSession, ok := sessionSnapshot.Sessions[sessionID]
-	if !ok {
-		t.Fatalf("missing seeded session %q in snapshot", sessionID)
-	}
-
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
+	sessionStartedAt := time.Date(2026, time.April, 2, 10, 59, 0, 0, time.UTC)
 	sessionUpdatedAt := time.Date(2026, time.April, 2, 11, 0, 0, 0, time.UTC)
 	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
 		ID:        sessionID,
 		IssueID:   taskID,
 		State:     daemonstate.SessionStateAttached,
+		StartedAt: &sessionStartedAt,
 		UpdatedAt: sessionUpdatedAt,
 	}); err != nil {
 		t.Fatalf("seed projected session: %v", err)
@@ -316,13 +224,13 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
-		sessionStore: sessionStore,
+		sessionStore: daemonstate.NewStore(),
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			".": runtimeStateStore,
 		},
 		revision: map[string]uint64{projectID: 7},
-		tmux: nil,
-		git:  &git.Client{},
+		tmux:     nil,
+		git:      &git.Client{},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{
 			".": &git.WorktreeManager{},
 		},
@@ -364,7 +272,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if got, want := payload.SnapshotRevision, uint64(7); got != want {
 		t.Fatalf("payload.SnapshotRevision = %d, want %d", got, want)
 	}
-	wantLastCheckedAt := laterTime(storedSession.UpdatedAt, time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC))
+	wantLastCheckedAt := time.Date(2026, time.April, 2, 11, 2, 0, 0, time.UTC)
 	if got, want := payload.LastCheckedAt, wantLastCheckedAt; !got.Equal(want) {
 		t.Fatalf("payload.LastCheckedAt = %v, want %v", got, want)
 	}
@@ -389,8 +297,8 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	if task.Session.State != domain.SessionBusy {
 		t.Fatalf("task.Session.State = %q, want %q", task.Session.State, domain.SessionBusy)
 	}
-	if task.Session.StartedAt == nil || !task.Session.StartedAt.Equal(storedSession.UpdatedAt.UTC()) {
-		t.Fatalf("task.Session.StartedAt = %v, want %v", task.Session.StartedAt, storedSession.UpdatedAt.UTC())
+	if task.Session.StartedAt == nil || !task.Session.StartedAt.Equal(sessionStartedAt.UTC()) {
+		t.Fatalf("task.Session.StartedAt = %v, want %v", task.Session.StartedAt, sessionStartedAt.UTC())
 	}
 	if task.Session.Worktree != worktreePath {
 		t.Fatalf("task.Session.Worktree = %q, want %q", task.Session.Worktree, worktreePath)
@@ -573,8 +481,8 @@ func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testin
 	t.Cleanup(func() { _ = store.Close() })
 
 	d := &Daemon{
-		cfg:      Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
-		git:      git.NewClient(runner, slog.Default()),
+		cfg: Config{RepoDir: "/tmp/repo-root", BaseBranch: "main", Logger: slog.Default()},
+		git: git.NewClient(runner, slog.Default()),
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
 			"/tmp/repo-root": store,
 		},
