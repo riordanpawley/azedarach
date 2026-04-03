@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 type recordingRuntimeProjectionWriter struct {
@@ -129,10 +130,11 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 
 	writer := &recordingRuntimeProjectionWriter{}
 	d := &Daemon{
-		cfg:                     Config{Logger: logger},
-		sessionStore:            sessionStore,
-		sessionRuntimeStore:     runtimeStateStore,
-		worktreeRuntimeStore:    runtimeStateStore,
+		cfg:          Config{RepoDir: ".", Logger: logger},
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 		runtimeProjectionWriter: writer,
 	}
 
@@ -140,7 +142,7 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		t.Fatalf("upsertSessionAndPublish: %v", err)
 	}
 	d.writeSessionStopProjection(projectID, sessionID, issueID)
-	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []string{sessionID}); err != nil {
+	if err := d.persistTmuxSessionRuntimeState(ctx, projectID, []tmux.SessionInfo{{Name: sessionID}}); err != nil {
 		t.Fatalf("persistTmuxSessionRuntimeState: %v", err)
 	}
 
@@ -196,11 +198,12 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 
 	d := &Daemon{
-		cfg:                  Config{Logger: logger},
-		hub:                  publish.NewHub(8, 4, logger),
-		sessionStore:         sessionStore,
-		sessionRuntimeStore:  runtimeStateStore,
-		worktreeRuntimeStore: runtimeStateStore,
+		cfg:          Config{RepoDir: ".", Logger: logger},
+		hub:          publish.NewHub(8, 4, logger),
+		sessionStore: sessionStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 	writer := newRuntimeProjectionWriter(d)
 

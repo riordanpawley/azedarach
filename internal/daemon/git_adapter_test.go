@@ -82,7 +82,7 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 				return "", nil
 			}
 			switch {
-			case args[0] == "merge":
+			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "merge":
 				return "Already up to date.", nil
 			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
 				return "", nil

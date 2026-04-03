@@ -132,7 +132,7 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
-	output, err := c.runner.Run(ctx, "merge", branch)
+	output, err := c.runInWorktree(ctx, worktree, "merge", branch)
 
 	result := &MergeResult{
 		Success:      err == nil,
@@ -218,7 +218,7 @@ func (c *Client) Commit(ctx context.Context, worktree, message string) error {
 func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
 	c.logger.Debug("getting diff", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "diff")
+	output, err := c.runInWorktree(ctx, worktree, "diff")
 	if err != nil {
 		return "", fmt.Errorf("failed to get diff: %w", err)
 	}
@@ -325,7 +325,7 @@ func (c *Client) ChangedFiles(ctx context.Context, worktree, baseBranch string) 
 func (c *Client) Push(ctx context.Context, worktree, remote, branch string) error {
 	c.logger.Info("pushing branch", "worktree", worktree, "remote", remote, "branch", branch)
 
-	_, err := c.runner.Run(ctx, "push", remote, branch)
+	_, err := c.runInWorktree(ctx, worktree, "push", remote, branch)
 	if err != nil {
 		return fmt.Errorf("failed to push branch: %w", err)
 	}
@@ -338,7 +338,7 @@ func (c *Client) Push(ctx context.Context, worktree, remote, branch string) erro
 func (c *Client) CurrentBranch(ctx context.Context, worktree string) (string, error) {
 	c.logger.Debug("getting current branch", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "branch", "--show-current")
+	output, err := c.runInWorktree(ctx, worktree, "branch", "--show-current")
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
 	}
@@ -353,7 +353,7 @@ func (c *Client) CurrentBranch(ctx context.Context, worktree string) (string, er
 func (c *Client) Checkout(ctx context.Context, worktree, branch string) error {
 	c.logger.Info("checking out branch", "worktree", worktree, "branch", branch)
 
-	_, err := c.runner.Run(ctx, "checkout", branch)
+	_, err := c.runInWorktree(ctx, worktree, "checkout", branch)
 	if err != nil {
 		return fmt.Errorf("failed to checkout branch: %w", err)
 	}
@@ -426,18 +426,29 @@ func (c *Client) baseRefCandidates(ctx context.Context, worktree, baseBranch str
 		ordered = append(ordered, ref)
 	}
 
-	add(baseBranch)
-	if baseBranch != "" && !strings.Contains(baseBranch, "/") {
-		add("origin/" + baseBranch)
-	}
+	normalizedBase := strings.ToLower(strings.TrimSpace(baseBranch))
 
-	// Prefer remote default branch if available; this helps repos that do not
-	// use "main" while still keeping configured base as first priority.
+	// Prefer remote default branch when configured base is generic (main/master).
+	// This avoids massive, misleading deltas in repos whose canonical base branch differs.
 	if headRef, err := c.runInWorktree(ctx, worktree, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
 		headRef = strings.TrimSpace(headRef) // e.g. origin/main or origin/trunk
+		headLocal := strings.TrimPrefix(headRef, "origin/")
+		if normalizedBase == "" || normalizedBase == "main" || normalizedBase == "master" {
+			if !strings.EqualFold(headRef, "origin/"+normalizedBase) && !strings.EqualFold(headLocal, normalizedBase) {
+				add(headRef)
+				add(headLocal)
+			}
+		}
+		add(baseBranch)
+		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
+			add("origin/" + baseBranch)
+		}
 		add(headRef)
-		if strings.HasPrefix(headRef, "origin/") {
-			add(strings.TrimPrefix(headRef, "origin/"))
+		add(headLocal)
+	} else {
+		add(baseBranch)
+		if baseBranch != "" && !strings.Contains(baseBranch, "/") {
+			add("origin/" + baseBranch)
 		}
 	}
 
@@ -466,7 +477,7 @@ func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...str
 func (c *Client) Pull(ctx context.Context, worktree, remote, branch string) error {
 	c.logger.Info("pulling from remote", "worktree", worktree, "remote", remote, "branch", branch)
 
-	_, err := c.runner.Run(ctx, "pull", remote, branch)
+	_, err := c.runInWorktree(ctx, worktree, "pull", remote, branch)
 	if err != nil {
 		return fmt.Errorf("failed to pull from remote: %w", err)
 	}
@@ -480,7 +491,7 @@ func (c *Client) Pull(ctx context.Context, worktree, remote, branch string) erro
 func (c *Client) FetchRef(ctx context.Context, worktree, remote, refSpec string) error {
 	c.logger.Info("fetching ref", "worktree", worktree, "remote", remote, "refSpec", refSpec)
 
-	_, err := c.runner.Run(ctx, "fetch", remote, refSpec)
+	_, err := c.runInWorktree(ctx, worktree, "fetch", remote, refSpec)
 	if err != nil {
 		return fmt.Errorf("failed to fetch ref: %w", err)
 	}

@@ -73,13 +73,13 @@ func (w *daemonRuntimeProjectionWriter) PublishSessionProjectionEvent(ctx contex
 }
 
 func (w *daemonRuntimeProjectionWriter) ReplaceSessionProjectionSnapshot(ctx context.Context, projectID string, sessions []daemonstate.Session) error {
-	if w == nil || w.d == nil || w.d.sessionRuntimeStateStore() == nil {
+	if w == nil || w.d == nil || w.d.sessionRuntimeStateStore(projectID) == nil {
 		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.d.sessionRuntimeStateStore().ReplaceSessionStates(ctx, projectID, sessions)
+	return w.d.sessionRuntimeStateStore(projectID).ReplaceSessionStates(ctx, projectID, sessions)
 }
 
 func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) error {
@@ -111,8 +111,8 @@ func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx c
 	projectID = protocol.NormalizeProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.d.worktreeRuntimeStateStore() != nil {
-		if err := w.d.worktreeRuntimeStateStore().DeleteWorktreeState(ctx, protocol.NormalizeProjectID(projectID), strings.TrimSpace(issueID)); err != nil && w.d.cfg.Logger != nil {
+	if w.d.worktreeRuntimeStateStore(projectID) != nil {
+		if err := w.d.worktreeRuntimeStateStore(projectID).DeleteWorktreeState(ctx, protocol.NormalizeProjectID(projectID), strings.TrimSpace(issueID)); err != nil && w.d.cfg.Logger != nil {
 			w.d.cfg.Logger.Warn("delete worktree runtime state failed", "project_id", projectID, "issue_id", issueID, "error", err)
 		}
 	}
@@ -134,13 +134,13 @@ func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx conte
 }
 
 func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx context.Context, projectID string, rows []daemonstate.WorktreeState) error {
-	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore() == nil {
+	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore(projectID) == nil {
 		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.d.worktreeRuntimeStateStore().ReplaceWorktreeStates(ctx, projectID, rows)
+	return w.d.worktreeRuntimeStateStore(projectID).ReplaceWorktreeStates(ctx, projectID, rows)
 }
 
 func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
@@ -149,7 +149,7 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	status *git.GitStatus,
 	publishOnChange, forcePublish bool,
 ) uint64 {
-	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore() == nil || status == nil {
+	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore(projectID) == nil || status == nil {
 		return 0
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
@@ -166,13 +166,13 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 		err        error
 	)
 	if issueID != "" {
-		projection, found, err = w.d.worktreeRuntimeStateStore().GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		projection, found, err = w.d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID)
 	}
 	if err != nil || !found {
 		if worktree == "" {
 			return 0
 		}
-		projection, found, err = w.d.worktreeRuntimeStateStore().GetWorktreeStateByPath(ctx, projectID, worktree)
+		projection, found, err = w.d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByPath(ctx, projectID, worktree)
 	}
 	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
 		return 0
@@ -182,7 +182,7 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 		return 0
 	}
 	changed := string(rawStatus) != string(projection.GitStatusRaw)
-	if err := w.d.worktreeRuntimeStateStore().UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil {
+	if err := w.d.worktreeRuntimeStateStore(projectID).UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil {
 		if w.d.cfg.Logger != nil {
 			w.d.cfg.Logger.Debug("persist worktree runtime-state git status failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
 		}

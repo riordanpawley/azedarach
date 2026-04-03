@@ -1687,6 +1687,16 @@ func TestParseIssueListArgs(t *testing.T) {
 			want: IssueListOptions{JSON: false, Deps: false, Limit: 25},
 		},
 		{
+			name: "status filters",
+			args: []string{"--status", "open", "--status", "blocked", "--statuses", "in_progress,open"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusBlocked, domain.StatusInProgress}},
+		},
+		{
+			name: "state aliases",
+			args: []string{"--state", "open", "--states", "blocked"},
+			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, States: []domain.Status{domain.StatusOpen, domain.StatusBlocked}},
+		},
+		{
 			name: "id filters",
 			args: []string{"--id", "az-1", "--id", "az-2", "--ids", "az-3,az-4"},
 			want: IssueListOptions{JSON: false, Deps: false, Limit: defaultIssueListLimit, IDs: []string{"az-1", "az-2", "az-3", "az-4"}},
@@ -1700,6 +1710,11 @@ func TestParseIssueListArgs(t *testing.T) {
 			name:        "rejects extra args",
 			args:        []string{"extra"},
 			errContains: "unexpected argument: extra",
+		},
+		{
+			name:        "invalid state",
+			args:        []string{"--status", "queued"},
+			errContains: "invalid status: queued",
 		},
 	}
 
@@ -2571,6 +2586,49 @@ func TestIssueListCommand_IDSetFilter(t *testing.T) {
 	}
 	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-3") {
 		t.Fatalf("id-set filter should include requested issues: %q", output)
+	}
+}
+
+func TestIssueListCommand_StatusFilter(t *testing.T) {
+	now := time.Date(2026, 3, 26, 2, 0, 0, 0, time.UTC)
+	tasks := []domain.Task{
+		{ID: "az-1", Title: "Open", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(3 * time.Hour)},
+		{ID: "az-2", Title: "Blocked", Status: domain.StatusBlocked, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(2 * time.Hour)},
+		{ID: "az-3", Title: "Closed", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now.Add(1 * time.Hour)},
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				body, err := marshalTaskListBody(tasks)
+				if err != nil {
+					t.Fatalf("marshal tasks: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Revision:        2,
+					Body:            body,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		return IssueListCommand(deps, IssueListOptions{States: []domain.Status{domain.StatusOpen, domain.StatusBlocked}})
+	})
+	if strings.Contains(output, "az-3") {
+		t.Fatalf("status filter should exclude az-3: %q", output)
+	}
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "az-2") {
+		t.Fatalf("status filter should include matching issues: %q", output)
 	}
 }
 
@@ -4068,7 +4126,7 @@ func TestPrintUsageIncludesExport(t *testing.T) {
 	if !strings.Contains(output, "az log --no-follow --lines 100 daemon tui") {
 		t.Fatalf("usage missing log example: %q", output)
 	}
-	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps]") {
+	if !strings.Contains(output, "issue list [--project <project-id>] [--json] [--deps] [--status <status> ...]") {
 		t.Fatalf("usage missing issue list command: %q", output)
 	}
 	if !strings.Contains(output, "issue get [--project <project-id>] [--id <id>] [--json] [<id>]") {
@@ -4364,6 +4422,90 @@ func (f *fakeLauncher) Start(context.Context) error { return nil }
 func (f *fakeLauncher) Replace(context.Context) error {
 	f.replaceCalled = true
 	return f.replaceErr
+}
+
+type timeoutBudgetLauncher struct {
+	minBudget time.Duration
+	started   *bool
+}
+
+func (l *timeoutBudgetLauncher) Start(ctx context.Context) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fmt.Errorf("wait for daemon socket readiness: %w", context.DeadlineExceeded)
+	}
+	if time.Until(deadline) < l.minBudget {
+		return fmt.Errorf("wait for daemon socket readiness: %w", context.DeadlineExceeded)
+	}
+	if l.started != nil {
+		*l.started = true
+	}
+	return nil
+}
+
+func (l *timeoutBudgetLauncher) Replace(ctx context.Context) error {
+	return l.Start(ctx)
+}
+
+func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	started := false
+	newLauncher = func(_, _ string) daemonStarter {
+		return &timeoutBudgetLauncher{
+			minBudget: 8 * time.Second,
+			started:   &started,
+		}
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if !started {
+					return protocol.ResponseEnvelope{}, errors.New("daemon socket unavailable")
+				}
+				switch req.Command {
+				case daemonclient.CommandTaskCreate:
+					body, err := json.Marshal(map[string]string{"task_id": "az-timeout"})
+					if err != nil {
+						t.Fatalf("marshal create response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Body:            body,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCreateCommand(deps, IssueCreateOptions{
+		Title:           "timeout budget",
+		Type:            domain.TypeTask,
+		Priority:        domain.P2,
+		Implementations: []string{"default"},
+	})
+	if err != nil {
+		t.Fatalf("IssueCreateCommand() error = %v", err)
+	}
 }
 
 func TestRestartDaemonCommand(t *testing.T) {

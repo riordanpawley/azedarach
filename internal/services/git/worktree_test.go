@@ -635,6 +635,20 @@ branch refs/heads/riordanpawley/che-3002/migrate-prep-lists-to-db
 				},
 			},
 		},
+		{
+			name: "fallback extracts issue id from worktree path when branch format is nonstandard",
+			output: `worktree /home/user/test-repo-hn
+HEAD abc123
+branch refs/heads/revive/ch-l566-auth-codex
+`,
+			expected: []Worktree{
+				{
+					Path:    "/home/user/test-repo-hn",
+					Branch:  "revive/ch-l566-auth-codex",
+					IssueID: "hn",
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {

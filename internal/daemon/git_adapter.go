@@ -25,15 +25,17 @@ var (
 const runtimeSignalProjectionTTL = 15 * time.Second
 
 type gitServiceAdapter struct {
-	client                  *git.Client
-	runtimeStateStore       *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter runtimeProjectionWriter
-	statusRefreshQueue      *reconcileQueue[*git.GitStatus]
-	statusRefreshThrottle   *reconcileThrottle
-	logger                  *slog.Logger
-	pollInterval            time.Duration
-	onStatusUpdate          func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
-	baseBranch              string
+	client                      *git.Client
+	runtimeStateStore           *daemonstate.RuntimeStateStore
+	runtimeStateStoreForProject func(string) *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter     runtimeProjectionWriter
+	statusRefreshQueue          *reconcileQueue[*git.GitStatus]
+	statusRefreshThrottle       *reconcileThrottle
+	logger                      *slog.Logger
+	pollInterval                time.Duration
+	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
+	baseBranch                  string
+	baseBranchForProject        func(string) string
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -41,6 +43,18 @@ type gitServiceAdapter struct {
 
 	runtimeSignalsMu    sync.Mutex
 	runtimeSignalsCache map[string]runtimeSignalProjection
+}
+
+func (a *gitServiceAdapter) runtimeStore(projectID string) *daemonstate.RuntimeStateStore {
+	if a == nil {
+		return nil
+	}
+	if a.runtimeStateStoreForProject != nil {
+		if store := a.runtimeStateStoreForProject(projectID); store != nil {
+			return store
+		}
+	}
+	return a.runtimeStateStore
 }
 
 type runtimeSignalProjection struct {
@@ -158,6 +172,11 @@ func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string
 	projectID = normalizeProjectID(projectID)
 	baseBranch = strings.TrimSpace(baseBranch)
 	if baseBranch == "" {
+		if a.baseBranchForProject != nil {
+			baseBranch = strings.TrimSpace(a.baseBranchForProject(projectID))
+		}
+	}
+	if baseBranch == "" {
 		baseBranch = strings.TrimSpace(a.baseBranch)
 	}
 	if baseBranch == "" {
@@ -208,8 +227,8 @@ func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree stri
 	if worktree == "" {
 		return a.client.Status(ctx, worktree)
 	}
-	if a.runtimeStateStore != nil {
-		if projection, found, err := a.runtimeStateStore.GetWorktreeStateByPath(ctx, projectID, worktree); err == nil && found && len(projection.GitStatusRaw) > 0 {
+	if runtimeStore := a.runtimeStore(projectID); runtimeStore != nil {
+		if projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree); err == nil && found && len(projection.GitStatusRaw) > 0 {
 			var cached git.GitStatus
 			if unmarshalErr := json.Unmarshal(projection.GitStatusRaw, &cached); unmarshalErr == nil {
 				a.refreshGitStatusVisible(projectID, worktree)
@@ -398,10 +417,11 @@ func (a *gitServiceAdapter) ensureStatusRefreshThrottle() *reconcileThrottle {
 }
 
 func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID, worktree string, status *git.GitStatus) (bool, string) {
-	if a.runtimeStateStore == nil || status == nil {
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil || status == nil {
 		return false, ""
 	}
-	projection, found, err := a.runtimeStateStore.GetWorktreeStateByPath(ctx, projectID, worktree)
+	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
 	if err != nil || !found || strings.TrimSpace(projection.IssueID) == "" {
 		return false, ""
 	}
@@ -410,7 +430,7 @@ func (a *gitServiceAdapter) persistStatusSnapshot(ctx context.Context, projectID
 		return false, ""
 	}
 	changed := string(rawStatus) != string(projection.GitStatusRaw)
-	if err := a.runtimeStateStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil && a.logger != nil {
+	if err := runtimeStore.UpsertWorktreeStateGitStatus(ctx, projectID, projection.IssueID, rawStatus, time.Now().UTC()); err != nil && a.logger != nil {
 		a.logger.Debug("persist git status projection failed", "project_id", projectID, "issue_id", projection.IssueID, "worktree", worktree, "error", err)
 		return false, ""
 	}

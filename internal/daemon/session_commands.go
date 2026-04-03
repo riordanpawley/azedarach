@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -17,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 type sessionCommandBody struct {
@@ -124,6 +127,9 @@ func (d *Daemon) isSessionStopPending(projectID, issueID string) bool {
 
 func (d *Daemon) sessionNamingScope(projectID string) string {
 	trimmed := protocol.TrimProjectID(projectID)
+	if repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(trimmed)); repoDir != "" {
+		return repoDir
+	}
 	if trimmed == "" || trimmed == protocol.DefaultProjectID {
 		return d.cfg.RepoDir
 	}
@@ -164,6 +170,43 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 		ImagePaths: cmd.ImagePaths,
 		Prompt:     cmd.Prompt,
 	}, protocol.ResponseEnvelope{}, true
+}
+
+func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueID, canonicalSessionID string) ([]string, error) {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, nil
+	}
+
+	names := make(map[string]struct{})
+	if canonicalSessionID = strings.TrimSpace(canonicalSessionID); canonicalSessionID != "" {
+		exists, err := d.tmux.HasSession(ctx, canonicalSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			names[canonicalSessionID] = struct{}{}
+		}
+	}
+
+	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	namingScope := d.sessionNamingScope(projectID)
+	for _, name := range tmuxSessions {
+		parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		if !ok || !naming.IssueIDsEqual(parsedIssueID, issueID) {
+			continue
+		}
+		names[name] = struct{}{}
+	}
+
+	resolved := make([]string, 0, len(names))
+	for name := range names {
+		resolved = append(resolved, name)
+	}
+	return resolved, nil
 }
 
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -211,15 +254,19 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	}
 	baseBranch := cmd.BaseBranch
 	if baseBranch == "" {
-		baseBranch = d.cfg.BaseBranch
+		baseBranch = d.baseBranchForProject(cmd.ProjectID)
 	}
-	worktree, err := d.worktree.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
+	worktreeManager := d.worktreeManagerForProject(cmd.ProjectID)
+	if worktreeManager == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "worktree manager unavailable"), nil
+	}
+	worktree, err := worktreeManager.CreateWithTitle(ctx, cmd.IssueID, task.Title, baseBranch)
 	reusedWorktree := false
 	if err != nil {
 		// Recovery path: git worktree add can return non-zero after materializing
 		// a usable worktree (for example, hooks that fail post-checkout).
 		// If we can load the worktree for the issue, continue by reusing it.
-		if recoveredWorktree, recoverErr := d.worktree.Get(ctx, cmd.IssueID); recoverErr == nil {
+		if recoveredWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
 			worktree = recoveredWorktree
 			reusedWorktree = true
 		} else {
@@ -230,7 +277,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	if !reusedWorktree {
-		if err := d.runWorktreeInitCommands(ctx, worktree.Path); err != nil {
+		if err := d.runWorktreeInitCommands(ctx, cmd.ProjectID, worktree.Path); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed: %v", err)), nil
 		}
 	}
@@ -252,7 +299,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if initialPrompt == "" {
 		initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title)
 	}
-	launchCommand := d.buildSessionLaunchCommand(cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
+	launchCommand := d.buildSessionLaunchCommand(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt)
 	if err := d.tmux.SendKeys(ctx, cmd.SessionID, launchCommand); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -457,18 +504,9 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
 	// work is still in flight.
+	clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
+	defer clearStopPending()
 	d.writeSessionStopProjection(cmd.ProjectID, cmd.SessionID, cmd.IssueID)
-	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	if exists {
-		clearStopPending := d.markSessionStopPending(cmd.ProjectID, cmd.IssueID)
-		defer clearStopPending()
-		if err := d.tmux.KillSession(ctx, cmd.SessionID); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -478,6 +516,18 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		daemonhandlers.CommandSessionStop,
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
+	}
+	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	exists := len(sessionNamesToKill) > 0
+	if exists {
+		for _, sessionName := range sessionNamesToKill {
+			if err := d.tmux.KillSession(ctx, sessionName); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+		}
 	}
 	outputLines := []string{
 		fmt.Sprintf("Killing session: %s", cmd.IssueID),
@@ -503,7 +553,7 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 }
 
 func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
-	if d.sessionRuntimeStateStore() == nil {
+	if d.sessionRuntimeStateStore(projectID) == nil {
 		return
 	}
 
@@ -666,7 +716,11 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 
 func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, sessionID string) (sessionRecoveryResult, error) {
 	result := sessionRecoveryResult{}
-	if d == nil || d.sessionStore == nil || d.tmux == nil || d.worktree == nil {
+	if d == nil || d.sessionStore == nil || d.tmux == nil {
+		return result, nil
+	}
+	worktreeManager := d.worktreeManagerForProject(projectID)
+	if worktreeManager == nil {
 		return result, nil
 	}
 	if d.cfg.Logger != nil {
@@ -716,7 +770,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if _, ok := tmuxSet[issueKey]; ok {
 			continue
 		}
-		wt, getErr := d.worktree.Get(ctx, issueID)
+		wt, getErr := worktreeManager.Get(ctx, issueID)
 		if getErr != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation skipped worktree restore",
@@ -748,7 +802,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 				"worktree", wt.Path,
 			)
 		}
-		if sendErr := d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(issueID, canonicalSessionID, false, nil, "")); sendErr != nil && d.cfg.Logger != nil {
+		if sendErr := d.tmux.SendKeys(ctx, canonicalSessionID, d.buildSessionLaunchCommand(projectID, issueID, canonicalSessionID, false, nil, "")); sendErr != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("session reconciliation failed to seed launch command",
 				"project_id", projectID,
 				"issue_id", issueID,
@@ -781,6 +835,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		if !parsed {
 			issueID = sessionIDInTmux
 		}
+		if d.isSessionStopPending(projectID, issueID) {
+			continue
+		}
+		d.ensureSessionWorktreeProjection(ctx, projectID, issueID)
 		if !ok {
 			if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateStarting); err == nil {
 				if err := d.upsertSessionAndPublish(projectID, sessionIDInTmux, issueID, daemonstate.SessionStateAttached); err == nil {
@@ -879,6 +937,48 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	return result, nil
 }
 
+func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) {
+	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
+		return
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return
+	}
+	if _, found, err := d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID); err == nil && found {
+		return
+	}
+
+	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectLocked(projectID))
+	if repoDir == "" {
+		return
+	}
+	worktreePath := filepath.Join(filepath.Dir(repoDir), fmt.Sprintf("%s-%s", filepath.Base(repoDir), issueID))
+	info, err := os.Stat(worktreePath)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	branch := ""
+	if d.git != nil {
+		if currentBranch, branchErr := d.git.CurrentBranch(ctx, worktreePath); branchErr == nil {
+			branch = strings.TrimSpace(currentBranch)
+		}
+	}
+	rev := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info(
+			"backfilled session worktree projection",
+			"project_id", projectID,
+			"issue_id", issueID,
+			"worktree", worktreePath,
+			"branch", branch,
+			"revision", rev,
+		)
+	}
+}
+
 func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
 	if len(tasks) == 0 || d.sessionStore == nil {
 		return tasks
@@ -913,8 +1013,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	snapshotByKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	projectionByKey := map[string]daemonstate.Session{}
-	if d.sessionRuntimeStateStore() != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	if d.sessionRuntimeStateStore(projectID) != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("failed to load cached session runtime state while enriching tasks", "project_id", projectID, "error", err)
@@ -933,13 +1033,24 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 
 		state := domain.SessionBusy
 		var startedAt *time.Time
-		session, ok := snapshotByKey[taskKey]
+		snapshotSession, snapshotOK := snapshotByKey[taskKey]
+		projectionSession, projectionOK := projectionByKey[taskKey]
+		session, ok := snapshotSession, snapshotOK
 		if !ok {
-			session, ok = projectionByKey[taskKey]
+			session, ok = projectionSession, projectionOK
 		}
 		if ok {
-			if !session.UpdatedAt.IsZero() {
-				started := session.UpdatedAt.UTC()
+			startedSource := session.StartedAt
+			if projectionOK && projectionSession.StartedAt != nil && !projectionSession.StartedAt.IsZero() {
+				if startedSource == nil || startedSource.IsZero() || projectionSession.StartedAt.Before(*startedSource) {
+					startedSource = projectionSession.StartedAt
+				}
+			}
+			if (startedSource == nil || startedSource.IsZero()) && !session.UpdatedAt.IsZero() {
+				startedSource = &session.UpdatedAt
+			}
+			if startedSource != nil && !startedSource.IsZero() {
+				started := startedSource.UTC()
 				startedAt = &started
 			}
 			switch session.State {
@@ -964,8 +1075,8 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	if d.sessionRuntimeStateStore() != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	if d.sessionRuntimeStateStore(projectID) != nil {
+		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 		if err == nil && len(cachedSessions) > 0 {
 			cachedActive := make([]string, 0, len(cachedSessions))
 			for _, session := range cachedSessions {
@@ -999,18 +1110,18 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 }
 
 func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID string) error {
-	if d == nil || d.tmux == nil || d.sessionRuntimeStateStore() == nil || d.sessionStore == nil {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStore(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	tmuxSessions, err := d.tmux.ListSessionInfos(ctx)
 	if err != nil {
 		return err
 	}
 	return d.persistTmuxSessionRuntimeState(ctx, projectID, tmuxSessions)
 }
 
-func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []string) error {
-	if d.sessionRuntimeStateStore() == nil || d.sessionStore == nil {
+func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID string, tmuxSessions []tmux.SessionInfo) error {
+	if d.sessionRuntimeStateStore(projectID) == nil || d.sessionStore == nil {
 		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
@@ -1024,7 +1135,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	byIssueKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	cachedByIssueKey := map[string]daemonstate.Session{}
-	cachedSessions, err := d.sessionRuntimeStateStore().ListSessionStates(ctx, projectID)
+	cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("load cached session runtime-state snapshot failed", "project_id", projectID, "error", err)
@@ -1034,8 +1145,8 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	}
 
 	rows := make([]daemonstate.Session, 0, len(tmuxSessions))
-	for _, name := range tmuxSessions {
-		name = strings.TrimSpace(name)
+	for _, info := range tmuxSessions {
+		name := strings.TrimSpace(info.Name)
 		if name == "" {
 			continue
 		}
@@ -1048,6 +1159,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			ID:        name,
 			IssueID:   issueID,
 			State:     daemonstate.SessionStateAttached,
+			StartedAt: info.CreatedAt,
 			UpdatedAt: time.Now().UTC(),
 		}
 		if existing, exists := byIssueKey[issueKey]; exists {
@@ -1055,16 +1167,24 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 			if row.State == daemonstate.SessionStateStopped {
 				row.State = daemonstate.SessionStateAttached
 			}
-			if !existing.UpdatedAt.IsZero() {
-				row.UpdatedAt = existing.UpdatedAt
+			if (row.StartedAt == nil || row.StartedAt.IsZero()) && existing.StartedAt != nil && !existing.StartedAt.IsZero() {
+				started := existing.StartedAt.UTC()
+				row.StartedAt = &started
 			}
 		} else if cached, exists := cachedByIssueKey[issueKey]; exists {
 			row.State = cached.State
 			if row.State == daemonstate.SessionStateStopped {
 				row.State = daemonstate.SessionStateAttached
 			}
-			if !cached.UpdatedAt.IsZero() {
-				row.UpdatedAt = cached.UpdatedAt
+			if (row.StartedAt == nil || row.StartedAt.IsZero()) && cached.StartedAt != nil && !cached.StartedAt.IsZero() {
+				started := cached.StartedAt.UTC()
+				row.StartedAt = &started
+			}
+		}
+		if row.StartedAt == nil || row.StartedAt.IsZero() {
+			if !row.UpdatedAt.IsZero() {
+				started := row.UpdatedAt.UTC()
+				row.StartedAt = &started
 			}
 		}
 		rows = append(rows, row)
@@ -1072,10 +1192,11 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	return d.runtimeProjectionStateWriter().ReplaceSessionProjectionSnapshot(ctx, projectID, rows)
 }
 
-func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
-	toolCommand := d.buildCLIToolCommand(issueID, sessionID, yolo, imagePaths, initialPrompt)
-	commands := make([]string, 0, len(d.cfg.SessionInitCommands)+2)
-	for _, initCmd := range d.cfg.SessionInitCommands {
+func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
+	projectCfg := d.runtimeConfigForProject(projectID)
+	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
+	commands := make([]string, 0, len(projectCfg.SessionInitCommands)+2)
+	for _, initCmd := range projectCfg.SessionInitCommands {
 		trimmed := strings.TrimSpace(initCmd)
 		if trimmed != "" {
 			commands = append(commands, trimmed)
@@ -1083,7 +1204,7 @@ func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool,
 	}
 	commands = append(commands, toolCommand)
 
-	shell := strings.TrimSpace(d.cfg.SessionShell)
+	shell := strings.TrimSpace(projectCfg.SessionShell)
 	if shell == "" {
 		shell = appconfig.DefaultSessionShell()
 	}
@@ -1092,13 +1213,13 @@ func (d *Daemon) buildSessionLaunchCommand(issueID, sessionID string, yolo bool,
 	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
-func (d *Daemon) runWorktreeInitCommands(ctx context.Context, worktreePath string) error {
-	commands := d.cfg.WorktreeInitCommands
+func (d *Daemon) runWorktreeInitCommands(ctx context.Context, projectID string, worktreePath string) error {
+	commands := d.runtimeConfigForProject(projectID).WorktreeInitCommands
 	if len(commands) == 0 {
 		return nil
 	}
 
-	shell := strings.TrimSpace(d.cfg.SessionShell)
+	shell := strings.TrimSpace(d.runtimeConfigForProject(projectID).SessionShell)
 	if shell == "" {
 		shell = appconfig.DefaultSessionShell()
 	}
@@ -1119,8 +1240,8 @@ func (d *Daemon) runWorktreeInitCommands(ctx context.Context, worktreePath strin
 	return nil
 }
 
-func (d *Daemon) buildCLIToolCommand(issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
-	tool := strings.TrimSpace(d.cfg.CLITool)
+func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
 	if tool == "" {
 		tool = "claude"
 	}

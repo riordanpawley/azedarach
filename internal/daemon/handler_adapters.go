@@ -334,29 +334,60 @@ func mapSpecStoreError(err error) error {
 }
 
 type worktreeServiceAdapter struct {
-	manager                 *git.WorktreeManager
-	runtimeStateStore       *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter runtimeProjectionWriter
-	logger                  *slog.Logger
-	pollInterval            time.Duration
-	onProjectionUpdate      func(ctx context.Context, projectID, issueID, path string)
-	onWorktreeObserved      func(ctx context.Context, projectID, issueID, path string)
+	manager                     *git.WorktreeManager
+	managerForProject           func(string) *git.WorktreeManager
+	runtimeStateStore           *daemonstate.RuntimeStateStore
+	runtimeStateStoreForProject func(string) *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter     runtimeProjectionWriter
+	logger                      *slog.Logger
+	pollInterval                time.Duration
+	onProjectionUpdate          func(ctx context.Context, projectID, issueID, path string)
+	onWorktreeObserved          func(ctx context.Context, projectID, issueID, path string)
 
 	mu      sync.Mutex
 	pollers map[string]context.CancelFunc
 }
 
+func (a *worktreeServiceAdapter) runtimeStore(projectID string) *daemonstate.RuntimeStateStore {
+	if a == nil {
+		return nil
+	}
+	if a.runtimeStateStoreForProject != nil {
+		if store := a.runtimeStateStoreForProject(projectID); store != nil {
+			return store
+		}
+	}
+	return a.runtimeStateStore
+}
+
+func (a *worktreeServiceAdapter) managerFor(projectID string) *git.WorktreeManager {
+	if a == nil {
+		return nil
+	}
+	if a.managerForProject != nil {
+		if manager := a.managerForProject(projectID); manager != nil {
+			return manager
+		}
+	}
+	return a.manager
+}
+
 func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]git.Worktree, error) {
 	projectID = normalizedProjectID(projectID)
-	if a.runtimeStateStore == nil {
-		worktrees, err := a.manager.List(ctx)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return nil, errors.New("worktree manager unavailable")
+	}
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
+		worktrees, err := manager.List(ctx)
 		if err == nil {
 			a.observeWorktrees(ctx, projectID, worktrees)
 		}
 		return worktrees, err
 	}
 
-	cached, err := a.runtimeStateStore.ListWorktreeStates(ctx, projectID)
+	cached, err := runtimeStore.ListWorktreeStates(ctx, projectID)
 	if err == nil && len(cached) > 0 {
 		worktrees := mapProjectionWorktrees(cached)
 		a.observeWorktrees(ctx, projectID, worktrees)
@@ -364,7 +395,7 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 		return worktrees, nil
 	}
 
-	worktrees, listErr := a.manager.List(ctx)
+	worktrees, listErr := manager.List(ctx)
 	if listErr != nil {
 		if err == nil {
 			return mapProjectionWorktrees(cached), nil
@@ -378,11 +409,15 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 }
 
 func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, issueID string, baseBranch string) (*git.Worktree, error) {
-	worktree, err := a.manager.Create(ctx, issueID, baseBranch)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return nil, errors.New("worktree manager unavailable")
+	}
+	worktree, err := manager.Create(ctx, issueID, baseBranch)
 	if err != nil {
 		return nil, err
 	}
-	if a.runtimeStateStore != nil && worktree != nil {
+	if a.runtimeStore(projectID) != nil && worktree != nil {
 		if a.runtimeProjectionWriter != nil {
 			a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
 		}
@@ -392,11 +427,15 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 }
 
 func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, issueID string, force bool) error {
-	worktree, err := a.manager.Get(ctx, issueID)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return errors.New("worktree manager unavailable")
+	}
+	worktree, err := manager.Get(ctx, issueID)
 	if err != nil {
 		return err
 	}
-	if err := a.manager.DeleteWithOptions(ctx, issueID, force); err != nil {
+	if err := manager.DeleteWithOptions(ctx, issueID, force); err != nil {
 		return err
 	}
 	if worktree != nil {
@@ -409,7 +448,11 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 }
 
 func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID string) (*daemonhandlers.CleanupOrphanedResult, error) {
-	worktrees, err := a.manager.List(ctx)
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return nil, errors.New("worktree manager unavailable")
+	}
+	worktrees, err := manager.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +461,7 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 		ProjectID: projectID,
 	}
 	for _, wt := range worktrees {
-		if err := a.manager.Delete(ctx, wt.IssueID); err != nil {
+		if err := manager.Delete(ctx, wt.IssueID); err != nil {
 			result.Skipped = append(result.Skipped, wt)
 			continue
 		}
@@ -433,7 +476,7 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 }
 
 func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {
-	if a.runtimeStateStore == nil {
+	if a.runtimeStore(projectID) == nil {
 		return
 	}
 	interval := a.pollInterval
@@ -470,13 +513,17 @@ func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {
 }
 
 func (a *worktreeServiceAdapter) pollAndPersistWorktrees(ctx context.Context, projectID string) {
+	manager := a.managerFor(projectID)
+	if manager == nil {
+		return
+	}
 	var previous []daemonstate.WorktreeState
-	if a.runtimeStateStore != nil {
-		if cached, err := a.runtimeStateStore.ListWorktreeStates(ctx, projectID); err == nil {
+	if runtimeStore := a.runtimeStore(projectID); runtimeStore != nil {
+		if cached, err := runtimeStore.ListWorktreeStates(ctx, projectID); err == nil {
 			previous = cached
 		}
 	}
-	worktrees, err := a.manager.List(ctx)
+	worktrees, err := manager.List(ctx)
 	if err != nil {
 		if a.logger != nil {
 			a.logger.Debug("worktree projection poll failed", "project_id", projectID, "error", err)
@@ -501,8 +548,8 @@ func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID
 		if issueID == "" || path == "" {
 			continue
 		}
-		if a.runtimeStateStore != nil {
-			row, found, err := a.runtimeStateStore.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		if runtimeStore := a.runtimeStore(projectID); runtimeStore != nil {
+			row, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, issueID)
 			if err != nil {
 				if a.logger != nil {
 					a.logger.Debug("worktree observation lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
@@ -518,7 +565,8 @@ func (a *worktreeServiceAdapter) observeWorktrees(ctx context.Context, projectID
 }
 
 func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Context, projectID string, worktrees []git.Worktree) {
-	if a.runtimeStateStore == nil {
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
 		return
 	}
 	rows := make([]daemonstate.WorktreeState, 0, len(worktrees))
@@ -541,7 +589,7 @@ func (a *worktreeServiceAdapter) writeWorktreeProjectionSnapshot(ctx context.Con
 		}
 		return
 	}
-	if err := a.runtimeStateStore.ReplaceWorktreeStates(ctx, normalizedProjectID(projectID), rows); err != nil && a.logger != nil {
+	if err := runtimeStore.ReplaceWorktreeStates(ctx, normalizedProjectID(projectID), rows); err != nil && a.logger != nil {
 		a.logger.Warn("replace worktree projection snapshot failed", "project_id", projectID, "error", err)
 	}
 }

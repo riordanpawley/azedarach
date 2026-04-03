@@ -132,7 +132,7 @@ func TestDetailPanelViewShowsBehindOnlyDirectionalStatus(t *testing.T) {
 	assert.NotContains(t, view, "↑0/↓5")
 }
 
-func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *testing.T) {
+func TestDetailPanelViewWithSessionShowsCleanGitStatusWithoutTelemetry(t *testing.T) {
 	task := domain.Task{
 		ID:          "az-789",
 		Title:       "Task with unavailable git telemetry",
@@ -151,7 +151,8 @@ func TestDetailPanelViewWithSessionShowsUnknownGitStatusWithoutTelemetry(t *test
 	view := panel.View()
 
 	assert.Contains(t, view, "Worktree:")
-	assert.Contains(t, view, "unknown")
+	assert.Contains(t, view, "clean")
+	assert.Contains(t, view, "/tmp/az-789")
 }
 
 func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
@@ -167,7 +168,7 @@ func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
 
 	assert.Contains(t, view, "Runtime")
 	assert.Contains(t, view, "none")
-	assert.Contains(t, view, "Age N/A")
+	assert.Contains(t, view, "clean | present")
 }
 
 func TestDetailPanelViewWithParent(t *testing.T) {
