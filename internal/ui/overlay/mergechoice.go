@@ -14,6 +14,7 @@ type MergeChoiceOverlay struct {
 	issueID       string
 	commitsBehind int
 	baseBranch    string
+	selectedMerge bool
 	styles        *Styles
 }
 
@@ -22,6 +23,7 @@ func NewMergeChoiceOverlay(issueID string, commitsBehind int, baseBranch string)
 		issueID:       issueID,
 		commitsBehind: commitsBehind,
 		baseBranch:    baseBranch,
+		selectedMerge: true,
 		styles:        New(),
 	}
 }
@@ -48,6 +50,27 @@ func (m *MergeChoiceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Value: m.issueID,
 				}
 			}
+		case "enter":
+			if m.selectedMerge {
+				return m, func() tea.Msg {
+					return SelectionMsg{
+						Key:   "merge_attach",
+						Value: m.issueID,
+					}
+				}
+			}
+			return m, func() tea.Msg {
+				return SelectionMsg{
+					Key:   "skip_attach",
+					Value: m.issueID,
+				}
+			}
+		case "left", "h":
+			m.selectedMerge = true
+			return m, nil
+		case "right", "l", "tab":
+			m.selectedMerge = false
+			return m, nil
 		case "esc":
 			return m, func() tea.Msg {
 				return CloseOverlayMsg{}
@@ -76,13 +99,22 @@ func (m *MergeChoiceOverlay) View() string {
 			var b strings.Builder
 			b.WriteString(m.styles.MenuItem.Render(fmt.Sprintf("%d commits behind base branch (%s). Merge latest?", m.commitsBehind, m.baseBranch)))
 			b.WriteString("\n\n")
-			b.WriteString(m.styles.MenuItem.Render("[M] Merge & Attach"))
+			mergeStyle := m.styles.MenuItem
+			skipStyle := m.styles.MenuItem
+			if m.selectedMerge {
+				mergeStyle = m.styles.MenuItemActive
+			} else {
+				skipStyle = m.styles.MenuItemActive
+			}
+			b.WriteString(mergeStyle.Render("[M] Merge & Attach"))
 			b.WriteString("\n")
-			b.WriteString(m.styles.MenuItem.Render("[S] Skip & Attach"))
+			b.WriteString(skipStyle.Render("[S] Skip & Attach"))
 			return strings.TrimRight(b.String(), "\n")
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(m.styles, []keybinds.Binding{
+				{Key: "←/→/Tab", Description: "switch"},
+				{Key: "Enter", Description: "confirm"},
 				{Key: "M", Description: "merge & attach"},
 				{Key: "S", Description: "skip & attach"},
 				{Key: "Esc", Description: "cancel"},
