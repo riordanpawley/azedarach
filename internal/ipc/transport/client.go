@@ -11,7 +11,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ipc/codec"
 )
 
-const defaultTimeout = 5 * time.Second
+const defaultClientTimeout = 30 * time.Second
 
 // Client is a Unix-socket daemon transport implementation.
 type Client struct {
@@ -25,7 +25,7 @@ func NewClient(socketPath string) *Client {
 	return &Client{
 		socketPath: socketPath,
 		codec:      codec.NewCodec(),
-		timeout:    defaultTimeout,
+		timeout:    defaultClientTimeout,
 	}
 }
 
