@@ -238,6 +238,10 @@ type sqliteColumnSpec struct {
 }
 
 func (c *Client) ensureSpecSchema(db *sql.DB) error {
+	if err := migrateLegacySpecRequirementsSchema(db); err != nil {
+		return fmt.Errorf("normalize legacy spec schema: %w", err)
+	}
+
 	requirementsDDL := `
 		CREATE TABLE IF NOT EXISTS spec_requirements (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -323,6 +327,271 @@ func (c *Client) ensureSpecSchema(db *sql.DB) error {
 	return nil
 }
 
+type specRequirementsLegacyProfile struct {
+	hasBodyMD      bool
+	hasKind        bool
+	hasPriority    bool
+	textPrimaryKey bool
+}
+
+func migrateLegacySpecRequirementsSchema(db *sql.DB) error {
+	cols, err := tableColumnDetails(db, "spec_requirements")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+
+	profile := specRequirementsLegacyProfile{}
+	for _, col := range cols {
+		switch col.name {
+		case "body_md":
+			profile.hasBodyMD = true
+		case "kind":
+			profile.hasKind = true
+		case "priority":
+			profile.hasPriority = true
+		case "id":
+			typeName := strings.ToUpper(strings.TrimSpace(col.typ))
+			profile.textPrimaryKey = col.primaryKey > 0 && !strings.Contains(typeName, "INT")
+		}
+	}
+	hasColumn := func(name string) bool {
+		for _, col := range cols {
+			if col.name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !profile.hasBodyMD && !profile.hasKind && !profile.hasPriority && !profile.textPrimaryKey {
+		return nil
+	}
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`
+		ALTER TABLE spec_requirements RENAME TO spec_requirements_legacy
+	`); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`
+		CREATE TABLE spec_requirements (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL,
+			external_code TEXT,
+			title TEXT NOT NULL,
+			description TEXT,
+			issue_id TEXT,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT,
+			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE SET NULL
+		)
+	`); err != nil {
+		return err
+	}
+
+	localIDExpr := `CAST(id AS TEXT)`
+	localIDExprLegacy := `CAST(legacy.id AS TEXT)`
+	if hasColumn("local_id") {
+		localIDExpr = `COALESCE(NULLIF(TRIM(local_id), ''), CAST(id AS TEXT))`
+		localIDExprLegacy = `COALESCE(NULLIF(TRIM(legacy.local_id), ''), CAST(legacy.id AS TEXT))`
+	}
+	externalCodeExpr := `NULL`
+	if hasColumn("external_code") {
+		externalCodeExpr = `NULLIF(TRIM(external_code), '')`
+	}
+	descriptionExpr := `''`
+	switch {
+	case hasColumn("description") && profile.hasBodyMD:
+		descriptionExpr = `COALESCE(NULLIF(description, ''), body_md, '')`
+	case hasColumn("description"):
+		descriptionExpr = `COALESCE(description, '')`
+	case profile.hasBodyMD:
+		descriptionExpr = `COALESCE(body_md, '')`
+	}
+	issueIDExpr := `NULL`
+	if hasColumn("issue_id") {
+		issueIDExpr = `NULLIF(TRIM(issue_id), '')`
+	}
+	statusExpr := `'open'`
+	if hasColumn("status") {
+		statusExpr = `CASE WHEN status IN ('open', 'accepted', 'superseded') THEN status ELSE 'open' END`
+	}
+	createdAtExpr := `'1970-01-01T00:00:00Z'`
+	if hasColumn("created_at") {
+		createdAtExpr = `created_at`
+	}
+	updatedAtExpr := `'1970-01-01T00:00:00Z'`
+	if hasColumn("updated_at") {
+		updatedAtExpr = `updated_at`
+	}
+	deletedAtExpr := `NULL`
+	if hasColumn("deleted_at") {
+		deletedAtExpr = `deleted_at`
+	}
+
+	copyRequirementsSQL := fmt.Sprintf(`
+		INSERT INTO spec_requirements (
+			local_id,
+			external_code,
+			title,
+			description,
+			issue_id,
+			status,
+			created_at,
+			updated_at,
+			deleted_at
+		)
+		SELECT
+			%s,
+			%s,
+			title,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s
+		FROM spec_requirements_legacy
+	`, localIDExpr, externalCodeExpr, descriptionExpr, issueIDExpr, statusExpr, createdAtExpr, updatedAtExpr, deletedAtExpr)
+	if _, err := tx.Exec(copyRequirementsSQL); err != nil {
+		return err
+	}
+
+	if tableExistsInTx(tx, "spec_links") {
+		if _, err := tx.Exec(`ALTER TABLE spec_links RENAME TO spec_links_legacy`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			CREATE TABLE spec_links (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				issue_id TEXT NOT NULL,
+				requirement_id INTEGER NOT NULL,
+				role TEXT NOT NULL,
+				note TEXT,
+				implementations_json TEXT,
+				fulfillment_status TEXT,
+				fulfilled_at TEXT,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				deleted_at TEXT,
+				FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+				FOREIGN KEY (requirement_id) REFERENCES spec_requirements(id) ON DELETE CASCADE
+			)
+		`); err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(`
+			CREATE TEMP TABLE spec_requirement_id_map (
+				old_key TEXT PRIMARY KEY,
+				new_id INTEGER NOT NULL
+			)
+		`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO spec_requirement_id_map(old_key, new_id)
+			SELECT CAST(legacy.id AS TEXT), current.id
+			FROM spec_requirements_legacy legacy
+			JOIN spec_requirements current
+			  ON current.local_id = ` + localIDExprLegacy + `
+		`); err != nil {
+			return err
+		}
+		if hasColumn("local_id") {
+			if _, err := tx.Exec(`
+				INSERT OR IGNORE INTO spec_requirement_id_map(old_key, new_id)
+				SELECT legacy.local_id, current.id
+				FROM spec_requirements_legacy legacy
+				JOIN spec_requirements current
+				  ON current.local_id = ` + localIDExprLegacy + `
+				WHERE legacy.local_id IS NOT NULL AND TRIM(legacy.local_id) != ''
+			`); err != nil {
+				return err
+			}
+		}
+		if hasColumn("external_code") {
+			if _, err := tx.Exec(`
+			INSERT OR IGNORE INTO spec_requirement_id_map(old_key, new_id)
+			SELECT legacy.external_code, current.id
+			FROM spec_requirements_legacy legacy
+			JOIN spec_requirements current
+			  ON current.local_id = ` + localIDExprLegacy + `
+			WHERE legacy.external_code IS NOT NULL AND TRIM(legacy.external_code) != ''
+		`); err != nil {
+				return err
+			}
+		}
+
+		if _, err := tx.Exec(`
+			INSERT INTO spec_links (
+				issue_id,
+				requirement_id,
+				role,
+				note,
+				implementations_json,
+				fulfillment_status,
+				fulfilled_at,
+				created_at,
+				updated_at,
+				deleted_at
+			)
+			SELECT
+				l.issue_id,
+				m.new_id,
+				l.role,
+				l.note,
+				l.implementations_json,
+				l.fulfillment_status,
+				l.fulfilled_at,
+				l.created_at,
+				l.updated_at,
+				l.deleted_at
+			FROM spec_links_legacy l
+			JOIN spec_requirement_id_map m
+			  ON m.old_key = CAST(l.requirement_id AS TEXT)
+		`); err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(`DROP TABLE spec_links_legacy`); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(`DROP TABLE spec_requirements_legacy`); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func tableExistsInTx(tx *sql.Tx, tableName string) bool {
+	var exists int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name = ?
+	`, tableName).Scan(&exists); err != nil {
+		return false
+	}
+	return exists > 0
+}
+
 func (c *Client) ensureSpecAuditSchema(db *sql.DB) error {
 	auditDDL := `
 		CREATE TABLE IF NOT EXISTS spec_audit_log (
@@ -383,13 +652,31 @@ func ensureTableColumns(db *sql.DB, tableName string, columns []sqliteColumnSpec
 }
 
 func tableColumns(db *sql.DB, tableName string) (map[string]struct{}, error) {
+	details, err := tableColumnDetails(db, tableName)
+	if err != nil {
+		return nil, err
+	}
+	columns := make(map[string]struct{})
+	for _, detail := range details {
+		columns[detail.name] = struct{}{}
+	}
+	return columns, nil
+}
+
+type tableColumnDetail struct {
+	name       string
+	typ        string
+	primaryKey int
+}
+
+func tableColumnDetails(db *sql.DB, tableName string) ([]tableColumnDetail, error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info('%s')", tableName))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	columns := make(map[string]struct{})
+	details := make([]tableColumnDetail, 0, 16)
 	for rows.Next() {
 		var (
 			cid        int
@@ -402,10 +689,14 @@ func tableColumns(db *sql.DB, tableName string) (map[string]struct{}, error) {
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
 			return nil, err
 		}
-		columns[name] = struct{}{}
+		details = append(details, tableColumnDetail{
+			name:       name,
+			typ:        columnType,
+			primaryKey: primaryKey,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return columns, nil
+	return details, nil
 }
