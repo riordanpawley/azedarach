@@ -79,21 +79,27 @@ func (w *routePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*
 }
 
 type routeBranchBehindGit struct {
-	fetched   bool
-	revRanges []string
-}
-
-func (g *routeBranchBehindGit) Fetch(context.Context, string, string) error {
-	g.fetched = true
-	return nil
-}
-
-func (g *routeBranchBehindGit) RevListCount(_ context.Context, _ string, revRange string) (int, error) {
-	g.revRanges = append(g.revRanges, revRange)
-	if revRange == "origin/main..HEAD" {
-		return 1, nil
+	calls []struct {
+		projectID  string
+		worktree   string
+		baseBranch string
+		remote     string
 	}
-	return 3, nil
+}
+
+func (g *routeBranchBehindGit) BranchBehind(_ context.Context, projectID, worktree, baseBranch, remote string) (int, int, error) {
+	g.calls = append(g.calls, struct {
+		projectID  string
+		worktree   string
+		baseBranch string
+		remote     string
+	}{
+		projectID:  projectID,
+		worktree:   worktree,
+		baseBranch: baseBranch,
+		remote:     remote,
+	})
+	return 1, 3, nil
 }
 
 type routeOperationHandler struct {
@@ -430,7 +436,11 @@ func TestDispatcherRoutesPRAndBranchBehindCommands(t *testing.T) {
 	if behindOut.CommitsBehind != 3 || behindOut.RevRange != "main..origin/main" || behindOut.CommitsAhead != 1 || behindOut.AheadRevRange != "origin/main..HEAD" {
 		t.Fatalf("branch-behind response = %+v", behindOut)
 	}
-	if !gitClient.fetched || len(gitClient.revRanges) != 2 {
-		t.Fatalf("git service calls = fetched:%v revRanges:%v", gitClient.fetched, gitClient.revRanges)
+	if len(gitClient.calls) != 1 {
+		t.Fatalf("git service branch-behind calls = %+v", gitClient.calls)
+	}
+	call := gitClient.calls[0]
+	if call.projectID != "default" || call.worktree != "/tmp/repo" || call.baseBranch != "main" || call.remote != "origin" {
+		t.Fatalf("git service branch-behind call = %+v", call)
 	}
 }

@@ -6,14 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -107,7 +108,7 @@ func (d *Daemon) handleIssueFanout(ctx context.Context, req protocol.RequestEnve
 	return resp, nil
 }
 
-func (d *Daemon) handleIssueFanoutDrift(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleIssueFanoutDrift(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd protocol.FanoutDriftCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -135,9 +136,10 @@ func (d *Daemon) handleIssueFanoutDrift(_ context.Context, req protocol.RequestE
 	if worktree == "" {
 		worktree = repoDir
 	}
-	changed, err := gitChangedFiles(worktree)
+	projectID := d.projectID(req.Meta)
+	changed, err := d.fanoutDriftChangedFilesFromProjection(ctx, projectID, issueID, worktree)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("git changed files: %v", err)), nil
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("projection changed files: %v", err)), nil
 	}
 	result := protocol.FanoutDriftResult{
 		IssueID:      issueID,
@@ -415,34 +417,62 @@ func normalizeDeps(values []string) []string {
 	return out
 }
 
-func gitChangedFiles(worktree string) ([]string, error) {
-	cmds := [][]string{
-		{"git", "-C", worktree, "diff", "--name-only"},
-		{"git", "-C", worktree, "diff", "--name-only", "--cached"},
-		{"git", "-C", worktree, "ls-files", "--others", "--exclude-standard"},
+func (d *Daemon) fanoutDriftChangedFilesFromProjection(ctx context.Context, projectID, issueID, worktree string) ([]string, error) {
+	store := d.worktreeRuntimeStateStore(projectID)
+	if store == nil {
+		return []string{}, nil
 	}
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 16)
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		output, err := cmd.Output()
+
+	projectID = protocol.NormalizeProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+
+	var (
+		projection daemonstate.WorktreeState
+		found      bool
+		err        error
+	)
+	if issueID != "" {
+		projection, found, err = store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !found && worktree != "" {
+		projection, found, err = store.GetWorktreeStateByPath(ctx, projectID, worktree)
 		if err != nil {
 			return nil, err
 		}
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" {
+	}
+	if !found || len(projection.GitStatusRaw) == 0 {
+		return []string{}, nil
+	}
+
+	var status git.GitStatus
+	if err := json.Unmarshal(projection.GitStatusRaw, &status); err != nil {
+		return nil, fmt.Errorf("unmarshal projection git status: %w", err)
+	}
+
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(status.Modified)+len(status.Added)+len(status.Deleted)+len(status.Untracked)+len(status.Staged))
+	add := func(paths []string) {
+		for _, path := range paths {
+			path = filepath.ToSlash(strings.TrimSpace(path))
+			if path == "" {
 				continue
 			}
-			line = filepath.ToSlash(line)
-			if _, ok := seen[line]; ok {
+			if _, ok := seen[path]; ok {
 				continue
 			}
-			seen[line] = struct{}{}
-			out = append(out, line)
+			seen[path] = struct{}{}
+			out = append(out, path)
 		}
 	}
+	add(status.Modified)
+	add(status.Added)
+	add(status.Deleted)
+	add(status.Untracked)
+	add(status.Staged)
 	sort.Strings(out)
 	return out, nil
 }

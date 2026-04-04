@@ -229,6 +229,39 @@ func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string
 	return results, partialFailures, nil
 }
 
+func (a *gitServiceAdapter) BranchBehind(ctx context.Context, projectID, worktree, _baseBranch, _remote string) (int, int, error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return 0, 0, nil
+	}
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
+		return 0, 0, nil
+	}
+
+	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !found || len(projection.GitStatusRaw) == 0 {
+		return 0, 0, nil
+	}
+
+	var status git.GitStatus
+	if err := json.Unmarshal(projection.GitStatusRaw, &status); err != nil {
+		if a.logger != nil {
+			a.logger.Debug("unmarshal cached git status projection failed for branch-behind",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
+		return 0, 0, nil
+	}
+	return status.GitAheadCount, status.GitBehindCount, nil
+}
+
 func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
 	worktree = strings.TrimSpace(worktree)

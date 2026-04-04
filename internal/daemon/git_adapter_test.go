@@ -783,3 +783,33 @@ func TestGitServiceAdapterRuntimeSignalsMissingProjectionReturnsZeroSignal(t *te
 		t.Fatalf("signal = %+v, want zero-value runtime signal for missing projection", got)
 	}
 }
+
+func TestGitServiceAdapterBranchBehindUsesProjectionOnly(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-behind"
+	worktree := "/tmp/az-behind"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, &git.GitStatus{
+		GitAheadCount:  4,
+		GitBehindCount: 6,
+	})
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		t.Fatalf("unexpected live git call for branch-behind: %v", args)
+		return "", nil
+	}}
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+	}
+
+	ahead, behind, err := adapter.BranchBehind(ctx, projectID, worktree, "main", "origin")
+	if err != nil {
+		t.Fatalf("BranchBehind: %v", err)
+	}
+	if ahead != 4 || behind != 6 {
+		t.Fatalf("ahead/behind = %d/%d, want 4/6", ahead, behind)
+	}
+}

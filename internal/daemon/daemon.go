@@ -189,7 +189,7 @@ func New(cfg Config) *Daemon {
 	sessionStore := daemonstate.NewStore()
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
-	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
+	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitService)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
 	specService := issueSpecService{daemon: nil}
 
@@ -1003,23 +1003,6 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 		var projectedStatus git.GitStatus
 		if err := json.Unmarshal(projectionWorktree.GitStatusRaw, &projectedStatus); err == nil {
 			fallbackStatus = &projectedStatus
-		}
-	}
-
-	if worktree != "" && d.git != nil {
-		baseBranch := d.baseBranchForProject(projectID)
-		switch {
-		case status == nil:
-			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, baseBranch); err == nil {
-				status = liveStatus
-			}
-		case status.GitAdditions == 0 && status.GitDeletions == 0 && status.GitAheadCount == 0 && status.GitBehindCount == 0:
-			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, baseBranch); err == nil {
-				status.GitAdditions = liveStatus.GitAdditions
-				status.GitDeletions = liveStatus.GitDeletions
-				status.GitAheadCount = liveStatus.GitAheadCount
-				status.GitBehindCount = liveStatus.GitBehindCount
-			}
 		}
 	}
 
