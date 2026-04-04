@@ -3,9 +3,11 @@ package daemonprocess
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,6 +182,11 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	launcher := NewLauncher(repoDir, socketPath)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
+	terminateCalls := 0
+	launcher.terminateLockOwner = func(lockPath string) error {
+		terminateCalls++
+		return os.Remove(lockPath)
+	}
 
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
@@ -208,7 +215,37 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	if readyCalls != 2 {
 		t.Fatalf("waitForReady call count = %d, want 2", readyCalls)
 	}
+	if terminateCalls != 1 {
+		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
+	}
 	if !tracker.closed.Load() {
 		t.Fatal("daemon log file was not closed after Start() returned")
+	}
+}
+
+func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = "true"
+	launcher.sleepFn = func(time.Duration) {}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.terminateLockOwner = func(string) error { return errors.New("kill denied") }
+
+	lockRecordBytes, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"created_at": time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Marshal(lockRecord): %v", err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecordBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile(lock): %v", err)
+	}
+
+	err = launcher.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "recover stale daemon lock owner") {
+		t.Fatalf("Start() error = %v, want lock recovery failure", err)
 	}
 }
