@@ -188,6 +188,7 @@ type Model struct {
 	daemonClient              *daemonclient.Client
 	daemonSocketPath          string
 	daemonEvents              <-chan protocol.EventEnvelope
+	logStreamEvents           <-chan protocol.EventEnvelope
 	daemonRevision            uint64
 	lastDaemonReattachAttempt time.Time
 
@@ -840,6 +841,20 @@ type daemonStreamClosedMsg struct {
 	stream <-chan protocol.EventEnvelope
 }
 
+type logStreamAttachedMsg struct {
+	stream <-chan protocol.EventEnvelope
+	err    error
+}
+
+type logStreamEventMsg struct {
+	stream <-chan protocol.EventEnvelope
+	event  protocol.EventEnvelope
+}
+
+type logStreamClosedMsg struct {
+	stream <-chan protocol.EventEnvelope
+}
+
 type hookLogLoadedMsg struct {
 	events []protocol.HookLogEvent
 	err    error
@@ -1399,6 +1414,33 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 		}
 
 		return daemonStreamEventMsg{stream: stream, event: evt}
+	}
+}
+
+func (m Model) attachLogStreamCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return logStreamAttachedMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		events, err := m.daemonClient.Subscribe(context.Background(), protocol.GlobalEventStreamProjectID, 0)
+		if err != nil {
+			return logStreamAttachedMsg{err: err}
+		}
+		return logStreamAttachedMsg{stream: events}
+	}
+}
+
+func (m Model) waitForLogStreamEventCmd() tea.Cmd {
+	stream := m.logStreamEvents
+	return func() tea.Msg {
+		if stream == nil {
+			return nil
+		}
+		evt, ok := <-stream
+		if !ok {
+			return logStreamClosedMsg{stream: stream}
+		}
+		return logStreamEventMsg{stream: stream, event: evt}
 	}
 }
 
