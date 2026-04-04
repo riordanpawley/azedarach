@@ -698,6 +698,13 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		}
 		return nil
 	}
+	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
+		Hook:     strings.TrimSpace(hookName),
+		Worktree: worktreeRoot,
+		Source:   "githooks.hook",
+		Level:    "info",
+		Message:  "reconciling daemon git state",
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -706,6 +713,13 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		return struct{}{}, callErr
 	})
 	if err != nil {
+		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
+			Hook:     strings.TrimSpace(hookName),
+			Worktree: worktreeRoot,
+			Source:   "githooks.hook",
+			Level:    "warn",
+			Message:  fmt.Sprintf("daemon git status refresh failed: %v", err),
+		})
 		if deps.Logger != nil {
 			deps.Logger.Warn("githooks hook: daemon git status refresh failed", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot, "error", err)
 		}
@@ -714,6 +728,13 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		}
 		return nil
 	}
+	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
+		Hook:     strings.TrimSpace(hookName),
+		Worktree: worktreeRoot,
+		Source:   "githooks.hook",
+		Level:    "info",
+		Message:  "refreshed daemon git state",
+	})
 	if deps.Logger != nil {
 		deps.Logger.Info("githooks hook: refreshed daemon git state", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
 	}
@@ -721,6 +742,17 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		fmt.Printf("githooks hook: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)
 	}
 	return nil
+}
+
+func appendHookLogEventBestEffort(deps *Dependencies, evt protocol.HookLogEvent) {
+	if deps == nil || deps.DaemonClient == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := deps.DaemonClient.AppendHookLogEvent(ctx, evt); err != nil && deps.Logger != nil {
+		deps.Logger.Debug("githooks hook: append hook log event failed", "error", err)
+	}
 }
 
 func shellSingleQuote(value string) string {
@@ -1132,6 +1164,12 @@ func CodexHookRunCommand(deps *Dependencies, opts CodexHookRunOptions) error {
 	if err != nil {
 		return err
 	}
+	appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
+		Hook:    strings.TrimSpace(opts.Event),
+		Source:  "codex.hook",
+		Level:   "info",
+		Message: fmt.Sprintf("codex hook run: %s", strings.TrimSpace(opts.Event)),
+	})
 	if !opts.JSON {
 		notifyOutput, err := renderNotifyOutput(NotifyOptions{Event: notifyEvent})
 		if err != nil {

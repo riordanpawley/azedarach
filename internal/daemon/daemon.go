@@ -98,6 +98,8 @@ type Daemon struct {
 	runtimeStoresMu               sync.Mutex
 	runtimeStoresByProject        map[string]*daemonstate.RuntimeStateStore
 	runtimeStoresByRoot           map[string]*daemonstate.RuntimeStateStore
+	hookLogMu                     sync.Mutex
+	hookLogByProject              map[string][]protocol.HookLogEvent
 	tmux                          *tmux.Client
 	git                           *git.Client
 	gitHandler                    *daemonhandlers.GitHandler
@@ -187,7 +189,7 @@ func New(cfg Config) *Daemon {
 	sessionStore := daemonstate.NewStore()
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
-	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitClient)
+	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitService)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
 	specService := issueSpecService{daemon: nil}
 
@@ -212,6 +214,7 @@ func New(cfg Config) *Daemon {
 		worktreeManagersByRoot:        map[string]*git.WorktreeManager{},
 		runtimeStoresByProject:        map[string]*daemonstate.RuntimeStateStore{},
 		runtimeStoresByRoot:           map[string]*daemonstate.RuntimeStateStore{},
+		hookLogByProject:              map[string][]protocol.HookLogEvent{},
 		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                           gitClient,
 		session:                       sessionHandler,
@@ -270,8 +273,9 @@ func New(cfg Config) *Daemon {
 			runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
 				return d.worktreeRuntimeStateStore(projectID)
 			},
-			runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
-			logger:                  cfg.Logger,
+			runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
+			ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
+			logger:                        cfg.Logger,
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 				d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 			},
@@ -467,6 +471,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleMailList(ctx, req)
 	case protocol.CommandMailWatch:
 		return d.handleMailWatch(ctx, req)
+	case protocol.CommandHookLogAppend:
+		return d.handleHookLogAppend(ctx, req)
+	case protocol.CommandHookLogList:
+		return d.handleHookLogList(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.create":
@@ -995,23 +1003,6 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 		var projectedStatus git.GitStatus
 		if err := json.Unmarshal(projectionWorktree.GitStatusRaw, &projectedStatus); err == nil {
 			fallbackStatus = &projectedStatus
-		}
-	}
-
-	if worktree != "" && d.git != nil {
-		baseBranch := d.baseBranchForProject(projectID)
-		switch {
-		case status == nil:
-			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, baseBranch); err == nil {
-				status = liveStatus
-			}
-		case status.GitAdditions == 0 && status.GitDeletions == 0 && status.GitAheadCount == 0 && status.GitBehindCount == 0:
-			if liveStatus, err := d.git.RuntimeStatus(ctx, worktree, baseBranch); err == nil {
-				status.GitAdditions = liveStatus.GitAdditions
-				status.GitDeletions = liveStatus.GitDeletions
-				status.GitAheadCount = liveStatus.GitAheadCount
-				status.GitBehindCount = liveStatus.GitBehindCount
-			}
 		}
 	}
 

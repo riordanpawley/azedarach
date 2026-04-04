@@ -28,8 +28,7 @@ type prWorkflow interface {
 }
 
 type branchBehindService interface {
-	Fetch(context.Context, string, string) error
-	RevListCount(context.Context, string, string) (int, error)
+	BranchBehind(context.Context, string, string, string, string) (int, int, error)
 }
 
 type prCreateCommandBody struct {
@@ -203,19 +202,10 @@ func (h *PRHandler) handleBranchBehind(ctx context.Context, resp protocol.Respon
 		cmd.Remote = "origin"
 	}
 
-	if err := h.gitClient.Fetch(ctx, cmd.Worktree, cmd.Remote); err != nil {
-		resp.Error = mapPRGitError(err)
-		return resp
-	}
-
+	projectID := resolveProjectID("", req.Meta)
 	revRange := fmt.Sprintf("%s..%s/%s", cmd.BaseBranch, cmd.Remote, cmd.BaseBranch)
-	commitsBehind, err := h.gitClient.RevListCount(ctx, cmd.Worktree, revRange)
-	if err != nil {
-		resp.Error = mapPRGitError(err)
-		return resp
-	}
 	aheadRevRange := fmt.Sprintf("%s/%s..HEAD", cmd.Remote, cmd.BaseBranch)
-	commitsAhead, err := h.gitClient.RevListCount(ctx, cmd.Worktree, aheadRevRange)
+	commitsAhead, commitsBehind, err := h.gitClient.BranchBehind(ctx, projectID, cmd.Worktree, cmd.BaseBranch, cmd.Remote)
 	if err != nil {
 		resp.Error = mapPRGitError(err)
 		return resp

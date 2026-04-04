@@ -660,6 +660,97 @@ func TestClient_DeleteRemovesIssue(t *testing.T) {
 	assert.Empty(t, tasks)
 }
 
+func TestClient_DeleteBlockedWhenTaskHasWorktreeProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-delete-worktree"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Delete blocked by worktree",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, projectID, taskID, "/tmp/"+taskID, "riordan/"+taskID, time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	err = client.Delete(ctx, taskID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDeleteBlockedByRuntimeAttachments)
+
+	tasks, findErr := client.Search(ctx, taskID)
+	require.NoError(t, findErr)
+	require.Len(t, tasks, 1)
+}
+
+func TestClient_DeleteBlockedWhenTaskHasActiveSessionProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-delete-session"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Delete blocked by active session",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-"+taskID, taskID, "attached", time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	err = client.Delete(ctx, taskID)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrDeleteBlockedByRuntimeAttachments)
+
+	tasks, findErr := client.Search(ctx, taskID)
+	require.NoError(t, findErr)
+	require.Len(t, tasks, 1)
+}
+
+func TestClient_DeleteAllowsStoppedSessionWithoutWorktreeProjection(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-delete-stopped"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Delete allowed with stopped session",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	db, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO daemon_session_projections (project_id, session_id, issue_id, state, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, projectID, "sess-"+taskID, taskID, "stopped", "", time.Now().UTC().Format(time.RFC3339Nano))
+	require.NoError(t, err)
+
+	require.NoError(t, client.Delete(ctx, taskID))
+
+	tasks, findErr := client.Search(ctx, taskID)
+	require.NoError(t, findErr)
+	assert.Empty(t, tasks)
+}
+
 func TestClient_CreateDoesNotReuseDeletedLocalIssueIDs(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)

@@ -196,10 +196,10 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 		t.Fatalf("ParseGitHooksNotifyArgs error: %v", err)
 	}
 
-	var gotReq protocol.RequestEnvelope
+	reqs := make([]protocol.RequestEnvelope, 0, 4)
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotReq = req
+			reqs = append(reqs, req)
 			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
 		},
 	}
@@ -212,8 +212,15 @@ func TestGitHooksNotifyCommandRefreshesDaemonGitStatus(t *testing.T) {
 	if err := GitHooksNotifyCommand(deps, opts); err != nil {
 		t.Fatalf("GitHooksNotifyCommand error: %v", err)
 	}
+	var gotReq protocol.RequestEnvelope
+	for _, req := range reqs {
+		if req.Command == daemonclient.CommandGitStatus {
+			gotReq = req
+			break
+		}
+	}
 	if gotReq.Command != daemonclient.CommandGitStatus {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatus)
+		t.Fatalf("expected %q in requests, got=%v", daemonclient.CommandGitStatus, requestCommands(reqs))
 	}
 	var body daemonclient.GitCommandRequest
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
@@ -265,10 +272,10 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 		}
 	}()
 
-	var gotReq protocol.RequestEnvelope
+	reqs := make([]protocol.RequestEnvelope, 0, 4)
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotReq = req
+			reqs = append(reqs, req)
 			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
 		},
 	}
@@ -282,8 +289,15 @@ func TestGitHooksNotifyCommandPrefersCurrentWorktreeWhenProjectDirUnset(t *testi
 	if err := GitHooksNotifyCommand(deps, GitHooksNotifyOptions{Hook: "post-commit"}); err != nil {
 		t.Fatalf("GitHooksNotifyCommand error: %v", err)
 	}
+	var gotReq protocol.RequestEnvelope
+	for _, req := range reqs {
+		if req.Command == daemonclient.CommandGitStatus {
+			gotReq = req
+			break
+		}
+	}
 	if gotReq.Command != daemonclient.CommandGitStatus {
-		t.Fatalf("command = %q, want %q", gotReq.Command, daemonclient.CommandGitStatus)
+		t.Fatalf("expected %q in requests, got=%v", daemonclient.CommandGitStatus, requestCommands(reqs))
 	}
 
 	var body daemonclient.GitCommandRequest
@@ -1081,4 +1095,12 @@ func TestOpenCodePluginInstallCommandCreatesPlaceholderFiles(t *testing.T) {
 			t.Fatalf("expected plugin file %s: %v", path, err)
 		}
 	}
+}
+
+func requestCommands(reqs []protocol.RequestEnvelope) []string {
+	out := make([]string, 0, len(reqs))
+	for _, req := range reqs {
+		out = append(out, req.Command)
+	}
+	return out
 }

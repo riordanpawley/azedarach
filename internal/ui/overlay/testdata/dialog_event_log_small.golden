@@ -1,7 +1,7 @@
 ╭────────────────────────────────────────────────────────────────────╮
 │Event Log                                                           │
 │────────────────────────────────────────────────────────────────────│
-│[Runtime Events]  |  Hook Events                                    │
+│Filter: [All]  |  Operation  |  Git  |  Hooks                       │
 │2026-03-30 08:21:00  #42  daemon.event.new  [event]                 │
 │  project=azedarach                                                 │
 │  new payload line                                                  │
@@ -11,7 +11,7 @@
 │                                                                    │
 │Actions                                                             │
 │────────────────────────────────────────────────────────────────────│
-│ Tab/Shift+Tab switch source                                        │
+│ Tab/Shift+Tab/f cycle filter                                       │
 │ s stream (Ctrl+C to stop)                                          │
 │ Esc/q/backspace close                                              │
 │                                                                    │

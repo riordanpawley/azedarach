@@ -3646,6 +3646,79 @@ func TestIssueCheckDoctorAndDeleteCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueDeleteCommandBlocksWhenRuntimeAttachmentsPresent(t *testing.T) {
+	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
+	deleteCalled := false
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					body, err := marshalTaskListBody([]domain.Task{
+						{
+							ID:             "az-1",
+							Title:          "Delete target",
+							Type:           domain.TypeTask,
+							Priority:       domain.P2,
+							Status:         domain.StatusOpen,
+							HasTmuxSession: true,
+							HasWorktree:    true,
+							CreatedAt:      now,
+							UpdatedAt:      now,
+						},
+					})
+					if err != nil {
+						t.Fatalf("marshal task list: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+						Revision:        2,
+						Body:            body,
+					}, nil
+				case daemonclient.CommandTaskDelete:
+					deleteCalled = true
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						OK:              true,
+						CompletedAt:     req.SentAt,
+					}, nil
+				}
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueDeleteCommand(deps, IssueDeleteOptions{
+		IssueID: "az-1",
+		Confirm: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot delete issue az-1: active runtime attachments detected (session, worktree)") {
+		t.Fatalf("IssueDeleteCommand() error = %v", err)
+	}
+	if deleteCalled {
+		t.Fatal("IssueDeleteCommand() called task.delete despite runtime attachments")
+	}
+}
+
 func TestIssueUpdateCommandUsesDaemonTaskUpdateCommand(t *testing.T) {
 	now := time.Date(2026, 3, 25, 10, 0, 0, 0, time.UTC)
 	var gotUpdateReq protocol.RequestEnvelope

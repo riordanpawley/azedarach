@@ -28,6 +28,8 @@ type Server struct {
 	listener   net.Listener
 }
 
+const serverFrameTimeout = 5 * time.Second
+
 // NewServer returns an unstarted IPC server.
 func NewServer(socketPath string, handlers Handlers) *Server {
 	return &Server{
@@ -83,7 +85,7 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetReadDeadline(time.Now().Add(defaultTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(serverFrameTimeout))
 
 	first, err := readFrame(conn, s.codec)
 	if err != nil {
@@ -113,7 +115,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			})
 			return
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
+		_ = conn.SetWriteDeadline(time.Now().Add(serverFrameTimeout))
 		_ = writeFrame(conn, s.codec, rpcFrame{
 			Type:     frameTypeHelloAck,
 			HelloAck: &ack,
@@ -144,7 +146,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				},
 			}
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
+		_ = conn.SetWriteDeadline(time.Now().Add(serverFrameTimeout))
 		_ = writeFrame(conn, s.codec, rpcFrame{
 			Type:     frameTypeResponse,
 			Response: &resp,

@@ -201,13 +201,21 @@ func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string
 			results = append(results, cached)
 			continue
 		}
-		signal, err := a.computeRuntimeSignal(ctx, issueID, worktree, baseBranch, compareRemote, remote)
+
+		signal, found, err := a.computeRuntimeSignalFromProjection(ctx, projectID, issueID, worktree)
 		if err != nil {
 			partialFailures++
 			if cached, ok := a.cachedRuntimeSignalAnyBase(projectID, issueID, worktree, now); ok {
 				results = append(results, cached)
 				continue
 			}
+			results = append(results, daemonhandlers.GitRuntimeSignalsResult{
+				IssueID:  issueID,
+				Worktree: worktree,
+			})
+			continue
+		}
+		if !found {
 			results = append(results, daemonhandlers.GitRuntimeSignalsResult{
 				IssueID:  issueID,
 				Worktree: worktree,
@@ -221,30 +229,77 @@ func (a *gitServiceAdapter) RuntimeSignals(ctx context.Context, projectID string
 	return results, partialFailures, nil
 }
 
+func (a *gitServiceAdapter) BranchBehind(ctx context.Context, projectID, worktree, _baseBranch, _remote string) (int, int, error) {
+	projectID = normalizeProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return 0, 0, nil
+	}
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
+		return 0, 0, nil
+	}
+
+	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !found || len(projection.GitStatusRaw) == 0 {
+		return 0, 0, nil
+	}
+
+	var status git.GitStatus
+	if err := json.Unmarshal(projection.GitStatusRaw, &status); err != nil {
+		if a.logger != nil {
+			a.logger.Debug("unmarshal cached git status projection failed for branch-behind",
+				"project_id", projectID,
+				"worktree", worktree,
+				"error", err,
+			)
+		}
+		return 0, 0, nil
+	}
+	return status.GitAheadCount, status.GitBehindCount, nil
+}
+
 func (a *gitServiceAdapter) Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error) {
 	projectID = normalizeProjectID(projectID)
 	worktree = strings.TrimSpace(worktree)
 	if worktree == "" {
-		return a.client.Status(ctx, worktree)
+		return &git.GitStatus{}, nil
 	}
-	if runtimeStore := a.runtimeStore(projectID); runtimeStore != nil {
-		if projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree); err == nil && found && len(projection.GitStatusRaw) > 0 {
-			var cached git.GitStatus
-			if unmarshalErr := json.Unmarshal(projection.GitStatusRaw, &cached); unmarshalErr == nil {
-				a.refreshGitStatusVisible(projectID, worktree)
-				a.ensureStatusPoller(projectID, worktree)
-				return &cached, nil
-			}
-		}
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
+		return &git.GitStatus{}, nil
 	}
 
-	status, err := a.client.Status(ctx, worktree)
+	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
 	if err != nil {
 		return nil, err
 	}
-	a.persistStatusSnapshot(ctx, projectID, worktree, status)
+	if !found || len(projection.GitStatusRaw) == 0 {
+		a.refreshGitStatusVisible(projectID, worktree)
+		a.ensureStatusPoller(projectID, worktree)
+		return &git.GitStatus{}, nil
+	}
+
+	var cached git.GitStatus
+	unmarshalErr := json.Unmarshal(projection.GitStatusRaw, &cached)
+	if unmarshalErr == nil {
+		a.refreshGitStatusVisible(projectID, worktree)
+		a.ensureStatusPoller(projectID, worktree)
+		return &cached, nil
+	}
+	if a.logger != nil {
+		a.logger.Debug("unmarshal cached git status projection failed",
+			"project_id", projectID,
+			"worktree", worktree,
+			"error", unmarshalErr,
+		)
+	}
+	a.refreshGitStatusVisible(projectID, worktree)
 	a.ensureStatusPoller(projectID, worktree)
-	return status, nil
+	return &git.GitStatus{}, nil
 }
 
 func (a *gitServiceAdapter) ensureStatusRefreshQueue() *reconcileQueue[*git.GitStatus] {
@@ -517,42 +572,33 @@ func gitStatusSignature(status *git.GitStatus) string {
 	return string(raw)
 }
 
-func (a *gitServiceAdapter) computeRuntimeSignal(ctx context.Context, issueID, worktree, baseBranch string, compareRemote bool, remote string) (daemonhandlers.GitRuntimeSignalsResult, error) {
+func (a *gitServiceAdapter) computeRuntimeSignalFromProjection(ctx context.Context, projectID, issueID, worktree string) (daemonhandlers.GitRuntimeSignalsResult, bool, error) {
 	out := daemonhandlers.GitRuntimeSignalsResult{
 		IssueID:  issueID,
 		Worktree: worktree,
 	}
-	status, err := a.client.Status(ctx, worktree)
+	runtimeStore := a.runtimeStore(projectID)
+	if runtimeStore == nil {
+		return out, false, nil
+	}
+	projection, found, err := runtimeStore.GetWorktreeStateByPath(ctx, projectID, worktree)
 	if err != nil {
-		return out, err
+		return out, false, err
+	}
+	if !found || len(projection.GitStatusRaw) == 0 {
+		return out, false, nil
+	}
+	var status git.GitStatus
+	if err := json.Unmarshal(projection.GitStatusRaw, &status); err != nil {
+		return out, false, err
 	}
 	out.HasUncommittedChanges = status.HasChanges
+	out.GitAdditions = status.GitAdditions
+	out.GitDeletions = status.GitDeletions
+	out.GitAheadCount = status.GitAheadCount
+	out.GitBehindCount = status.GitBehindCount
 
-	diffStat, err := a.client.DiffStat(ctx, worktree, baseBranch)
-	if err != nil {
-		return out, err
-	}
-	out.GitAdditions, out.GitDeletions = parseDiffStatTotalsDaemon(diffStat)
-
-	if compareRemote {
-		if err := a.client.Fetch(ctx, worktree, remote); err != nil {
-			return out, fmt.Errorf("fetch remote %s before branch-behind check: %w", remote, err)
-		}
-		behindRevRange := fmt.Sprintf("%s..%s/%s", baseBranch, remote, baseBranch)
-		behind, err := a.client.RevListCount(ctx, worktree, behindRevRange)
-		if err != nil {
-			return out, err
-		}
-		aheadRevRange := fmt.Sprintf("%s/%s..HEAD", remote, baseBranch)
-		ahead, err := a.client.RevListCount(ctx, worktree, aheadRevRange)
-		if err != nil {
-			return out, err
-		}
-		out.GitAheadCount = ahead
-		out.GitBehindCount = behind
-	}
-
-	return out, nil
+	return out, true, nil
 }
 
 func runtimeSignalCacheKey(projectID, issueID, worktree, baseBranch string, compareRemote bool, remote string) string {

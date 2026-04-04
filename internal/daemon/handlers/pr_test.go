@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -37,27 +36,33 @@ func (f *fakePRWorkflow) Create(_ context.Context, params pr.CreatePRParams) (*p
 }
 
 type fakeBranchBehindGit struct {
-	fetchCalls    []string
-	revRangeCalls []string
-	aheadCount    int
-	behindCount   int
-	err           error
+	branchBehindCalls []struct {
+		projectID  string
+		worktree   string
+		baseBranch string
+		remote     string
+	}
+	aheadCount  int
+	behindCount int
+	err         error
 }
 
-func (g *fakeBranchBehindGit) Fetch(_ context.Context, _ string, remote string) error {
-	g.fetchCalls = append(g.fetchCalls, remote)
-	return g.err
-}
-
-func (g *fakeBranchBehindGit) RevListCount(_ context.Context, _ string, revRange string) (int, error) {
-	g.revRangeCalls = append(g.revRangeCalls, revRange)
+func (g *fakeBranchBehindGit) BranchBehind(_ context.Context, projectID, worktree, baseBranch, remote string) (int, int, error) {
+	g.branchBehindCalls = append(g.branchBehindCalls, struct {
+		projectID  string
+		worktree   string
+		baseBranch string
+		remote     string
+	}{
+		projectID:  projectID,
+		worktree:   worktree,
+		baseBranch: baseBranch,
+		remote:     remote,
+	})
 	if g.err != nil {
-		return 0, g.err
+		return 0, 0, g.err
 	}
-	if strings.HasSuffix(revRange, "..HEAD") {
-		return g.aheadCount, nil
-	}
-	return g.behindCount, nil
+	return g.aheadCount, g.behindCount, nil
 }
 
 func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
@@ -109,6 +114,7 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 			RequestID:       "req-behind",
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         CommandGitBranchBehind,
+			Meta:            protocol.Metadata{ProjectID: "proj-pr"},
 			Body:            body,
 		})
 		if !resp.OK {
@@ -121,11 +127,12 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 		if out.RevRange != "main..origin/main" || out.AheadRevRange != "origin/main..HEAD" || out.CommitsAhead != 2 || !out.Ahead || out.CommitsBehind != 4 || !out.Behind {
 			t.Fatalf("response = %+v", out)
 		}
-		if len(gitClient.fetchCalls) != 1 || gitClient.fetchCalls[0] != "origin" {
-			t.Fatalf("fetch calls = %+v", gitClient.fetchCalls)
+		if len(gitClient.branchBehindCalls) != 1 {
+			t.Fatalf("branch behind calls = %+v", gitClient.branchBehindCalls)
 		}
-		if len(gitClient.revRangeCalls) != 2 || gitClient.revRangeCalls[0] != "main..origin/main" || gitClient.revRangeCalls[1] != "origin/main..HEAD" {
-			t.Fatalf("rev range calls = %+v", gitClient.revRangeCalls)
+		call := gitClient.branchBehindCalls[0]
+		if call.projectID != "proj-pr" || call.worktree != "/tmp/repo" || call.baseBranch != "main" || call.remote != "origin" {
+			t.Fatalf("branch behind call = %+v", call)
 		}
 	})
 
@@ -146,11 +153,12 @@ func TestPRHandlerCreateAndBranchBehind(t *testing.T) {
 		if !resp.OK {
 			t.Fatalf("branch-behind response error: %+v", resp.Error)
 		}
-		if len(gitClient.fetchCalls) != 1 || gitClient.fetchCalls[0] != "origin" {
-			t.Fatalf("fetch calls = %+v, want origin default", gitClient.fetchCalls)
+		if len(gitClient.branchBehindCalls) != 1 {
+			t.Fatalf("branch behind calls = %+v", gitClient.branchBehindCalls)
 		}
-		if len(gitClient.revRangeCalls) != 2 || gitClient.revRangeCalls[0] != "main..origin/main" || gitClient.revRangeCalls[1] != "origin/main..HEAD" {
-			t.Fatalf("rev range calls = %+v, want main/origin defaults", gitClient.revRangeCalls)
+		call := gitClient.branchBehindCalls[0]
+		if call.baseBranch != "main" || call.remote != "origin" {
+			t.Fatalf("branch behind call = %+v, want main/origin defaults", call)
 		}
 	})
 }

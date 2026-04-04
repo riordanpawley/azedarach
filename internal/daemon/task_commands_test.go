@@ -454,6 +454,91 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 	}
 }
 
+func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "snapshot export projection sessions",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	projectID := "proj-snapshot-export"
+	sessionID := naming.CanonicalSessionID(projectID, taskID)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   taskID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	// Keep tmux empty; export should still include the projected session.
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		issues:       issuesClient,
+		sessionStore: daemonstate.NewStore(),
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	resp, err := d.handleTaskSnapshotExport(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-snapshot-export",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.snapshot.export",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+	})
+	if err != nil {
+		t.Fatalf("handleTaskSnapshotExport error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.snapshot.export response not OK: %+v", resp.Error)
+	}
+
+	var out taskSnapshotExportBody
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		t.Fatalf("unmarshal snapshot export body: %v", err)
+	}
+	if out.ProjectID != projectID {
+		t.Fatalf("project id = %q, want %q", out.ProjectID, projectID)
+	}
+	if out.TaskCount != 1 {
+		t.Fatalf("task count = %d, want 1", out.TaskCount)
+	}
+	if out.SessionCount != 1 {
+		t.Fatalf("session count = %d, want 1", out.SessionCount)
+	}
+	if len(out.Sessions) != 1 || out.Sessions[0].Name != sessionID {
+		t.Fatalf("sessions = %+v, want [%s]", out.Sessions, sessionID)
+	}
+	if len(out.Tasks) != 1 || !out.Tasks[0].SessionAttached {
+		t.Fatalf("tasks = %+v, expected exported task with SessionAttached=true", out.Tasks)
+	}
+}
+
 func TestRefreshWorktreeRuntimeStatePersistsGitMetricsFromWorktreeList(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-refresh-worktrees"

@@ -1,5 +1,7 @@
 package protocol
 
+const GlobalEventStreamProjectID = "*"
+
 // StreamProjectionDecision captures how a live daemon event should affect a client projection.
 type StreamProjectionDecision uint8
 
