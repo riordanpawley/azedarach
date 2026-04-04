@@ -2984,6 +2984,28 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandRuntimeReconcile:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID, []domain.Task{
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
+						}),
+					}, nil
 				case daemonclient.CommandSessionStop:
 					var body struct {
 						ProjectID string `json:"project_id"`
@@ -3029,18 +3051,49 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		})
 		m.nav.SelectTask("az-1", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
-		if _, ok := updated.(Model); !ok {
-			t.Fatalf("updated model type = %T, want Model", updated)
+		updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
 		}
 		if cmd == nil {
-			t.Fatal("expected worktree cleanup command")
+			t.Fatal("expected cleanup preflight command")
 		}
 
-		msg := cmd()
-		result, ok := msg.(worktreeCleanupResultMsg)
+		preflightMsg := cmd()
+		prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+			t.Fatalf("message type = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+		}
+
+		updatedAny, confirmCmd := updated.Update(prompt)
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation")
+		}
+
+		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if runCleanupCmd == nil {
+			t.Fatal("expected cleanup command after confirmation")
+		}
+
+		resultMsg := runCleanupCmd()
+		result, ok := resultMsg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", resultMsg)
 		}
 		if result.err != nil {
 			t.Fatalf("cleanup result err = %v", result.err)
@@ -3048,9 +3101,11 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if result.deletedTask {
 			t.Fatalf("deletedTask = true, want false")
 		}
-		if got := transport.requests; len(got) != 2 ||
-			got[0] != daemonclient.CommandSessionStop ||
-			got[1] != daemonclient.CommandWorktreeRemove {
+		if got := transport.requests; len(got) != 4 ||
+			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -3059,6 +3114,28 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandRuntimeReconcile:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID, []domain.Task{
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
+						}),
+					}, nil
 				case daemonclient.CommandSessionStop, daemonclient.CommandWorktreeRemove, daemonclient.CommandTaskDelete:
 					// expected commands
 				default:
@@ -3084,18 +3161,49 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		})
 		m.nav.SelectTask("az-1", 1)
 
-		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "W"})
-		if _, ok := updated.(Model); !ok {
-			t.Fatalf("updated model type = %T, want Model", updated)
+		updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "W"})
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
 		}
 		if cmd == nil {
+			t.Fatal("expected cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+		}
+
+		updatedAny, confirmCmd := updated.Update(prompt)
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation")
+		}
+
+		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if runCleanupCmd == nil {
 			t.Fatal("expected full cleanup command")
 		}
 
-		msg := cmd()
-		result, ok := msg.(worktreeCleanupResultMsg)
+		resultMsg := runCleanupCmd()
+		result, ok := resultMsg.(worktreeCleanupResultMsg)
 		if !ok {
-			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", msg)
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", resultMsg)
 		}
 		if result.err != nil {
 			t.Fatalf("cleanup result err = %v", result.err)
@@ -3103,10 +3211,12 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if !result.deletedTask {
 			t.Fatalf("deletedTask = false, want true")
 		}
-		if got := transport.requests; len(got) != 3 ||
-			got[0] != daemonclient.CommandSessionStop ||
-			got[1] != daemonclient.CommandWorktreeRemove ||
-			got[2] != daemonclient.CommandTaskDelete {
+		if got := transport.requests; len(got) != 5 ||
+			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove ||
+			got[4] != daemonclient.CommandTaskDelete {
 			t.Fatalf("requests = %v", got)
 		}
 	})
@@ -3117,6 +3227,28 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				switch req.Command {
+				case daemonclient.CommandRuntimeReconcile:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID, []domain.Task{
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
+						}),
+					}, nil
 				case daemonclient.CommandSessionStop:
 					stopCalls++
 					if stopCalls > 1 {
@@ -3187,9 +3319,40 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 
 		_, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
 		if cmd == nil {
+			t.Fatal("expected cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+		}
+
+		updatedAny, confirmCmd := m.Update(prompt)
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation")
+		}
+
+		updatedAny, runInitialCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if runInitialCleanupCmd == nil {
 			t.Fatal("expected initial cleanup command")
 		}
-		initialMsg := cmd()
+
+		initialMsg := runInitialCleanupCmd()
 		cleanupResult, ok := initialMsg.(worktreeCleanupResultMsg)
 		if !ok {
 			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", initialMsg)
@@ -3198,13 +3361,13 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 			t.Fatalf("needsForce = false, want true")
 		}
 
-		updatedAny, confirmCmd := m.Update(cleanupResult)
-		updated, ok := updatedAny.(Model)
+		updatedAny, forceConfirmCmd := m.Update(cleanupResult)
+		updated, ok = updatedAny.(Model)
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updatedAny)
 		}
-		if confirmCmd != nil {
-			_ = confirmCmd()
+		if forceConfirmCmd != nil {
+			_ = forceConfirmCmd()
 		}
 		if updated.pendingCleanup == nil {
 			t.Fatal("expected pending forced cleanup confirmation")
@@ -3234,6 +3397,15 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 		if stopCalls != 2 {
 			t.Fatalf("stop calls = %d, want 2", stopCalls)
+		}
+		if got := transport.requests; len(got) != 6 ||
+			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove ||
+			got[4] != daemonclient.CommandSessionStop ||
+			got[5] != daemonclient.CommandWorktreeRemove {
+			t.Fatalf("requests = %v", got)
 		}
 	})
 }

@@ -2233,6 +2233,22 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 		return err
 	}
 
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to inspect issue %s for delete guard: %w", opts.IssueID, err)
+	}
+	task, ok := findTaskByID(snapshot.Tasks, opts.IssueID)
+	if !ok {
+		return fmt.Errorf("issue not found: %s", opts.IssueID)
+	}
+	if blockers := issueDeleteRuntimeBlockers(task); len(blockers) > 0 {
+		return fmt.Errorf(
+			"cannot delete issue %s: active runtime attachments detected (%s); stop active session and remove worktree first",
+			opts.IssueID,
+			strings.Join(blockers, ", "),
+		)
+	}
+
 	if err := deps.DaemonClient.DeleteTask(ctx, opts.IssueID); err != nil {
 		return fmt.Errorf("failed to delete issue %s: %w", opts.IssueID, err)
 	}
@@ -2244,6 +2260,18 @@ func IssueDeleteCommand(deps *Dependencies, opts IssueDeleteOptions) error {
 	}
 	fmt.Printf("Deleted issue: %s\n", opts.IssueID)
 	return nil
+}
+
+func issueDeleteRuntimeBlockers(task domain.Task) []string {
+	blockers := make([]string, 0, 2)
+	if task.HasTmuxSession || task.Session != nil {
+		blockers = append(blockers, "session")
+	}
+	hasSessionWorktree := task.Session != nil && strings.TrimSpace(task.Session.Worktree) != ""
+	if task.HasWorktree || hasSessionWorktree {
+		blockers = append(blockers, "worktree")
+	}
+	return blockers
 }
 
 func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
