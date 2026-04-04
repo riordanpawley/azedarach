@@ -675,24 +675,47 @@ func restageHookChanges(projectDir string, paths []string) error {
 }
 
 func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName string, verbose bool) error {
+	if deps != nil && deps.Logger != nil {
+		deps.Logger.Info("githooks hook: reconcile requested",
+			"hook", strings.TrimSpace(hookName),
+			"project_dir", strings.TrimSpace(projectDir),
+		)
+	}
+
 	worktreeRoot, err := config.ResolveWorktreeRoot(projectDir)
 	if err != nil {
+		if deps != nil && deps.Logger != nil {
+			deps.Logger.Warn("githooks notify: resolve worktree root failed", "hook", strings.TrimSpace(hookName), "error", err)
+		}
 		if verbose {
 			fmt.Fprintf(os.Stderr, "githooks notify: resolve worktree root failed: %v\n", err)
 		}
 		return nil
 	}
 	if deps == nil || deps.DaemonClient == nil {
+		if deps != nil && deps.Logger != nil {
+			deps.Logger.Info("githooks hook: daemon client unavailable; skipping refresh", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
+		}
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if _, err := deps.DaemonClient.GitStatus(ctx, worktreeRoot); err != nil {
+	_, err = commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+		_, callErr := deps.DaemonClient.GitStatus(callCtx, worktreeRoot)
+		return struct{}{}, callErr
+	})
+	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("githooks hook: daemon git status refresh failed", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot, "error", err)
+		}
 		if verbose {
 			fmt.Fprintf(os.Stderr, "githooks hook: daemon git status refresh failed for %s: %v\n", worktreeRoot, err)
 		}
 		return nil
+	}
+	if deps.Logger != nil {
+		deps.Logger.Info("githooks hook: refreshed daemon git state", "hook", strings.TrimSpace(hookName), "worktree", worktreeRoot)
 	}
 	if verbose {
 		fmt.Printf("githooks hook: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)

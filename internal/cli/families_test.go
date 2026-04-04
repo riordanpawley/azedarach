@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -347,6 +348,78 @@ func TestGitHooksRunCommandBestEffortContinuesOnFailures(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", ".best-effort-ran")); err != nil {
 		t.Fatalf("expected post-failure command marker: %v", err)
+	}
+}
+
+func TestGitHooksNotifyCommandAutostartsDaemonOnTransientGitStatusError(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed file: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "add", "README.md"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeDir, "-b", "hook-test-autostart"); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatalf("chdir worktree: %v", err)
+	}
+	defer func() {
+		if chdirErr := os.Chdir(wd); chdirErr != nil {
+			t.Fatalf("restore cwd: %v", chdirErr)
+		}
+	}()
+
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	started := false
+	newLauncher = func(_, _ string) daemonStarter {
+		return &timeoutBudgetLauncher{minBudget: 1 * time.Second, started: &started}
+	}
+
+	attempts := 0
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandGitStatus {
+				return responseWithJSON(req, map[string]any{}), nil
+			}
+			attempts++
+			if !started {
+				return protocol.ResponseEnvelope{}, errors.New("dial unix /tmp/azedarach.sock: connect: connection refused")
+			}
+			return responseWithJSON(req, map[string]any{"status": map[string]any{}}), nil
+		},
+	}
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+		RepoDir:      baseDir,
+	}
+
+	if err := GitHooksNotifyCommand(deps, GitHooksNotifyOptions{Hook: "post-commit"}); err != nil {
+		t.Fatalf("GitHooksNotifyCommand error: %v", err)
+	}
+	if !started {
+		t.Fatalf("expected daemon autostart attempt")
+	}
+	if attempts < 2 {
+		t.Fatalf("git status attempts = %d, want at least 2", attempts)
 	}
 }
 
