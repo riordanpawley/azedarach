@@ -94,11 +94,18 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 		t.Error("expected 'Image attachments' action in action menu")
 	}
 
-	// Worktree-gated actions should be disabled
+	// Worktree-gated actions should be disabled without session/worktree.
 	for _, action := range menu.actions {
-		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" || action.Key == "w" || action.Key == "W" {
+		if action.Key == "u" || action.Key == "m" || action.Key == "P" || action.Key == "O" || action.Key == "M" || action.Key == "H" {
 			if action.Enabled {
 				t.Errorf("expected worktree-gated action '%s' to be disabled without session", action.Key)
+			}
+		}
+	}
+	for _, action := range menu.actions {
+		if action.Key == "w" || action.Key == "W" {
+			if !action.Enabled {
+				t.Errorf("expected cleanup action '%s' to remain enabled by issue id", action.Key)
 			}
 		}
 	}
@@ -110,6 +117,21 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 				t.Errorf("expected action '%s' to be enabled without session", action.Key)
 			}
 		}
+	}
+}
+
+func TestActionMenu_BuildActions_CleanupEnabledWithIssueIDWithoutSession(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-999",
+		Status: domain.StatusOpen,
+	}
+	menu := NewActionMenu(task, nil)
+
+	if cmd := menu.selectByKey("w"); cmd == nil {
+		t.Fatal("expected cleanup worktree action to be selectable without projected session/worktree")
+	}
+	if cmd := menu.selectByKey("W"); cmd == nil {
+		t.Fatal("expected delete+cleanup action to be selectable without projected session/worktree")
 	}
 }
 
