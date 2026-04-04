@@ -98,6 +98,8 @@ type Daemon struct {
 	runtimeStoresMu               sync.Mutex
 	runtimeStoresByProject        map[string]*daemonstate.RuntimeStateStore
 	runtimeStoresByRoot           map[string]*daemonstate.RuntimeStateStore
+	hookLogMu                     sync.Mutex
+	hookLogByProject              map[string][]protocol.HookLogEvent
 	tmux                          *tmux.Client
 	git                           *git.Client
 	gitHandler                    *daemonhandlers.GitHandler
@@ -212,6 +214,7 @@ func New(cfg Config) *Daemon {
 		worktreeManagersByRoot:        map[string]*git.WorktreeManager{},
 		runtimeStoresByProject:        map[string]*daemonstate.RuntimeStateStore{},
 		runtimeStoresByRoot:           map[string]*daemonstate.RuntimeStateStore{},
+		hookLogByProject:              map[string][]protocol.HookLogEvent{},
 		tmux:                          tmux.NewClient(tmuxRunner, cfg.Logger),
 		git:                           gitClient,
 		session:                       sessionHandler,
@@ -467,6 +470,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleMailList(ctx, req)
 	case protocol.CommandMailWatch:
 		return d.handleMailWatch(ctx, req)
+	case protocol.CommandHookLogAppend:
+		return d.handleHookLogAppend(ctx, req)
+	case protocol.CommandHookLogList:
+		return d.handleHookLogList(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.create":

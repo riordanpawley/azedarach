@@ -292,6 +292,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.waitForDaemonEventCmd()
 		}
 		m.recordRuntimeEvent(msg.event)
+		if current := m.overlayStack.Current(); current != nil {
+			if logOverlay, ok := current.(*overlay.EventLogOverlay); ok {
+				logOverlay.AddEvent(msg.event)
+			}
+		}
 		m.applyOperationProgressEvent(msg.event)
 		if msg.event.Event == protocol.EventSessionUpdated {
 			m.applySessionProjectionEvent(msg.event)
@@ -325,6 +330,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.daemonEvents = nil
 		return m, m.attachDaemonCmd()
+
+	case hookLogLoadedMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		current := m.overlayStack.Current()
+		logOverlay, ok := current.(*overlay.EventLogOverlay)
+		if !ok {
+			return m, nil
+		}
+		for _, hookEvt := range msg.events {
+			body, err := json.Marshal(hookEvt)
+			if err != nil {
+				continue
+			}
+			evt := protocol.EventEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				ProjectID:       m.daemonProjectID(),
+				Meta:            protocol.Metadata{ProjectID: m.daemonProjectID()},
+				Event:           protocol.EventHookLogAppended,
+				Kind:            protocol.EnvelopeKindEvent,
+				EmittedAt:       hookEvt.CreatedAt.UTC(),
+				Body:            body,
+			}
+			logOverlay.AddEvent(evt)
+		}
+		return m, nil
 
 	case network.StatusMsg:
 		// Update online status
