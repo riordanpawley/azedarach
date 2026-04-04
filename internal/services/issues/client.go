@@ -26,6 +26,7 @@ type dependencyRemovalConfirmationKey struct{}
 // ErrDependencyRemovalConfirmationRequired is returned when a removal that can
 // unblock or retarget workflow is attempted without explicit confirmation.
 var ErrDependencyRemovalConfirmationRequired = errors.New("explicit confirmation required")
+var ErrDeleteBlockedByRuntimeAttachments = errors.New("delete blocked: task has worktree or active session")
 
 // WithDependencyRemovalConfirmation marks a context as explicitly confirming a
 // dependency removal that can unblock or retarget workflow.
@@ -745,6 +746,33 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 			_ = tx.Rollback()
 		}
 	}()
+	var runtimeAttachmentCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT (
+			CASE
+				WHEN EXISTS (
+					SELECT 1
+					FROM daemon_worktree_projections
+					WHERE issue_id = ? AND TRIM(COALESCE(path, '')) <> ''
+				)
+				THEN 1 ELSE 0
+			END
+		) + (
+			CASE
+				WHEN EXISTS (
+					SELECT 1
+					FROM daemon_session_projections
+					WHERE issue_id = ? AND LOWER(TRIM(COALESCE(state, ''))) <> 'stopped'
+				)
+				THEN 1 ELSE 0
+			END
+		)
+	`, id, id).Scan(&runtimeAttachmentCount); err != nil {
+		return c.wrapError("delete", id, err)
+	}
+	if runtimeAttachmentCount > 0 {
+		return c.wrapError("delete", id, ErrDeleteBlockedByRuntimeAttachments)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM issue_dependencies WHERE issue_id = ? OR depends_on_id = ?`, id, id); err != nil {
 		return c.wrapError("delete", id, err)
 	}
