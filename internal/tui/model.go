@@ -405,11 +405,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	switch msg.String() {
 	case overlay.EventLogHotkey:
-		return m, m.openOverlay(overlay.NewEventLogOverlayWithLogFiles(
-			m.runtimeEvents,
-			m.eventLogFilePath(),
-			m.daemonLogFilePath(),
-		))
+		return m, tea.Batch(
+			m.openOverlay(overlay.NewEventLogOverlayWithLogFiles(
+				m.runtimeEvents,
+				m.eventLogFilePath(),
+				m.daemonLogFilePath(),
+			)),
+			m.loadHookLogEventsCmd(),
+		)
 	case "O": // Orchestration overlay
 		return m, m.openOrchestrationOverlay()
 	case "X": // Bulk cleanup (Shift+X)
@@ -837,6 +840,11 @@ type daemonStreamClosedMsg struct {
 	stream <-chan protocol.EventEnvelope
 }
 
+type hookLogLoadedMsg struct {
+	events []protocol.HookLogEvent
+	err    error
+}
+
 type tickMsg time.Time
 
 type daemonEventDecision int
@@ -1075,6 +1083,22 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 		}
+	}
+}
+
+func (m Model) loadHookLogEventsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return hookLogLoadedMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		events, err := m.daemonClient.ListHookLogEvents(ctx, 200)
+		if err != nil {
+			return hookLogLoadedMsg{err: err}
+		}
+		return hookLogLoadedMsg{events: events}
 	}
 }
 

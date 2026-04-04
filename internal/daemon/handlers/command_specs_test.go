@@ -18,6 +18,7 @@ func TestCommandSpecRegistryProjectIDPolicy(t *testing.T) {
 		{command: CommandSessionStart, want: true},
 		{command: protocol.CommandRuntimeReconcile, want: true},
 		{command: protocol.CommandIssueFanout, want: true},
+		{command: protocol.CommandHookLogList, want: true},
 		{command: protocol.CommandSpecRead, want: false},
 		{command: "unknown.command", want: false},
 	}
@@ -171,6 +172,8 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandMailSend,
 		protocol.CommandMailList,
 		protocol.CommandMailWatch,
+		protocol.CommandHookLogAppend,
+		protocol.CommandHookLogList,
 		commandTaskList,
 		commandTaskCreate,
 		commandTaskUpdateStatus,

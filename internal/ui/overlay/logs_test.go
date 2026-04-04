@@ -1,8 +1,6 @@
 package overlay
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,8 +101,8 @@ func TestEventLogOverlay_View_EmptyState(t *testing.T) {
 	if !strings.Contains(view, "No runtime events yet.") {
 		t.Fatalf("View() missing empty state: %s", view)
 	}
-	if !strings.Contains(view, "Runtime Events") || !strings.Contains(view, "Hook Events") {
-		t.Fatalf("View() missing source tabs: %s", view)
+	if !strings.Contains(view, "Filter:") || !strings.Contains(view, "All") || !strings.Contains(view, "Hooks") {
+		t.Fatalf("View() missing filter header: %s", view)
 	}
 	if !strings.Contains(view, "Esc/q/backspace") || !strings.Contains(view, "close") {
 		t.Fatalf("View() missing close hint: %s", view)
@@ -236,35 +234,49 @@ func TestEventLogOverlay_Update_LogActionKeys(t *testing.T) {
 	}
 }
 
-func TestEventLogOverlay_Update_TabSwitchesSources(t *testing.T) {
-	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "az.log")
-	if err := os.WriteFile(logPath, []byte("Hook notification: stop -> stopped\n"), 0o644); err != nil {
-		t.Fatalf("write log fixture: %v", err)
-	}
-
-	overlay := NewEventLogOverlayWithLogFiles([]protocol.EventEnvelope{testEvent(1, "daemon.event.one")}, logPath, "")
+func TestEventLogOverlay_Update_FilterCycles(t *testing.T) {
+	hookBody := []byte(`{"source":"githooks.hook","message":"refreshed daemon git state"}`)
+	overlay := NewEventLogOverlayWithLogFiles([]protocol.EventEnvelope{
+		testEvent(1, "operation.running"),
+		testEvent(2, "git.status.updated"),
+		{
+			ProtocolVersion: protocol.CurrentVersion,
+			ProjectID:       "proj-a",
+			Revision:        3,
+			Event:           protocol.EventHookLogAppended,
+			Kind:            protocol.EnvelopeKindEvent,
+			EmittedAt:       time.Date(2026, time.March, 25, 17, 0, 3, 0, time.UTC),
+			Body:            hookBody,
+		},
+	}, "", "")
 
 	runtimeView := overlay.View()
-	if !strings.Contains(runtimeView, "[Runtime Events]") {
-		t.Fatalf("runtime tab not highlighted: %s", runtimeView)
+	if !strings.Contains(runtimeView, "[All]") {
+		t.Fatalf("all filter not highlighted: %s", runtimeView)
 	}
 
 	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = model.(*EventLogOverlay)
-	hookView := overlay.View()
-	if !strings.Contains(hookView, "[Hook Events]") {
-		t.Fatalf("hook tab not highlighted after tab: %s", hookView)
-	}
-	if !strings.Contains(hookView, "Hook notification: stop -> stopped") {
-		t.Fatalf("hook events missing after tab switch: %s", hookView)
+	opView := overlay.View()
+	if !strings.Contains(opView, "[Operation]") {
+		t.Fatalf("operation filter not highlighted after tab: %s", opView)
 	}
 
-	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
 	overlay = model.(*EventLogOverlay)
-	backView := overlay.View()
-	if !strings.Contains(backView, "[Runtime Events]") {
-		t.Fatalf("runtime tab not restored after shift+tab: %s", backView)
+	gitView := overlay.View()
+	if !strings.Contains(gitView, "[Git]") {
+		t.Fatalf("git filter not highlighted after tab: %s", gitView)
+	}
+
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
+	overlay = model.(*EventLogOverlay)
+	hookView := overlay.View()
+	if !strings.Contains(hookView, "[Hooks]") {
+		t.Fatalf("hook filter not highlighted after tab: %s", hookView)
+	}
+	if !strings.Contains(hookView, protocol.EventHookLogAppended) {
+		t.Fatalf("hook filter view missing hook event: %s", hookView)
 	}
 }
 
@@ -341,35 +353,6 @@ func TestEventLogOverlay_EventCapAndChronologicalAppend(t *testing.T) {
 	}
 	if got := overlay.events[len(overlay.events)-1].Revision; got != eventLogMaxRetainedEvents+25 {
 		t.Fatalf("newest retained revision = %d, want %d", got, eventLogMaxRetainedEvents+25)
-	}
-}
-
-func TestReadHookEventLinesFromLogFile_FiltersAndFormats(t *testing.T) {
-	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "az.log")
-	logContent := strings.Join([]string{
-		`{"time":"2026-04-03T15:09:28Z","level":"info","msg":"Hook notification: stop -> stopped"}`,
-		`{"time":"2026-04-03T15:09:29Z","level":"info","msg":"az githooks hook --hook post-commit"}`,
-		`{"time":"2026-04-03T15:09:30Z","level":"info","msg":"unrelated event"}`,
-		`githooks notify: resolve worktree root failed`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
-		t.Fatalf("write log fixture: %v", err)
-	}
-
-	lines := readHookEventLinesFromLogFile(logPath, 10)
-	if len(lines) != 3 {
-		t.Fatalf("hook line count = %d, want 3 (%#v)", len(lines), lines)
-	}
-	if !strings.Contains(lines[0], "Hook notification: stop -> stopped") {
-		t.Fatalf("first hook line missing hook notification: %q", lines[0])
-	}
-	if !strings.Contains(lines[1], "az githooks hook --hook post-commit") {
-		t.Fatalf("second hook line missing githooks command: %q", lines[1])
-	}
-	if !strings.Contains(lines[2], "githooks notify: resolve worktree root failed") {
-		t.Fatalf("third hook line mismatch: %q", lines[2])
 	}
 }
 
