@@ -32,6 +32,7 @@ type sessionCommandBody struct {
 	SessionID  string   `json:"session_id"`
 	BaseBranch string   `json:"base_branch,omitempty"`
 	Yolo       bool     `json:"yolo,omitempty"`
+	StartWork  *bool    `json:"start_work,omitempty"`
 	ImagePaths []string `json:"image_paths,omitempty"`
 }
 
@@ -41,6 +42,7 @@ type StartSessionParams struct {
 	IssueID    string
 	BaseBranch string
 	Yolo       bool
+	StartWork  *bool
 	ImagePaths []string
 }
 
@@ -128,6 +130,7 @@ func (c *Client) StartSession(ctx context.Context, params StartSessionParams) (s
 		SessionID:  params.IssueID,
 		BaseBranch: params.BaseBranch,
 		Yolo:       params.Yolo,
+		StartWork:  params.StartWork,
 		ImagePaths: params.ImagePaths,
 	})
 }

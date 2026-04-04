@@ -106,6 +106,19 @@ func TestSettingsOverlay_Size(t *testing.T) {
 	}
 }
 
+func TestSettingsOverlay_Size_ResponsiveToWindow(t *testing.T) {
+	menu := NewDefaultSettingsOverlay()
+	_, _ = menu.Update(tea.WindowSizeMsg{Width: 150, Height: 60})
+
+	width, height := menu.Size()
+	if width != 120 {
+		t.Fatalf("width = %d, want 120", width)
+	}
+	if height != 48 {
+		t.Fatalf("height = %d, want 48", height)
+	}
+}
+
 func TestSettingsOverlay_MoveCursor(t *testing.T) {
 	items := []SettingItem{
 		{Key: "1", Label: "First", Type: SettingToggle, Value: true},
@@ -559,6 +572,86 @@ func TestSettingsOverlay_ConfigBackedGitPrAndNetworkSettingsPersist(t *testing.T
 	}
 	if loaded.Network.AutoDetect {
 		t.Fatal("expected network auto-detect to be disabled after toggle")
+	}
+}
+
+func TestSettingsOverlay_ConfigBackedExpandedSettingsPersist(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Git.WorkflowMode = "worktree"
+	cfg.Git.DefaultMergeStrategy = "merge"
+	cfg.Network.CheckInterval = 60
+	cfg.Merge.Strategy = "merge"
+	cfg.Notifications.ErrorThreshold = 3
+	cfg.Worktree.KeepDays = 7
+	cfg.Spec.Enabled = true
+
+	menu := NewSettingsOverlayWithEditorAndConfig(
+		&mockSettingsEditor{showPhases: true},
+		cfg,
+		filepath.Join(tmpDir, config.ConfigDirName, config.ConfigFileName),
+	)
+
+	for _, key := range []string{
+		"git-workflow-mode",
+		"git-default-merge-strategy",
+		"network-check-interval",
+		"merge-strategy",
+		"notifications-error-threshold",
+		"worktree-keep-days",
+	} {
+		idx := settingIndexByKey(menu, key)
+		if idx < 0 {
+			t.Fatalf("setting %q not found", key)
+		}
+		menu.cursor = idx
+		_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+		if cmd == nil {
+			t.Fatalf("expected config save command after cycling %q", key)
+		}
+		if result := cmd(); result != nil {
+			t.Fatalf("expected nil result from successful config save for %q, got %T", key, result)
+		}
+	}
+
+	specIdx := settingIndexByKey(menu, "spec-enabled")
+	if specIdx < 0 {
+		t.Fatal("setting \"spec-enabled\" not found")
+	}
+	menu.cursor = specIdx
+	_, cmd := menu.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd == nil {
+		t.Fatal("expected config save command after toggling spec-enabled")
+	}
+	if result := cmd(); result != nil {
+		t.Fatalf("expected nil result from successful config save for spec-enabled, got %T", result)
+	}
+
+	loaded, err := config.LoadConfig(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if loaded.Git.WorkflowMode != "branch" {
+		t.Fatalf("git workflow mode = %q, want branch", loaded.Git.WorkflowMode)
+	}
+	if loaded.Git.DefaultMergeStrategy != "squash" {
+		t.Fatalf("git default merge strategy = %q, want squash", loaded.Git.DefaultMergeStrategy)
+	}
+	if loaded.Network.CheckInterval != 120 {
+		t.Fatalf("network check interval = %d, want 120", loaded.Network.CheckInterval)
+	}
+	if loaded.Merge.Strategy != "squash" {
+		t.Fatalf("merge strategy = %q, want squash", loaded.Merge.Strategy)
+	}
+	if loaded.Notifications.ErrorThreshold != 5 {
+		t.Fatalf("notifications error threshold = %d, want 5", loaded.Notifications.ErrorThreshold)
+	}
+	if loaded.Worktree.KeepDays != 14 {
+		t.Fatalf("worktree keep days = %d, want 14", loaded.Worktree.KeepDays)
+	}
+	if loaded.Spec.Enabled {
+		t.Fatal("expected spec-enabled to be toggled to false")
 	}
 }
 
