@@ -214,14 +214,18 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	if msg.Key == "yes" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
 		m.pendingCleanup = nil
-		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, true)
+		return m, m.cleanupWorktreeCmd(pending.taskID, pending.deletedTask, pending.force)
 	}
 	if msg.Key == "no" && m.pendingCleanup != nil {
 		pending := m.pendingCleanup
 		m.pendingCleanup = nil
+		cancelMessage := fmt.Sprintf("Cancelled cleanup for %s", pending.taskID)
+		if pending.force {
+			cancelMessage = fmt.Sprintf("Cancelled forced cleanup for %s", pending.taskID)
+		}
 		m.addToast(Toast{
 			Level:   ToastInfo,
-			Message: fmt.Sprintf("Cancelled forced cleanup for %s", pending.taskID),
+			Message: cancelMessage,
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
@@ -382,10 +386,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case "w":
 		// Cleanup worktree and keep task.
-		return m, m.cleanupWorktreeCmd(task.ID, false, false)
+		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID, false)
 	case "W":
 		// Delete task and cleanup worktree.
-		return m, m.cleanupWorktreeCmd(task.ID, true, false)
+		return m, m.requestWorktreeCleanupConfirmationCmd(task.ID, true)
 
 	case "i":
 		// Image attachments

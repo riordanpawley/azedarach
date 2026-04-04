@@ -2202,9 +2202,27 @@ type worktreeCleanupResultMsg struct {
 	err         error
 }
 
+type worktreeCleanupConfirmPromptMsg struct {
+	taskID       string
+	deletedTask  bool
+	freshness    protocol.TaskListFreshness
+	checkedAt    time.Time
+	hasSnapshot  bool
+	hasTask      bool
+	hasWorktree  bool
+	dirty        bool
+	ahead        int
+	behind       int
+	additions    int
+	deletions    int
+	reconcileErr error
+	snapshotErr  error
+}
+
 type pendingWorktreeCleanupConfirmation struct {
 	taskID      string
 	deletedTask bool
+	force       bool
 }
 
 func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
@@ -2263,6 +2281,97 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 
 		return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force}
 	}
+}
+
+func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask bool) tea.Cmd {
+	return func() tea.Msg {
+		msg := worktreeCleanupConfirmPromptMsg{
+			taskID:      taskID,
+			deletedTask: deleteTask,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if m.daemonClient == nil {
+			msg.snapshotErr = fmt.Errorf("daemon client unavailable")
+			return msg
+		}
+
+		if _, err := m.daemonClient.ReconcileRuntime(ctx); err != nil {
+			msg.reconcileErr = err
+		}
+
+		snapshot, err := m.readTaskSnapshot(ctx, m.daemonClient)
+		if err != nil {
+			msg.snapshotErr = err
+			return msg
+		}
+
+		msg.hasSnapshot = true
+		msg.freshness = snapshot.Freshness
+		msg.checkedAt = snapshot.LastCheckedAt
+
+		for _, task := range snapshot.Tasks {
+			if taskIDKey(task.ID) != taskIDKey(taskID) {
+				continue
+			}
+			msg.hasTask = true
+			msg.hasWorktree = task.HasWorktree
+			msg.ahead = task.GitAheadCount
+			msg.behind = task.GitBehindCount
+			msg.additions = task.GitAdditions
+			msg.deletions = task.GitDeletions
+			msg.dirty = task.HasUncommittedChanges || task.GitAdditions > 0 || task.GitDeletions > 0
+			break
+		}
+
+		return msg
+	}
+}
+
+func formatWorktreeCleanupConfirmPrompt(msg worktreeCleanupConfirmPromptMsg) string {
+	action := "cleanup worktree"
+	if msg.deletedTask {
+		action = "delete task and cleanup worktree"
+	}
+
+	lines := []string{
+		fmt.Sprintf("Action: %s", action),
+		fmt.Sprintf("Task: %s", msg.taskID),
+		"",
+		"Git state (after priority reconcile):",
+	}
+
+	if msg.snapshotErr != nil {
+		lines = append(lines, fmt.Sprintf("- unavailable (%v)", msg.snapshotErr))
+	} else if !msg.hasTask {
+		lines = append(lines, "- task not found in refreshed snapshot")
+	} else {
+		worktreeState := "not detected"
+		if msg.hasWorktree {
+			worktreeState = "present"
+		}
+		changeState := "clean"
+		if msg.dirty {
+			changeState = fmt.Sprintf("dirty (+%d/-%d)", msg.additions, msg.deletions)
+		}
+		lines = append(lines,
+			fmt.Sprintf("- Worktree: %s", worktreeState),
+			fmt.Sprintf("- Changes: %s", changeState),
+			fmt.Sprintf("- Ahead/Behind: ↑%d/↓%d", msg.ahead, msg.behind),
+		)
+		if msg.hasSnapshot && !msg.checkedAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("- Snapshot: %s at %s", msg.freshness, msg.checkedAt.Local().Format("2006-01-02 15:04:05")))
+		}
+	}
+
+	if msg.reconcileErr != nil {
+		lines = append(lines, "", fmt.Sprintf("Note: reconcile warning: %v", msg.reconcileErr))
+	}
+
+	lines = append(lines, "", "Proceed?")
+	return strings.Join(lines, "\n")
 }
 
 func isDirtyWorktreeRemovalError(err error) bool {
