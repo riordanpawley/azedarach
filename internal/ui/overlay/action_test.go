@@ -122,6 +122,9 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 
 	menu := NewActionMenu(task, nil)
 	hasAttach := false
+	hasStart := false
+	hasStartAndWork := false
+	hasStartYolo := false
 	hasCleanup := false
 	hasDeleteAndCleanup := false
 	worktreeOnlyActionsEnabled := []string{}
@@ -129,6 +132,15 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	for _, action := range menu.actions {
 		if action.Key == "a" && action.Enabled {
 			hasAttach = true
+		}
+		if action.Key == "s" && action.Enabled {
+			hasStart = true
+		}
+		if action.Key == "S" && action.Enabled {
+			hasStartAndWork = true
+		}
+		if action.Key == "!" && action.Enabled {
+			hasStartYolo = true
 		}
 		if action.Key == "w" && action.Enabled {
 			hasCleanup = true
@@ -145,6 +157,9 @@ func TestActionMenu_BuildActions_TmuxPresenceWithoutProjectedSession(t *testing.
 	}
 	if !hasAttach {
 		t.Fatal("expected attach action when task has tmux presence")
+	}
+	if !hasStart || !hasStartAndWork || !hasStartYolo {
+		t.Fatal("expected start actions when projected session is missing")
 	}
 	if !hasCleanup || !hasDeleteAndCleanup {
 		t.Fatal("expected cleanup actions to remain enabled when tmux session is present")
