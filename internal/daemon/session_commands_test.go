@@ -123,7 +123,8 @@ func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (strin
 }
 
 type sessionStartTmuxRunner struct {
-	sessions map[string]bool
+	sessions      map[string]bool
+	sendKeysCalls int
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -150,6 +151,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		r.sessions[args[3]] = true
 		return "", nil
 	case "send-keys":
+		r.sendKeysCalls++
 		return "", nil
 	case "list-sessions":
 		names := make([]string, 0, len(r.sessions))
@@ -242,6 +244,96 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "Worktree reused: "+worktreePath) {
 		t.Fatalf("output = %q, want reused worktree path", payload.Output)
+	}
+	if tmuxRunner.sendKeysCalls != 1 {
+		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
+	}
+}
+
+func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start tmux only",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/start-tmux-only"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-tmux-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: projectID,
+		},
+		Body: marshalJSON(map[string]any{
+			"project_id": projectID,
+			"session_id": issueID,
+			"start_work": false,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want 0 when start_work=false", tmuxRunner.sendKeysCalls)
+	}
+
+	var payload struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal response body: %v", err)
+	}
+	if !strings.Contains(payload.Output, "Skipping AI launch (tmux session only)") {
+		t.Fatalf("output = %q, want tmux-only launch line", payload.Output)
 	}
 }
 

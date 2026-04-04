@@ -4069,6 +4069,7 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 					SessionID  string `json:"session_id"`
 					BaseBranch string `json:"base_branch,omitempty"`
 					Yolo       bool   `json:"yolo,omitempty"`
+					StartWork  bool   `json:"start_work,omitempty"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session start request: %v", err)
@@ -4081,6 +4082,9 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 				}
 				if body.Yolo {
 					t.Fatal("expected yolo=false for Shift+S start")
+				}
+				if !body.StartWork {
+					t.Fatal("expected start_work=true for Shift+S start")
 				}
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
@@ -4128,6 +4132,82 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 	}
 }
 
+func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
+	baseBranch := "develop"
+	childID := "az-child"
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionStart:
+				var body struct {
+					ProjectID  string `json:"project_id"`
+					SessionID  string `json:"session_id"`
+					BaseBranch string `json:"base_branch,omitempty"`
+					Yolo       bool   `json:"yolo,omitempty"`
+					StartWork  bool   `json:"start_work,omitempty"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal session start request: %v", err)
+				}
+				if body.SessionID != childID {
+					t.Fatalf("session ID = %q, want %q", body.SessionID, childID)
+				}
+				if body.BaseBranch != baseBranch {
+					t.Fatalf("base branch = %q, want %q", body.BaseBranch, baseBranch)
+				}
+				if body.Yolo {
+					t.Fatal("expected yolo=false for s start")
+				}
+				if body.StartWork {
+					t.Fatal("expected start_work=false for s start")
+				}
+				respBody, _ := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "started"})
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.config.Git.BaseBranch = baseBranch
+	m.tasks = []domain.Task{
+		{
+			ID:     childID,
+			Title:  "Child task",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+		},
+	}
+	m.nav.SelectTask(childID, 0)
+
+	_, startCmd := m.handleSelection(overlay.SelectionMsg{Key: "s"})
+	if startCmd == nil {
+		t.Fatal("expected session start command")
+	}
+	startMsg := startCmd()
+	started, ok := startMsg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("start message type = %T, want sessionStartedMsg", startMsg)
+	}
+	if started.issueID != childID {
+		t.Fatalf("started issue = %q, want %q", started.issueID, childID)
+	}
+	if len(transport.requests) != 1 || transport.requests[0] != daemonclient.CommandSessionStart {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+}
+
 func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -4149,7 +4229,7 @@ func TestStartSessionCommandReturnsPendingOperationToast(t *testing.T) {
 	}
 
 	m := newDaemonTestModel(transport)
-	startMsg := m.startSessionCmd("az-child", "main", false)()
+	startMsg := m.startSessionCmd("az-child", "main", false, true)()
 	started, ok := startMsg.(sessionStartedMsg)
 	if !ok {
 		t.Fatalf("message type = %T, want sessionStartedMsg", startMsg)
@@ -4239,6 +4319,7 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 					SessionID  string `json:"session_id"`
 					BaseBranch string `json:"base_branch,omitempty"`
 					Yolo       bool   `json:"yolo,omitempty"`
+					StartWork  bool   `json:"start_work,omitempty"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session start request: %v", err)
@@ -4251,6 +4332,9 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 				}
 				if body.Yolo {
 					t.Fatal("expected yolo=false for Shift+S start")
+				}
+				if !body.StartWork {
+					t.Fatal("expected start_work=true for Shift+S start")
 				}
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`
@@ -4343,6 +4427,7 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 					SessionID  string `json:"session_id"`
 					BaseBranch string `json:"base_branch,omitempty"`
 					Yolo       bool   `json:"yolo,omitempty"`
+					StartWork  bool   `json:"start_work,omitempty"`
 				}
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal session start request: %v", err)
@@ -4355,6 +4440,9 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 				}
 				if !body.Yolo {
 					t.Fatal("expected yolo=true for ! start")
+				}
+				if !body.StartWork {
+					t.Fatal("expected start_work=true for ! start")
 				}
 				respBody, _ := json.Marshal(struct {
 					Output string `json:"output"`

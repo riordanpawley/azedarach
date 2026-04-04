@@ -1687,10 +1687,11 @@ func (m Model) daemonCommandTimeout() time.Duration {
 }
 
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
-func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea.Cmd {
+func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool, startWork bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		startWorkValue := startWork
 
 		if baseBranch == "" {
 			baseBranch = m.resolveBaseBranch()
@@ -1702,6 +1703,7 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea
 			IssueID:    issueID,
 			BaseBranch: baseBranch,
 			Yolo:       yolo,
+			StartWork:  &startWorkValue,
 			ImagePaths: m.sessionImagePaths(ctx, issueID),
 		}); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
