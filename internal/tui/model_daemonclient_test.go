@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"reflect"
@@ -3313,25 +3314,45 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("open PR without session warns", func(t *testing.T) {
-		m := newDaemonTestModel(&recordingDaemonTransport{})
+	t.Run("open PR without session defers to daemon and returns error", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandWorktreeList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            []byte(`{"project_id":"proj-daemon","worktrees":[]}`),
+					}, nil
+				default:
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+			},
+		}
+		m := newDaemonTestModel(transport)
 		m.tasks = []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, Type: domain.TypeTask}}
 		m.nav.SelectTask("az-1", 1)
 
 		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "O"})
-		if cmd != nil {
-			t.Fatal("expected nil command when session is missing")
+		if cmd == nil {
+			t.Fatal("expected command when session projection is missing")
+		}
+		msg := cmd()
+		result, ok := msg.(openPRResultMsg)
+		if !ok {
+			t.Fatalf("cmd message type = %T, want openPRResultMsg", msg)
+		}
+		if result.err == nil {
+			t.Fatal("expected open PR error when daemon has no worktree")
 		}
 		updatedModel, ok := updated.(Model)
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updated)
 		}
-		if len(updatedModel.toasts) == 0 {
-			t.Fatal("expected warning toast")
-		}
-		got := updatedModel.toasts[len(updatedModel.toasts)-1].Message
-		if !strings.Contains(got, "No active session - start session first") {
-			t.Fatalf("warning toast = %q", got)
+		if len(updatedModel.toasts) != 0 {
+			t.Fatalf("unexpected immediate toast; command should report result asynchronously: %+v", updatedModel.toasts)
 		}
 	})
 

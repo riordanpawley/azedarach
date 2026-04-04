@@ -241,6 +241,9 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"image_count", len(cmd.ImagePaths),
 		)
 	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStart); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
+	}
 	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -400,6 +403,9 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 			"session_id", cmd.SessionID,
 		)
 	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionAttach); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
+	}
 	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -444,6 +450,9 @@ func (d *Daemon) handleSessionPause(ctx context.Context, req protocol.RequestEnv
 			"session_id", cmd.SessionID,
 		)
 	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionPause); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
+	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
 		req,
@@ -475,6 +484,9 @@ func (d *Daemon) handleSessionResume(ctx context.Context, req protocol.RequestEn
 			"issue_id", cmd.IssueID,
 			"session_id", cmd.SessionID,
 		)
+	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionResume); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	if err := d.applySessionLifecycleTransition(
 		ctx,
@@ -516,6 +528,9 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 			"issue_id", cmd.IssueID,
 			"session_id", cmd.SessionID,
 		)
+	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStop); err != nil {
+		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
@@ -566,6 +581,13 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 		)
 	}
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) mutationFreshnessErrorResponse(req protocol.RequestEnvelope, err error) protocol.ResponseEnvelope {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return d.errorResponse(req, protocol.ErrorCodeTimeout, fmt.Sprintf("refresh runtime state before mutation: %v", err))
+	}
+	return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh runtime state before mutation: %v", err))
 }
 
 func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
@@ -1091,38 +1113,39 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID string) ([]string, error) {
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	if d.sessionRuntimeStateStore(projectID) != nil {
-		cachedSessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
-		if err == nil && len(cachedSessions) > 0 {
-			cachedActive := make([]string, 0, len(cachedSessions))
-			for _, session := range cachedSessions {
-				if session.State == daemonstate.SessionStateStopped {
-					continue
-				}
-				if d.isSessionStopPending(projectID, session.IssueID) {
-					continue
-				}
-				if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, d.sessionNamingScope(projectID)); ok {
-					if d.isSessionStopPending(projectID, parsedIssueID) {
-						continue
-					}
-				}
-				if strings.TrimSpace(session.ID) == "" {
-					continue
-				}
-				cachedActive = append(cachedActive, session.ID)
-			}
-			if len(cachedActive) > 0 {
-				return cachedActive, nil
-			}
-		}
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return []string{}, nil
 	}
-
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
+	cachedSessions, err := store.ListSessionStates(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	return tmuxSessions, nil
+	cachedActive := make([]string, 0, len(cachedSessions))
+	for _, session := range cachedSessions {
+		if session.State == daemonstate.SessionStateStopped {
+			continue
+		}
+		if d.isSessionStopPending(projectID, session.IssueID) {
+			continue
+		}
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, d.sessionNamingScope(projectID)); ok {
+			if d.isSessionStopPending(projectID, parsedIssueID) {
+				continue
+			}
+		}
+		if strings.TrimSpace(session.ID) == "" {
+			continue
+		}
+		cachedActive = append(cachedActive, session.ID)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("using projection-backed session runtime state",
+			"project_id", projectID,
+			"cached_sessions", len(cachedActive),
+		)
+	}
+	return cachedActive, nil
 }
 
 func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID string) error {

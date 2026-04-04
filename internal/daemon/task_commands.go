@@ -668,7 +668,7 @@ func (d *Daemon) handleTaskSnapshotExport(ctx context.Context, req protocol.Requ
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	sessions, err := d.tmux.ListSessions(ctx)
+	sessions, err := d.listTmuxSessionsCacheFirst(ctx, projectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}

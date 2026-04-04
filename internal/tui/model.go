@@ -2298,15 +2298,11 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if session := m.sessionForIssue(taskID); session != nil {
-			m.sessionMonitor.Stop(taskID)
-			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-				if force && isSessionAlreadyStoppedError(err) {
-					// Force-retry path may re-enter before projections clear the stale session.
-					// If daemon already stopped it, continue to worktree removal.
-				} else {
-					return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
-				}
+		// Always ask daemon to stop first; local projection may be stale.
+		m.sessionMonitor.Stop(taskID)
+		if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
+			if !(force && isSessionAlreadyStoppedError(err)) && !isSessionAlreadyStoppedError(err) {
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
 			}
 		}
 

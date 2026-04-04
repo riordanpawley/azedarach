@@ -3179,22 +3179,77 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Command != daemonclient.CommandSessionAttach {
-				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			switch req.Command {
+			case daemonclient.CommandWorktreeList:
+				respBody, err := json.Marshal(struct {
+					ProjectID string `json:"project_id"`
+					Worktrees []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					} `json:"worktrees"`
+				}{
+					ProjectID: "proj-test",
+					Worktrees: []struct {
+						Path    string `json:"path"`
+						Branch  string `json:"branch"`
+						IssueID string `json:"issue_id"`
+					}{{
+						Path:    "/tmp/wt-az-1",
+						Branch:  "riordan/az-1/topic",
+						IssueID: m.tasks[0].ID,
+					}},
+				})
+				if err != nil {
+					t.Fatalf("marshal worktree list: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandGitBranchBehind:
+				respBody, err := json.Marshal(struct {
+					Worktree      string `json:"worktree"`
+					BaseBranch    string `json:"base_branch"`
+					Remote        string `json:"remote"`
+					CommitsBehind int    `json:"commits_behind"`
+				}{
+					Worktree:      "/tmp/wt-az-1",
+					BaseBranch:    "main",
+					Remote:        "origin",
+					CommitsBehind: 0,
+				})
+				if err != nil {
+					t.Fatalf("marshal branch behind response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			case daemonclient.CommandSessionAttach:
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "attached"})
+				if err != nil {
+					t.Fatalf("marshal response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+			default:
+				t.Fatalf("command = %q, want one of %q/%q/%q", req.Command, daemonclient.CommandWorktreeList, daemonclient.CommandGitBranchBehind, daemonclient.CommandSessionAttach)
 			}
-			respBody, err := json.Marshal(struct {
-				Output string `json:"output"`
-			}{Output: "attached"})
-			if err != nil {
-				t.Fatalf("marshal response: %v", err)
-			}
-			return protocol.ResponseEnvelope{
-				ProtocolVersion: req.ProtocolVersion,
-				RequestID:       req.RequestID,
-				Kind:            protocol.EnvelopeKindResponse,
-				OK:              true,
-				Body:            respBody,
-			}, nil
+			return protocol.ResponseEnvelope{}, nil
 		},
 	}
 	m.daemonClient = daemonclient.New(transport)
@@ -3204,8 +3259,18 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 		t.Fatal("expected attach command")
 	}
 	msg := cmd()
-	if _, ok := msg.(sessionAttachedMsg); !ok {
-		t.Fatalf("attach cmd returned %T, want sessionAttachedMsg", msg)
+	behind, ok := msg.(branchBehindMsg)
+	if !ok {
+		t.Fatalf("attach command returned %T, want branchBehindMsg", msg)
+	}
+	updated, nextCmd := m.Update(behind)
+	if nextCmd == nil {
+		t.Fatal("expected attach follow-up command")
+	}
+	m = updated.(Model)
+	attachMsg := nextCmd()
+	if _, ok := attachMsg.(sessionAttachedMsg); !ok {
+		t.Fatalf("attach follow-up returned %T, want sessionAttachedMsg", attachMsg)
 	}
 }
 

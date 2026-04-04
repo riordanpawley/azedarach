@@ -180,12 +180,18 @@ func (m Model) openPRCmd(worktree, issueID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		branch, err := m.resolveWorktreeBranch(ctx, worktree, issueID)
+		resolvedWorktree := strings.TrimSpace(worktree)
+		if resolvedWorktree == "" {
+			if fallback, resolveErr := m.resolveIssueWorktreePath(ctx, issueID); resolveErr == nil {
+				resolvedWorktree = strings.TrimSpace(fallback)
+			}
+		}
+		branch, err := m.resolveWorktreeBranch(ctx, resolvedWorktree, issueID)
 		if err != nil {
 			return openPRResultMsg{issueID: issueID, err: fmt.Errorf("resolve branch: %w", err)}
 		}
 		cmd := exec.CommandContext(ctx, "gh", "pr", "view", "--head", branch, "--web")
-		cmd.Dir = worktree
+		cmd.Dir = resolvedWorktree
 		if err := cmd.Run(); err != nil {
 			return openPRResultMsg{issueID: issueID, err: err}
 		}
@@ -195,11 +201,19 @@ func (m Model) openPRCmd(worktree, issueID string) tea.Cmd {
 
 func (m Model) openHelixCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
-		if strings.TrimSpace(worktree) == "" {
+		resolvedWorktree := strings.TrimSpace(worktree)
+		if resolvedWorktree == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if fallback, err := m.resolveIssueWorktreePath(ctx, issueID); err == nil {
+				resolvedWorktree = strings.TrimSpace(fallback)
+			}
+		}
+		if strings.TrimSpace(resolvedWorktree) == "" {
 			return helixOpenResultMsg{issueID: issueID, err: fmt.Errorf("worktree path is empty")}
 		}
 		if strings.TrimSpace(os.Getenv("TMUX")) != "" && m.tmuxClient != nil {
-			popupCommand := fmt.Sprintf("cd %s && hx", shellSingleQuote(worktree))
+			popupCommand := fmt.Sprintf("cd %s && hx", shellSingleQuote(resolvedWorktree))
 			if err := m.tmuxClient.DisplayPopup(context.Background(), "hx-"+issueID, "90%", "90%", popupCommand); err != nil {
 				return helixOpenResultMsg{issueID: issueID, err: err}
 			}
@@ -207,7 +221,7 @@ func (m Model) openHelixCmd(worktree, issueID string) tea.Cmd {
 		}
 		return helixOpenResultMsg{
 			issueID:     issueID,
-			commandHint: fmt.Sprintf("Run: cd %s && hx", worktree),
+			commandHint: fmt.Sprintf("Run: cd %s && hx", resolvedWorktree),
 		}
 	}
 }
@@ -773,6 +787,21 @@ func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 			worktree: worktree,
 			err:      err,
 		}
+	}
+}
+
+func (m Model) abortMergeIssueCmd(issueID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		worktree, err := m.resolveIssueWorktreePath(ctx, issueID)
+		if err != nil {
+			return abortMergeResultMsg{
+				worktree: "",
+				err:      err,
+			}
+		}
+		return m.abortMergeCmd(worktree)()
 	}
 }
 

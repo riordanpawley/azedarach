@@ -273,8 +273,9 @@ func New(cfg Config) *Daemon {
 			runtimeStateStoreForProject: func(projectID string) *daemonstate.RuntimeStateStore {
 				return d.worktreeRuntimeStateStore(projectID)
 			},
-			runtimeProjectionWriter: d.runtimeProjectionStateWriter(),
-			logger:                  cfg.Logger,
+			runtimeProjectionWriter:       d.runtimeProjectionStateWriter(),
+			ensureRuntimeFreshForMutation: d.ensureFreshRuntimeForMutation,
+			logger:                        cfg.Logger,
 			onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
 				d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
 			},

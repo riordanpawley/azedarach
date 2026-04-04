@@ -188,6 +188,37 @@ func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, pr
 	})
 }
 
+func (d *Daemon) ensureFreshRuntimeForMutation(ctx context.Context, projectID string, reason string) error {
+	if d == nil {
+		return nil
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "mutation"
+	}
+
+	timeout := d.runtimeReconcileTimeout()
+	if timeout <= 0 {
+		timeout = defaultRuntimeReconcileTimeout
+	}
+	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	submission, err := d.queueRuntimeReconcile(reconcileCtx, projectID, reconcilePriorityManual, "mutation:"+reason)
+	if err != nil {
+		return fmt.Errorf("queue runtime reconcile: %w", err)
+	}
+	outcome, err := submission.Wait(reconcileCtx)
+	if err != nil {
+		return fmt.Errorf("wait runtime reconcile: %w", err)
+	}
+	if outcome.Err != nil {
+		return fmt.Errorf("runtime reconcile failed: %w", outcome.Err)
+	}
+	return nil
+}
+
 func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var body runtimeReconcileCommandBody
 	if len(req.Body) > 0 {

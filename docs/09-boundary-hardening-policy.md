@@ -50,6 +50,22 @@ cd . && just check-boundaries
 
 If socket tests fail in sandbox, rerun with elevated permissions and record it in issue notes.
 
+## Runtime Projection Consistency Pattern
+
+All daemon runtime reads/mutations must follow this consistency split:
+
+- Low-consistency reads (`*.list`, `*.status`, snapshot/export reads):
+  - Use projection/cache reads only.
+  - Do not fall back to live tmux/git/worktree probes inside read handlers.
+- High-consistency mutations/invariant checks (`*.start`, `*.stop`, `*.remove`, etc):
+  - Run a freshness barrier first (`ensureFreshRuntimeForMutation` / `runtime.reconcile`).
+  - Wait for barrier completion before enforcing invariants or mutating state.
+
+Rationale:
+- Keeps read paths fast and deterministic.
+- Prevents hidden authority probes in query paths.
+- Centralizes live reconciliation in one explicit place with bounded timeout semantics.
+
 ## PR / Issue Checklist
 
 Any boundary-touching change must include:
