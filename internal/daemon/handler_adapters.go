@@ -334,15 +334,16 @@ func mapSpecStoreError(err error) error {
 }
 
 type worktreeServiceAdapter struct {
-	manager                     *git.WorktreeManager
-	managerForProject           func(string) *git.WorktreeManager
-	runtimeStateStore           *daemonstate.RuntimeStateStore
-	runtimeStateStoreForProject func(string) *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter     runtimeProjectionWriter
-	logger                      *slog.Logger
-	pollInterval                time.Duration
-	onProjectionUpdate          func(ctx context.Context, projectID, issueID, path string)
-	onWorktreeObserved          func(ctx context.Context, projectID, issueID, path string)
+	manager                       *git.WorktreeManager
+	managerForProject             func(string) *git.WorktreeManager
+	runtimeStateStore             *daemonstate.RuntimeStateStore
+	runtimeStateStoreForProject   func(string) *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter       runtimeProjectionWriter
+	ensureRuntimeFreshForMutation func(context.Context, string, string) error
+	logger                        *slog.Logger
+	pollInterval                  time.Duration
+	onProjectionUpdate            func(ctx context.Context, projectID, issueID, path string)
+	onWorktreeObserved            func(ctx context.Context, projectID, issueID, path string)
 
 	mu      sync.Mutex
 	pollers map[string]context.CancelFunc
@@ -380,31 +381,32 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 	}
 	runtimeStore := a.runtimeStore(projectID)
 	if runtimeStore == nil {
-		worktrees, err := manager.List(ctx)
-		if err == nil {
-			a.observeWorktrees(ctx, projectID, worktrees)
+		if a.logger != nil {
+			a.logger.Debug("worktree projection store unavailable for projection-only read",
+				"project_id", projectID,
+			)
 		}
-		return worktrees, err
+		return []git.Worktree{}, nil
 	}
 
-	cached, err := runtimeStore.ListWorktreeStates(ctx, projectID)
-	if err == nil && len(cached) > 0 {
-		worktrees := mapProjectionWorktrees(cached)
+	cached, cacheErr := runtimeStore.ListWorktreeStates(ctx, projectID)
+	if cacheErr != nil {
+		if a.logger != nil {
+			a.logger.Debug("worktree list cache read failed", "project_id", projectID, "error", cacheErr)
+		}
+		return nil, cacheErr
+	}
+	worktrees := mapProjectionWorktrees(cached)
+	if len(worktrees) > 0 {
 		a.observeWorktrees(ctx, projectID, worktrees)
-		a.ensureBackgroundPoller(projectID)
-		return worktrees, nil
 	}
-
-	worktrees, listErr := manager.List(ctx)
-	if listErr != nil {
-		if err == nil {
-			return mapProjectionWorktrees(cached), nil
-		}
-		return nil, listErr
-	}
-	a.writeWorktreeProjectionSnapshot(ctx, projectID, worktrees)
-	a.observeWorktrees(ctx, projectID, worktrees)
 	a.ensureBackgroundPoller(projectID)
+	if a.logger != nil {
+		a.logger.Debug("using projection-backed worktree runtime state",
+			"project_id", projectID,
+			"cached_worktrees", len(worktrees),
+		)
+	}
 	return worktrees, nil
 }
 
@@ -412,6 +414,11 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 	manager := a.managerFor(projectID)
 	if manager == nil {
 		return nil, errors.New("worktree manager unavailable")
+	}
+	if a.ensureRuntimeFreshForMutation != nil {
+		if err := a.ensureRuntimeFreshForMutation(ctx, normalizedProjectID(projectID), daemonhandlers.CommandWorktreeCreate); err != nil {
+			return nil, err
+		}
 	}
 	worktree, err := manager.Create(ctx, issueID, baseBranch)
 	if err != nil {
@@ -430,6 +437,11 @@ func (a *worktreeServiceAdapter) Delete(ctx context.Context, projectID string, i
 	manager := a.managerFor(projectID)
 	if manager == nil {
 		return errors.New("worktree manager unavailable")
+	}
+	if a.ensureRuntimeFreshForMutation != nil {
+		if err := a.ensureRuntimeFreshForMutation(ctx, normalizedProjectID(projectID), daemonhandlers.CommandWorktreeRemove); err != nil {
+			return err
+		}
 	}
 	worktree, err := manager.Get(ctx, issueID)
 	if err != nil {
@@ -451,6 +463,11 @@ func (a *worktreeServiceAdapter) CleanupOrphaned(ctx context.Context, projectID 
 	manager := a.managerFor(projectID)
 	if manager == nil {
 		return nil, errors.New("worktree manager unavailable")
+	}
+	if a.ensureRuntimeFreshForMutation != nil {
+		if err := a.ensureRuntimeFreshForMutation(ctx, normalizedProjectID(projectID), daemonhandlers.CommandWorktreeCleanupOrphaned); err != nil {
+			return nil, err
+		}
 	}
 	worktrees, err := manager.List(ctx)
 	if err != nil {

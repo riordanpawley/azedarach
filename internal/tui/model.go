@@ -188,6 +188,7 @@ type Model struct {
 	daemonClient              *daemonclient.Client
 	daemonSocketPath          string
 	daemonEvents              <-chan protocol.EventEnvelope
+	logStreamEvents           <-chan protocol.EventEnvelope
 	daemonRevision            uint64
 	lastDaemonReattachAttempt time.Time
 
@@ -405,11 +406,14 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	switch msg.String() {
 	case overlay.EventLogHotkey:
-		return m, m.openOverlay(overlay.NewEventLogOverlayWithLogFiles(
-			m.runtimeEvents,
-			m.eventLogFilePath(),
-			m.daemonLogFilePath(),
-		))
+		return m, tea.Batch(
+			m.openOverlay(overlay.NewEventLogOverlayWithLogFiles(
+				m.runtimeEvents,
+				m.eventLogFilePath(),
+				m.daemonLogFilePath(),
+			)),
+			m.loadHookLogEventsCmd(),
+		)
 	case "O": // Orchestration overlay
 		return m, m.openOrchestrationOverlay()
 	case "X": // Bulk cleanup (Shift+X)
@@ -837,6 +841,25 @@ type daemonStreamClosedMsg struct {
 	stream <-chan protocol.EventEnvelope
 }
 
+type logStreamAttachedMsg struct {
+	stream <-chan protocol.EventEnvelope
+	err    error
+}
+
+type logStreamEventMsg struct {
+	stream <-chan protocol.EventEnvelope
+	event  protocol.EventEnvelope
+}
+
+type logStreamClosedMsg struct {
+	stream <-chan protocol.EventEnvelope
+}
+
+type hookLogLoadedMsg struct {
+	events []protocol.HookLogEvent
+	err    error
+}
+
 type tickMsg time.Time
 
 type daemonEventDecision int
@@ -1075,6 +1098,22 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			lastCheckedAt: snapshot.LastCheckedAt,
 			freshness:     snapshot.Freshness,
 		}
+	}
+}
+
+func (m Model) loadHookLogEventsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return hookLogLoadedMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		events, err := m.daemonClient.ListHookLogEvents(ctx, 200)
+		if err != nil {
+			return hookLogLoadedMsg{err: err}
+		}
+		return hookLogLoadedMsg{events: events}
 	}
 }
 
@@ -1375,6 +1414,33 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 		}
 
 		return daemonStreamEventMsg{stream: stream, event: evt}
+	}
+}
+
+func (m Model) attachLogStreamCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return logStreamAttachedMsg{err: fmt.Errorf("daemon client unavailable")}
+		}
+		events, err := m.daemonClient.Subscribe(context.Background(), protocol.GlobalEventStreamProjectID, 0)
+		if err != nil {
+			return logStreamAttachedMsg{err: err}
+		}
+		return logStreamAttachedMsg{stream: events}
+	}
+}
+
+func (m Model) waitForLogStreamEventCmd() tea.Cmd {
+	stream := m.logStreamEvents
+	return func() tea.Msg {
+		if stream == nil {
+			return nil
+		}
+		evt, ok := <-stream
+		if !ok {
+			return logStreamClosedMsg{stream: stream}
+		}
+		return logStreamEventMsg{stream: stream, event: evt}
 	}
 }
 
@@ -1687,10 +1753,11 @@ func (m Model) daemonCommandTimeout() time.Duration {
 }
 
 // startSessionCmd requests daemon-owned lifecycle start and lets daemon snapshots rebuild the local projection.
-func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea.Cmd {
+func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool, startWork bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
 		defer cancel()
+		startWorkValue := startWork
 
 		if baseBranch == "" {
 			baseBranch = m.resolveBaseBranch()
@@ -1702,6 +1769,7 @@ func (m Model) startSessionCmd(issueID string, baseBranch string, yolo bool) tea
 			IssueID:    issueID,
 			BaseBranch: baseBranch,
 			Yolo:       yolo,
+			StartWork:  &startWorkValue,
 			ImagePaths: m.sessionImagePaths(ctx, issueID),
 		}); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
@@ -2230,15 +2298,11 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 			return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: fmt.Errorf("daemon client unavailable")}
 		}
 
-		if session := m.sessionForIssue(taskID); session != nil {
-			m.sessionMonitor.Stop(taskID)
-			if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-				if force && isSessionAlreadyStoppedError(err) {
-					// Force-retry path may re-enter before projections clear the stale session.
-					// If daemon already stopped it, continue to worktree removal.
-				} else {
-					return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
-				}
+		// Always ask daemon to stop first; local projection may be stale.
+		m.sessionMonitor.Stop(taskID)
+		if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
+			if !(force && isSessionAlreadyStoppedError(err)) && !isSessionAlreadyStoppedError(err) {
+				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
 			}
 		}
 

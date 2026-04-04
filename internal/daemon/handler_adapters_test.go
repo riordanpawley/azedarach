@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -9,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -193,4 +196,41 @@ func newTestIssueClient(t *testing.T) (*issues.Client, string) {
 	client := issues.NewClient(repoDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = client.CloseDB() })
 	return client, repoDir
+}
+
+type countingWorktreeListRunner struct {
+	listCalls int
+}
+
+func (r *countingWorktreeListRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		r.listCalls++
+		return "", errors.New("live worktree list should not be called for projection-only reads")
+	}
+	return "", nil
+}
+
+func TestWorktreeServiceAdapterListUsesProjectionOnlyWhenRuntimeStoreAvailable(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+
+	runner := &countingWorktreeListRunner{}
+	manager := git.NewWorktreeManager(runner, t.TempDir(), logger)
+	adapter := &worktreeServiceAdapter{
+		manager:           manager,
+		runtimeStateStore: store,
+		logger:            logger,
+	}
+
+	worktrees, err := adapter.List(context.Background(), "proj")
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(worktrees) != 0 {
+		t.Fatalf("worktrees = %v, want empty projection-backed result", worktrees)
+	}
+	if runner.listCalls != 0 {
+		t.Fatalf("live worktree list calls = %d, want 0", runner.listCalls)
+	}
 }

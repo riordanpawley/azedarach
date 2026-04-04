@@ -2,8 +2,10 @@ package publish
 
 import (
 	"log/slog"
+	"sort"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
@@ -86,7 +88,7 @@ func (h *Hub) Subscribe(projectID string, fromRevision uint64) (<-chan protocol.
 		ch:        make(chan protocol.EventEnvelope, h.maxSubscriberQ),
 	}
 	h.subscribers[id] = sub
-	backlog := append([]protocol.EventEnvelope(nil), h.backlogByProj[projectID]...)
+	backlog := h.backlogForProjectLocked(projectID)
 	h.mu.Unlock()
 
 	// Catch-up on subscribe with strict > fromRevision ordering.
@@ -103,11 +105,42 @@ func (h *Hub) Subscribe(projectID string, fromRevision uint64) (<-chan protocol.
 func (h *Hub) subscribersForProjectLocked(projectID string) []*subscriber {
 	out := make([]*subscriber, 0, len(h.subscribers))
 	for _, sub := range h.subscribers {
-		if sub.projectID == projectID {
+		if sub.projectID == projectID || sub.projectID == protocol.GlobalEventStreamProjectID {
 			out = append(out, sub)
 		}
 	}
 	return out
+}
+
+func (h *Hub) backlogForProjectLocked(projectID string) []protocol.EventEnvelope {
+	if projectID != protocol.GlobalEventStreamProjectID {
+		return append([]protocol.EventEnvelope(nil), h.backlogByProj[projectID]...)
+	}
+	merged := make([]protocol.EventEnvelope, 0, h.maxBacklog)
+	for _, events := range h.backlogByProj {
+		merged = append(merged, events...)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		ti := merged[i].EmittedAt
+		tj := merged[j].EmittedAt
+		if ti.Equal(tj) {
+			if merged[i].ProjectID == merged[j].ProjectID {
+				return merged[i].Revision < merged[j].Revision
+			}
+			return merged[i].ProjectID < merged[j].ProjectID
+		}
+		if ti.IsZero() && !tj.IsZero() {
+			return true
+		}
+		if !ti.IsZero() && tj.IsZero() {
+			return false
+		}
+		return ti.Before(tj)
+	})
+	if len(merged) <= h.maxBacklog {
+		return merged
+	}
+	return append([]protocol.EventEnvelope(nil), merged[len(merged)-h.maxBacklog:]...)
 }
 
 func (h *Hub) unsubscribeByID(id int) {
@@ -122,6 +155,9 @@ func (h *Hub) unsubscribeByID(id int) {
 }
 
 func appendTrimmed(list []protocol.EventEnvelope, evt protocol.EventEnvelope, max int) []protocol.EventEnvelope {
+	if evt.EmittedAt.IsZero() {
+		evt.EmittedAt = time.Now().UTC()
+	}
 	out := append(list, evt)
 	if len(out) <= max {
 		return out

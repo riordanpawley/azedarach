@@ -106,6 +106,8 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandMailSend:              {Command: protocol.CommandMailSend, RequiresProjectID: true},
 	protocol.CommandMailList:              {Command: protocol.CommandMailList, RequiresProjectID: true},
 	protocol.CommandMailWatch:             {Command: protocol.CommandMailWatch, RequiresProjectID: true},
+	protocol.CommandHookLogAppend:         {Command: protocol.CommandHookLogAppend, RequiresProjectID: true},
+	protocol.CommandHookLogList:           {Command: protocol.CommandHookLogList, RequiresProjectID: true},
 	commandTaskList:                       {Command: commandTaskList, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskCreate:                     {Command: commandTaskCreate, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},
 	commandTaskUpdateStatus:               {Command: commandTaskUpdateStatus, RequiresProjectID: true, syncBootstrapPolicy: syncBootstrapPolicyAlways},

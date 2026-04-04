@@ -241,35 +241,26 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	switch msg.Key {
 	// Session actions
 	case "s":
-		// Start session
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+		// Start tmux session only; do not launch work automatically.
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false, false)
 	case "S":
 		// Start session directly without origin/base selection prompt.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false)
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), false, true)
 	case "!":
 		// Start session with dangerous skip-permissions mode.
-		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true)
+		return m, m.startSessionCmd(task.ID, m.resolveBaseBranch(), true, true)
 	case "session_origin":
 		if originMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
-			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false)
+			return m, m.startSessionCmd(task.ID, m.originBranchForSelection(originMsg.SourceID), false, true)
 		}
 		return m, nil
 	case "a":
-		// Attach to session
+		// Delegate attach readiness to daemon authority; projection can be stale.
+		worktreeHint := ""
 		if session != nil {
-			// Check if branch is behind main
-			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
-		} else if task.HasTmuxSession {
-			// We still have tmux presence, so attempt direct attach even when
-			// the session projection is stale or not yet hydrated.
-			return m, m.attachSessionCmd(task.ID)
-		} else {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session for this task",
-				Expires: time.Now().Add(3 * time.Second),
-			})
+			worktreeHint = session.Worktree
 		}
+		return m, m.checkBranchBehindCmd(worktreeHint, task.ID)
 	case "p":
 		// TODO: Pause session
 		m.addToast(Toast{
@@ -278,16 +269,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 	case "x":
-		// Stop session
-		if session != nil {
-			return m, m.stopSessionCmd(task.ID)
-		} else {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session for this task",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-		}
+		// Delegate stop decision to daemon authority; projection can be stale.
+		return m, m.stopSessionCmd(task.ID)
 	case "R":
 		// TODO: Resume session
 		m.addToast(Toast{
@@ -310,50 +293,29 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.followOnMergeSelectionCmd(task, session)
 
 	case "P":
-		// Create PR (with overlay)
-		if session == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
+		// Resolve branch/worktree via daemon when local projection is stale.
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
 		}
-		// Get current branch name and open PR creation overlay
-		return m, m.openPROverlayCmd(session.Worktree, task.ID)
+		return m, m.openPROverlayCmd(worktreeHint, task.ID)
 	case "O":
 		// Open PR in browser for current branch
-		if session == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
 		}
-		return m, m.openPRCmd(session.Worktree, task.ID)
+		return m, m.openPRCmd(worktreeHint, task.ID)
 	case "M":
 		// Abort in-progress merge in worktree
-		if session == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
-		}
-		return m, m.abortMergeCmd(session.Worktree)
+		return m, m.abortMergeIssueCmd(task.ID)
 	case "H":
 		// Open Helix in the task worktree.
-		if session == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: "No active session - start session first",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-			return m, nil
+		worktreeHint := ""
+		if session != nil {
+			worktreeHint = session.Worktree
 		}
-		return m, m.openHelixCmd(session.Worktree, task.ID)
+		return m, m.openHelixCmd(worktreeHint, task.ID)
 
 	case "f":
 		// Show diff viewer

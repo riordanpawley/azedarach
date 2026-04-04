@@ -92,3 +92,4 @@ coverage/
 /ts-opentui
 /staged.txt
 /.runtime
+**/daemon.lock
