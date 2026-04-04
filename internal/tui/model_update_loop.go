@@ -911,11 +911,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, m.loadIssuesCmd()
 
+	case worktreeCleanupConfirmPromptMsg:
+		m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
+			taskID:      msg.taskID,
+			deletedTask: msg.deletedTask,
+			force:       false,
+		}
+		title := "Confirm worktree cleanup?"
+		if msg.deletedTask {
+			title = "Confirm delete + cleanup?"
+		}
+		confirm := overlay.NewConfirmDialog(title, formatWorktreeCleanupConfirmPrompt(msg))
+		return m, m.openOverlay(confirm)
+
 	case worktreeCleanupResultMsg:
 		if msg.needsForce {
 			m.pendingCleanup = &pendingWorktreeCleanupConfirmation{
 				taskID:      msg.taskID,
 				deletedTask: msg.deletedTask,
+				force:       true,
 			}
 			action := "cleanup worktree"
 			if msg.deletedTask {

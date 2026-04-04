@@ -101,9 +101,10 @@ func (m *ActionMenu) buildActions() []Action {
 	if m.task.ParentID == nil && len(m.relatedTasks) > 0 && !m.hasEligibleUpstreamSource() {
 		mergeLabel = "Merge into base branch"
 	}
-	// Update/cleanup can route by issue id through the daemon even when
-	// worktree metadata is stale in the current projection.
+	// Cleanup can route by issue id through the daemon even when worktree
+	// metadata is stale in the current projection.
 	hasIssueScopedGitTarget := hasWorktree || hasTmuxSession
+	hasIssueScopedCleanupTarget := strings.TrimSpace(m.task.ID) != ""
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from base branch", Enabled: hasIssueScopedGitTarget},
 		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree},
@@ -115,8 +116,8 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "i", Label: "Attachments", Enabled: true},
 		Action{Key: "r", Label: "Dev servers", Enabled: true},
 		Action{Key: "f", Label: "Show diff", Enabled: hasWorktree},
-		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasIssueScopedGitTarget},
-		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedGitTarget},
+		Action{Key: "w", Label: "Cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
+		Action{Key: "W", Label: "Delete task + cleanup worktree", Enabled: hasIssueScopedCleanupTarget},
 	)
 
 	actions = append(actions, Action{Key: "i", Label: "Image attachments", Enabled: true})
