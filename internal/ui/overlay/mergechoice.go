@@ -83,17 +83,17 @@ func (m *MergeChoiceOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *MergeChoiceOverlay) View() string {
-	width, height := m.Clamp(64, 12)
+	width, height := m.dialogSize()
 	return renderDialogTwoPane(dialogLayoutConfig{
 		styles:            m.styles,
 		width:             width,
 		height:            height,
 		title:             "MERGE CHOICE",
 		rightSectionTitle: "Actions",
-		breakpoint:        72,
-		gap:               3,
-		minLeft:           30,
-		minRight:          20,
+		breakpoint:        58,
+		gap:               2,
+		minLeft:           28,
+		minRight:          18,
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
 			var b strings.Builder
@@ -128,5 +128,44 @@ func (m *MergeChoiceOverlay) Title() string {
 }
 
 func (m *MergeChoiceOverlay) Size() (width, height int) {
-	return 60, 10
+	return m.dialogSize()
+}
+
+func (m *MergeChoiceOverlay) dialogSize() (width, height int) {
+	width, height = 64, 12
+	if m.width <= 0 || m.height <= 0 {
+		return width, height
+	}
+
+	maxWidth := max(44, m.width-2)
+	maxHeight := max(10, m.height-2)
+	if width > maxWidth {
+		width = maxWidth
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+
+	// Keep this lightweight prompt compact on medium viewports instead of
+	// promoting to near-fullscreen dialog sizing.
+	if m.width <= 100 {
+		targetWidth := m.width - 10
+		if targetWidth < 44 {
+			targetWidth = m.width - 2
+		}
+		if targetWidth > 0 && targetWidth < width {
+			width = targetWidth
+		}
+	}
+	if m.height <= 24 {
+		targetHeight := m.height - 8
+		if targetHeight < 10 {
+			targetHeight = m.height - 2
+		}
+		if targetHeight > 0 && targetHeight < height {
+			height = targetHeight
+		}
+	}
+
+	return max(1, width), max(1, height)
 }

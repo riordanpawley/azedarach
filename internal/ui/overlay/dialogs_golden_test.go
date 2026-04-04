@@ -64,6 +64,7 @@ func TestDialogs_View_Golden_SmallViewport(t *testing.T) {
 	}{
 		{name: "conflict_small", view: goldenConflictSmallView},
 		{name: "cleanup_small", view: goldenCleanupSmallView},
+		{name: "mergechoice_small", view: goldenMergeChoiceSmallView},
 		{name: "imageattach_list_small", view: goldenImageAttachListSmallView},
 		{name: "merge_select_small", view: goldenMergeSelectSmallView},
 		{name: "imagepreview_default_small", view: goldenImagePreviewSmallView},
@@ -182,6 +183,13 @@ func goldenMergeChoiceView(t *testing.T) string {
 	t.Helper()
 	overlay := NewMergeChoiceOverlay("az-123", 3, "main")
 	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	return model.(*MergeChoiceOverlay).View()
+}
+
+func goldenMergeChoiceSmallView(t *testing.T) string {
+	t.Helper()
+	overlay := NewMergeChoiceOverlay("az-123", 6, "main")
+	model, _ := overlay.Update(tea.WindowSizeMsg{Width: 72, Height: 22})
 	return model.(*MergeChoiceOverlay).View()
 }
 
