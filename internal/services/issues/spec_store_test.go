@@ -215,6 +215,83 @@ func TestClient_ListRequirements_WithTextPrimaryKeyIDs(t *testing.T) {
 	assert.Equal(t, "REQ-TEXT-ID", requirements[0].LocalID)
 }
 
+func TestClient_CreateRequirement_WithLegacySpecTableShape(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "legacy-shape-create.db")
+	db := openSQLiteDB(t, dbPath)
+
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS issues (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			issue_type TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			closed_at TEXT,
+			assignee TEXT,
+			labels_json TEXT,
+			implementations_json TEXT,
+			design TEXT,
+			notes TEXT,
+			acceptance TEXT,
+			estimate INTEGER,
+			deleted_at TEXT
+		);
+		CREATE TABLE IF NOT EXISTS issue_dependencies (
+			issue_id TEXT NOT NULL,
+			depends_on_id TEXT NOT NULL,
+			dependency_type TEXT NOT NULL,
+			tombstoned_at TEXT,
+			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
+		);
+		CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS spec_requirements (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			body_md TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			status TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT,
+			local_id TEXT,
+			external_code TEXT,
+			description TEXT,
+			issue_id TEXT
+		);
+		INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at, deleted_at)
+		VALUES ('bpq', 'legacy issue', '', 'open', 2, 'task', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', NULL);
+	`)
+	require.NoError(t, err)
+
+	client := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, client.CloseDB())
+	})
+
+	created, err := client.CreateRequirement(ctx, CreateRequirementParams{
+		LocalID:      "bpq-log-integration",
+		Title:        "Integrate charmbracelet/log as canonical structured logger",
+		Description:  "Runtime and service logging should use charmbracelet/log consistently.",
+		IssueID:      stringPtr("bpq"),
+		ExternalCode: stringPtr("bpq-log-integration"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "bpq-log-integration", created.LocalID)
+
+	got, err := client.GetRequirement(ctx, "bpq-log-integration")
+	require.NoError(t, err)
+	assert.Equal(t, "bpq", derefString(got.IssueID))
+	assert.Equal(t, "Integrate charmbracelet/log as canonical structured logger", got.Title)
+}
+
 func TestClient_RequirementCRUDAndSelectorResolution(t *testing.T) {
 	ctx := context.Background()
 	client := newTestClient(t)
