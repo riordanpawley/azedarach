@@ -697,3 +697,89 @@ func TestGitServiceAdapterQueueGitStatusRefreshBacksOffUnchangedTarget(t *testin
 		t.Fatalf("throttle counters = %+v, want processed=1 skipped=1 deferred=0", counters)
 	}
 }
+
+func TestGitServiceAdapterRuntimeSignalsUsesProjectionOnly(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-signal"
+	worktree := "/tmp/az-signal"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, &git.GitStatus{
+		HasChanges:     true,
+		GitAdditions:   7,
+		GitDeletions:   3,
+		GitAheadCount:  2,
+		GitBehindCount: 1,
+	})
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		t.Fatalf("unexpected live git call for runtime signals: %v", args)
+		return "", nil
+	}}
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+	}
+
+	signals, partialFailures, err := adapter.RuntimeSignals(ctx, projectID, []daemonhandlers.GitRuntimeSignalsTarget{
+		{IssueID: issueID, Worktree: worktree},
+	}, "main", true, "origin")
+	if err != nil {
+		t.Fatalf("RuntimeSignals: %v", err)
+	}
+	if partialFailures != 0 {
+		t.Fatalf("partial failures = %d, want 0", partialFailures)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("signals len = %d, want 1", len(signals))
+	}
+	got := signals[0]
+	if got.IssueID != issueID || got.Worktree != worktree {
+		t.Fatalf("signal id/worktree = %+v", got)
+	}
+	if !got.HasUncommittedChanges || got.GitAdditions != 7 || got.GitDeletions != 3 || got.GitAheadCount != 2 || got.GitBehindCount != 1 {
+		t.Fatalf("signal = %+v, want projected git metrics", got)
+	}
+}
+
+func TestGitServiceAdapterRuntimeSignalsMissingProjectionReturnsZeroSignal(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	projectID := "default"
+	issueID := "az-missing"
+	worktree := "/tmp/az-missing"
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		t.Fatalf("unexpected live git call for runtime signals: %v", args)
+		return "", nil
+	}}
+	adapter := &gitServiceAdapter{
+		client:            git.NewClient(runner, slog.Default()),
+		runtimeStateStore: store,
+	}
+
+	signals, partialFailures, err := adapter.RuntimeSignals(ctx, projectID, []daemonhandlers.GitRuntimeSignalsTarget{
+		{IssueID: issueID, Worktree: worktree},
+	}, "main", false, "origin")
+	if err != nil {
+		t.Fatalf("RuntimeSignals: %v", err)
+	}
+	if partialFailures != 0 {
+		t.Fatalf("partial failures = %d, want 0", partialFailures)
+	}
+	if len(signals) != 1 {
+		t.Fatalf("signals len = %d, want 1", len(signals))
+	}
+	got := signals[0]
+	if got.IssueID != issueID || got.Worktree != worktree {
+		t.Fatalf("signal id/worktree = %+v", got)
+	}
+	if got.HasUncommittedChanges || got.GitAdditions != 0 || got.GitDeletions != 0 || got.GitAheadCount != 0 || got.GitBehindCount != 0 {
+		t.Fatalf("signal = %+v, want zero-value runtime signal for missing projection", got)
+	}
+}

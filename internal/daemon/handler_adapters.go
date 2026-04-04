@@ -381,11 +381,12 @@ func (a *worktreeServiceAdapter) List(ctx context.Context, projectID string) ([]
 	}
 	runtimeStore := a.runtimeStore(projectID)
 	if runtimeStore == nil {
-		worktrees, err := manager.List(ctx)
-		if err == nil {
-			a.observeWorktrees(ctx, projectID, worktrees)
+		if a.logger != nil {
+			a.logger.Debug("worktree projection store unavailable for projection-only read",
+				"project_id", projectID,
+			)
 		}
-		return worktrees, err
+		return []git.Worktree{}, nil
 	}
 
 	cached, cacheErr := runtimeStore.ListWorktreeStates(ctx, projectID)
