@@ -152,7 +152,7 @@ func TestClient_MigratesLegacySpecSchemaWithoutDataLoss(t *testing.T) {
 	assert.Equal(t, []string{"0004_spec_tables", "0005_spec_audit_log"}, gotMigrations)
 }
 
-func TestClient_ListRequirements_WithTextPrimaryKeyIDs(t *testing.T) {
+func TestClient_ListRequirements_WithTextPrimaryKeyIDs_AutoMigratesSchema(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "text-id-spec.db")
 	db := openSQLiteDB(t, dbPath)
@@ -213,6 +213,33 @@ func TestClient_ListRequirements_WithTextPrimaryKeyIDs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, requirements, 1)
 	assert.Equal(t, "REQ-TEXT-ID", requirements[0].LocalID)
+
+	rows, err := db.Query(`PRAGMA table_info('spec_requirements')`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var (
+		idType string
+		idPK   int
+	)
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal any
+			primaryKey int
+		)
+		require.NoError(t, rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey))
+		if name == "id" {
+			idType = strings.ToUpper(columnType)
+			idPK = primaryKey
+		}
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, 1, idPK)
+	assert.Contains(t, idType, "INT")
 }
 
 func TestClient_CreateRequirement_WithLegacySpecTableShape(t *testing.T) {

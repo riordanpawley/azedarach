@@ -148,13 +148,6 @@ type sqlRequirementExecer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-type specRequirementsTableProfile struct {
-	hasBodyMD     bool
-	hasKind       bool
-	hasPriority   bool
-	textPrimaryID bool
-}
-
 func WithSpecAuditActorSource(ctx context.Context, source string) context.Context {
 	trimmed := strings.TrimSpace(source)
 	if trimmed == "" {
@@ -200,55 +193,20 @@ func (c *Client) CreateRequirement(ctx context.Context, params CreateRequirement
 		UpdatedAt:    now,
 	}
 
-	tableProfile, err := loadSpecRequirementsTableProfile(ctx, tx)
-	if err != nil {
-		return Requirement{}, c.wrapError("create-requirement", normalized.LocalID, err)
-	}
-
-	insertColumns := []string{
-		"local_id",
-		"external_code",
-		"title",
-		"description",
-		"issue_id",
-		"status",
-		"created_at",
-		"updated_at",
-		"deleted_at",
-	}
-	insertArgs := []any{
-		requirement.LocalID,
-		nullableTextPtr(requirement.ExternalCode),
-		requirement.Title,
-		nullableString(requirement.Description),
-		nullableTextPtr(requirement.IssueID),
-		string(requirement.Status),
-		formatTimestamp(requirement.CreatedAt),
-		formatTimestamp(requirement.UpdatedAt),
-		nil,
-	}
-	if tableProfile.textPrimaryID {
-		insertColumns = append(insertColumns, "id")
-		insertArgs = append(insertArgs, requirement.LocalID)
-	}
-	if tableProfile.hasBodyMD {
-		insertColumns = append(insertColumns, "body_md")
-		insertArgs = append(insertArgs, strings.TrimSpace(requirement.Description))
-	}
-	if tableProfile.hasKind {
-		insertColumns = append(insertColumns, "kind")
-		insertArgs = append(insertArgs, "requirement")
-	}
-	if tableProfile.hasPriority {
-		insertColumns = append(insertColumns, "priority")
-		insertArgs = append(insertArgs, 2)
-	}
-	placeholders := make([]string, 0, len(insertColumns))
-	for range insertColumns {
-		placeholders = append(placeholders, "?")
-	}
-	stmt := fmt.Sprintf("INSERT INTO spec_requirements (%s) VALUES (%s)", strings.Join(insertColumns, ", "), strings.Join(placeholders, ", "))
-	if _, err := tx.ExecContext(ctx, stmt, insertArgs...); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO spec_requirements (
+			local_id,
+			external_code,
+			title,
+			description,
+			issue_id,
+			status,
+			created_at,
+			updated_at,
+			deleted_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`, requirement.LocalID, nullableTextPtr(requirement.ExternalCode), requirement.Title, nullableString(requirement.Description), nullableTextPtr(requirement.IssueID), string(requirement.Status), formatTimestamp(requirement.CreatedAt), formatTimestamp(requirement.UpdatedAt)); err != nil {
 		return Requirement{}, c.wrapError("create-requirement", normalized.LocalID, classifySQLiteConstraint(err))
 	}
 
@@ -262,44 +220,6 @@ func (c *Client) CreateRequirement(ctx context.Context, params CreateRequirement
 	tx = nil
 
 	return requirement, nil
-}
-
-func loadSpecRequirementsTableProfile(ctx context.Context, queryer sqlRequirementQueryer) (specRequirementsTableProfile, error) {
-	rows, err := queryer.QueryContext(ctx, "PRAGMA table_info('spec_requirements')")
-	if err != nil {
-		return specRequirementsTableProfile{}, err
-	}
-	defer rows.Close()
-
-	profile := specRequirementsTableProfile{}
-	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			columnType string
-			notNull    int
-			defaultVal any
-			primaryKey int
-		)
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
-			return specRequirementsTableProfile{}, err
-		}
-		switch name {
-		case "body_md":
-			profile.hasBodyMD = true
-		case "kind":
-			profile.hasKind = true
-		case "priority":
-			profile.hasPriority = true
-		case "id":
-			typeName := strings.ToUpper(strings.TrimSpace(columnType))
-			profile.textPrimaryID = primaryKey > 0 && !strings.Contains(typeName, "INT")
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return specRequirementsTableProfile{}, err
-	}
-	return profile, nil
 }
 
 func (c *Client) GetRequirement(ctx context.Context, selector string) (Requirement, error) {
