@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 )
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
@@ -27,8 +28,9 @@ type Launcher struct {
 	BinPath     string
 	Logger      *slog.Logger
 	openLogFile func(path string) (io.WriteCloser, error)
-	waitForReady func(ctx context.Context, socketPath string) error
-	sleepFn      func(time.Duration)
+	waitForReady       func(ctx context.Context, socketPath string) error
+	sleepFn            func(time.Duration)
+	terminateLockOwner func(lockPath string) error
 }
 
 // NewLauncher returns a daemon process launcher for repoDir.
@@ -54,6 +56,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		openLogFile: openDaemonLog,
 		waitForReady: waitForDaemonReady,
 		sleepFn:      time.Sleep,
+		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
 }
 
@@ -97,6 +100,13 @@ func (l *Launcher) Start(ctx context.Context) error {
 					"socket_path", l.SocketPath,
 					"error", err,
 				)
+			}
+			terminate := l.terminateLockOwner
+			if terminate == nil {
+				terminate = lifecycle.TerminateLockOwner
+			}
+			if err := terminate(l.LockPath); err != nil {
+				return fmt.Errorf("recover stale daemon lock owner: %w", err)
 			}
 		}
 	}
