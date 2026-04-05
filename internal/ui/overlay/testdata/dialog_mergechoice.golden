@@ -1,19 +1,12 @@
 ╭──────────────────────────────────────────────────────────────╮
 │MERGE CHOICE                                                  │
 │──────────────────────────────────────────────────────────────│
-│3 commits behind base branch (main). Merge latest?            │
-│                                                              │
-│[M] Merge & Attach                                            │
-│[S] Skip & Attach                                             │
-│                                                              │
-│                                                              │
-│                                                              │
-│Actions                                                       │
-│──────────────────────────────────────────────────────────────│
-│ M merge & attach                                             │
-│ S skip & attach                                              │
-│ Esc cancel                                                   │
-│                                                              │
-│                                                              │
-│                                                              │
+││ 3 commits behind base branch (main).    Actions             │
+││ Merge latest?                           ────────────────────│
+││                                          ←/→/Tab switch     │
+││ [M] Merge & Attach                       Enter confirm      │
+││ [S] Skip & Attach                        M merge & attach   │
+││                                          S skip & attach    │
+││                                          Esc cancel         │
+││                                                             │
 ╰──────────────────────────────────────────────────────────────╯
