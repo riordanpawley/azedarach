@@ -3642,6 +3642,34 @@ func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	}
 }
 
+func TestFormatWorktreeCleanupConfirmPromptKeepsCleanWhenOnlyBaseDiffPresent(t *testing.T) {
+	checkedAt := time.Date(2026, time.April, 5, 7, 30, 0, 0, time.UTC)
+	msg := worktreeCleanupConfirmPromptMsg{
+		taskID:      "az-1",
+		hasSnapshot: true,
+		hasTask:     true,
+		hasWorktree: true,
+		dirty:       false,
+		additions:   12,
+		deletions:   4,
+		ahead:       2,
+		behind:      0,
+		freshness:   protocol.TaskListFreshnessFresh,
+		checkedAt:   checkedAt,
+	}
+
+	prompt := formatWorktreeCleanupConfirmPrompt(msg)
+	if !strings.Contains(prompt, "- Changes: clean") {
+		t.Fatalf("prompt missing clean changes state: %q", prompt)
+	}
+	if strings.Contains(prompt, "dirty (+12/-4)") {
+		t.Fatalf("prompt incorrectly reported dirty from base diff counters: %q", prompt)
+	}
+	if !strings.Contains(prompt, "- Base diff (+/-): +12/-4") {
+		t.Fatalf("prompt missing base diff summary: %q", prompt)
+	}
+}
+
 func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
