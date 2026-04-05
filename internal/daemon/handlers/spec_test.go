@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 type fakeSpecService struct {
@@ -116,7 +117,7 @@ func specRequest(t *testing.T, command string, body any) protocol.RequestEnvelop
 	}
 	return protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-" + command,
+		RequestID:       naming.RequestID("req-" + command),
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         command,
 		Body:            payload,

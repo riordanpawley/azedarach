@@ -2,9 +2,11 @@ package daemonclient
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const defaultOperationPollInterval = 250 * time.Millisecond
@@ -17,10 +19,14 @@ type OperationListOptions struct {
 }
 
 func (c *Client) GetOperation(ctx context.Context, operationID string) (protocol.OperationRecord, error) {
+	parsedOperationID, err := naming.ParseOperationID(operationID)
+	if err != nil {
+		return protocol.OperationRecord{}, fmt.Errorf("invalid operation id: %w", err)
+	}
 	var out protocol.OperationGetResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationGet, protocol.OperationGetRequestBody{
 		ProjectID:   c.projectRoute(),
-		OperationID: operationID,
+		OperationID: parsedOperationID,
 	}, &out); err != nil {
 		return protocol.OperationRecord{}, err
 	}
@@ -42,10 +48,14 @@ func (c *Client) ListOperations(ctx context.Context, opts OperationListOptions) 
 }
 
 func (c *Client) CancelOperation(ctx context.Context, operationID, reason string) (protocol.OperationRecord, error) {
+	parsedOperationID, err := naming.ParseOperationID(operationID)
+	if err != nil {
+		return protocol.OperationRecord{}, fmt.Errorf("invalid operation id: %w", err)
+	}
 	var out protocol.OperationCancelResponseBody
 	if err := c.commandJSON(ctx, protocol.CommandOperationCancel, protocol.OperationCancelRequestBody{
 		ProjectID:   c.projectRoute(),
-		OperationID: operationID,
+		OperationID: parsedOperationID,
 		Reason:      reason,
 	}, &out); err != nil {
 		return protocol.OperationRecord{}, err

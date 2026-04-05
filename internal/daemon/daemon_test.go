@@ -14,6 +14,7 @@ import (
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
@@ -137,7 +138,7 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 		}
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       command + "-req",
+				RequestID:       naming.RequestID(command + "-req"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: projectID},
 			Command:         command,

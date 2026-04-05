@@ -49,7 +49,7 @@ type RuntimeGitProjection struct {
 
 // RuntimeOperationProjection captures the active long-running operation metadata rendered in the UI.
 type RuntimeOperationProjection struct {
-	OperationID     string         `json:"operation_id" msgpack:"operation_id"`
+	OperationID     naming.OperationID `json:"operation_id" msgpack:"operation_id"`
 	State           OperationState `json:"state" msgpack:"state"`
 	ProgressPercent int            `json:"progress_percent" msgpack:"progress_percent"`
 	Message         string         `json:"message,omitempty" msgpack:"message,omitempty"`

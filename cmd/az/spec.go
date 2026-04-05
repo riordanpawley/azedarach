@@ -13,6 +13,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const specDisabledMessage = "spec workflows are disabled for this project; re-enable with: az config set spec.enabled true"
@@ -454,7 +455,7 @@ func runSpecRPC(cfg *config.Config, command string, body any, out any) error {
 		}
 		resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       fmt.Sprintf("%s-%d", command, time.Now().UnixNano()),
+				RequestID:       naming.RequestID(fmt.Sprintf("%s-%d", command, time.Now().UnixNano())),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         command,
 			SentAt:          time.Now().UTC(),

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -179,7 +180,7 @@ func TestWorktreeHandlerHappyPath(t *testing.T) {
 
 			resp := h.Handle(context.Background(), protocol.RequestEnvelope{
 				ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       "req-" + tc.name,
+				RequestID:       naming.RequestID("req-" + tc.name),
 				Kind:            protocol.EnvelopeKindCommand,
 				Command:         tc.command,
 				Body:            body,
@@ -273,7 +274,7 @@ func TestWorktreeHandlerErrorMapping(t *testing.T) {
 
 			resp := h.Handle(context.Background(), protocol.RequestEnvelope{
 				ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       "req-" + tc.name,
+					RequestID:       naming.RequestID("req-" + tc.name),
 				Kind:            protocol.EnvelopeKindCommand,
 				Command:         tc.command,
 				Body:            body,

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -114,7 +115,7 @@ func gitRequest(t *testing.T, command string, body any) protocol.RequestEnvelope
 	}
 	return protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-" + command,
+		RequestID:       naming.RequestID("req-" + command),
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         command,
 		Body:            payload,

@@ -7,6 +7,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestSessionHandlerStartPauseStopFlow(t *testing.T) {
@@ -21,7 +22,7 @@ func TestSessionHandlerStartPauseStopFlow(t *testing.T) {
 		})
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       "req-" + command,
+			RequestID:       naming.RequestID("req-" + command),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         command,
 			Body:            body,

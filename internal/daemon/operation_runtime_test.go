@@ -10,6 +10,7 @@ import (
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -73,7 +74,7 @@ func TestOperationRuntimeSubmitGetListPublishesLifecycleEvents(t *testing.T) {
 		t.Fatal("expected operation id")
 	}
 
-	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID, daemonops.StateDone)
+	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateDone)
 	if got := string(record.ResultPayload); got == "" {
 		t.Fatal("expected persisted result payload")
 	}
@@ -161,7 +162,7 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 		t.Fatal("expected operation id")
 	}
 
-	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID, daemonops.StateDone)
+	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateDone)
 	if record.Kind != daemonhandlers.CommandGitMerge {
 		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMerge)
 	}
@@ -225,7 +226,7 @@ func TestOperationRuntimeWorktreeCleanupPublishesProgressEvents(t *testing.T) {
 		t.Fatalf("unmarshal submit body: %v", err)
 	}
 
-	_ = waitForRuntimeState(t, runtime, submitBody.Operation.OperationID, daemonops.StateDone)
+	_ = waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateDone)
 	events := collectOperationEvents(t, ch, 6)
 	if events[1].Event != protocol.EventOperationProgress || events[3].Event != protocol.EventOperationProgress || events[5].Event != protocol.EventOperationProgress {
 		t.Fatalf("expected progress events at queued/running/done slots, got %q %q %q", events[1].Event, events[3].Event, events[5].Event)
@@ -304,7 +305,7 @@ func TestOperationRuntimeCancelMarksRunningOperationCancelled(t *testing.T) {
 		t.Fatalf("cancel response = %+v", cancelResp)
 	}
 
-	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID, daemonops.StateCancelled)
+	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateCancelled)
 	if record.ErrorMessage != "user requested cancel" {
 		t.Fatalf("cancel error message = %q, want user requested cancel", record.ErrorMessage)
 	}
@@ -317,7 +318,7 @@ func TestSessionOperationExecutorWrapsNestedResultEnvelope(t *testing.T) {
 	}
 	executor := sessionOperationExecutor{runtime: runtime}
 	payload := mustJSON(t, map[string]string{"project_id": "proj-1", "session_id": "AZ-3"})
-	req := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-session", Kind: protocol.EnvelopeKindCommand, Command: "session.start", Meta: protocol.Metadata{ProjectID: "proj-1"}, Body: payload}
+	req := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-session"), Kind: protocol.EnvelopeKindCommand, Command: "session.start", Meta: protocol.Metadata{ProjectID: "proj-1"}, Body: payload}
 
 	resp, err := executor.Execute(context.Background(), req, req.Command, func(_ context.Context) (protocol.ResponseEnvelope, error) {
 		return testResponse(req, map[string]string{"output": "started"}), nil
@@ -371,7 +372,7 @@ func TestCommandExecutorWrapsGitAndWorktreeResults(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-" + tc.name, Kind: protocol.EnvelopeKindCommand, Command: tc.command, Meta: protocol.Metadata{ProjectID: "proj-1"}, Body: mustJSON(t, tc.body)}
+			req := protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-" + tc.name), Kind: protocol.EnvelopeKindCommand, Command: tc.command, Meta: protocol.Metadata{ProjectID: "proj-1"}, Body: mustJSON(t, tc.body)}
 			resp := executor.Execute(context.Background(), req, tc.command, func(_ context.Context) protocol.ResponseEnvelope {
 				return testResponse(req, tc.result)
 			})
@@ -490,7 +491,7 @@ func (r *operationRuntime) buildSubmitRequestForTest(t *testing.T, kind, project
 }
 
 func testRequest(command string, body any) protocol.RequestEnvelope {
-	return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-" + command, Kind: protocol.EnvelopeKindCommand, Command: command, Body: marshalJSON(body)}
+	return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-" + command), Kind: protocol.EnvelopeKindCommand, Command: command, Body: marshalJSON(body)}
 }
 
 func mustJSON(tb testing.TB, value any) []byte {

@@ -631,7 +631,7 @@ func OperationCancelCommand(deps *Dependencies, opts OperationCancelOptions) err
 		return fmt.Errorf("failed to cancel operation: %w", err)
 	}
 	if opts.Wait && !operationStateTerminal(record.State) {
-		record, err = deps.DaemonClient.WaitForOperation(ctx, record.OperationID, opts.PollInterval)
+		record, err = deps.DaemonClient.WaitForOperation(ctx, record.OperationID.String(), opts.PollInterval)
 		if err != nil {
 			return fmt.Errorf("failed while waiting for operation %s: %w", record.OperationID, err)
 		}
@@ -1739,7 +1739,7 @@ func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 
 	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       fmt.Sprintf("%s-%d", commandTaskSnapshotExport, time.Now().UTC().UnixNano()),
+		RequestID:       makeRequestID(commandTaskSnapshotExport),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
 			ProjectID: deps.ProjectID,
@@ -3223,7 +3223,7 @@ func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations [
 
 	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       fmt.Sprintf("%s-%d", protocol.CommandTaskBulkApply, time.Now().UTC().UnixNano()),
+		RequestID:       makeRequestID(protocol.CommandTaskBulkApply),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
 			ProjectID: deps.ProjectID,
@@ -3660,6 +3660,11 @@ func scopedDaemonRuntimeEnabledForJustRun() bool {
 	return modeEnabled && source == "just-run"
 }
 
+func makeRequestID(prefix string) naming.RequestID {
+	id, _ := naming.ParseRequestID(fmt.Sprintf("%s-%d", prefix, time.Now().UTC().UnixNano()))
+	return id
+}
+
 func newSessionRequest(command, projectID, sessionID, baseBranch string) protocol.RequestEnvelope {
 	body, _ := json.Marshal(sessionRequestBody{
 		ProjectID:  projectID,
@@ -3670,7 +3675,7 @@ func newSessionRequest(command, projectID, sessionID, baseBranch string) protoco
 
 	return protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       fmt.Sprintf("%s-%d", command, time.Now().UTC().UnixNano()),
+		RequestID:       makeRequestID(command),
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         command,
 		Meta: protocol.Metadata{

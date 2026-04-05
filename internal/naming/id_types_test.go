@@ -39,3 +39,34 @@ func TestCanonicalSessionIDForIssue(t *testing.T) {
 	}
 }
 
+func TestParseOperationID(t *testing.T) {
+	id, err := ParseOperationID("20260405163240.161281000")
+	if err != nil {
+		t.Fatalf("ParseOperationID() error = %v", err)
+	}
+	if got, want := id.String(), "20260405163240.161281000"; got != want {
+		t.Fatalf("ParseOperationID() = %q, want %q", got, want)
+	}
+}
+
+func TestParseOperationIDRejectsInvalid(t *testing.T) {
+	if _, err := ParseOperationID("op/1"); err == nil {
+		t.Fatal("ParseOperationID() expected error for slash-separated value")
+	}
+}
+
+func TestParseRequestID(t *testing.T) {
+	id, err := ParseRequestID("session.start-123")
+	if err != nil {
+		t.Fatalf("ParseRequestID() error = %v", err)
+	}
+	if got, want := id.String(), "session.start-123"; got != want {
+		t.Fatalf("ParseRequestID() = %q, want %q", got, want)
+	}
+}
+
+func TestParseRequestIDRejectsInvalid(t *testing.T) {
+	if _, err := ParseRequestID("req/1"); err == nil {
+		t.Fatal("ParseRequestID() expected error for slash-separated value")
+	}
+}

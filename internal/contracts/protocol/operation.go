@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -46,7 +48,7 @@ type OperationError struct {
 }
 
 type OperationRecord struct {
-	OperationID  string             `json:"operation_id" msgpack:"operation_id"`
+	OperationID  naming.OperationID `json:"operation_id" msgpack:"operation_id"`
 	ProjectID    string             `json:"project_id" msgpack:"project_id"`
 	Kind         string             `json:"kind" msgpack:"kind"`
 	IssueID      string             `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
@@ -78,7 +80,7 @@ type OperationSubmitResponseBody struct {
 
 type OperationGetRequestBody struct {
 	ProjectID   string `json:"project_id" msgpack:"project_id"`
-	OperationID string `json:"operation_id" msgpack:"operation_id"`
+	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
 }
 
 type OperationGetResponseBody struct {
@@ -100,7 +102,7 @@ type OperationListResponseBody struct {
 
 type OperationCancelRequestBody struct {
 	ProjectID   string `json:"project_id" msgpack:"project_id"`
-	OperationID string `json:"operation_id" msgpack:"operation_id"`
+	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
 	Reason      string `json:"reason,omitempty" msgpack:"reason,omitempty"`
 }
 
@@ -114,7 +116,7 @@ type OperationEventBody struct {
 }
 
 type OperationProgressEventBody struct {
-	OperationID string            `json:"operation_id" msgpack:"operation_id"`
+	OperationID naming.OperationID `json:"operation_id" msgpack:"operation_id"`
 	ProjectID   string            `json:"project_id" msgpack:"project_id"`
 	State       OperationState    `json:"state" msgpack:"state"`
 	Progress    OperationProgress `json:"progress" msgpack:"progress"`

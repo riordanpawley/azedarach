@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestMailSendSerializesSequenceNumbers(t *testing.T) {
@@ -24,7 +25,7 @@ func TestMailSendSerializesSequenceNumbers(t *testing.T) {
 		<-start
 		_, err := d.command(context.Background(), protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       fmt.Sprintf("req-%s", issue),
+			RequestID:       naming.RequestID(fmt.Sprintf("req-%s", issue)),
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta:            protocol.Metadata{ProjectID: "proj-mail"},
 			Command:         protocol.CommandMailSend,

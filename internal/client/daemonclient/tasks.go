@@ -9,6 +9,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -120,9 +121,10 @@ func (c *Client) commandJSONResponse(ctx context.Context, command string, body a
 		}
 	}
 
+	requestID, _ := naming.ParseRequestID(fmt.Sprintf("%s-%d", command, time.Now().UTC().UnixNano()))
 	resp, err := c.Command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       fmt.Sprintf("%s-%d", command, time.Now().UTC().UnixNano()),
+		RequestID:       requestID,
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
 			ProjectID: c.projectRoute(),

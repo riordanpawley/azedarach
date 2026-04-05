@@ -930,21 +930,21 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		if err := json.Unmarshal(evt.Body, &body); err != nil {
 			return
 		}
-		if strings.TrimSpace(body.Operation.OperationID) == "" {
+		if strings.TrimSpace(body.Operation.OperationID.String()) == "" {
 			return
 		}
 		taskID := m.resolveOperationTaskID(body.Operation.IssueID, body.Operation.ResourceKeys)
 		if taskID == "" {
-			taskID = m.operationTaskID[body.Operation.OperationID]
+			taskID = m.operationTaskID[body.Operation.OperationID.String()]
 		}
 		if taskID == "" {
 			return
 		}
-		m.operationTaskID[body.Operation.OperationID] = taskID
+		m.operationTaskID[body.Operation.OperationID.String()] = taskID
 		state := protocol.OperationState(body.Operation.State)
 		if operationStateTerminal(state) {
 			delete(m.pendingOpsByTask, taskIDKey(taskID))
-			delete(m.operationTaskID, body.Operation.OperationID)
+			delete(m.operationTaskID, body.Operation.OperationID.String())
 			m.syncTaskWorkspaceOverlay()
 			return
 		}
@@ -954,7 +954,7 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 			percent = 50
 		}
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
-			operationID: body.Operation.OperationID,
+			operationID: body.Operation.OperationID.String(),
 			state:       state,
 			percent:     percent,
 		}
@@ -964,21 +964,21 @@ func (m *Model) applyOperationProgressEvent(evt protocol.EventEnvelope) {
 		if err := json.Unmarshal(evt.Body, &body); err != nil {
 			return
 		}
-		if strings.TrimSpace(body.OperationID) == "" {
+		if strings.TrimSpace(body.OperationID.String()) == "" {
 			return
 		}
-		taskID := m.operationTaskID[body.OperationID]
+		taskID := m.operationTaskID[body.OperationID.String()]
 		if taskID == "" {
 			return
 		}
 		if operationStateTerminal(body.State) {
 			delete(m.pendingOpsByTask, taskIDKey(taskID))
-			delete(m.operationTaskID, body.OperationID)
+			delete(m.operationTaskID, body.OperationID.String())
 			m.syncTaskWorkspaceOverlay()
 			return
 		}
 		m.pendingOpsByTask[taskIDKey(taskID)] = pendingOperationProgress{
-			operationID: body.OperationID,
+			operationID: body.OperationID.String(),
 			state:       body.State,
 			percent:     clampOperationPercent(body.Progress.Percent),
 			message:     strings.TrimSpace(body.Progress.Message),

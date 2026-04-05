@@ -13,6 +13,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonpublish "github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -226,7 +227,7 @@ func TestMultiprojectIsolationConcurrentClients(t *testing.T) {
 
 		resp, err := tc.client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       tc.projectID + "-upsert",
+				RequestID:       naming.RequestID(tc.projectID + "-upsert"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectUpsertCommand,
 			SentAt:          time.Now().UTC(),
@@ -359,7 +360,7 @@ func TestMultiprojectIsolationScopedSnapshots(t *testing.T) {
 
 		resp, err := client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       projectID + "-upsert",
+				RequestID:       naming.RequestID(projectID + "-upsert"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectUpsertCommand,
 			SentAt:          time.Now().UTC(),
@@ -381,7 +382,7 @@ func TestMultiprojectIsolationScopedSnapshots(t *testing.T) {
 
 		resp, err := client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       projectID + "-snapshot",
+				RequestID:       naming.RequestID(projectID + "-snapshot"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectSnapshotCommand,
 			SentAt:          time.Now().UTC(),
@@ -484,7 +485,7 @@ func TestMultiprojectFallbackDoesNotBlockHealthyProject(t *testing.T) {
 
 		resp, err := client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       projectID + "-upsert",
+				RequestID:       naming.RequestID(projectID + "-upsert"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectUpsertCommand,
 			SentAt:          time.Now().UTC(),

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 )
 
@@ -75,7 +76,7 @@ func TestDevServerHandlerStartStopStatusFlow(t *testing.T) {
 		body, _ := json.Marshal(map[string]string{"issue_id": "issue-1"})
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       "req-" + command,
+			RequestID:       naming.RequestID("req-" + command),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         command,
 			Body:            body,

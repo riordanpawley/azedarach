@@ -27,7 +27,7 @@ type Metadata struct {
 // RequestEnvelope is the daemon command request shell.
 type RequestEnvelope struct {
 	ProtocolVersion Version      `json:"protocol_version" msgpack:"protocol_version"`
-	RequestID       string       `json:"request_id" msgpack:"request_id"`
+	RequestID       naming.RequestID `json:"request_id" msgpack:"request_id"`
 	Kind            EnvelopeKind `json:"kind" msgpack:"kind"`
 	Meta            Metadata     `json:"meta,omitempty" msgpack:"meta,omitempty"`
 	Command         string       `json:"command" msgpack:"command"`
@@ -38,7 +38,7 @@ type RequestEnvelope struct {
 // ResponseEnvelope is the daemon command response shell.
 type ResponseEnvelope struct {
 	ProtocolVersion Version        `json:"protocol_version" msgpack:"protocol_version"`
-	RequestID       string         `json:"request_id" msgpack:"request_id"`
+	RequestID       naming.RequestID `json:"request_id" msgpack:"request_id"`
 	Kind            EnvelopeKind   `json:"kind" msgpack:"kind"`
 	Meta            Metadata       `json:"meta,omitempty" msgpack:"meta,omitempty"`
 	Revision        uint64         `json:"revision,omitempty" msgpack:"revision,omitempty"`

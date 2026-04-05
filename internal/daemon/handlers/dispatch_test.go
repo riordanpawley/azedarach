@@ -8,6 +8,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
@@ -220,7 +221,7 @@ func TestDispatcherMixedRouting(t *testing.T) {
 		b, _ := json.Marshal(body)
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       "req-" + cmd,
+				RequestID:       naming.RequestID("req-" + cmd),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         cmd,
 			Body:            b,

@@ -302,9 +302,9 @@ func (r *operationRuntime) handleOperationGet(ctx context.Context, req protocol.
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
 	if r.logger != nil {
-		r.logger.Info("daemon operation get requested", "operation_id", strings.TrimSpace(body.OperationID))
+		r.logger.Info("daemon operation get requested", "operation_id", body.OperationID.String())
 	}
-	record, err := r.manager.Get(ctx, strings.TrimSpace(body.OperationID))
+	record, err := r.manager.Get(ctx, body.OperationID.String())
 	if err != nil {
 		return r.errorResponse(req, mapOperationStoreErrorCode(err), err.Error())
 	}
@@ -374,9 +374,9 @@ func (r *operationRuntime) handleOperationCancel(ctx context.Context, req protoc
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
 	if r.logger != nil {
-		r.logger.Info("daemon operation cancel requested", "operation_id", strings.TrimSpace(body.OperationID), "reason", strings.TrimSpace(body.Reason))
+		r.logger.Info("daemon operation cancel requested", "operation_id", body.OperationID.String(), "reason", strings.TrimSpace(body.Reason))
 	}
-	record, err := r.manager.Cancel(ctx, strings.TrimSpace(body.OperationID), strings.TrimSpace(body.Reason))
+	record, err := r.manager.Cancel(ctx, body.OperationID.String(), strings.TrimSpace(body.Reason))
 	if err != nil {
 		return r.errorResponse(req, mapOperationStoreErrorCode(err), err.Error())
 	}
@@ -651,7 +651,7 @@ func (r *operationRuntime) errorResponse(req protocol.RequestEnvelope, code prot
 
 func (r *operationRuntime) toProtocolRecord(record daemonops.Record) protocol.OperationRecord {
 	out := protocol.OperationRecord{
-		OperationID:  record.ID,
+		OperationID:  parseOperationIDOrZero(record.ID),
 		ProjectID:    record.ProjectID,
 		IssueID:      record.IssueID,
 		Kind:         record.Kind,
@@ -767,7 +767,7 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 		Body:            body,
 	})
 	progressBody, err := json.Marshal(protocol.OperationProgressEventBody{
-		OperationID: record.ID,
+		OperationID: parseOperationIDOrZero(record.ID),
 		ProjectID:   projectID,
 		State:       protocol.OperationState(record.State),
 		Progress:    operationProgressForState(record.State, record.Kind),
@@ -827,7 +827,7 @@ func operationProgressForState(state daemonops.State, kind string) protocol.Oper
 func daemonOperationRecord(record daemonops.Record) protocol.OperationRecord {
 	state := protocol.OperationState(record.State)
 	out := protocol.OperationRecord{
-		OperationID:  record.ID,
+		OperationID:  parseOperationIDOrZero(record.ID),
 		ProjectID:    record.ProjectID,
 		IssueID:      record.IssueID,
 		Kind:         record.Kind,
@@ -844,6 +844,14 @@ func daemonOperationRecord(record daemonops.Record) protocol.OperationRecord {
 		out.Error = &protocol.OperationError{Code: code, Message: record.ErrorMessage, Retryable: code.Retryable()}
 	}
 	return out
+}
+
+func parseOperationIDOrZero(raw string) naming.OperationID {
+	parsed, err := naming.ParseOperationID(raw)
+	if err != nil {
+		return ""
+	}
+	return parsed
 }
 
 func fromStoreRecord(record opstore.Record) daemonops.Record {

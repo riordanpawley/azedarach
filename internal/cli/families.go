@@ -853,7 +853,7 @@ func DevServerListCommand(deps *Dependencies) error {
 	ctx := context.Background()
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       fmt.Sprintf("%s-%d", commandDevServerList, time.Now().UTC().UnixNano()),
+		RequestID:       makeRequestID(commandDevServerList),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
 			ProjectID: deps.ProjectID,

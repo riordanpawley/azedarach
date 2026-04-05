@@ -79,7 +79,7 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 		signals.GitAdditions = projection.Git.GitAdditions
 		signals.GitDeletions = projection.Git.GitDeletions
 		if op := projection.Git.ActiveOperation; op != nil {
-			signals.PendingOperationID = strings.TrimSpace(op.OperationID)
+				signals.PendingOperationID = strings.TrimSpace(op.OperationID.String())
 			signals.PendingOperationState = string(op.State)
 			signals.PendingOperationPercent = op.ProgressPercent
 		} else {
