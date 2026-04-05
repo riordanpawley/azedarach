@@ -3486,6 +3486,95 @@ func TestHandleSelectionOpenPRAndHelixPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("open diff prefers task session worktree when present", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m.tasks = []domain.Task{{
+			ID:     "az-1",
+			Title:  "Task 1",
+			Status: domain.StatusInProgress,
+			Type:   domain.TypeTask,
+			Session: &domain.Session{
+				IssueID:  "az-1",
+				Worktree: "/tmp/az-1",
+			},
+		}}
+		m.repoDir = "/tmp/repo-root"
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
+		}
+		worktreeField := reflect.ValueOf(diffOverlay).Elem().FieldByName("worktree")
+		if got := worktreeField.String(); got != "/tmp/az-1" {
+			t.Fatalf("diff worktree = %q, want %q", got, "/tmp/az-1")
+		}
+		if len(updatedModel.toasts) != 0 {
+			t.Fatalf("unexpected toasts: %+v", updatedModel.toasts)
+		}
+	})
+
+	t.Run("open diff uses runtime worktree signal when task is worktree-backed but session is absent", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m.tasks = []domain.Task{{
+			ID:          "az-1",
+			Title:       "Task 1",
+			Status:      domain.StatusInProgress,
+			Type:        domain.TypeTask,
+			HasWorktree: true,
+		}}
+		m.runtimeSignalWorktreeByTask = map[string]string{"az-1": "/tmp/az-1"}
+		m.repoDir = "/tmp/repo-root"
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd == nil {
+			t.Fatal("expected diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		diffOverlay, ok := updatedModel.overlayStack.Current().(*diff.DiffViewer)
+		if !ok {
+			t.Fatalf("overlay type = %T, want *diff.DiffViewer", updatedModel.overlayStack.Current())
+		}
+		worktreeField := reflect.ValueOf(diffOverlay).Elem().FieldByName("worktree")
+		if got := worktreeField.String(); got != "/tmp/az-1" {
+			t.Fatalf("diff worktree = %q, want %q", got, "/tmp/az-1")
+		}
+		if len(updatedModel.toasts) != 0 {
+			t.Fatalf("unexpected toasts: %+v", updatedModel.toasts)
+		}
+	})
+
+	t.Run("open diff with task worktree flag but unknown path warns instead of falling back to repo root", func(t *testing.T) {
+		m := newDaemonTestModel(&recordingDaemonTransport{})
+		m.tasks = []domain.Task{{
+			ID:          "az-1",
+			Title:       "Task 1",
+			Status:      domain.StatusInProgress,
+			Type:        domain.TypeTask,
+			HasWorktree: true,
+		}}
+		m.repoDir = "/tmp/repo-root"
+		m.nav.SelectTask("az-1", 1)
+
+		updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "f"})
+		if cmd != nil {
+			t.Fatal("expected no diff overlay command")
+		}
+		updatedModel := updated.(Model)
+		if len(updatedModel.toasts) != 1 {
+			t.Fatalf("toasts = %+v, want 1 warning toast", updatedModel.toasts)
+		}
+		if got := updatedModel.toasts[0].Message; !strings.Contains(got, "No task worktree available for diff") {
+			t.Fatalf("toast message = %q", got)
+		}
+	})
+
 	t.Run("open PR without session defers to daemon and returns error", func(t *testing.T) {
 		transport := &recordingDaemonTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

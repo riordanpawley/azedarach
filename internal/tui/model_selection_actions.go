@@ -323,14 +323,25 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "f":
 		// Show diff viewer
-		diffWorktree := strings.TrimSpace(m.repoDir)
+		diffWorktree := ""
 		if session != nil && strings.TrimSpace(session.Worktree) != "" {
 			diffWorktree = strings.TrimSpace(session.Worktree)
+		}
+		if diffWorktree == "" && task.Session != nil && strings.TrimSpace(task.Session.Worktree) != "" {
+			diffWorktree = strings.TrimSpace(task.Session.Worktree)
+		}
+		if diffWorktree == "" {
+			if runtimeWorktree := strings.TrimSpace(m.runtimeSignalWorktreeByTask[task.ID]); runtimeWorktree != "" {
+				diffWorktree = runtimeWorktree
+			}
+		}
+		if diffWorktree == "" && !task.HasWorktree {
+			diffWorktree = strings.TrimSpace(m.repoDir)
 		}
 		if diffWorktree == "" {
 			m.addToast(Toast{
 				Level:   ToastWarning,
-				Message: "No worktree available for diff",
+				Message: "No task worktree available for diff",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 			return m, nil
