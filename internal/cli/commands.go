@@ -3666,6 +3666,7 @@ func newSessionRequest(command, projectID, sessionID, baseBranch string) protoco
 		SessionID:  sessionID,
 		BaseBranch: baseBranch,
 	})
+	parsedSessionID, _ := naming.ParseSessionIDLoose(sessionID)
 
 	return protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -3674,7 +3675,7 @@ func newSessionRequest(command, projectID, sessionID, baseBranch string) protoco
 		Command:         command,
 		Meta: protocol.Metadata{
 			ProjectID: projectID,
-			SessionID: sessionID,
+			SessionID: parsedSessionID,
 		},
 		SentAt: time.Now().UTC(),
 		Body:   body,

@@ -299,7 +299,7 @@ func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope, prettyBody boo
 		metaParts = append(metaParts, "project="+evt.ProjectID)
 	}
 	if evt.Meta.SessionID != "" {
-		metaParts = append(metaParts, "session="+evt.Meta.SessionID)
+		metaParts = append(metaParts, "session="+evt.Meta.SessionID.String())
 	}
 	if evt.Meta.CorrelationID != "" {
 		metaParts = append(metaParts, "correlation="+evt.Meta.CorrelationID)

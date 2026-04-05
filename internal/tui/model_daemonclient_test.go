@@ -679,7 +679,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 	makeProjectionBody := func(revision uint64, issueID, worktreePath string, gitAdditions, gitDeletions, gitAhead, gitBehind int, sessionState protocol.SessionLifecycleState, agentStatus string, updatedAt time.Time, activeOperation *protocol.RuntimeOperationProjection) []byte {
 		body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 			ProjectID: projectID,
-			IssueID:   issueID,
+			IssueID:   naming.IssueID(issueID),
 			Worktree:  worktreePath,
 			UpdatedAt: updatedAt,
 			Runtime: &protocol.RuntimeProjectionEventBody{

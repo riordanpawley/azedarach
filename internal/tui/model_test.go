@@ -3405,7 +3405,7 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	updatedAt := startedAt.Add(5 * time.Minute)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: m.daemonProjectID(),
-		IssueID:   task.ID,
+		IssueID:   naming.IssueID(task.ID),
 		Worktree:  "/tmp/az-1",
 		UpdatedAt: updatedAt,
 		Runtime: &protocol.RuntimeProjectionEventBody{
@@ -3584,7 +3584,7 @@ func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	updatedAt := time.Date(2026, time.April, 1, 15, 0, 0, 0, time.UTC)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: m.daemonProjectID(),
-		IssueID:   task.ID,
+		IssueID:   naming.IssueID(task.ID),
 		Worktree:  "/tmp/wt-az-1",
 		UpdatedAt: updatedAt,
 		Runtime: &protocol.RuntimeProjectionEventBody{

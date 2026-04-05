@@ -18,6 +18,7 @@ import (
 	opmanager "github.com/riordanpawley/azedarach/internal/daemon/operations/manager"
 	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -459,10 +460,11 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
 		projectID = coalesceProjectID(body.ProjectID, projectID)
-		issueID = strings.TrimSpace(body.SessionID)
-		if issueID == "" {
+		parsedIssueID, parseErr := naming.ParseIssueID(strings.TrimSpace(body.SessionID))
+		if parseErr != nil {
 			return "", nil, "", errors.New("missing required fields: project_id/session_id")
 		}
+		issueID = parsedIssueID.String()
 		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
@@ -524,10 +526,11 @@ func deriveOperationRouting(kind, projectID string, payload []byte) (issueID str
 			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
 		}
 		projectID = coalesceProjectID(body.ProjectID, projectID)
-		issueID = strings.TrimSpace(body.IssueID)
-		if issueID == "" {
+		parsedIssueID, parseErr := naming.ParseIssueID(strings.TrimSpace(body.IssueID))
+		if parseErr != nil {
 			return "", nil, "", errors.New("missing required fields: project_id/issue_id")
 		}
+		issueID = parsedIssueID.String()
 		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil

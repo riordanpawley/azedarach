@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 // EnvelopeKind identifies the high-level message envelope category.
 type EnvelopeKind string
@@ -13,11 +17,11 @@ const (
 
 // Metadata carries request correlation and revision semantics.
 type Metadata struct {
-	ProjectID           string `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	ClientID            string `json:"client_id,omitempty" msgpack:"client_id,omitempty"`
-	SessionID           string `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-	CorrelationID       string `json:"correlation_id,omitempty" msgpack:"correlation_id,omitempty"`
-	LastAppliedRevision uint64 `json:"last_applied_revision,omitempty" msgpack:"last_applied_revision,omitempty"`
+	ProjectID           string           `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ClientID            string           `json:"client_id,omitempty" msgpack:"client_id,omitempty"`
+	SessionID           naming.SessionID `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	CorrelationID       string           `json:"correlation_id,omitempty" msgpack:"correlation_id,omitempty"`
+	LastAppliedRevision uint64           `json:"last_applied_revision,omitempty" msgpack:"last_applied_revision,omitempty"`
 }
 
 // RequestEnvelope is the daemon command request shell.

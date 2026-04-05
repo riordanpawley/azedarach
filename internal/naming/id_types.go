@@ -31,7 +31,7 @@ func ParseIssueID(raw string) (IssueID, error) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
 			continue
 		}
-			return "", fmt.Errorf("%w: disallowed character %q", ErrInvalidIssueID, r)
+		return "", fmt.Errorf("%w: disallowed character %q", ErrInvalidIssueID, r)
 	}
 	return IssueID(trimmed), nil
 }
@@ -91,11 +91,27 @@ func (id *IssueID) Scan(src any) error {
 
 func ParseSessionID(raw, projectPath string) (SessionID, error) {
 	trimmed := strings.TrimSpace(raw)
+	parsedLoose, err := ParseSessionIDLoose(trimmed)
+	if err != nil {
+		return "", err
+	}
+	trimmed = parsedLoose.String()
+	if _, ok := ParseIssueIDFromSessionName(trimmed, projectPath); !ok {
+		return "", fmt.Errorf("%w: %q does not match project naming scope", ErrInvalidSessionID, trimmed)
+	}
+	return SessionID(trimmed), nil
+}
+
+func ParseSessionIDLoose(raw string) (SessionID, error) {
+	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidSessionID)
 	}
-	if _, ok := ParseIssueIDFromSessionName(trimmed, projectPath); !ok {
-		return "", fmt.Errorf("%w: %q does not match project naming scope", ErrInvalidSessionID, trimmed)
+	for _, r := range trimmed {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return "", fmt.Errorf("%w: disallowed character %q", ErrInvalidSessionID, r)
 	}
 	return SessionID(trimmed), nil
 }
@@ -121,12 +137,12 @@ func (id *SessionID) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	// Project scope is unknown while decoding generic payloads; validate non-empty/session-safe shape.
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return fmt.Errorf("%w: empty", ErrInvalidSessionID)
+	// Project scope is unknown while decoding generic payloads; validate session-safe shape.
+	parsed, err := ParseSessionIDLoose(raw)
+	if err != nil {
+		return err
 	}
-	*id = SessionID(trimmed)
+	*id = parsed
 	return nil
 }
 
@@ -140,18 +156,18 @@ func (id *SessionID) Scan(src any) error {
 		*id = ""
 		return nil
 	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return fmt.Errorf("%w: empty", ErrInvalidSessionID)
+		parsed, err := ParseSessionIDLoose(v)
+		if err != nil {
+			return err
 		}
-		*id = SessionID(trimmed)
+		*id = parsed
 		return nil
 	case []byte:
-		trimmed := strings.TrimSpace(string(v))
-		if trimmed == "" {
-			return fmt.Errorf("%w: empty", ErrInvalidSessionID)
+		parsed, err := ParseSessionIDLoose(string(v))
+		if err != nil {
+			return err
 		}
-		*id = SessionID(trimmed)
+		*id = parsed
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported scan type %T", ErrInvalidSessionID, src)

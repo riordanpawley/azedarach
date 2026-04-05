@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 const (
 	EventWorktreeProjectionUpdated = "worktree.projection.updated"
@@ -9,7 +13,7 @@ const (
 
 type ProjectionUpdateEventBody struct {
 	ProjectID string                      `json:"project_id" msgpack:"project_id"`
-	IssueID   string                      `json:"issue_id" msgpack:"issue_id"`
+	IssueID   naming.IssueID              `json:"issue_id" msgpack:"issue_id"`
 	Worktree  string                      `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
 	UpdatedAt time.Time                   `json:"updated_at" msgpack:"updated_at"`
 	Runtime   *RuntimeProjectionEventBody `json:"runtime,omitempty" msgpack:"runtime,omitempty"`

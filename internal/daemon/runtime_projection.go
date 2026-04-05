@@ -18,10 +18,10 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 
 	if session != nil {
 		updatedAt := session.UpdatedAt.UTC()
-		projection.IssueID = naming.IssueID(strings.TrimSpace(session.IssueID))
+		projection.IssueID = parseIssueIDOrZero(session.IssueID)
 		projection.Session = protocol.RuntimeSessionProjection{
 			HasSession: true,
-			SessionID:  naming.SessionID(strings.TrimSpace(session.ID)),
+			SessionID:  parseSessionIDOrZero(session.ID),
 			State:      protocol.SessionLifecycleState(session.State),
 			StartedAt:  timePtrFrom(session.StartedAt),
 			UpdatedAt:  timePtr(updatedAt),
@@ -29,7 +29,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		}
 		projection.Agent = protocol.RuntimeAgentProjection{
 			Status:    string(session.State),
-			SessionID: naming.SessionID(strings.TrimSpace(session.ID)),
+			SessionID: parseSessionIDOrZero(session.ID),
 			UpdatedAt: timePtr(updatedAt),
 		}
 	}
@@ -39,7 +39,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		path := strings.TrimSpace(worktree.Path)
 		branch := strings.TrimSpace(worktree.Branch)
 		if projection.IssueID == "" {
-			projection.IssueID = naming.IssueID(strings.TrimSpace(worktree.IssueID))
+			projection.IssueID = parseIssueIDOrZero(worktree.IssueID)
 		}
 		projection.Worktree = protocol.RuntimeWorktreeProjection{
 			Exists:             path != "",
@@ -63,6 +63,22 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 	}
 
 	return projection
+}
+
+func parseIssueIDOrZero(raw string) naming.IssueID {
+	parsed, err := naming.ParseIssueID(raw)
+	if err != nil {
+		return ""
+	}
+	return parsed
+}
+
+func parseSessionIDOrZero(raw string) naming.SessionID {
+	parsed, err := naming.ParseSessionIDLoose(raw)
+	if err != nil {
+		return ""
+	}
+	return parsed
 }
 
 func buildRuntimeProjectionSnapshot(projectID string, revision uint64, projections []protocol.RuntimeProjection) protocol.RuntimeProjectionSnapshotPayload {

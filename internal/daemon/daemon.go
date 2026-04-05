@@ -20,7 +20,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
-	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -876,15 +875,15 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 	}
 	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
-		body, err := json.Marshal(protocol.SessionProjectionEventBody{
-			ProjectID: projectID,
-			Revision:  rev,
-			Session: protocol.SessionProjection{
-				SessionID: naming.SessionID(strings.TrimSpace(session.ID)),
-				IssueID:   naming.IssueID(strings.TrimSpace(session.IssueID)),
-				State:     protocol.SessionLifecycleState(session.State),
-				UpdatedAt: session.UpdatedAt,
-			},
+	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+		ProjectID: projectID,
+		Revision:  rev,
+		Session: protocol.SessionProjection{
+			SessionID: parseSessionIDOrZero(session.ID),
+			IssueID:   parseIssueIDOrZero(session.IssueID),
+			State:     protocol.SessionLifecycleState(session.State),
+			UpdatedAt: session.UpdatedAt,
+		},
 		Runtime: &runtimeBody,
 	})
 	if err != nil {
@@ -917,7 +916,7 @@ func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, p
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: projectID,
-		IssueID:   strings.TrimSpace(issueID),
+		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
 		Runtime:   &runtimeBody,
@@ -949,7 +948,7 @@ func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, 
 	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: projectID,
-		IssueID:   strings.TrimSpace(issueID),
+		IssueID:   parseIssueIDOrZero(issueID),
 		Worktree:  strings.TrimSpace(worktree),
 		UpdatedAt: time.Now().UTC(),
 		Runtime:   &runtimeBody,
@@ -1003,7 +1002,7 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 
 	projection := buildRuntimeProjection(projectID, session, projectionWorktree)
 	if projection.IssueID == "" {
-		projection.IssueID = naming.IssueID(strings.TrimSpace(issueID))
+		projection.IssueID = parseIssueIDOrZero(issueID)
 	}
 	if session != nil && projection.Session.Worktree == "" && projection.Worktree.Path != "" {
 		projection.Session.Worktree = projection.Worktree.Path
