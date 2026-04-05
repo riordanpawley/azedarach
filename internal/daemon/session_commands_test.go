@@ -122,6 +122,46 @@ func (r *recoveringWorktreeRunner) Run(_ context.Context, args ...string) (strin
 	return "", nil
 }
 
+func TestSessionProjectionIssueIDPrefersSessionNameParsing(t *testing.T) {
+	session := daemonstate.Session{
+		ID:      "az-bra",
+		IssueID: "az-bra",
+	}
+	if got, want := sessionProjectionIssueID(session, "azedarach"), "bra"; got != want {
+		t.Fatalf("sessionProjectionIssueID() = %q, want %q", got, want)
+	}
+}
+
+func TestSessionProjectionByIssueKeyPrefersActiveStateOverStopped(t *testing.T) {
+	now := time.Now().UTC()
+	sessions := []daemonstate.Session{
+		{
+			ID:        "az-bra",
+			IssueID:   "az-bra",
+			State:     daemonstate.SessionStateStopped,
+			UpdatedAt: now,
+		},
+		{
+			ID:        "plain",
+			IssueID:   "bra",
+			State:     daemonstate.SessionStateAttached,
+			UpdatedAt: now.Add(-1 * time.Minute),
+		},
+	}
+
+	byIssue := sessionProjectionByIssueKey(sessions, "azedarach")
+	entry, ok := byIssue["bra"]
+	if !ok {
+		t.Fatalf("missing projection for issue key bra: %+v", byIssue)
+	}
+	if entry.State != daemonstate.SessionStateAttached {
+		t.Fatalf("projection state = %s, want %s", entry.State, daemonstate.SessionStateAttached)
+	}
+	if entry.ID != "plain" {
+		t.Fatalf("projection session id = %s, want plain", entry.ID)
+	}
+}
+
 type sessionStartTmuxRunner struct {
 	sessions      map[string]bool
 	sendKeysCalls int

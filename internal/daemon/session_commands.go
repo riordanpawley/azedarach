@@ -58,13 +58,50 @@ func sessionKey(value string) string {
 
 func sessionProjectionIssueID(session daemonstate.Session, namingScope string) string {
 	issueID := strings.TrimSpace(session.IssueID)
+	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
+		if issueID == "" {
+			return parsedIssueID
+		}
+		sessionLikePrefix := naming.ProjectSessionPrefix(namingScope) + "-"
+		if naming.IssueIDsEqual(issueID, session.ID) || strings.HasPrefix(strings.ToLower(issueID), strings.ToLower(sessionLikePrefix)) {
+			return parsedIssueID
+		}
+	}
 	if issueID != "" {
 		return issueID
 	}
-	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
-		return parsedIssueID
-	}
+
 	return strings.TrimSpace(session.ID)
+}
+
+func sessionProjectionStateRank(state daemonstate.SessionState) int {
+	switch state {
+	case daemonstate.SessionStateAttached:
+		return 4
+	case daemonstate.SessionStateStarting:
+		return 3
+	case daemonstate.SessionStatePaused:
+		return 2
+	case daemonstate.SessionStateStopped:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func shouldReplaceSessionProjection(existing, candidate daemonstate.Session) bool {
+	existingRank := sessionProjectionStateRank(existing.State)
+	candidateRank := sessionProjectionStateRank(candidate.State)
+	if candidateRank != existingRank {
+		return candidateRank > existingRank
+	}
+	if candidate.UpdatedAt.After(existing.UpdatedAt) {
+		return true
+	}
+	if existing.UpdatedAt.After(candidate.UpdatedAt) {
+		return false
+	}
+	return strings.TrimSpace(candidate.ID) < strings.TrimSpace(existing.ID)
 }
 
 func sessionProjectionByIssueKey(sessions []daemonstate.Session, namingScope string) map[string]daemonstate.Session {
@@ -74,7 +111,10 @@ func sessionProjectionByIssueKey(sessions []daemonstate.Session, namingScope str
 		if key == "" {
 			continue
 		}
-		byIssueKey[key] = session
+		existing, exists := byIssueKey[key]
+		if !exists || shouldReplaceSessionProjection(existing, session) {
+			byIssueKey[key] = session
+		}
 	}
 	return byIssueKey
 }
@@ -823,11 +863,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	}
 
 	snapshot := d.sessionStore.ReadSnapshot(projectID)
+	snapshotSessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
 	for _, session := range snapshot.Sessions {
-		issueID := strings.TrimSpace(session.IssueID)
-		if issueID == "" {
-			issueID = session.ID
-		}
+		snapshotSessions = append(snapshotSessions, session)
+		issueID := sessionProjectionIssueID(session, namingScope)
 		issueKey := sessionKey(issueID)
 		if targetIssueKey != "" && issueKey != targetIssueKey {
 			continue
@@ -886,18 +925,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		result.RecreatedTmuxSessions++
 	}
 
-	snapshotByIssueKey := make(map[string]daemonstate.Session, len(snapshot.Sessions))
-	for _, session := range snapshot.Sessions {
-		issueID := strings.TrimSpace(session.IssueID)
-		if issueID == "" {
-			issueID = session.ID
-		}
-		issueKey := sessionKey(issueID)
-		if issueKey == "" {
-			continue
-		}
-		snapshotByIssueKey[issueKey] = session
-	}
+	snapshotByIssueKey := sessionProjectionByIssueKey(snapshotSessions, namingScope)
 
 	for issueKey := range tmuxSet {
 		sessionIDInTmux := tmuxNameByIssueKey[issueKey]
