@@ -12,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
@@ -50,8 +51,8 @@ func TestIssueSpecServiceReadResolvesExternalCodeSelector(t *testing.T) {
 
 	service := newTestIssueSpecService(client, repoDir)
 	out, err := service.Read(ctx, protocol.SpecReadRequestBody{
-		IssueID: issueID,
-		ReqID:   ext,
+		IssueID: naming.IssueID(issueID),
+		ReqID:   naming.RequirementID(ext),
 	})
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -100,7 +101,7 @@ func TestIssueSpecServiceReadIssueScopeIncludesLinkedRequirementsWithoutIssueID(
 	}
 
 	service := newTestIssueSpecService(client, repoDir)
-	out, err := service.Read(ctx, protocol.SpecReadRequestBody{IssueID: issueID})
+	out, err := service.Read(ctx, protocol.SpecReadRequestBody{IssueID: naming.IssueID(issueID)})
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

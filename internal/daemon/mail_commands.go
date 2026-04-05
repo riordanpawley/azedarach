@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"golang.org/x/sys/unix"
 )
 
@@ -43,7 +44,7 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 		d.cfg.Logger.Info("daemon mail send requested",
 			"repo_dir", repoDir,
 			"parent_issue", parentIssue,
-			"issue_id", strings.TrimSpace(cmd.IssueID),
+			"issue_id", strings.TrimSpace(cmd.IssueID.String()),
 			"type", eventType,
 			"body_bytes", len(cmd.Body),
 		)
@@ -66,7 +67,7 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	event := daemonMailEvent{
 		Seq:         nextSeq,
 		ParentIssue: parentIssue,
-		IssueID:     strings.TrimSpace(cmd.IssueID),
+		IssueID:     strings.TrimSpace(cmd.IssueID.String()),
 		Type:        eventType,
 		From:        strings.TrimSpace(cmd.From),
 		To:          strings.TrimSpace(cmd.To),
@@ -189,7 +190,7 @@ func mailEventToProtocol(evt daemonMailEvent) protocol.MailEvent {
 	return protocol.MailEvent{
 		Seq:         evt.Seq,
 		ParentIssue: evt.ParentIssue,
-		IssueID:     evt.IssueID,
+		IssueID:     naming.IssueID(evt.IssueID),
 		Type:        evt.Type,
 		From:        evt.From,
 		To:          evt.To,

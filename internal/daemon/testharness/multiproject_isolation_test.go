@@ -58,22 +58,22 @@ func (d *multiprojectDaemon) Command(ctx context.Context, req protocol.RequestEn
 
 	switch req.Command {
 	case multiprojectUpsertCommand:
-		if d.fallbackProjectID != "" && req.Meta.ProjectID == d.fallbackProjectID {
+		if d.fallbackProjectID != "" && req.Meta.ProjectID.String() == d.fallbackProjectID {
 			d.fallbackActivatedMu.Lock()
-			activated := d.fallbackActivated[req.Meta.ProjectID]
+			activated := d.fallbackActivated[req.Meta.ProjectID.String()]
 			if d.fallbackActivated == nil {
 				d.fallbackActivated = map[string]bool{}
 			}
 			if !activated {
-				d.fallbackActivated[req.Meta.ProjectID] = true
+				d.fallbackActivated[req.Meta.ProjectID.String()] = true
 				d.fallbackActivatedMu.Unlock()
 				if err := d.harness.appendEvent("daemon.multiproject.fallback.activated", map[string]any{
-					"project_id": req.Meta.ProjectID,
+					"project_id": req.Meta.ProjectID.String(),
 					"command":    req.Command,
 				}); err != nil {
 					return protocol.ResponseEnvelope{}, err
 				}
-				return protocol.ResponseEnvelope{}, fmt.Errorf("project %s switched to fallback", req.Meta.ProjectID)
+				return protocol.ResponseEnvelope{}, fmt.Errorf("project %s switched to fallback", req.Meta.ProjectID.String())
 			}
 			d.fallbackActivatedMu.Unlock()
 		}
@@ -83,7 +83,7 @@ func (d *multiprojectDaemon) Command(ctx context.Context, req protocol.RequestEn
 			return protocol.ResponseEnvelope{}, fmt.Errorf("decode upsert request: %w", err)
 		}
 
-		evt, err := d.store.UpsertSession(req.Meta.ProjectID, cmd.SessionID, cmd.IssueID, cmd.State)
+		evt, err := d.store.UpsertSession(req.Meta.ProjectID.String(), cmd.SessionID, cmd.IssueID, cmd.State)
 		if err != nil {
 			return protocol.ResponseEnvelope{}, err
 		}
@@ -103,7 +103,7 @@ func (d *multiprojectDaemon) Command(ctx context.Context, req protocol.RequestEn
 			Body:            sessionBody,
 		})
 
-		snapshot := d.store.ReadSnapshot(req.Meta.ProjectID)
+		snapshot := d.store.ReadSnapshot(req.Meta.ProjectID.String())
 		body, err := json.Marshal(snapshot)
 		if err != nil {
 			return protocol.ResponseEnvelope{}, fmt.Errorf("marshal snapshot response: %w", err)
@@ -111,7 +111,7 @@ func (d *multiprojectDaemon) Command(ctx context.Context, req protocol.RequestEn
 
 		if err := d.harness.appendEvent("daemon.multiproject.command", map[string]any{
 			"command":    req.Command,
-			"project_id": req.Meta.ProjectID,
+			"project_id": req.Meta.ProjectID.String(),
 			"session_id": cmd.SessionID,
 			"revision":   snapshot.Revision,
 		}); err != nil {
@@ -130,7 +130,7 @@ func (d *multiprojectDaemon) Command(ctx context.Context, req protocol.RequestEn
 		}, nil
 
 	case multiprojectSnapshotCommand:
-		snapshot := d.store.ReadSnapshot(req.Meta.ProjectID)
+		snapshot := d.store.ReadSnapshot(req.Meta.ProjectID.String())
 		body, err := json.Marshal(snapshot)
 		if err != nil {
 			return protocol.ResponseEnvelope{}, fmt.Errorf("marshal snapshot response: %w", err)
@@ -227,7 +227,7 @@ func TestMultiprojectIsolationConcurrentClients(t *testing.T) {
 
 		resp, err := tc.client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID(tc.projectID + "-upsert"),
+			RequestID:       naming.RequestID(tc.projectID + "-upsert"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectUpsertCommand,
 			SentAt:          time.Now().UTC(),
@@ -266,7 +266,7 @@ func TestMultiprojectIsolationConcurrentClients(t *testing.T) {
 				errCh <- fmt.Errorf("subscription %s closed early", tc.projectID)
 				return
 			}
-			if evt.ProjectID != tc.projectID {
+			if evt.ProjectID.String() != tc.projectID {
 				errCh <- fmt.Errorf("event project_id = %q, want %q", evt.ProjectID, tc.projectID)
 				return
 			}
@@ -360,7 +360,7 @@ func TestMultiprojectIsolationScopedSnapshots(t *testing.T) {
 
 		resp, err := client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID(projectID + "-upsert"),
+			RequestID:       naming.RequestID(projectID + "-upsert"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectUpsertCommand,
 			SentAt:          time.Now().UTC(),
@@ -382,7 +382,7 @@ func TestMultiprojectIsolationScopedSnapshots(t *testing.T) {
 
 		resp, err := client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID(projectID + "-snapshot"),
+			RequestID:       naming.RequestID(projectID + "-snapshot"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectSnapshotCommand,
 			SentAt:          time.Now().UTC(),
@@ -485,7 +485,7 @@ func TestMultiprojectFallbackDoesNotBlockHealthyProject(t *testing.T) {
 
 		resp, err := client.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID(projectID + "-upsert"),
+			RequestID:       naming.RequestID(projectID + "-upsert"),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         multiprojectUpsertCommand,
 			SentAt:          time.Now().UTC(),

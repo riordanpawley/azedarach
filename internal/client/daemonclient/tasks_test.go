@@ -13,17 +13,17 @@ import (
 )
 
 type taskRecordingTransport struct {
-	lastReq         protocol.RequestEnvelope
-	commandCalls    int
-	handshakeCalls  int
-	replyFn         func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	handshakeFn     func(protocol.Hello) (protocol.HelloAck, error)
+	lastReq        protocol.RequestEnvelope
+	commandCalls   int
+	handshakeCalls int
+	replyFn        func(protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	handshakeFn    func(protocol.Hello) (protocol.HelloAck, error)
 }
 
 func assertTaskProjectID(t *testing.T, req protocol.RequestEnvelope, want string) {
 	t.Helper()
-	if req.Meta.ProjectID != want {
-		t.Fatalf("project_id = %q, want %q", req.Meta.ProjectID, want)
+	if req.Meta.ProjectID.String() != want {
+		t.Fatalf("project_id = %q, want %q", req.Meta.ProjectID.String(), want)
 	}
 }
 

@@ -28,10 +28,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
@@ -2740,7 +2740,7 @@ func (m *Model) addToast(toast Toast) {
 	}
 	m.recordRuntimeEvent(protocol.EventEnvelope{
 		Revision:  m.daemonRevision,
-		ProjectID: m.daemonProjectID(),
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		Event:     "ui.toast",
 		Kind:      kind,
 		Body:      []byte(toast.Message),
@@ -2753,7 +2753,7 @@ func (m *Model) recordRuntimeEvent(evt protocol.EventEnvelope) {
 		evt.EmittedAt = time.Now().UTC()
 	}
 	if evt.ProjectID == "" {
-		evt.ProjectID = m.daemonProjectID()
+		evt.ProjectID = naming.ProjectID(m.daemonProjectID())
 	}
 	m.runtimeEvents = append(m.runtimeEvents, evt)
 	if len(m.runtimeEvents) > eventLogCapacity {
@@ -3320,10 +3320,10 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 		return
 	}
 	taskView := *task
-		if path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); path != "" {
-			if taskView.Session == nil {
-				taskView.Session = &domain.Session{IssueID: naming.IssueID(taskView.ID)}
-			}
+	if path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); path != "" {
+		if taskView.Session == nil {
+			taskView.Session = &domain.Session{IssueID: naming.IssueID(taskView.ID)}
+		}
 		if strings.TrimSpace(taskView.Session.Worktree) == "" {
 			taskView.Session.Worktree = path
 		}

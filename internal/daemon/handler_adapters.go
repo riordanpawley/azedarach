@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -41,8 +42,8 @@ func (s issueSpecService) ListRequirements(ctx context.Context, req protocol.Spe
 		return protocol.SpecRequirementListResponseBody{}, err
 	}
 	filter := issues.RequirementFilter{
-		IssueID:  req.IssueID,
-		LocalIDs: req.IDs,
+		IssueID:  req.IssueID.String(),
+		LocalIDs: requirementIDsToStrings(req.IDs),
 	}
 	if req.Status != "" {
 		filter.Statuses = []issues.RequirementStatus{issues.RequirementStatus(req.Status)}
@@ -63,7 +64,7 @@ func (s issueSpecService) GetRequirement(ctx context.Context, req protocol.SpecR
 	if err != nil {
 		return protocol.SpecRequirementGetResponseBody{}, err
 	}
-	row, err := client.GetRequirement(ctx, req.ID)
+	row, err := client.GetRequirement(ctx, req.ID.String())
 	if err != nil {
 		return protocol.SpecRequirementGetResponseBody{}, err
 	}
@@ -76,13 +77,14 @@ func (s issueSpecService) CreateRequirement(ctx context.Context, req protocol.Sp
 		return protocol.SpecRequirementCreateResponseBody{}, err
 	}
 	params := issues.CreateRequirementParams{
-		LocalID:     req.ID,
+		LocalID:     req.ID.String(),
 		Title:       req.Title,
 		Description: req.Description,
 		Status:      issues.RequirementStatusOpen,
 	}
 	if req.IssueID != "" {
-		params.IssueID = &req.IssueID
+		issueID := req.IssueID.String()
+		params.IssueID = &issueID
 	}
 	row, err := client.CreateRequirement(ctx, params)
 	if err != nil {
@@ -104,7 +106,7 @@ func (s issueSpecService) UpdateRequirement(ctx context.Context, req protocol.Sp
 		status := issues.RequirementStatus(*req.Status)
 		params.Status = &status
 	}
-	row, err := client.UpdateRequirement(ctx, req.ID, params)
+	row, err := client.UpdateRequirement(ctx, req.ID.String(), params)
 	if err != nil {
 		return protocol.SpecRequirementUpdateResponseBody{}, err
 	}
@@ -116,7 +118,7 @@ func (s issueSpecService) DeleteRequirement(ctx context.Context, req protocol.Sp
 	if err != nil {
 		return protocol.SpecRequirementDeleteResponseBody{}, err
 	}
-	if err := client.DeleteRequirement(ctx, req.ID); err != nil {
+	if err := client.DeleteRequirement(ctx, req.ID.String()); err != nil {
 		return protocol.SpecRequirementDeleteResponseBody{}, err
 	}
 	return protocol.SpecRequirementDeleteResponseBody{
@@ -131,9 +133,9 @@ func (s issueSpecService) ListLinks(ctx context.Context, req protocol.SpecLinkLi
 		return protocol.SpecLinkListResponseBody{}, err
 	}
 	links, err := client.ListSpecLinks(ctx, issues.SpecLinkFilter{
-		IssueID:       req.IssueID,
-		RequirementID: req.ReqID,
-		LinkIDs:       req.IDs,
+		IssueID:       req.IssueID.String(),
+		RequirementID: req.ReqID.String(),
+		LinkIDs:       specLinkIDsToStrings(req.IDs),
 	})
 	if err != nil {
 		return protocol.SpecLinkListResponseBody{}, err
@@ -151,8 +153,8 @@ func (s issueSpecService) AddLink(ctx context.Context, req protocol.SpecLinkAddR
 		return protocol.SpecLinkAddResponseBody{}, err
 	}
 	params := issues.AddSpecLinkParams{
-		IssueID:       req.IssueID,
-		RequirementID: req.ReqID,
+		IssueID:       req.IssueID.String(),
+		RequirementID: req.ReqID.String(),
 		Role:          issues.LinkRole(req.Role),
 	}
 	if req.Note != "" {
@@ -170,7 +172,7 @@ func (s issueSpecService) RemoveLink(ctx context.Context, req protocol.SpecLinkR
 	if err != nil {
 		return protocol.SpecLinkRemoveResponseBody{}, err
 	}
-	if err := client.RemoveSpecLink(ctx, req.IssueID, req.ReqID); err != nil {
+	if err := client.RemoveSpecLink(ctx, req.IssueID.String(), req.ReqID.String()); err != nil {
 		return protocol.SpecLinkRemoveResponseBody{}, err
 	}
 	return protocol.SpecLinkRemoveResponseBody{
@@ -188,23 +190,23 @@ func (s issueSpecService) Read(ctx context.Context, req protocol.SpecReadRequest
 	resolvedReqID := req.ReqID
 	requirements := make([]issues.Requirement, 0, 1)
 	if req.ReqID != "" {
-		requirement, err := client.GetRequirement(ctx, req.ReqID)
+		requirement, err := client.GetRequirement(ctx, req.ReqID.String())
 		if err != nil {
 			return protocol.SpecReadResponseBody{}, err
 		}
-		resolvedReqID = requirement.LocalID
+		resolvedReqID = naming.RequirementID(requirement.LocalID)
 		requirements = append(requirements, requirement)
 	}
 
 	if req.ReqID == "" {
-		reqFilter := issues.RequirementFilter{IssueID: req.IssueID}
+		reqFilter := issues.RequirementFilter{IssueID: req.IssueID.String()}
 		rows, err := client.ListRequirements(ctx, reqFilter)
 		if err != nil {
 			return protocol.SpecReadResponseBody{}, err
 		}
 		requirements = rows
 	}
-	linkFilter := issues.SpecLinkFilter{IssueID: req.IssueID, RequirementID: resolvedReqID}
+	linkFilter := issues.SpecLinkFilter{IssueID: req.IssueID.String(), RequirementID: resolvedReqID.String()}
 	links, err := client.ListSpecLinks(ctx, linkFilter)
 	if err != nil {
 		return protocol.SpecReadResponseBody{}, err
@@ -264,7 +266,7 @@ func (s issueSpecService) Lint(ctx context.Context, _ protocol.SpecLintRequestBo
 				Code:     "unlinked_requirement",
 				Message:  "requirement has no linked issue",
 				Severity: "warning",
-				ReqID:    req.LocalID,
+				ReqID:    naming.RequirementID(req.LocalID),
 			})
 		}
 	}
@@ -300,26 +302,60 @@ func (s issueSpecService) SyncMD(context.Context, protocol.SpecSyncMDRequestBody
 
 func mapRequirementToProtocol(req issues.Requirement) protocol.SpecRequirement {
 	out := protocol.SpecRequirement{
-		ID:          req.LocalID,
+		ID:          naming.RequirementID(req.LocalID),
 		Title:       req.Title,
 		Description: req.Description,
 		Status:      protocol.SpecRequirementStatus(req.Status),
 	}
 	if req.IssueID != nil {
-		out.IssueID = *req.IssueID
+		out.IssueID = naming.IssueID(*req.IssueID)
 	}
 	return out
 }
 
 func mapLinkToProtocol(link issues.SpecLink) protocol.SpecLink {
 	out := protocol.SpecLink{
-		ID:      link.ID,
-		IssueID: link.IssueID,
-		ReqID:   link.RequirementID,
+		ID:      naming.SpecLinkID(link.ID),
+		IssueID: naming.IssueID(link.IssueID),
+		ReqID:   naming.RequirementID(link.RequirementID),
 		Role:    protocol.SpecLinkRole(link.Role),
 	}
 	if link.Note != nil {
 		out.Note = *link.Note
+	}
+	return out
+}
+
+func requirementIDsToStrings(ids []naming.RequirementID) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		out = append(out, id.String())
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func specLinkIDsToStrings(ids []naming.SpecLinkID) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		out = append(out, id.String())
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

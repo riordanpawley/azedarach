@@ -10,6 +10,16 @@ import (
 )
 
 var (
+	// ErrInvalidProjectID indicates the supplied project identifier is malformed.
+	ErrInvalidProjectID = errors.New("invalid project id")
+	// ErrInvalidClientID indicates the supplied client identifier is malformed.
+	ErrInvalidClientID = errors.New("invalid client id")
+	// ErrInvalidCorrelationID indicates the supplied correlation identifier is malformed.
+	ErrInvalidCorrelationID = errors.New("invalid correlation id")
+	// ErrInvalidRequirementID indicates the supplied requirement identifier is malformed.
+	ErrInvalidRequirementID = errors.New("invalid requirement id")
+	// ErrInvalidSpecLinkID indicates the supplied spec link identifier is malformed.
+	ErrInvalidSpecLinkID = errors.New("invalid spec link id")
 	// ErrInvalidIssueID indicates the supplied issue identifier is malformed.
 	ErrInvalidIssueID = errors.New("invalid issue id")
 	// ErrInvalidSessionID indicates the supplied session identifier is malformed.
@@ -19,6 +29,21 @@ var (
 	// ErrInvalidRequestID indicates the supplied request identifier is malformed.
 	ErrInvalidRequestID = errors.New("invalid request id")
 )
+
+// ProjectID is a validated daemon project identifier.
+type ProjectID string
+
+// ClientID is a validated daemon client identifier.
+type ClientID string
+
+// CorrelationID is a validated request correlation identifier.
+type CorrelationID string
+
+// RequirementID is a validated spec requirement identifier.
+type RequirementID string
+
+// SpecLinkID is a validated spec link identifier.
+type SpecLinkID string
 
 // IssueID is a validated issue identifier.
 type IssueID string
@@ -31,6 +56,157 @@ type OperationID string
 
 // RequestID is a validated request correlation identifier.
 type RequestID string
+
+func ParseProjectID(raw string) (ProjectID, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidProjectID)
+	}
+	return ProjectID(trimmed), nil
+}
+
+func (id ProjectID) String() string {
+	return string(id)
+}
+
+func (id ProjectID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(id.String())
+}
+
+func (id *ProjectID) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	parsed, err := ParseProjectID(raw)
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
+
+func ParseClientID(raw string) (ClientID, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidClientID)
+	}
+	return ClientID(trimmed), nil
+}
+
+func (id ClientID) String() string {
+	return string(id)
+}
+
+func (id ClientID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(id.String())
+}
+
+func (id *ClientID) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	parsed, err := ParseClientID(raw)
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
+
+func ParseCorrelationID(raw string) (CorrelationID, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidCorrelationID)
+	}
+	return CorrelationID(trimmed), nil
+}
+
+func (id CorrelationID) String() string {
+	return string(id)
+}
+
+func (id CorrelationID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(id.String())
+}
+
+func (id *CorrelationID) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	parsed, err := ParseCorrelationID(raw)
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
+
+func ParseRequirementID(raw string) (RequirementID, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidRequirementID)
+	}
+	if err := validateIDCharset(trimmed, ErrInvalidRequirementID); err != nil {
+		return "", err
+	}
+	return RequirementID(trimmed), nil
+}
+
+func (id RequirementID) String() string {
+	return string(id)
+}
+
+func (id RequirementID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(id.String())
+}
+
+func (id *RequirementID) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	parsed, err := ParseRequirementID(raw)
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
+
+func ParseSpecLinkID(raw string) (SpecLinkID, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: empty", ErrInvalidSpecLinkID)
+	}
+	if err := validateIDCharset(trimmed, ErrInvalidSpecLinkID); err != nil {
+		return "", err
+	}
+	return SpecLinkID(trimmed), nil
+}
+
+func (id SpecLinkID) String() string {
+	return string(id)
+}
+
+func (id SpecLinkID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(id.String())
+}
+
+func (id *SpecLinkID) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	parsed, err := ParseSpecLinkID(raw)
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
 
 func ParseIssueID(raw string) (IssueID, error) {
 	trimmed := strings.TrimSpace(raw)

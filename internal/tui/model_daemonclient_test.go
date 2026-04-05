@@ -149,7 +149,7 @@ func TestTaskCommandsUseDaemonClient(t *testing.T) {
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 				}, nil
 			},
 		}
@@ -531,7 +531,7 @@ func TestTaskSnapshotReadPathsUseExplicitTimeoutBudget(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        11,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 11, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 11, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		}
 	}
@@ -618,7 +618,7 @@ func TestDaemonAttachFlowUsesHandshakeSnapshotSubscribe(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -745,7 +745,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        7,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 7, req.Meta.ProjectID, tasks),
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 7, req.Meta.ProjectID.String(), tasks),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1086,7 +1086,7 @@ func TestDaemonStreamClosedTriggersReattachAndSnapshotRehydrate(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1148,7 +1148,7 @@ func TestDaemonGapEventTriggersSnapshotRehydrate(t *testing.T) {
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        12,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 12, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 12, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1220,7 +1220,7 @@ func TestDaemonStreamClosedRehydratesCurrentStreamAndIgnoresStaleClose(t *testin
 				Kind:            protocol.EnvelopeKindResponse,
 				Revision:        8,
 				OK:              true,
-				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID, []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
+				Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 8, req.Meta.ProjectID.String(), []domain.Task{{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen}}),
 			}, nil
 		},
 		subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
@@ -1896,7 +1896,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 					RequestID:       req.RequestID,
 					Kind:            protocol.EnvelopeKindResponse,
 					OK:              true,
-					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID, tasks),
+					Body:            mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 0, req.Meta.ProjectID.String(), tasks),
 				}, nil
 			case daemonclient.CommandSessionStop:
 				var body struct {
@@ -3003,7 +3003,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID, []domain.Task{
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
@@ -3133,7 +3133,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID, []domain.Task{
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
 						}),
 					}, nil
@@ -3246,7 +3246,7 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 						RequestID:       req.RequestID,
 						Kind:            protocol.EnvelopeKindResponse,
 						OK:              true,
-						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID, []domain.Task{
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
 							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true, HasUncommittedChanges: true, GitAdditions: 4, GitDeletions: 2},
 						}),
 					}, nil

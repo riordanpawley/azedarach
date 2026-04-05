@@ -17,6 +17,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -856,7 +857,7 @@ func DevServerListCommand(deps *Dependencies) error {
 		RequestID:       makeRequestID(commandDevServerList),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: deps.ProjectID,
+			ProjectID: naming.ProjectID(deps.ProjectID),
 		},
 		Command: commandDevServerList,
 		SentAt:  time.Now().UTC(),

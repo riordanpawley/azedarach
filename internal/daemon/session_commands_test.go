@@ -260,7 +260,7 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.start",
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 		Body: marshalJSON(map[string]string{
 			"project_id": projectID,
@@ -346,7 +346,7 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.start",
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 		Body: marshalJSON(map[string]any{
 			"project_id": projectID,
@@ -428,7 +428,7 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		Command:         "session.stop",
 		Body:            body,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 	}
 
@@ -528,7 +528,7 @@ func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T)
 		Command:         "session.stop",
 		Body:            body,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 	}
 
@@ -590,7 +590,7 @@ func TestHandleSessionStopDirectKillsLegacyIssueNamedSession(t *testing.T) {
 		Command:         "session.stop",
 		Body:            body,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 	}
 
@@ -740,7 +740,7 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 			"session_id": issueID,
 		}),
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 	}
 
@@ -854,7 +854,7 @@ func TestSessionAttachRefreshesRuntimeBeforeMutation(t *testing.T) {
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         daemonhandlers.CommandSessionAttach,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 		Body: body,
 	})
@@ -896,7 +896,7 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 		RequestID:       "req-start",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 	}
 	if err := daemon.applySessionLifecycleTransition(context.Background(), req, projectID, sessionID, issueID, daemonhandlers.CommandSessionStart); err != nil {
@@ -1300,7 +1300,7 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 		RequestID:       "req-session.start",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 		},
 		Command: daemonhandlers.CommandSessionStart,
 		Body: marshalJSON(map[string]string{

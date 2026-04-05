@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"golang.org/x/sys/unix"
 )
 
@@ -327,7 +328,7 @@ func IssueFanoutDriftCommand(deps *Dependencies, opts IssueFanoutDriftOptions) e
 
 	worktree := strings.TrimSpace(opts.Worktree)
 	result, err := deps.DaemonClient.FanoutDrift(ctx, protocol.FanoutDriftCommandBody{
-		IssueID:  opts.IssueID,
+		IssueID:  naming.IssueID(strings.TrimSpace(opts.IssueID)),
 		RepoDir:  deps.RepoDir,
 		Worktree: worktree,
 	})
@@ -439,7 +440,7 @@ func MailSendCommand(deps *Dependencies, opts MailSendOptions) error {
 	event, err := deps.DaemonClient.MailSend(ctx, protocol.MailSendCommandBody{
 		RepoDir:     deps.RepoDir,
 		ParentIssue: opts.ParentIssueID,
-		IssueID:     strings.TrimSpace(opts.IssueID),
+		IssueID:     naming.IssueID(strings.TrimSpace(opts.IssueID)),
 		Type:        strings.TrimSpace(opts.Type),
 		From:        strings.TrimSpace(opts.From),
 		To:          strings.TrimSpace(opts.To),
@@ -552,7 +553,7 @@ func protocolToLocalMailEvent(evt protocol.MailEvent) mailEvent {
 	return mailEvent{
 		Seq:         evt.Seq,
 		ParentIssue: evt.ParentIssue,
-		IssueID:     evt.IssueID,
+		IssueID:     evt.IssueID.String(),
 		Type:        evt.Type,
 		From:        evt.From,
 		To:          evt.To,

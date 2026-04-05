@@ -117,7 +117,7 @@ func (d *Daemon) handleIssueFanoutDrift(ctx context.Context, req protocol.Reques
 	if repoDir == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: repo_dir"), nil
 	}
-	issueID := strings.TrimSpace(cmd.IssueID)
+	issueID := strings.TrimSpace(cmd.IssueID.String())
 	if issueID == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: issue_id"), nil
 	}
@@ -142,7 +142,7 @@ func (d *Daemon) handleIssueFanoutDrift(ctx context.Context, req protocol.Reques
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("projection changed files: %v", err)), nil
 	}
 	result := protocol.FanoutDriftResult{
-		IssueID:      issueID,
+		IssueID:      cmd.IssueID,
 		Worktree:     worktree,
 		FileBudget:   entry.FileBudget,
 		ChangedFiles: changed,

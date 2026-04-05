@@ -9,7 +9,7 @@ func resolveProjectID(bodyProjectID string, meta protocol.Metadata) string {
 	if projectID != "" {
 		return projectID
 	}
-	projectID = protocol.TrimProjectID(meta.ProjectID)
+	projectID = protocol.TrimProjectID(meta.ProjectID.String())
 	if projectID != "" {
 		return projectID
 	}

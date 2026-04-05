@@ -127,7 +127,7 @@ func (c *Client) commandJSONResponse(ctx context.Context, command string, body a
 		RequestID:       requestID,
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: c.projectRoute(),
+			ProjectID: naming.ProjectID(c.projectRoute()),
 		},
 		Command: command,
 		SentAt:  time.Now().UTC(),

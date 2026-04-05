@@ -172,7 +172,7 @@ func (e sessionOperationExecutor) Execute(ctx context.Context, req protocol.Requ
 }
 
 func (r *operationRuntime) executeLegacy(ctx context.Context, req protocol.RequestEnvelope, command string, runner operationDirectRunner) (protocol.ResponseEnvelope, error) {
-	submitReq, err := r.buildSubmitRequest(command, req.Meta.ProjectID, req.Body, operationSubmitOverrides{})
+	submitReq, err := r.buildSubmitRequest(command, req.Meta.ProjectID.String(), req.Body, operationSubmitOverrides{})
 	if err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
@@ -226,7 +226,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
-	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID)
+	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())
 	if r.logger != nil {
 		r.logger.Info("daemon operation submit requested",
 			"project_id", projectID,
@@ -234,7 +234,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			"issue_id", strings.TrimSpace(body.IssueID),
 		)
 	}
-	submitReq, err := r.buildSubmitRequest(body.Kind, coalesceProjectID(body.ProjectID, req.Meta.ProjectID), body.Payload, operationSubmitOverrides{
+	submitReq, err := r.buildSubmitRequest(body.Kind, coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String()), body.Payload, operationSubmitOverrides{
 		IssueID:      body.IssueID,
 		DedupeKey:    body.DedupeKey,
 		ResourceKeys: body.ResourceKeys,
@@ -252,7 +252,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			RequestID:       req.RequestID,
 			Kind:            protocol.EnvelopeKindCommand,
 			Meta: protocol.Metadata{
-				ProjectID: coalesceProjectID(body.ProjectID, req.Meta.ProjectID),
+				ProjectID: naming.ProjectID(coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())),
 			},
 			Command: body.Kind,
 			Body:    append([]byte(nil), body.Payload...),
@@ -330,7 +330,7 @@ func (r *operationRuntime) handleOperationList(ctx context.Context, req protocol
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err))
 	}
-	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID)
+	projectID := coalesceProjectID(body.ProjectID, req.Meta.ProjectID.String())
 	if r.logger != nil {
 		r.logger.Info("daemon operation list requested",
 			"project_id", projectID,
@@ -758,8 +758,8 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 	eventRevision := s.nextRevision(projectID)
 	s.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		ProjectID:       naming.ProjectID(projectID),
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Revision:        eventRevision,
 		Event:           eventName,
 		Kind:            protocol.EnvelopeKindEvent,
@@ -780,8 +780,8 @@ func (s *operationStoreAdapter) publish(record daemonops.Record) {
 	}
 	s.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		ProjectID:       naming.ProjectID(projectID),
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Revision:        s.nextRevision(projectID),
 		Event:           protocol.EventOperationProgress,
 		Kind:            protocol.EnvelopeKindEvent,

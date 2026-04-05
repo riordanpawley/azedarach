@@ -428,7 +428,7 @@ func mapApplyExecutionError(err error) *protocol.ErrorEnvelope {
 
 func projectIDFromMeta(meta protocol.Metadata) string {
 	if meta.ProjectID != "" {
-		return meta.ProjectID
+		return meta.ProjectID.String()
 	}
 	return "default"
 }

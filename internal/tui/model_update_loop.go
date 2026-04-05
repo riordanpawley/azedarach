@@ -12,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
@@ -322,7 +323,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stream != nil && msg.stream != m.daemonEvents {
 			return m, nil
 		}
-		if projectID := strings.TrimSpace(msg.event.ProjectID); projectID != "" && projectID != m.daemonProjectID() {
+		if projectID := strings.TrimSpace(msg.event.ProjectID.String()); projectID != "" && projectID != m.daemonProjectID() {
 			return m, m.waitForDaemonEventCmd()
 		}
 		m.recordRuntimeEvent(msg.event)
@@ -371,7 +372,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Primary daemon stream already carries current-project events used for
 		// projection/state updates. Keep this stream for cross-project logging.
-		if strings.TrimSpace(msg.event.ProjectID) == m.daemonProjectID() {
+		if strings.TrimSpace(msg.event.ProjectID.String()) == m.daemonProjectID() {
 			return m, m.waitForLogStreamEventCmd()
 		}
 		m.recordRuntimeEvent(msg.event)
@@ -431,8 +432,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			evt := protocol.EventEnvelope{
 				ProtocolVersion: protocol.CurrentVersion,
-				ProjectID:       m.daemonProjectID(),
-				Meta:            protocol.Metadata{ProjectID: m.daemonProjectID()},
+				ProjectID:       naming.ProjectID(m.daemonProjectID()),
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(m.daemonProjectID())},
 				Event:           protocol.EventHookLogAppended,
 				Kind:            protocol.EnvelopeKindEvent,
 				EmittedAt:       hookEvt.CreatedAt.UTC(),

@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 const (
 	CommandIssueFanout      = "issue.fanout"
@@ -18,9 +22,9 @@ type FanoutCommandBody struct {
 }
 
 type FanoutDriftCommandBody struct {
-	IssueID  string `json:"issue_id" msgpack:"issue_id"`
-	RepoDir  string `json:"repo_dir" msgpack:"repo_dir"`
-	Worktree string `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
+	IssueID  naming.IssueID `json:"issue_id" msgpack:"issue_id"`
+	RepoDir  string         `json:"repo_dir" msgpack:"repo_dir"`
+	Worktree string         `json:"worktree,omitempty" msgpack:"worktree,omitempty"`
 }
 
 type FanoutSpec struct {
@@ -70,22 +74,22 @@ type FanoutApplyResult struct {
 }
 
 type FanoutDriftResult struct {
-	IssueID      string   `json:"issue_id" msgpack:"issue_id"`
-	Worktree     string   `json:"worktree" msgpack:"worktree"`
-	FileBudget   []string `json:"file_budget" msgpack:"file_budget"`
-	ChangedFiles []string `json:"changed_files" msgpack:"changed_files"`
-	OutOfBudget  []string `json:"out_of_budget" msgpack:"out_of_budget"`
-	AdvisoryOnly bool     `json:"advisory_only" msgpack:"advisory_only"`
+	IssueID      naming.IssueID `json:"issue_id" msgpack:"issue_id"`
+	Worktree     string         `json:"worktree" msgpack:"worktree"`
+	FileBudget   []string       `json:"file_budget" msgpack:"file_budget"`
+	ChangedFiles []string       `json:"changed_files" msgpack:"changed_files"`
+	OutOfBudget  []string       `json:"out_of_budget" msgpack:"out_of_budget"`
+	AdvisoryOnly bool           `json:"advisory_only" msgpack:"advisory_only"`
 }
 
 type MailSendCommandBody struct {
-	RepoDir     string `json:"repo_dir" msgpack:"repo_dir"`
-	ParentIssue string `json:"parent_issue" msgpack:"parent_issue"`
-	IssueID     string `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
-	Type        string `json:"type" msgpack:"type"`
-	From        string `json:"from,omitempty" msgpack:"from,omitempty"`
-	To          string `json:"to,omitempty" msgpack:"to,omitempty"`
-	Body        string `json:"body" msgpack:"body"`
+	RepoDir     string         `json:"repo_dir" msgpack:"repo_dir"`
+	ParentIssue string         `json:"parent_issue" msgpack:"parent_issue"`
+	IssueID     naming.IssueID `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	Type        string         `json:"type" msgpack:"type"`
+	From        string         `json:"from,omitempty" msgpack:"from,omitempty"`
+	To          string         `json:"to,omitempty" msgpack:"to,omitempty"`
+	Body        string         `json:"body" msgpack:"body"`
 }
 
 type MailListCommandBody struct {
@@ -104,7 +108,7 @@ type MailWatchCommandBody struct {
 type MailEvent struct {
 	Seq         int64                  `json:"seq" msgpack:"seq"`
 	ParentIssue string                 `json:"parent_issue" msgpack:"parent_issue"`
-	IssueID     string                 `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	IssueID     naming.IssueID         `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
 	Type        string                 `json:"type" msgpack:"type"`
 	From        string                 `json:"from,omitempty" msgpack:"from,omitempty"`
 	To          string                 `json:"to,omitempty" msgpack:"to,omitempty"`

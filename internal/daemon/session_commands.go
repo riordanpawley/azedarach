@@ -190,7 +190,7 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 	}
 	cmd.ProjectID = protocol.TrimProjectID(cmd.ProjectID)
 	if cmd.ProjectID == "" {
-		cmd.ProjectID = req.Meta.ProjectID
+		cmd.ProjectID = req.Meta.ProjectID.String()
 	}
 	cmd.ProjectID = protocol.NormalizeProjectID(cmd.ProjectID)
 	if requireSession && cmd.SessionID == "" {
@@ -792,7 +792,7 @@ func (d *Daemon) handleSessionRecover(ctx context.Context, req protocol.RequestE
 	}
 	cmd.ProjectID = protocol.TrimProjectID(cmd.ProjectID)
 	if cmd.ProjectID == "" {
-		cmd.ProjectID = req.Meta.ProjectID
+		cmd.ProjectID = req.Meta.ProjectID.String()
 	}
 	cmd.ProjectID = protocol.NormalizeProjectID(cmd.ProjectID)
 	if d.cfg.Logger != nil {
@@ -833,7 +833,7 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 	if err != nil {
 		return err
 	}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: projectID}, event.Session)
+	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, event.Session)
 	return nil
 }
 
@@ -1173,11 +1173,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				state = domain.SessionBusy
 			}
 		}
-			tasks[i].Session = &domain.Session{
-				IssueID:   naming.IssueID(taskID),
-				State:     state,
-				StartedAt: startedAt,
-			}
+		tasks[i].Session = &domain.Session{
+			IssueID:   naming.IssueID(taskID),
+			State:     state,
+			StartedAt: startedAt,
+		}
 	}
 
 	return tasks

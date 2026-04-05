@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -419,7 +420,7 @@ func (d *Daemon) subscribe(_ context.Context, projectID string, fromRevision uin
 func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (resp protocol.ResponseEnvelope, err error) {
 	startedAt := time.Now()
 	projectID := d.projectID(req.Meta)
-	req.Meta.ProjectID = projectID
+	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
@@ -812,7 +813,7 @@ func (d *Daemon) errorResponse(req protocol.RequestEnvelope, code protocol.Error
 }
 
 func (d *Daemon) projectID(meta protocol.Metadata) string {
-	return protocol.NormalizeProjectID(meta.ProjectID)
+	return protocol.NormalizeProjectID(meta.ProjectID.String())
 }
 
 func (d *Daemon) nextRevision(projectID string) uint64 {
@@ -838,7 +839,7 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 	projectID := d.projectID(req.Meta)
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: req.ProtocolVersion,
-		ProjectID:       projectID,
+		ProjectID:       naming.ProjectID(projectID),
 		Meta:            req.Meta,
 		Revision:        rev,
 		Event:           eventName,
@@ -893,11 +894,11 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		return
 	}
 	if meta.ProjectID == "" {
-		meta.ProjectID = projectID
+		meta.ProjectID = naming.ProjectID(projectID)
 	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
+		ProjectID:       naming.ProjectID(projectID),
 		Meta:            meta,
 		Revision:        rev,
 		Event:           protocol.EventSessionUpdated,
@@ -929,8 +930,8 @@ func (d *Daemon) publishWorktreeProjectionEventAtRevision(ctx context.Context, p
 	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		ProjectID:       naming.ProjectID(projectID),
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Revision:        rev,
 		Event:           protocol.EventWorktreeProjectionUpdated,
 		Kind:            protocol.EnvelopeKindEvent,
@@ -961,8 +962,8 @@ func (d *Daemon) publishGitStatusProjectionEventAtRevision(ctx context.Context, 
 	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		ProjectID:       naming.ProjectID(projectID),
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Revision:        rev,
 		Event:           protocol.EventGitStatusUpdated,
 		Kind:            protocol.EnvelopeKindEvent,

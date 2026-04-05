@@ -32,7 +32,7 @@ func TestMailSendSerializesSequenceNumbers(t *testing.T) {
 			Body: mustMarshal(t, protocol.MailSendCommandBody{
 				RepoDir:     repoDir,
 				ParentIssue: parent,
-				IssueID:     issue,
+				IssueID:     naming.IssueID(issue),
 				Type:        "handoff",
 				Body:        issue,
 			}),

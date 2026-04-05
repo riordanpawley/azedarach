@@ -175,7 +175,11 @@ func TestSpecHandlerRequirementCommands(t *testing.T) {
 	resp := handler.Handle(context.Background(), specRequest(t, protocol.CommandSpecRequirementList, protocol.SpecRequirementListRequestBody{
 		IssueID: " az-1 ",
 		Status:  protocol.SpecRequirementStatusOpen,
-		IDs:     []string{" REQ-2 ", "REQ-1", "REQ-2", ""},
+		IDs: []naming.RequirementID{
+			" REQ-2 ",
+			"REQ-1",
+			"REQ-2",
+		},
 	}))
 	if !resp.OK {
 		t.Fatalf("list response error: %+v", resp.Error)
@@ -280,7 +284,11 @@ func TestSpecHandlerLinkReadLintParityAndSyncCommands(t *testing.T) {
 	resp := handler.Handle(context.Background(), specRequest(t, protocol.CommandSpecLinkList, protocol.SpecLinkListRequestBody{
 		IssueID: " az-1 ",
 		ReqID:   " REQ-1 ",
-		IDs:     []string{" LINK-2 ", "LINK-1", "LINK-2"},
+		IDs: []naming.SpecLinkID{
+			" LINK-2 ",
+			"LINK-1",
+			"LINK-2",
+		},
 	}))
 	if !resp.OK {
 		t.Fatalf("link list response error: %+v", resp.Error)

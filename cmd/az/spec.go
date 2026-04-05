@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/cli"
-	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -273,9 +273,9 @@ func runSpecSyncCommand(args []string) error {
 
 func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
 	req := protocol.SpecRequirementListRequestBody{
-		IssueID: opts.Issue,
+		IssueID: naming.IssueID(opts.Issue),
 		Status:  protocol.SpecRequirementStatus(opts.Status),
-		IDs:     opts.IDs,
+		IDs:     requirementIDsFromStrings(opts.IDs),
 	}
 	var out protocol.SpecRequirementListResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementList, req, &out); err != nil {
@@ -291,7 +291,7 @@ func runSpecReqListRPC(cfg *config.Config, opts specReqListOptions) error {
 }
 
 func runSpecReqGetRPC(cfg *config.Config, opts specReqGetOptions) error {
-	req := protocol.SpecRequirementGetRequestBody{ID: opts.ID}
+	req := protocol.SpecRequirementGetRequestBody{ID: naming.RequirementID(opts.ID)}
 	var out protocol.SpecRequirementGetResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementGet, req, &out); err != nil {
 		return err
@@ -305,10 +305,10 @@ func runSpecReqGetRPC(cfg *config.Config, opts specReqGetOptions) error {
 
 func runSpecReqCreateRPC(cfg *config.Config, opts specReqCreateOptions) error {
 	req := protocol.SpecRequirementCreateRequestBody{
-		ID:          opts.ID,
+		ID:          naming.RequirementID(opts.ID),
 		Title:       opts.Title,
 		Description: opts.Description,
-		IssueID:     opts.Issue,
+		IssueID:     naming.IssueID(opts.Issue),
 	}
 	var out protocol.SpecRequirementCreateResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementCreate, req, &out); err != nil {
@@ -322,7 +322,7 @@ func runSpecReqCreateRPC(cfg *config.Config, opts specReqCreateOptions) error {
 }
 
 func runSpecReqUpdateRPC(cfg *config.Config, opts specReqUpdateOptions) error {
-	req := protocol.SpecRequirementUpdateRequestBody{ID: opts.ID}
+	req := protocol.SpecRequirementUpdateRequestBody{ID: naming.RequirementID(opts.ID)}
 	if opts.Title != "" {
 		v := opts.Title
 		req.Title = &v
@@ -347,7 +347,7 @@ func runSpecReqUpdateRPC(cfg *config.Config, opts specReqUpdateOptions) error {
 }
 
 func runSpecReqDeleteRPC(cfg *config.Config, opts specReqDeleteOptions) error {
-	req := protocol.SpecRequirementDeleteRequestBody{ID: opts.ID, Confirm: opts.Confirm}
+	req := protocol.SpecRequirementDeleteRequestBody{ID: naming.RequirementID(opts.ID), Confirm: opts.Confirm}
 	var out protocol.SpecRequirementDeleteResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecRequirementDelete, req, &out); err != nil {
 		return err
@@ -360,7 +360,11 @@ func runSpecReqDeleteRPC(cfg *config.Config, opts specReqDeleteOptions) error {
 }
 
 func runSpecLinkListRPC(cfg *config.Config, opts specLinkListOptions) error {
-	req := protocol.SpecLinkListRequestBody{IssueID: opts.Issue, ReqID: opts.Req, IDs: opts.IDs}
+	req := protocol.SpecLinkListRequestBody{
+		IssueID: naming.IssueID(opts.Issue),
+		ReqID:   naming.RequirementID(opts.Req),
+		IDs:     linkIDsFromStrings(opts.IDs),
+	}
 	var out protocol.SpecLinkListResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecLinkList, req, &out); err != nil {
 		return err
@@ -376,8 +380,8 @@ func runSpecLinkListRPC(cfg *config.Config, opts specLinkListOptions) error {
 
 func runSpecLinkAddRPC(cfg *config.Config, opts specLinkAddOptions) error {
 	req := protocol.SpecLinkAddRequestBody{
-		IssueID: opts.Issue,
-		ReqID:   opts.Req,
+		IssueID: naming.IssueID(opts.Issue),
+		ReqID:   naming.RequirementID(opts.Req),
 		Role:    protocol.SpecLinkRole(opts.Role),
 		Note:    opts.Note,
 	}
@@ -393,7 +397,10 @@ func runSpecLinkAddRPC(cfg *config.Config, opts specLinkAddOptions) error {
 }
 
 func runSpecLinkRemoveRPC(cfg *config.Config, opts specLinkRemoveOptions) error {
-	req := protocol.SpecLinkRemoveRequestBody{IssueID: opts.Issue, ReqID: opts.Req}
+	req := protocol.SpecLinkRemoveRequestBody{
+		IssueID: naming.IssueID(opts.Issue),
+		ReqID:   naming.RequirementID(opts.Req),
+	}
 	var out protocol.SpecLinkRemoveResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecLinkRemove, req, &out); err != nil {
 		return err
@@ -406,7 +413,10 @@ func runSpecLinkRemoveRPC(cfg *config.Config, opts specLinkRemoveOptions) error 
 }
 
 func runSpecReadRPC(cfg *config.Config, opts specReadOptions) error {
-	req := protocol.SpecReadRequestBody{IssueID: opts.Issue, ReqID: opts.Req}
+	req := protocol.SpecReadRequestBody{
+		IssueID: naming.IssueID(opts.Issue),
+		ReqID:   naming.RequirementID(opts.Req),
+	}
 	var out protocol.SpecReadResponseBody
 	if err := runSpecRPC(cfg, protocol.CommandSpecRead, req, &out); err != nil {
 		return err
@@ -455,12 +465,12 @@ func runSpecRPC(cfg *config.Config, command string, body any, out any) error {
 		}
 		resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID(fmt.Sprintf("%s-%d", command, time.Now().UnixNano())),
+			RequestID:       naming.RequestID(fmt.Sprintf("%s-%d", command, time.Now().UnixNano())),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         command,
 			SentAt:          time.Now().UTC(),
 			Body:            payload,
-			Meta:            protocol.Metadata{ProjectID: deps.ProjectID},
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
 		})
 		if err != nil {
 			return err
@@ -812,6 +822,42 @@ func parseLinkRole(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid link role %q; expected implements|verifies|relates", value)
 	}
+}
+
+func requirementIDsFromStrings(ids []string) []naming.RequirementID {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]naming.RequirementID, 0, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, naming.RequirementID(trimmed))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func linkIDsFromStrings(ids []string) []naming.SpecLinkID {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]naming.SpecLinkID, 0, len(ids))
+	for _, id := range ids {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, naming.SpecLinkID(trimmed))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func specNotImplementedError(parts ...string) error {

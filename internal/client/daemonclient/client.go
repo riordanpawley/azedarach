@@ -8,6 +8,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/compatibility"
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // TransportClient is the daemon RPC transport abstraction.
@@ -66,10 +67,10 @@ func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.
 
 // Command executes one daemon command envelope.
 func (c *Client) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	if metaProjectID := protocol.TrimProjectID(req.Meta.ProjectID); metaProjectID != "" {
-		req.Meta.ProjectID = metaProjectID
+	if metaProjectID := protocol.TrimProjectID(req.Meta.ProjectID.String()); metaProjectID != "" {
+		req.Meta.ProjectID = naming.ProjectID(metaProjectID)
 	} else {
-		req.Meta.ProjectID = c.projectRoute()
+		req.Meta.ProjectID = naming.ProjectID(c.projectRoute())
 	}
 
 	var lastErr error

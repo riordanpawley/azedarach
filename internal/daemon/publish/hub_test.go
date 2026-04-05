@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestSubscribeReceivesOrderedPublishedEvents(t *testing.T) {
@@ -116,13 +117,13 @@ func recv(t *testing.T, ch <-chan protocol.EventEnvelope) protocol.EventEnvelope
 func makeEvent(projectID string, revision uint64, event string) protocol.EventEnvelope {
 	return protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
+		ProjectID:       naming.ProjectID(projectID),
 		Revision:        revision,
 		Event:           event,
 		Kind:            protocol.EnvelopeKindEvent,
 		EmittedAt:       time.Now().UTC(),
 		Meta: protocol.Metadata{
-			CorrelationID: "corr-" + event,
+			CorrelationID: naming.CorrelationID("corr-" + event),
 		},
 	}
 }

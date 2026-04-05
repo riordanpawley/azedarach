@@ -3450,7 +3450,7 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 
 	next, _ := m.Update(daemonStreamEventMsg{
 		event: protocol.EventEnvelope{
-			ProjectID: m.daemonProjectID(),
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
 			Revision:  1,
 			Event:     protocol.EventGitStatusUpdated,
 			Body:      body,
@@ -3621,7 +3621,7 @@ func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 
 	updatedAny, _ := m.Update(daemonStreamEventMsg{
 		event: protocol.EventEnvelope{
-			ProjectID: m.daemonProjectID(),
+			ProjectID: naming.ProjectID(m.daemonProjectID()),
 			Revision:  2,
 			Event:     protocol.EventWorktreeProjectionUpdated,
 			Body:      body,

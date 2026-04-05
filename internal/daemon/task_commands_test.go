@@ -243,7 +243,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-task-list",
 		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "task.list",
 	})
 	if err != nil {
@@ -435,7 +435,7 @@ func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 		RequestID:       "req-task-list-no-write",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "task.list",
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 	}
 	resp, err := d.handleTaskList(ctx, req)
 	if err != nil {
@@ -509,7 +509,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 		RequestID:       "req-snapshot-export",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "task.snapshot.export",
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 	})
 	if err != nil {
 		t.Fatalf("handleTaskSnapshotExport error: %v", err)

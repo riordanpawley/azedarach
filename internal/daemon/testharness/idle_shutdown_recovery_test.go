@@ -16,6 +16,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonruntime "github.com/riordanpawley/azedarach/internal/daemon/runtime"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 type idleRecoveryDaemon struct {
@@ -160,7 +161,7 @@ func (d *idleRecoveryDaemon) runSessionMutation(ctx context.Context, sessionID s
 	}
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       d.projectID,
+		ProjectID:       naming.ProjectID(d.projectID),
 		Revision:        evt.Revision,
 		Event:           evt.Type,
 		Kind:            protocol.EnvelopeKindEvent,

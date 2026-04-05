@@ -296,13 +296,13 @@ func (o *EventLogOverlay) renderEvent(evt protocol.EventEnvelope, prettyBody boo
 
 	metaParts := make([]string, 0, 3)
 	if evt.ProjectID != "" {
-		metaParts = append(metaParts, "project="+evt.ProjectID)
+		metaParts = append(metaParts, "project="+evt.ProjectID.String())
 	}
 	if evt.Meta.SessionID != "" {
 		metaParts = append(metaParts, "session="+evt.Meta.SessionID.String())
 	}
 	if evt.Meta.CorrelationID != "" {
-		metaParts = append(metaParts, "correlation="+evt.Meta.CorrelationID)
+		metaParts = append(metaParts, "correlation="+evt.Meta.CorrelationID.String())
 	}
 	if len(metaParts) > 0 {
 		lines = append(lines, o.styles.MenuItem.Render("  "+strings.Join(metaParts, "  ")))

@@ -1742,7 +1742,7 @@ func ExportCommand(deps *Dependencies, opts ExportOptions) error {
 		RequestID:       makeRequestID(commandTaskSnapshotExport),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: deps.ProjectID,
+			ProjectID: naming.ProjectID(deps.ProjectID),
 		},
 		Command: commandTaskSnapshotExport,
 		SentAt:  time.Now().UTC(),
@@ -3226,7 +3226,7 @@ func executeBulkApply(deps *Dependencies, dryRun bool, asJSON bool, operations [
 		RequestID:       makeRequestID(protocol.CommandTaskBulkApply),
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta: protocol.Metadata{
-			ProjectID: deps.ProjectID,
+			ProjectID: naming.ProjectID(deps.ProjectID),
 		},
 		Command: protocol.CommandTaskBulkApply,
 		SentAt:  time.Now().UTC(),
@@ -3679,7 +3679,7 @@ func newSessionRequest(command, projectID, sessionID, baseBranch string) protoco
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         command,
 		Meta: protocol.Metadata{
-			ProjectID: projectID,
+			ProjectID: naming.ProjectID(projectID),
 			SessionID: parsedSessionID,
 		},
 		SentAt: time.Now().UTC(),

@@ -9,6 +9,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -69,7 +70,7 @@ func TestHandleIssueFanoutDriftUsesProjectionChangedFiles(t *testing.T) {
 
 	body, err := json.Marshal(protocol.FanoutDriftCommandBody{
 		RepoDir: repoDir,
-		IssueID: issueID,
+		IssueID: naming.IssueID(issueID),
 	})
 	if err != nil {
 		t.Fatalf("marshal request body: %v", err)
@@ -80,7 +81,7 @@ func TestHandleIssueFanoutDriftUsesProjectionChangedFiles(t *testing.T) {
 		RequestID:       "req-fanout-drift",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         protocol.CommandIssueFanoutDrift,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Body:            body,
 	})
 	if err != nil {
@@ -94,7 +95,7 @@ func TestHandleIssueFanoutDriftUsesProjectionChangedFiles(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if out.IssueID != issueID {
+	if out.IssueID.String() != issueID {
 		t.Fatalf("issue id = %q, want %q", out.IssueID, issueID)
 	}
 	if len(out.ChangedFiles) != 3 {

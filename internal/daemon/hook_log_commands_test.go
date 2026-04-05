@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 func TestHookLogAppendAndList(t *testing.T) {
@@ -28,7 +29,7 @@ func TestHookLogAppendAndList(t *testing.T) {
 			ProtocolVersion: protocol.CurrentVersion,
 			RequestID:       "hook-append",
 			Kind:            protocol.EnvelopeKindCommand,
-			Meta:            protocol.Metadata{ProjectID: projectID},
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         protocol.CommandHookLogAppend,
 			Body: mustMarshal(t, protocol.HookLogAppendCommandBody{
 				Event: protocol.HookLogEvent{
@@ -56,9 +57,9 @@ func TestHookLogAppendAndList(t *testing.T) {
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "hook-list",
 		Kind:            protocol.EnvelopeKindCommand,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         protocol.CommandHookLogList,
-		Body: mustMarshal(t, protocol.HookLogListCommandBody{Limit: 2}),
+		Body:            mustMarshal(t, protocol.HookLogListCommandBody{Limit: 2}),
 	})
 	if err != nil {
 		t.Fatalf("hook.log.list command error: %v", err)
@@ -81,4 +82,3 @@ func TestHookLogAppendAndList(t *testing.T) {
 		t.Fatalf("hook.log.list project ids = [%q,%q], want %q", events[0].ProjectID, events[1].ProjectID, projectID)
 	}
 }
-

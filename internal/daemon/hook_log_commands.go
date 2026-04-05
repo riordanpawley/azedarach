@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -49,8 +50,8 @@ func (d *Daemon) handleHookLogAppend(_ context.Context, req protocol.RequestEnve
 	resp.Revision = rev
 	d.hub.Publish(protocol.EventEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		ProjectID:       projectID,
-		Meta:            protocol.Metadata{ProjectID: projectID},
+		ProjectID:       naming.ProjectID(projectID),
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Revision:        rev,
 		Event:           protocol.EventHookLogAppended,
 		Kind:            protocol.EnvelopeKindEvent,

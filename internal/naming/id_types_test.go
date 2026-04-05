@@ -70,3 +70,23 @@ func TestParseRequestIDRejectsInvalid(t *testing.T) {
 		t.Fatal("ParseRequestID() expected error for slash-separated value")
 	}
 }
+
+func TestParseProjectID(t *testing.T) {
+	id, err := ParseProjectID("proj-1")
+	if err != nil {
+		t.Fatalf("ParseProjectID() error = %v", err)
+	}
+	if got, want := id.String(), "proj-1"; got != want {
+		t.Fatalf("ParseProjectID() = %q, want %q", got, want)
+	}
+}
+
+func TestParseRequirementID(t *testing.T) {
+	id, err := ParseRequirementID("bfs-req-1")
+	if err != nil {
+		t.Fatalf("ParseRequirementID() error = %v", err)
+	}
+	if got, want := id.String(), "bfs-req-1"; got != want {
+		t.Fatalf("ParseRequirementID() = %q, want %q", got, want)
+	}
+}

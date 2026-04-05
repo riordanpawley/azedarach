@@ -186,7 +186,7 @@ func TestClientProjectRouting(t *testing.T) {
 
 	c := New(&fakeTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			gotCommandProjectID = req.Meta.ProjectID
+			gotCommandProjectID = req.Meta.ProjectID.String()
 			return protocol.ResponseEnvelope{OK: true}, nil
 		},
 		subscribeFn: func(_ context.Context, projectID string, _ uint64) (<-chan protocol.EventEnvelope, error) {
@@ -241,7 +241,7 @@ func TestClientProjectRoutingCanonicalization(t *testing.T) {
 
 		c := New(&fakeTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				gotCommandProjectID = req.Meta.ProjectID
+				gotCommandProjectID = req.Meta.ProjectID.String()
 				return protocol.ResponseEnvelope{OK: true}, nil
 			},
 			subscribeFn: func(_ context.Context, projectID string, _ uint64) (<-chan protocol.EventEnvelope, error) {
@@ -271,7 +271,7 @@ func TestClientProjectRoutingCanonicalization(t *testing.T) {
 
 		c := New(&fakeTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				gotCommandProjectID = req.Meta.ProjectID
+				gotCommandProjectID = req.Meta.ProjectID.String()
 				return protocol.ResponseEnvelope{OK: true}, nil
 			},
 			subscribeFn: func(_ context.Context, projectID string, _ uint64) (<-chan protocol.EventEnvelope, error) {

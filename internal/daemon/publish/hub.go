@@ -2,8 +2,8 @@ package publish
 
 import (
 	"log/slog"
-	"sort"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -51,9 +51,10 @@ func NewHub(maxBacklog, maxSubscriberQ int, logger *slog.Logger) *Hub {
 
 // Publish appends event to backlog and attempts non-blocking fanout.
 func (h *Hub) Publish(evt protocol.EventEnvelope) {
+	projectID := evt.ProjectID.String()
 	h.mu.Lock()
-	h.backlogByProj[evt.ProjectID] = appendTrimmed(h.backlogByProj[evt.ProjectID], evt, h.maxBacklog)
-	subs := h.subscribersForProjectLocked(evt.ProjectID)
+	h.backlogByProj[projectID] = appendTrimmed(h.backlogByProj[projectID], evt, h.maxBacklog)
+	subs := h.subscribersForProjectLocked(projectID)
 	h.mu.Unlock()
 
 	h.logger.Info(

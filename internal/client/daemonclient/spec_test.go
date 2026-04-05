@@ -37,8 +37,8 @@ func (t *specRecordingTransport) Subscribe(context.Context, string, uint64) (<-c
 
 func assertSpecProjectID(t *testing.T, req protocol.RequestEnvelope, want string) {
 	t.Helper()
-	if req.Meta.ProjectID != want {
-		t.Fatalf("project_id = %q, want %q", req.Meta.ProjectID, want)
+	if req.Meta.ProjectID.String() != want {
+		t.Fatalf("project_id = %q, want %q", req.Meta.ProjectID.String(), want)
 	}
 }
 
@@ -397,7 +397,7 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 				if body.IssueID != "az-1" || body.RequirementID != "req-1" {
 					t.Fatalf("request body = %+v", body)
 				}
-					respBody, err := json.Marshal(SpecLinkRemoveResult{Removed: true})
+				respBody, err := json.Marshal(SpecLinkRemoveResult{Removed: true})
 				if err != nil {
 					t.Fatalf("marshal response: %v", err)
 				}
@@ -419,9 +419,9 @@ func TestSpecLinkAndReadParitySyncCommandsEncodeAndDecode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RemoveSpecIssueLink error: %v", err)
 		}
-			if !out.Removed {
-				t.Fatalf("remove result = %+v", out)
-			}
+		if !out.Removed {
+			t.Fatalf("remove result = %+v", out)
+		}
 	})
 
 	t.Run("read long-running result", func(t *testing.T) {

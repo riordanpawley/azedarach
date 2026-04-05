@@ -10,6 +10,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 var ErrSpecUnavailable = errors.New("spec service unavailable")
@@ -65,8 +66,7 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.IssueID = strings.TrimSpace(cmd.IssueID)
-		cmd.IDs = uniqueTrimmed(cmd.IDs)
+		cmd.IDs = uniqueTrimmedRequirementIDs(cmd.IDs)
 		if cmd.Status != "" && !cmd.Status.Valid() {
 			return specInvalidRequest(resp, "invalid status: expected open|accepted|superseded")
 		}
@@ -77,7 +77,6 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.ID = strings.TrimSpace(cmd.ID)
 		if cmd.ID == "" {
 			return specInvalidRequest(resp, "missing required field: id")
 		}
@@ -88,10 +87,8 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.ID = strings.TrimSpace(cmd.ID)
 		cmd.Title = strings.TrimSpace(cmd.Title)
 		cmd.Description = strings.TrimSpace(cmd.Description)
-		cmd.IssueID = strings.TrimSpace(cmd.IssueID)
 		if cmd.ID == "" || cmd.Title == "" {
 			return specInvalidRequest(resp, "missing required fields: id/title")
 		}
@@ -102,7 +99,6 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.ID = strings.TrimSpace(cmd.ID)
 		cmd.Title = trimOptionalString(cmd.Title)
 		cmd.Description = trimOptionalString(cmd.Description)
 		if cmd.Status != nil {
@@ -128,7 +124,6 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.ID = strings.TrimSpace(cmd.ID)
 		if cmd.ID == "" {
 			return specInvalidRequest(resp, "missing required field: id")
 		}
@@ -142,9 +137,7 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.IssueID = strings.TrimSpace(cmd.IssueID)
-		cmd.ReqID = strings.TrimSpace(cmd.ReqID)
-		cmd.IDs = uniqueTrimmed(cmd.IDs)
+		cmd.IDs = uniqueTrimmedLinkIDs(cmd.IDs)
 		return specJSONResponse(ctx, resp, h.service.ListLinks, cmd)
 
 	case protocol.CommandSpecLinkAdd:
@@ -152,8 +145,6 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.IssueID = strings.TrimSpace(cmd.IssueID)
-		cmd.ReqID = strings.TrimSpace(cmd.ReqID)
 		cmd.Note = strings.TrimSpace(cmd.Note)
 		if cmd.Role == "" {
 			cmd.Role = protocol.SpecLinkRoleImplements
@@ -173,8 +164,6 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.IssueID = strings.TrimSpace(cmd.IssueID)
-		cmd.ReqID = strings.TrimSpace(cmd.ReqID)
 		if cmd.IssueID == "" || cmd.ReqID == "" {
 			return specInvalidRequest(resp, "missing required fields: issue_id/req_id")
 		}
@@ -185,8 +174,6 @@ func (h *SpecHandler) Handle(ctx context.Context, req protocol.RequestEnvelope) 
 		if !decodeSpecRequest(req.Body, &cmd, &resp) {
 			return resp
 		}
-		cmd.IssueID = strings.TrimSpace(cmd.IssueID)
-		cmd.ReqID = strings.TrimSpace(cmd.ReqID)
 		return specJSONResponse(ctx, resp, h.service.Read, cmd)
 
 	case protocol.CommandSpecLint:
@@ -281,14 +268,37 @@ func trimOptionalString(value *string) *string {
 	return &trimmed
 }
 
-func uniqueTrimmed(values []string) []string {
+func uniqueTrimmedRequirementIDs(values []naming.RequirementID) []naming.RequirementID {
 	if len(values) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
+	seen := make(map[naming.RequirementID]struct{}, len(values))
+	out := make([]naming.RequirementID, 0, len(values))
 	for _, value := range values {
-		trimmed := strings.TrimSpace(value)
+		trimmed := naming.RequirementID(strings.TrimSpace(value.String()))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func uniqueTrimmedLinkIDs(values []naming.SpecLinkID) []naming.SpecLinkID {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[naming.SpecLinkID]struct{}, len(values))
+	out := make([]naming.SpecLinkID, 0, len(values))
+	for _, value := range values {
+		trimmed := naming.SpecLinkID(strings.TrimSpace(value.String()))
 		if trimmed == "" {
 			continue
 		}

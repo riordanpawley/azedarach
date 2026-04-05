@@ -138,9 +138,9 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 		}
 		return protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-				RequestID:       naming.RequestID(command + "-req"),
+			RequestID:       naming.RequestID(command + "-req"),
 			Kind:            protocol.EnvelopeKindCommand,
-			Meta:            protocol.Metadata{ProjectID: projectID},
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 			Command:         command,
 			SentAt:          time.Now().UTC(),
 			Body:            payload,
@@ -164,7 +164,7 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	if !createResp.OK {
 		t.Fatalf("task.create response = %+v", createResp.Error)
 	}
-	if got, want := createResp.Meta.ProjectID, "bmd"; got != want {
+	if got, want := createResp.Meta.ProjectID.String(), "bmd"; got != want {
 		t.Fatalf("task.create response meta project_id = %q, want %q", got, want)
 	}
 	if got, want := createResp.Revision, uint64(1); got != want {
@@ -181,10 +181,10 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	}
 
 	createEvt := waitForDaemonEvent(t, events)
-	if createEvt.ProjectID != "bmd" {
+	if createEvt.ProjectID.String() != "bmd" {
 		t.Fatalf("task.create event project_id = %q, want bmd", createEvt.ProjectID)
 	}
-	if createEvt.Meta.ProjectID != "bmd" {
+	if createEvt.Meta.ProjectID.String() != "bmd" {
 		t.Fatalf("task.create event meta project_id = %q, want bmd", createEvt.Meta.ProjectID)
 	}
 
@@ -201,7 +201,7 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	if !updateResp.OK {
 		t.Fatalf("task.update_status response = %+v", updateResp.Error)
 	}
-	if got, want := updateResp.Meta.ProjectID, "bmd"; got != want {
+	if got, want := updateResp.Meta.ProjectID.String(), "bmd"; got != want {
 		t.Fatalf("task.update_status response meta project_id = %q, want %q", got, want)
 	}
 	if got, want := updateResp.Revision, uint64(2); got != want {
@@ -209,14 +209,13 @@ func TestCommandCanonicalizesProjectIDAcrossTaskCommands(t *testing.T) {
 	}
 
 	updateEvt := waitForDaemonEvent(t, events)
-	if updateEvt.ProjectID != "bmd" {
+	if updateEvt.ProjectID.String() != "bmd" {
 		t.Fatalf("task.update_status event project_id = %q, want bmd", updateEvt.ProjectID)
 	}
-	if updateEvt.Meta.ProjectID != "bmd" {
+	if updateEvt.Meta.ProjectID.String() != "bmd" {
 		t.Fatalf("task.update_status event meta project_id = %q, want bmd", updateEvt.Meta.ProjectID)
 	}
 }
-
 
 func TestCommandDefaultsBlankProjectID(t *testing.T) {
 	ctx := context.Background()
@@ -268,17 +267,17 @@ func TestCommandDefaultsBlankProjectID(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("task.create response = %+v", resp.Error)
 	}
-	if got, want := resp.Meta.ProjectID, protocol.DefaultProjectID; got != want {
+	if got, want := resp.Meta.ProjectID.String(), protocol.DefaultProjectID; got != want {
 		t.Fatalf("task.create response meta project_id = %q, want %q", got, want)
 	}
 	if got, want := resp.Revision, uint64(1); got != want {
 		t.Fatalf("task.create revision = %d, want %d", got, want)
 	}
 	evt := waitForDaemonEvent(t, events)
-	if evt.ProjectID != protocol.DefaultProjectID {
+	if evt.ProjectID.String() != protocol.DefaultProjectID {
 		t.Fatalf("event project_id = %q, want default", evt.ProjectID)
 	}
-	if evt.Meta.ProjectID != protocol.DefaultProjectID {
+	if evt.Meta.ProjectID.String() != protocol.DefaultProjectID {
 		t.Fatalf("event meta project_id = %q, want default", evt.Meta.ProjectID)
 	}
 }
