@@ -184,29 +184,42 @@ func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueI
 	if issueID == "" {
 		return nil, nil
 	}
-
-	names := make(map[string]struct{})
-	if canonicalSessionID = strings.TrimSpace(canonicalSessionID); canonicalSessionID != "" {
-		exists, err := d.tmux.HasSession(ctx, canonicalSessionID)
+	projectID = protocol.NormalizeProjectID(projectID)
+	store := d.sessionRuntimeStateStore(projectID)
+	cachedSessions := []daemonstate.Session{}
+	if store != nil {
+		loadedSessions, err := store.ListSessionStates(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
-		if exists {
-			names[canonicalSessionID] = struct{}{}
+		cachedSessions = loadedSessions
+	}
+	if d.sessionStore != nil {
+		snapshot := d.sessionStore.ReadSnapshot(projectID)
+		for _, session := range snapshot.Sessions {
+			cachedSessions = append(cachedSessions, session)
 		}
 	}
 
-	tmuxSessions, err := d.tmux.ListSessions(ctx)
-	if err != nil {
-		return nil, err
-	}
+	names := make(map[string]struct{}, len(cachedSessions))
 	namingScope := d.sessionNamingScope(projectID)
-	for _, name := range tmuxSessions {
-		parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
-		if !ok || !naming.IssueIDsEqual(parsedIssueID, issueID) {
+	canonicalSessionID = strings.TrimSpace(canonicalSessionID)
+	for _, session := range cachedSessions {
+		if session.State == daemonstate.SessionStateStopped {
 			continue
 		}
-		names[name] = struct{}{}
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		if canonicalSessionID != "" && strings.EqualFold(sessionID, canonicalSessionID) {
+			names[sessionID] = struct{}{}
+			continue
+		}
+		projectedIssueID := sessionProjectionIssueID(session, namingScope)
+		if naming.IssueIDsEqual(projectedIssueID, issueID) {
+			names[sessionID] = struct{}{}
+		}
 	}
 
 	resolved := make([]string, 0, len(names))
@@ -214,6 +227,26 @@ func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueI
 		resolved = append(resolved, name)
 	}
 	return resolved, nil
+}
+
+func (d *Daemon) sessionExistsInProjection(ctx context.Context, projectID, issueID, canonicalSessionID string) (bool, error) {
+	names, err := d.tmuxSessionNamesForIssue(ctx, projectID, issueID, canonicalSessionID)
+	if err != nil {
+		return false, err
+	}
+	if len(names) == 0 {
+		return false, nil
+	}
+	target := strings.TrimSpace(canonicalSessionID)
+	if target == "" {
+		return true, nil
+	}
+	for _, name := range names {
+		if strings.TrimSpace(name) == target {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (d *Daemon) handleSessionStart(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -244,7 +277,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStart); err != nil {
 		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
-	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
+	exists, err := d.sessionExistsInProjection(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -406,7 +439,7 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionAttach); err != nil {
 		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
-	exists, err := d.tmux.HasSession(ctx, cmd.SessionID)
+	exists, err := d.sessionExistsInProjection(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}

@@ -315,24 +315,6 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 		}
 	}
 
-	// Collect tmux session names
-	tmuxSessions, err := s.tmuxClient.ListSessions(ctx)
-	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("Failed to list tmux sessions: %v", err))
-	}
-
-	// Check for orphaned tmux sessions (sessions without issues)
-	issueIDs := make(map[string]bool)
-	for issueID := range sessions {
-		issueIDs[issueID] = true
-	}
-
-	for _, tmuxName := range tmuxSessions {
-		if !issueIDs[tmuxName] && !strings.HasPrefix(tmuxName, "devserver-") {
-			warnings = append(warnings, fmt.Sprintf("Orphaned tmux session: %s", tmuxName))
-		}
-	}
-
 	// Collect worktree information
 	worktreeInfos := s.GetWorktreeStatus(ctx, sessions)
 

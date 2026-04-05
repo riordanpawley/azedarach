@@ -377,7 +377,7 @@ func TestCollectDiagnostics(t *testing.T) {
 			wantErrors:   1,
 		},
 		{
-			name: "orphaned tmux session",
+			name: "orphaned tmux session ignored in projection-only diagnostics",
 			sessions: map[string]*domain.Session{
 				"test-1": {
 					IssueID: "test-1",
@@ -385,8 +385,8 @@ func TestCollectDiagnostics(t *testing.T) {
 			},
 			tmuxSessions: []string{"test-1", "orphaned-session"},
 			online:       true,
-			wantHealthy:  false,
-			wantWarnings: 1,
+			wantHealthy:  true,
+			wantWarnings: 0,
 			wantErrors:   0,
 		},
 	}
