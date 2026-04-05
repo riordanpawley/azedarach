@@ -66,6 +66,36 @@ func TestOverflowSubscriberRemovedDeterministically(t *testing.T) {
 	}
 }
 
+func TestSubscribeCatchupOverflowClosesSubscriber(t *testing.T) {
+	h := NewHub(32, 1, slog.Default())
+	h.Publish(makeEvent("proj", 1, "r1"))
+	h.Publish(makeEvent("proj", 2, "r2"))
+
+	ch, _ := h.Subscribe("proj", 0)
+
+	// Catch-up fills queue with first event then overflows and unsubscribes.
+	select {
+	case evt, ok := <-ch:
+		if !ok {
+			t.Fatal("expected one queued catch-up event before close")
+		}
+		if evt.Revision != 1 {
+			t.Fatalf("unexpected catch-up revision: %d", evt.Revision)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out reading catch-up event")
+	}
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("subscriber channel should close after catch-up overflow")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for catch-up overflow close")
+	}
+}
+
 func recv(t *testing.T, ch <-chan protocol.EventEnvelope) protocol.EventEnvelope {
 	t.Helper()
 	select {

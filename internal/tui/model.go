@@ -2386,7 +2386,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 			msg.behind = task.GitBehindCount
 			msg.additions = task.GitAdditions
 			msg.deletions = task.GitDeletions
-			msg.dirty = task.HasUncommittedChanges || task.GitAdditions > 0 || task.GitDeletions > 0
+			msg.dirty = task.HasUncommittedChanges
 			break
 		}
 
@@ -2423,6 +2423,7 @@ func formatWorktreeCleanupConfirmPrompt(msg worktreeCleanupConfirmPromptMsg) str
 		lines = append(lines,
 			fmt.Sprintf("- Worktree: %s", worktreeState),
 			fmt.Sprintf("- Changes: %s", changeState),
+			fmt.Sprintf("- Base diff (+/-): +%d/-%d", msg.additions, msg.deletions),
 			fmt.Sprintf("- Ahead/Behind: ↑%d/↓%d", msg.ahead, msg.behind),
 		)
 		if msg.hasSnapshot && !msg.checkedAt.IsZero() {

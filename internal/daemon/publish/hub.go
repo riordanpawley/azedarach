@@ -25,6 +25,8 @@ type subscriber struct {
 	id        int
 	projectID string
 	ch        chan protocol.EventEnvelope
+	mu        sync.RWMutex
+	closed    bool
 }
 
 // NewHub returns an event publish/subscribe hub.
@@ -63,9 +65,7 @@ func (h *Hub) Publish(evt protocol.EventEnvelope) {
 	)
 
 	for _, sub := range subs {
-		select {
-		case sub.ch <- evt:
-		default:
+		if !sub.trySend(evt) {
 			h.logger.Warn(
 				"daemon.event.subscriber_overflow",
 				"project_id", evt.ProjectID,
@@ -94,7 +94,16 @@ func (h *Hub) Subscribe(projectID string, fromRevision uint64) (<-chan protocol.
 	// Catch-up on subscribe with strict > fromRevision ordering.
 	for _, evt := range backlog {
 		if evt.Revision > fromRevision {
-			sub.ch <- evt
+			if !sub.trySend(evt) {
+				h.logger.Warn(
+					"daemon.event.subscriber_overflow",
+					"project_id", projectID,
+					"subscriber_id", sub.id,
+					"revision", evt.Revision,
+				)
+				h.unsubscribeByID(sub.id)
+				break
+			}
 		}
 	}
 
@@ -151,7 +160,31 @@ func (h *Hub) unsubscribeByID(id int) {
 		return
 	}
 	delete(h.subscribers, id)
-	close(sub.ch)
+	sub.close()
+}
+
+func (s *subscriber) trySend(evt protocol.EventEnvelope) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- evt:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *subscriber) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.ch)
 }
 
 func appendTrimmed(list []protocol.EventEnvelope, evt protocol.EventEnvelope, max int) []protocol.EventEnvelope {

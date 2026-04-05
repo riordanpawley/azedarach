@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -278,5 +279,63 @@ func TestReconcileQueueHonorsWorkerLimit(t *testing.T) {
 
 	if got := maxSeen.Load(); got != 2 {
 		t.Fatalf("max concurrent workers after completion = %d, want 2", got)
+	}
+}
+
+func TestReconcileQueueWorkerRecoversFromPanicAndContinues(t *testing.T) {
+	t.Parallel()
+
+	q := newReconcileQueue[string](reconcileQueueConfig{
+		Name:    "test_recover_panic",
+		Workers: 1,
+	})
+	t.Cleanup(func() {
+		_ = q.Close()
+	})
+
+	bad, err := q.Enqueue(reconcileQueueRequest[string]{
+		Key:      "bad",
+		Priority: reconcilePriorityBackground,
+		Reason:   "panic",
+		Work: func(context.Context) (string, error) {
+			panic("boom")
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue bad: %v", err)
+	}
+
+	good, err := q.Enqueue(reconcileQueueRequest[string]{
+		Key:      "good",
+		Priority: reconcilePriorityBackground,
+		Reason:   "after-panic",
+		Work: func(context.Context) (string, error) {
+			return "ok", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue good: %v", err)
+	}
+
+	badResult, err := bad.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait bad: %v", err)
+	}
+	if badResult.Err == nil {
+		t.Fatal("expected panic job to return error")
+	}
+	if !strings.Contains(badResult.Err.Error(), "panic in work") {
+		t.Fatalf("panic error missing marker: %v", badResult.Err)
+	}
+
+	goodResult, err := good.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait good: %v", err)
+	}
+	if goodResult.Err != nil {
+		t.Fatalf("good job should not fail: %v", goodResult.Err)
+	}
+	if goodResult.Value != "ok" {
+		t.Fatalf("good result value = %q, want ok", goodResult.Value)
 	}
 }

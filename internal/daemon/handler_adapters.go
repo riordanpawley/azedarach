@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -515,6 +516,11 @@ func (a *worktreeServiceAdapter) ensureBackgroundPoller(projectID string) {
 	a.mu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && a.logger != nil {
+				a.logger.Error("worktree background poller panicked", "project_id", projectID, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		a.pollAndPersistWorktrees(ctx, projectID)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

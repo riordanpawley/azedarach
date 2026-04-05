@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -392,5 +393,65 @@ func TestStopIntakeRejectsNewOperations(t *testing.T) {
 	})
 	if !errors.Is(err, daemonops.ErrIntakeClosed) {
 		t.Fatalf("submit error = %v, want ErrIntakeClosed", err)
+	}
+}
+
+func TestSubmitRunnerPanicMarksOperationFailedAndDoesNotCrashManager(t *testing.T) {
+	store := newMemoryStore()
+	nextID := 0
+	mgr := New(store, Config{NewID: func() string {
+		nextID++
+		if nextID == 1 {
+			return "op-panic"
+		}
+		return "op-after"
+	}})
+
+	first, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{
+		ProjectID:    "p1",
+		Kind:         "panic.case",
+		ResourceKeys: []string{"res:1"},
+	}, func(context.Context) ([]byte, error) {
+		panic("boom")
+	})
+	if err != nil {
+		t.Fatalf("submit panic operation: %v", err)
+	}
+
+	second, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{
+		ProjectID:    "p1",
+		Kind:         "after.case",
+		ResourceKeys: []string{"res:2"},
+	}, func(context.Context) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+	if err != nil {
+		t.Fatalf("submit second operation: %v", err)
+	}
+
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+
+	firstRecord, err := mgr.Get(context.Background(), first.Record.ID)
+	if err != nil {
+		t.Fatalf("get first record: %v", err)
+	}
+	if firstRecord.State != daemonops.StateFailed {
+		t.Fatalf("first state = %q, want %q", firstRecord.State, daemonops.StateFailed)
+	}
+	if !strings.Contains(firstRecord.ErrorMessage, "panicked") {
+		t.Fatalf("first error message missing panic marker: %q", firstRecord.ErrorMessage)
+	}
+
+	secondRecord, err := mgr.Get(context.Background(), second.Record.ID)
+	if err != nil {
+		t.Fatalf("get second record: %v", err)
+	}
+	if secondRecord.State != daemonops.StateDone {
+		t.Fatalf("second state = %q, want %q", secondRecord.State, daemonops.StateDone)
+	}
+	if string(secondRecord.ResultPayload) != "ok" {
+		t.Fatalf("second payload = %q, want ok", string(secondRecord.ResultPayload))
 	}
 }
