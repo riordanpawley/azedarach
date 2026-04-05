@@ -57,21 +57,26 @@ func sessionKey(value string) string {
 }
 
 func sessionProjectionIssueID(session daemonstate.Session, namingScope string) string {
-	issueID := strings.TrimSpace(session.IssueID)
+	issue, issueErr := naming.ParseIssueID(strings.TrimSpace(session.IssueID))
 	if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(session.ID, namingScope); ok {
-		if issueID == "" {
+		_, parsedErr := naming.ParseIssueID(parsedIssueID)
+		if parsedErr == nil && issueErr != nil {
 			return parsedIssueID
 		}
 		sessionLikePrefix := naming.ProjectSessionPrefix(namingScope) + "-"
-		if naming.IssueIDsEqual(issueID, session.ID) || strings.HasPrefix(strings.ToLower(issueID), strings.ToLower(sessionLikePrefix)) {
+		if parsedErr == nil && issueErr == nil && (naming.IssueIDsEqual(issue.String(), session.ID) || strings.HasPrefix(strings.ToLower(issue.String()), strings.ToLower(sessionLikePrefix))) {
 			return parsedIssueID
 		}
 	}
-	if issueID != "" {
-		return issueID
+	if issueErr == nil {
+		return issue.String()
 	}
 
-	return strings.TrimSpace(session.ID)
+	fallback, fallbackErr := naming.ParseIssueID(strings.TrimSpace(session.ID))
+	if fallbackErr != nil {
+		return ""
+	}
+	return fallback.String()
 }
 
 func sessionProjectionStateRank(state daemonstate.SessionState) int {
@@ -192,16 +197,23 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 		return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required fields: project_id/session_id"), false
 	}
 
-	issueID := strings.TrimSpace(cmd.SessionID)
+	issueID := ""
 	namingScope := d.sessionNamingScope(cmd.ProjectID)
-	if issueID != "" {
-		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(issueID, namingScope); ok {
-			issueID = parsedIssueID
+	sessionInput := strings.TrimSpace(cmd.SessionID)
+	if sessionInput != "" {
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionInput, namingScope); ok {
+			sessionInput = parsedIssueID
 		}
+		validIssueID, issueErr := naming.ParseIssueID(sessionInput)
+		if issueErr != nil {
+			return resolvedSessionTarget{}, d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid session/issue id: %v", issueErr)), false
+		}
+		issueID = validIssueID.String()
 	}
 	sessionID := ""
 	if issueID != "" {
-		sessionID = naming.CanonicalSessionID(namingScope, issueID)
+		typedIssueID, _ := naming.ParseIssueID(issueID)
+		sessionID = naming.CanonicalSessionIDForIssue(namingScope, typedIssueID).String()
 	}
 	startWork := true
 	if cmd.StartWork != nil {
@@ -220,8 +232,8 @@ func (d *Daemon) decodeSessionRequest(req protocol.RequestEnvelope, requireSessi
 }
 
 func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueID, canonicalSessionID string) ([]string, error) {
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
+	typedIssueID, issueErr := naming.ParseIssueID(strings.TrimSpace(issueID))
+	if issueErr != nil {
 		return nil, nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
@@ -257,7 +269,7 @@ func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueI
 			continue
 		}
 		projectedIssueID := sessionProjectionIssueID(session, namingScope)
-		if naming.IssueIDsEqual(projectedIssueID, issueID) {
+		if naming.IssueIDsEqual(projectedIssueID, typedIssueID.String()) {
 			names[sessionID] = struct{}{}
 		}
 	}
