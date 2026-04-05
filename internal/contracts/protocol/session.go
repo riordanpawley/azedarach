@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 const (
 	EventSessionUpdated = "session.updated"
@@ -16,8 +20,8 @@ const (
 )
 
 type SessionProjection struct {
-	SessionID string                `json:"session_id" msgpack:"session_id"`
-	IssueID   string                `json:"issue_id" msgpack:"issue_id"`
+	SessionID naming.SessionID      `json:"session_id" msgpack:"session_id"`
+	IssueID   naming.IssueID        `json:"issue_id" msgpack:"issue_id"`
 	State     SessionLifecycleState `json:"state" msgpack:"state"`
 	UpdatedAt time.Time             `json:"updated_at" msgpack:"updated_at"`
 }

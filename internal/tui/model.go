@@ -28,6 +28,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ipc/transport"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/logstream"
@@ -3319,10 +3320,10 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 		return
 	}
 	taskView := *task
-	if path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); path != "" {
-		if taskView.Session == nil {
-			taskView.Session = &domain.Session{IssueID: taskView.ID}
-		}
+		if path := strings.TrimSpace(m.runtimeSignalWorktreeByTask[taskID]); path != "" {
+			if taskView.Session == nil {
+				taskView.Session = &domain.Session{IssueID: naming.IssueID(taskView.ID)}
+			}
 		if strings.TrimSpace(taskView.Session.Worktree) == "" {
 			taskView.Session.Worktree = path
 		}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 )
 
@@ -51,7 +52,7 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 }
 
 func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bool {
-	issueID := strings.TrimSpace(projection.IssueID)
+	issueID := strings.TrimSpace(projection.IssueID.String())
 	if issueID == "" {
 		return false
 	}
@@ -101,7 +102,7 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			if next == nil {
 				next = &domain.Session{}
 			}
-			next.IssueID = task.ID
+				next.IssueID = naming.IssueID(task.ID)
 			if state, ok := projectSessionLifecycleState(projection.Session.State); ok {
 				next.State = state
 			} else {
@@ -148,7 +149,7 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 		updated = m.applyRuntimeProjection(body.Runtime.Projection) || updated
 	}
 
-	issueID := strings.TrimSpace(body.Session.IssueID)
+	issueID := strings.TrimSpace(body.Session.IssueID.String())
 	if issueID == "" {
 		return updated
 	}
@@ -169,9 +170,9 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 
 		next := cloneSession(m.tasks[i].Session)
 		if next == nil {
-			next = &domain.Session{IssueID: issueID}
+			next = &domain.Session{IssueID: naming.IssueID(issueID)}
 		}
-		next.IssueID = issueID
+		next.IssueID = naming.IssueID(issueID)
 		next.State = nextState
 		if next.StartedAt == nil {
 			startedAt := body.Session.UpdatedAt

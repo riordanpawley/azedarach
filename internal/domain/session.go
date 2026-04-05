@@ -1,10 +1,14 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 // Session represents an active Claude session
 type Session struct {
-	IssueID   string       `json:"issue_id"`
+	IssueID   naming.IssueID `json:"issue_id"`
 	State     SessionState `json:"state"`
 	StartedAt *time.Time   `json:"started_at,omitempty"`
 	Worktree  string       `json:"worktree,omitempty"`

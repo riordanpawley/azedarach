@@ -1,6 +1,10 @@
 package protocol
 
-import "time"
+import (
+	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 // RuntimeProjectionSchemaVersion identifies the runtime projection payload schema contract.
 const RuntimeProjectionSchemaVersion uint16 = 1
@@ -26,7 +30,7 @@ type RuntimeProjectionEventBody struct {
 // RuntimeProjection captures the daemon-authoritative runtime state rendered on board and workspace surfaces.
 type RuntimeProjection struct {
 	ProjectID string                    `json:"project_id" msgpack:"project_id"`
-	IssueID   string                    `json:"issue_id" msgpack:"issue_id"`
+	IssueID   naming.IssueID            `json:"issue_id" msgpack:"issue_id"`
 	Worktree  RuntimeWorktreeProjection `json:"worktree" msgpack:"worktree"`
 	Git       RuntimeGitProjection      `json:"git" msgpack:"git"`
 	Session   RuntimeSessionProjection  `json:"session" msgpack:"session"`
@@ -54,7 +58,7 @@ type RuntimeOperationProjection struct {
 // RuntimeSessionProjection captures tmux/session lifecycle signals used by the workspace detail panel.
 type RuntimeSessionProjection struct {
 	HasSession bool                  `json:"has_session" msgpack:"has_session"`
-	SessionID  string                `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	SessionID  naming.SessionID      `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
 	State      SessionLifecycleState `json:"state,omitempty" msgpack:"state,omitempty"`
 	StartedAt  *time.Time            `json:"started_at,omitempty" msgpack:"started_at,omitempty"`
 	UpdatedAt  *time.Time            `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
@@ -63,9 +67,9 @@ type RuntimeSessionProjection struct {
 
 // RuntimeAgentProjection captures the current agent/runtime status surfaced alongside session state.
 type RuntimeAgentProjection struct {
-	Status    string     `json:"status,omitempty" msgpack:"status,omitempty"`
-	SessionID string     `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
-	UpdatedAt *time.Time `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
+	Status    string           `json:"status,omitempty" msgpack:"status,omitempty"`
+	SessionID naming.SessionID `json:"session_id,omitempty" msgpack:"session_id,omitempty"`
+	UpdatedAt *time.Time       `json:"updated_at,omitempty" msgpack:"updated_at,omitempty"`
 }
 
 // RuntimeWorktreeProjection captures the worktree identity and health metadata used by the UI.

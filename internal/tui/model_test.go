@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/testprofile"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -2771,7 +2772,7 @@ func TestIssuesLoadedPreservesLocalRuntimeOverlays(t *testing.T) {
 	m := newTestModel()
 	startedAt := time.Now().Add(-3 * time.Minute)
 	m.tasks[0].Session = &domain.Session{
-		IssueID:   m.tasks[0].ID,
+		IssueID:   naming.IssueID(m.tasks[0].ID),
 		State:     domain.SessionBusy,
 		StartedAt: &startedAt,
 	}
@@ -3288,7 +3289,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 		Revision:  7,
 		Session: protocol.SessionProjection{
 			SessionID: "proj-az-1",
-			IssueID:   issueID,
+			IssueID:   naming.IssueID(issueID),
 			State:     protocol.SessionLifecycleStateAttached,
 			UpdatedAt: updatedAt,
 		},
@@ -3412,7 +3413,7 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 			Revision:  1,
 			Projection: protocol.RuntimeProjection{
 				ProjectID: m.daemonProjectID(),
-				IssueID:   task.ID,
+				IssueID:   naming.IssueID(task.ID),
 				Worktree: protocol.RuntimeWorktreeProjection{
 					Exists:             true,
 					Path:               "/tmp/az-1",
@@ -3591,7 +3592,7 @@ func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 			Revision:  2,
 			Projection: protocol.RuntimeProjection{
 				ProjectID: m.daemonProjectID(),
-				IssueID:   task.ID,
+				IssueID:   naming.IssueID(task.ID),
 				Worktree: protocol.RuntimeWorktreeProjection{
 					Exists:             true,
 					Path:               "/tmp/wt-az-1",
@@ -3689,7 +3690,7 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 			Type:     domain.TypeTask,
 			ParentID: &childID,
 			Session: &domain.Session{
-				IssueID:   grandchildID,
+				IssueID:   naming.IssueID(grandchildID),
 				State:     domain.SessionBusy,
 				StartedAt: &startedAt,
 			},
@@ -3776,7 +3777,7 @@ func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *tes
 			Type:     domain.TypeTask,
 			ParentID: &parentID,
 			Session: &domain.Session{
-				IssueID:   childID,
+				IssueID:   naming.IssueID(childID),
 				State:     domain.SessionBusy,
 				StartedAt: &startedAt,
 			},

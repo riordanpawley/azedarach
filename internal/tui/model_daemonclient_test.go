@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/client/reconnect"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
@@ -686,7 +687,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 				Revision:  revision,
 				Projection: protocol.RuntimeProjection{
 					ProjectID: projectID,
-					IssueID:   issueID,
+					IssueID:   naming.IssueID(issueID),
 					Worktree: protocol.RuntimeWorktreeProjection{
 						Exists:             worktreePath != "",
 						Path:               worktreePath,
@@ -1494,9 +1495,9 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 		{ID: blockerID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
 		{ID: nonReadyID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
 	}
-	m.sessions[parentID] = &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"}
-	m.sessions[blockerID] = &domain.Session{IssueID: blockerID, State: domain.SessionBusy, Worktree: "/tmp/blocker"}
-	m.sessions[nonReadyID] = &domain.Session{IssueID: nonReadyID, State: domain.SessionBusy, Worktree: "/tmp/open"}
+	m.sessions[parentID] = &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"}
+	m.sessions[blockerID] = &domain.Session{IssueID: naming.IssueID(blockerID), State: domain.SessionBusy, Worktree: "/tmp/blocker"}
+	m.sessions[nonReadyID] = &domain.Session{IssueID: naming.IssueID(nonReadyID), State: domain.SessionBusy, Worktree: "/tmp/open"}
 
 	candidates := m.getFollowOnMergeCandidates(&m.tasks[0])
 	if len(candidates) != 2 {
@@ -1631,8 +1632,8 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 			HasWorktree: true,
 		},
 	}
-	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
-	setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
+	setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionPaused, Worktree: "/tmp/child"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1807,8 +1808,8 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 					Type:   domain.TypeEpic,
 				},
 			}
-			setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: tt.state, Worktree: "/tmp/child"})
-			setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
+			setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: tt.state, Worktree: "/tmp/child"})
+			setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
 			m.nav.SelectTask(childID, 1)
 
 			updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -1880,14 +1881,14 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 						Title:   "Child task",
 						Status:  domain.StatusInProgress,
 						Type:    domain.TypeTask,
-						Session: &domain.Session{IssueID: childID, State: domain.SessionBusy, Worktree: "/tmp/child"},
+						Session: &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionBusy, Worktree: "/tmp/child"},
 					},
 					{
 						ID:      parentID,
 						Title:   "Parent epic",
 						Status:  domain.StatusInProgress,
 						Type:    domain.TypeEpic,
-						Session: &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"},
+						Session: &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"},
 					},
 				}
 				return protocol.ResponseEnvelope{
@@ -2325,8 +2326,8 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 		{ID: childID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentID},
 		{ID: parentID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
 	}
-	setTaskSession(t, &m, childID, &domain.Session{IssueID: childID, State: domain.SessionPaused, Worktree: "/tmp/child"})
-	setTaskSession(t, &m, parentID, &domain.Session{IssueID: parentID, State: domain.SessionBusy, Worktree: "/tmp/parent"})
+	setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionPaused, Worktree: "/tmp/child"})
+	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
 	m.nav.SelectTask(childID, 1)
 
 	updated, cmd := m.handleActionMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
@@ -2465,7 +2466,7 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 			Type:   domain.TypeTask,
 		},
 	}
-	setTaskSession(t, &m, issueID, &domain.Session{IssueID: issueID, State: domain.SessionPaused, Worktree: "/tmp/az-top"})
+	setTaskSession(t, &m, issueID, &domain.Session{IssueID: naming.IssueID(issueID), State: domain.SessionPaused, Worktree: "/tmp/az-top"})
 	m.nav.SelectTask(issueID, 1)
 
 	updated, cmd := m.handleSelection(overlay.SelectionMsg{Key: "m"})
@@ -4557,7 +4558,7 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 		},
 	}
 	setTaskSession(t, &m, parentID, &domain.Session{
-		IssueID:  parentID,
+		IssueID:  naming.IssueID(parentID),
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent",
 	})
@@ -4660,12 +4661,12 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 		},
 	}
 	setTaskSession(t, &m, parentA, &domain.Session{
-		IssueID:  parentA,
+		IssueID:  naming.IssueID(parentA),
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent-a",
 	})
 	setTaskSession(t, &m, parentB, &domain.Session{
-		IssueID:  parentB,
+		IssueID:  naming.IssueID(parentB),
 		State:    domain.SessionBusy,
 		Worktree: "/tmp/parent-b",
 	})
@@ -4913,8 +4914,8 @@ func TestPerformCleanupRoutesDaemonCleanupAndPreservesCounts(t *testing.T) {
 		{ID: "az-open", Status: domain.StatusOpen, UpdatedAt: base},
 	}
 	m.sessions = map[string]*domain.Session{
-		"issue-1": &domain.Session{IssueID: "issue-1", State: domain.SessionPaused, StartedAt: &oldSessionStart},
-		"issue-2": &domain.Session{IssueID: "issue-2", State: domain.SessionBusy, StartedAt: &oldSessionStart},
+		"issue-1": {IssueID: naming.IssueID("issue-1"), State: domain.SessionPaused, StartedAt: &oldSessionStart},
+		"issue-2": {IssueID: naming.IssueID("issue-2"), State: domain.SessionBusy, StartedAt: &oldSessionStart},
 	}
 
 	result, err := m.performCleanup(context.Background(), []string{

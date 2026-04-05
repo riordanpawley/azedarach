@@ -1173,11 +1173,11 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 				state = domain.SessionBusy
 			}
 		}
-		tasks[i].Session = &domain.Session{
-			IssueID:   taskID,
-			State:     state,
-			StartedAt: startedAt,
-		}
+			tasks[i].Session = &domain.Session{
+				IssueID:   naming.IssueID(taskID),
+				State:     state,
+				StartedAt: startedAt,
+			}
 	}
 
 	return tasks

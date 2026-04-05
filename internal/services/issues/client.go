@@ -18,6 +18,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -1070,17 +1071,21 @@ func (c *Client) queryTasksWithRuntime(ctx context.Context, db *sql.DB, projectI
 			task.HasWorktree = true
 		}
 		sessionStateRaw = strings.TrimSpace(sessionStateRaw)
-		if sessionStateRaw != "" && sessionStateRaw != "stopped" {
-			startedAt := parseOptionalTimestamp(sessionStartedRaw)
-			if startedAt == nil {
-				startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
-			}
-			task.Session = &domain.Session{
-				IssueID:   task.ID,
-				State:     mapRuntimeSessionState(sessionStateRaw),
-				StartedAt: startedAt,
-				Worktree:  worktreePath,
-			}
+			if sessionStateRaw != "" && sessionStateRaw != "stopped" {
+				startedAt := parseOptionalTimestamp(sessionStartedRaw)
+				if startedAt == nil {
+					startedAt = parseOptionalTimestamp(sessionUpdatedRaw)
+				}
+				issueID, err := naming.ParseIssueID(task.ID)
+				if err != nil {
+					continue
+				}
+				task.Session = &domain.Session{
+					IssueID:   issueID,
+					State:     mapRuntimeSessionState(sessionStateRaw),
+					StartedAt: startedAt,
+					Worktree:  worktreePath,
+				}
 			task.HasTmuxSession = true
 		}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -17,10 +18,10 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 
 	if session != nil {
 		updatedAt := session.UpdatedAt.UTC()
-		projection.IssueID = strings.TrimSpace(session.IssueID)
+		projection.IssueID = naming.IssueID(strings.TrimSpace(session.IssueID))
 		projection.Session = protocol.RuntimeSessionProjection{
 			HasSession: true,
-			SessionID:  strings.TrimSpace(session.ID),
+			SessionID:  naming.SessionID(strings.TrimSpace(session.ID)),
 			State:      protocol.SessionLifecycleState(session.State),
 			StartedAt:  timePtrFrom(session.StartedAt),
 			UpdatedAt:  timePtr(updatedAt),
@@ -28,7 +29,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		}
 		projection.Agent = protocol.RuntimeAgentProjection{
 			Status:    string(session.State),
-			SessionID: strings.TrimSpace(session.ID),
+			SessionID: naming.SessionID(strings.TrimSpace(session.ID)),
 			UpdatedAt: timePtr(updatedAt),
 		}
 	}
@@ -38,7 +39,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		path := strings.TrimSpace(worktree.Path)
 		branch := strings.TrimSpace(worktree.Branch)
 		if projection.IssueID == "" {
-			projection.IssueID = strings.TrimSpace(worktree.IssueID)
+			projection.IssueID = naming.IssueID(strings.TrimSpace(worktree.IssueID))
 		}
 		projection.Worktree = protocol.RuntimeWorktreeProjection{
 			Exists:             path != "",

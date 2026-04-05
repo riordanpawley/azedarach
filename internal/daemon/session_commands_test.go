@@ -996,7 +996,7 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		if body.ProjectID != projectID {
 			t.Fatalf("event[%d] project = %s, want %s", i, body.ProjectID, projectID)
 		}
-		if body.Session.SessionID != sessionID {
+		if body.Session.SessionID.String() != sessionID {
 			t.Fatalf("event[%d] session = %s, want %s", i, body.Session.SessionID, sessionID)
 		}
 		if body.Session.State != wantStates[i] {
