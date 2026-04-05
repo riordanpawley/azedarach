@@ -256,6 +256,7 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	}
 	logPath := filepath.Join(resolveSessionLogDirFor(cfg, absRepoDir), "az-cli.log")
 	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
+	slog.SetDefault(logger)
 
 	rootRepoDir, err := config.ResolveProjectRoot(absRepoDir)
 	if err != nil {

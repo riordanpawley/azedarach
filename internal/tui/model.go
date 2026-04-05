@@ -239,6 +239,7 @@ func New(cfg *config.Config) Model {
 	}
 	logFilePath := resolveTUILogFilePath(cfg)
 	logger := newTUILogger(logFilePath)
+	slog.SetDefault(logger)
 	if err != nil {
 		logger.Error("failed to get current directory", "error", err)
 	}
