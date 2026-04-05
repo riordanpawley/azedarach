@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -327,6 +328,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Error("daemon shutdown watcher panicked", "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		select {
 		case <-ctx.Done():
 			d.drainInFlightCommands()
@@ -742,6 +748,9 @@ func (d *Daemon) triggerSessionStateRefresh(projectID string, refreshFn func(con
 
 	go func() {
 		defer func() {
+			if r := recover(); r != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Error("session runtime-state refresh goroutine panicked", "project_id", projectID, "panic", r, "stack", string(debug.Stack()))
+			}
 			d.sessionStateRefreshMu.Lock()
 			d.sessionStateRefreshing[projectID] = false
 			d.sessionStateRefreshMu.Unlock()

@@ -3,6 +3,8 @@ package manager
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -327,7 +329,18 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 	}
 	op.record = updated
 
-	payload, runErr := op.runner(ctx)
+	var (
+		payload []byte
+		runErr  error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				runErr = fmt.Errorf("operation %s panicked: %v\n%s", op.record.ID, r, debug.Stack())
+			}
+		}()
+		payload, runErr = op.runner(ctx)
+	}()
 	finished := m.now().UTC()
 	params := daemonops.UpdateParams{
 		ID:            op.record.ID,
