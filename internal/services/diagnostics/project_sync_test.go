@@ -125,10 +125,9 @@ func TestProjectSyncDiagnosticsFromLifecycle(t *testing.T) {
 }
 
 func TestCollectDiagnosticsIncludesProjectSyncDiagnostics(t *testing.T) {
-	tmux := &mockTmuxClient{sessions: []string{}}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	started := time.Date(2026, 3, 30, 10, 15, 0, 0, time.UTC)
 
@@ -200,10 +199,9 @@ func TestCollectDiagnosticsIncludesProjectSyncDiagnostics(t *testing.T) {
 }
 
 func TestSetProjectSyncDiagnosticsNormalizesProjectIDKey(t *testing.T) {
-	tmux := &mockTmuxClient{sessions: []string{}}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	service.SetProjectSyncDiagnostics(ProjectSyncDiagnostics{
 		ProjectID: " proj-a ",
@@ -263,7 +261,7 @@ func TestFormatDiagnosticsPreservesLegacySectionsWhenProjectSyncPresent(t *testi
 		Errors:   []string{},
 	}
 
-	service := NewService(&mockTmuxClient{}, &mockPortAllocator{}, &mockNetworkChecker{})
+	service := NewService(&mockPortAllocator{}, &mockNetworkChecker{})
 	output := service.FormatDiagnostics(diag)
 
 	expectedSections := []string{
@@ -284,10 +282,9 @@ func TestFormatDiagnosticsPreservesLegacySectionsWhenProjectSyncPresent(t *testi
 }
 
 func TestProjectSyncDiagnosticsRegressionMatrix(t *testing.T) {
-	tmux := &mockTmuxClient{sessions: []string{}}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	started := time.Date(2026, 3, 30, 10, 15, 0, 0, time.UTC)
 	lastErrorAt := time.Date(2026, 3, 30, 10, 30, 0, 0, time.UTC)

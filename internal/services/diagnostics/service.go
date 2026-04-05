@@ -96,12 +96,6 @@ type SystemDiagnostics struct {
 	Errors          []string
 }
 
-// TmuxClient interface for tmux operations
-type TmuxClient interface {
-	ListSessions(ctx context.Context) ([]string, error)
-	HasSession(ctx context.Context, name string) (bool, error)
-}
-
 // GitClient interface for git operations
 type GitClient interface {
 	ListWorktrees(ctx context.Context) ([]string, error)
@@ -123,7 +117,6 @@ type Service struct {
 	mu sync.RWMutex
 
 	// Dependencies
-	tmuxClient     TmuxClient
 	portAllocator  PortAllocator
 	networkChecker NetworkChecker
 
@@ -135,9 +128,8 @@ type Service struct {
 }
 
 // NewService creates a new diagnostics service
-func NewService(tmux TmuxClient, ports PortAllocator, network NetworkChecker) *Service {
+func NewService(ports PortAllocator, network NetworkChecker) *Service {
 	return &Service{
-		tmuxClient:     tmux,
 		portAllocator:  ports,
 		networkChecker: network,
 		projectSync:    map[string]ProjectSyncDiagnostics{},
