@@ -180,9 +180,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.logger != nil {
 				m.logger.Debug("log stream attach failed", "error", msg.err)
 			}
-			return m, nil
+			interval := reconnect.DefaultReconciliationPolicy().ReattachRetryInterval
+			if interval <= 0 {
+				interval = 5 * time.Second
+			}
+			now := time.Now()
+			delay := time.Duration(0)
+			if !m.lastLogStreamReattachAt.IsZero() {
+				elapsed := now.Sub(m.lastLogStreamReattachAt)
+				if elapsed < interval {
+					delay = interval - elapsed
+				}
+			}
+			if delay == 0 {
+				m.lastLogStreamReattachAt = now
+				m.logStreamReconnectQueued = false
+				return m, m.attachLogStreamCmd()
+			}
+			if m.logStreamReconnectQueued {
+				return m, nil
+			}
+			m.logStreamReconnectQueued = true
+			return m, m.queueLogStreamReconnectCmd(delay)
 		}
 		m.logStreamEvents = msg.stream
+		m.lastLogStreamReattachAt = time.Time{}
+		m.logStreamReconnectQueued = false
 		return m, m.waitForLogStreamEventCmd()
 
 	case issuesErrorMsg:
@@ -364,6 +387,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.logStreamEvents = nil
+		interval := reconnect.DefaultReconciliationPolicy().ReattachRetryInterval
+		if interval <= 0 {
+			interval = 5 * time.Second
+		}
+		now := time.Now()
+		delay := time.Duration(0)
+		if !m.lastLogStreamReattachAt.IsZero() {
+			elapsed := now.Sub(m.lastLogStreamReattachAt)
+			if elapsed < interval {
+				delay = interval - elapsed
+			}
+		}
+		if delay == 0 {
+			m.lastLogStreamReattachAt = now
+			m.logStreamReconnectQueued = false
+			return m, m.attachLogStreamCmd()
+		}
+		if m.logStreamReconnectQueued {
+			return m, nil
+		}
+		m.logStreamReconnectQueued = true
+		return m, m.queueLogStreamReconnectCmd(delay)
+
+	case logStreamReconnectMsg:
+		m.logStreamReconnectQueued = false
+		m.lastLogStreamReattachAt = time.Now()
 		return m, m.attachLogStreamCmd()
 
 	case hookLogLoadedMsg:

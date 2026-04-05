@@ -92,18 +92,33 @@ func (h *Hub) Subscribe(projectID string, fromRevision uint64) (<-chan protocol.
 	h.mu.Unlock()
 
 	// Catch-up on subscribe with strict > fromRevision ordering.
+	catchup := make([]protocol.EventEnvelope, 0, len(backlog))
 	for _, evt := range backlog {
 		if evt.Revision > fromRevision {
-			if !sub.trySend(evt) {
-				h.logger.Warn(
-					"daemon.event.subscriber_overflow",
-					"project_id", projectID,
-					"subscriber_id", sub.id,
-					"revision", evt.Revision,
-				)
-				h.unsubscribeByID(sub.id)
-				break
-			}
+			catchup = append(catchup, evt)
+		}
+	}
+	if overflow := len(catchup) - h.maxSubscriberQ; overflow > 0 {
+		catchup = catchup[overflow:]
+		h.logger.Warn(
+			"daemon.event.subscribe.catchup_truncated",
+			"project_id", projectID,
+			"subscriber_id", sub.id,
+			"from_revision", fromRevision,
+			"dropped_events", overflow,
+			"delivered_events", len(catchup),
+		)
+	}
+	for _, evt := range catchup {
+		if !sub.trySend(evt) {
+			h.logger.Warn(
+				"daemon.event.subscriber_overflow",
+				"project_id", projectID,
+				"subscriber_id", sub.id,
+				"revision", evt.Revision,
+			)
+			h.unsubscribeByID(sub.id)
+			break
 		}
 	}
 

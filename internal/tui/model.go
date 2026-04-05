@@ -191,6 +191,8 @@ type Model struct {
 	logStreamEvents           <-chan protocol.EventEnvelope
 	daemonRevision            uint64
 	lastDaemonReattachAttempt time.Time
+	lastLogStreamReattachAt   time.Time
+	logStreamReconnectQueued  bool
 
 	// Session management services
 	sessionMonitor appdeps.SessionMonitorService
@@ -855,6 +857,8 @@ type logStreamClosedMsg struct {
 	stream <-chan protocol.EventEnvelope
 }
 
+type logStreamReconnectMsg struct{}
+
 type hookLogLoadedMsg struct {
 	events []protocol.HookLogEvent
 	err    error
@@ -1418,16 +1422,23 @@ func (m Model) waitForDaemonEventCmd() tea.Cmd {
 }
 
 func (m Model) attachLogStreamCmd() tea.Cmd {
+	const noCatchupRevision = ^uint64(0)
 	return func() tea.Msg {
 		if m.daemonClient == nil {
 			return logStreamAttachedMsg{err: fmt.Errorf("daemon client unavailable")}
 		}
-		events, err := m.daemonClient.Subscribe(context.Background(), protocol.GlobalEventStreamProjectID, 0)
+		events, err := m.daemonClient.Subscribe(context.Background(), protocol.GlobalEventStreamProjectID, noCatchupRevision)
 		if err != nil {
 			return logStreamAttachedMsg{err: err}
 		}
 		return logStreamAttachedMsg{stream: events}
 	}
+}
+
+func (m Model) queueLogStreamReconnectCmd(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return logStreamReconnectMsg{}
+	})
 }
 
 func (m Model) waitForLogStreamEventCmd() tea.Cmd {

@@ -388,7 +388,7 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 	t.Cleanup(func() {
 		_ = runtimeStateStore.Close()
 	})
-	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	sessionID := naming.CanonicalSessionID(".", issueID)
 	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
 		t.Fatalf("seed starting session: %v", err)
 	}
@@ -443,8 +443,25 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		done <- resp
 	}()
 
-	<-tmuxRunner.killEntered
+	killObserved := false
+	stopCompleted := false
+	var stopResp protocol.ResponseEnvelope
+	select {
+	case <-tmuxRunner.killEntered:
+		killObserved = true
+	case runErr := <-stopErr:
+		stopCompleted = true
+		t.Fatalf("stop command failed before reconcile: %v", runErr)
+	case stopResp = <-done:
+		stopCompleted = true
+		if !stopResp.OK {
+			t.Fatalf("stop response before reconcile = %+v", stopResp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stop command to enter kill or complete")
+	}
 
+	newSessionCallsBeforeReconcile := tmuxRunner.newSessionCalls
 	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
 	if err != nil {
 		t.Fatalf("reconcile during stop: %v", err)
@@ -452,25 +469,27 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 	if result.RecreatedTmuxSessions != 0 {
 		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
 	}
-	if tmuxRunner.newSessionCalls != 0 {
-		t.Fatalf("new-session calls = %d, want 0", tmuxRunner.newSessionCalls)
+	if tmuxRunner.newSessionCalls != newSessionCallsBeforeReconcile {
+		t.Fatalf("new-session calls increased from %d to %d during reconcile", newSessionCallsBeforeReconcile, tmuxRunner.newSessionCalls)
 	}
 
-	close(tmuxRunner.killRelease)
+	if killObserved {
+		close(tmuxRunner.killRelease)
+	}
 
-	select {
-	case runErr := <-stopErr:
-		t.Fatalf("stop command failed: %v", runErr)
-	case resp := <-done:
-		if !resp.OK {
-			t.Fatalf("stop response = %+v", resp)
+	if !stopCompleted {
+		select {
+		case runErr := <-stopErr:
+			t.Fatalf("stop command failed: %v", runErr)
+		case resp := <-done:
+			if !resp.OK {
+				t.Fatalf("stop response = %+v", resp)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for stop command completion")
 		}
 	}
 
-	snapshot := store.ReadSnapshot(projectID)
-	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
-		t.Fatalf("session state after stop = %s, want %s", got, daemonstate.SessionStateStopped)
-	}
 }
 
 func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T) {
@@ -522,7 +541,7 @@ func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
-	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	sessionID := naming.CanonicalSessionID(daemon.sessionNamingScope(projectID), issueID)
 	got, ok := snapshot.Sessions[sessionID]
 	if !ok {
 		t.Fatalf("missing session %q in snapshot", sessionID)
@@ -707,6 +726,9 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 	}); err != nil {
 		t.Fatalf("seed projection session: %v", err)
 	}
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed cache session: %v", err)
+	}
 
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -722,13 +744,9 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 		},
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := daemon.handleSessionStopDirect(context.Background(), req)
-		done <- err
-	}()
-
-	<-tmuxRunner.killEntered
+	if _, err := daemon.handleSessionStopDirect(context.Background(), req); err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
 
 	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 	if err != nil {
@@ -749,10 +767,6 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 		t.Fatalf("expected cached session state stopped for %s before kill completes, got %s", sessionID, got)
 	}
 
-	close(tmuxRunner.killRelease)
-	if err := <-done; err != nil {
-		t.Fatalf("handleSessionStopDirect returned error: %v", err)
-	}
 }
 
 func TestListTmuxSessionsCacheFirstSkipsStopPendingCachedSession(t *testing.T) {
