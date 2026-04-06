@@ -28,7 +28,14 @@ func (e *TaskStoreError) Error() string {
 		id = e.IssueID
 	}
 	if id != "" {
-		return fmt.Sprintf("taskstore %s [%s]: %s", e.Op, id, e.Message)
+		switch {
+		case e.Message != "":
+			return fmt.Sprintf("taskstore %s [%s]: %s", e.Op, id, e.Message)
+		case e.Err != nil:
+			return fmt.Sprintf("taskstore %s [%s]: %v", e.Op, id, e.Err)
+		default:
+			return fmt.Sprintf("taskstore %s [%s] failed", e.Op, id)
+		}
 	}
 	if e.Message != "" {
 		return fmt.Sprintf("taskstore %s: %s", e.Op, e.Message)
