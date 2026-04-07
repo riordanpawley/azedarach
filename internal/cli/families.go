@@ -731,12 +731,9 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		Message:  "reconciling daemon git state",
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
-		_, callErr := deps.DaemonClient.GitStatus(callCtx, worktreeRoot)
-		return struct{}{}, callErr
-	})
+	err = refreshDaemonGitStatusWithRetry(ctx, deps, worktreeRoot)
 	if err != nil {
 		appendHookLogEventBestEffort(deps, protocol.HookLogEvent{
 			Hook:     strings.TrimSpace(hookName),
@@ -767,6 +764,39 @@ func reconcileDaemonGitState(projectDir string, deps *Dependencies, hookName str
 		fmt.Printf("githooks hook: refreshed daemon git state for %s (%s)\n", worktreeRoot, hookName)
 	}
 	return nil
+}
+
+func refreshDaemonGitStatusWithRetry(ctx context.Context, deps *Dependencies, worktreeRoot string) error {
+	const maxAttempts = 3
+	backoff := 150 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+			_, callErr := deps.DaemonClient.GitStatus(callCtx, worktreeRoot)
+			return struct{}{}, callErr
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == maxAttempts {
+			break
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if backoff < 500*time.Millisecond {
+			backoff *= 2
+		}
+	}
+	if lastErr == nil {
+		return fmt.Errorf("daemon git status refresh failed")
+	}
+	return lastErr
 }
 
 func appendHookLogEventBestEffort(deps *Dependencies, evt protocol.HookLogEvent) {
