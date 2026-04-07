@@ -317,37 +317,6 @@ func (d *Daemon) tmuxSessionNamesForIssue(ctx context.Context, projectID, issueI
 	for name := range names {
 		resolved = append(resolved, name)
 	}
-	if len(resolved) > 0 {
-		return resolved, nil
-	}
-
-	// Fallback to live tmux sessions when projection/session stores do not yet
-	// include this issue (for example legacy issue-named sessions).
-	liveSessions, err := d.tmux.ListSessions(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, sessionName := range liveSessions {
-		sessionName = strings.TrimSpace(sessionName)
-		if sessionName == "" {
-			continue
-		}
-		if canonicalSessionID != "" && strings.EqualFold(sessionName, canonicalSessionID) {
-			names[sessionName] = struct{}{}
-			continue
-		}
-		if naming.IssueIDsEqual(sessionName, typedIssueID.String()) {
-			names[sessionName] = struct{}{}
-			continue
-		}
-		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionName, namingScope); ok && naming.IssueIDsEqual(parsedIssueID, typedIssueID.String()) {
-			names[sessionName] = struct{}{}
-		}
-	}
-	resolved = resolved[:0]
-	for name := range names {
-		resolved = append(resolved, name)
-	}
 	return resolved, nil
 }
 
@@ -686,6 +655,19 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 			"session_id", cmd.SessionID,
 		)
 	}
+	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStop); err != nil {
+		if !isRuntimeMutationFreshnessTimeout(err) {
+			return d.mutationFreshnessErrorResponse(req, err), nil
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("daemon session stop continuing after freshness timeout",
+				"project_id", cmd.ProjectID,
+				"issue_id", cmd.IssueID,
+				"session_id", cmd.SessionID,
+				"error", err,
+			)
+		}
+	}
 	stopTargetsSource := d.sourceForSessionInvariant(sessionInvariantSessionStopTargets)
 	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, stopTargetsSource)
 	if err != nil {
@@ -743,6 +725,18 @@ func (d *Daemon) mutationFreshnessErrorResponse(req protocol.RequestEnvelope, er
 		return d.errorResponse(req, protocol.ErrorCodeTimeout, fmt.Sprintf("refresh runtime state before mutation: %v", err))
 	}
 	return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh runtime state before mutation: %v", err))
+}
+
+func isRuntimeMutationFreshnessTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "wait runtime reconcile") &&
+		(strings.Contains(message, "deadline exceeded") || strings.Contains(message, "context canceled"))
 }
 
 func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
