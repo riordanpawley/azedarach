@@ -538,13 +538,10 @@ func TestRenderCard_WithRuntimeSignals(t *testing.T) {
 		t.Fatalf("expected header line in card, got: %s", stripped)
 	}
 
-	for _, token := range []string{tmuxSessionToken, worktreeToken, "↓4", "✎", "+8/-2"} {
+	for _, token := range []string{tmuxSessionToken, worktreeToken, "↑2", "↓4", "✎", "+8/-2"} {
 		if !strings.Contains(headerLine, token) {
 			t.Fatalf("header should contain %q, got: %s", token, headerLine)
 		}
-	}
-	if strings.Contains(headerLine, "↑2") {
-		t.Fatalf("header should hide ahead token when line changes exist, got: %s", headerLine)
 	}
 }
 
@@ -667,13 +664,11 @@ func TestRenderRuntimeSignals(t *testing.T) {
 			!strings.Contains(got, descendantTmuxSessionToken) ||
 			!strings.Contains(got, worktreeToken) ||
 			!strings.Contains(got, "M:queued(25%)") ||
+			!strings.Contains(got, "↑1") ||
 			!strings.Contains(got, "↓2") ||
 			!strings.Contains(got, "✎") ||
 			!strings.Contains(got, "+10/-3") {
 			t.Fatalf("renderRuntimeSignals(...) = %q, missing expected token(s)", got)
-		}
-		if strings.Contains(got, "↑1") {
-			t.Fatalf("renderRuntimeSignals(...) = %q, should hide ahead token when line changes exist", got)
 		}
 	})
 

@@ -910,11 +910,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime pending op after git event = %+v, want running op-git 40%%", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, " T ") || !strings.Contains(view, " ✓ ") || !strings.Contains(view, " ↓1 ") || !strings.Contains(view, " ✎ ") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
+				if !strings.Contains(view, " T ") || !strings.Contains(view, " ✓ ") || !strings.Contains(view, " ↑2 ") || !strings.Contains(view, " ↓1 ") || !strings.Contains(view, " ✎ ") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
 					t.Fatalf("board view after git event = %q, missing projected runtime tokens", view)
-				}
-				if strings.Contains(view, " ↑2 ") {
-					t.Fatalf("board view after git event = %q, should hide ahead token when line changes exist", view)
 				}
 				workspaceView := workspace(model).View()
 				if !strings.Contains(workspaceView, "Runtime") || !strings.Contains(workspaceView, "dirty (+3/-1; ↑2/↓1)") {
