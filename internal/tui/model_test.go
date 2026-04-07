@@ -3154,6 +3154,111 @@ func TestResolveConflictWithAICmd_AttachFailureReturnsManualFallbackMsg(t *testi
 	}
 }
 
+func TestResolveConflictWithAICmd_SessionNotFoundStartsSessionAndAttaches(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	var attachCalls int
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandSessionAttach:
+				attachCalls++
+				if attachCalls == 1 {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              false,
+						Error: &protocol.ErrorEnvelope{
+							Code:    protocol.ErrorCodeInvalidRequest,
+							Message: "session not found: az-1 (use 'az start az-1' to create)",
+						},
+					}, nil
+				}
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "attached"})
+				if err != nil {
+					t.Fatalf("marshal attach response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+
+			case daemonclient.CommandSessionStart:
+				var body struct {
+					SessionID string `json:"session_id"`
+					StartWork bool   `json:"start_work"`
+				}
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal start body: %v", err)
+				}
+				if body.SessionID != "az-1" {
+					t.Fatalf("session id = %q, want az-1", body.SessionID)
+				}
+				if !body.StartWork {
+					t.Fatal("expected start_work=true when conflict resolve starts AI session")
+				}
+				respBody, err := json.Marshal(struct {
+					Output string `json:"output"`
+				}{Output: "started"})
+				if err != nil {
+					t.Fatalf("marshal start response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body:            respBody,
+				}, nil
+
+			default:
+				t.Fatalf("unexpected command %q", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	var switchTargets []string
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			switchTargets = append(switchTargets, target)
+			return nil
+		},
+	}
+
+	msg := m.resolveConflictWithAICmd("az-1")()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("resolveConflictWithAICmd returned %T, want sessionAttachedMsg", msg)
+	}
+	if attached.issueID != "az-1" {
+		t.Fatalf("attached issue id = %q, want az-1", attached.issueID)
+	}
+	if !attached.switchedTmux {
+		t.Fatal("expected tmux switch after starting and attaching conflict-resolution session")
+	}
+	if !reflect.DeepEqual(transport.requests, []string{
+		daemonclient.CommandSessionAttach,
+		daemonclient.CommandSessionStart,
+		daemonclient.CommandSessionAttach,
+	}) {
+		t.Fatalf("requests = %v", transport.requests)
+	}
+	if len(switchTargets) == 0 || switchTargets[0] != "az-1" {
+		t.Fatalf("switch targets = %v, want first target az-1", switchTargets)
+	}
+}
+
 func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
 	t.Setenv("TMUX", "client")
 	m := newTestModel()
