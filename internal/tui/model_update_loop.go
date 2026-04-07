@@ -67,6 +67,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if msg.Key == "async_recovery_recover" {
+			id, _ := msg.Value.(string)
+			notification, ok := m.popAsyncRecoveryNotification(id)
+			m.overlayStack.Pop()
+			if !ok {
+				m.addToast(Toast{
+					Level:   ToastInfo,
+					Message: "Recovery notification is no longer available",
+					Expires: time.Now().Add(3 * time.Second),
+				})
+				return m, nil
+			}
+			cmd := m.recoverAsyncFailureCmd(notification)
+			if cmd == nil {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: "Recovery action unavailable for selected notification",
+					Expires: time.Now().Add(4 * time.Second),
+				})
+				return m, nil
+			}
+			return m, cmd
+		}
+		if msg.Key == "async_recovery_ignore" {
+			id, _ := msg.Value.(string)
+			m.overlayStack.Pop()
+			if m.dismissAsyncRecoveryNotification(id) {
+				m.addToast(Toast{
+					Level:   ToastInfo,
+					Message: "Ignored recovery notification",
+					Expires: time.Now().Add(3 * time.Second),
+				})
+				return m, nil
+			}
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: "Recovery notification is no longer available",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		if msg.Key == "async_recovery_ignore_all" {
+			m.overlayStack.Pop()
+			cleared := m.clearAsyncRecoveryNotifications()
+			m.addToast(Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Ignored %d recovery notifications", cleared),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
 		if msg.Key == "git_pull" {
 			m.overlayStack.Pop()
 			return m, m.gitSyncService.Pull()
@@ -482,10 +533,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadIssuesCmd()
 		}
 		if msg.err != nil {
+			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
+				IssueID:  msg.sourceID,
+				Title:    fmt.Sprintf("Merge failed: %s -> %s", msg.sourceID, msg.targetID),
+				Message:  msg.err.Error(),
+				Action:   asyncRecoveryActionRetryMerge,
+				SourceID: msg.sourceID,
+				TargetID: msg.targetID,
+			})
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Merge failed: %v", msg.err),
-				Expires: time.Now().Add(5 * time.Second),
+				Message: fmt.Sprintf("Merge failed: %v (press n for recovery)", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
 			})
 			return m, nil
 		}
@@ -583,10 +642,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadIssuesCmd()
 		}
 		if msg.err != nil {
+			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
+				IssueID:  msg.issueID,
+				Worktree: msg.worktree,
+				Title:    fmt.Sprintf("Update failed: %s", msg.issueID),
+				Message:  msg.err.Error(),
+				Action:   asyncRecoveryActionRetryUpdate,
+			})
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Merge failed: %v", msg.err),
-				Expires: time.Now().Add(5 * time.Second),
+				Message: fmt.Sprintf("Merge failed: %v (press n for recovery)", msg.err),
+				Expires: time.Now().Add(6 * time.Second),
 			})
 			return m, nil
 		}

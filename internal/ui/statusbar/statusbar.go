@@ -16,6 +16,7 @@ import (
 type StatusBar struct {
 	mode             types.Mode
 	modeSuffix       string
+	alertIndicator   string
 	width            int
 	hintBindings     []keybinds.Binding
 	currentProject   string
@@ -75,6 +76,11 @@ func (sb *StatusBar) SetModeSuffix(suffix string) {
 	sb.modeSuffix = strings.TrimSpace(suffix)
 }
 
+// SetAlertIndicator sets an optional alert label rendered near the mode badge.
+func (sb *StatusBar) SetAlertIndicator(indicator string) {
+	sb.alertIndicator = strings.TrimSpace(indicator)
+}
+
 // Render renders the status bar as a string
 func (sb StatusBar) Render() string {
 	if sb.width < 1 {
@@ -118,6 +124,9 @@ func (sb StatusBar) Render() string {
 	}
 
 	mandatorySlots := make([]statusSlot, 0, 2)
+	if strings.TrimSpace(sb.alertIndicator) != "" {
+		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusHint.Copy().Bold(true), text: sb.alertIndicator})
+	}
 	if strings.TrimSpace(sb.filterSummary) != "" {
 		mandatorySlots = append(mandatorySlots, statusSlot{style: sb.styles.StatusInfo, text: sb.filterSummary})
 	}

@@ -45,6 +45,7 @@ const (
 	ActionCreateTask     ActionID = "create_task"
 	ActionOpenSettings   ActionID = "open_settings"
 	ActionOpenDiagnostic ActionID = "open_diagnostics"
+	ActionOpenRecovery   ActionID = "open_recovery"
 	ActionToggleView     ActionID = "toggle_view"
 	ActionRefresh        ActionID = "refresh"
 
@@ -84,6 +85,7 @@ var registry = []ActionSpec{
 	{ID: ActionOpenSettings, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "s", Display: "s"}}, Hint: "settings"},
 	{ID: ActionRefresh, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "r", Display: "r"}}, Hint: "refresh"},
 	{ID: ActionOpenDiagnostic, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "D", Display: "D"}}},
+	{ID: ActionOpenRecovery, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "n", Display: "n"}}, Hint: "recover"},
 	{ID: ActionToggleView, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "tab", Display: "Tab"}}, Hint: "view"},
 	{ID: ActionOpenHelp, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "?", Display: "?"}}, Hint: "help"},
 	{ID: ActionQuit, Mode: types.ModeNormal, Keys: []KeySpec{{Input: "q", Display: "q"}}, Hint: "quit"},
@@ -171,6 +173,7 @@ var registry = []ActionSpec{
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "b", Help: "Open merge-into selector in workspace"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "r (workspace)", Help: "Open dev server menu"},
 	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "w/W", Help: "Cleanup worktree / delete + cleanup"},
+	{Mode: types.ModeNormal, Category: "Task Actions", HelpKey: "n", Help: "Open async failure recovery overlay"},
 
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "Tab", Help: "Toggle compact/kanban view"},
 	{Mode: types.ModeNormal, Category: "Other", HelpKey: "esc", Help: "Close overlay / exit mode"},

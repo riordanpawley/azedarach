@@ -50,6 +50,7 @@ func (m Model) View() string {
 	sb.SetSelectionSummary(m.selectionSummary())
 	sb.SetFilterSummary(m.filterSummary())
 	sb.SetSortSummary(m.sortSummary())
+	sb.SetAlertIndicator(m.recoveryNotificationIndicator())
 	if m.boardRefreshing {
 		sb.SetModeSuffix(m.spinner.View())
 	}
