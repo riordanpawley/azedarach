@@ -481,6 +481,81 @@ func TestBuildSubmitRequestDefaultsGitFetchRemote(t *testing.T) {
 	}
 }
 
+func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      t.TempDir(),
+		nextRevision: sequentialRevision(),
+		gitHandler:   daemonhandlers.NewGitHandler(runtimeGitService{}),
+	})
+
+	firstReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandGitMerge,
+		"proj-1",
+		mustJSON(t, map[string]string{
+			"worktree": "/tmp/az-1/",
+			"branch":   "main",
+		}),
+	)
+	secondReq := runtime.buildSubmitRequestForTest(
+		t,
+		daemonhandlers.CommandGitMerge,
+		"proj-1",
+		mustJSON(t, map[string]string{
+			"worktree": "/tmp/az-1",
+			"branch":   "release",
+		}),
+	)
+
+	if firstReq.IssueID != "/tmp/az-1" || secondReq.IssueID != "/tmp/az-1" {
+		t.Fatalf("issue ids = %q and %q, want normalized /tmp/az-1", firstReq.IssueID, secondReq.IssueID)
+	}
+	if len(firstReq.ResourceKeys) != 1 || firstReq.ResourceKeys[0] != "worktree:/tmp/az-1" {
+		t.Fatalf("first resource keys = %v, want normalized worktree key", firstReq.ResourceKeys)
+	}
+	if len(secondReq.ResourceKeys) != 1 || secondReq.ResourceKeys[0] != "worktree:/tmp/az-1" {
+		t.Fatalf("second resource keys = %v, want normalized worktree key", secondReq.ResourceKeys)
+	}
+
+	firstRunning := make(chan struct{})
+	firstRelease := make(chan struct{})
+	secondStarted := make(chan struct{}, 1)
+
+	if _, err := runtime.manager.Submit(context.Background(), firstReq, func(context.Context) ([]byte, error) {
+		close(firstRunning)
+		<-firstRelease
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit first merge: %v", err)
+	}
+	<-firstRunning
+
+	if _, err := runtime.manager.Submit(context.Background(), secondReq, func(context.Context) ([]byte, error) {
+		secondStarted <- struct{}{}
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("submit second merge: %v", err)
+	}
+
+	select {
+	case <-secondStarted:
+		t.Fatal("second merge started before conflicting normalized key was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(firstRelease)
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second merge did not start after first merge completed")
+	}
+
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatalf("drain error: %v", err)
+	}
+}
+
 func (r *operationRuntime) buildSubmitRequestForTest(t *testing.T, kind, projectID string, payload []byte) daemonops.SubmitRequest {
 	t.Helper()
 	req, err := r.buildSubmitRequest(kind, projectID, payload, operationSubmitOverrides{})
