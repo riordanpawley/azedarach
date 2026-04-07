@@ -131,7 +131,19 @@ func (w *WorktreeManager) DeleteWithOptions(ctx context.Context, issueID string,
 	removeArgs = append(removeArgs, worktree.Path)
 	_, err = w.runner.Run(ctx, removeArgs...)
 	if err != nil {
-		return fmt.Errorf("failed to remove worktree: %w", err)
+		if isPermissionDeniedWorktreeDeleteError(err) {
+			if chmodErr := makeTreeUserWritable(worktree.Path); chmodErr != nil {
+				w.logger.Warn("failed to make worktree writable before retry", "path", worktree.Path, "error", chmodErr)
+			}
+			if _, retryErr := w.runner.Run(ctx, removeArgs...); retryErr == nil {
+				err = nil
+			} else {
+				err = retryErr
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("failed to remove worktree: %w", err)
+		}
 	}
 
 	// Delete branch
@@ -269,6 +281,38 @@ func (w *WorktreeManager) resolveBranchAuthor(ctx context.Context) string {
 		return envUser
 	}
 	return "author"
+}
+
+func isPermissionDeniedWorktreeDeleteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "permission denied") && strings.Contains(msg, "failed to delete")
+}
+
+func makeTreeUserWritable(root string) error {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return fmt.Errorf("empty worktree path")
+	}
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if mode&os.ModeSymlink != 0 {
+			return nil
+		}
+		if mode&0o200 != 0 {
+			return nil
+		}
+		return os.Chmod(path, mode|0o200)
+	})
 }
 
 func isBranchAlreadyExistsError(err error, branchName string) bool {

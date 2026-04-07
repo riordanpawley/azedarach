@@ -980,6 +980,66 @@ func TestSessionAttachRefreshesRuntimeBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestHandleSessionStopDirectFreshnessTimeoutUsesDirectReconcileFallback(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed session store: %v", err)
+	}
+	recorder := &sequentialRuntimeReconciler{}
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir:                ".",
+			Logger:                 slog.Default(),
+			RuntimeReconcileTimeout: 20 * time.Millisecond,
+		},
+		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
+		session:           daemonhandlers.NewSessionHandler(store),
+		sessionStore:      store,
+		runtimeReconciler: recorder,
+	}
+	t.Cleanup(func() {
+		if daemon.runtimeReconcileQueue != nil {
+			_ = daemon.runtimeReconcileQueue.Close()
+		}
+	})
+
+	resp, err := daemon.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-fallback",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStop,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("handleSessionStopDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("response not ok: %+v", resp.Error)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 2 {
+		t.Fatalf("runtime reconcile calls = %d, want 2", calls)
+	}
+	if len(projectIDs) != 2 || projectIDs[0] != projectID || projectIDs[1] != projectID {
+		t.Fatalf("runtime reconcile project ids = %v, want [%s %s]", projectIDs, projectID, projectID)
+	}
+}
+
 func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	const (
 		projectID = "proj"

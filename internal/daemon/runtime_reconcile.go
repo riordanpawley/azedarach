@@ -211,10 +211,41 @@ func (d *Daemon) ensureFreshRuntimeForMutation(ctx context.Context, projectID st
 	}
 	outcome, err := submission.Wait(reconcileCtx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			if fallbackErr := d.directRuntimeReconcileForMutation(ctx, projectID, reason, timeout); fallbackErr == nil {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("runtime reconcile queue wait timed out; direct mutation reconcile succeeded",
+						"project_id", projectID,
+						"reason", reason,
+					)
+				}
+				return nil
+			} else {
+				return fmt.Errorf("wait runtime reconcile: %w; direct runtime reconcile fallback failed: %w", err, fallbackErr)
+			}
+		}
 		return fmt.Errorf("wait runtime reconcile: %w", err)
 	}
 	if outcome.Err != nil {
 		return fmt.Errorf("runtime reconcile failed: %w", outcome.Err)
+	}
+	return nil
+}
+
+func (d *Daemon) directRuntimeReconcileForMutation(ctx context.Context, projectID string, reason string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultRuntimeReconcileTimeout
+	}
+	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	reconcileCtx = context.WithValue(reconcileCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-direct:" + strings.TrimSpace(reason),
+	})
+	result, err := d.ensureRuntimeReconciler().Reconcile(reconcileCtx, projectID)
+	d.ensureRuntimeReconcileThrottle().Record(projectID, runtimeReconcileResultSignature(result), err)
+	if err != nil {
+		return err
 	}
 	return nil
 }

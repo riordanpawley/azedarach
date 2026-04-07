@@ -258,6 +258,46 @@ branch refs/heads/az/issue-123
 	mock.AssertCommand(t, "branch -D az/issue-123")
 }
 
+func TestWorktreeManager_DeleteWithOptions_RetriesAfterPermissionDenied(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	issueID := "issue-123"
+	worktreePath := filepath.Join(t.TempDir(), "test-repo-issue-123")
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreePath, ".gopath", "pkg", "mod"), 0o755))
+
+	removeCalls := 0
+	mock := NewMockRunner()
+	mock.handler = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "list" {
+			return fmt.Sprintf(`worktree %s
+HEAD abc123
+branch refs/heads/main
+
+worktree %s
+HEAD def456
+branch refs/heads/az/issue-123
+`, repoDir, worktreePath), nil
+		}
+		if len(args) > 1 && args[0] == "worktree" && args[1] == "remove" {
+			removeCalls++
+			if removeCalls == 1 {
+				return "", fmt.Errorf("git worktree remove %s failed: exit status 255: error: failed to delete '%s': Permission denied", worktreePath, worktreePath)
+			}
+			return "", nil
+		}
+		if len(args) > 1 && args[0] == "branch" && args[1] == "-D" {
+			return "", nil
+		}
+		return "", nil
+	}
+
+	manager := NewWorktreeManager(mock, repoDir, slog.Default())
+	err := manager.DeleteWithOptions(ctx, issueID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 2, removeCalls)
+	mock.AssertCommand(t, "branch -D az/issue-123")
+}
+
 func TestWorktreeManager_Delete_NotFound(t *testing.T) {
 	ctx := context.Background()
 	repoDir := "/home/user/test-repo"
