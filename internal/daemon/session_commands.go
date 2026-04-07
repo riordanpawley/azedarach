@@ -1195,19 +1195,6 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 		return nil, err
 	}
 	cachedActive := d.activeSessionIDsFromProjection(projectID, cachedSessions)
-	if len(cachedActive) > 0 && d.tmux != nil {
-		liveSessions, liveErr := d.tmux.ListSessions(ctx)
-		if liveErr != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("list tmux sessions failed while validating projection cache; using cached projection sessions",
-					"project_id", projectID,
-					"error", liveErr,
-				)
-			}
-			return cachedActive, nil
-		}
-		cachedActive = d.activeSessionIDsFromTmux(projectID, liveSessions)
-	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Debug("using projection-backed session runtime state",
 			"project_id", projectID,
@@ -1235,24 +1222,6 @@ func (d *Daemon) activeSessionIDsFromProjection(projectID string, sessions []dae
 			continue
 		}
 		active = append(active, session.ID)
-	}
-	return active
-}
-
-func (d *Daemon) activeSessionIDsFromTmux(projectID string, sessions []string) []string {
-	active := make([]string, 0, len(sessions))
-	namingScope := d.sessionNamingScope(projectID)
-	for _, sessionID := range sessions {
-		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
-			continue
-		}
-		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope); ok {
-			if d.isSessionStopPending(projectID, parsedIssueID) {
-				continue
-			}
-		}
-		active = append(active, sessionID)
 	}
 	return active
 }

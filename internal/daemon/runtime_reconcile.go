@@ -60,25 +60,23 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	if d == nil {
 		return result, nil
 	}
-	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStore(result.ProjectID) == nil || d.worktreeRuntimeStateStore(result.ProjectID) == nil {
-		return result, nil
-	}
-	if d.worktreeManagerForProject(result.ProjectID) == nil {
+	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStore(result.ProjectID) == nil {
 		return result, nil
 	}
 
 	var errs []error
-	if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID); err != nil {
-		errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
-	} else {
-		result.WorktreesRefreshed = worktreeCount
-	}
-
-	if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID, ""); err != nil {
-		errs = append(errs, fmt.Errorf("reconcile sessions: %w", err))
-	} else {
-		result.RecreatedTmuxSessions = sessionResult.RecreatedTmuxSessions
-		result.AlignedDaemonSessions = sessionResult.AlignedDaemonSessions
+	if d.worktreeRuntimeStateStore(result.ProjectID) != nil && d.worktreeManagerForProject(result.ProjectID) != nil {
+		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID); err != nil {
+			errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
+		} else {
+			result.WorktreesRefreshed = worktreeCount
+		}
+		if sessionResult, err := d.reconcileTmuxAndDaemonSessions(ctx, result.ProjectID, ""); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile sessions: %w", err))
+		} else {
+			result.RecreatedTmuxSessions = sessionResult.RecreatedTmuxSessions
+			result.AlignedDaemonSessions = sessionResult.AlignedDaemonSessions
+		}
 	}
 
 	if err := d.refreshSessionRuntimeState(ctx, result.ProjectID); err != nil {

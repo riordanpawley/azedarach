@@ -898,3 +898,49 @@ func TestDefaultRuntimeReconcilePathIsNilSafe(t *testing.T) {
 		t.Fatalf("default reconcile result = %+v, want zero counts", result)
 	}
 }
+
+func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *testing.T) {
+	const projectID = "proj-runtime"
+	const issueID = "az-1"
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	sessionID := projectID + "-" + issueID
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux:         tmux.NewClient(emptyTmuxRunner{}, slog.Default()),
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+
+	result, err := d.ensureRuntimeReconciler().Reconcile(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("runtime reconcile returned error: %v", err)
+	}
+	if result.ProjectID != projectID {
+		t.Fatalf("project id = %q, want %q", result.ProjectID, projectID)
+	}
+
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list projection sessions: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("projection rows = %d, want 0 after session runtime refresh", len(rows))
+	}
+}
