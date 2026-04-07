@@ -32,6 +32,12 @@ func NewSortMenu(sort *domain.Sort) *SortMenu {
 		styles: New(),
 		options: []SortOption{
 			{
+				Key:         "d",
+				Label:       "Git Diff",
+				Field:       domain.SortByGitDiff,
+				Description: "Sort by total diff (+/-), highest first",
+			},
+			{
 				Key:         "s",
 				Label:       "Session",
 				Field:       domain.SortBySession,
@@ -69,7 +75,7 @@ func (m *SortMenu) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			return m, func() tea.Msg { return CloseOverlayMsg{} }
 
-		case "s", "p", "u":
+		case "d", "s", "p", "u":
 			// Find the option for this key
 			for _, opt := range m.options {
 				if opt.Key == msg.String() {
@@ -170,6 +176,7 @@ func (m *SortMenu) renderContent() string {
 
 func (m *SortMenu) actionBindings() []keybinds.Binding {
 	return []keybinds.Binding{
+		{Key: "d", Description: "sort by git diff"},
 		{Key: "s", Description: "sort by session"},
 		{Key: "p", Description: "sort by priority"},
 		{Key: "u", Description: "sort by updated"},

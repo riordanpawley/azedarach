@@ -33,7 +33,7 @@ func NewService() *Service {
 		mode:   ModeNormal,
 		filter: domain.NewFilter(),
 		sort: &domain.Sort{
-			Field: domain.SortBySession,
+			Field: domain.SortByGitDiff,
 			Order: domain.SortAsc,
 		},
 		selectedTasks: make(map[string]bool),
