@@ -1194,8 +1194,32 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 	if err != nil {
 		return nil, err
 	}
-	cachedActive := make([]string, 0, len(cachedSessions))
-	for _, session := range cachedSessions {
+	cachedActive := d.activeSessionIDsFromProjection(projectID, cachedSessions)
+	if len(cachedActive) > 0 && d.tmux != nil {
+		liveSessions, liveErr := d.tmux.ListSessions(ctx)
+		if liveErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("list tmux sessions failed while validating projection cache; using cached projection sessions",
+					"project_id", projectID,
+					"error", liveErr,
+				)
+			}
+			return cachedActive, nil
+		}
+		cachedActive = d.activeSessionIDsFromTmux(projectID, liveSessions)
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("using projection-backed session runtime state",
+			"project_id", projectID,
+			"cached_sessions", len(cachedActive),
+		)
+	}
+	return cachedActive, nil
+}
+
+func (d *Daemon) activeSessionIDsFromProjection(projectID string, sessions []daemonstate.Session) []string {
+	active := make([]string, 0, len(sessions))
+	for _, session := range sessions {
 		if session.State == daemonstate.SessionStateStopped {
 			continue
 		}
@@ -1210,15 +1234,40 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 		if strings.TrimSpace(session.ID) == "" {
 			continue
 		}
-		cachedActive = append(cachedActive, session.ID)
+		active = append(active, session.ID)
 	}
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("using projection-backed session runtime state",
-			"project_id", projectID,
-			"cached_sessions", len(cachedActive),
-		)
+	return active
+}
+
+func (d *Daemon) activeSessionIDsFromTmux(projectID string, sessions []string) []string {
+	active := make([]string, 0, len(sessions))
+	namingScope := d.sessionNamingScope(projectID)
+	for _, sessionID := range sessions {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			continue
+		}
+		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope); ok {
+			if d.isSessionStopPending(projectID, parsedIssueID) {
+				continue
+			}
+		}
+		active = append(active, sessionID)
 	}
-	return cachedActive, nil
+	return active
+}
+
+func (d *Daemon) listProjectionSessionsOnly(ctx context.Context, projectID string) ([]string, error) {
+	projectID = protocol.NormalizeProjectID(projectID)
+	store := d.sessionRuntimeStateStore(projectID)
+	if store == nil {
+		return []string{}, nil
+	}
+	cachedSessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return d.activeSessionIDsFromProjection(projectID, cachedSessions), nil
 }
 
 func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID string) error {

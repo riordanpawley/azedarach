@@ -1058,6 +1058,55 @@ func TestListTmuxSessionsCacheFirstUsesProjectionOnlyWhenCacheEmpty(t *testing.T
 	}
 }
 
+func TestListTmuxSessionsCacheFirstPrefersLiveTmuxOverStaleProjectionSessions(t *testing.T) {
+	const projectID = "proj-stale-cache"
+	const issueID = "az-1"
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed projection session: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	d := &Daemon{
+		cfg:  Config{RepoDir: ".", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	sessions, err := d.listTmuxSessionsCacheFirst(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("listTmuxSessionsCacheFirst returned error: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions = %v, want empty when tmux has no live sessions", sessions)
+	}
+
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list projection sessions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("projection rows = %d, want 1 (read path must not rewrite projection rows)", len(rows))
+	}
+}
+
 func collectSessionProjectionEvents(t *testing.T, ch <-chan protocol.EventEnvelope, count int) []protocol.EventEnvelope {
 	t.Helper()
 	events := make([]protocol.EventEnvelope, 0, count)
