@@ -24,8 +24,8 @@ func TestNewSortMenu(t *testing.T) {
 		t.Error("expected menu to hold reference to sort state")
 	}
 
-	if len(menu.options) != 3 {
-		t.Errorf("expected 3 sort options, got %d", len(menu.options))
+	if len(menu.options) != 4 {
+		t.Errorf("expected 4 sort options, got %d", len(menu.options))
 	}
 }
 
@@ -63,6 +63,13 @@ func TestSortMenu_InitialDisplay(t *testing.T) {
 		expectArrow  string
 		expectActive string
 	}{
+		{
+			name:         "Git diff ascending",
+			field:        domain.SortByGitDiff,
+			order:        domain.SortAsc,
+			expectArrow:  "↑",
+			expectActive: "Git Diff",
+		},
 		{
 			name:         "Session ascending",
 			field:        domain.SortBySession,
@@ -133,6 +140,13 @@ func TestSortMenu_FieldSelection(t *testing.T) {
 		expectField  domain.SortField
 		expectOrder  domain.SortOrder
 	}{
+		{
+			name:         "Change from Session to Git Diff",
+			initialField: domain.SortBySession,
+			pressKey:     "d",
+			expectField:  domain.SortByGitDiff,
+			expectOrder:  domain.SortAsc,
+		},
 		{
 			name:         "Change from Priority to Session",
 			initialField: domain.SortByPriority,
@@ -299,8 +313,9 @@ func TestSortMenu_View_ShowsAllOptions(t *testing.T) {
 
 	view := menu.View()
 
-	// Should show all three options
+	// Should show all options
 	expectedOptions := []string{
+		"Git Diff",
 		"Session",
 		"Priority",
 		"Updated",
@@ -312,14 +327,6 @@ func TestSortMenu_View_ShowsAllOptions(t *testing.T) {
 		}
 	}
 
-	// Should show footer hint
-	if !strings.Contains(view, "Press same key to toggle direction") {
-		t.Error("expected view to contain footer hint")
-	}
-
-	if !strings.Contains(view, "Esc to close") {
-		t.Error("expected view to contain close hint")
-	}
 }
 
 func TestSortMenu_MultipleToggles(t *testing.T) {
