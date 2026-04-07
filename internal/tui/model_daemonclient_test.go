@@ -3259,6 +3259,126 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		}
 	})
 
+	t.Run("cleanup continues when session stop freshness times out", func(t *testing.T) {
+		transport := &recordingDaemonTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				switch req.Command {
+				case daemonclient.CommandRuntimeReconcile:
+					respBody, err := json.Marshal(daemonclient.RuntimeReconcileResult{})
+					if err != nil {
+						t.Fatalf("marshal reconcile response: %v", err)
+					}
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            respBody,
+					}, nil
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body: mustMarshalTaskListSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{
+							{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress, HasWorktree: true},
+						}),
+					}, nil
+				case daemonclient.CommandSessionStop:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              false,
+						Error: &protocol.ErrorEnvelope{
+							Code:      protocol.ErrorCodeTimeout,
+							Message:   "refresh runtime state before mutation: wait runtime reconcile: context deadline exceeded",
+							Retryable: true,
+						},
+					}, nil
+				case daemonclient.CommandWorktreeRemove:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+					}, nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{}, nil
+			},
+		}
+
+		m := newDaemonTestModel(transport)
+		m.tasks = []domain.Task{
+			{ID: "az-1", Title: "Task 1", Status: domain.StatusInProgress},
+		}
+		setTaskSession(t, &m, "az-1", &domain.Session{
+			IssueID:  "az-1",
+			State:    domain.SessionBusy,
+			Worktree: "/tmp/az-1",
+		})
+		m.nav.SelectTask("az-1", 1)
+
+		updatedAny, cmd := m.handleSelection(overlay.SelectionMsg{Key: "w"})
+		updated, ok := updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if cmd == nil {
+			t.Fatal("expected cleanup preflight command")
+		}
+
+		preflightMsg := cmd()
+		prompt, ok := preflightMsg.(worktreeCleanupConfirmPromptMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupConfirmPromptMsg", preflightMsg)
+		}
+
+		updatedAny, confirmCmd := updated.Update(prompt)
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if confirmCmd != nil {
+			_ = confirmCmd()
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation")
+		}
+
+		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if runCleanupCmd == nil {
+			t.Fatal("expected cleanup command after confirmation")
+		}
+
+		resultMsg := runCleanupCmd()
+		result, ok := resultMsg.(worktreeCleanupResultMsg)
+		if !ok {
+			t.Fatalf("message type = %T, want worktreeCleanupResultMsg", resultMsg)
+		}
+		if result.err != nil {
+			t.Fatalf("cleanup result err = %v", result.err)
+		}
+
+		if got := transport.requests; len(got) != 4 ||
+			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[1] != daemonclient.CommandTaskList ||
+			got[2] != daemonclient.CommandSessionStop ||
+			got[3] != daemonclient.CommandWorktreeRemove {
+			t.Fatalf("requests = %v", got)
+		}
+	})
+
 	t.Run("dirty worktree prompts before forced cleanup", func(t *testing.T) {
 		forceFlags := []bool{}
 		stopCalls := 0
