@@ -63,6 +63,7 @@ type Dependencies struct {
 
 type daemonStarter interface {
 	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
 	Replace(ctx context.Context) error
 }
 
@@ -3345,6 +3346,23 @@ func parseStatus(raw string) (domain.Status, error) {
 	}
 }
 
+// StartDaemonCommand starts daemon process and verifies client attach.
+func StartDaemonCommand(deps *Dependencies) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
+	if err := launcher.Start(ctx); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return fmt.Errorf("daemon health check after start failed: %w", err)
+	}
+
+	fmt.Println("Daemon started successfully.")
+	return nil
+}
+
 // RestartDaemonCommand forces daemon replacement and verifies client re-attach.
 func RestartDaemonCommand(deps *Dependencies) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -3359,6 +3377,20 @@ func RestartDaemonCommand(deps *Dependencies) error {
 	}
 
 	fmt.Println("Daemon restarted successfully.")
+	return nil
+}
+
+// StopDaemonCommand stops daemon lock-owner process for current daemon scope.
+func StopDaemonCommand(deps *Dependencies) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	launcher := newLauncher(runtimeRepoDirForDeps(deps), deps.DaemonSocket)
+	if err := launcher.Stop(ctx); err != nil {
+		return fmt.Errorf("stop daemon: %w", err)
+	}
+
+	fmt.Println("Daemon stopped successfully.")
 	return nil
 }
 

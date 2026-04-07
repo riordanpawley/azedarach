@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/riordanpawley/azedarach/internal/tui"
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/cli"
 	clitext "github.com/riordanpawley/azedarach/internal/cli/text"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/tui"
 )
 
 func main() {
@@ -699,13 +699,29 @@ func main() {
 		}
 
 	case "daemon":
-		if len(commandArgs) != 1 || commandArgs[0] != "restart" {
-			fmt.Fprintf(os.Stderr, "Usage: az daemon restart\n")
+		if len(commandArgs) != 1 {
+			fmt.Fprintf(os.Stderr, "Usage: az daemon <start|stop|restart>\n")
 			os.Exit(1)
 		}
-		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.RestartDaemonCommand(deps)
-		}); err != nil {
+		var err error
+		switch commandArgs[0] {
+		case "start":
+			err = runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.StartDaemonCommand(deps)
+			})
+		case "stop":
+			err = runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.StopDaemonCommand(deps)
+			})
+		case "restart":
+			err = runCommand(cfg, func(deps *cli.Dependencies) error {
+				return cli.RestartDaemonCommand(deps)
+			})
+		default:
+			fmt.Fprintf(os.Stderr, "Usage: az daemon <start|stop|restart>\n")
+			os.Exit(1)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

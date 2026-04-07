@@ -22,12 +22,12 @@ import (
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
-	RepoDir     string
-	SocketPath  string
-	LockPath    string
-	BinPath     string
-	Logger      *slog.Logger
-	openLogFile func(path string) (io.WriteCloser, error)
+	RepoDir            string
+	SocketPath         string
+	LockPath           string
+	BinPath            string
+	Logger             *slog.Logger
+	openLogFile        func(path string) (io.WriteCloser, error)
 	waitForReady       func(ctx context.Context, socketPath string) error
 	sleepFn            func(time.Duration)
 	terminateLockOwner func(lockPath string) error
@@ -49,13 +49,13 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		lockPath = filepath.Join(filepath.Dir(socketPath), "daemon.lock")
 	}
 	return &Launcher{
-		RepoDir:     repoDir,
-		SocketPath:  socketPath,
-		LockPath:    lockPath,
-		Logger:      slog.Default(),
-		openLogFile: openDaemonLog,
-		waitForReady: waitForDaemonReady,
-		sleepFn:      time.Sleep,
+		RepoDir:            repoDir,
+		SocketPath:         socketPath,
+		LockPath:           lockPath,
+		Logger:             slog.Default(),
+		openLogFile:        openDaemonLog,
+		waitForReady:       waitForDaemonReady,
+		sleepFn:            time.Sleep,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
 }
@@ -140,6 +140,19 @@ func (l *Launcher) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("wait for daemon socket readiness: %w", err)
 		}
+	}
+	return nil
+}
+
+// Stop attempts to stop existing lock-owner process.
+func (l *Launcher) Stop(ctx context.Context) error {
+	_ = ctx
+	terminate := l.terminateLockOwner
+	if terminate == nil {
+		terminate = lifecycle.TerminateLockOwner
+	}
+	if err := terminate(l.LockPath); err != nil {
+		return fmt.Errorf("terminate daemon lock owner: %w", err)
 	}
 	return nil
 }
