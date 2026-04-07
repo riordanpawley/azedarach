@@ -378,13 +378,37 @@ func NotifyCommand(deps *Dependencies, opts NotifyOptions) error {
 }
 
 func notifyDaemonSessionStatus(ctx context.Context, deps *Dependencies, issueID, event string) error {
+	callWithAutostart := func(call func(context.Context) error) error {
+		_, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (struct{}, error) {
+			return struct{}{}, call(callCtx)
+		})
+		return err
+	}
+
 	switch event {
 	case hookEventIdlePrompt, hookEventPermissionRequest, hookEventStop, hookEventSessionEnd:
-		_, err := deps.DaemonClient.PauseSession(ctx, issueID)
-		return err
+		if err := callWithAutostart(func(callCtx context.Context) error {
+			_, pauseErr := deps.DaemonClient.PauseSession(callCtx, issueID)
+			return pauseErr
+		}); err != nil {
+			return err
+		}
+		// Stop/session-end events indicate a likely lifecycle boundary; force a
+		// reconcile now so task-list/session projections do not linger as busy.
+		if event == hookEventStop || event == hookEventSessionEnd {
+			if err := callWithAutostart(func(callCtx context.Context) error {
+				_, reconcileErr := deps.DaemonClient.ReconcileRuntime(callCtx)
+				return reconcileErr
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	case hookEventSessionStart, hookEventUserPromptSubmit, hookEventPreToolUse, hookEventPostToolUse:
-		_, err := deps.DaemonClient.ResumeSession(ctx, issueID)
-		return err
+		return callWithAutostart(func(callCtx context.Context) error {
+			_, resumeErr := deps.DaemonClient.ResumeSession(callCtx, issueID)
+			return resumeErr
+		})
 	default:
 		return nil
 	}
