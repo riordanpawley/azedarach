@@ -617,6 +617,11 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	if err := d.ensureFreshRuntimeForMutation(ctx, cmd.ProjectID, daemonhandlers.CommandSessionStop); err != nil {
 		return d.mutationFreshnessErrorResponse(req, err), nil
 	}
+	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	exists := len(sessionNamesToKill) > 0
 	// Write-through stopped projection immediately so cache-first task/session
 	// reads do not resurrect a just-stopped session while tmux/process stop
 	// work is still in flight.
@@ -633,11 +638,6 @@ func (d *Daemon) handleSessionStopDirect(ctx context.Context, req protocol.Reque
 	); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session stop transition: %v", err)), nil
 	}
-	sessionNamesToKill, err := d.tmuxSessionNamesForIssue(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	exists := len(sessionNamesToKill) > 0
 	if exists {
 		for _, sessionName := range sessionNamesToKill {
 			if err := d.tmux.KillSession(ctx, sessionName); err != nil {

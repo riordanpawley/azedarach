@@ -705,6 +705,7 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
 	daemon := &Daemon{
 		cfg: Config{
 			RepoDir: ".",
@@ -765,6 +766,13 @@ func TestHandleSessionStopDirectWritesStoppedProjectionBeforeKillCompletes(t *te
 	snapshot := store.ReadSnapshot(projectID)
 	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
 		t.Fatalf("expected cached session state stopped for %s before kill completes, got %s", sessionID, got)
+	}
+
+	tmuxRunner.mu.Lock()
+	_, sessionStillRunning := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if sessionStillRunning {
+		t.Fatalf("expected tmux session %q to be killed", sessionID)
 	}
 
 }
