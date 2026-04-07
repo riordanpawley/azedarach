@@ -513,6 +513,47 @@ func TestNotifyCommandUpdatesDaemonSessionStateForIdlePrompt(t *testing.T) {
 	}
 }
 
+func TestNotifyCommandStopTriggersPauseAndRuntimeReconcile(t *testing.T) {
+	opts, err := ParseNotifyArgs([]string{"--json", "stop", "az-123"})
+	if err != nil {
+		t.Fatalf("ParseNotifyArgs error: %v", err)
+	}
+
+	requests := make([]protocol.RequestEnvelope, 0, 2)
+	transport := &fakeDaemonTransport{
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			requests = append(requests, req)
+			if req.Command == daemonclient.CommandRuntimeReconcile {
+				return responseWithJSON(req, protocol.RuntimeReconcileResponseBody{
+					ProjectID: "proj-1",
+				}), nil
+			}
+			return responseWithOutput(req, "ok"), nil
+		},
+	}
+
+	deps := &Dependencies{
+		DaemonClient: daemonclient.New(transport).WithProjectID("proj-1"),
+		ProjectID:    "proj-1",
+	}
+	output := captureStdout(t, func() error {
+		return NotifyCommand(deps, opts)
+	})
+
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if requests[0].Command != daemonclient.CommandSessionPause {
+		t.Fatalf("first command = %q, want %q", requests[0].Command, daemonclient.CommandSessionPause)
+	}
+	if requests[1].Command != daemonclient.CommandRuntimeReconcile {
+		t.Fatalf("second command = %q, want %q", requests[1].Command, daemonclient.CommandRuntimeReconcile)
+	}
+	if strings.TrimSpace(output) != "{}" {
+		t.Fatalf("notify json output = %q, want {}", output)
+	}
+}
+
 func TestNotifyCommandResolvesIssueIDFromEnvForSessionStart(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-from-env")
 	opts, err := ParseNotifyArgs([]string{"--json", "session_start"})
