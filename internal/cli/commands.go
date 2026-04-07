@@ -384,8 +384,12 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 		return err
 	}
 	baseBranch := resolveCLIBaseBranch(deps.Config)
+	mainWorktree := strings.TrimSpace(deps.RepoDir)
+	if mainWorktree == "" {
+		mainWorktree = "."
+	}
 
-	if err := checkMergeToMainPreflight(ctx, deps, source, "."); err != nil {
+	if err := checkMergeToMainPreflight(ctx, deps, source, mainWorktree); err != nil {
 		return err
 	}
 
@@ -396,13 +400,13 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 		"base_branch", baseBranch,
 	)
 
-	if _, err := deps.DaemonClient.GitFetch(ctx, ".", "origin"); err != nil {
+	if _, err := deps.DaemonClient.GitFetch(ctx, mainWorktree, "origin"); err != nil {
 		return wrapPendingGitOperation("fetch", err)
 	}
-	if _, err := deps.DaemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
+	if _, err := deps.DaemonClient.GitCheckout(ctx, mainWorktree, baseBranch); err != nil {
 		return wrapPendingGitOperation("checkout", err)
 	}
-	result, err := deps.DaemonClient.GitMerge(ctx, ".", source.Branch)
+	result, err := deps.DaemonClient.GitMerge(ctx, mainWorktree, source.Branch)
 	if err != nil {
 		return wrapPendingGitOperation("merge", err)
 	}

@@ -399,7 +399,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return *preflight
 		}
 
-		if _, err := m.daemonClient.GitFetch(ctx, ".", "origin"); err != nil {
+		if _, err := m.daemonClient.GitFetch(ctx, mainWorktree, "origin"); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return mergeResultMsg{
 					sourceID:    sourceID,
@@ -412,7 +412,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
-		if _, err := m.daemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
+		if _, err := m.daemonClient.GitCheckout(ctx, mainWorktree, baseBranch); err != nil {
 			if pending, ok := pendingOperationDetails(err); ok {
 				return mergeResultMsg{
 					sourceID:    sourceID,
@@ -425,7 +425,7 @@ func (m Model) mergeToMainCmd(sourceWorktree, sourceID string, refreshStatus boo
 			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
 		}
 
-		result, err := m.daemonClient.GitMerge(ctx, ".", branch)
+		result, err := m.daemonClient.GitMerge(ctx, mainWorktree, branch)
 		if pending, ok := pendingOperationDetails(err); ok {
 			return mergeResultMsg{
 				sourceID:    sourceID,

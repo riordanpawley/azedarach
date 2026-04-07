@@ -320,6 +320,7 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 
 func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 	commands := make([]string, 0, 8)
+	mainWorktree := t.TempDir()
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -341,7 +342,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != "." {
+					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != mainWorktree {
 						t.Fatalf("git status worktree = %q", body.Worktree)
 					}
 					return responseWithJSON(req, map[string]any{
@@ -349,17 +350,17 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					}), nil
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Remote:   "origin",
 					}), nil
 				case daemonclient.CommandGitCheckout:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Branch:   "main",
 					}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Branch:   "riordan/az-123/some-change",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -373,7 +374,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
+		RepoDir:   mainWorktree,
 	}
 
 	output := captureStdout(t, func() error {
@@ -525,6 +526,7 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 
 func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
+	mainWorktree := t.TempDir()
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -546,7 +548,7 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree == "." {
+					if body.Worktree == mainWorktree {
 						return responseWithJSON(req, map[string]any{
 							"status": gitservice.GitStatus{
 								HasChanges: true,
@@ -558,12 +560,12 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 						"status": gitservice.GitStatus{HasChanges: false},
 					}), nil
 				case daemonclient.CommandGitFetch:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Remote: "origin"}), nil
 				case daemonclient.CommandGitCheckout:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Branch: "main"}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Branch:   "riordan/bhv/fix-mtm-timeout",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -576,7 +578,7 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
+		RepoDir:   mainWorktree,
 	}
 
 	err := BranchMergeToMainCommand(deps, "bhv")
