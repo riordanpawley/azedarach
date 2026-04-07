@@ -30,6 +30,9 @@ type popupResultMsg struct {
 	Err error
 }
 
+// ExternalRefreshMsg triggers a full reload of changed files for an already-open viewer.
+type ExternalRefreshMsg struct{}
+
 // DiffViewer displays changed files and opens difftastic popups for selected diffs.
 type DiffViewer struct {
 	worktree    string
@@ -144,8 +147,22 @@ func (d *DiffViewer) Init() tea.Cmd {
 	return d.loadChangedFilesCmd()
 }
 
+// Worktree returns the viewer's target worktree path.
+func (d *DiffViewer) Worktree() string {
+	return strings.TrimSpace(d.worktree)
+}
+
 func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case ExternalRefreshMsg:
+		if d.loading {
+			return d, nil
+		}
+		d.loading = true
+		d.err = nil
+		d.popupStatus = ""
+		return d, d.loadChangedFilesCmd()
+
 	case loadChangedFilesMsg:
 		d.loading = false
 		d.cursor = 0

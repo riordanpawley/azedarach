@@ -45,6 +45,27 @@ type recordingCommandRunner struct {
 
 type blockingSnapshotTransport struct{}
 
+type refreshableDiffClient struct {
+	paths       []string
+	statusCalls int
+}
+
+func (r *refreshableDiffClient) Status(context.Context, string) (*git.GitStatus, error) {
+	r.statusCalls++
+	return &git.GitStatus{
+		HasChanges: len(r.paths) > 0,
+		Modified:   append([]string(nil), r.paths...),
+	}, nil
+}
+
+func (*refreshableDiffClient) ChangedFiles(context.Context, string, string) ([]git.ChangedFile, error) {
+	return nil, nil
+}
+
+func (*refreshableDiffClient) MergeBase(context.Context, string, string) (string, error) {
+	return "abc123", nil
+}
+
 func (blockingSnapshotTransport) Handshake(context.Context, protocol.Hello) (protocol.HelloAck, error) {
 	return protocol.HelloAck{Accepted: true}, nil
 }
@@ -3449,6 +3470,48 @@ func TestAbortMergeCmdUsesDaemonClient(t *testing.T) {
 	}
 	if got := transport.requests; len(got) != 1 || got[0] != daemonclient.CommandGitAbortMerge {
 		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestRefreshOpenDiffOverlayFromProjectionBody(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+
+	client := &refreshableDiffClient{paths: []string{"old.go"}}
+	viewer := diff.NewDiffViewer("/tmp/az-1", "main", client, nil)
+	m.overlayStack.Push(viewer)
+
+	initCmd := viewer.Init()
+	if initCmd == nil {
+		t.Fatal("expected init command")
+	}
+	initMsg := initCmd()
+	updatedViewer, _ := viewer.Update(initMsg)
+	viewer = updatedViewer.(*diff.DiffViewer)
+	if view := viewer.View(); !strings.Contains(view, "old.go") {
+		t.Fatalf("initial view = %q, want old.go", view)
+	}
+
+	client.paths = []string{"new.go"}
+	refreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(protocol.ProjectionUpdateEventBody{
+		Worktree: "/tmp/az-1",
+	})
+	if refreshCmd == nil {
+		t.Fatal("expected diff refresh command for matching worktree")
+	}
+	if view := viewer.View(); !strings.Contains(view, "Loading changed files...") {
+		t.Fatalf("view after refresh trigger = %q, want loading state", view)
+	}
+
+	refreshMsg := refreshCmd()
+	updatedViewer, _ = viewer.Update(refreshMsg)
+	viewer = updatedViewer.(*diff.DiffViewer)
+
+	view := viewer.View()
+	if !strings.Contains(view, "new.go") {
+		t.Fatalf("refreshed view = %q, want new.go", view)
+	}
+	if strings.Contains(view, "old.go") {
+		t.Fatalf("refreshed view = %q, should not contain old.go", view)
 	}
 }
 

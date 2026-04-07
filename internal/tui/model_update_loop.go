@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/linearsync"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/network"
+	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -341,8 +342,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := json.Unmarshal(msg.event.Body, &body); err == nil && body.Runtime != nil {
 				m.applyRuntimeProjection(body.Runtime.Projection)
 			}
+			diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
 			cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 			m.daemonRevision = cursor.Advance(msg.event).Revision
+			if diffRefreshCmd != nil {
+				return m, tea.Batch(diffRefreshCmd, m.waitForDaemonEventCmd())
+			}
 			return m, m.waitForDaemonEventCmd()
 		}
 		switch m.reduceDaemonEvent(msg.event) {
@@ -1088,4 +1093,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) refreshOpenDiffOverlayFromProjectionBody(body protocol.ProjectionUpdateEventBody) tea.Cmd {
+	current := m.overlayStack.Current()
+	viewer, ok := current.(*diff.DiffViewer)
+	if !ok || viewer == nil {
+		return nil
+	}
+
+	eventWorktree := strings.TrimSpace(body.Worktree)
+	if eventWorktree == "" && body.Runtime != nil {
+		eventWorktree = strings.TrimSpace(body.Runtime.Projection.Worktree.Path)
+	}
+	if eventWorktree == "" || viewer.Worktree() != eventWorktree {
+		return nil
+	}
+
+	_, cmd := viewer.Update(diff.ExternalRefreshMsg{})
+	return cmd
 }
