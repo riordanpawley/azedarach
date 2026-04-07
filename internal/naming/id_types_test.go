@@ -90,3 +90,19 @@ func TestParseRequirementID(t *testing.T) {
 		t.Fatalf("ParseRequirementID() = %q, want %q", got, want)
 	}
 }
+
+func TestParseSpecLinkIDAllowsColon(t *testing.T) {
+	id, err := ParseSpecLinkID("brl:fr4216")
+	if err != nil {
+		t.Fatalf("ParseSpecLinkID() error = %v", err)
+	}
+	if got, want := id.String(), "brl:fr4216"; got != want {
+		t.Fatalf("ParseSpecLinkID() = %q, want %q", got, want)
+	}
+}
+
+func TestParseSpecLinkIDRejectsInvalid(t *testing.T) {
+	if _, err := ParseSpecLinkID("brl/fr4216"); err == nil {
+		t.Fatal("ParseSpecLinkID() expected error for slash-separated value")
+	}
+}

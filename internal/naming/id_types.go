@@ -181,7 +181,7 @@ func ParseSpecLinkID(raw string) (SpecLinkID, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidSpecLinkID)
 	}
-	if err := validateIDCharset(trimmed, ErrInvalidSpecLinkID); err != nil {
+	if err := validateIDCharsetWithExtras(trimmed, ErrInvalidSpecLinkID, ':'); err != nil {
 		return "", err
 	}
 	return SpecLinkID(trimmed), nil
@@ -422,8 +422,19 @@ func (id *RequestID) UnmarshalJSON(data []byte) error {
 }
 
 func validateIDCharset(trimmed string, sentinel error) error {
+	return validateIDCharsetWithExtras(trimmed, sentinel)
+}
+
+func validateIDCharsetWithExtras(trimmed string, sentinel error, extras ...rune) error {
+	allowedExtras := make(map[rune]struct{}, len(extras))
+	for _, extra := range extras {
+		allowedExtras[extra] = struct{}{}
+	}
 	for _, r := range trimmed {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		if _, ok := allowedExtras[r]; ok {
 			continue
 		}
 		return fmt.Errorf("%w: disallowed character %q", sentinel, r)
