@@ -100,7 +100,9 @@ if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
 fi
 
 if [[ "$RUN_PULL" -eq 1 ]]; then
-  run git pull --rebase "$REMOTE" "$BRANCH"
+  # Never rewrite local history during release.
+  # This only fast-forwards when remote has new commits.
+  run git pull --ff-only "$REMOTE" "$BRANCH"
 fi
 
 latest_tag="$(git tag --list 'v*' | sed 's/^v//' | sort -V | tail -n 1)"
