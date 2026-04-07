@@ -605,6 +605,9 @@ func (d *Daemon) applySessionLifecycleTransition(
 	if d.session == nil {
 		return errors.New("session handler unavailable")
 	}
+	if err := d.refreshSessionInvariantCacheIfConfigured(ctx, projectID); err != nil {
+		return fmt.Errorf("refresh session transition cache: %w", err)
+	}
 
 	body, err := json.Marshal(struct {
 		ProjectID string `json:"project_id"`
@@ -659,6 +662,58 @@ func (d *Daemon) worktreeRuntimeStateStore(projectID ...string) *daemonstate.Run
 		return d.runtimeStateStoreForProject(projectID[0])
 	}
 	return d.runtimeStateStoreForProject(protocol.DefaultProjectID)
+}
+
+func (d *Daemon) worktreeRuntimeStateStoreIfConfigured(projectID string) *daemonstate.RuntimeStateStore {
+	if d == nil {
+		return nil
+	}
+	d.runtimeStoresMu.Lock()
+	hasConfiguredStores := len(d.runtimeStoresByProject) > 0 || len(d.runtimeStoresByRoot) > 0
+	d.runtimeStoresMu.Unlock()
+	if !hasConfiguredStores {
+		return nil
+	}
+	return d.worktreeRuntimeStateStore(projectID)
+}
+
+func (d *Daemon) sessionRuntimeStateStoreIfConfigured(projectID string) *daemonstate.RuntimeStateStore {
+	if d == nil {
+		return nil
+	}
+	d.runtimeStoresMu.Lock()
+	hasConfiguredStores := len(d.runtimeStoresByProject) > 0 || len(d.runtimeStoresByRoot) > 0
+	d.runtimeStoresMu.Unlock()
+	if !hasConfiguredStores {
+		return nil
+	}
+	return d.sessionRuntimeStateStore(projectID)
+}
+
+func (d *Daemon) refreshSessionInvariantCache(ctx context.Context, projectID string) error {
+	if d == nil || d.sessionStore == nil {
+		return nil
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		d.sessionStore.ReplaceProjectSessions(projectID, nil)
+		return nil
+	}
+	sessions, err := store.ListSessionStates(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	d.sessionStore.ReplaceProjectSessions(projectID, sessions)
+	return nil
+}
+
+func (d *Daemon) refreshSessionInvariantCacheIfConfigured(ctx context.Context, projectID string) error {
+	projectID = protocol.NormalizeProjectID(projectID)
+	if d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
+		return nil
+	}
+	return d.refreshSessionInvariantCache(ctx, projectID)
 }
 
 func (d *Daemon) runtimeProjectionStateWriter() runtimeProjectionWriter {
@@ -978,7 +1033,12 @@ func (d *Daemon) runtimeProjectionForEvent(ctx context.Context, projectID, issue
 	worktree = strings.TrimSpace(worktree)
 
 	var session *daemonstate.Session
-	if d.sessionStore != nil && issueID != "" {
+	if issueID != "" {
+		if err := d.refreshSessionInvariantCache(ctx, projectID); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Debug("refresh session invariant cache failed", "project_id", projectID, "issue_id", issueID, "error", err)
+			}
+		}
 		if loaded, ok := d.sessionStore.SessionByIssueID(projectID, issueID); ok {
 			copy := loaded
 			session = &copy

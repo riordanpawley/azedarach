@@ -99,6 +99,30 @@ fd "filename" -t f internal cmd
 7. If runtime assets are user-global (socket/lock), preserve project isolation and avoid cross-repo authority bleed.
 8. Include regression guards so direct client-side authority operations fail tests if reintroduced.
 
+## Invariant Cache Pattern (Critical)
+
+1. Every daemon invariant must declare an explicit source of truth: `projection`, `tmux`, or `hybrid`.
+2. For `projection` and `hybrid` invariants, read pattern must be: refresh in-memory cache from durable SQLite projection first, then evaluate from refreshed in-memory cache.
+3. For `tmux` invariants, query tmux directly; do not infer runtime presence only from projection state.
+4. `hybrid` invariants must compare durable projection intent and live tmux runtime without fallback shortcuts.
+5. Do not evaluate invariants from stale in-memory state or direct ad-hoc SQLite reads.
+6. Mutations remain write-through: update in-memory authority and durable projection, then publish events.
+7. Example matrix:
+   - `session.start`/`session.attach`/`session.stop` runtime-presence checks -> `tmux`
+   - session recovery/reconcile -> `hybrid`
+   - task-list freshness/session projection checks -> `projection` via refresh-then-cache
+
+### Adding New Invariants (Required Checklist)
+
+1. Add invariant ID and source policy (`projection`/`tmux`/`hybrid`) in the shared daemon invariant matrix.
+2. Route invariant evaluation through existing policy-aware helpers (no ad-hoc direct source reads).
+3. Add/update runtime debug visibility so `runtime.reconcile` exposes the invariant source mapping.
+4. Add regression tests:
+   - source-matrix mapping test coverage
+   - behavior test for the concrete invariant path
+   - multi-daemon stale-cache race test when lifecycle state could diverge across processes
+5. Update docs (`AGENTS.md` and `docs/README.md`) when adding or changing invariant sources.
+
 ## Architecture Migration Gates
 
 1. Do not mark migrations complete while active entrypoints still depend on transitional adapters or legacy execution paths.

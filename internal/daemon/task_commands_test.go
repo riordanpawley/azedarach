@@ -389,6 +389,59 @@ func TestTaskListSnapshotFreshnessMarksStaleProjection(t *testing.T) {
 	}
 }
 
+func TestTaskListSnapshotFreshnessRefreshesSessionCacheBeforeEvaluation(t *testing.T) {
+	originalNow := timeNow
+	t.Cleanup(func() {
+		timeNow = originalNow
+	})
+	timeNow = func() time.Time {
+		return time.Date(2026, time.April, 2, 11, 5, 0, 0, time.UTC)
+	}
+
+	ctx := context.Background()
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	const (
+		projectID = "proj-fresh"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	durableUpdatedAt := time.Date(2026, time.April, 2, 11, 4, 45, 0, time.UTC)
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: durableUpdatedAt,
+	}); err != nil {
+		t.Fatalf("seed durable session projection: %v", err)
+	}
+
+	sessionStore := daemonstate.NewStore()
+	sessionStore.ReplaceProjectSessions(projectID, []daemonstate.Session{{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC),
+	}})
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: slog.Default()},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStore,
+		},
+		sessionStore: sessionStore,
+	}
+
+	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
+	if !lastCheckedAt.Equal(durableUpdatedAt) {
+		t.Fatalf("lastCheckedAt = %v, want %v from durable projection", lastCheckedAt, durableUpdatedAt)
+	}
+	if freshness != protocol.TaskListFreshnessFresh {
+		t.Fatalf("freshness = %q, want %q", freshness, protocol.TaskListFreshnessFresh)
+	}
+}
+
 func TestHandleTaskListDoesNotPersistSessionProjectionSnapshot(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

@@ -141,8 +141,13 @@ func TestPublishSessionProjectionEventIncludesRuntimeDelta(t *testing.T) {
 	)
 	sessionUpdatedAt := time.Date(2026, time.April, 1, 13, 0, 0, 0, time.UTC)
 	worktreeUpdatedAt := time.Date(2026, time.April, 1, 13, 5, 0, 0, time.UTC)
-	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
-		t.Fatalf("seed session store: %v", err)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: sessionUpdatedAt,
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
 	}
 	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
@@ -224,8 +229,13 @@ func TestPublishGitStatusProjectionEventIncludesRuntimeDelta(t *testing.T) {
 		worktree  = "/tmp/repo-az-2"
 		branch    = "riordan/az-2/task"
 	)
-	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
-		t.Fatalf("seed session store: %v", err)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateStarting,
+		UpdatedAt: time.Date(2026, time.April, 1, 14, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
 	}
 	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
@@ -315,8 +325,13 @@ func TestPublishWorktreeProjectionEventIncludesRuntimeDelta(t *testing.T) {
 		worktree  = "/tmp/repo-az-3"
 		branch    = "riordan/az-3/task"
 	)
-	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStatePaused); err != nil {
-		t.Fatalf("seed session store: %v", err)
+	if err := runtimeStateStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStatePaused,
+		UpdatedAt: time.Date(2026, time.April, 1, 15, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed session projection: %v", err)
 	}
 	if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,

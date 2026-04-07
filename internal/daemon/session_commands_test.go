@@ -162,6 +162,22 @@ func TestSessionProjectionByIssueKeyPrefersActiveStateOverStopped(t *testing.T) 
 	}
 }
 
+func TestSourceForSessionInvariant(t *testing.T) {
+	d := &Daemon{}
+	if got := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict); got != daemonInvariantSourceTmux {
+		t.Fatalf("start conflict source = %s, want %s", got, daemonInvariantSourceTmux)
+	}
+	if got := d.sourceForSessionInvariant(sessionInvariantSessionAttachTarget); got != daemonInvariantSourceTmux {
+		t.Fatalf("attach target source = %s, want %s", got, daemonInvariantSourceTmux)
+	}
+	if got := d.sourceForSessionInvariant(sessionInvariantSessionStopTargets); got != daemonInvariantSourceTmux {
+		t.Fatalf("stop targets source = %s, want %s", got, daemonInvariantSourceTmux)
+	}
+	if got := d.sourceForSessionInvariant(sessionInvariantSessionReconcile); got != daemonInvariantSourceHybrid {
+		t.Fatalf("reconcile source = %s, want %s", got, daemonInvariantSourceHybrid)
+	}
+}
+
 type sessionStartTmuxRunner struct {
 	sessions      map[string]bool
 	sendKeysCalls int
@@ -287,6 +303,89 @@ func TestSessionStartRecoversFromPartialWorktreeCreate(t *testing.T) {
 	}
 	if tmuxRunner.sendKeysCalls != 1 {
 		t.Fatalf("send-keys calls = %d, want 1", tmuxRunner.sendKeysCalls)
+	}
+}
+
+func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Start should use tmux truth",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	branch := "testuser/" + issueID + "/tmux-truth"
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID)
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: worktreePath,
+		branchName:   branch,
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed stale starting session: %v", err)
+	}
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed stale attached session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-tmux-truth",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("session start response not OK: %+v", resp)
+	}
+	if !tmuxRunner.sessions[sessionID] {
+		t.Fatalf("expected tmux session %q to be created", sessionID)
 	}
 }
 
@@ -889,11 +988,18 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	)
 
 	store := daemonstate.NewStore()
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
 	daemon := &Daemon{
-		cfg:          Config{Logger: slog.Default()},
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
 		hub:          publish.NewHub(32, 8, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	ch, cancel := daemon.hub.Subscribe(projectID, 0)
@@ -942,6 +1048,66 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvent(t *testing.T) {
 	}
 }
 
+func TestApplySessionLifecycleTransitionRefreshesDurableCacheBeforeTransition(t *testing.T) {
+	const (
+		projectID = "proj-refresh-transition"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed starting session: %v", err)
+	}
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed attached session: %v", err)
+	}
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateStopped,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed durable stopped session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-transition-refresh",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionStart,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+	}
+
+	if err := d.applySessionLifecycleTransition(context.Background(), req, projectID, sessionID, issueID, daemonhandlers.CommandSessionStart); err != nil {
+		t.Fatalf("applySessionLifecycleTransition: %v", err)
+	}
+
+	got, err := store.Session(projectID, sessionID)
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if got.State != daemonstate.SessionStateStarting {
+		t.Fatalf("session state = %s, want %s", got.State, daemonstate.SessionStateStarting)
+	}
+}
+
 func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 	const (
 		projectID = "proj"
@@ -954,8 +1120,13 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		_ = runtimeStateStore.Close()
 	})
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
-	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStopped); err != nil {
-		t.Fatalf("seed stopped session: %v", err)
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateStopped,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed durable stopped session: %v", err)
 	}
 
 	tmuxRunner := newTestTmuxRunner(sessionID)
@@ -974,6 +1145,9 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		},
 		worktreeManagersByProject: map[string]*git.WorktreeManager{
 			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
 		},
 	}
 
@@ -1022,6 +1196,186 @@ func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 		if body.Runtime.Projection.IssueID != issueID {
 			t.Fatalf("event[%d] runtime issue = %s, want %s", i, body.Runtime.Projection.IssueID, issueID)
 		}
+	}
+}
+
+func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
+	const issueID = "az-1"
+
+	repoDir := t.TempDir()
+	projectID := filepath.Base(repoDir)
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed durable session projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/az-1/test"}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/az-1/test"}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("reconcile with durable session projection: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 1 {
+		t.Fatalf("recreated tmux sessions = %d, want 1", result.RecreatedTmuxSessions)
+	}
+
+	tmuxRunner.mu.Lock()
+	created := tmuxRunner.newSessionCalls
+	sessionExists := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if created != 1 {
+		t.Fatalf("new-session calls = %d, want 1", created)
+	}
+	if !sessionExists {
+		t.Fatalf("expected tmux session %q to exist after reconcile", sessionID)
+	}
+}
+
+func TestReconcileDoesNotResurrectStoppedSessionAcrossDaemons(t *testing.T) {
+	const (
+		projectID = "proj"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   issueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed durable attached session: %v", err)
+	}
+
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+
+	storeA := daemonstate.NewStore()
+	if _, err := storeA.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed daemon A starting session: %v", err)
+	}
+	if _, err := storeA.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatalf("seed daemon A attached session: %v", err)
+	}
+	daemonA := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(storeA),
+		sessionStore: storeA,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			".": git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{worktreePath: "/tmp/proj-az-1", branchName: "riordan/az-1/test"}, ".", slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	storeB := daemonstate.NewStore()
+	daemonB := &Daemon{
+		cfg: Config{
+			RepoDir: ".",
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(storeB),
+		sessionStore: storeB,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	stopBody, err := json.Marshal(map[string]string{
+		"project_id": projectID,
+		"session_id": issueID,
+	})
+	if err != nil {
+		t.Fatalf("marshal stop body: %v", err)
+	}
+	stopResp, err := daemonB.handleSessionStopDirect(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-stop-daemon-b",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.stop",
+		Body:            stopBody,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatalf("daemon B stop returned error: %v", err)
+	}
+	if !stopResp.OK {
+		t.Fatalf("daemon B stop response not OK: %+v", stopResp.Error)
+	}
+
+	tmuxRunner.mu.Lock()
+	_, runningAfterStop := tmuxRunner.sessions[sessionID]
+	newSessionCallsBeforeReconcile := tmuxRunner.newSessionCalls
+	tmuxRunner.mu.Unlock()
+	if runningAfterStop {
+		t.Fatalf("expected tmux session %q to be stopped by daemon B", sessionID)
+	}
+
+	result, err := daemonA.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
+	if err != nil {
+		t.Fatalf("daemon A reconcile: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 0 {
+		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	}
+
+	tmuxRunner.mu.Lock()
+	newSessionCallsAfterReconcile := tmuxRunner.newSessionCalls
+	_, runningAfterReconcile := tmuxRunner.sessions[sessionID]
+	tmuxRunner.mu.Unlock()
+	if newSessionCallsAfterReconcile != newSessionCallsBeforeReconcile {
+		t.Fatalf("new-session calls increased from %d to %d after reconcile", newSessionCallsBeforeReconcile, newSessionCallsAfterReconcile)
+	}
+	if runningAfterReconcile {
+		t.Fatalf("session %q resurrected unexpectedly", sessionID)
 	}
 }
 
@@ -1290,14 +1644,22 @@ func TestApplySessionLifecycleTransitionPublishesProjectionEvents(t *testing.T) 
 
 	store := daemonstate.NewStore()
 	hub := publish.NewHub(32, 8, slog.Default())
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
 	daemon := &Daemon{
 		cfg: Config{
-			Logger: slog.Default(),
+			RepoDir: ".",
+			Logger:  slog.Default(),
 		},
 		hub:          hub,
 		session:      daemonhandlers.NewSessionHandler(store),
 		sessionStore: store,
 		revision:     map[string]uint64{},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
 	}
 
 	ch, cancel := hub.Subscribe(projectID, 0)
