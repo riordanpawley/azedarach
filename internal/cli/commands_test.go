@@ -315,22 +315,22 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 				return tt.command(deps, tt.sessionID)
 			})
 
-				if gotReq.Command != tt.wantCommand {
-					t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
+			if gotReq.Command != tt.wantCommand {
+				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
+			}
+			switch tt.wantCommand {
+			case commandSessionAttach, commandSessionStop:
+				if len(commands) != 2 || commands[0] != daemonclient.CommandTaskList || commands[1] != tt.wantCommand {
+					t.Fatalf("commands = %v", commands)
 				}
-				switch tt.wantCommand {
-				case commandSessionAttach, commandSessionStop:
-					if len(commands) != 2 || commands[0] != daemonclient.CommandTaskList || commands[1] != tt.wantCommand {
-						t.Fatalf("commands = %v", commands)
-					}
-				case commandSessionStatus:
-					if len(commands) != 1 || commands[0] != commandSessionStatus {
-						t.Fatalf("commands = %v", commands)
-					}
+			case commandSessionStatus:
+				if len(commands) != 1 || commands[0] != commandSessionStatus {
+					t.Fatalf("commands = %v", commands)
 				}
-				if gotReq.Meta.ProjectID != "proj" {
-					t.Fatalf("meta project_id = %q, want proj", gotReq.Meta.ProjectID)
-				}
+			}
+			if gotReq.Meta.ProjectID != "proj" {
+				t.Fatalf("meta project_id = %q, want proj", gotReq.Meta.ProjectID)
+			}
 			if output != tt.response {
 				t.Fatalf("output = %q, want %q", output, tt.response)
 			}
@@ -4534,7 +4534,7 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if !strings.Contains(output, "`az mail send --parent <parent-issue> --type dependency-ready --body \"...\"`") {
 		t.Fatalf("prime output missing mail send command example: %q", output)
 	}
-	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon restart`, `az export --format json [--out <path>]`") {
+	if !strings.Contains(output, "`az session start <issue-id>`, `az session status [issue-id]`, `az daemon start|stop|restart`, `az export --format json [--out <path>]`") {
 		t.Fatalf("prime output missing session/runtime command examples: %q", output)
 	}
 }
@@ -4695,11 +4695,23 @@ func TestPrimeCommandSpecBlockDisabled(t *testing.T) {
 }
 
 type fakeLauncher struct {
+	startErr      error
+	stopErr       error
 	replaceErr    error
+	startCalled   bool
+	stopCalled    bool
 	replaceCalled bool
 }
 
-func (f *fakeLauncher) Start(context.Context) error { return nil }
+func (f *fakeLauncher) Start(context.Context) error {
+	f.startCalled = true
+	return f.startErr
+}
+
+func (f *fakeLauncher) Stop(context.Context) error {
+	f.stopCalled = true
+	return f.stopErr
+}
 
 func (f *fakeLauncher) Replace(context.Context) error {
 	f.replaceCalled = true
@@ -4728,6 +4740,8 @@ func (l *timeoutBudgetLauncher) Start(ctx context.Context) error {
 func (l *timeoutBudgetLauncher) Replace(ctx context.Context) error {
 	return l.Start(ctx)
 }
+
+func (l *timeoutBudgetLauncher) Stop(context.Context) error { return nil }
 
 func TestIssueCreateCommandUsesExtendedDaemonAttachTimeout(t *testing.T) {
 	oldLauncher := newLauncher
@@ -4829,6 +4843,68 @@ func TestRestartDaemonCommand(t *testing.T) {
 	}
 }
 
+func TestStartDaemonCommand(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{}
+	var gotRepoDir string
+	newLauncher = func(repoDir, _ string) daemonStarter {
+		gotRepoDir = repoDir
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+				return protocol.HelloAck{Accepted: true}, nil
+			},
+		}),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:      "proj",
+		RepoDir:        t.TempDir(),
+		RuntimeRepoDir: "/tmp/runtime-worktree",
+	}
+
+	output := captureStdout(t, func() error {
+		return StartDaemonCommand(deps)
+	})
+
+	if !fake.startCalled {
+		t.Fatalf("expected start to be called")
+	}
+	if gotRepoDir != deps.RuntimeRepoDir {
+		t.Fatalf("launcher repoDir = %q, want %q", gotRepoDir, deps.RuntimeRepoDir)
+	}
+	if !strings.Contains(output, "Daemon started successfully.") {
+		t.Fatalf("output missing start success: %q", output)
+	}
+}
+
+func TestStartDaemonCommandStartFailure(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{startErr: errors.New("boom")}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      t.TempDir(),
+	}
+
+	err := StartDaemonCommand(deps)
+	if err == nil || !strings.Contains(err.Error(), "start daemon: boom") {
+		t.Fatalf("error = %v, want start daemon boom", err)
+	}
+}
+
 func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	oldLauncher := newLauncher
 	t.Cleanup(func() { newLauncher = oldLauncher })
@@ -4849,6 +4925,64 @@ func TestRestartDaemonCommandReplaceFailure(t *testing.T) {
 	err := RestartDaemonCommand(deps)
 	if err == nil || !strings.Contains(err.Error(), "restart daemon: boom") {
 		t.Fatalf("error = %v, want restart daemon boom", err)
+	}
+}
+
+func TestStopDaemonCommand(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{}
+	var gotRepoDir string
+	newLauncher = func(repoDir, _ string) daemonStarter {
+		gotRepoDir = repoDir
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config:         config.DefaultConfig(),
+		DaemonClient:   daemonclient.New(&fakeDaemonTransport{}),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:      "proj",
+		RepoDir:        t.TempDir(),
+		RuntimeRepoDir: "/tmp/runtime-worktree",
+	}
+
+	output := captureStdout(t, func() error {
+		return StopDaemonCommand(deps)
+	})
+
+	if !fake.stopCalled {
+		t.Fatalf("expected stop to be called")
+	}
+	if gotRepoDir != deps.RuntimeRepoDir {
+		t.Fatalf("launcher repoDir = %q, want %q", gotRepoDir, deps.RuntimeRepoDir)
+	}
+	if !strings.Contains(output, "Daemon stopped successfully.") {
+		t.Fatalf("output missing stop success: %q", output)
+	}
+}
+
+func TestStopDaemonCommandFailure(t *testing.T) {
+	oldLauncher := newLauncher
+	t.Cleanup(func() { newLauncher = oldLauncher })
+
+	fake := &fakeLauncher{stopErr: errors.New("boom")}
+	newLauncher = func(_, _ string) daemonStarter {
+		return fake
+	}
+
+	deps := &Dependencies{
+		Config:       config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{}),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID:    "proj",
+		RepoDir:      t.TempDir(),
+	}
+
+	err := StopDaemonCommand(deps)
+	if err == nil || !strings.Contains(err.Error(), "stop daemon: boom") {
+		t.Fatalf("error = %v, want stop daemon boom", err)
 	}
 }
 

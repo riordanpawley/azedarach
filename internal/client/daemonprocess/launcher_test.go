@@ -249,3 +249,39 @@ func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 		t.Fatalf("Start() error = %v, want lock recovery failure", err)
 	}
 }
+
+func TestLauncherStopUsesTerminateLockOwner(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+
+	called := false
+	var gotLockPath string
+	launcher.terminateLockOwner = func(lockPath string) error {
+		called = true
+		gotLockPath = lockPath
+		return nil
+	}
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !called {
+		t.Fatal("expected terminateLockOwner to be called")
+	}
+	if gotLockPath != launcher.LockPath {
+		t.Fatalf("lock path = %q, want %q", gotLockPath, launcher.LockPath)
+	}
+}
+
+func TestLauncherStopWrapsTerminateError(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.terminateLockOwner = func(string) error { return errors.New("boom") }
+
+	err := launcher.Stop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "terminate daemon lock owner: boom") {
+		t.Fatalf("Stop() error = %v, want wrapped terminate error", err)
+	}
+}

@@ -47,6 +47,8 @@ Commands:
   sync [--all] [<directory>] [--project-dir <dir>]  Refresh issue tracker state for the current project or all worktrees
   prime                Print AI session primer with current issue context
   export               Export a snapshot (use --format json [--out <path>])
+  daemon start         Start daemon and verify client attach
+  daemon stop          Stop daemon for current runtime scope
   daemon restart       Force-restart the daemon and verify re-attach
   help                 Show this help message
 
@@ -129,6 +131,8 @@ Examples:
   az prime
   az export --format json
   az export --format json --out snapshot.json
+  az daemon start
+  az daemon stop
   az daemon restart
 
 For more information, see: https://github.com/riordanpawley/azedarach
