@@ -2058,6 +2058,7 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 
 func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T) {
 	sourceID := "az-source"
+	mainWorktree := ""
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2109,7 +2110,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal fetch request: %v", err)
 				}
-				if body.Worktree != "." || body.Remote != "origin" {
+				if body.Worktree != mainWorktree || body.Remote != "origin" {
 					t.Fatalf("fetch body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Remote: body.Remote})
@@ -2128,7 +2129,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal checkout request: %v", err)
 				}
-				if body.Worktree != "." || body.Branch != "main" {
+				if body.Worktree != mainWorktree || body.Branch != "main" {
 					t.Fatalf("checkout body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Branch: body.Branch})
@@ -2147,7 +2148,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "." || body.Branch != "az/az-source" {
+				if body.Worktree != mainWorktree || body.Branch != "az/az-source" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -2170,7 +2171,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 					SourceID:       sourceID,
 					SourceWorktree: "/tmp/az-source",
 					TargetID:       "main",
-					TargetWorktree: ".",
+					TargetWorktree: mainWorktree,
 					Clean:          true,
 				})
 				if err != nil {
@@ -2191,6 +2192,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	}
 
 	m := newTestModel()
+	mainWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
 
 	updated, cmd := m.handleMergeTargetSelection(overlay.MergeTargetSelectedMsg{
