@@ -26,6 +26,7 @@ type RecoveryOverlay struct {
 	dialogViewportState
 	items    []RecoveryNotificationItem
 	selected int
+	scroll   int
 	styles   *Styles
 }
 
@@ -34,6 +35,7 @@ func NewRecoveryOverlay(items []RecoveryNotificationItem) *RecoveryOverlay {
 	return &RecoveryOverlay{
 		items:    copied,
 		selected: 0,
+		scroll:   0,
 		styles:   New(),
 	}
 }
@@ -100,7 +102,7 @@ func (r *RecoveryOverlay) View() string {
 		minRight:          22,
 		leftFocused:       true,
 		renderLeft: func(mode dialogLayoutMode, width, height int) string {
-			return r.renderItems(width)
+			return r.renderItems(width, height)
 		},
 		renderRight: func(mode dialogLayoutMode, width, height int) string {
 			return renderDialogActions(r.styles, []keybinds.Binding{
@@ -114,7 +116,7 @@ func (r *RecoveryOverlay) View() string {
 	})
 }
 
-func (r *RecoveryOverlay) renderItems(width int) string {
+func (r *RecoveryOverlay) renderItems(width, height int) string {
 	if len(r.items) == 0 {
 		return r.styles.MenuItemDisabled.Render("No queued async failure notifications")
 	}
@@ -122,7 +124,12 @@ func (r *RecoveryOverlay) renderItems(width int) string {
 	var b strings.Builder
 	b.WriteString(r.styles.MenuItem.Render(fmt.Sprintf("Queued recoverable async failures: %d", len(r.items))))
 	b.WriteString("\n\n")
-	for i, item := range r.items {
+	visibleRows := max(1, height-6)
+	r.ensureSelectionVisible(visibleRows)
+	start := r.scroll
+	end := min(len(r.items), start+visibleRows)
+	for i := start; i < end; i++ {
+		item := r.items[i]
 		prefix := "  "
 		style := r.styles.MenuItem
 		if i == r.selected {
@@ -167,6 +174,36 @@ func (r *RecoveryOverlay) renderItems(width int) string {
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (r *RecoveryOverlay) ensureSelectionVisible(visibleRows int) {
+	if len(r.items) == 0 {
+		r.selected = 0
+		r.scroll = 0
+		return
+	}
+	if r.selected < 0 {
+		r.selected = 0
+	}
+	if r.selected >= len(r.items) {
+		r.selected = len(r.items) - 1
+	}
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	if r.scroll < 0 {
+		r.scroll = 0
+	}
+	maxScroll := max(0, len(r.items)-visibleRows)
+	if r.scroll > maxScroll {
+		r.scroll = maxScroll
+	}
+	if r.selected < r.scroll {
+		r.scroll = r.selected
+	}
+	if r.selected >= r.scroll+visibleRows {
+		r.scroll = r.selected - visibleRows + 1
+	}
 }
 
 func (r *RecoveryOverlay) current() (RecoveryNotificationItem, bool) {

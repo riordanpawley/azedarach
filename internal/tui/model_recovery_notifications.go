@@ -118,7 +118,7 @@ func (m Model) recoveryNotificationIndicator() string {
 	return fmt.Sprintf("%s recover:%d (n)", icon, count)
 }
 
-func (m Model) openRecoveryOverlayCmd() tea.Cmd {
+func (m *Model) openRecoveryOverlayCmd() tea.Cmd {
 	if len(m.recoveryNotifications) == 0 {
 		m.addToast(Toast{
 			Level:   ToastInfo,
@@ -169,4 +169,17 @@ func (m Model) recoverAsyncFailureCmd(notification asyncRecoveryNotification) te
 	default:
 		return nil
 	}
+}
+
+func (m Model) asyncRecoveryNotificationByID(id string) (asyncRecoveryNotification, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return asyncRecoveryNotification{}, false
+	}
+	for i := range m.recoveryNotifications {
+		if m.recoveryNotifications[i].ID == id {
+			return m.recoveryNotifications[i], true
+		}
+	}
+	return asyncRecoveryNotification{}, false
 }

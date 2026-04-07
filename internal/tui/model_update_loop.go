@@ -69,9 +69,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlay.SelectionMsg:
 		if msg.Key == "async_recovery_recover" {
 			id, _ := msg.Value.(string)
-			notification, ok := m.popAsyncRecoveryNotification(id)
-			m.overlayStack.Pop()
+			notification, ok := m.asyncRecoveryNotificationByID(id)
 			if !ok {
+				m.overlayStack.Pop()
 				m.addToast(Toast{
 					Level:   ToastInfo,
 					Message: "Recovery notification is no longer available",
@@ -88,6 +88,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				return m, nil
 			}
+			_, _ = m.popAsyncRecoveryNotification(id)
+			m.overlayStack.Pop()
 			return m, cmd
 		}
 		if msg.Key == "async_recovery_ignore" {

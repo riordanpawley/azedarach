@@ -307,6 +307,9 @@ func shortModeLabel(mode types.Mode) string {
 
 func (sb StatusBar) compactMandatoryStatus() string {
 	parts := []string{shortModeLabel(sb.mode)}
+	if strings.TrimSpace(sb.alertIndicator) != "" {
+		parts = append(parts, "R!")
+	}
 	if strings.TrimSpace(sb.filterSummary) != "" {
 		parts = append(parts, compactFilterToken(sb.filterSummary))
 	}

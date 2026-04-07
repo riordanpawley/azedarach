@@ -218,6 +218,19 @@ func TestStatusBar_RenderKeepsFilterAndSortOnNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderKeepsRecoveryAlertOnNarrowWidth(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 18, style)
+	sb.SetAlertIndicator("o recover:2 (n)")
+	sb.SetFilterSummary("F:st:2")
+	sb.SetSortSummary("S:priority/asc")
+
+	result := sb.Render()
+	if !strings.Contains(result, "R!") {
+		t.Fatalf("Expected narrow status bar to keep compact recovery alert marker, got: %s", result)
+	}
+}
+
 func TestStatusBar_RenderShowsLoadingIndicator(t *testing.T) {
 	style := styles.New()
 	sb := New(types.ModeNormal, 80, style)
