@@ -2136,11 +2136,10 @@ func TestParseIssueCreateArgs(t *testing.T) {
 			name: "deferred defaults priority",
 			args: []string{"--deferred", "Title"},
 			want: IssueCreateOptions{
-				Title:                 "Title",
-				Type:                  domain.TypeTask,
-				Priority:              domain.P4,
-				Deferred:              true,
-				AutoParentFromIssueID: ptrToString("az-parent"),
+				Title:    "Title",
+				Type:     domain.TypeTask,
+				Priority: domain.P4,
+				Deferred: true,
 			},
 		},
 		{
@@ -3594,8 +3593,7 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 		return IssueCreateCommand(deps, IssueCreateOptions{
 			Title:                 "Child issue",
 			Type:                  domain.TypeTask,
-			Priority:              domain.P4,
-			Deferred:              true,
+			Priority:              domain.P2,
 			AutoParentFromIssueID: &parentID,
 		})
 	})
@@ -3623,11 +3621,74 @@ func TestIssueCreateCommandAutoParentsAndInheritsImplsFromActiveIssue(t *testing
 	if createReq.Title != "Child issue" || createReq.Type != domain.TypeTask {
 		t.Fatalf("create body = %+v", createReq)
 	}
-	if createReq.Priority != domain.P4 {
-		t.Fatalf("create priority = %s, want P4", createReq.Priority.String())
+	if createReq.Priority != domain.P2 {
+		t.Fatalf("create priority = %s, want P2", createReq.Priority.String())
 	}
-	if !strings.Contains(output, "Created issue: az-child (parent: az-parent, auto-parent from AZEDARACH_ISSUE_ID) [deferred]") {
-		t.Fatalf("output missing auto-parent/deferred message: %q", output)
+	if !strings.Contains(output, "Created issue: az-child (parent: az-parent, auto-parent from AZEDARACH_ISSUE_ID)") {
+		t.Fatalf("output missing auto-parent message: %q", output)
+	}
+}
+
+func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
+	var requests []protocol.RequestEnvelope
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				requests = append(requests, req)
+				if req.Command == daemonclient.CommandTaskList {
+					t.Fatalf("unexpected %s request for deferred issue", daemonclient.CommandTaskList)
+				}
+				payload, err := json.Marshal(map[string]string{"task_id": "az-child"})
+				if err != nil {
+					t.Fatalf("marshal task create response: %v", err)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              true,
+					CompletedAt:     req.SentAt,
+					Body:            payload,
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	output := captureStdout(t, func() error {
+		parentID := "az-parent"
+		return IssueCreateCommand(deps, IssueCreateOptions{
+			Title:                 "Child issue",
+			Type:                  domain.TypeTask,
+			Priority:              domain.P4,
+			Deferred:              true,
+			AutoParentFromIssueID: &parentID,
+			Implementations:       []string{"default"},
+		})
+	})
+
+	if len(requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(requests))
+	}
+	if requests[0].Command != daemonclient.CommandTaskCreate {
+		t.Fatalf("requests[0].Command = %q, want %q", requests[0].Command, daemonclient.CommandTaskCreate)
+	}
+
+	var createReq daemonclient.TaskCreateParams
+	if err := json.Unmarshal(requests[0].Body, &createReq); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	if createReq.ParentID != nil {
+		t.Fatalf("create parent = %+v, want nil", createReq.ParentID)
+	}
+	if !reflect.DeepEqual(createReq.Implementations, []string{"default"}) {
+		t.Fatalf("create implementations = %+v, want [default]", createReq.Implementations)
+	}
+	if !strings.Contains(output, "Created issue: az-child [deferred]") {
+		t.Fatalf("output missing deferred message: %q", output)
 	}
 }
 

@@ -1236,8 +1236,10 @@ func ParseIssueCreateArgs(args []string) (IssueCreateOptions, error) {
 	}
 	opts.Type = taskType
 	opts.Implementations = dedupeOrderedIDs(impls)
-	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
-		opts.AutoParentFromIssueID = &issueID
+	if !opts.Deferred {
+		if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_ISSUE_ID")); issueID != "" {
+			opts.AutoParentFromIssueID = &issueID
+		}
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -2163,7 +2165,7 @@ func IssueCreateCommand(deps *Dependencies, opts IssueCreateOptions) error {
 
 	var parentID *string
 	implementations := append([]string{}, opts.Implementations...)
-	if opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
+	if !opts.Deferred && opts.AutoParentFromIssueID != nil && strings.TrimSpace(*opts.AutoParentFromIssueID) != "" {
 		parentIssueID := strings.TrimSpace(*opts.AutoParentFromIssueID)
 		snapshot, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskSnapshot, error) {
 			return deps.DaemonClient.ListTasksSnapshot(callCtx)
