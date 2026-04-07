@@ -122,11 +122,12 @@ func TestSort_Apply_Updated(t *testing.T) {
 }
 
 func TestSort_Apply_GitDiff(t *testing.T) {
+	now := time.Now()
 	tasks := []Task{
-		{ID: "az-1", GitAdditions: 10, GitDeletions: 2}, // 12
-		{ID: "az-2", GitAdditions: 3, GitDeletions: 1},  // 4
-		{ID: "az-3", GitAdditions: 5, GitDeletions: 5},  // 10
-		{ID: "az-4", GitAdditions: 0, GitDeletions: 0},  // 0
+		{ID: "az-1", GitAdditions: 10, GitDeletions: 2, UpdatedAt: now.Add(-2 * time.Hour)}, // 12
+		{ID: "az-2", GitAdditions: 3, GitDeletions: 1, UpdatedAt: now.Add(-4 * time.Hour)},  // 4
+		{ID: "az-3", GitAdditions: 5, GitDeletions: 5, UpdatedAt: now.Add(-3 * time.Hour)},  // 10
+		{ID: "az-4", GitAdditions: 0, GitDeletions: 0, UpdatedAt: now.Add(-5 * time.Hour)},  // 0
 	}
 
 	t.Run("ascending (largest diff first)", func(t *testing.T) {
@@ -146,6 +147,47 @@ func TestSort_Apply_GitDiff(t *testing.T) {
 		result := s.Apply(tasks)
 
 		want := []string{"az-4", "az-2", "az-3", "az-1"}
+		for i, task := range result {
+			if task.ID != want[i] {
+				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
+			}
+		}
+	})
+
+	t.Run("ascending tie-breaks by active session, worktree, then updated", func(t *testing.T) {
+		tieTasks := []Task{
+			{
+				ID:           "active-session",
+				GitAdditions: 4,
+				GitDeletions: 1,
+				UpdatedAt:    now.Add(-4 * time.Hour),
+				HasTmuxSession: true,
+			},
+			{
+				ID:           "worktree-recent",
+				GitAdditions: 3,
+				GitDeletions: 2,
+				UpdatedAt:    now.Add(-1 * time.Hour),
+				HasWorktree:  true,
+			},
+			{
+				ID:           "worktree-old",
+				GitAdditions: 2,
+				GitDeletions: 3,
+				UpdatedAt:    now.Add(-6 * time.Hour),
+				HasWorktree:  true,
+			},
+			{
+				ID:           "plain-newer",
+				GitAdditions: 1,
+				GitDeletions: 4,
+				UpdatedAt:    now.Add(-2 * time.Hour),
+			},
+		}
+
+		s := Sort{Field: SortByGitDiff, Order: SortAsc}
+		result := s.Apply(tieTasks)
+		want := []string{"active-session", "worktree-recent", "worktree-old", "plain-newer"}
 		for i, task := range result {
 			if task.ID != want[i] {
 				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
