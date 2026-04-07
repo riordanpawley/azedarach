@@ -971,7 +971,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.deletedTask {
 			title = "Confirm delete + cleanup?"
 		}
-		confirm := overlay.NewConfirmDialog(title, formatWorktreeCleanupConfirmPrompt(msg))
+		confirm := overlay.NewConfirmDialogExplicitYN(title, formatWorktreeCleanupConfirmPrompt(msg))
 		return m, m.openOverlay(confirm)
 
 	case worktreeCleanupResultMsg:
@@ -985,7 +985,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.deletedTask {
 				action = "delete task and cleanup worktree"
 			}
-			confirm := overlay.NewConfirmDialog(
+			confirm := overlay.NewConfirmDialogExplicitYN(
 				"Force worktree cleanup?",
 				fmt.Sprintf("Worktree has local changes.\n\nAction: %s\nTask: %s\n\nDetails: %s\n\nForce removal will discard modified/untracked files.\nProceed?", action, msg.taskID, msg.reason),
 			)

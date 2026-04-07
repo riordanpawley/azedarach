@@ -3075,14 +3075,31 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if confirmCmd != nil {
 			_ = confirmCmd()
 		}
-		if updated.pendingCleanup == nil {
-			t.Fatal("expected pending cleanup confirmation")
-		}
+			if updated.pendingCleanup == nil {
+				t.Fatal("expected pending cleanup confirmation")
+			}
+			if got := transport.requests; len(got) != 2 ||
+				got[0] != daemonclient.CommandRuntimeReconcile ||
+				got[1] != daemonclient.CommandTaskList {
+				t.Fatalf("requests before confirmation = %v", got)
+			}
 
-		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
-			Key:   "yes",
-			Value: overlay.ConfirmResult{Confirmed: true},
-		})
+			updatedAny, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			updated, ok = updatedAny.(Model)
+			if !ok {
+				t.Fatalf("updated model type = %T, want Model", updatedAny)
+			}
+			if enterCmd != nil {
+				t.Fatal("expected enter to be ignored for cleanup confirmation")
+			}
+			if updated.pendingCleanup == nil {
+				t.Fatal("expected pending cleanup confirmation to remain after enter")
+			}
+
+			updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+				Key:   "yes",
+				Value: overlay.ConfirmResult{Confirmed: true},
+			})
 		updated, ok = updatedAny.(Model)
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updatedAny)
