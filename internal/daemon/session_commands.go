@@ -731,12 +731,12 @@ func isRuntimeMutationFreshnessTimeout(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(message, "wait runtime reconcile") &&
-		(strings.Contains(message, "deadline exceeded") || strings.Contains(message, "context canceled"))
+		strings.Contains(message, "deadline exceeded")
 }
 
 func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string) {
