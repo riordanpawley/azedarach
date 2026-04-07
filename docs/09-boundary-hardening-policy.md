@@ -54,6 +54,10 @@ If socket tests fail in sandbox, rerun with elevated permissions and record it i
 
 All daemon runtime reads/mutations must follow this consistency split:
 
+- Invariant source policy is explicit per check: `projection`, `tmux`, or `hybrid`.
+- `projection`/`hybrid` checks must use refresh-then-cache (hydrate in-memory from durable projection, then evaluate).
+- `tmux` checks must read live tmux runtime directly for runtime-presence decisions.
+
 - Low-consistency reads (`*.list`, `*.status`, snapshot/export reads):
   - Use projection/cache reads only.
   - Do not fall back to live tmux/git/worktree probes inside read handlers.

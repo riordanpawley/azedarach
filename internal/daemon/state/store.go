@@ -175,6 +175,24 @@ func (s *Store) SessionByIssueID(projectID, issueID string) (Session, bool) {
 	return newest, found
 }
 
+// ReplaceProjectSessions atomically replaces the in-memory session cache for a project.
+// Intended for durable->cache hydration before invariant reads.
+func (s *Store) ReplaceProjectSessions(projectID string, sessions []Session) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ps := s.ensureProjectLocked(projectID)
+	next := make(map[string]Session, len(sessions))
+	for _, session := range sessions {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		next[sessionID] = session
+	}
+	ps.sessions = next
+}
+
 // ProjectIDs returns the known project IDs currently present in the store.
 func (s *Store) ProjectIDs() []string {
 	s.mu.RLock()

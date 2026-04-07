@@ -22,6 +22,18 @@ This directory primarily contains **developer/internal documentation**.
 - [11-az-spec-v1-contract.md](11-az-spec-v1-contract.md)
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 
+## Daemon Invariant Rule
+
+- Every invariant must declare an explicit source policy: `projection`, `tmux`, or `hybrid`.
+- For `projection` and `hybrid`, refresh in-memory cache from durable SQLite projections, then evaluate from the refreshed cache.
+- For `tmux`, use live tmux runtime as source of truth (do not infer runtime presence from projection alone).
+- Current source-policy examples:
+- `session.start` conflict / `session.attach` target / `session.stop` kill targets: `tmux`.
+- `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
+- `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
+- `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
+- Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
+
 ## Generated Spec Docs
 
 - `az spec sync --target md` generates deterministic Markdown under `docs/spec/`.

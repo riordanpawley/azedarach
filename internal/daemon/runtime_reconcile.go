@@ -54,18 +54,19 @@ func newRuntimeReconcileService(d *Daemon) *runtimeReconcileService {
 
 func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
 	result := protocol.RuntimeReconcileResponseBody{
-		ProjectID: protocol.NormalizeProjectID(projectID),
+		ProjectID:        protocol.NormalizeProjectID(projectID),
+		InvariantSources: invariantSourceDebugMap(),
 	}
 	d := s.daemon
 	if d == nil {
 		return result, nil
 	}
-	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStore(result.ProjectID) == nil {
+	if d.tmux == nil || d.sessionStore == nil || d.sessionRuntimeStateStoreIfConfigured(result.ProjectID) == nil {
 		return result, nil
 	}
 
 	var errs []error
-	if d.worktreeRuntimeStateStore(result.ProjectID) != nil && d.worktreeManagerForProject(result.ProjectID) != nil {
+	if d.worktreeRuntimeStateStoreIfConfigured(result.ProjectID) != nil && d.worktreeManagerForProject(result.ProjectID) != nil {
 		if worktreeCount, err := d.refreshWorktreeRuntimeState(ctx, result.ProjectID); err != nil {
 			errs = append(errs, fmt.Errorf("refresh worktree runtime state: %w", err))
 		} else {
@@ -244,6 +245,9 @@ func (d *Daemon) handleRuntimeReconcile(ctx context.Context, req protocol.Reques
 		return d.errorResponse(req, protocol.ErrorCodeInternal, outcome.Err.Error()), nil
 	}
 	result := outcome.Value
+	if len(result.InvariantSources) == 0 {
+		result.InvariantSources = invariantSourceDebugMap()
+	}
 
 	resp := d.successResponse(req)
 	resp.Revision = d.currentRevision(projectID)
@@ -433,6 +437,7 @@ func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, prior
 }
 
 func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string, error) {
+	source := sourceForInvariant(daemonInvariantRuntimeKnownProjectIDs)
 	seen := map[string]struct{}{}
 	projectIDs := make([]string, 0, 8)
 	add := func(projectID string) {
@@ -482,14 +487,16 @@ func (d *Daemon) runtimeReconcileKnownProjectIDs(ctx context.Context) ([]string,
 		}
 		return nil
 	}
-	if sessionStore := d.sessionRuntimeStateStore(); sessionStore != nil {
-		if err := addRuntimeStateProjects(sessionStore); err != nil {
-			return nil, err
+	if usesProjectionSource(source) {
+		if sessionStore := d.sessionRuntimeStateStoreIfConfigured(protocol.DefaultProjectID); sessionStore != nil {
+			if err := addRuntimeStateProjects(sessionStore); err != nil {
+				return nil, err
+			}
 		}
-	}
-	if worktreeStore := d.worktreeRuntimeStateStore(); worktreeStore != nil && worktreeStore != d.sessionRuntimeStateStore() {
-		if err := addRuntimeStateProjects(worktreeStore); err != nil {
-			return nil, err
+		if worktreeStore := d.worktreeRuntimeStateStoreIfConfigured(protocol.DefaultProjectID); worktreeStore != nil && worktreeStore != d.sessionRuntimeStateStoreIfConfigured(protocol.DefaultProjectID) {
+			if err := addRuntimeStateProjects(worktreeStore); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -560,10 +567,14 @@ func prioritizeProjectIDs(projectIDs []string, preferred []string) []string {
 
 func summarizeRuntimeReconcileSweep(results []protocol.RuntimeReconcileResponseBody) protocol.RuntimeReconcileResponseBody {
 	if len(results) == 0 {
-		return protocol.RuntimeReconcileResponseBody{ProjectID: protocol.DefaultProjectID}
+		return protocol.RuntimeReconcileResponseBody{
+			ProjectID:        protocol.DefaultProjectID,
+			InvariantSources: invariantSourceDebugMap(),
+		}
 	}
 	summary := protocol.RuntimeReconcileResponseBody{
-		ProjectID: results[0].ProjectID,
+		ProjectID:        results[0].ProjectID,
+		InvariantSources: invariantSourceDebugMap(),
 	}
 	if len(results) > 1 {
 		summary.ProjectID = "multi"

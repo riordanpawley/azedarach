@@ -44,6 +44,14 @@ type taskSnapshotExportSession struct {
 	Name string `json:"name"`
 }
 
+const (
+	taskInvariantTaskListFreshness daemonInvariantID = daemonInvariantTaskListFreshness
+)
+
+func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
+	return sourceForInvariant(invariant)
+}
+
 func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)
@@ -96,28 +104,26 @@ func (d *Daemon) taskListSnapshotFreshness(ctx context.Context, projectID string
 	lastCheckedAt := time.Time{}
 	projectID = protocol.NormalizeProjectID(projectID)
 
-	if d.sessionStore != nil {
-		snapshot := d.sessionStore.ReadSnapshot(projectID)
-		for _, session := range snapshot.Sessions {
-			lastCheckedAt = laterTime(lastCheckedAt, session.UpdatedAt)
-		}
-	}
-
-	if d.sessionRuntimeStateStore(projectID) != nil {
-		sessions, err := d.sessionRuntimeStateStore(projectID).ListSessionStates(ctx, projectID)
-		if err != nil {
+	sessionFreshnessSource := d.sourceForTaskInvariant(taskInvariantTaskListFreshness)
+	if usesProjectionSource(sessionFreshnessSource) && d.sessionStore != nil {
+		if err := d.refreshSessionInvariantCacheIfConfigured(ctx, projectID); err != nil {
 			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("load session freshness projections failed", "project_id", projectID, "error", err)
+				d.cfg.Logger.Debug("refresh session freshness cache failed", "project_id", projectID, "error", err)
 			}
 		} else {
+			snapshot := d.sessionStore.ReadSnapshot(projectID)
+			sessions := make([]daemonstate.Session, 0, len(snapshot.Sessions))
+			for _, session := range snapshot.Sessions {
+				sessions = append(sessions, session)
+			}
 			for _, session := range sessions {
 				lastCheckedAt = laterTime(lastCheckedAt, session.UpdatedAt)
 			}
 		}
 	}
 
-	if d.worktreeRuntimeStateStore(projectID) != nil {
-		worktrees, err := d.worktreeRuntimeStateStore(projectID).ListWorktreeStates(ctx, projectID)
+	if d.worktreeRuntimeStateStoreIfConfigured(projectID) != nil {
+		worktrees, err := d.worktreeRuntimeStateStoreIfConfigured(projectID).ListWorktreeStates(ctx, projectID)
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("load worktree freshness projections failed", "project_id", projectID, "error", err)

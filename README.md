@@ -137,6 +137,9 @@ Authority model:
 - `az`/TUI builds intents and renders projection state.
 - `azd` owns lifecycle mutations (sessions/worktrees/devservers) and publishes revisioned updates.
 - Cross-process payloads are typed contracts, not UI message types.
+- Daemon invariants must explicitly choose a source of truth: `projection`, `tmux`, or `hybrid`.
+- Projection-backed invariants are refresh-then-cache: refresh in-memory state from durable SQLite projections first, then evaluate from refreshed cache.
+- Runtime-presence invariants (for example session start/attach/stop target checks) use tmux as source of truth.
 
 ## Flow Diagrams
 

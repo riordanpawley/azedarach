@@ -212,6 +212,12 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if out.WorktreesRefreshed != 2 || out.RecreatedTmuxSessions != 1 || out.AlignedDaemonSessions != 1 {
 		t.Fatalf("runtime reconcile body = %+v", out)
 	}
+	if got := out.InvariantSources[string(daemonInvariantSessionStartConflict)]; got != string(daemonInvariantSourceTmux) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantSessionStartConflict, got, daemonInvariantSourceTmux)
+	}
+	if got := out.InvariantSources[string(daemonInvariantTaskListFreshness)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTaskListFreshness, got, daemonInvariantSourceProjection)
+	}
 
 	calls, projectIDs := recorder.snapshot()
 	if calls != 1 {
@@ -518,6 +524,9 @@ func TestCommandRuntimeReconcileReprioritizesPendingQueuedProject(t *testing.T) 
 	}
 	if out.ProjectID != "proj-runtime" || out.WorktreesRefreshed != 1 || out.RecreatedTmuxSessions != 2 || out.AlignedDaemonSessions != 3 {
 		t.Fatalf("runtime.reconcile body = %+v", out)
+	}
+	if got := out.InvariantSources[string(daemonInvariantSessionReconcile)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantSessionReconcile, got, daemonInvariantSourceHybrid)
 	}
 
 	if err := <-sweepDone; err != nil {
@@ -827,6 +836,37 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t
 	}
 	if got[1] != repoProjectID {
 		t.Fatalf("second project id = %q, want repo-scoped id %q", got[1], repoProjectID)
+	}
+}
+
+func TestRuntimeReconcileKnownProjectIDsDoesNotCreateRuntimeStoresWhenUnconfigured(t *testing.T) {
+	repoDir := t.TempDir()
+	wantProjectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{},
+	}
+
+	got, err := d.runtimeReconcileKnownProjectIDs(context.Background())
+	if err != nil {
+		t.Fatalf("runtimeReconcileKnownProjectIDs: %v", err)
+	}
+	if len(got) != 1 || got[0] != wantProjectID {
+		t.Fatalf("project ids = %v, want [%s]", got, wantProjectID)
+	}
+	if len(d.runtimeStoresByRoot) != 0 {
+		t.Fatalf("runtimeStoresByRoot mutated: len=%d, want 0", len(d.runtimeStoresByRoot))
+	}
+	if len(d.runtimeStoresByProject) != 0 {
+		t.Fatalf("runtimeStoresByProject mutated: len=%d, want 0", len(d.runtimeStoresByProject))
 	}
 }
 

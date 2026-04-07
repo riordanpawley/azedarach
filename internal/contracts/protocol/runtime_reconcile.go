@@ -10,8 +10,9 @@ type RuntimeReconcileRequestBody struct {
 
 // RuntimeReconcileResponseBody is the deterministic response payload for runtime reconciliation.
 type RuntimeReconcileResponseBody struct {
-	ProjectID             string `json:"project_id" msgpack:"project_id"`
-	WorktreesRefreshed    int    `json:"worktrees_refreshed" msgpack:"worktrees_refreshed"`
-	RecreatedTmuxSessions int    `json:"recreated_tmux_sessions" msgpack:"recreated_tmux_sessions"`
-	AlignedDaemonSessions int    `json:"aligned_daemon_sessions" msgpack:"aligned_daemon_sessions"`
+	ProjectID             string            `json:"project_id" msgpack:"project_id"`
+	WorktreesRefreshed    int               `json:"worktrees_refreshed" msgpack:"worktrees_refreshed"`
+	RecreatedTmuxSessions int               `json:"recreated_tmux_sessions" msgpack:"recreated_tmux_sessions"`
+	AlignedDaemonSessions int               `json:"aligned_daemon_sessions" msgpack:"aligned_daemon_sessions"`
+	InvariantSources      map[string]string `json:"invariant_sources,omitempty" msgpack:"invariant_sources,omitempty"`
 }

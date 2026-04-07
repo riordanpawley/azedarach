@@ -184,3 +184,31 @@ func TestStoreProjectIDs(t *testing.T) {
 		t.Fatalf("ProjectIDs() = %v, want %v", got, want)
 	}
 }
+
+func TestStoreReplaceProjectSessions(t *testing.T) {
+	s := NewStore()
+	if _, err := s.UpsertSession("proj", "s-old", "az-1", SessionStateAttached); err != nil {
+		t.Fatalf("UpsertSession old: %v", err)
+	}
+
+	now := time.Date(2026, time.April, 7, 3, 0, 0, 0, time.UTC)
+	s.ReplaceProjectSessions("proj", []Session{
+		{
+			ID:        "s-new",
+			IssueID:   "az-2",
+			State:     SessionStateStarting,
+			UpdatedAt: now,
+		},
+	})
+
+	if _, err := s.Session("proj", "s-old"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expected old session removed, got err=%v", err)
+	}
+	newSession, err := s.Session("proj", "s-new")
+	if err != nil {
+		t.Fatalf("Session new: %v", err)
+	}
+	if newSession.IssueID != "az-2" || newSession.State != SessionStateStarting {
+		t.Fatalf("new session = %+v", newSession)
+	}
+}
