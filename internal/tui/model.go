@@ -2336,7 +2336,7 @@ func (m Model) cleanupWorktreeCmd(taskID string, deleteTask bool, force bool) te
 		// Always ask daemon to stop first; local projection may be stale.
 		m.sessionMonitor.Stop(taskID)
 		if _, err := m.daemonClient.StopSession(ctx, taskID); err != nil {
-			if !(force && isSessionAlreadyStoppedError(err)) && !isSessionAlreadyStoppedError(err) {
+			if !isSessionAlreadyStoppedError(err) && !isSessionStopSkippableDuringCleanup(err) {
 				return worktreeCleanupResultMsg{taskID: taskID, deletedTask: deleteTask, force: force, err: err}
 			}
 		}
@@ -2478,6 +2478,23 @@ func isSessionAlreadyStoppedError(err error) bool {
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(message, "no active session found") ||
 		strings.Contains(message, "session not found")
+}
+
+func isSessionStopSkippableDuringCleanup(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cmdErr *daemonclient.CommandError
+	if errors.As(err, &cmdErr) && cmdErr.Code == protocol.ErrorCodeTimeout {
+		message := strings.ToLower(strings.TrimSpace(cmdErr.Message))
+		return strings.Contains(message, "refresh runtime state before mutation") ||
+			strings.Contains(message, "wait runtime reconcile")
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "refresh runtime state before mutation") &&
+		(strings.Contains(message, "wait runtime reconcile") ||
+			strings.Contains(message, "deadline exceeded") ||
+			strings.Contains(message, "context canceled"))
 }
 
 // NOTE: clampTaskIndex and clampTaskIndexForColumn have been removed.
