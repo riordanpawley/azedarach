@@ -5,6 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
+
+	charmlog "github.com/charmbracelet/log"
 )
 
 // NewTextFileLogger returns a text slog logger that writes to path.
@@ -21,15 +24,27 @@ func NewTextFileLogger(path string, level slog.Leveler) *slog.Logger {
 		logger.Warn("failed to open log file; falling back to stderr logger", "log_path", path, "error", err)
 		return logger
 	}
-	return slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: level}))
+	return NewTextStreamLogger(logFile, level)
 }
 
 // NewTextStreamLogger returns a text slog logger that writes to w.
 func NewTextStreamLogger(w io.Writer, level slog.Leveler) *slog.Logger {
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
+	return slog.New(charmlog.NewWithOptions(w, charmlog.Options{
+		Level:           charmLogLevel(level),
+		Formatter:       charmlog.LogfmtFormatter,
+		ReportTimestamp: true,
+		TimeFormat:      time.RFC3339Nano,
+	}))
 }
 
 // NewDiscardLogger returns a text slog logger that discards all output.
 func NewDiscardLogger(level slog.Leveler) *slog.Logger {
 	return NewTextStreamLogger(io.Discard, level)
+}
+
+func charmLogLevel(level slog.Leveler) charmlog.Level {
+	if level == nil {
+		return charmlog.InfoLevel
+	}
+	return charmlog.Level(level.Level())
 }
