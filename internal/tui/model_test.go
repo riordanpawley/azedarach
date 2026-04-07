@@ -2525,6 +2525,45 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	}
 }
 
+func TestSpaceWorkspaceUsesVisibleFilteredTaskWhenCursorTaskIDIsHidden(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.tasks = []domain.Task{
+		{
+			ID:       "az-hidden",
+			Title:    "Hidden task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		},
+		{
+			ID:       "az-visible",
+			Title:    "Visible task",
+			Status:   domain.StatusOpen,
+			Priority: domain.P2,
+			Type:     domain.TypeTask,
+		},
+	}
+
+	m.editor.SetSearchQuery("visible")
+	cursor := m.nav.GetCursor()
+	cursor.TaskID = "az-hidden"
+	cursor.FallbackColumn = 0
+	cursor.FallbackTask = 0
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	newModel := result.(Model)
+
+	current := newModel.overlayStack.Current()
+	taskWorkspace, ok := current.(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected TaskWorkspaceOverlay on top, got %T", current)
+	}
+	if got := taskWorkspace.TaskID(); got != "az-visible" {
+		t.Fatalf("workspace task ID = %q, want %q", got, "az-visible")
+	}
+}
+
 func TestEnterOnLeafTaskShowsDrillDownGuidanceToast(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
