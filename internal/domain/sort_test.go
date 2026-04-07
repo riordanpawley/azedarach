@@ -121,6 +121,39 @@ func TestSort_Apply_Updated(t *testing.T) {
 	})
 }
 
+func TestSort_Apply_GitDiff(t *testing.T) {
+	tasks := []Task{
+		{ID: "az-1", GitAdditions: 10, GitDeletions: 2}, // 12
+		{ID: "az-2", GitAdditions: 3, GitDeletions: 1},  // 4
+		{ID: "az-3", GitAdditions: 5, GitDeletions: 5},  // 10
+		{ID: "az-4", GitAdditions: 0, GitDeletions: 0},  // 0
+	}
+
+	t.Run("ascending (largest diff first)", func(t *testing.T) {
+		s := Sort{Field: SortByGitDiff, Order: SortAsc}
+		result := s.Apply(tasks)
+
+		want := []string{"az-1", "az-3", "az-2", "az-4"}
+		for i, task := range result {
+			if task.ID != want[i] {
+				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
+			}
+		}
+	})
+
+	t.Run("descending (smallest diff first)", func(t *testing.T) {
+		s := Sort{Field: SortByGitDiff, Order: SortDesc}
+		result := s.Apply(tasks)
+
+		want := []string{"az-4", "az-2", "az-3", "az-1"}
+		for i, task := range result {
+			if task.ID != want[i] {
+				t.Errorf("Apply()[%d] = %s, want %s", i, task.ID, want[i])
+			}
+		}
+	})
+}
+
 func TestSort_Apply_Session(t *testing.T) {
 	tasks := []Task{
 		{ID: "az-1", Session: &Session{State: SessionBusy}},

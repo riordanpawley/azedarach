@@ -9,6 +9,7 @@ const (
 	SortBySession  SortField = "session"
 	SortByPriority SortField = "priority"
 	SortByUpdated  SortField = "updated"
+	SortByGitDiff  SortField = "git_diff"
 )
 
 // SortOrder represents sort direction
@@ -81,6 +82,16 @@ func (s *Sort) Apply(tasks []Task) []Task {
 			}
 			return pi < pj // Lower priority first in descending
 		})
+
+	case SortByGitDiff:
+		sort.SliceStable(result, func(i, j int) bool {
+			di := gitDiffTotal(result[i])
+			dj := gitDiffTotal(result[j])
+			if s.Order == SortAsc {
+				return di > dj // Higher diff first in ascending
+			}
+			return di < dj // Lower diff first in descending
+		})
 	}
 
 	return result
@@ -103,6 +114,10 @@ func sessionPriority(t Task) int {
 		return 1
 	}
 	return 0
+}
+
+func gitDiffTotal(t Task) int {
+	return t.GitAdditions + t.GitDeletions
 }
 
 // sessionStatePriority returns the priority value for session states
