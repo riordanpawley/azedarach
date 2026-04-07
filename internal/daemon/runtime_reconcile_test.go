@@ -64,6 +64,32 @@ func (r *runtimeReconcileRecorder) snapshot() (calls int, projectIDs []string) {
 	return r.calls, append([]string(nil), r.projectIDs...)
 }
 
+type sequentialRuntimeReconciler struct {
+	mu         sync.Mutex
+	calls      int
+	projectIDs []string
+}
+
+func (r *sequentialRuntimeReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	r.projectIDs = append(r.projectIDs, projectID)
+	r.mu.Unlock()
+
+	if call == 1 {
+		<-ctx.Done()
+		return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+	}
+	return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, nil
+}
+
+func (r *sequentialRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, append([]string(nil), r.projectIDs...)
+}
+
 type scriptedRuntimeReconciler struct {
 	mu            sync.Mutex
 	started       chan string
@@ -287,7 +313,7 @@ func TestRunStartupRuntimeReconcileUsesRepoScopedProjectID(t *testing.T) {
 		cfg: Config{
 			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			RepoDir:                 repoDir,
-			RuntimeReconcileTimeout: 25 * time.Millisecond,
+			RuntimeReconcileTimeout: 250 * time.Millisecond,
 		},
 		runtimeReconciler: recorder,
 	}
@@ -654,7 +680,7 @@ func TestRuntimeReconcileCycleUsesRepoScopedProjectID(t *testing.T) {
 		cfg: Config{
 			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
 			RepoDir:                 repoDir,
-			RuntimeReconcileTimeout: 25 * time.Millisecond,
+			RuntimeReconcileTimeout: 250 * time.Millisecond,
 		},
 		runtimeReconciler: recorder,
 	}
@@ -827,6 +853,34 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoNameProjectID(t
 	}
 	if got[1] != repoProjectID {
 		t.Fatalf("second project id = %q, want repo-scoped id %q", got[1], repoProjectID)
+	}
+}
+
+func TestEnsureFreshRuntimeForMutationFallsBackToDirectReconcileAfterTimeout(t *testing.T) {
+	recorder := &sequentialRuntimeReconciler{}
+	d := &Daemon{
+		cfg: Config{
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RuntimeReconcileTimeout: 20 * time.Millisecond,
+		},
+		runtimeReconciler: recorder,
+	}
+	t.Cleanup(func() {
+		if d.runtimeReconcileQueue != nil {
+			_ = d.runtimeReconcileQueue.Close()
+		}
+	})
+
+	if err := d.ensureFreshRuntimeForMutation(context.Background(), "proj-fresh", "session.stop"); err != nil {
+		t.Fatalf("ensureFreshRuntimeForMutation returned error: %v", err)
+	}
+
+	calls, projectIDs := recorder.snapshot()
+	if calls != 2 {
+		t.Fatalf("reconcile calls = %d, want 2 (queued then direct fallback)", calls)
+	}
+	if len(projectIDs) != 2 || projectIDs[0] != "proj-fresh" || projectIDs[1] != "proj-fresh" {
+		t.Fatalf("reconcile project ids = %v, want [proj-fresh proj-fresh]", projectIDs)
 	}
 }
 
