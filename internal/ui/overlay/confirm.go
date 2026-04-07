@@ -11,10 +11,11 @@ import (
 type ConfirmDialog struct {
 	twoPaneDialogChrome
 	dialogViewportState
-	title    string
-	message  string
-	styles   *Styles
-	selected bool // true = Yes, false = No
+	title                string
+	message              string
+	styles               *Styles
+	selected             bool // true = Yes, false = No
+	requireExplicitYNKey bool
 }
 
 // ConfirmResult represents the result of a confirmation dialog
@@ -32,6 +33,13 @@ func NewConfirmDialog(title, message string) *ConfirmDialog {
 	}
 }
 
+// NewConfirmDialogExplicitYN creates a confirmation dialog that only accepts Y/N.
+func NewConfirmDialogExplicitYN(title, message string) *ConfirmDialog {
+	dialog := NewConfirmDialog(title, message)
+	dialog.requireExplicitYNKey = true
+	return dialog
+}
+
 // Init initializes the dialog
 func (c *ConfirmDialog) Init() tea.Cmd {
 	return nil
@@ -40,9 +48,9 @@ func (c *ConfirmDialog) Init() tea.Cmd {
 // Update handles messages
 func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "y", "Y":
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "y", "Y":
 			// Yes - confirm and close
 			return c, func() tea.Msg {
 				return SelectionMsg{
@@ -51,19 +59,34 @@ func (c *ConfirmDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		case "n", "N", "esc":
-			// No or Escape - cancel and close
-			return c, func() tea.Msg {
-				return SelectionMsg{
-					Key:   "no",
-					Value: ConfirmResult{Confirmed: false},
+			case "n", "N":
+				// No - cancel and close
+				return c, func() tea.Msg {
+					return SelectionMsg{
+						Key:   "no",
+						Value: ConfirmResult{Confirmed: false},
+					}
 				}
-			}
 
-		case "enter":
-			// Confirm current selection
-			return c, func() tea.Msg {
-				return SelectionMsg{
+			case "esc":
+				if c.requireExplicitYNKey {
+					return c, nil
+				}
+				// Escape - cancel and close
+				return c, func() tea.Msg {
+					return SelectionMsg{
+						Key:   "no",
+						Value: ConfirmResult{Confirmed: false},
+					}
+				}
+
+			case "enter":
+				if c.requireExplicitYNKey {
+					return c, nil
+				}
+				// Confirm current selection
+				return c, func() tea.Msg {
+					return SelectionMsg{
 					Key:   map[bool]string{true: "yes", false: "no"}[c.selected],
 					Value: ConfirmResult{Confirmed: c.selected},
 				}
@@ -118,14 +141,21 @@ func (c *ConfirmDialog) View() string {
 			b.WriteString(noStyle.Render("[N] No"))
 			return strings.TrimRight(b.String(), "\n")
 		},
-		renderRight: func(mode dialogLayoutMode, width, height int) string {
-			return renderDialogActions(c.styles, []keybinds.Binding{
-				{Key: "←/→/Tab", Description: "switch"},
-				{Key: "Enter", Description: "confirm"},
-				{Key: "Esc", Description: "cancel"},
-			})
-		},
-	})
+			renderRight: func(mode dialogLayoutMode, width, height int) string {
+				bindings := []keybinds.Binding{
+					{Key: "←/→/Tab", Description: "switch"},
+					{Key: "Y", Description: "confirm"},
+					{Key: "N", Description: "cancel"},
+				}
+				if !c.requireExplicitYNKey {
+					bindings = append(bindings,
+						keybinds.Binding{Key: "Enter", Description: "confirm"},
+						keybinds.Binding{Key: "Esc", Description: "cancel"},
+					)
+				}
+				return renderDialogActions(c.styles, bindings)
+			},
+		})
 }
 
 // Title returns the dialog title

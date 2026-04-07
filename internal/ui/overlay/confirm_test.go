@@ -283,6 +283,29 @@ func TestConfirmDialog_EnterConfirmsSelection(t *testing.T) {
 	}
 }
 
+func TestConfirmDialogExplicitYN_EnterIgnored(t *testing.T) {
+	dialog := NewConfirmDialogExplicitYN("Title", "Message")
+	updatedModel, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("expected nil command when enter is disabled")
+	}
+	updatedDialog, ok := updatedModel.(*ConfirmDialog)
+	if !ok {
+		t.Fatalf("updated model type = %T, want *ConfirmDialog", updatedModel)
+	}
+	if updatedDialog.selected {
+		t.Fatal("expected selection to remain No when enter is ignored")
+	}
+}
+
+func TestConfirmDialogExplicitYN_EscapeIgnored(t *testing.T) {
+	dialog := NewConfirmDialogExplicitYN("Title", "Message")
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if cmd != nil {
+		t.Fatal("expected nil command when escape is disabled")
+	}
+}
+
 func TestConfirmDialog_View(t *testing.T) {
 	dialog := NewConfirmDialog("Confirm", "Are you sure?")
 

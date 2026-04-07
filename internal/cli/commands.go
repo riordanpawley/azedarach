@@ -296,6 +296,9 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+		return err
+	}
 
 	deps.Logger.Info("starting session", "issue_id", issueID)
 
@@ -313,6 +316,9 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 func AttachCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -336,6 +342,9 @@ func KillCommand(deps *Dependencies, issueID string) error {
 func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -370,6 +379,25 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	}
 
 	return printCommandOutput(resp)
+}
+
+func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) error {
+	trimmed := strings.TrimSpace(issueID)
+	if trimmed == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	if _, err := naming.ParseIssueID(trimmed); err != nil {
+		return fmt.Errorf("invalid issue id %q: %w", issueID, err)
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
+	}
+	if _, ok := findTaskByID(snapshot.Tasks, trimmed); !ok {
+		return fmt.Errorf("issue not found: %s", trimmed)
+	}
+	return nil
 }
 
 // BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
