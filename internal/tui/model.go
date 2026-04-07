@@ -484,7 +484,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keybinds.ActionOpenWorkspace: // Space - open task panel (details + actions)
-		task, _ := m.getCurrentTaskAndSession()
+		columns := m.buildColumns()
+		task, _ := m.nav.GetCurrentTask(columns)
+		if task == nil {
+			task, _ = m.getCurrentTaskAndSession()
+		}
 		if task != nil {
 			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height)
 			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
