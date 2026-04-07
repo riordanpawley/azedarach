@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -398,13 +399,24 @@ func (q *reconcileQueue[T]) worker(workerID int) {
 		if execCtx == nil {
 			execCtx = context.Background()
 		}
-		ctx, cancel := context.WithCancel(execCtx)
-		stop := context.AfterFunc(q.ctx, cancel)
-		startedAt := q.now().UTC()
-		value, err := job.work(ctx)
-		finishedAt := q.now().UTC()
-		stop()
-		cancel()
+			ctx, cancel := context.WithCancel(execCtx)
+			stop := context.AfterFunc(q.ctx, cancel)
+			startedAt := q.now().UTC()
+			var (
+				value T
+				err   error
+			)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("reconcile queue %s: panic in work for key %s: %v\n%s", q.name, job.key, r, debug.Stack())
+					}
+				}()
+				value, err = job.work(ctx)
+			}()
+			finishedAt := q.now().UTC()
+			stop()
+			cancel()
 
 		q.finish(job, reconcileQueueResult[T]{
 			Key:        job.key,

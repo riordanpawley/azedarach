@@ -85,7 +85,7 @@ func Build(cfg *config.Config, repoDir string, logger *slog.Logger) Deps {
 
 	issuesPath := filepath.Join(repoDir, ".azedarach")
 	attachmentSvc := attachment.NewService(issuesPath, logger)
-	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
+	diagService := diagnostics.NewService(portAllocator, networkChecker)
 
 	return Deps{
 		SessionMonitor:     sessionMonitor,

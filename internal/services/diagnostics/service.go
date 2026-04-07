@@ -96,12 +96,6 @@ type SystemDiagnostics struct {
 	Errors          []string
 }
 
-// TmuxClient interface for tmux operations
-type TmuxClient interface {
-	ListSessions(ctx context.Context) ([]string, error)
-	HasSession(ctx context.Context, name string) (bool, error)
-}
-
 // GitClient interface for git operations
 type GitClient interface {
 	ListWorktrees(ctx context.Context) ([]string, error)
@@ -123,7 +117,6 @@ type Service struct {
 	mu sync.RWMutex
 
 	// Dependencies
-	tmuxClient     TmuxClient
 	portAllocator  PortAllocator
 	networkChecker NetworkChecker
 
@@ -135,9 +128,8 @@ type Service struct {
 }
 
 // NewService creates a new diagnostics service
-func NewService(tmux TmuxClient, ports PortAllocator, network NetworkChecker) *Service {
+func NewService(ports PortAllocator, network NetworkChecker) *Service {
 	return &Service{
-		tmuxClient:     tmux,
 		portAllocator:  ports,
 		networkChecker: network,
 		projectSync:    map[string]ProjectSyncDiagnostics{},
@@ -312,24 +304,6 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 			errors = append(errors, errMsg)
 		case domain.SessionPaused:
 			ops.Paused++
-		}
-	}
-
-	// Collect tmux session names
-	tmuxSessions, err := s.tmuxClient.ListSessions(ctx)
-	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("Failed to list tmux sessions: %v", err))
-	}
-
-	// Check for orphaned tmux sessions (sessions without issues)
-	issueIDs := make(map[string]bool)
-	for issueID := range sessions {
-		issueIDs[issueID] = true
-	}
-
-	for _, tmuxName := range tmuxSessions {
-		if !issueIDs[tmuxName] && !strings.HasPrefix(tmuxName, "devserver-") {
-			warnings = append(warnings, fmt.Sprintf("Orphaned tmux session: %s", tmuxName))
 		}
 	}
 

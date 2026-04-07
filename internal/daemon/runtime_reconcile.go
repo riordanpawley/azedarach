@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -279,6 +280,11 @@ func (d *Daemon) startRuntimeReconcileWorker(ctx context.Context) {
 		interval = defaultRuntimeReconcileInterval
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Error("daemon runtime reconcile worker panicked", "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

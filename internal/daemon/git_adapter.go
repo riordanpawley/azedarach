@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -516,6 +517,11 @@ func (a *gitServiceAdapter) ensureStatusPoller(projectID, worktree string) {
 	a.refreshMu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil && a.logger != nil {
+				a.logger.Error("git status poller panicked", "project_id", projectID, "worktree", worktree, "panic", r, "stack", string(debug.Stack()))
+			}
+		}()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

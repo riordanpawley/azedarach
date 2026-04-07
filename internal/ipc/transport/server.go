@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -85,6 +86,11 @@ func (s *Server) Close() error {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "azd ipc server recovered panic in connection handler: %v\n%s", r, debug.Stack())
+		}
+	}()
 	_ = conn.SetReadDeadline(time.Now().Add(serverFrameTimeout))
 
 	first, err := readFrame(conn, s.codec)

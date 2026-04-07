@@ -329,34 +329,6 @@ func (d *Daemon) ensureWorktreeGitProbeThrottle() *reconcileThrottle {
 	return d.worktreeGitProbeThrottle
 }
 
-func (d *Daemon) hydrateGitStatusProjection(ctx context.Context, projectID, issueID, worktree string) *git.GitStatus {
-	if d == nil || d.git == nil || d.worktreeRuntimeStateStore(projectID) == nil {
-		return nil
-	}
-	projectID = protocol.NormalizeProjectID(projectID)
-	issueID = strings.TrimSpace(issueID)
-	worktree = strings.TrimSpace(worktree)
-	if issueID == "" || worktree == "" {
-		return nil
-	}
-
-	timeoutCtx := ctx
-	cancel := func() {}
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		timeoutCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
-	}
-	defer cancel()
-
-	status, err := d.git.RuntimeStatus(timeoutCtx, worktree, d.baseBranchForProject(projectID))
-	if err != nil || status == nil {
-		return nil
-	}
-	if rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(timeoutCtx, projectID, issueID, worktree, status, true, true); rev == 0 {
-		return status
-	}
-	return status
-}
-
 func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	resp := d.successResponse(req)
 	projectID := d.projectID(req.Meta)

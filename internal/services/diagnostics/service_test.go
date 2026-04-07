@@ -53,17 +53,13 @@ func (m *mockNetworkChecker) LastCheck() time.Time {
 }
 
 func TestNewService(t *testing.T) {
-	tmux := &mockTmuxClient{}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{}
 
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	if service == nil {
 		t.Fatal("NewService returned nil")
-	}
-	if service.tmuxClient != tmux {
-		t.Error("tmuxClient not set correctly")
 	}
 	if service.portAllocator != ports {
 		t.Error("portAllocator not set correctly")
@@ -96,11 +92,10 @@ func TestGetSystemStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmux := &mockTmuxClient{}
 			ports := &mockPortAllocator{}
 			network := &mockNetworkChecker{online: tt.online}
 
-			service := NewService(tmux, ports, network)
+			service := NewService(ports, network)
 			ctx := context.Background()
 
 			status := service.GetSystemStatus(ctx, tt.sessions)
@@ -113,10 +108,9 @@ func TestGetSystemStatus(t *testing.T) {
 
 func TestCollectDiagnosticsIncludesOperationSummaryAndErrorGuidance(t *testing.T) {
 	now := time.Now().Add(-3 * time.Minute)
-	tmux := &mockTmuxClient{sessions: []string{}}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{online: true, lastCheck: time.Now()}
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	diag := service.CollectDiagnostics(context.Background(), map[string]*domain.Session{
 		"test-busy": {
@@ -208,11 +202,10 @@ func TestGetPortConflicts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmux := &mockTmuxClient{}
 			ports := &mockPortAllocator{}
 			network := &mockNetworkChecker{}
 
-			service := NewService(tmux, ports, network)
+			service := NewService(ports, network)
 			ctx := context.Background()
 
 			conflicts := service.GetPortConflicts(ctx, tt.sessions)
@@ -266,11 +259,10 @@ func TestGetSessionHealth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmux := &mockTmuxClient{}
 			ports := &mockPortAllocator{}
 			network := &mockNetworkChecker{}
 
-			service := NewService(tmux, ports, network)
+			service := NewService(ports, network)
 			ctx := context.Background()
 
 			health := service.GetSessionHealth(ctx, tt.sessions)
@@ -331,11 +323,10 @@ func TestGetWorktreeStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmux := &mockTmuxClient{}
 			ports := &mockPortAllocator{}
 			network := &mockNetworkChecker{}
 
-			service := NewService(tmux, ports, network)
+			service := NewService(ports, network)
 			ctx := context.Background()
 
 			worktrees := service.GetWorktreeStatus(ctx, tt.sessions)
@@ -377,7 +368,7 @@ func TestCollectDiagnostics(t *testing.T) {
 			wantErrors:   1,
 		},
 		{
-			name: "orphaned tmux session",
+			name: "orphaned tmux session ignored in projection-only diagnostics",
 			sessions: map[string]*domain.Session{
 				"test-1": {
 					IssueID: "test-1",
@@ -385,22 +376,21 @@ func TestCollectDiagnostics(t *testing.T) {
 			},
 			tmuxSessions: []string{"test-1", "orphaned-session"},
 			online:       true,
-			wantHealthy:  false,
-			wantWarnings: 1,
+			wantHealthy:  true,
+			wantWarnings: 0,
 			wantErrors:   0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmux := &mockTmuxClient{sessions: tt.tmuxSessions}
 			ports := &mockPortAllocator{}
 			network := &mockNetworkChecker{
 				online:    tt.online,
 				lastCheck: now,
 			}
 
-			service := NewService(tmux, ports, network)
+			service := NewService(ports, network)
 			ctx := context.Background()
 
 			diag := service.CollectDiagnostics(ctx, tt.sessions, nil)
@@ -462,11 +452,10 @@ func TestFormatDiagnostics(t *testing.T) {
 		Errors:   []string{},
 	}
 
-	tmux := &mockTmuxClient{}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{}
 
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	output := service.FormatDiagnostics(diag)
 
@@ -524,11 +513,10 @@ func TestFormatDiagnosticsIncludesWebhookFallbackStatus(t *testing.T) {
 		Errors:          []string{},
 	}
 
-	tmux := &mockTmuxClient{}
 	ports := &mockPortAllocator{}
 	network := &mockNetworkChecker{}
 
-	service := NewService(tmux, ports, network)
+	service := NewService(ports, network)
 
 	output := service.FormatDiagnostics(diag)
 
