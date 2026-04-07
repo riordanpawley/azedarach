@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/tui"
@@ -745,8 +746,23 @@ func runCommandAtRepoDir(cfg *config.Config, repoDir string, fn func(*cli.Depend
 }
 
 func runSessionCommand(cfg *config.Config, command string, args []string, namespaced bool) error {
+	sessionHelpRequested := func(values ...string) bool {
+		for _, value := range values {
+			switch strings.TrimSpace(value) {
+			case "-h", "--help":
+				return true
+			}
+		}
+		return false
+	}
 	switch command {
 	case "start":
+		if sessionHelpRequested(args...) {
+			if namespaced {
+				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
+			}
+			return fmt.Errorf("usage: az start <issue-id> [--wait]")
+		}
 		if len(args) < 1 || len(args) > 2 {
 			if namespaced {
 				return fmt.Errorf("usage: az session start <issue-id> [--wait]")
@@ -767,6 +783,12 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 			return cli.StartCommandWithOptions(deps, args[0], opts)
 		})
 	case "attach":
+		if sessionHelpRequested(args...) {
+			if namespaced {
+				return fmt.Errorf("usage: az session attach <issue-id>")
+			}
+			return fmt.Errorf("usage: az attach <issue-id>")
+		}
 		if len(args) != 1 {
 			if namespaced {
 				return fmt.Errorf("usage: az session attach <issue-id>")
@@ -777,6 +799,12 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 			return cli.AttachCommand(deps, args[0])
 		})
 	case "kill":
+		if sessionHelpRequested(args...) {
+			if namespaced {
+				return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
+			}
+			return fmt.Errorf("usage: az kill <issue-id> [--wait]")
+		}
 		if len(args) < 1 || len(args) > 2 {
 			if namespaced {
 				return fmt.Errorf("usage: az session kill <issue-id> [--wait]")
@@ -797,6 +825,12 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 			return cli.KillCommandWithOptions(deps, args[0], opts)
 		})
 	case "status":
+		if sessionHelpRequested(args...) {
+			if namespaced {
+				return fmt.Errorf("usage: az session status [issue-id]")
+			}
+			return fmt.Errorf("usage: az status [issue-id]")
+		}
 		issueID := ""
 		if len(args) == 1 {
 			issueID = args[0]

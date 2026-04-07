@@ -320,7 +320,7 @@ func renderRuntimeSignals(signals *RuntimeSignals, s *styles.Styles) string {
 	if pendingToken := renderPendingOperationToken(signals.PendingOperationState, signals.PendingOperationPercent, false); pendingToken != "" {
 		parts = append(parts, renderRuntimeSignalToken(pendingToken, styles.Mauve, s))
 	}
-	if signals.GitAheadCount > 0 && !hasLineChanges {
+	if signals.GitAheadCount > 0 {
 		parts = append(parts, renderRuntimeSignalToken(fmt.Sprintf("↑%d", signals.GitAheadCount), styles.Green, s))
 	}
 	if signals.GitBehindCount > 0 {

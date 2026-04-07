@@ -17,6 +17,16 @@ func TestTaskStoreError_Error(t *testing.T) {
 			want: "taskstore update [az-1]: failed",
 		},
 		{
+			name: "with task id and underlying error",
+			err:  TaskStoreError{Op: "update", TaskID: "az-1", Err: errors.New("constraint failed")},
+			want: "taskstore update [az-1]: constraint failed",
+		},
+		{
+			name: "with task id only",
+			err:  TaskStoreError{Op: "update", TaskID: "az-1"},
+			want: "taskstore update [az-1] failed",
+		},
+		{
 			name: "with message only",
 			err:  TaskStoreError{Op: "list", Message: "timeout"},
 			want: "taskstore list: timeout",

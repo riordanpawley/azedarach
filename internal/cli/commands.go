@@ -256,6 +256,7 @@ func NewDependenciesAt(cfg *config.Config, repoDir string) (*Dependencies, error
 	}
 	logPath := filepath.Join(resolveSessionLogDirFor(cfg, absRepoDir), "az-cli.log")
 	logger := logging.NewTextFileLogger(logPath, slog.LevelInfo)
+	slog.SetDefault(logger)
 
 	rootRepoDir, err := config.ResolveProjectRoot(absRepoDir)
 	if err != nil {
@@ -295,6 +296,9 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
+	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
+		return err
+	}
 
 	deps.Logger.Info("starting session", "issue_id", issueID)
 
@@ -312,6 +316,9 @@ func StartCommandWithOptions(deps *Dependencies, issueID string, opts SessionCom
 func AttachCommand(deps *Dependencies, issueID string) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -335,6 +342,9 @@ func KillCommand(deps *Dependencies, issueID string) error {
 func KillCommandWithOptions(deps *Dependencies, issueID string, opts SessionCommandOptions) error {
 	ctx := context.Background()
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	if err := validateSessionIssueID(ctx, deps, issueID); err != nil {
 		return err
 	}
 
@@ -371,6 +381,25 @@ func StatusCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
+func validateSessionIssueID(ctx context.Context, deps *Dependencies, issueID string) error {
+	trimmed := strings.TrimSpace(issueID)
+	if trimmed == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	if _, err := naming.ParseIssueID(trimmed); err != nil {
+		return fmt.Errorf("invalid issue id %q: %w", issueID, err)
+	}
+
+	snapshot, err := deps.DaemonClient.ListTasksSnapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to validate issue %s: %w", trimmed, err)
+	}
+	if _, ok := findTaskByID(snapshot.Tasks, trimmed); !ok {
+		return fmt.Errorf("issue not found: %s", trimmed)
+	}
+	return nil
+}
+
 // BranchMergeToMainCommand merges one issue worktree branch into the base branch using daemon git commands.
 func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), branchMergeToMainTimeout)
@@ -384,8 +413,12 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 		return err
 	}
 	baseBranch := resolveCLIBaseBranch(deps.Config)
+	mainWorktree := strings.TrimSpace(deps.RepoDir)
+	if mainWorktree == "" {
+		mainWorktree = "."
+	}
 
-	if err := checkMergeToMainPreflight(ctx, deps, source, "."); err != nil {
+	if err := checkMergeToMainPreflight(ctx, deps, source, mainWorktree); err != nil {
 		return err
 	}
 
@@ -396,13 +429,13 @@ func BranchMergeToMainCommand(deps *Dependencies, issueID string) error {
 		"base_branch", baseBranch,
 	)
 
-	if _, err := deps.DaemonClient.GitFetch(ctx, ".", "origin"); err != nil {
+	if _, err := deps.DaemonClient.GitFetch(ctx, mainWorktree, "origin"); err != nil {
 		return wrapPendingGitOperation("fetch", err)
 	}
-	if _, err := deps.DaemonClient.GitCheckout(ctx, ".", baseBranch); err != nil {
+	if _, err := deps.DaemonClient.GitCheckout(ctx, mainWorktree, baseBranch); err != nil {
 		return wrapPendingGitOperation("checkout", err)
 	}
-	result, err := deps.DaemonClient.GitMerge(ctx, ".", source.Branch)
+	result, err := deps.DaemonClient.GitMerge(ctx, mainWorktree, source.Branch)
 	if err != nil {
 		return wrapPendingGitOperation("merge", err)
 	}

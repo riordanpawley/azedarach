@@ -931,11 +931,8 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 					t.Fatalf("runtime pending op after git event = %+v, want running op-git 40%%", runtime)
 				}
 				view := boardView(model)
-				if !strings.Contains(view, " T ") || !strings.Contains(view, " ✓ ") || !strings.Contains(view, " ↓1 ") || !strings.Contains(view, " ✎ ") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
+				if !strings.Contains(view, " T ") || !strings.Contains(view, " ✓ ") || !strings.Contains(view, " ↑2 ") || !strings.Contains(view, " ↓1 ") || !strings.Contains(view, " ✎ ") || !strings.Contains(view, "+3/-1") || !strings.Contains(view, "M:running(40%)") {
 					t.Fatalf("board view after git event = %q, missing projected runtime tokens", view)
-				}
-				if strings.Contains(view, " ↑2 ") {
-					t.Fatalf("board view after git event = %q, should hide ahead token when line changes exist", view)
 				}
 				workspaceView := workspace(model).View()
 				if !strings.Contains(workspaceView, "Runtime") || !strings.Contains(workspaceView, "dirty (+3/-1; ↑2/↓1)") {
@@ -2079,6 +2076,7 @@ func TestHandleMergeResultPendingOperationShowsInfoToast(t *testing.T) {
 
 func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T) {
 	sourceID := "az-source"
+	mainWorktree := ""
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2130,7 +2128,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal fetch request: %v", err)
 				}
-				if body.Worktree != "." || body.Remote != "origin" {
+				if body.Worktree != mainWorktree || body.Remote != "origin" {
 					t.Fatalf("fetch body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Remote: body.Remote})
@@ -2149,7 +2147,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal checkout request: %v", err)
 				}
-				if body.Worktree != "." || body.Branch != "main" {
+				if body.Worktree != mainWorktree || body.Branch != "main" {
 					t.Fatalf("checkout body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitCommandResponse{Worktree: body.Worktree, Branch: body.Branch})
@@ -2168,7 +2166,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "." || body.Branch != "az/az-source" {
+				if body.Worktree != mainWorktree || body.Branch != "az/az-source" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -2191,7 +2189,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 					SourceID:       sourceID,
 					SourceWorktree: "/tmp/az-source",
 					TargetID:       "main",
-					TargetWorktree: ".",
+					TargetWorktree: mainWorktree,
 					Clean:          true,
 				})
 				if err != nil {
@@ -2212,6 +2210,7 @@ func TestHandleMergeTargetSelectionToMainUsesWorktreeLookupFallback(t *testing.T
 	}
 
 	m := newTestModel()
+	mainWorktree = m.activeProjectPath()
 	m.daemonClient = daemonclient.New(transport)
 
 	updated, cmd := m.handleMergeTargetSelection(overlay.MergeTargetSelectedMsg{
@@ -3096,14 +3095,31 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if confirmCmd != nil {
 			_ = confirmCmd()
 		}
-		if updated.pendingCleanup == nil {
-			t.Fatal("expected pending cleanup confirmation")
-		}
+			if updated.pendingCleanup == nil {
+				t.Fatal("expected pending cleanup confirmation")
+			}
+			if got := transport.requests; len(got) != 2 ||
+				got[0] != daemonclient.CommandRuntimeReconcile ||
+				got[1] != daemonclient.CommandTaskList {
+				t.Fatalf("requests before confirmation = %v", got)
+			}
 
-		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
-			Key:   "yes",
-			Value: overlay.ConfirmResult{Confirmed: true},
-		})
+			updatedAny, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			updated, ok = updatedAny.(Model)
+			if !ok {
+				t.Fatalf("updated model type = %T, want Model", updatedAny)
+			}
+			if enterCmd != nil {
+				t.Fatal("expected enter to be ignored for cleanup confirmation")
+			}
+			if updated.pendingCleanup == nil {
+				t.Fatal("expected pending cleanup confirmation to remain after enter")
+			}
+
+			updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+				Key:   "yes",
+				Value: overlay.ConfirmResult{Confirmed: true},
+			})
 		updated, ok = updatedAny.(Model)
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updatedAny)

@@ -185,12 +185,36 @@ func (f *fakeDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan
 
 func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 	var gotReq protocol.RequestEnvelope
+	commands := []string{}
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				gotReq = req
-				return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
+				commands = append(commands, req.Command)
+				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						Meta:            req.Meta,
+						CompletedAt:     req.SentAt,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				case commandSessionStart:
+					gotReq = req
+					return responseWithOutput(req, "Starting session for: issue-1 - Example\nCreating worktree from branch: main\nWorktree created: /tmp/repo-issue-1\nCreating tmux session: issue-1\n\n✓ Session started successfully\n  To attach: az attach issue-1\n  Or run:    tmux attach-session -t issue-1\n"), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
 			},
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -203,6 +227,9 @@ func TestStartCommandUsesDaemonEnvelope(t *testing.T) {
 
 	if gotReq.Command != commandSessionStart {
 		t.Fatalf("command = %q, want %q", gotReq.Command, commandSessionStart)
+	}
+	if len(commands) != 2 || commands[0] != daemonclient.CommandTaskList || commands[1] != commandSessionStart {
+		t.Fatalf("commands = %v", commands)
 	}
 	var body sessionRequestBody
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {
@@ -250,10 +277,32 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var gotReq protocol.RequestEnvelope
+			commands := []string{}
+			taskListBody, err := marshalTaskListBody([]domain.Task{
+				{ID: tt.sessionID, Title: "Example task", Status: domain.StatusOpen},
+			})
+			if err != nil {
+				t.Fatalf("marshal task list: %v", err)
+			}
 			deps := &Dependencies{
 				Config: config.DefaultConfig(),
 				DaemonClient: daemonclient.New(&fakeDaemonTransport{
 					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						commands = append(commands, req.Command)
+						if tt.wantCommand != commandSessionStatus && req.Command == daemonclient.CommandTaskList {
+							return protocol.ResponseEnvelope{
+								ProtocolVersion: req.ProtocolVersion,
+								RequestID:       req.RequestID,
+								Kind:            protocol.EnvelopeKindResponse,
+								Meta:            req.Meta,
+								CompletedAt:     req.SentAt,
+								OK:              true,
+								Body:            taskListBody,
+							}, nil
+						}
+						if req.Command != tt.wantCommand {
+							t.Fatalf("unexpected command: %s", req.Command)
+						}
 						gotReq = req
 						return responseWithOutput(req, tt.response), nil
 					},
@@ -266,12 +315,22 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 				return tt.command(deps, tt.sessionID)
 			})
 
-			if gotReq.Command != tt.wantCommand {
-				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
-			}
-			if gotReq.Meta.ProjectID != "proj" {
-				t.Fatalf("meta project_id = %q, want proj", gotReq.Meta.ProjectID)
-			}
+				if gotReq.Command != tt.wantCommand {
+					t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
+				}
+				switch tt.wantCommand {
+				case commandSessionAttach, commandSessionStop:
+					if len(commands) != 2 || commands[0] != daemonclient.CommandTaskList || commands[1] != tt.wantCommand {
+						t.Fatalf("commands = %v", commands)
+					}
+				case commandSessionStatus:
+					if len(commands) != 1 || commands[0] != commandSessionStatus {
+						t.Fatalf("commands = %v", commands)
+					}
+				}
+				if gotReq.Meta.ProjectID != "proj" {
+					t.Fatalf("meta project_id = %q, want proj", gotReq.Meta.ProjectID)
+				}
 			if output != tt.response {
 				t.Fatalf("output = %q, want %q", output, tt.response)
 			}
@@ -279,11 +338,115 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	}
 }
 
+func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    func(*Dependencies, string) error
+		issueID    string
+		taskIDs    []string
+		wantSubstr string
+	}{
+		{
+			name:       "start invalid id format",
+			command:    StartCommand,
+			issueID:    "bad id",
+			wantSubstr: "invalid issue id",
+		},
+		{
+			name:       "start unknown id",
+			command:    StartCommand,
+			issueID:    "az-missing",
+			taskIDs:    []string{"az-1"},
+			wantSubstr: "issue not found: az-missing",
+		},
+		{
+			name:       "attach unknown id",
+			command:    AttachCommand,
+			issueID:    "az-missing",
+			taskIDs:    []string{"az-1"},
+			wantSubstr: "issue not found: az-missing",
+		},
+		{
+			name:       "kill unknown id",
+			command:    KillCommand,
+			issueID:    "az-missing",
+			taskIDs:    []string{"az-1"},
+			wantSubstr: "issue not found: az-missing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commands := []string{}
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{
+					commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+						commands = append(commands, req.Command)
+						if req.Command != daemonclient.CommandTaskList {
+							t.Fatalf("unexpected command: %s", req.Command)
+						}
+						tasks := make([]domain.Task, 0, len(tt.taskIDs))
+						for _, id := range tt.taskIDs {
+							tasks = append(tasks, domain.Task{ID: id, Title: id, Status: domain.StatusOpen})
+						}
+						body, err := marshalTaskListBody(tasks)
+						if err != nil {
+							t.Fatalf("marshal task list: %v", err)
+						}
+						return protocol.ResponseEnvelope{
+							ProtocolVersion: req.ProtocolVersion,
+							RequestID:       req.RequestID,
+							Kind:            protocol.EnvelopeKindResponse,
+							Meta:            req.Meta,
+							CompletedAt:     req.SentAt,
+							OK:              true,
+							Body:            body,
+						}, nil
+					},
+				}),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: "proj",
+			}
+
+			err := tt.command(deps, tt.issueID)
+			if err == nil || !strings.Contains(err.Error(), tt.wantSubstr) {
+				t.Fatalf("err = %v, want substring %q", err, tt.wantSubstr)
+			}
+
+			if strings.Contains(tt.wantSubstr, "invalid issue id") {
+				if len(commands) != 0 {
+					t.Fatalf("commands for invalid ID = %v, want none", commands)
+				}
+				return
+			}
+			if len(commands) != 1 || commands[0] != daemonclient.CommandTaskList {
+				t.Fatalf("commands for unknown ID = %v, want [%s]", commands, daemonclient.CommandTaskList)
+			}
+		})
+	}
+}
+
 func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				}
 				nested, err := json.Marshal(commandOutputBody{Output: "wrapped output\n"})
 				if err != nil {
 					t.Fatalf("marshal nested response: %v", err)
@@ -320,6 +483,7 @@ func TestStartCommandPrintsNestedOperationOutput(t *testing.T) {
 
 func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 	commands := make([]string, 0, 8)
+	mainWorktree := t.TempDir()
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -341,7 +505,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != "." {
+					if body.Worktree != "/tmp/azedarach-az-123" && body.Worktree != mainWorktree {
 						t.Fatalf("git status worktree = %q", body.Worktree)
 					}
 					return responseWithJSON(req, map[string]any{
@@ -349,17 +513,17 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 					}), nil
 				case daemonclient.CommandGitFetch:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Remote:   "origin",
 					}), nil
 				case daemonclient.CommandGitCheckout:
 					return responseWithJSON(req, daemonclient.GitCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Branch:   "main",
 					}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Branch:   "riordan/az-123/some-change",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -373,7 +537,7 @@ func TestBranchMergeToMainCommandUsesDaemonGitFlow(t *testing.T) {
 		}).WithProjectID("proj"),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
+		RepoDir:   mainWorktree,
 	}
 
 	output := captureStdout(t, func() error {
@@ -525,6 +689,7 @@ func TestBranchMergeToMainCommandUsesEnvIssueIDWhenArgumentMissing(t *testing.T)
 
 func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(t *testing.T) {
 	commands := make([]string, 0, 8)
+	mainWorktree := t.TempDir()
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -546,7 +711,7 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git status body: %v", err)
 					}
-					if body.Worktree == "." {
+					if body.Worktree == mainWorktree {
 						return responseWithJSON(req, map[string]any{
 							"status": gitservice.GitStatus{
 								HasChanges: true,
@@ -558,12 +723,12 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 						"status": gitservice.GitStatus{HasChanges: false},
 					}), nil
 				case daemonclient.CommandGitFetch:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Remote: "origin"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Remote: "origin"}), nil
 				case daemonclient.CommandGitCheckout:
-					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: ".", Branch: "main"}), nil
+					return responseWithJSON(req, daemonclient.GitCommandResponse{Worktree: mainWorktree, Branch: "main"}), nil
 				case daemonclient.CommandGitMerge:
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
-						Worktree: ".",
+						Worktree: mainWorktree,
 						Branch:   "riordan/bhv/fix-mtm-timeout",
 						Result: gitservice.MergeResult{
 							Success: true,
@@ -576,7 +741,7 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 		}),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ProjectID: "proj",
-		RepoDir:   t.TempDir(),
+		RepoDir:   mainWorktree,
 	}
 
 	err := BranchMergeToMainCommand(deps, "bhv")
@@ -592,10 +757,25 @@ func TestBranchMergeToMainCommandTreatsAzedarachRuntimeConfigAsDirtyInPreflight(
 }
 
 func TestStartCommandPrintsPendingOperationState(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				}
 				body, err := json.Marshal(map[string]any{
 					"operation_id": "op-start",
 					"state":        string(protocol.OperationStateQueued),
@@ -627,12 +807,26 @@ func TestStartCommandPrintsPendingOperationState(t *testing.T) {
 
 func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
 	var calls int
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
 			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				calls++
 				switch req.Command {
+				case daemonclient.CommandTaskList:
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
 				case commandSessionStart:
 					body, err := json.Marshal(map[string]any{
 						"operation_id": "op-start",
@@ -688,8 +882,8 @@ func TestStartCommandWithWaitPrintsTerminalOperationOutput(t *testing.T) {
 	if output != "started\n" {
 		t.Fatalf("output = %q, want terminal operation output", output)
 	}
-	if calls != 2 {
-		t.Fatalf("calls = %d, want 2", calls)
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
 	}
 }
 
@@ -983,10 +1177,25 @@ func TestLogCommandErrorsWhenAllSelectedLogsMissing(t *testing.T) {
 }
 
 func TestCommandErrorUsesTransportMessage(t *testing.T) {
+	taskListBody, err := marshalTaskListBody([]domain.Task{
+		{ID: "issue-1", Title: "Example", Status: domain.StatusOpen},
+	})
+	if err != nil {
+		t.Fatalf("marshal task list: %v", err)
+	}
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command == daemonclient.CommandTaskList {
+					return protocol.ResponseEnvelope{
+						ProtocolVersion: req.ProtocolVersion,
+						RequestID:       req.RequestID,
+						Kind:            protocol.EnvelopeKindResponse,
+						OK:              true,
+						Body:            taskListBody,
+					}, nil
+				}
 				return protocol.ResponseEnvelope{
 					ProtocolVersion: protocol.CurrentVersion,
 					RequestID:       "req",
@@ -1004,7 +1213,7 @@ func TestCommandErrorUsesTransportMessage(t *testing.T) {
 		ProjectID: "proj",
 	}
 
-	err := StartCommand(deps, "issue-1")
+	err = StartCommand(deps, "issue-1")
 	if err == nil || err.Error() != "session already exists: issue-1 (use 'az attach issue-1' to connect)" {
 		t.Fatalf("error = %v", err)
 	}

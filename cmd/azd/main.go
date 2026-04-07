@@ -62,6 +62,8 @@ func main() {
 	if scopeWatchPath := resolveScopedWorktreeWatchPath(repoDir); scopeWatchPath != "" {
 		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
 	}
+	logger := newDaemonLogger()
+	slog.SetDefault(logger)
 
 	d := daemon.New(daemon.Config{
 		RepoDir:              repoDir,
@@ -71,7 +73,7 @@ func main() {
 		CLITool:              cfg.CLITool,
 		SessionShell:         cfg.Session.Shell,
 		SessionInitCommands:  cfg.Session.InitCommands,
-		Logger:              newDaemonLogger(),
+		Logger:               logger,
 		WorktreeInitCommands: cfg.Worktree.InitCommands,
 	})
 	if err := d.Run(ctx); err != nil {
