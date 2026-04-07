@@ -551,7 +551,7 @@ func TestHandleSessionStopDirectMarksStoppedWhenTmuxSessionMissing(t *testing.T)
 	}
 }
 
-func TestHandleSessionStopDirectContinuesWhenFreshnessTimesOut(t *testing.T) {
+func TestHandleSessionStopDirectDoesNotRequireFreshnessGate(t *testing.T) {
 	const (
 		projectID = "proj"
 		issueID   = "az-1"
@@ -581,7 +581,7 @@ func TestHandleSessionStopDirectContinuesWhenFreshnessTimesOut(t *testing.T) {
 
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-stop-fresh-timeout",
+		RequestID:       "req-stop-no-freshness-gate",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "session.stop",
 		Body: marshalJSON(map[string]string{
@@ -602,11 +602,11 @@ func TestHandleSessionStopDirectContinuesWhenFreshnessTimesOut(t *testing.T) {
 	}
 
 	calls, projectIDs := recorder.snapshot()
-	if calls != 1 {
-		t.Fatalf("runtime reconcile calls = %d, want 1", calls)
+	if calls != 0 {
+		t.Fatalf("runtime reconcile calls = %d, want 0", calls)
 	}
-	if len(projectIDs) != 1 || projectIDs[0] != projectID {
-		t.Fatalf("runtime reconcile project ids = %v, want [%s]", projectIDs, projectID)
+	if len(projectIDs) != 0 {
+		t.Fatalf("runtime reconcile project ids = %v, want empty", projectIDs)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
