@@ -998,9 +998,48 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session reconcile started", "project_id", projectID, "target_issue_id", sessionID)
 	}
+	validIssueKeys, issueValidationEnabled, err := d.reconcileIssueKeyIndex(ctx, projectID)
+	if err != nil {
+		return result, err
+	}
+	isValidIssueKey := func(issueKey string) bool {
+		if !issueValidationEnabled {
+			return true
+		}
+		_, ok := validIssueKeys[issueKey]
+		return ok
+	}
+	pruneInvalidSessionProjection := func(session daemonstate.Session, issueID string) {
+		runtimeStore := d.sessionRuntimeStateStoreIfConfigured(projectID)
+		if runtimeStore == nil {
+			return
+		}
+		sessionIDToDelete := strings.TrimSpace(session.ID)
+		if sessionIDToDelete == "" {
+			sessionIDToDelete = naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+		}
+		if sessionIDToDelete == "" {
+			return
+		}
+		if err := runtimeStore.DeleteSessionState(ctx, projectID, sessionIDToDelete); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("session reconciliation failed to prune invalid desired session",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", sessionIDToDelete,
+				"error", err,
+			)
+			return
+		}
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Info("session reconciliation pruned invalid desired session",
+				"project_id", projectID,
+				"issue_id", issueID,
+				"session_id", sessionIDToDelete,
+			)
+		}
+	}
 
 	source := d.sourceForSessionInvariant(sessionInvariantSessionReconcile)
-	var err error
 	tmuxSessions := []string{}
 	if usesTmuxSource(source) {
 		tmuxSessions, err = d.tmux.ListSessions(ctx)
@@ -1039,6 +1078,10 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 		issueID := sessionProjectionIssueID(session, namingScope)
 		issueKey := sessionKey(issueID)
 		if targetIssueKey != "" && issueKey != targetIssueKey {
+			continue
+		}
+		if issueKey == "" || !isValidIssueKey(issueKey) {
+			pruneInvalidSessionProjection(session, issueID)
 			continue
 		}
 		if d.isSessionStopPending(projectID, issueID) {
@@ -1100,6 +1143,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	for issueKey := range tmuxSet {
 		sessionIDInTmux := tmuxNameByIssueKey[issueKey]
 		session, ok := snapshotByIssueKey[issueKey]
+		if !isValidIssueKey(issueKey) {
+			continue
+		}
 		issueID, parsed := naming.ParseIssueIDFromSessionName(sessionIDInTmux, namingScope)
 		if !parsed {
 			issueID = sessionIDInTmux
@@ -1203,6 +1249,38 @@ func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, 
 	}
 
 	return result, nil
+}
+
+func (d *Daemon) reconcileIssueKeyIndex(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {
+	if d == nil {
+		return nil, false, nil
+	}
+	if strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID)) == "" {
+		return nil, false, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, false, nil
+	}
+	tasks, err := issueClient.List(ctx)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("session reconciliation issue validation unavailable",
+				"project_id", projectID,
+				"error", err,
+			)
+		}
+		return nil, false, nil
+	}
+	index := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		key := sessionKey(task.ID.String())
+		if key == "" {
+			continue
+		}
+		index[key] = struct{}{}
+	}
+	return index, true, nil
 }
 
 func (d *Daemon) sessionSnapshotForReconcile(ctx context.Context, projectID string) ([]daemonstate.Session, error) {

@@ -111,7 +111,7 @@ func (r *timeoutRuntimeReconciler) Reconcile(ctx context.Context, projectID stri
 	r.projectIDs = append(r.projectIDs, projectID)
 	r.mu.Unlock()
 	<-ctx.Done()
-	return protocol.RuntimeReconcileResponseBody{ProjectID: projectID}, ctx.Err()
+	return protocol.RuntimeReconcileResponseBody{ProjectID: naming.ProjectID(projectID)}, ctx.Err()
 }
 
 func (r *timeoutRuntimeReconciler) snapshot() (calls int, projectIDs []string) {
@@ -1881,6 +1881,175 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 	if !sessionExists {
 		t.Fatalf("expected tmux session %q to exist after reconcile", sessionID)
+	}
+}
+
+func TestReconcilePrunesInvalidDesiredSessionAndDoesNotRecreate(t *testing.T) {
+	const invalidIssueID = "ch-it"
+
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	if _, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Valid local issue",
+		Type:  domain.TypeTask,
+	}); err != nil {
+		t.Fatalf("create local issue: %v", err)
+	}
+
+	sessionID := naming.CanonicalSessionID(repoDir, invalidIssueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:        sessionID,
+		IssueID:   invalidIssueID,
+		State:     daemonstate.SessionStateAttached,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed invalid durable session projection: %v", err)
+	}
+
+	tmuxRunner := &testTmuxRunner{
+		sessions:    map[string]bool{},
+		killEntered: make(chan struct{}),
+		killRelease: make(chan struct{}),
+	}
+	store := daemonstate.NewStore()
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{
+				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+invalidIssueID),
+				branchName:   "riordan/" + invalidIssueID + "/test",
+			}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{
+				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+invalidIssueID),
+				branchName:   "riordan/" + invalidIssueID + "/test",
+			}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: issuesClient,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, invalidIssueID)
+	if err != nil {
+		t.Fatalf("reconcile invalid desired session: %v", err)
+	}
+	if result.RecreatedTmuxSessions != 0 {
+		t.Fatalf("recreated tmux sessions = %d, want 0", result.RecreatedTmuxSessions)
+	}
+	tmuxRunner.mu.Lock()
+	newSessionCalls := tmuxRunner.newSessionCalls
+	tmuxRunner.mu.Unlock()
+	if newSessionCalls != 0 {
+		t.Fatalf("new-session calls = %d, want 0", newSessionCalls)
+	}
+	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("list session states: %v", err)
+	}
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.IssueID), invalidIssueID) {
+			t.Fatalf("invalid desired session was not pruned: %+v", row)
+		}
+	}
+}
+
+func TestReconcileDoesNotAlignUnknownTmuxSessionWithoutIssueRecord(t *testing.T) {
+	const invalidIssueID = "ch-hn"
+
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+
+	tmuxSessionID := naming.CanonicalSessionID(repoDir, invalidIssueID)
+	tmuxRunner := newTestTmuxRunner(tmuxSessionID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+	store := daemonstate.NewStore()
+
+	daemon := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir,
+			CLITool: "claude",
+			Logger:  slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{
+				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+invalidIssueID),
+				branchName:   "riordan/" + invalidIssueID + "/test",
+			}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{
+				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+invalidIssueID),
+				branchName:   "riordan/" + invalidIssueID + "/test",
+			}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStateStore,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: issuesClient,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+	}
+
+	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, "")
+	if err != nil {
+		t.Fatalf("reconcile with unknown tmux session: %v", err)
+	}
+	if result.AlignedDaemonSessions != 0 {
+		t.Fatalf("aligned daemon sessions = %d, want 0", result.AlignedDaemonSessions)
+	}
+	snapshot := store.ReadSnapshot(projectID)
+	if len(snapshot.Sessions) != 0 {
+		t.Fatalf("unexpected in-memory sessions aligned from unknown tmux: %+v", snapshot.Sessions)
 	}
 }
 
