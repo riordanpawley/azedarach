@@ -29,7 +29,7 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 	}
 	wantCapturedAt := time.Date(2026, 3, 25, 12, 34, 56, 789000000, time.UTC).UnixMilli()
 
-	parentID := "parent-1"
+	parentID := naming.IssueID("parent-1")
 	body := buildTaskSnapshotExportBody(
 		"proj",
 		17,
@@ -91,8 +91,8 @@ func TestBuildTaskSnapshotExportBodyIsDeterministic(t *testing.T) {
 	if got, want := body.Tasks[0].Critical, false; got != want {
 		t.Fatalf("Tasks[0].Critical = %v, want %v", got, want)
 	}
-	if body.Tasks[0].ParentID == nil || *body.Tasks[0].ParentID != parentID {
-		t.Fatalf("Tasks[0].ParentID = %+v, want %q", body.Tasks[0].ParentID, parentID)
+	if body.Tasks[0].ParentID == nil || *body.Tasks[0].ParentID != parentID.String() {
+		t.Fatalf("Tasks[0].ParentID = %+v, want %q", body.Tasks[0].ParentID, parentID.String())
 	}
 	if got, want := body.Tasks[1].ID, "b-task"; got != want {
 		t.Fatalf("Tasks[1].ID = %q, want %q", got, want)
@@ -285,7 +285,7 @@ func TestHandleTaskListIsReadOnlyAndUsesProjectionData(t *testing.T) {
 	}
 
 	task := tasks[0]
-	if task.ID != taskID {
+	if task.ID.String() != taskID {
 		t.Fatalf("task.ID = %q, want %q", task.ID, taskID)
 	}
 	if task.Title != "Read-only task list" {

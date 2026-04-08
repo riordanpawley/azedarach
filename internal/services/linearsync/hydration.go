@@ -1,6 +1,9 @@
 package linearsync
 
-import "github.com/riordanpawley/azedarach/internal/domain"
+import (
+	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
+)
 
 // ReconcileHydratedTasks overlays local runtime state onto a refreshed snapshot
 // while preserving the authoritative task payload from the daemon.
@@ -9,7 +12,7 @@ func ReconcileHydratedTasks(current, hydrated []domain.Task) []domain.Task {
 		return nil
 	}
 
-	currentByID := make(map[string]domain.Task, len(current))
+	currentByID := make(map[naming.IssueID]domain.Task, len(current))
 	for _, task := range current {
 		currentByID[task.ID] = task
 	}

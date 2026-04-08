@@ -558,7 +558,7 @@ func resolveSessionIssue(tasks []domain.Task, requestedIssueID string) (domain.T
 	requestedKey := sessionKey(requestedIssueID)
 	if requestedKey != "" {
 		for _, task := range tasks {
-			if sessionKey(task.ID) == requestedKey {
+			if sessionKey(task.ID.String()) == requestedKey {
 				return task, true
 			}
 		}
@@ -874,9 +874,9 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	taskMap := make(map[string]domain.Task, len(tasks))
+	taskMap := make(map[naming.IssueID]domain.Task, len(tasks))
 	for _, task := range tasks {
-		taskMap[sessionKey(task.ID)] = task
+		taskMap[task.ID] = task
 	}
 	if cmd.IssueID != "" {
 		matching := make([]string, 0, 1)
@@ -903,11 +903,15 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	b.WriteString("ISSUE ID\tSTATUS\tTITLE\n")
 	b.WriteString("-------\t------\t-----\n")
 	for _, name := range tmuxSessions {
-		issueID := name
+		issueIDRaw := name
 		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, d.sessionNamingScope(cmd.ProjectID)); ok {
-			issueID = parsedIssueID
+			issueIDRaw = parsedIssueID
 		}
-		task, ok := taskMap[sessionKey(issueID)]
+		issueID, parseErr := naming.ParseIssueID(issueIDRaw)
+		task, ok := taskMap[issueID]
+		if parseErr != nil {
+			ok = false
+		}
 		status := "unknown"
 		title := "(not in issues)"
 		if ok {
@@ -917,7 +921,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 				title = title[:57] + "..."
 			}
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%s\n", issueID, status, title)
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", issueIDRaw, status, title)
 	}
 	b.WriteString("\nUse 'az attach <issue-id>' to attach to a session\n")
 	if d.cfg.Logger != nil {
@@ -1303,7 +1307,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 
 	for i := range tasks {
 		taskID := tasks[i].ID
-		taskKey := sessionKey(taskID)
+		taskKey := sessionKey(taskID.String())
 		if _, ok := tmuxSet[taskKey]; !ok {
 			continue
 		}

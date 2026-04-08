@@ -703,14 +703,20 @@ func buildTaskSnapshotExportBody(projectID string, revision uint64, tasks []doma
 	}
 
 	for _, task := range taskCopy {
-		_, hasSession := sessionSet[sessionKey(task.ID)]
+		_, hasSession := sessionSet[sessionKey(task.ID.String())]
 		out.Tasks = append(out.Tasks, taskSnapshotExportTask{
-			ID:              task.ID,
+			ID:              task.ID.String(),
 			Title:           task.Title,
 			Status:          task.Status,
 			Priority:        task.Priority,
 			Type:            task.Type,
-			ParentID:        task.ParentID,
+			ParentID: func() *string {
+				if task.ParentID == nil {
+					return nil
+				}
+				parentID := task.ParentID.String()
+				return &parentID
+			}(),
 			DependencyCount: len(task.Dependencies),
 			SessionAttached: hasSession,
 			Critical:        task.Status == domain.StatusBlocked,

@@ -505,11 +505,11 @@ func (s *Service) CreateIssuesFromPlan(ctx context.Context, plan *domain.Plan) (
 			continue
 		}
 
-		idMapping[task.ID] = issue.ID
+		idMapping[task.ID] = issue.ID.String()
 		createdIssues = append(createdIssues, *issue)
 
 		// Link to epic as child
-		if err := s.issuesClient.AddDependency(ctx, issue.ID, epic.ID, "parent-child"); err != nil {
+		if err := s.issuesClient.AddDependency(ctx, issue.ID.String(), epic.ID.String(), "parent-child"); err != nil {
 			s.logger.Warn("failed to link task to epic", "task", issue.ID, "error", err)
 		}
 	}
@@ -555,18 +555,18 @@ func (s *Service) CreateIssuesFromPlan(ctx context.Context, plan *domain.Plan) (
 				continue
 			}
 
-			idMapping[task.ID] = issue.ID
+			idMapping[task.ID] = issue.ID.String()
 			createdIssues = append(createdIssues, *issue)
 
 			// Link to epic as child
-			if err := s.issuesClient.AddDependency(ctx, issue.ID, epic.ID, "parent-child"); err != nil {
+			if err := s.issuesClient.AddDependency(ctx, issue.ID.String(), epic.ID.String(), "parent-child"); err != nil {
 				s.logger.Warn("failed to link task to epic", "task", issue.ID, "error", err)
 			}
 
 			// Add task dependencies (blocks relationship)
 			for _, depID := range task.DependsOn {
 				if realDepID, ok := idMapping[depID]; ok {
-					if err := s.issuesClient.AddDependency(ctx, issue.ID, realDepID, "blocks"); err != nil {
+					if err := s.issuesClient.AddDependency(ctx, issue.ID.String(), realDepID, "blocks"); err != nil {
 						s.logger.Warn("failed to add dependency", "task", issue.ID, "dep", realDepID, "error", err)
 					}
 				}

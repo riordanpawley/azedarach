@@ -91,9 +91,9 @@ func renderCard(task domain.Task, runtimeSignals *RuntimeSignals, isCursor bool,
 		cursor = "▶"
 	}
 
-	issueToken := task.ID
+	issueToken := task.ID.String()
 	if cursor != "" {
-		issueToken = cursor + task.ID
+		issueToken = cursor + task.ID.String()
 	}
 	headerParts := []string{
 		priorityBadge,
@@ -501,12 +501,12 @@ func BuildChildProgress(tasks []domain.Task) map[string]ChildProgress {
 	progressByParent := make(map[string]ChildProgress)
 	for _, task := range tasks {
 		parentID := ""
-		if task.ParentID != nil && *task.ParentID != "" {
-			parentID = *task.ParentID
+		if task.ParentID != nil && task.ParentID.String() != "" {
+			parentID = task.ParentID.String()
 		} else {
 			for _, dep := range task.Dependencies {
-				if dep.Type == domain.DependencyParentChild && dep.ID != "" {
-					parentID = dep.ID
+				if dep.Type == domain.DependencyParentChild && dep.ID.String() != "" {
+					parentID = dep.ID.String()
 					break
 				}
 			}

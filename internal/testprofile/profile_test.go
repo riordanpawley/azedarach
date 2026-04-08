@@ -33,7 +33,7 @@ func TestCanonicalFixtureProfilesIncludeDependencyVariants(t *testing.T) {
 		assert.Empty(t, Smoke.Tasks[0].Dependencies)
 		assert.Len(t, Smoke.Tasks[1].Dependencies, 1)
 		assert.Equal(t, domain.DependencyBlocks, Smoke.Tasks[1].Dependencies[0].Type)
-		assert.Equal(t, "az-smoke-root", Smoke.Tasks[1].Dependencies[0].ID)
+		assert.Equal(t, "az-smoke-root", Smoke.Tasks[1].Dependencies[0].ID.String())
 		assert.Equal(t, domain.TypeEpic, Smoke.Tasks[2].Type)
 		assert.Len(t, Smoke.Tasks[3].Dependencies, 1)
 	})
@@ -41,7 +41,7 @@ func TestCanonicalFixtureProfilesIncludeDependencyVariants(t *testing.T) {
 	t.Run("integration", func(t *testing.T) {
 		require.Len(t, Integration.Tasks, 4)
 		assert.Len(t, Integration.Tasks[2].Dependencies, 2)
-		assert.ElementsMatch(t, []string{"az-int-root-a", "az-int-root-b"}, []string{Integration.Tasks[2].Dependencies[0].ID, Integration.Tasks[2].Dependencies[1].ID})
+		assert.ElementsMatch(t, []string{"az-int-root-a", "az-int-root-b"}, []string{Integration.Tasks[2].Dependencies[0].ID.String(), Integration.Tasks[2].Dependencies[1].ID.String()})
 		assert.Equal(t, domain.StatusBlocked, Integration.Tasks[3].Status)
 	})
 
@@ -49,8 +49,8 @@ func TestCanonicalFixtureProfilesIncludeDependencyVariants(t *testing.T) {
 		require.Greater(t, len(Scale.Tasks), 4)
 		assert.Len(t, Scale.Tasks[2].Dependencies, 1)
 		assert.Len(t, Scale.Tasks[3].Dependencies, 1)
-		assert.Equal(t, "az-scale-child", Scale.Tasks[3].Dependencies[0].ID)
-		assert.Equal(t, "az-scale-root", Scale.Tasks[2].Dependencies[0].ID)
+		assert.Equal(t, "az-scale-child", Scale.Tasks[3].Dependencies[0].ID.String())
+		assert.Equal(t, "az-scale-root", Scale.Tasks[2].Dependencies[0].ID.String())
 	})
 }
 

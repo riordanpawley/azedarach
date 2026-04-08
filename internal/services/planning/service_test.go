@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,8 +41,12 @@ func (m *mockIssuesClient) Create(ctx context.Context, title, description string
 	}
 
 	m.nextID++
+	taskID, err := naming.ParseIssueID("az-" + string(rune('0'+m.nextID)))
+	if err != nil {
+		return nil, err
+	}
 	task := &domain.Task{
-		ID:          "az-" + string(rune('0'+m.nextID)),
+		ID:          taskID,
 		Title:       title,
 		Description: description,
 		Type:        taskType,

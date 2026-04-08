@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -279,7 +280,7 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 			var gotReq protocol.RequestEnvelope
 			commands := []string{}
 			taskListBody, err := marshalTaskListBody([]domain.Task{
-				{ID: tt.sessionID, Title: "Example task", Status: domain.StatusOpen},
+				{ID: naming.IssueID(tt.sessionID), Title: "Example task", Status: domain.StatusOpen},
 			})
 			if err != nil {
 				t.Fatalf("marshal task list: %v", err)
@@ -388,7 +389,7 @@ func TestSessionCommandsRejectInvalidOrUnknownIssueIDs(t *testing.T) {
 						}
 						tasks := make([]domain.Task, 0, len(tt.taskIDs))
 						for _, id := range tt.taskIDs {
-							tasks = append(tasks, domain.Task{ID: id, Title: id, Status: domain.StatusOpen})
+							tasks = append(tasks, domain.Task{ID: naming.IssueID(id), Title: id, Status: domain.StatusOpen})
 						}
 						body, err := marshalTaskListBody(tasks)
 						if err != nil {
@@ -2842,7 +2843,7 @@ func TestIssueListCommand_StatusFilter(t *testing.T) {
 
 func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.T) {
 	now := time.Date(2026, 3, 26, 2, 10, 0, 0, time.UTC)
-	parentID := "az-parent"
+	parentID := naming.IssueID("az-parent")
 	tasks := []domain.Task{
 		{
 			ID:        parentID,
@@ -2854,7 +2855,7 @@ func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.
 			UpdatedAt: now,
 		},
 		{
-			ID:        "az-child",
+			ID:        naming.IssueID("az-child"),
 			Title:     "Child issue",
 			Status:    domain.StatusOpen,
 			Priority:  domain.P2,
@@ -2864,7 +2865,7 @@ func TestIssueListCommandDepsProjection_IncludesTopLevelGraphContext(t *testing.
 			UpdatedAt: now,
 		},
 		{
-			ID:       "az-dependent",
+			ID:       naming.IssueID("az-dependent"),
 			Title:    "Depends on parent via blocks",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
@@ -3119,8 +3120,8 @@ func TestIssueGetCommandDepsProjectionCanonicalTypes(t *testing.T) {
 
 func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing.T) {
 	now := time.Date(2026, 3, 26, 1, 15, 0, 0, time.UTC)
-	parentID := "az-parent"
-	targetID := "az-target"
+	parentID := naming.IssueID("az-parent")
+	targetID := naming.IssueID("az-target")
 	childParentID := targetID
 	tasks := []domain.Task{
 		{
@@ -3143,7 +3144,7 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 			UpdatedAt: now,
 		},
 		{
-			ID:        "az-child",
+			ID:        naming.IssueID("az-child"),
 			Title:     "Child issue",
 			Status:    domain.StatusOpen,
 			Priority:  domain.P2,
@@ -3179,7 +3180,7 @@ func TestIssueGetCommandDepsProjectionIncludesDependentsAndParentEdge(t *testing
 	}
 
 	output := captureStdout(t, func() error {
-		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID})
+		return IssueGetCommand(deps, IssueGetOptions{IssueID: targetID.String()})
 	})
 	for _, want := range []string{
 		"Dependency edges:",

@@ -1845,10 +1845,10 @@ func ImplDeleteCommand(deps *Dependencies, opts ImplDeleteOptions) error {
 			Priority:        task.Priority,
 			Implementations: nextImpls,
 		}
-		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID, update); err != nil {
+		if err := deps.DaemonClient.UpdateTaskDetails(ctx, task.ID.String(), update); err != nil {
 			return fmt.Errorf("failed to remove implementation %s from issue %s: %w", impl, task.ID, err)
 		}
-		updated = append(updated, task.ID)
+		updated = append(updated, task.ID.String())
 	}
 
 	if len(updated) == 0 {
@@ -1995,7 +1995,7 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed to get issues: %w", err)
 	}
-	tasksByID := make(map[string]domain.Task, len(snapshot.Tasks))
+	tasksByID := make(map[naming.IssueID]domain.Task, len(snapshot.Tasks))
 	for _, task := range snapshot.Tasks {
 		tasksByID[task.ID] = task
 	}
@@ -2005,7 +2005,11 @@ func IssueGetManyCommand(deps *Dependencies, opts IssueGetManyOptions) error {
 		Results:   make([]issueGetManyItem, 0, len(opts.IssueIDs)),
 	}
 	for _, issueID := range opts.IssueIDs {
-		task, ok := tasksByID[issueID]
+		typedIssueID, parseErr := naming.ParseIssueID(issueID)
+		task, ok := tasksByID[typedIssueID]
+		if parseErr != nil {
+			ok = false
+		}
 		if !ok {
 			result.Missing++
 			result.Results = append(result.Results, issueGetManyItem{
@@ -2504,7 +2508,7 @@ func IssueDependencyBulkApplyCommand(deps *Dependencies, opts IssueDependencyBul
 		return fmt.Errorf("load issues for dependency bulk apply: %w", err)
 	}
 	taskEdges := buildTaskDependencyEdgeSet(snapshot.Tasks)
-	taskIDs := make(map[string]struct{}, len(snapshot.Tasks))
+	taskIDs := make(map[naming.IssueID]struct{}, len(snapshot.Tasks))
 	for _, task := range snapshot.Tasks {
 		taskIDs[task.ID] = struct{}{}
 	}
@@ -2673,7 +2677,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 	if err != nil {
 		return fmt.Errorf("load issues for bulk-update: %w", err)
 	}
-	tasksByID := map[string]domain.Task{}
+	tasksByID := map[naming.IssueID]domain.Task{}
 	for _, task := range snapshot.Tasks {
 		tasksByID[task.ID] = task
 	}
@@ -2687,7 +2691,11 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 		if taskID == "" {
 			return fmt.Errorf("bulk-update item %d: missing task_id", i)
 		}
-		current, ok := tasksByID[taskID]
+		typedTaskID, parseErr := naming.ParseIssueID(taskID)
+		if parseErr != nil {
+			return fmt.Errorf("bulk-update item %d: invalid task_id %q: %w", i, taskID, parseErr)
+		}
+		current, ok := tasksByID[typedTaskID]
 		if !ok {
 			return fmt.Errorf("bulk-update item %d: issue not found: %s", i, taskID)
 		}
@@ -2787,7 +2795,7 @@ func IssueBulkUpdateCommand(deps *Dependencies, opts IssueBulkUpdateOptions) err
 
 func findTaskByID(tasks []domain.Task, id string) (domain.Task, bool) {
 	for _, task := range tasks {
-		if task.ID == id {
+		if task.ID.String() == id {
 			return task, true
 		}
 	}
@@ -2804,7 +2812,7 @@ func filterTasksByIDs(tasks []domain.Task, ids []string) []domain.Task {
 	}
 	filtered := make([]domain.Task, 0, len(ids))
 	for _, task := range tasks {
-		if _, ok := idSet[task.ID]; ok {
+		if _, ok := idSet[task.ID.String()]; ok {
 			filtered = append(filtered, task)
 		}
 	}
@@ -2844,24 +2852,26 @@ func dedupeOrderedIDs(ids []string) []string {
 	return deduped
 }
 
-func buildTaskDependencyEdgeSet(tasks []domain.Task) map[string]map[string]struct{} {
-	edges := make(map[string]map[string]struct{}, len(tasks))
+type dependencyEdgeKey struct {
+	depID   naming.IssueID
+	depType domain.DependencyType
+}
+
+func buildTaskDependencyEdgeSet(tasks []domain.Task) map[naming.IssueID]map[dependencyEdgeKey]struct{} {
+	edges := make(map[naming.IssueID]map[dependencyEdgeKey]struct{}, len(tasks))
 	for _, task := range tasks {
-		if _, ok := edges[task.ID]; !ok {
-			edges[task.ID] = map[string]struct{}{}
+		taskID := task.ID
+		if _, ok := edges[taskID]; !ok {
+			edges[taskID] = map[dependencyEdgeKey]struct{}{}
 		}
 		for _, dep := range task.Dependencies {
-			edges[task.ID][dependencyEdgeKey(dep.ID, dep.Type)] = struct{}{}
+			edges[taskID][dependencyEdgeKey{depID: dep.ID, depType: dep.Type}] = struct{}{}
 		}
-		if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
-			edges[task.ID][dependencyEdgeKey(strings.TrimSpace(*task.ParentID), domain.DependencyParentChild)] = struct{}{}
+		if task.ParentID != nil && !task.ParentID.IsZero() {
+			edges[taskID][dependencyEdgeKey{depID: *task.ParentID, depType: domain.DependencyParentChild}] = struct{}{}
 		}
 	}
 	return edges
-}
-
-func dependencyEdgeKey(depID string, depType domain.DependencyType) string {
-	return strings.TrimSpace(depID) + "|" + string(depType)
 }
 
 func dependencyTypeOrDefault(raw string) (domain.DependencyType, error) {
@@ -2880,8 +2890,8 @@ func dependencyTypeOrDefault(raw string) (domain.DependencyType, error) {
 func planDependencyMutation(
 	index int,
 	mutation dependencyBulkMutation,
-	taskIDs map[string]struct{},
-	taskEdges map[string]map[string]struct{},
+	taskIDs map[naming.IssueID]struct{},
+	taskEdges map[naming.IssueID]map[dependencyEdgeKey]struct{},
 ) (dependencyBulkOutcome, []protocol.ApplyOperationBody, error) {
 	issueID := strings.TrimSpace(mutation.IssueID)
 	if issueID == "" {
@@ -2901,12 +2911,16 @@ func planDependencyMutation(
 	if issueID == "" {
 		return outcome, nil, fmt.Errorf("missing issue_id")
 	}
-	if _, ok := taskIDs[issueID]; !ok {
+	typedIssueID, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return outcome, nil, fmt.Errorf("invalid issue_id: %w", err)
+	}
+	if _, ok := taskIDs[typedIssueID]; !ok {
 		return outcome, nil, fmt.Errorf("issue not found: %s", issueID)
 	}
-	edges := taskEdges[issueID]
+	edges := taskEdges[typedIssueID]
 	if edges == nil {
-		edges = map[string]struct{}{}
+		edges = map[dependencyEdgeKey]struct{}{}
 	}
 
 	switch action {
@@ -2916,10 +2930,14 @@ func planDependencyMutation(
 		if depID == "" {
 			return outcome, nil, fmt.Errorf("missing depends_on_id")
 		}
-		if _, ok := taskIDs[depID]; !ok {
+		typedDepID, err := naming.ParseIssueID(depID)
+		if err != nil {
+			return outcome, nil, fmt.Errorf("invalid depends_on_id: %w", err)
+		}
+		if _, ok := taskIDs[typedDepID]; !ok {
 			return outcome, nil, fmt.Errorf("depends_on issue not found: %s", depID)
 		}
-		key := dependencyEdgeKey(depID, depType)
+		key := dependencyEdgeKey{depID: typedDepID, depType: depType}
 		if _, exists := edges[key]; exists {
 			outcome.Status = "no-op"
 			outcome.Reason = "edge already exists"
@@ -2945,7 +2963,11 @@ func planDependencyMutation(
 		if depID == "" {
 			return outcome, nil, fmt.Errorf("missing depends_on_id")
 		}
-		key := dependencyEdgeKey(depID, depType)
+		typedDepID, err := naming.ParseIssueID(depID)
+		if err != nil {
+			return outcome, nil, fmt.Errorf("invalid depends_on_id: %w", err)
+		}
+		key := dependencyEdgeKey{depID: typedDepID, depType: depType}
 		if _, exists := edges[key]; !exists {
 			outcome.Status = "no-op"
 			outcome.Reason = "edge already absent"
@@ -2974,11 +2996,19 @@ func planDependencyMutation(
 		if fromID == "" || toID == "" {
 			return outcome, nil, fmt.Errorf("retarget requires from_id and to_id")
 		}
-		if _, ok := taskIDs[toID]; !ok {
+		typedFromID, err := naming.ParseIssueID(fromID)
+		if err != nil {
+			return outcome, nil, fmt.Errorf("invalid from_id: %w", err)
+		}
+		typedToID, err := naming.ParseIssueID(toID)
+		if err != nil {
+			return outcome, nil, fmt.Errorf("invalid to_id: %w", err)
+		}
+		if _, ok := taskIDs[typedToID]; !ok {
 			return outcome, nil, fmt.Errorf("to issue not found: %s", toID)
 		}
-		removeKey := dependencyEdgeKey(fromID, depType)
-		addKey := dependencyEdgeKey(toID, depType)
+		removeKey := dependencyEdgeKey{depID: typedFromID, depType: depType}
+		addKey := dependencyEdgeKey{depID: typedToID, depType: depType}
 		needsRemove := false
 		needsAdd := false
 		if _, exists := edges[removeKey]; exists {
@@ -3093,12 +3123,12 @@ type dependencyLink struct {
 func buildListDependencyContext(tasks []domain.Task) ([]string, []dependencyLink) {
 	idSet := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
-		idSet[task.ID] = struct{}{}
+		idSet[task.ID.String()] = struct{}{}
 	}
 
 	topLevel := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
-		topLevel[task.ID] = struct{}{}
+		topLevel[task.ID.String()] = struct{}{}
 	}
 
 	links := make([]dependencyLink, 0, len(tasks))
@@ -3118,15 +3148,15 @@ func buildListDependencyContext(tasks []domain.Task) ([]string, []dependencyLink
 
 	for _, task := range tasks {
 		if task.ParentID != nil {
-			parentID := strings.TrimSpace(*task.ParentID)
+			parentID := strings.TrimSpace(task.ParentID.String())
 			if _, ok := idSet[parentID]; ok {
-				addLink(task.ID, parentID, domain.DependencyParentChild)
+				addLink(task.ID.String(), parentID, domain.DependencyParentChild)
 			}
 		}
 		for _, dep := range task.Dependencies {
-			depID := strings.TrimSpace(dep.ID)
+			depID := strings.TrimSpace(dep.ID.String())
 			if _, ok := idSet[depID]; ok {
-				addLink(task.ID, depID, dep.Type)
+				addLink(task.ID.String(), depID, dep.Type)
 			}
 		}
 	}
@@ -3151,14 +3181,14 @@ func buildListDependencyContext(tasks []domain.Task) ([]string, []dependencyLink
 func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]dependencyDetails, []dependencyDetails) {
 	statusByID := make(map[string]string, len(allTasks))
 	for _, candidate := range allTasks {
-		statusByID[candidate.ID] = candidate.Status.String()
+		statusByID[candidate.ID.String()] = candidate.Status.String()
 	}
 
 	dependencies := make([]dependencyDetails, 0, len(task.Dependencies)+1)
 	seenDependencies := make(map[string]struct{}, len(task.Dependencies)+1)
 
 	addDependency := func(dep domain.Dependency) {
-		id := strings.TrimSpace(dep.ID)
+		id := strings.TrimSpace(dep.ID.String())
 		if id == "" {
 			return
 		}
@@ -3181,9 +3211,9 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]depe
 	for _, dep := range task.Dependencies {
 		addDependency(dep)
 	}
-	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
+	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
 		addDependency(domain.Dependency{
-			ID:   strings.TrimSpace(*task.ParentID),
+			ID:   *task.ParentID,
 			Type: domain.DependencyParentChild,
 		})
 	}
@@ -3191,7 +3221,7 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]depe
 	dependents := make([]dependencyDetails, 0, 8)
 	seenDependents := map[string]struct{}{}
 	addDependent := func(dep domain.Dependency) {
-		id := strings.TrimSpace(dep.ID)
+		id := strings.TrimSpace(dep.ID.String())
 		if id == "" {
 			return
 		}
@@ -3215,14 +3245,14 @@ func buildDependencyProjection(task domain.Task, allTasks []domain.Task) ([]depe
 		if candidate.ID == task.ID {
 			continue
 		}
-		if candidate.ParentID != nil && strings.TrimSpace(*candidate.ParentID) == task.ID {
+		if candidate.ParentID != nil && strings.TrimSpace(candidate.ParentID.String()) == task.ID.String() {
 			addDependent(domain.Dependency{
 				ID:   candidate.ID,
 				Type: domain.DependencyParentChild,
 			})
 		}
 		for _, dep := range candidate.Dependencies {
-			if strings.TrimSpace(dep.ID) == task.ID {
+			if strings.TrimSpace(dep.ID.String()) == task.ID.String() {
 				addDependent(domain.Dependency{
 					ID:   candidate.ID,
 					Type: dep.Type,
@@ -3474,8 +3504,8 @@ func renderPrimeIssueSection(issueID string, task domain.Task) string {
 	}
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
-	if task.ParentID != nil && strings.TrimSpace(*task.ParentID) != "" {
-		parent = fmt.Sprintf("\nParent: %s", strings.TrimSpace(*task.ParentID))
+	if task.ParentID != nil && strings.TrimSpace(task.ParentID.String()) != "" {
+		parent = fmt.Sprintf("\nParent: %s", strings.TrimSpace(task.ParentID.String()))
 	}
 	return fmt.Sprintf(
 		"Active issue context (AZEDARACH_ISSUE_ID=%s):\nRefresh with `az issue get %s` if this looks stale.\n```\n%s: %s [status=%s priority=%s type=%s impl=%s]%s%s\nDependencies:\n%s\n```\n",
@@ -3518,7 +3548,7 @@ func formatPrimeDependencyLines(deps []domain.Dependency) string {
 	}
 	grouped := map[domain.DependencyType][]string{}
 	for _, dep := range deps {
-		grouped[dep.Type] = append(grouped[dep.Type], dep.ID)
+		grouped[dep.Type] = append(grouped[dep.Type], dep.ID.String())
 	}
 	lines := make([]string, 0, len(grouped))
 	order := []domain.DependencyType{

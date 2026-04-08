@@ -303,7 +303,7 @@ func (m *Model) reconcileCursorAfterIssuesRefresh() {
 	if pos.Task < 0 || pos.Task >= len(col.Tasks) {
 		return
 	}
-	m.nav.SelectTask(col.Tasks[pos.Task].ID, pos.Column)
+	m.nav.SelectTask(col.Tasks[pos.Task].ID.String(), pos.Column)
 }
 
 func (m *Model) applyPendingCreatedTaskSelection() {
@@ -492,7 +492,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			task, _ = m.getCurrentTaskAndSession()
 		}
 		if task != nil {
-			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID), m.width, m.height)
+			workspace := overlay.NewTaskWorkspaceOverlay(*task, m.tasks, m.pendingMutationForTask(task.ID.String()), m.width, m.height)
 			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 			return m, m.openOverlay(workspace)
 		}
@@ -518,11 +518,11 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionDrillDown: // Drill into children
 		task, _ := m.getCurrentTaskAndSession()
 		if task != nil {
-			children := m.getTaskChildren(task.ID)
+			children := m.getTaskChildren(task.ID.String())
 			if len(children) > 0 {
-				m.enterDrillDown(task.ID, task.Title)
+				m.enterDrillDown(task.ID.String(), task.Title)
 				columns := m.buildColumns()
-				m.nav.JumpToTaskByID(columns, children[0].ID)
+				m.nav.JumpToTaskByID(columns, children[0].ID.String())
 				m.ensureCursorVisible(columns)
 				return m, nil
 			}
@@ -674,7 +674,7 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if session != nil {
 			worktreeHint = session.Worktree
 		}
-		return m, m.updateFromBaseCmd(task.ID, worktreeHint, false)
+		return m, m.updateFromBaseCmd(task.ID.String(), worktreeHint, false)
 	case "P":
 		m.addToast(Toast{
 			Level: ToastWarning,
@@ -700,7 +700,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionMoveDown:
 		// Keep current task selected, then move down.
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.MoveDown(columns)
 		m.ensureCursorVisible(columns)
@@ -709,7 +709,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keybinds.ActionMoveUp:
 		// Keep current task selected, then move up.
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.MoveUp(columns)
 		m.ensureCursorVisible(columns)
@@ -729,7 +729,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Half-page movement with selection toggle
 	case keybinds.ActionHalfPageDown:
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.HalfPageDown(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -737,7 +737,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionHalfPageUp:
 		if task != nil {
-			m.editor.Select(task.ID)
+			m.editor.Select(task.ID.String())
 		}
 		m.nav.HalfPageUp(columns, m.halfPage())
 		m.ensureCursorVisible(columns)
@@ -746,7 +746,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Toggle current selection without moving.
 	case keybinds.ActionSelectToggle:
 		if task != nil {
-			m.editor.ToggleSelection(task.ID)
+			m.editor.ToggleSelection(task.ID.String())
 		}
 		return m, nil
 
@@ -755,7 +755,7 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		status := m.nav.GetCurrentStatus(columns)
 		for _, t := range m.tasks {
 			if t.Status == status {
-				m.editor.Select(t.ID)
+				m.editor.Select(t.ID.String())
 			}
 		}
 		return m, nil
@@ -769,10 +769,10 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Invert visible selection
 	case keybinds.ActionSelectInvert:
 		for _, t := range m.editor.ApplyFilter(m.tasks) {
-			if m.editor.IsSelected(t.ID) {
-				m.editor.Deselect(t.ID)
+			if m.editor.IsSelected(t.ID.String()) {
+				m.editor.Deselect(t.ID.String())
 			} else {
-				m.editor.Select(t.ID)
+				m.editor.Select(t.ID.String())
 			}
 		}
 		return m, nil
@@ -1042,8 +1042,8 @@ func (m Model) lookupTaskID(candidate string) string {
 		return ""
 	}
 	for _, task := range m.tasks {
-		if taskIDKey(task.ID) == key {
-			return task.ID
+		if taskIDKey(task.ID.String()) == key {
+			return task.ID.String()
 		}
 	}
 	return ""
@@ -1069,7 +1069,7 @@ func (m Model) lookupTaskIDByWorktree(worktree string) string {
 	}
 	for _, task := range m.tasks {
 		if task.Session != nil && strings.TrimSpace(task.Session.Worktree) == worktree {
-			return task.ID
+			return task.ID.String()
 		}
 	}
 	return ""
@@ -1182,7 +1182,7 @@ func (m Model) filterSuppressedHydratedTasks(tasks []domain.Task) []domain.Task 
 
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if m.isTaskHydrationSuppressed(task.ID) {
+		if m.isTaskHydrationSuppressed(task.ID.String()) {
 			continue
 		}
 		filtered = append(filtered, task)
@@ -1198,7 +1198,7 @@ func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
 	target := taskIDKey(taskID)
 	filtered := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		if taskIDKey(task.ID) == target {
+		if taskIDKey(task.ID.String()) == target {
 			continue
 		}
 		filtered = append(filtered, task)
@@ -1769,7 +1769,7 @@ func (m Model) taskAndSessionByID(issueID string) (*domain.Task, *domain.Session
 	}
 
 	for i := range m.tasks {
-		if taskIDKey(m.tasks[i].ID) != targetID {
+		if taskIDKey(m.tasks[i].ID.String()) != targetID {
 			continue
 		}
 		task := &m.tasks[i]
@@ -1968,7 +1968,7 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 		activeDescendantSessionByTask := buildActiveDescendantSessionByTask(m.tasks)
 		if len(activeDescendantSessionByTask) > 0 {
 			for i := range inColumn {
-				if activeDescendantSessionByTask[inColumn[i].ID] {
+				if activeDescendantSessionByTask[inColumn[i].ID.String()] {
 					inColumn[i].HasTmuxSession = true
 				}
 			}
@@ -1983,7 +1983,7 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
 	cursor := m.nav.GetCursor()
 	if task, session := m.nav.GetCurrentTask(columns); task != nil {
-		if cursor == nil || cursor.TaskID == "" || task.ID == cursor.TaskID {
+		if cursor == nil || cursor.TaskID == "" || task.ID.String() == cursor.TaskID {
 			return task, session
 		}
 	}
@@ -1995,7 +1995,7 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 		return nil, nil
 	}
 	for i := range m.tasks {
-		if m.tasks[i].ID == cursor.TaskID {
+		if m.tasks[i].ID.String() == cursor.TaskID {
 			task := m.tasks[i]
 			return &task, task.Session
 		}
@@ -2449,7 +2449,7 @@ func (m Model) requestWorktreeCleanupConfirmationCmd(taskID string, deleteTask b
 		msg.checkedAt = snapshot.LastCheckedAt
 
 		for _, task := range snapshot.Tasks {
-			if taskIDKey(task.ID) != taskIDKey(taskID) {
+			if taskIDKey(task.ID.String()) != taskIDKey(taskID) {
 				continue
 			}
 			msg.hasTask = true
@@ -2719,7 +2719,7 @@ func (m Model) selectionSummary() string {
 	filtered := m.editor.ApplyFilter(m.tasks)
 	visible := make(map[string]struct{}, len(filtered))
 	for _, task := range filtered {
-		visible[task.ID] = struct{}{}
+		visible[task.ID.String()] = struct{}{}
 	}
 
 	hiddenCount := 0
@@ -2989,7 +2989,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			// Find the task to get current status
 			var currentTask *domain.Task
 			for i := range m.tasks {
-				if m.tasks[i].ID == taskID {
+				if m.tasks[i].ID.String() == taskID {
 					currentTask = &m.tasks[i]
 					break
 				}
@@ -3142,7 +3142,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 
 func (m Model) taskExists(taskID string) bool {
 	for i := range m.tasks {
-		if m.tasks[i].ID == taskID {
+		if m.tasks[i].ID.String() == taskID {
 			return true
 		}
 	}
@@ -3293,7 +3293,7 @@ func shiftedTaskStatus(current domain.Status, delta int) (domain.Status, bool) {
 
 func (m *Model) applyOptimisticTaskStatus(taskID string, status domain.Status) {
 	for i := range m.tasks {
-		if m.tasks[i].ID == taskID {
+		if m.tasks[i].ID.String() == taskID {
 			m.tasks[i].Status = status
 			break
 		}
@@ -3388,7 +3388,7 @@ func (m *Model) syncTaskWorkspaceOverlay() {
 
 	var task *domain.Task
 	for i := range m.tasks {
-		if m.tasks[i].ID == taskID {
+		if m.tasks[i].ID.String() == taskID {
 			task = &m.tasks[i]
 			break
 		}
@@ -3415,7 +3415,7 @@ func (m *Model) applyPendingStatusOverlays() {
 		return
 	}
 	for i := range m.tasks {
-		key := taskIDKey(m.tasks[i].ID)
+		key := taskIDKey(m.tasks[i].ID.String())
 		pending, ok := m.pendingStatuses[key]
 		if !ok {
 			continue
@@ -3438,7 +3438,7 @@ func (m *Model) reconcilePendingStatuses() {
 
 	taskByID := make(map[string]domain.Task, len(m.tasks))
 	for _, task := range m.tasks {
-		taskByID[task.ID] = task
+		taskByID[task.ID.String()] = task
 	}
 
 	const stalePendingTTL = 2 * time.Minute
@@ -3476,15 +3476,15 @@ func (m *Model) reconcilePendingStatuses() {
 func (m Model) getTaskChildren(parentID string) []domain.Task {
 	var children []domain.Task
 	for _, task := range m.tasks {
-		if task.ID == parentID {
+		if task.ID.String() == parentID {
 			continue
 		}
-		if task.ParentID != nil && *task.ParentID == parentID {
+		if task.ParentID != nil && task.ParentID.String() == parentID {
 			children = append(children, task)
 			continue
 		}
 		for _, dep := range task.Dependencies {
-			if dep.Type == domain.DependencyParentChild && dep.ID == parentID {
+			if dep.Type == domain.DependencyParentChild && dep.ID.String() == parentID {
 				children = append(children, task)
 				break
 			}
@@ -3686,7 +3686,7 @@ func (m Model) resolveIssueSessionStateFromSnapshot(ctx context.Context, issueID
 		return domain.SessionIdle, false, err
 	}
 	for _, task := range snapshot.Tasks {
-		if task.ID != issueID {
+		if task.ID.String() != issueID {
 			continue
 		}
 		if task.Session == nil {
@@ -4031,7 +4031,7 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 		hasSession := task.Session != nil
 
 		candidates = append(candidates, overlay.MergeTarget{
-			ID:          task.ID,
+			ID:          task.ID.String(),
 			Label:       task.Title,
 			IsMain:      false,
 			Status:      task.Status,
@@ -4051,7 +4051,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	for _, task := range m.tasks {
 		if task.Session != nil {
 			sessions = append(sessions, overlay.SessionInfo{
-				IssueID:      task.ID,
+				IssueID:      task.ID.String(),
 				TaskTitle:    task.Title,
 				State:        task.Session.State,
 				StartedAt:    task.Session.StartedAt,
@@ -4111,7 +4111,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 						m.logger.Warn("daemon client unavailable for delete", "id", task.ID)
 						continue
 					}
-					err := m.daemonClient.DeleteTask(ctx, task.ID)
+					err := m.daemonClient.DeleteTask(ctx, task.ID.String())
 					if err != nil {
 						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
 						continue
@@ -4129,7 +4129,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 						m.logger.Warn("daemon client unavailable for archive", "id", task.ID)
 						continue
 					}
-					err := m.daemonClient.ArchiveTask(ctx, task.ID)
+					err := m.daemonClient.ArchiveTask(ctx, task.ID.String())
 					if err != nil {
 						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
 						continue

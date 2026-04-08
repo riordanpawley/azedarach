@@ -386,7 +386,7 @@ func (p *PlanningOverlay) renderCompletePhase() string {
 		titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
 
 		b.WriteString("  ")
-		b.WriteString(idStyle.Render(issue.ID + ": "))
+		b.WriteString(idStyle.Render(issue.ID.String() + ": "))
 		b.WriteString(titleStyle.Render(truncateText(issue.Title, 50)))
 		b.WriteString("\n")
 	}

@@ -225,7 +225,7 @@ func (w *TaskWorkspaceOverlay) halfPageStep() int {
 
 // TaskID returns the selected task ID shown in the workspace.
 func (w *TaskWorkspaceOverlay) TaskID() string {
-	return w.detail.task.ID
+	return w.detail.task.ID.String()
 }
 
 // SyncSnapshotFreshness updates the detail panel freshness metadata from the latest daemon snapshot.

@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -172,7 +173,7 @@ func TestDetailPanelViewWithGitOnlyStillShowsSessionSection(t *testing.T) {
 }
 
 func TestDetailPanelViewWithParent(t *testing.T) {
-	parentID := "az-parent"
+	parentID := naming.IssueID("az-parent")
 	task := domain.Task{
 		ID:       "az-child",
 		Title:    "Child task",
@@ -190,7 +191,7 @@ func TestDetailPanelViewWithParent(t *testing.T) {
 func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 	taskID := "az-current"
 	task := domain.Task{
-		ID:       taskID,
+		ID:       naming.IssueID(taskID),
 		Title:    "Current task",
 		Status:   domain.StatusOpen,
 		Priority: domain.P2,
@@ -209,7 +210,7 @@ func TestDetailPanelViewShowsTypedDependencies(t *testing.T) {
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
 			Dependencies: []domain.Dependency{
-				{ID: taskID, Type: domain.DependencyRelatedTo},
+				{ID: naming.IssueID(taskID), Type: domain.DependencyRelatedTo},
 			},
 		},
 		{

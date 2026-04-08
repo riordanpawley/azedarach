@@ -148,7 +148,7 @@ func daemonSnapshotCheckedAt() time.Time {
 func setTaskSession(t *testing.T, m *Model, issueID string, session *domain.Session) {
 	t.Helper()
 	for i := range m.tasks {
-		if m.tasks[i].ID != issueID {
+		if m.tasks[i].ID.String() != issueID {
 			continue
 		}
 		m.tasks[i].Session = cloneSession(session)
@@ -1495,23 +1495,26 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 	parentID := "az-parent"
 	blockerID := "az-blocker"
 	nonReadyID := "az-open"
+	parentIssueID := naming.IssueID(parentID)
+	blockerIssueID := naming.IssueID(blockerID)
+	nonReadyIssueID := naming.IssueID(nonReadyID)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
 		{
-			ID:       "az-child",
+			ID:       naming.IssueID("az-child"),
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 			Dependencies: []domain.Dependency{
-				{ID: blockerID, Type: domain.DependencyBlocks},
-				{ID: nonReadyID, Type: domain.DependencyBlocks},
+				{ID: blockerIssueID, Type: domain.DependencyBlocks},
+				{ID: nonReadyIssueID, Type: domain.DependencyBlocks},
 			},
 		},
-		{ID: parentID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic, HasWorktree: true},
-		{ID: blockerID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
-		{ID: nonReadyID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
+		{ID: parentIssueID, Title: "Parent epic", Status: domain.StatusInProgress, Type: domain.TypeEpic, HasWorktree: true},
+		{ID: blockerIssueID, Title: "Ready blocker", Status: domain.StatusDone, Type: domain.TypeTask, HasWorktree: true},
+		{ID: nonReadyIssueID, Title: "Non-ready blocker", Status: domain.StatusOpen, Type: domain.TypeTask},
 	}
 	m.sessions[parentID] = &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"}
 	m.sessions[blockerID] = &domain.Session{IssueID: naming.IssueID(blockerID), State: domain.SessionBusy, Worktree: "/tmp/blocker"}
@@ -1537,6 +1540,8 @@ func TestFollowOnMergeCandidateOrderingAndEligibility(t *testing.T) {
 func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -1635,14 +1640,14 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 
 	m.tasks = []domain.Task{
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		{
-			ID:     parentID,
+			ID:     parentIssueID,
 			Title:  "Parent epic",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeEpic,
@@ -1811,16 +1816,18 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 
 			m := newTestModel()
 			m.daemonClient = daemonclient.New(transport)
+			parentIssueID := naming.IssueID(parentID)
+			childIssueID := naming.IssueID(childID)
 			m.tasks = []domain.Task{
 				{
-					ID:       childID,
+					ID:       childIssueID,
 					Title:    "Child task",
 					Status:   domain.StatusInProgress,
 					Type:     domain.TypeTask,
-					ParentID: &parentID,
+					ParentID: &parentIssueID,
 				},
 				{
-					ID:     parentID,
+					ID:     parentIssueID,
 					Title:  "Parent epic",
 					Status: domain.StatusInProgress,
 					Type:   domain.TypeEpic,
@@ -1893,16 +1900,18 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 					Body:            respBody,
 				}, nil
 			case daemonclient.CommandTaskList:
+				childIssueID := naming.IssueID(childID)
+				parentIssueID := naming.IssueID(parentID)
 				tasks := []domain.Task{
 					{
-						ID:      childID,
+						ID:      childIssueID,
 						Title:   "Child task",
 						Status:  domain.StatusInProgress,
 						Type:    domain.TypeTask,
 						Session: &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionBusy, Worktree: "/tmp/child"},
 					},
 					{
-						ID:      parentID,
+						ID:      parentIssueID,
 						Title:   "Parent epic",
 						Status:  domain.StatusInProgress,
 						Type:    domain.TypeEpic,
@@ -2004,16 +2013,18 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		{
-			ID:          parentID,
+			ID:          parentIssueID,
 			Title:       "Parent epic",
 			Status:      domain.StatusInProgress,
 			Type:        domain.TypeEpic,
@@ -2342,9 +2353,11 @@ func TestActionModeMergeKeyTriggersFollowOnMergeFlow(t *testing.T) {
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
 	m.editor.EnterAction()
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
-		{ID: childID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentID},
-		{ID: parentID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
+		{ID: childIssueID, Title: "Child task", Status: domain.StatusInProgress, Type: domain.TypeTask, ParentID: &parentIssueID},
+		{ID: parentIssueID, Title: "Parent task", Status: domain.StatusDone, Type: domain.TypeTask},
 	}
 	setTaskSession(t, &m, childID, &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionPaused, Worktree: "/tmp/child"})
 	setTaskSession(t, &m, parentID, &domain.Session{IssueID: naming.IssueID(parentID), State: domain.SessionBusy, Worktree: "/tmp/parent"})
@@ -2478,9 +2491,10 @@ func TestFollowOnMergeSelectionTopLevelFallsBackToMergeMain(t *testing.T) {
 
 	m := newTestModel()
 	m.daemonClient = daemonclient.New(transport)
+	issueIDTyped := naming.IssueID(issueID)
 	m.tasks = []domain.Task{
 		{
-			ID:     issueID,
+			ID:     issueIDTyped,
 			Title:  "Top-level task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -3095,31 +3109,31 @@ func TestHandleSelectionWorktreeCleanupActions(t *testing.T) {
 		if confirmCmd != nil {
 			_ = confirmCmd()
 		}
-			if updated.pendingCleanup == nil {
-				t.Fatal("expected pending cleanup confirmation")
-			}
-			if got := transport.requests; len(got) != 2 ||
-				got[0] != daemonclient.CommandRuntimeReconcile ||
-				got[1] != daemonclient.CommandTaskList {
-				t.Fatalf("requests before confirmation = %v", got)
-			}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation")
+		}
+		if got := transport.requests; len(got) != 2 ||
+			got[0] != daemonclient.CommandRuntimeReconcile ||
+			got[1] != daemonclient.CommandTaskList {
+			t.Fatalf("requests before confirmation = %v", got)
+		}
 
-			updatedAny, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
-			updated, ok = updatedAny.(Model)
-			if !ok {
-				t.Fatalf("updated model type = %T, want Model", updatedAny)
-			}
-			if enterCmd != nil {
-				t.Fatal("expected enter to be ignored for cleanup confirmation")
-			}
-			if updated.pendingCleanup == nil {
-				t.Fatal("expected pending cleanup confirmation to remain after enter")
-			}
+		updatedAny, enterCmd := updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, ok = updatedAny.(Model)
+		if !ok {
+			t.Fatalf("updated model type = %T, want Model", updatedAny)
+		}
+		if enterCmd != nil {
+			t.Fatal("expected enter to be ignored for cleanup confirmation")
+		}
+		if updated.pendingCleanup == nil {
+			t.Fatal("expected pending cleanup confirmation to remain after enter")
+		}
 
-			updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
-				Key:   "yes",
-				Value: overlay.ConfirmResult{Confirmed: true},
-			})
+		updatedAny, runCleanupCmd := updated.handleSelection(overlay.SelectionMsg{
+			Key:   "yes",
+			Value: overlay.ConfirmResult{Confirmed: true},
+		})
 		updated, ok = updatedAny.(Model)
 		if !ok {
 			t.Fatalf("updated model type = %T, want Model", updatedAny)
@@ -4516,7 +4530,7 @@ func TestMergeSourceOverlaySelectsUpstreamSource(t *testing.T) {
 	}
 
 	view := menu.View()
-	if !strings.Contains(view, "Merge into") || !strings.Contains(view, target.ID) {
+	if !strings.Contains(view, "Merge into") || !strings.Contains(view, target.ID.String()) {
 		t.Fatalf("view = %q, want upstream header", view)
 	}
 
@@ -4587,9 +4601,10 @@ func TestStartSessionShiftSStartsDirectlyFromBaseBranch(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:     childID,
+			ID:     childIssueID,
 			Title:  "Child task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -4663,9 +4678,10 @@ func TestStartSessionLowercaseSStartsTmuxOnly(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:     childID,
+			ID:     childIssueID,
 			Title:  "Child task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -4738,19 +4754,21 @@ func TestSessionOriginCandidatesIncludeBaseBranchAndUpstreamSource(t *testing.T)
 	baseBranch := "develop"
 	parentID := "az-parent"
 	childID := "az-child"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 
 	m := newDaemonTestModel(&recordingDaemonTransport{})
 	m.config.Git.BaseBranch = baseBranch
 	m.tasks = []domain.Task{
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child task",
 			Status:   domain.StatusInProgress,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		{
-			ID:     parentID,
+			ID:     parentIssueID,
 			Title:  "Parent task",
 			Status: domain.StatusDone,
 			Type:   domain.TypeTask,
@@ -4837,23 +4855,26 @@ func TestStartSessionShiftSIgnoresUpstreamChoices(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
+	parentAIssueID := naming.IssueID(parentA)
+	parentBIssueID := naming.IssueID(parentB)
 	m.tasks = []domain.Task{
 		{
-			ID:           childID,
+			ID:           childIssueID,
 			Title:        "Child task",
 			Status:       domain.StatusInProgress,
 			Type:         domain.TypeTask,
-			ParentID:     &parentA,
-			Dependencies: []domain.Dependency{{ID: parentB, Type: domain.DependencyBlocks}},
+			ParentID:     &parentAIssueID,
+			Dependencies: []domain.Dependency{{ID: parentBIssueID, Type: domain.DependencyBlocks}},
 		},
 		{
-			ID:     parentA,
+			ID:     parentAIssueID,
 			Title:  "Parent A",
 			Status: domain.StatusDone,
 			Type:   domain.TypeTask,
 		},
 		{
-			ID:     parentB,
+			ID:     parentBIssueID,
 			Title:  "Parent B",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,
@@ -4945,9 +4966,10 @@ func TestStartSessionBangStartsYoloFromBaseBranch(t *testing.T) {
 
 	m := newDaemonTestModel(transport)
 	m.config.Git.BaseBranch = baseBranch
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:     childID,
+			ID:     childIssueID,
 			Title:  "Child task",
 			Status: domain.StatusInProgress,
 			Type:   domain.TypeTask,

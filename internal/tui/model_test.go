@@ -818,7 +818,7 @@ func TestRuntimeSignalRefreshTasks_BoardUsesRenderedWindow(t *testing.T) {
 	m.tasks = make([]domain.Task, 0, 12)
 	for i := 1; i <= 12; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       fmt.Sprintf("az-%d", i),
+			ID:       naming.IssueID(fmt.Sprintf("az-%d", i)),
 			Title:    fmt.Sprintf("Task %d", i),
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
@@ -859,7 +859,7 @@ func TestRuntimeSignalRefreshTasks_CompactUsesVisibleRows(t *testing.T) {
 	m.tasks = make([]domain.Task, 0, 16)
 	for i := 1; i <= 16; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       fmt.Sprintf("az-%02d", i),
+			ID:       naming.IssueID(fmt.Sprintf("az-%02d", i)),
 			Title:    fmt.Sprintf("Task %d", i),
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
@@ -1057,9 +1057,11 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 	m := newTestModel()
 	parentID := "az-parent"
 	childID := "az-child"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 	m.tasks = []domain.Task{
 		{
-			ID:          parentID,
+			ID:          parentIssueID,
 			Title:       "Parent",
 			Status:      domain.StatusDone,
 			Priority:    domain.P1,
@@ -1067,12 +1069,12 @@ func TestFollowOnMergeSelectionNoEligibleUpstreamShowsToast(t *testing.T) {
 			HasWorktree: false,
 		},
 		{
-			ID:          childID,
+			ID:          childIssueID,
 			Title:       "Child",
 			Status:      domain.StatusInProgress,
 			Priority:    domain.P1,
 			Type:        domain.TypeTask,
-			ParentID:    &parentID,
+			ParentID:    &parentIssueID,
 			HasWorktree: true,
 		},
 	}
@@ -1097,11 +1099,13 @@ func TestGetFollowOnMergeCandidatesRequiresUpstreamWorktree(t *testing.T) {
 	m := newTestModel()
 	parentID := "az-parent"
 	childID := "az-child"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
 
 	makeTasks := func(parentHasWorktree bool) []domain.Task {
 		return []domain.Task{
 			{
-				ID:          parentID,
+				ID:          parentIssueID,
 				Title:       "Parent",
 				Status:      domain.StatusDone,
 				Priority:    domain.P1,
@@ -1109,12 +1113,12 @@ func TestGetFollowOnMergeCandidatesRequiresUpstreamWorktree(t *testing.T) {
 				HasWorktree: parentHasWorktree,
 			},
 			{
-				ID:          childID,
+				ID:          childIssueID,
 				Title:       "Child",
 				Status:      domain.StatusInProgress,
 				Priority:    domain.P1,
 				Type:        domain.TypeTask,
-				ParentID:    &parentID,
+				ParentID:    &parentIssueID,
 				HasWorktree: true,
 			},
 		}
@@ -1167,7 +1171,7 @@ func TestHalfPageScroll(t *testing.T) {
 	// Add more tasks to Open column for scrolling
 	for i := 0; i < 10; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       string(rune('a' + i)),
+			ID:       naming.IssueID(string(rune('a' + i))),
 			Title:    "Extra Task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P3,
@@ -1229,7 +1233,7 @@ func TestHalfPageScroll(t *testing.T) {
 		m := newTestModel()
 		for i := 0; i < 50; i++ {
 			m.tasks = append(m.tasks, domain.Task{
-				ID:       string(rune('a'+i%26)) + string(rune('A'+i/26)),
+				ID:       naming.IssueID(string(rune('a'+i%26)) + string(rune('A'+i/26))),
 				Title:    "Extra Task",
 				Status:   domain.StatusOpen,
 				Priority: domain.P3,
@@ -1271,7 +1275,7 @@ func TestSelectModeHalfPageNavigation(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       string(rune('a' + i)),
+			ID:       naming.IssueID(string(rune('a' + i))),
 			Title:    "Extra Task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P3,
@@ -1537,7 +1541,7 @@ func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       string(rune('a' + i)),
+			ID:       naming.IssueID(string(rune('a' + i))),
 			Title:    "Extra Task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P3,
@@ -1562,13 +1566,13 @@ func TestNormalModeUpFromBottom_DoesNotTopSnapViewport(t *testing.T) {
 	}
 
 	lastVisible := initialEnd - 1
-	m.nav.SelectTask(columns[0].Tasks[lastVisible].ID, 0)
+	m.nav.SelectTask(columns[0].Tasks[lastVisible].ID.String(), 0)
 
 	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyUp})
 	newModel := result.(Model)
 
 	expectedTask := columns[0].Tasks[lastVisible-1].ID
-	if got := newModel.nav.GetCursor().TaskID; got != expectedTask {
+	if got := newModel.nav.GetCursor().TaskID; got != expectedTask.String() {
 		t.Fatalf("expected cursor to move up one task to %s, got %s", expectedTask, got)
 	}
 	if newModel.viewportStarts[0] != initialStart {
@@ -1581,7 +1585,7 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 
 	for i := 0; i < 30; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       fmt.Sprintf("open-%02d", i),
+			ID:       naming.IssueID(fmt.Sprintf("open-%02d", i)),
 			Title:    fmt.Sprintf("Open Task %02d", i),
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
@@ -1612,7 +1616,7 @@ func TestNormalModeDown_KeepsCursorVisibleWithIndicators(t *testing.T) {
 	}
 
 	m.viewportStarts[0] = start
-	m.nav.SelectTask(columns[0].Tasks[windowEnd-1].ID, 0)
+	m.nav.SelectTask(columns[0].Tasks[windowEnd-1].ID.String(), 0)
 
 	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyDown})
 	next := result.(Model)
@@ -1755,7 +1759,7 @@ func TestGotoMode(t *testing.T) {
 	// Add more tasks to Open column
 	for i := 0; i < 5; i++ {
 		m.tasks = append(m.tasks, domain.Task{
-			ID:       string(rune('a' + i)),
+			ID:       naming.IssueID(string(rune('a' + i))),
 			Title:    "Extra Task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P3,
@@ -1833,7 +1837,7 @@ func TestGotoMode(t *testing.T) {
 		boundaryModel := newTestModel()
 		for i := 0; i < 5; i++ {
 			boundaryModel.tasks = append(boundaryModel.tasks, domain.Task{
-				ID:       fmt.Sprintf("boundary-%d", i),
+				ID:       naming.IssueID(fmt.Sprintf("boundary-%d", i)),
 				Title:    "Boundary Task",
 				Status:   domain.StatusOpen,
 				Priority: domain.P3,
@@ -1879,7 +1883,7 @@ func TestGotoMode(t *testing.T) {
 
 		for i := 0; i < 5; i++ {
 			jumpModel.tasks = append(jumpModel.tasks, domain.Task{
-				ID:       fmt.Sprintf("jump-%02d", i),
+				ID:       naming.IssueID(fmt.Sprintf("jump-%02d", i)),
 				Title:    fmt.Sprintf("Jump Task %02d", i),
 				Status:   domain.StatusOpen,
 				Priority: domain.P3,
@@ -2320,21 +2324,23 @@ func TestEpicDrillDownFlow(t *testing.T) {
 
 	epicID := "az-epic"
 	childID := "az-epic-child"
+	epicIssueID := naming.IssueID(epicID)
+	childIssueID := naming.IssueID(childID)
 	m.tasks = append(m.tasks,
 		domain.Task{
-			ID:       epicID,
+			ID:       epicIssueID,
 			Title:    "Parent Epic",
 			Status:   domain.StatusOpen,
 			Priority: domain.P1,
 			Type:     domain.TypeEpic,
 		},
 		domain.Task{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Epic Child",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
-			ParentID: &epicID,
+			ParentID: &epicIssueID,
 		},
 	)
 
@@ -2357,7 +2363,7 @@ func TestEpicDrillDownFlow(t *testing.T) {
 	var renderedIDs []string
 	for _, column := range columns {
 		for _, task := range column.Tasks {
-			renderedIDs = append(renderedIDs, task.ID)
+			renderedIDs = append(renderedIDs, task.ID.String())
 		}
 	}
 	if slices.Contains(renderedIDs, "az-1") {
@@ -2388,29 +2394,32 @@ func TestNestedDrillDownEscapePopsSingleLevel(t *testing.T) {
 	parentID := "az-parent"
 	childID := "az-child"
 	grandchildID := "az-grandchild"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
+	grandchildIssueID := naming.IssueID(grandchildID)
 	m.tasks = append(m.tasks,
 		domain.Task{
-			ID:       parentID,
+			ID:       parentIssueID,
 			Title:    "Parent",
 			Status:   domain.StatusOpen,
 			Priority: domain.P1,
 			Type:     domain.TypeEpic,
 		},
 		domain.Task{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 		},
 		domain.Task{
-			ID:       grandchildID,
+			ID:       grandchildIssueID,
 			Title:    "Grandchild",
 			Status:   domain.StatusOpen,
 			Priority: domain.P3,
 			Type:     domain.TypeTask,
-			ParentID: &childID,
+			ParentID: &childIssueID,
 		},
 	)
 
@@ -2448,7 +2457,7 @@ func TestNestedDrillDownEscapePopsSingleLevel(t *testing.T) {
 	var renderedIDs []string
 	for _, column := range columns {
 		for _, task := range column.Tasks {
-			renderedIDs = append(renderedIDs, task.ID)
+			renderedIDs = append(renderedIDs, task.ID.String())
 		}
 	}
 	if !slices.Contains(renderedIDs, childID) {
@@ -2472,30 +2481,33 @@ func TestTaskDetailPanelIncludesTypedDependencies(t *testing.T) {
 	currentID := "az-current"
 	upstreamID := "az-upstream"
 	downstreamID := "az-downstream"
+	currentIssueID := naming.IssueID(currentID)
+	upstreamIssueID := naming.IssueID(upstreamID)
+	downstreamIssueID := naming.IssueID(downstreamID)
 
 	m.tasks = append(m.tasks,
 		domain.Task{
-			ID:       currentID,
+			ID:       currentIssueID,
 			Title:    "Current task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
 			Dependencies: []domain.Dependency{
-				{ID: downstreamID, Type: domain.DependencyBlocks},
+				{ID: downstreamIssueID, Type: domain.DependencyBlocks},
 			},
 		},
 		domain.Task{
-			ID:       upstreamID,
+			ID:       upstreamIssueID,
 			Title:    "Upstream task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
 			Dependencies: []domain.Dependency{
-				{ID: currentID, Type: domain.DependencyRelatedTo},
+				{ID: currentIssueID, Type: domain.DependencyRelatedTo},
 			},
 		},
 		domain.Task{
-			ID:       downstreamID,
+			ID:       downstreamIssueID,
 			Title:    "Downstream task",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
@@ -2590,14 +2602,15 @@ func TestEnterOnNonParentDependenciesDoesNotOpenChildDrillDown(t *testing.T) {
 	m.editor.EnterNormal()
 
 	taskID := "az-non-parent-rel"
+	taskIssueID := naming.IssueID(taskID)
 	m.tasks = append(m.tasks, domain.Task{
-		ID:       taskID,
+		ID:       taskIssueID,
 		Title:    "Task with blocks dependency only",
 		Status:   domain.StatusOpen,
 		Priority: domain.P2,
 		Type:     domain.TypeTask,
 		Dependencies: []domain.Dependency{
-			{ID: "az-upstream", Type: domain.DependencyBlocks},
+			{ID: naming.IssueID("az-upstream"), Type: domain.DependencyBlocks},
 		},
 	})
 	m.nav.SelectTask(taskID, 0)
@@ -2623,27 +2636,28 @@ func TestBuildColumns_HidesParentChildEvenWhenFilterToggleIsOff(t *testing.T) {
 	m.editor.EnterNormal()
 
 	parentID := "az-parent"
+	parentIssueID := naming.IssueID(parentID)
 	m.tasks = []domain.Task{
-		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
-		{ID: "az-child-parent-id", Title: "Child by parent_id", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{ID: parentIssueID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: naming.IssueID("az-child-parent-id"), Title: "Child by parent_id", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentIssueID},
 		{
-			ID:       "az-child-dep",
+			ID:       naming.IssueID("az-child-dep"),
 			Title:    "Child by parent-child dep",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
 			Dependencies: []domain.Dependency{
-				{ID: parentID, Type: domain.DependencyParentChild},
+				{ID: parentIssueID, Type: domain.DependencyParentChild},
 			},
 		},
 		{
-			ID:       "az-blocks-only",
+			ID:       naming.IssueID("az-blocks-only"),
 			Title:    "Blocks-only issue",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
 			Dependencies: []domain.Dependency{
-				{ID: parentID, Type: domain.DependencyBlocks},
+				{ID: parentIssueID, Type: domain.DependencyBlocks},
 			},
 		},
 	}
@@ -2655,7 +2669,7 @@ func TestBuildColumns_HidesParentChildEvenWhenFilterToggleIsOff(t *testing.T) {
 	openTasks := columns[domain.StatusOpen.Column()].Tasks
 	ids := make(map[string]struct{}, len(openTasks))
 	for _, task := range openTasks {
-		ids[task.ID] = struct{}{}
+		ids[task.ID.String()] = struct{}{}
 	}
 
 	if _, ok := ids[parentID]; !ok {
@@ -3320,7 +3334,7 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 	m.tasks[0].HasTmuxSession = true
 	m.tasks[0].Session = nil
 	m.tmuxAvailable = false
-	m.nav.SelectTask(m.tasks[0].ID, 0)
+	m.nav.SelectTask(m.tasks[0].ID.String(), 0)
 
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -3342,7 +3356,7 @@ func TestHandleSelection_AttachUsesTmuxPresenceWithoutSessionProjection(t *testi
 					}{{
 						Path:    "/tmp/wt-az-1",
 						Branch:  "riordan/az-1/topic",
-						IssueID: m.tasks[0].ID,
+						IssueID: m.tasks[0].ID.String(),
 					}},
 				})
 				if err != nil {
@@ -3425,7 +3439,7 @@ func TestDaemonSessionUpdatedEventAllowsImmediateAttachFromWorkspace(t *testing.
 	issueID := m.tasks[0].ID
 	m.tasks[0].Session = nil
 	m.tmuxAvailable = false
-	m.nav.SelectTask(issueID, 0)
+	m.nav.SelectTask(issueID.String(), 0)
 
 	updatedAt := time.Date(2026, time.March, 31, 1, 2, 3, 0, time.UTC)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
@@ -3482,7 +3496,7 @@ func TestHandleSelection_AttachFromTaskWorkspaceKeepsOverlayOpen(t *testing.T) {
 	task.HasTmuxSession = true
 	task.Session = nil
 	m.tasks[0] = task
-	m.nav.SelectTask(task.ID, 0)
+	m.nav.SelectTask(task.ID.String(), 0)
 
 	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, nil, nil, 120, 30))
 
@@ -3504,7 +3518,7 @@ func TestHandleSelection_AttachFromNonWorkspaceClosesOverlay(t *testing.T) {
 	task.HasTmuxSession = true
 	task.Session = nil
 	m.tasks[0] = task
-	m.nav.SelectTask(task.ID, 0)
+	m.nav.SelectTask(task.ID.String(), 0)
 
 	m.overlayStack.Push(overlay.NewActionMenu(task, nil))
 
@@ -3612,7 +3626,7 @@ func TestDaemonStreamEventMsg_GitStatusEventAppliesRuntimeProjectionDirectly(t *
 	if got.Session == nil || got.Session.Worktree != "/tmp/az-1" || got.Session.State != domain.SessionBusy {
 		t.Fatalf("task session = %+v, want busy session with runtime worktree", got.Session)
 	}
-	if session := updated.sessions[got.ID]; session == nil || session.Worktree != "/tmp/az-1" {
+	if session := updated.sessions[got.ID.String()]; session == nil || session.Worktree != "/tmp/az-1" {
 		t.Fatalf("projected session index = %+v, want /tmp/az-1", session)
 	}
 	if updated.daemonRevision != 1 {
@@ -3722,13 +3736,13 @@ func TestRuntimeProjectionStreamSyncsOpenTaskWorkspaceOverlay(t *testing.T) {
 	task.GitAdditions = 0
 	task.GitDeletions = 0
 	m.tasks[0] = task
-	m.nav.SelectTask(task.ID, 0)
+	m.nav.SelectTask(task.ID.String(), 0)
 	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30))
 
 	updatedAt := time.Date(2026, time.April, 1, 15, 0, 0, 0, time.UTC)
 	body, err := json.Marshal(protocol.ProjectionUpdateEventBody{
 		ProjectID: m.daemonProjectID(),
-		IssueID:   naming.IssueID(task.ID),
+		IssueID:   task.ID,
 		Worktree:  "/tmp/wt-az-1",
 		UpdatedAt: updatedAt,
 		Runtime: &protocol.RuntimeProjectionEventBody{
@@ -3820,26 +3834,30 @@ func TestRuntimeSignalsForBoardMarksAncestorCardsWithChildSessions(t *testing.T)
 	childID := "az-child"
 	grandchildID := "az-grandchild"
 	unrelatedID := "az-unrelated"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
+	grandchildIssueID := naming.IssueID(grandchildID)
+	unrelatedIssueID := naming.IssueID(unrelatedID)
 	startedAt := time.Now().Add(-2 * time.Minute)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
-		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
-		{ID: childID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+		{ID: parentIssueID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
+		{ID: childIssueID, Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentIssueID},
 		{
-			ID:       grandchildID,
+			ID:       grandchildIssueID,
 			Title:    "Grandchild",
 			Status:   domain.StatusOpen,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
-			ParentID: &childID,
+			ParentID: &childIssueID,
 			Session: &domain.Session{
-				IssueID:   naming.IssueID(grandchildID),
+				IssueID:   grandchildIssueID,
 				State:     domain.SessionBusy,
 				StartedAt: &startedAt,
 			},
 		},
-		{ID: unrelatedID, Title: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: unrelatedIssueID, Title: "Unrelated", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 	m.runtimeSignalsByTask = map[string]board.RuntimeSignals{
 		parentID:     {},
@@ -3908,25 +3926,28 @@ func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *tes
 	parentID := "az-parent"
 	childID := "az-child"
 	otherID := "az-other"
+	parentIssueID := naming.IssueID(parentID)
+	childIssueID := naming.IssueID(childID)
+	otherIssueID := naming.IssueID(otherID)
 	startedAt := time.Now().Add(-2 * time.Minute)
 
 	m := newTestModel()
 	m.tasks = []domain.Task{
-		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
+		{ID: parentIssueID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeEpic},
 		{
-			ID:       childID,
+			ID:       childIssueID,
 			Title:    "Child",
 			Status:   domain.StatusInProgress,
 			Priority: domain.P2,
 			Type:     domain.TypeTask,
-			ParentID: &parentID,
+			ParentID: &parentIssueID,
 			Session: &domain.Session{
-				IssueID:   naming.IssueID(childID),
+				IssueID:   childIssueID,
 				State:     domain.SessionBusy,
 				StartedAt: &startedAt,
 			},
 		},
-		{ID: otherID, Title: "Other", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: otherIssueID, Title: "Other", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 	m.editor.SetSort(&domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc})
 
@@ -3935,7 +3956,7 @@ func TestSortTasksInColumnSessionSortPromotesAncestorOfActiveChildSession(t *tes
 	if len(sortedOpen) != 2 {
 		t.Fatalf("sorted open tasks len = %d, want 2", len(sortedOpen))
 	}
-	if sortedOpen[0].ID != parentID {
+	if sortedOpen[0].ID.String() != parentID {
 		t.Fatalf("expected ancestor task %q to sort first, got %q", parentID, sortedOpen[0].ID)
 	}
 }

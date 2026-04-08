@@ -104,7 +104,7 @@ func (m *ActionMenu) buildActions() []Action {
 	// Cleanup can route by issue id through the daemon even when worktree
 	// metadata is stale in the current projection.
 	hasIssueScopedGitTarget := hasWorktree || hasTmuxSession
-	hasIssueScopedCleanupTarget := strings.TrimSpace(m.task.ID) != ""
+	hasIssueScopedCleanupTarget := strings.TrimSpace(m.task.ID.String()) != ""
 	actions = append(actions,
 		Action{Key: "u", Label: "Update from base branch", Enabled: hasIssueScopedGitTarget},
 		Action{Key: "m", Label: mergeLabel, Enabled: hasWorktree},
@@ -145,7 +145,7 @@ func (m *ActionMenu) hasEligibleUpstreamSource() bool {
 
 	findRelated := func(id string) (domain.Task, bool) {
 		for _, task := range m.relatedTasks {
-			if task.ID == id {
+			if task.ID.String() == id {
 				return task, true
 			}
 		}
@@ -153,7 +153,7 @@ func (m *ActionMenu) hasEligibleUpstreamSource() bool {
 	}
 
 	if m.task.ParentID != nil {
-		if parent, ok := findRelated(*m.task.ParentID); ok && isReady(parent.Status) {
+		if parent, ok := findRelated(m.task.ParentID.String()); ok && isReady(parent.Status) {
 			return true
 		}
 	}
@@ -161,7 +161,7 @@ func (m *ActionMenu) hasEligibleUpstreamSource() bool {
 		if dep.Type != domain.DependencyBlocks && dep.Type != domain.DependencyBlockedBy {
 			continue
 		}
-		if upstream, ok := findRelated(dep.ID); ok && isReady(upstream.Status) {
+		if upstream, ok := findRelated(dep.ID.String()); ok && isReady(upstream.Status) {
 			return true
 		}
 	}

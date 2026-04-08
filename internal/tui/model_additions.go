@@ -12,8 +12,8 @@ func (m Model) computePhases() map[string]phases.TaskPhaseInfo {
 	taskIDs := make(map[string]bool)
 
 	for _, task := range m.tasks {
-		taskMap[task.ID] = task
-		taskIDs[task.ID] = true
+		taskMap[task.ID.String()] = task
+		taskIDs[task.ID.String()] = true
 	}
 
 	// Compute phases

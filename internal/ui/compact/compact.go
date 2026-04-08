@@ -178,7 +178,7 @@ func (cv *CompactView) renderSeparator() string {
 // renderRow renders a single task row
 func (cv *CompactView) renderRow(index int, task domain.Task) string {
 	isActive := index == cv.cursor
-	isSelected := cv.selected[task.ID]
+	isSelected := cv.selected[task.ID.String()]
 
 	// Choose row style
 	rowStyle := cv.styles.Row
@@ -194,7 +194,7 @@ func (cv *CompactView) renderRow(index int, task domain.Task) string {
 	// Build cells
 	cells := []string{
 		cv.renderNumberCell(index, isActive, isSelected, rowStyle, widths.number),
-		cv.renderIDCell(task.ID, rowStyle, widths.id),
+		cv.renderIDCell(task.ID.String(), rowStyle, widths.id),
 		cv.renderTitleCell(task.Title, rowStyle, widths.title),
 		cv.renderStatusCell(task.Status, widths.status),
 		cv.renderPriorityCell(task.Priority, widths.priority),

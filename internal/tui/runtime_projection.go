@@ -17,7 +17,7 @@ func (m *Model) syncProjectionIndexesFromTasks() {
 
 	for i := range m.tasks {
 		task := &m.tasks[i]
-		taskID := strings.TrimSpace(task.ID)
+		taskID := strings.TrimSpace(task.ID.String())
 		if taskID == "" {
 			continue
 		}
@@ -58,7 +58,7 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 	}
 
 	for i := range m.tasks {
-		if taskIDKey(m.tasks[i].ID) != taskIDKey(issueID) {
+		if taskIDKey(m.tasks[i].ID.String()) != taskIDKey(issueID) {
 			continue
 		}
 
@@ -70,7 +70,8 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 		task.GitAdditions = projection.Git.GitAdditions
 		task.GitDeletions = projection.Git.GitDeletions
 
-		signals := m.runtimeSignalsByTask[task.ID]
+		taskID := task.ID.String()
+		signals := m.runtimeSignalsByTask[taskID]
 		signals.HasTmuxSession = projection.Session.HasSession
 		signals.HasWorktree = projection.Worktree.Exists
 		signals.GitAheadCount = projection.Git.GitAheadCount
@@ -79,7 +80,7 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 		signals.GitAdditions = projection.Git.GitAdditions
 		signals.GitDeletions = projection.Git.GitDeletions
 		if op := projection.Git.ActiveOperation; op != nil {
-				signals.PendingOperationID = strings.TrimSpace(op.OperationID.String())
+			signals.PendingOperationID = strings.TrimSpace(op.OperationID.String())
 			signals.PendingOperationState = string(op.State)
 			signals.PendingOperationPercent = op.ProgressPercent
 		} else {
@@ -87,14 +88,14 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			signals.PendingOperationState = ""
 			signals.PendingOperationPercent = 0
 		}
-		m.runtimeSignalsByTask[task.ID] = signals
+		m.runtimeSignalsByTask[taskID] = signals
 
 		if worktreePath := strings.TrimSpace(projection.Session.Worktree); worktreePath != "" {
-			m.runtimeSignalWorktreeByTask[task.ID] = worktreePath
+			m.runtimeSignalWorktreeByTask[taskID] = worktreePath
 		} else if projection.Worktree.Exists && strings.TrimSpace(projection.Worktree.Path) != "" {
-			m.runtimeSignalWorktreeByTask[task.ID] = strings.TrimSpace(projection.Worktree.Path)
+			m.runtimeSignalWorktreeByTask[taskID] = strings.TrimSpace(projection.Worktree.Path)
 		} else {
-			delete(m.runtimeSignalWorktreeByTask, task.ID)
+			delete(m.runtimeSignalWorktreeByTask, taskID)
 		}
 
 		if projection.Session.HasSession {
@@ -102,13 +103,13 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			if next == nil {
 				next = &domain.Session{}
 			}
-				next.IssueID = naming.IssueID(task.ID)
+			next.IssueID = task.ID
 			if state, ok := projectSessionLifecycleState(projection.Session.State); ok {
 				next.State = state
 			} else {
 				task.Session = nil
 				task.HasTmuxSession = false
-				delete(m.sessions, task.ID)
+				delete(m.sessions, taskID)
 				m.syncTaskWorkspaceOverlay()
 				return true
 			}
@@ -129,11 +130,11 @@ func (m *Model) applyRuntimeProjection(projection protocol.RuntimeProjection) bo
 			}
 			task.Session = next
 			task.HasTmuxSession = true
-			m.sessions[task.ID] = cloneSession(next)
+			m.sessions[taskID] = cloneSession(next)
 		} else {
 			task.Session = nil
 			task.HasTmuxSession = false
-			delete(m.sessions, task.ID)
+			delete(m.sessions, taskID)
 		}
 
 		m.syncTaskWorkspaceOverlay()
@@ -155,7 +156,7 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 	}
 
 	for i := range m.tasks {
-		if taskIDKey(m.tasks[i].ID) != taskIDKey(issueID) {
+		if taskIDKey(m.tasks[i].ID.String()) != taskIDKey(issueID) {
 			continue
 		}
 
@@ -163,7 +164,7 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 		if !hasSession {
 			m.tasks[i].Session = nil
 			m.tasks[i].HasTmuxSession = false
-			delete(m.sessions, m.tasks[i].ID)
+			delete(m.sessions, m.tasks[i].ID.String())
 			m.syncTaskWorkspaceOverlay()
 			return true
 		}
@@ -185,7 +186,7 @@ func (m *Model) applyRuntimeProjectionFromSessionEvent(body protocol.SessionProj
 		}
 		m.tasks[i].Session = next
 		m.tasks[i].HasTmuxSession = true
-		m.sessions[m.tasks[i].ID] = cloneSession(next)
+		m.sessions[m.tasks[i].ID.String()] = cloneSession(next)
 		m.syncTaskWorkspaceOverlay()
 		return true
 	}

@@ -834,19 +834,24 @@ func fanoutPlanFromProtocol(plan protocol.FanoutPlan) fanoutPlan {
 }
 
 func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReadyResult, error) {
-	byID := make(map[string]domain.Task, len(tasks))
-	children := make(map[string][]string, len(tasks))
+	rootID, err := naming.ParseIssueID(strings.TrimSpace(rootIssueID))
+	if err != nil {
+		return fanoutReadyResult{}, fmt.Errorf("invalid root issue id %q: %w", rootIssueID, err)
+	}
+	byID := make(map[naming.IssueID]domain.Task, len(tasks))
+	children := make(map[naming.IssueID][]naming.IssueID, len(tasks))
 	for _, t := range tasks {
-		byID[t.ID] = t
-		if t.ParentID != nil && strings.TrimSpace(*t.ParentID) != "" {
-			p := strings.TrimSpace(*t.ParentID)
-			children[p] = append(children[p], t.ID)
+		taskID := t.ID
+		byID[taskID] = t
+		if t.ParentID != nil && !t.ParentID.IsZero() {
+			p := *t.ParentID
+			children[p] = append(children[p], taskID)
 		}
 	}
-	if _, ok := byID[rootIssueID]; !ok {
+	if _, ok := byID[rootID]; !ok {
 		return fanoutReadyResult{}, fmt.Errorf("root issue not found: %s", rootIssueID)
 	}
-	desc := collectDescendants(rootIssueID, children)
+	desc := collectDescendants(rootID, children)
 	leaves := make([]string, 0, len(desc))
 	for _, id := range desc {
 		task := byID[id]
@@ -854,7 +859,7 @@ func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReady
 			continue
 		}
 		if len(children[id]) == 0 {
-			leaves = append(leaves, id)
+			leaves = append(leaves, id.String())
 		}
 	}
 	sort.Strings(leaves)
@@ -863,43 +868,47 @@ func computeRunnableLeaves(rootIssueID string, tasks []domain.Task) (fanoutReady
 		Runnable:    make([]string, 0, len(leaves)),
 		Blocked:     make(map[string]string),
 	}
-	for _, id := range leaves {
+	for _, idRaw := range leaves {
+		id, parseErr := naming.ParseIssueID(idRaw)
+		if parseErr != nil {
+			continue
+		}
 		task := byID[id]
 		if task.Status == domain.StatusDone {
 			continue
 		}
 		if task.Status == domain.StatusBlocked {
-			result.Blocked[id] = "status=blocked"
+			result.Blocked[idRaw] = "status=blocked"
 			continue
 		}
 		blockers := unresolvedBlockers(task, byID)
 		if len(blockers) > 0 {
-			result.Blocked[id] = "waiting on " + strings.Join(blockers, ",")
+			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
 			continue
 		}
-		result.Runnable = append(result.Runnable, id)
+		result.Runnable = append(result.Runnable, idRaw)
 	}
 	return result, nil
 }
 
-func collectDescendants(root string, children map[string][]string) []string {
-	out := make([]string, 0, 16)
-	stack := append([]string(nil), children[root]...)
-	seen := map[string]struct{}{}
-	for len(stack) > 0 {
-		cur := stack[0]
-		stack = stack[1:]
+func collectDescendants(root naming.IssueID, children map[naming.IssueID][]naming.IssueID) []naming.IssueID {
+	out := make([]naming.IssueID, 0, 16)
+	stackTyped := append([]naming.IssueID(nil), children[root]...)
+	seen := map[naming.IssueID]struct{}{}
+	for len(stackTyped) > 0 {
+		cur := stackTyped[0]
+		stackTyped = stackTyped[1:]
 		if _, ok := seen[cur]; ok {
 			continue
 		}
 		seen[cur] = struct{}{}
 		out = append(out, cur)
-		stack = append(stack, children[cur]...)
+		stackTyped = append(stackTyped, children[cur]...)
 	}
 	return out
 }
 
-func unresolvedBlockers(task domain.Task, byID map[string]domain.Task) []string {
+func unresolvedBlockers(task domain.Task, byID map[naming.IssueID]domain.Task) []string {
 	out := make([]string, 0, 4)
 	for _, dep := range task.Dependencies {
 		if dep.Type != domain.DependencyBlocks {
@@ -907,11 +916,11 @@ func unresolvedBlockers(task domain.Task, byID map[string]domain.Task) []string 
 		}
 		depTask, ok := byID[dep.ID]
 		if !ok {
-			out = append(out, dep.ID+"(missing)")
+			out = append(out, dep.ID.String()+"(missing)")
 			continue
 		}
 		if depTask.Status != domain.StatusDone {
-			out = append(out, dep.ID)
+			out = append(out, dep.ID.String())
 		}
 	}
 	sort.Strings(out)

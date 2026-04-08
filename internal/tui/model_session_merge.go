@@ -309,7 +309,7 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 			})
 			return m, nil
 		}
-		return m, m.resolveConflictWithAICmd(task.ID)
+		return m, m.resolveConflictWithAICmd(task.ID.String())
 
 	default:
 		return m, nil
@@ -561,12 +561,12 @@ func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Ses
 		})
 		return nil
 	}
-	targetState, targetStateKnown := projectedSessionState(session, m.sessionForIssue(task.ID))
+	targetState, targetStateKnown := projectedSessionState(session, m.sessionForIssue(task.ID.String()))
 
 	candidates := m.getFollowOnMergeCandidates(task)
 	if len(candidates) == 0 {
 		if task.ParentID == nil {
-			return m.resolveMergeToMainCmd(task.ID, true)
+			return m.resolveMergeToMainCmd(task.ID.String(), true)
 		}
 		m.addToast(Toast{
 			Level:   ToastWarning,
@@ -582,7 +582,7 @@ func (m *Model) followOnMergeSelectionCmd(task *domain.Task, session *domain.Ses
 			"targetID", task.ID,
 			"relation", candidates[0].relation,
 		)
-		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID, targetState, targetStateKnown, true)
+		return m.resolveFollowOnMergeCmd(candidates[0].target.ID, task.ID.String(), targetState, targetStateKnown, true)
 	}
 
 	upstreamTargets := make([]overlay.MergeTarget, 0, len(candidates))
@@ -686,7 +686,7 @@ func (m Model) openMergeTargetSelection(task *domain.Task) tea.Cmd {
 				return overlay.SelectionMsg{
 					Key: "merge",
 					Value: overlay.MergeTargetSelectedMsg{
-						SourceID: task.ID,
+						SourceID: task.ID.String(),
 						TargetID: targetID,
 					},
 				}
@@ -702,7 +702,7 @@ func (m Model) sessionForIssue(issueID string) *domain.Session {
 		return nil
 	}
 	for i := range m.tasks {
-		if m.tasks[i].ID == issueID && m.tasks[i].Session != nil {
+		if m.tasks[i].ID.String() == issueID && m.tasks[i].Session != nil {
 			return m.tasks[i].Session
 		}
 	}
@@ -731,7 +731,7 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			return
 		}
 		for _, task := range m.tasks {
-			if task.ID != taskID {
+			if task.ID.String() != taskID {
 				continue
 			}
 			hasWorktree := false
@@ -745,7 +745,7 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 			}
 			candidates = append(candidates, followOnMergeCandidate{
 				target: overlay.MergeTarget{
-					ID:          task.ID,
+					ID:          task.ID.String(),
 					Label:       task.Title,
 					IsMain:      false,
 					Status:      task.Status,
@@ -760,12 +760,12 @@ func (m Model) getFollowOnMergeCandidates(target *domain.Task) []followOnMergeCa
 	}
 
 	if target.ParentID != nil {
-		addCandidate(*target.ParentID, string(domain.DependencyParentChild), 0)
+		addCandidate(target.ParentID.String(), string(domain.DependencyParentChild), 0)
 	}
 	for _, dep := range target.Dependencies {
 		switch dep.Type {
 		case domain.DependencyBlocks, domain.DependencyBlockedBy:
-			addCandidate(dep.ID, string(domain.DependencyBlocks), 1)
+			addCandidate(dep.ID.String(), string(domain.DependencyBlocks), 1)
 		}
 	}
 

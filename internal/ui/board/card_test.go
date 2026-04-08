@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -727,7 +728,7 @@ func TestRenderRuntimeSignalsCompact(t *testing.T) {
 }
 
 func TestBuildChildProgress(t *testing.T) {
-	parentID := "az-parent"
+	parentID := naming.IssueID("az-parent")
 	tasks := []domain.Task{
 		{ID: parentID, Title: "Parent", Status: domain.StatusOpen},
 		{ID: "az-c1", Title: "Child 1", Status: domain.StatusDone, ParentID: &parentID},
@@ -735,9 +736,9 @@ func TestBuildChildProgress(t *testing.T) {
 	}
 
 	progress := BuildChildProgress(tasks)
-	got, ok := progress[parentID]
+	got, ok := progress[parentID.String()]
 	if !ok {
-		t.Fatalf("expected child progress for %s", parentID)
+		t.Fatalf("expected child progress for %s", parentID.String())
 	}
 	if got.Total != 2 || got.Done != 1 {
 		t.Fatalf("progress = %+v, want total=2 done=1", got)
