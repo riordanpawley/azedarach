@@ -102,16 +102,16 @@ func sessionProjectionStateRank(state daemonstate.SessionState) int {
 }
 
 func shouldReplaceSessionProjection(existing, candidate daemonstate.Session) bool {
-	existingRank := sessionProjectionStateRank(existing.State)
-	candidateRank := sessionProjectionStateRank(candidate.State)
-	if candidateRank != existingRank {
-		return candidateRank > existingRank
-	}
 	if candidate.UpdatedAt.After(existing.UpdatedAt) {
 		return true
 	}
 	if existing.UpdatedAt.After(candidate.UpdatedAt) {
 		return false
+	}
+	existingRank := sessionProjectionStateRank(existing.State)
+	candidateRank := sessionProjectionStateRank(candidate.State)
+	if candidateRank != existingRank {
+		return candidateRank > existingRank
 	}
 	return strings.TrimSpace(candidate.ID) < strings.TrimSpace(existing.ID)
 }

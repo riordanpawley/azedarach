@@ -159,34 +159,65 @@ func TestSessionProjectionIssueIDPrefersSessionNameParsing(t *testing.T) {
 	}
 }
 
-func TestSessionProjectionByIssueKeyPrefersActiveStateOverStopped(t *testing.T) {
+func TestSessionProjectionByIssueKeyPrefersMostRecentState(t *testing.T) {
 	now := time.Now().UTC()
-	sessions := []daemonstate.Session{
-		{
-			ID:        "az-bra",
-			IssueID:   "az-bra",
-			State:     daemonstate.SessionStateStopped,
-			UpdatedAt: now,
-		},
-		{
-			ID:        "plain",
-			IssueID:   "bra",
-			State:     daemonstate.SessionStateAttached,
-			UpdatedAt: now.Add(-1 * time.Minute),
-		},
-	}
+	t.Run("newer attached wins over older stopped", func(t *testing.T) {
+		sessions := []daemonstate.Session{
+			{
+				ID:        "az-bra",
+				IssueID:   "az-bra",
+				State:     daemonstate.SessionStateStopped,
+				UpdatedAt: now.Add(-1 * time.Minute),
+			},
+			{
+				ID:        "plain",
+				IssueID:   "bra",
+				State:     daemonstate.SessionStateAttached,
+				UpdatedAt: now,
+			},
+		}
 
-	byIssue := sessionProjectionByIssueKey(sessions, "azedarach")
-	entry, ok := byIssue["bra"]
-	if !ok {
-		t.Fatalf("missing projection for issue key bra: %+v", byIssue)
-	}
-	if entry.State != daemonstate.SessionStateAttached {
-		t.Fatalf("projection state = %s, want %s", entry.State, daemonstate.SessionStateAttached)
-	}
-	if entry.ID != "plain" {
-		t.Fatalf("projection session id = %s, want plain", entry.ID)
-	}
+		byIssue := sessionProjectionByIssueKey(sessions, "azedarach")
+		entry, ok := byIssue["bra"]
+		if !ok {
+			t.Fatalf("missing projection for issue key bra: %+v", byIssue)
+		}
+		if entry.State != daemonstate.SessionStateAttached {
+			t.Fatalf("projection state = %s, want %s", entry.State, daemonstate.SessionStateAttached)
+		}
+		if entry.ID != "plain" {
+			t.Fatalf("projection session id = %s, want plain", entry.ID)
+		}
+	})
+
+	t.Run("newer stopped wins over older attached", func(t *testing.T) {
+		sessions := []daemonstate.Session{
+			{
+				ID:        "plain",
+				IssueID:   "bra",
+				State:     daemonstate.SessionStateAttached,
+				UpdatedAt: now.Add(-1 * time.Minute),
+			},
+			{
+				ID:        "az-bra",
+				IssueID:   "az-bra",
+				State:     daemonstate.SessionStateStopped,
+				UpdatedAt: now,
+			},
+		}
+
+		byIssue := sessionProjectionByIssueKey(sessions, "azedarach")
+		entry, ok := byIssue["bra"]
+		if !ok {
+			t.Fatalf("missing projection for issue key bra: %+v", byIssue)
+		}
+		if entry.State != daemonstate.SessionStateStopped {
+			t.Fatalf("projection state = %s, want %s", entry.State, daemonstate.SessionStateStopped)
+		}
+		if entry.ID != "az-bra" {
+			t.Fatalf("projection session id = %s, want az-bra", entry.ID)
+		}
+	})
 }
 
 func TestSourceForSessionInvariant(t *testing.T) {
