@@ -23,21 +23,32 @@ type Client struct {
 	transport TransportClient
 	policy    reconnect.Policy
 	readWait  ReadWaitPolicy
-	projectID string
+	projectID naming.ProjectID
 }
 
 // New returns a shared daemon client with default reconnect policy.
 func New(transport TransportClient) *Client {
+	defaultProjectID, err := naming.ParseProjectID(protocol.DefaultProjectID)
+	if err != nil {
+		defaultProjectID = naming.ProjectID(protocol.DefaultProjectID)
+	}
 	return &Client{
 		transport: transport,
 		policy:    reconnect.DefaultPolicy(),
 		readWait:  DefaultReadWaitPolicy(),
+		projectID: defaultProjectID,
 	}
 }
 
 // WithProjectID sets the default project route used for command metadata and fallback subscriptions.
 func (c *Client) WithProjectID(projectID string) *Client {
-	c.projectID = protocol.NormalizeProjectID(projectID)
+	c.projectID = normalizeRouteProjectID(projectID)
+	return c
+}
+
+// WithProjectRouteID sets the default project route using an explicit typed identifier.
+func (c *Client) WithProjectRouteID(projectID naming.ProjectID) *Client {
+	c.projectID = normalizeRouteProjectID(projectID.String())
 	return c
 }
 
@@ -114,4 +125,17 @@ func (c *Client) Subscribe(ctx context.Context, projectID string, fromRevision u
 		}
 	}
 	return nil, fmt.Errorf("subscribe failed after retries: %w", lastErr)
+}
+
+func normalizeRouteProjectID(projectID string) naming.ProjectID {
+	normalized := protocol.NormalizeProjectID(projectID)
+	parsed, err := naming.ParseProjectID(normalized)
+	if err == nil {
+		return parsed
+	}
+	fallback, fallbackErr := naming.ParseProjectID(protocol.DefaultProjectID)
+	if fallbackErr == nil {
+		return fallback
+	}
+	return naming.ProjectID(protocol.DefaultProjectID)
 }

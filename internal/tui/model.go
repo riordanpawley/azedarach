@@ -150,11 +150,12 @@ type Model struct {
 	runtimeSignalWorktreeByTask map[string]string
 
 	// Project
-	currentProject string
-	projects       []domain.Project
-	repoDir        string
-	runtimeRepoDir string
-	logFilePath    string
+	currentProject       string
+	daemonProjectRouteID naming.ProjectID
+	projects             []domain.Project
+	repoDir              string
+	runtimeRepoDir       string
+	logFilePath          string
 
 	// Toasts
 	toasts []Toast
@@ -286,7 +287,8 @@ func New(cfg *config.Config) Model {
 		currentProject:              resolveInitialProjectName(deps.ProjectRegistry, repoDir),
 	}
 	logger.Info("tui runtime initialized", "repo_dir", repoDir, "runtime_repo_dir", runtimeRepoDir, "daemon_socket", daemonSocketPath, "project", m.currentProject)
-	m.daemonClient.WithProjectID(m.daemonProjectID())
+	m.refreshDaemonProjectRouteID()
+	m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	return m
 }
 
@@ -1205,16 +1207,20 @@ func removeTaskByID(tasks []domain.Task, taskID string) []domain.Task {
 }
 
 func (m Model) daemonClientForSocket(socketPath, projectID string) *daemonclient.Client {
+	routeID := naming.ProjectID(protocol.NormalizeProjectID(projectID))
+	if parsed, err := naming.ParseProjectID(routeID.String()); err == nil {
+		routeID = parsed
+	}
 	if m.daemonClient != nil {
 		if strings.TrimSpace(m.daemonSocketPath) == "" || m.daemonSocketPath == socketPath {
-			return m.daemonClient.WithProjectID(projectID)
+			return m.daemonClient.WithProjectRouteID(routeID)
 		}
 	}
 	readWaitPolicy := daemonclient.DefaultReadWaitPolicy()
 	if m.daemonClient != nil {
 		readWaitPolicy = m.daemonClient.ReadWaitPolicy()
 	}
-	return newScopedDaemonClient(socketPath, projectID, readWaitPolicy)
+	return newScopedDaemonClient(socketPath, routeID.String(), readWaitPolicy)
 }
 
 func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client) (daemonclient.TaskSnapshot, error) {
@@ -1258,7 +1264,11 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 		if socketPath == "" {
 			socketPath = config.DaemonSocketPathFor(m.activeProjectPath())
 		}
-		daemonClient := m.daemonClientForSocket(socketPath, project.Name)
+		projectRouteID, ok := daemonProjectRouteIDForPath(project.Path)
+		if !ok {
+			projectRouteID = naming.ProjectID(protocol.NormalizeProjectID(project.Name))
+		}
+		daemonClient := m.daemonClientForSocket(socketPath, projectRouteID.String())
 
 		snapshot, err := m.readTaskSnapshot(ctx, daemonClient)
 		if err != nil {
@@ -1271,10 +1281,10 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 				err:       err,
 			}
 		}
-		events, err := daemonClient.Subscribe(context.Background(), project.Name, snapshot.Revision)
+		events, err := daemonClient.Subscribe(context.Background(), projectRouteID.String(), snapshot.Revision)
 		if err != nil {
 			if m.logger != nil {
-				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
+				m.logger.Warn("project switch subscribe failed", "to_project", project.Name, "to_project_route", projectRouteID.String(), "revision", snapshot.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 			}
 			return projectSwitchResultMsg{
 				switchSeq: switchSeq,
@@ -1283,7 +1293,7 @@ func (m Model) switchProjectCmd(project config.Project) tea.Cmd {
 			}
 		}
 		if m.logger != nil {
-			m.logger.Info("project switch snapshot loaded", "from_project", m.currentProject, "to_project", project.Name, "revision", snapshot.Revision, "task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
+			m.logger.Info("project switch snapshot loaded", "from_project", m.currentProject, "to_project", project.Name, "to_project_route", projectRouteID.String(), "revision", snapshot.Revision, "task_count", len(snapshot.Tasks), "elapsed_ms", time.Since(startedAt).Milliseconds())
 		}
 
 		return projectSwitchResultMsg{
@@ -1396,9 +1406,10 @@ func (m *Model) rebindProjectContext(project config.Project, projectConfig *conf
 	}
 	m.currentProject = project.Name
 	m.repoDir = project.Path
+	m.refreshDaemonProjectRouteID()
 	m.rebuildProjectScopedServices()
 	if m.daemonClient != nil {
-		m.daemonClient.WithProjectID(m.daemonProjectID())
+		m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	}
 }
 
@@ -1492,36 +1503,51 @@ func (m Model) reduceDaemonEvent(evt protocol.EventEnvelope) daemonEventDecision
 	}
 }
 
+func (m *Model) refreshDaemonProjectRouteID() {
+	m.daemonProjectRouteID = m.computeDaemonProjectRouteID()
+}
+
+func (m Model) daemonProjectRouteIDValue() naming.ProjectID {
+	return m.computeDaemonProjectRouteID()
+}
+
 func (m Model) daemonProjectID() string {
-	if m.currentProject != "" {
-		if m.projectRegistry != nil {
-			if project, err := m.projectRegistry.Get(m.currentProject); err == nil {
-				if projectID := daemonProjectIDForPath(project.Path); strings.TrimSpace(projectID) != "" {
-					return projectID
-				}
+	return m.daemonProjectRouteIDValue().String()
+}
+
+func (m Model) computeDaemonProjectRouteID() naming.ProjectID {
+	if m.currentProject != "" && m.projectRegistry != nil {
+		if project, err := m.projectRegistry.Get(m.currentProject); err == nil {
+			if projectID, ok := daemonProjectRouteIDForPath(project.Path); ok {
+				return projectID
 			}
 		}
-		if projectPath := strings.TrimSpace(m.activeProjectPath()); projectPath != "" {
-			if strings.EqualFold(filepath.Base(projectPath), strings.TrimSpace(m.currentProject)) {
-				if projectID := daemonProjectIDForPath(projectPath); strings.TrimSpace(projectID) != "" {
-					return projectID
-				}
-			}
-		}
-		return m.currentProject
 	}
 	if projectPath := strings.TrimSpace(m.activeProjectPath()); projectPath != "" {
-		if projectID := daemonProjectIDForPath(projectPath); strings.TrimSpace(projectID) != "" {
+		if m.currentProject == "" || strings.EqualFold(filepath.Base(projectPath), strings.TrimSpace(m.currentProject)) {
+			if projectID, ok := daemonProjectRouteIDForPath(projectPath); ok {
+				return projectID
+			}
+		}
+	}
+	if normalizedCurrent := protocol.NormalizeProjectID(m.currentProject); strings.TrimSpace(normalizedCurrent) != "" {
+		if projectID, err := naming.ParseProjectID(normalizedCurrent); err == nil {
 			return projectID
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		if projectID := daemonProjectIDForPath(cwd); strings.TrimSpace(projectID) != "" {
+		if projectID, ok := daemonProjectRouteIDForPath(cwd); ok {
 			return projectID
 		}
-		return filepath.Base(cwd)
+		if fallback, parseErr := naming.ParseProjectID(protocol.NormalizeProjectID(filepath.Base(cwd))); parseErr == nil {
+			return fallback
+		}
 	}
-	return "default"
+	defaultProjectID, err := naming.ParseProjectID(protocol.DefaultProjectID)
+	if err == nil {
+		return defaultProjectID
+	}
+	return naming.ProjectID(protocol.DefaultProjectID)
 }
 
 func daemonProjectIDForPath(path string) string {
@@ -1534,6 +1560,18 @@ func daemonProjectIDForPath(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(projectID)
+}
+
+func daemonProjectRouteIDForPath(path string) (naming.ProjectID, bool) {
+	projectID := daemonProjectIDForPath(path)
+	if strings.TrimSpace(projectID) == "" {
+		return "", false
+	}
+	parsed, err := naming.ParseProjectID(projectID)
+	if err != nil {
+		return "", false
+	}
+	return parsed, true
 }
 
 func resolveDaemonBinaryForRepo(repoDir string) string {

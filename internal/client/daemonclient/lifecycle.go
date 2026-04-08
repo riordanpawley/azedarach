@@ -120,7 +120,7 @@ func (c *Client) commandOutput(ctx context.Context, command string, body any) (s
 }
 
 func (c *Client) projectRoute() string {
-	return protocol.NormalizeProjectID(c.projectID)
+	return c.projectID.String()
 }
 
 // StartSession asks the daemon to start one session for issue/task id.
