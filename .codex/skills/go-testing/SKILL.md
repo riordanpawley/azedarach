@@ -230,6 +230,18 @@ func TestWorkerPool(t *testing.T) {
 }
 ```
 
+## Debugging Hanging Tests
+
+When a test or package appears to stall, do not stop at wall-clock timing. Timeouts and stack traces are usually more useful than elapsed durations alone.
+
+Recommended workflow:
+
+1. Re-run the suspicious test or package with a short timeout, for example `go test ./internal/daemon -run '^TestName$' -count=1 -timeout 10s`.
+2. Use the panic stack trace to find the exact blocked call.
+3. Check whether the fixture is modeling the correct lifecycle state for the path under test.
+4. Be suspicious of recovery/reconcile tests that seed the wrong intent state. A durable `stopped` row can legitimately force stop-enforcement logic instead of recovery logic and create misleading hangs in fake tmux runners.
+5. Prefer a minimal fixture that matches the production scenario being asserted. For recovery coverage, seed live runtime plus empty daemon cache; for stop coverage, seed desired-stop intent before runtime cleanup.
+
 ## AI Guardrails
 
 ### CRITICAL: Human Verification Required
