@@ -3167,7 +3167,17 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Estimate:        msg.Estimate,
 			ParentID:        msg.ParentID,
 		})
-		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
+		if err != nil {
+			return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
+		}
+
+		attachmentWarning := m.attachStagedAttachments(ctx, taskID, msg.AttachmentPaths)
+		return taskCreatedResultMsg{
+			taskID:            taskID,
+			err:               nil,
+			isUpdate:          false,
+			attachmentWarning: attachmentWarning,
+		}
 	}
 }
 
@@ -3439,9 +3449,43 @@ func (m Model) getTaskChildren(parentID string) []domain.Task {
 }
 
 type taskCreatedResultMsg struct {
-	taskID   string
-	err      error
-	isUpdate bool
+	taskID            string
+	err               error
+	isUpdate          bool
+	attachmentWarning string
+}
+
+func (m Model) attachStagedAttachments(ctx context.Context, issueID string, paths []string) string {
+	if strings.TrimSpace(issueID) == "" || len(paths) == 0 || m.attachmentService == nil {
+		return ""
+	}
+
+	failed := make([]string, 0)
+	for _, rawPath := range paths {
+		path := strings.TrimSpace(rawPath)
+		if path == "" {
+			continue
+		}
+
+		attached, err := m.attachmentService.Attach(ctx, issueID, path)
+		if err != nil {
+			failed = append(failed, filepath.Base(path))
+			continue
+		}
+
+		if attached != nil && m.daemonClient != nil {
+			if line := formatAttachmentNoteLine(attached); strings.TrimSpace(line) != "" {
+				_ = m.daemonClient.AppendTaskNotes(ctx, issueID, line)
+			}
+		}
+
+		_ = os.Remove(path)
+	}
+
+	if len(failed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Task created, but %d image attachment(s) failed: %s", len(failed), strings.Join(failed, ", "))
 }
 
 func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {

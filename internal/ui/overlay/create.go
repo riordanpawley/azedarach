@@ -50,6 +50,7 @@ type TaskCreatedMsg struct {
 	Acceptance      string
 	Estimate        *int
 	ParentID        *string
+	AttachmentPaths []string
 }
 
 // CreateTaskOverlay provides a form to create a new task
@@ -83,6 +84,7 @@ type CreateTaskOverlay struct {
 	attachments     []attachment.Attachment
 	attachmentIndex int
 	attachmentError string
+	draftIssueID    string
 }
 
 type createTaskDefaults struct {
@@ -351,11 +353,6 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return errorMsg{err: fmt.Errorf("image attachment service unavailable")}
 				}
 			}
-			if strings.TrimSpace(c.id) == "" {
-				return c, func() tea.Msg {
-					return errorMsg{err: fmt.Errorf("save the task before adding image attachments")}
-				}
-			}
 			return c, c.pasteAttachment()
 		}
 		switch msg.String() {
@@ -526,6 +523,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 	case attachmentAddedMsg:
 		c.attachmentError = ""
+		if strings.TrimSpace(c.id) == "" {
+			return c, c.loadAttachments()
+		}
 		return c, tea.Batch(
 			c.loadAttachments(),
 			func() tea.Msg {
@@ -537,6 +537,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case attachmentDeletedMsg:
 		c.attachmentError = ""
+		if strings.TrimSpace(c.id) == "" {
+			return c, c.loadAttachments()
+		}
 		return c, tea.Batch(
 			c.loadAttachments(),
 			func() tea.Msg {
@@ -892,11 +895,11 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 	if c.attachmentSvc == nil {
 		return c.styles.Footer.Render("Attachment service unavailable.")
 	}
-	if strings.TrimSpace(c.id) == "" {
-		return c.styles.Footer.Render("Save task first, then press Ctrl+P to paste from clipboard.")
-	}
 	if len(c.attachments) == 0 {
 		empty := "No attachments yet. Ctrl+P to paste from clipboard."
+		if strings.TrimSpace(c.id) == "" {
+			empty = "No staged attachments yet. Ctrl+P to paste before creating."
+		}
 		if c.attachmentError != "" {
 			return c.styles.Footer.Render(empty + " Error: " + c.attachmentError)
 		}
@@ -920,11 +923,12 @@ func (c *CreateTaskOverlay) renderAttachmentList() string {
 }
 
 func (c *CreateTaskOverlay) loadAttachments() tea.Cmd {
-	if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
+	targetID := c.attachmentTargetID()
+	if targetID == "" || c.attachmentSvc == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		files, err := c.attachmentSvc.List(context.Background(), c.id)
+		files, err := c.attachmentSvc.List(context.Background(), targetID)
 		if err != nil {
 			return errorMsg{err: err}
 		}
@@ -933,11 +937,12 @@ func (c *CreateTaskOverlay) loadAttachments() tea.Cmd {
 }
 
 func (c *CreateTaskOverlay) pasteAttachment() tea.Cmd {
-	if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil {
+	targetID := c.attachmentTargetID()
+	if targetID == "" || c.attachmentSvc == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		attached, err := c.attachmentSvc.AttachFromClipboard(context.Background(), c.id)
+		attached, err := c.attachmentSvc.AttachFromClipboard(context.Background(), targetID)
 		if err != nil {
 			return errorMsg{err: err}
 		}
@@ -946,16 +951,30 @@ func (c *CreateTaskOverlay) pasteAttachment() tea.Cmd {
 }
 
 func (c *CreateTaskOverlay) deleteSelectedAttachment() tea.Cmd {
-	if strings.TrimSpace(c.id) == "" || c.attachmentSvc == nil || c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
+	targetID := c.attachmentTargetID()
+	if targetID == "" || c.attachmentSvc == nil || c.attachmentIndex < 0 || c.attachmentIndex >= len(c.attachments) {
 		return nil
 	}
 	selected := c.attachments[c.attachmentIndex]
 	return func() tea.Msg {
-		if err := c.attachmentSvc.Delete(context.Background(), c.id, selected.ID); err != nil {
+		if err := c.attachmentSvc.Delete(context.Background(), targetID, selected.ID); err != nil {
 			return errorMsg{err: err}
 		}
 		return attachmentDeletedMsg{}
 	}
+}
+
+func (c *CreateTaskOverlay) attachmentTargetID() string {
+	if id := strings.TrimSpace(c.id); id != "" {
+		return id
+	}
+	if c.attachmentSvc == nil {
+		return ""
+	}
+	if strings.TrimSpace(c.draftIssueID) == "" {
+		c.draftIssueID = fmt.Sprintf("draft-%d", time.Now().UnixNano())
+	}
+	return c.draftIssueID
 }
 
 func wrapTitleLines(value string, width int) []string {
@@ -1004,10 +1023,29 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 				Acceptance:      acceptance,
 				Estimate:        c.estimate,
 				ParentID:        c.parentID,
+				AttachmentPaths: c.stagedAttachmentPaths(),
 			}
 		},
 		func() tea.Msg { return CloseOverlayMsg{} },
 	)
+}
+
+func (c *CreateTaskOverlay) stagedAttachmentPaths() []string {
+	if strings.TrimSpace(c.id) != "" || len(c.attachments) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(c.attachments))
+	for _, file := range c.attachments {
+		path := strings.TrimSpace(file.Path)
+		if path == "" {
+			continue
+		}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return paths
 }
 
 func (c *CreateTaskOverlay) editInEditorCmd() tea.Cmd {

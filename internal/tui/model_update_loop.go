@@ -758,6 +758,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Task created: %s", msg.taskID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
+		if strings.TrimSpace(msg.attachmentWarning) != "" {
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: msg.attachmentWarning,
+				Expires: time.Now().Add(6 * time.Second),
+			})
+		}
 
 		// Reload issues to show new task
 		return m, m.loadIssuesCmd()

@@ -648,7 +648,7 @@ func TestEditTaskOverlayCtrlPAttachesFromClipboard(t *testing.T) {
 	assert.Equal(t, "az-77", addedMsg.attachment.IssueID)
 }
 
-func TestCreateTaskOverlayCtrlPWithoutIDReturnsError(t *testing.T) {
+func TestCreateTaskOverlayCtrlPWithoutIDStagesAttachment(t *testing.T) {
 	svc := &createTestAttachmentService{}
 	overlay := NewCreateTaskOverlayWithParentImplOptionsAndAttachmentService(nil, nil, svc)
 
@@ -656,9 +656,10 @@ func TestCreateTaskOverlayCtrlPWithoutIDReturnsError(t *testing.T) {
 	require.NotNil(t, cmd)
 
 	msg := cmd()
-	errMsg, ok := msg.(errorMsg)
+	addedMsg, ok := msg.(attachmentAddedMsg)
 	require.True(t, ok)
-	assert.Contains(t, errMsg.err.Error(), "save the task before adding image attachments")
+	require.NotNil(t, addedMsg.attachment)
+	assert.NotEmpty(t, addedMsg.attachment.IssueID)
 }
 
 func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
@@ -667,7 +668,7 @@ func TestCreateTaskOverlayWithAttachmentServiceShowsGuidance(t *testing.T) {
 
 	view := overlay.View()
 	assert.Contains(t, view, "Image Attachments:")
-	assert.Contains(t, view, "Save task first, then press Ctrl+P")
+	assert.Contains(t, view, "No staged attachments yet. Ctrl+P to paste before creating.")
 }
 
 func TestEditTaskOverlayPasteKeyVariantsAttachFromClipboard(t *testing.T) {
@@ -756,12 +757,12 @@ func (s *createTestAttachmentService) List(_ context.Context, _ string) ([]attac
 	return append([]attachment.Attachment(nil), s.files...), nil
 }
 
-func (s *createTestAttachmentService) AttachFromClipboard(_ context.Context, _ string) (*attachment.Attachment, error) {
+func (s *createTestAttachmentService) AttachFromClipboard(_ context.Context, issueID string) (*attachment.Attachment, error) {
 	if s.attached != nil {
 		return s.attached, nil
 	}
 	now := time.Now()
-	return &attachment.Attachment{ID: "att-default", Filename: "clipboard.png", Created: now}, nil
+	return &attachment.Attachment{ID: "att-default", IssueID: issueID, Filename: "clipboard.png", Path: "/tmp/clipboard.png", Created: now}, nil
 }
 
 func (s *createTestAttachmentService) Attach(_ context.Context, _, _ string) (*attachment.Attachment, error) {
