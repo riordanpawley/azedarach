@@ -477,16 +477,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			"reused_worktree", reusedWorktree,
 		)
 	}
-	if err := d.applySessionLifecycleTransition(
-		ctx,
-		req,
-		cmd.ProjectID,
-		cmd.SessionID,
-		cmd.IssueID,
-		daemonhandlers.CommandSessionStart,
-	); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
-	}
 	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch)
 	if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -508,6 +498,16 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 				"prompt_bytes", len(initialPrompt),
 			)
 		}
+	}
+	if err := d.applySessionLifecycleTransition(
+		ctx,
+		req,
+		cmd.ProjectID,
+		cmd.SessionID,
+		cmd.IssueID,
+		daemonhandlers.CommandSessionStart,
+	); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v", err)), nil
 	}
 	if updateErr := issueClient.Update(ctx, cmd.IssueID, domain.StatusInProgress); updateErr != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("failed to update issue status to in_progress after session start",
@@ -1358,7 +1358,11 @@ func (d *Daemon) listTmuxSessionsCacheFirst(ctx context.Context, projectID strin
 func (d *Daemon) activeSessionIDsFromProjection(projectID string, sessions []daemonstate.Session) []string {
 	active := make([]string, 0, len(sessions))
 	for _, session := range sessions {
-		if session.State == daemonstate.SessionStateStopped {
+		observed := session.ObservedState
+		if strings.TrimSpace(string(observed)) == "" {
+			observed = session.State
+		}
+		if observed == daemonstate.SessionStateStopped {
 			continue
 		}
 		if d.isSessionStopPending(projectID, session.IssueID) {

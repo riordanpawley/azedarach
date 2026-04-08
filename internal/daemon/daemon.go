@@ -607,7 +607,12 @@ func (d *Daemon) applySessionLifecycleTransition(
 		return fmt.Errorf("unsupported session command: %s", command)
 	}
 
-	_, err := d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, state)
+	_, err := d.sessionStore.UpsertSession(projectID, sessionID, issueID, state)
+	if err != nil && state == daemonstate.SessionStateStarting && errors.Is(err, daemonstate.ErrInvalidTransition) {
+		// Start uses tmux as source-of-truth for conflict detection; when tmux has no
+		// session but stale desired state exists, allow resetting desired->starting.
+		_, err = d.sessionStore.ForceUpsertSession(projectID, sessionID, issueID, state)
+	}
 	if err != nil {
 		return err
 	}

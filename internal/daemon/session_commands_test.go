@@ -240,6 +240,8 @@ func TestSourceForSessionInvariant(t *testing.T) {
 type sessionStartTmuxRunner struct {
 	sessions      map[string]bool
 	sendKeysCalls int
+	newSessionErr error
+	sendKeysErr   error
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -263,10 +265,16 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		if len(args) < 4 {
 			return "", errors.New("missing session name")
 		}
+		if r.newSessionErr != nil {
+			return "", r.newSessionErr
+		}
 		r.sessions[args[3]] = true
 		return "", nil
 	case "send-keys":
 		r.sendKeysCalls++
+		if r.sendKeysErr != nil {
+			return "", r.sendKeysErr
+		}
 		return "", nil
 	case "list-sessions":
 		names := make([]string, 0, len(r.sessions))
@@ -532,6 +540,86 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "Skipping AI launch (tmux session only)") {
 		t.Fatalf("output = %q, want tmux-only launch line", payload.Output)
+	}
+}
+
+func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() {
+		_ = issuesClient.CloseDB()
+	})
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Fail tmux create",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreeRunner := &recoveringWorktreeRunner{
+		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+		branchName:   "testuser/" + issueID + "/fail-tmux-create",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.newSessionErr = errors.New("tmux new-session failed")
+	store := daemonstate.NewStore()
+
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:      repoDir,
+			BaseBranch:   "main",
+			CLITool:      "codex",
+			SessionShell: "zsh",
+			Logger:       slog.Default(),
+		},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		revision:     map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-start-tmux-fail",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "session.start",
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+		Body: marshalJSON(map[string]string{
+			"project_id": projectID,
+			"session_id": issueID,
+		}),
+	}
+
+	resp, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("handleSessionStartDirect returned error: %v", err)
+	}
+	if resp.OK {
+		t.Fatalf("expected start response to fail")
+	}
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want 0 on tmux create failure", tmuxRunner.sendKeysCalls)
+	}
+
+	snapshot := store.ReadSnapshot(projectID)
+	if len(snapshot.Sessions) != 0 {
+		t.Fatalf("session snapshot = %+v, want empty after failed start", snapshot.Sessions)
 	}
 }
 
@@ -1621,6 +1709,37 @@ func TestApplySessionLifecycleTransitionPreservesObservedRuntimeState(t *testing
 	}
 }
 
+func TestApplySessionLifecycleTransitionRejectsInvalidTransition(t *testing.T) {
+	const (
+		projectID = "proj-invalid-transition"
+		issueID   = "az-1"
+	)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+
+	store := daemonstate.NewStore()
+	if _, err := store.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateStarting); err != nil {
+		t.Fatalf("seed starting session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+		sessionStore: store,
+	}
+
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-invalid-transition",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         daemonhandlers.CommandSessionPause,
+		Meta: protocol.Metadata{
+			ProjectID: naming.ProjectID(projectID),
+		},
+	}
+	if err := d.applySessionLifecycleTransition(context.Background(), req, projectID, sessionID, issueID, daemonhandlers.CommandSessionPause); !errors.Is(err, daemonstate.ErrInvalidTransition) {
+		t.Fatalf("applySessionLifecycleTransition err = %v, want %v", err, daemonstate.ErrInvalidTransition)
+	}
+}
+
 func TestReconcilePublishesSessionProjectionEventsForRecovery(t *testing.T) {
 	const (
 		projectID = "proj"
@@ -1918,6 +2037,52 @@ func TestListTmuxSessionsCacheFirstUsesProjectionOnlyWhenCacheEmpty(t *testing.T
 	}
 	if len(rows) != 0 {
 		t.Fatalf("projection rows = %d, want 0 (read path must not persist)", len(rows))
+	}
+}
+
+func TestListTmuxSessionsCacheFirstUsesObservedStateForActiveSet(t *testing.T) {
+	const projectID = "proj-observed-runtime"
+
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projections.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = runtimeStateStore.Close()
+	})
+
+	stoppedObservedID := naming.CanonicalSessionID(projectID, "az-1")
+	attachedObservedID := naming.CanonicalSessionID(projectID, "az-2")
+	now := time.Now().UTC()
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            stoppedObservedID,
+		IssueID:       "az-1",
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed stopped-observed session: %v", err)
+	}
+	if err := runtimeStateStore.UpsertSessionState(context.Background(), projectID, daemonstate.Session{
+		ID:            attachedObservedID,
+		IssueID:       "az-2",
+		State:         daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed attached-observed session: %v", err)
+	}
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: slog.Default()},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+	}
+
+	sessions, err := d.listTmuxSessionsCacheFirst(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("listTmuxSessionsCacheFirst returned error: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0] != attachedObservedID {
+		t.Fatalf("sessions = %v, want [%q]", sessions, attachedObservedID)
 	}
 }
 
